@@ -1,0 +1,11 @@
+.DS_Store
+*.o
+*.obj
+*.exe
+*.log
+*.swp
+*~
+/build/
+/dist/
+/out/
+
