@@ -1,0 +1,26 @@
+#define CC_ENABLE_SHORT_NAMES
+#include "cc/include/std/prelude.h"
+#include <stdio.h>
+
+Vec(int, IntVec);
+
+int main(void) {
+    CCArena arena = cc_heap_arena(kilobytes(4));
+    if (!arena.base) return 1;
+
+    IntVec v = IntVec_init(&arena, 2);
+    if (IntVec_push(&v, 10) != 0) return 2;
+    if (IntVec_push(&v, 20) != 0) return 3;
+    if (IntVec_push(&v, 30) != 0) return 4;
+
+    int popped = 0;
+    if (IntVec_pop(&v, &popped) != 0 || popped != 30) return 5;
+    if (IntVec_len(&v) != 2) return 6;
+
+    CCSlice msg = cc_slice_from_buffer("vec smoke ok\n", 14);
+    cc_std_out_write(msg);
+
+    cc_heap_arena_free(&arena);
+    return 0;
+}
+

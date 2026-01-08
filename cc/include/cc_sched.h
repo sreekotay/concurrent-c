@@ -1,0 +1,56 @@
+/*
+ * Minimal task scheduler facade for early runtime bring-up.
+ * Backed by pthreads; supports deadlines and cancellation checks.
+ */
+#ifndef CC_SCHED_H
+#define CC_SCHED_H
+
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+#include <stdint.h>
+#include <time.h>
+
+typedef struct CCTask CCTask;
+
+typedef struct {
+    struct timespec deadline; // absolute; tv_sec=0 means no deadline
+    int cancelled;            // cooperative flag
+} CCDeadline;
+
+// Initialize/shutdown scheduler (no-op for pthread-backed stub).
+int cc_scheduler_init(void);
+void cc_scheduler_shutdown(void);
+
+// Spawn a detached task. The task handle can be joined via cc_task_join.
+// Returns 0 on success, errno-style code on failure.
+int cc_spawn(CCTask** out_task, void* (*fn)(void*), void* arg);
+
+// Join a task; returns 0 on success.
+int cc_task_join(CCTask* task);
+
+// Free task handle (after join or if spawn failed after allocation).
+void cc_task_free(CCTask* task);
+
+// Sleep for at least ms milliseconds (best-effort).
+int cc_sleep_ms(unsigned int ms);
+
+// Deadline helpers
+CCDeadline cc_deadline_none(void);
+CCDeadline cc_deadline_after_ms(uint64_t ms);
+bool cc_deadline_expired(const CCDeadline* d);
+void cc_cancel(CCDeadline* d);
+bool cc_is_cancelled(const CCDeadline* d);
+const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct timespec* out);
+
+#endif // CC_SCHED_H

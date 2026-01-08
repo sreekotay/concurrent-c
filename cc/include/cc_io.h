@@ -1,0 +1,47 @@
+/*
+ * Basic IO error representation and helpers.
+ */
+#ifndef CC_IO_H
+#define CC_IO_H
+
+#include <stdint.h>
+#include <errno.h>
+
+typedef enum {
+    CC_IO_PERMISSION_DENIED = 1,
+    CC_IO_FILE_NOT_FOUND,
+    CC_IO_INVALID_ARGUMENT,
+    CC_IO_INTERRUPTED,
+    CC_IO_OUT_OF_MEMORY,
+    CC_IO_BUSY,
+    CC_IO_CONNECTION_CLOSED,
+    CC_IO_OTHER
+} CCIoErrorKind;
+
+typedef struct {
+    CCIoErrorKind kind;
+    int32_t os_code; // errno or platform-specific code; 0 when not applicable.
+} CCIoError;
+
+// Map platform errno to our IoError kind.
+static inline CCIoError cc_io_from_errno(int err) {
+    CCIoError e;
+    e.os_code = err;
+    switch (err) {
+        case EACCES: e.kind = CC_IO_PERMISSION_DENIED; break;
+        case ENOENT: e.kind = CC_IO_FILE_NOT_FOUND; break;
+        case EINVAL: e.kind = CC_IO_INVALID_ARGUMENT; break;
+        case EINTR:  e.kind = CC_IO_INTERRUPTED; break;
+        case ENOMEM: e.kind = CC_IO_OUT_OF_MEMORY; break;
+        case EBUSY:  e.kind = CC_IO_BUSY; break;
+        case EPIPE:  e.kind = CC_IO_CONNECTION_CLOSED; break;
+        case EAGAIN: e.kind = CC_IO_BUSY; break;
+        case 0:      e.kind = CC_IO_OTHER; break;
+        default:     e.kind = CC_IO_OTHER; break;
+    }
+    return e;
+}
+
+#endif // CC_IO_H
+
+

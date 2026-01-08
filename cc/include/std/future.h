@@ -1,0 +1,112 @@
+/*
+ * Minimal future/promises for async I/O results.
+ * Futures are backed by a CCAsyncHandle; users poll/wait and access result storage.
+ */
+#ifndef CC_STD_FUTURE_H
+#define CC_STD_FUTURE_H
+
+#include <stdlib.h>
+#include "async_io.h"
+
+typedef enum {
+    CC_FUTURE_PENDING = 0,
+    CC_FUTURE_READY = 1,
+    CC_FUTURE_ERR = 2,
+    CC_FUTURE_CANCELLED = 3,
+    CC_FUTURE_TIMEOUT = 4,
+} CCFutureStatus;
+
+// Generic future wrapping a CCAsyncHandle and user-provided result pointer.
+typedef struct {
+    CCAsyncHandle handle;
+    void *result; // points to caller-owned result storage
+} CCFuture;
+
+typedef void (*cc_future_cb)(CCFutureStatus status, void *user, int err);
+
+static inline CCFutureStatus cc_future_poll(CCFuture *f, int *out_err) {
+    if (!f) return CC_FUTURE_ERR;
+    if (!f->handle.done) return CC_FUTURE_PENDING;
+    int err = 0;
+    int rc = cc_chan_try_recv(f->handle.done, &err, sizeof(int));
+    if (rc == EAGAIN) return CC_FUTURE_PENDING;
+    if (rc == 0) {
+        cc_chan_close(f->handle.done);
+        cc_chan_free(f->handle.done);
+        f->handle.done = NULL;
+        if (err == 0) return CC_FUTURE_READY;
+        if (out_err) *out_err = err;
+        if (err == ECANCELED) return CC_FUTURE_CANCELLED;
+        if (err == ETIMEDOUT) return CC_FUTURE_TIMEOUT;
+        return CC_FUTURE_ERR;
+    }
+    return CC_FUTURE_ERR;
+}
+
+static inline CCFutureStatus cc_future_wait(CCFuture *f, int *out_err) {
+    if (!f) return CC_FUTURE_ERR;
+    int err = cc_async_wait(&f->handle);
+    if (err == 0) return 0;
+    if (out_err) *out_err = err;
+    if (err == ECANCELED) return ECANCELED;
+    if (err == ETIMEDOUT) return ETIMEDOUT;
+    return err;
+}
+
+static inline CCFutureStatus cc_future_wait_deadline(CCFuture *f, const CCDeadline* deadline, int *out_err) {
+    if (!f) return CC_FUTURE_ERR;
+    int err = cc_async_wait_deadline(&f->handle, deadline);
+    if (err == 0) return 0;
+    if (out_err) *out_err = err;
+    if (err == ECANCELED) return ECANCELED;
+    if (err == ETIMEDOUT) return ETIMEDOUT;
+    return err;
+}
+
+static inline void cc_future_cancel(CCFuture *f) {
+    if (!f) return;
+    cc_async_cancel(&f->handle);
+}
+
+typedef struct {
+    CCFuture *f;
+    cc_future_cb cb;
+    void *user;
+} CCFutureCBThunk;
+
+static void cc__future_job(void *arg) {
+    CCFutureCBThunk *c = (CCFutureCBThunk*)arg;
+    int err = 0;
+    CCFutureStatus st = cc_future_wait(c->f, &err);
+    c->cb(st, c->user, err);
+    free(c);
+}
+
+// Fire a callback on completion using the executor (non-blocking).
+static inline int cc_future_on_complete(CCExec* ex, CCFuture *f, cc_future_cb cb, void *user) {
+    if (!ex || !f || !cb) return EINVAL;
+    CCFutureCBThunk *ctx = (CCFutureCBThunk*)malloc(sizeof(CCFutureCBThunk));
+    if (!ctx) return ENOMEM;
+    ctx->f = f; ctx->cb = cb; ctx->user = user;
+    int sub = cc_exec_submit(ex, cc__future_job, ctx);
+    if (sub != 0) { free(ctx); return sub; }
+    return 0;
+}
+
+static inline void cc_future_init(CCFuture *f) {
+    if (!f) return;
+    f->handle.done = NULL;
+    f->handle.cancelled = 0;
+    f->result = NULL;
+}
+
+static inline void cc_future_free(CCFuture *f) {
+    if (!f) return;
+    if (f->handle.done) {
+        cc_chan_close(f->handle.done);
+        cc_chan_free(f->handle.done);
+        f->handle.done = NULL;
+    }
+}
+
+#endif // CC_STD_FUTURE_H

@@ -1,0 +1,101 @@
+/*
+ * Arena-backed dynamic vector (kvec-style growth) for Concurrent-C stdlib.
+ * - Allocates from a caller-provided CCArena; growth copies into new arena
+ *   space and leaves old buffers to be reclaimed when the arena resets.
+ * - Fails when the arena cannot satisfy a growth request.
+ *
+ * Optional heap-backed variant is provided via CC_VEC_DECL_HEAP for tools/tests.
+ */
+#ifndef CC_STD_VEC_H
+#define CC_STD_VEC_H
+
+#include <stddef.h>
+#include <string.h>
+#include "../cc_runtime.h"
+
+// Arena-backed vector
+#define CC_VEC_DECL_ARENA(T, Name)                                                \
+    typedef struct {                                                              \
+        size_t len;                                                               \
+        size_t cap;                                                               \
+        T *data;                                                                  \
+        CCArena *arena;                                                           \
+    } Name;                                                                       \
+                                                                                  \
+    static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
+        Name v = {0, 0, NULL, arena};                                             \
+        if (!arena || initial_cap == 0) return v;                                 \
+        v.data = (T *)cc_arena_alloc(arena, initial_cap * sizeof(T), _Alignof(T));\
+        if (!v.data) { v.cap = 0; return v; }                                     \
+        v.cap = initial_cap;                                                      \
+        return v;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline int Name##_reserve(Name *v, size_t need) {                      \
+        if (!v || !v->arena) return -1;                                           \
+        if (need <= v->cap) return 0;                                             \
+        size_t new_cap = v->cap ? v->cap : 2;                                     \
+        while (new_cap < need) new_cap <<= 1;                                     \
+        T *new_data = (T *)cc_arena_alloc(v->arena, new_cap * sizeof(T), _Alignof(T));\
+        if (!new_data) return -1;                                                 \
+        if (v->data && v->len) memcpy(new_data, v->data, v->len * sizeof(T));     \
+        v->data = new_data;                                                       \
+        v->cap = new_cap;                                                         \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline int Name##_push(Name *v, T value) {                             \
+        if (!v) return -1;                                                        \
+        if (v->len == v->cap) {                                                   \
+            if (Name##_reserve(v, v->cap ? v->cap << 1 : 2) != 0) return -1;      \
+        }                                                                         \
+        v->data[v->len++] = value;                                                \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline int Name##_pop(Name *v, T *out) {                               \
+        if (!v || v->len == 0) return -1;                                         \
+        v->len--;                                                                 \
+        if (out) *out = v->data[v->len];                                          \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
+    static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
+    static inline size_t Name##_cap(const Name *v) { return v ? v->cap : 0; }     \
+    static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
+    static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }
+
+// Iteration helper
+#define CC_VEC_FOREACH(vptr, idx_var, item_var)                                   \
+    for (size_t idx_var = 0; (vptr) && idx_var < (vptr)->len && (((item_var) = (vptr)->data[idx_var]), 1); ++idx_var)
+
+// Heap-backed vector (tool/test-only; not arena-scoped)
+#define CC_VEC_DECL_HEAP(T, Name)                                                 \
+    typedef struct { size_t len, cap; T *data; } Name;                            \
+    static inline Name Name##_init(void) { Name v = {0,0,NULL}; return v; }       \
+    static inline void Name##_free(Name *v) { if (v && v->data) free(v->data); if(v){v->data=NULL;v->len=v->cap=0;} } \
+    static inline int Name##_reserve(Name *v, size_t need) {                      \
+        if (!v) return -1;                                                        \
+        if (need <= v->cap) return 0;                                             \
+        size_t new_cap = v->cap ? v->cap : 2;                                     \
+        while (new_cap < need) new_cap <<= 1;                                     \
+        void *p = realloc(v->data, new_cap * sizeof(T));                          \
+        if (!p) return -1;                                                        \
+        v->data = (T *)p; v->cap = new_cap; return 0;                             \
+    }                                                                             \
+    static inline int Name##_push(Name *v, T value) {                             \
+        if (!v) return -1;                                                        \
+        if (v->len == v->cap) { if (Name##_reserve(v, v->cap ? v->cap << 1 : 2) != 0) return -1; } \
+        v->data[v->len++] = value;                                                \
+        return 0;                                                                 \
+    }                                                                             \
+    static inline int Name##_pop(Name *v, T *out) {                               \
+        if (!v || v->len == 0) return -1;                                         \
+        v->len--; if (out) *out = v->data[v->len]; return 0;                      \
+    }                                                                             \
+    static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
+    static inline size_t Name##_cap(const Name *v) { return v ? v->cap : 0; }     \
+    static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
+    static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }
+
+#endif // CC_STD_VEC_H

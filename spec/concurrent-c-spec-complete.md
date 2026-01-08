@@ -94,6 +94,8 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 | `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }` |
 | `cc_is_cancelled()` | Check if current task is cancelled | `if (cc_is_cancelled()) return;` |
 
+**C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. Short aliases (`String`, `Arena`, etc.) are only available when the user opts in via `#include <std/prelude.h>` and defining `CC_ENABLE_SHORT_NAMES` before inclusion. Default is prefixed-only.
+
 ---
 
 

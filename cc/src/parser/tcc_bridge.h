@@ -1,0 +1,18 @@
+#ifndef CC_PARSER_TCC_BRIDGE_H
+#define CC_PARSER_TCC_BRIDGE_H
+
+// Bridge declarations for TCC integration. These are expected to be provided
+// by the TCC extension hooks once applied. If CC_TCC_EXT_AVAILABLE is not
+// defined, the parser will return ENOTSUP.
+
+#include "ast/ast.h"
+#include "comptime/symbols.h"
+
+// Parse the given file and return an AST handle. Returns NULL on failure.
+CCASTRoot* cc_tcc_parse_to_ast(const char* path, CCSymbolTable* symbols);
+
+// Free an AST returned by cc_tcc_parse_to_ast.
+void cc_tcc_free_ast(CCASTRoot* root);
+
+#endif // CC_PARSER_TCC_BRIDGE_H
+

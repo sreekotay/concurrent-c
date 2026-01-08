@@ -1,0 +1,147 @@
+diff --git a/tcc.c b/tcc.c
+index e1819239..92369674 100644
+--- a/tcc.c
++++ b/tcc.c
+@@ -426,3 +426,36 @@ redo:
+         fclose(ppfp);
+     return ret;
+ }
++
+ #ifdef CONFIG_CC_EXT
++/* Default no-op token registrar; can be overridden by CC runtime. */
++__attribute__((weak)) void tcc_ext_register_tokens(void) {}
++
+ PUB_FUNC void tcc_set_ext_parser(struct TCCExtParser const *p) {
+     tcc_state->ext_parser = p;
+ }
+
+ PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* path, struct CCSymbolTable* symbols) {
+     (void)path;
+     (void)symbols;
+     return tcc_mallocz(sizeof(struct CCASTStubRoot));
+ }
+
+ PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root) {
+     tcc_free(root);
+ }
+
+ /* Optional side-table attachment for CC AST nodes. */
+ PUB_FUNC void cc_tcc_ast_set_side(struct CCASTStubRoot* root, void* side) {
+     if (root)
+         root->side = side;
+ }
+
+ PUB_FUNC void* cc_tcc_ast_get_side(struct CCASTStubRoot* root) {
+     return root ? root->side : NULL;
+ }
+
+ /* Placeholder constexpr API: currently unsupported. */
+ PUB_FUNC int cc_tcc_eval_constexpr(const char* expr, long long* out_val) {
+     (void)expr;
+     (void)out_val;
+     return -1;
+ }
+ #endif
+diff --git a/tcc.h b/tcc.h
+index 1c2f6949..30455ae2 100644
+--- a/tcc.h
++++ b/tcc.h
+@@ -452,6 +452,22 @@ typedef struct TokenSym {
+     char str[1];
+ } TokenSym;
+ 
++#ifdef CONFIG_CC_EXT
++#define CC_TCC_EXT_AVAILABLE 1
++struct CCSymbolTable;
++struct CCASTStubRoot {
++    void *side;
++};
++struct TCCExtParser {
++    int (*try_cc_decl)(void);
++    int (*try_cc_stmt)(void);
++};
++#if defined(__GNUC__)
++__attribute__((weak))
++#endif
++void tcc_ext_register_tokens(void);
++#endif
++
+ #ifdef TCC_TARGET_PE
+ typedef unsigned short nwchar_t;
+ #else
+@@ -871,6 +887,9 @@ struct TCCState {
+ 
+     int ifdef_stack[IFDEF_STACK_SIZE];
+     int *ifdef_stack_ptr;
++#ifdef CONFIG_CC_EXT
++    const struct TCCExtParser *ext_parser; /* optional CC parser extensions */
++#endif
+ 
+     /* included files enclosed with #ifndef MACRO */
+     int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
+@@ -1223,6 +1242,16 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+ PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
+ PUB_FUNC char *tcc_strdup(const char *str);
+ 
++#ifdef CONFIG_CC_EXT
++PUB_FUNC void tcc_set_ext_parser(struct TCCExtParser const *p);
++PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* path, struct CCSymbolTable* symbols);
++PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root);
++PUB_FUNC void cc_tcc_ast_set_side(struct CCASTStubRoot* root, void* side);
++PUB_FUNC void* cc_tcc_ast_get_side(struct CCASTStubRoot* root);
++/* Evaluate a constexpr string in CC mode; returns 0 on success. */
++PUB_FUNC int cc_tcc_eval_constexpr(const char* expr, long long* out_val);
++#endif
++
+ #ifdef MEM_DEBUG
+ #define tcc_free(ptr)           tcc_free_debug(ptr)
+ #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
+diff --git a/tccgen.c b/tccgen.c
+index 6519a46b..7b33a829 100644
+--- a/tccgen.c
++++ b/tccgen.c
+@@ -7163,6 +7163,13 @@ static void gexpr_decl(void)
+ 
+ static void block(int flags)
+ {
++    /* CC extension: allow external parser to consume statements. */
++#ifdef CONFIG_CC_EXT
++    if (tcc_state->ext_parser && tcc_state->ext_parser->try_cc_stmt) {
++        if (tcc_state->ext_parser->try_cc_stmt())
++            return;
++    }
++#endif
+     int a, b, c, d, e, t;
+     struct scope o;
+     Sym *s;
+@@ -8688,6 +8695,13 @@ static void pe_check_linkage(CType *type, AttributeDef *ad)
+    or VT_JMP if parsing c99 for decl: for (int i = 0, ...) */
+ static int decl(int l)
+ {
++    /* CC extension: allow external parser to consume declarations. */
++#ifdef CONFIG_CC_EXT
++    if (tcc_state->ext_parser && tcc_state->ext_parser->try_cc_decl) {
++        if (tcc_state->ext_parser->try_cc_decl())
++            return 0;
++    }
++#endif
+     int v, has_init, r, oldint;
+     CType type, btype;
+     Sym *sym, *sa;
+diff --git a/tccpp.c b/tccpp.c
+index b30df5ad..127e19e4 100644
+--- a/tccpp.c
++++ b/tccpp.c
+@@ -3857,6 +3857,12 @@ ST_FUNC void tccpp_new(TCCState *s)
+         p = r;
+     }
+ 
++#ifdef CONFIG_CC_EXT
++    /* Allow external registrar to append tokens/keywords when CC mode is on. */
++    if (tcc_ext_register_tokens)
++        tcc_ext_register_tokens();
++#endif
++
+     /* we add dummy defines for some special macros to speed up tests
+        and to have working defined() */
+     define_push(TOK___LINE__, MACRO_OBJ, NULL, NULL);

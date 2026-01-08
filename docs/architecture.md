@@ -42,6 +42,13 @@ These should be optional/no-op when CC mode is off, so they can be upstreamed or
    - Comptime evaluation (`@comptime if` branch selection, comptime calls for generics).
    - Codegen to C11 (sync functions direct, async as state machines).
 
+## Comptime and Build Integration (roadmap)
+- Predefined consts: driver can preload comptime consts (future `build.cc` output) into the symbol table before Pass 0. Lookup order: predefined consts → user-declared consts. Last writer wins in the preload set.
+- Determinism: build-time consts must come from deterministic inputs (target triple/env) unless explicitly allowed; no ambient randomness by default.
+- Error reporting: build.cc errors should surface as normal compile errors with file/line once execution is wired in.
+- Cross-compilation: build layer receives a target description (os/arch/abi, endian, ptr size) and can set feature consts (`USE_TLS`, `DEBUG`, etc.) consumed by `@comptime if`.
+- Future graph: build.cc may later describe targets/deps; for now the contract is “emit const bindings.”
+
 ## Runtime/ABI Notes (Phase 1)
 - Slice ABI: `{ptr,len,id,alen}` with bits for unique/transferable/subslice; debug provenance table optional.
 - Channels: async vs sync typed; backpressure modes; `send_take` zero-copy only when eligible; async `@match` only.

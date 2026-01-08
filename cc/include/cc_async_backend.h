@@ -1,0 +1,23 @@
+/*
+ * Pluggable async backend interface (io_uring/kqueue/etc).
+ * Backends can handle async file operations without blocking threads.
+ * If no backend is registered, the runtime falls back to the portable executor.
+ */
+#ifndef CC_ASYNC_BACKEND_H
+#define CC_ASYNC_BACKEND_H
+
+#include "cc_sched.h"
+#include "std/async_io.h"
+#include "std/io.h"
+
+typedef struct CCAsyncBackendOps {
+    int (*open)(void* ctx, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h, const CCDeadline* d);
+    int (*close)(void* ctx, CCFile *file, CCAsyncHandle* h, const CCDeadline* d);
+    int (*read_all)(void* ctx, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d);
+    int (*read)(void* ctx, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* d);
+    int (*read_line)(void* ctx, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* d);
+    int (*write)(void* ctx, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* d);
+} CCAsyncBackendOps;
+
+#endif // CC_ASYNC_BACKEND_H
+

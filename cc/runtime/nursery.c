@@ -1,0 +1,168 @@
+/*
+ * Simple structured concurrency nursery built on the pthread-backed scheduler.
+ */
+
+#include "cc_nursery.h"
+#include "cc_channel.h"
+
+#include <errno.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct CCNursery {
+    CCTask** tasks;
+    size_t count;
+    size_t cap;
+    int cancelled;
+    struct timespec deadline;
+    CCChan** closing;
+    size_t closing_count;
+    size_t closing_cap;
+    pthread_mutex_t mu;
+};
+
+CCNursery* cc_nursery_create(void) {
+    CCNursery* n = (CCNursery*)malloc(sizeof(CCNursery));
+    if (!n) return NULL;
+    memset(n, 0, sizeof(*n));
+    n->cap = 8;
+    n->tasks = (CCTask**)calloc(n->cap, sizeof(CCTask*));
+    if (!n->tasks) {
+        free(n);
+        return NULL;
+    }
+    pthread_mutex_init(&n->mu, NULL);
+    n->deadline.tv_sec = 0;
+    n->deadline.tv_nsec = 0;
+    n->closing = NULL;
+    n->closing_cap = 0;
+    n->closing_count = 0;
+    return n;
+}
+
+void cc_nursery_cancel(CCNursery* n) {
+    if (!n) return;
+    pthread_mutex_lock(&n->mu);
+    n->cancelled = 1;
+    pthread_mutex_unlock(&n->mu);
+}
+
+void cc_nursery_set_deadline(CCNursery* n, struct timespec abs_deadline) {
+    if (!n) return;
+    pthread_mutex_lock(&n->mu);
+    n->deadline = abs_deadline;
+    pthread_mutex_unlock(&n->mu);
+}
+
+const struct timespec* cc_nursery_deadline(const CCNursery* n, struct timespec* out) {
+    if (!n || n->deadline.tv_sec == 0) return NULL;
+    if (out) *out = n->deadline;
+    return out;
+}
+
+CCDeadline cc_nursery_as_deadline(const CCNursery* n) {
+    CCDeadline d = cc_deadline_none();
+    if (!n) { d.cancelled = 1; return d; }
+    d.cancelled = n->cancelled;
+    d.deadline = n->deadline;
+    return d;
+}
+
+bool cc_nursery_is_cancelled(const CCNursery* n) {
+    if (!n) return true;
+    if (n->cancelled) return true;
+    if (n->deadline.tv_sec == 0) return false;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    if (now.tv_sec > n->deadline.tv_sec) return true;
+    if (now.tv_sec == n->deadline.tv_sec && now.tv_nsec >= n->deadline.tv_nsec) return true;
+    return false;
+}
+
+static int cc_nursery_grow(CCNursery* n) {
+    size_t new_cap = n->cap ? n->cap * 2 : 8;
+    CCTask** nt = (CCTask**)realloc(n->tasks, new_cap * sizeof(CCTask*));
+    if (!nt) return ENOMEM;
+    memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(CCTask*));
+    n->tasks = nt;
+    n->cap = new_cap;
+    return 0;
+}
+
+int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
+    if (!n || !fn) return EINVAL;
+    pthread_mutex_lock(&n->mu);
+    if (n->count == n->cap) {
+        int grow_err = cc_nursery_grow(n);
+        if (grow_err != 0) {
+            pthread_mutex_unlock(&n->mu);
+            return grow_err;
+        }
+    }
+    pthread_mutex_unlock(&n->mu);
+
+    CCTask* t = NULL;
+    int err = cc_spawn(&t, fn, arg);
+    if (err != 0) {
+        return err;
+    }
+
+    pthread_mutex_lock(&n->mu);
+    n->tasks[n->count++] = t;
+    pthread_mutex_unlock(&n->mu);
+    return 0;
+}
+
+int cc_nursery_wait(CCNursery* n) {
+    if (!n) return EINVAL;
+    int first_err = 0;
+    // Close registered channels first
+    for (size_t i = 0; i < n->closing_count; ++i) {
+        if (n->closing[i]) cc_chan_close(n->closing[i]);
+    }
+    for (size_t i = 0; i < n->count; ++i) {
+        if (!n->tasks[i]) continue;
+        int err = cc_task_join(n->tasks[i]);
+        if (first_err == 0 && err != 0) {
+            first_err = err;
+        }
+        cc_task_free(n->tasks[i]);
+        n->tasks[i] = NULL;
+    }
+    n->count = 0;
+    return first_err;
+}
+
+void cc_nursery_free(CCNursery* n) {
+    if (!n) return;
+    for (size_t i = 0; i < n->closing_count; ++i) {
+        if (n->closing[i]) cc_chan_close(n->closing[i]);
+    }
+    for (size_t i = 0; i < n->count; ++i) {
+        if (n->tasks[i]) {
+            cc_task_free(n->tasks[i]);
+        }
+    }
+    free(n->tasks);
+    free(n->closing);
+    pthread_mutex_destroy(&n->mu);
+    free(n);
+}
+
+int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch) {
+    if (!n || !ch) return EINVAL;
+    pthread_mutex_lock(&n->mu);
+    if (n->closing_count == n->closing_cap) {
+        size_t new_cap = n->closing_cap ? n->closing_cap * 2 : 4;
+        CCChan** nc = (CCChan**)realloc(n->closing, new_cap * sizeof(CCChan*));
+        if (!nc) { pthread_mutex_unlock(&n->mu); return ENOMEM; }
+        memset(nc + n->closing_cap, 0, (new_cap - n->closing_cap) * sizeof(CCChan*));
+        n->closing = nc;
+        n->closing_cap = new_cap;
+    }
+    n->closing[n->closing_count++] = ch;
+    pthread_mutex_unlock(&n->mu);
+    return 0;
+}
+
