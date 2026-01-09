@@ -1,60 +1,193 @@
+diff --git a/libtcc.c b/libtcc.c
+index f8a749db..9eace184 100644
+--- a/libtcc.c
++++ b/libtcc.c
+@@ -66,6 +66,126 @@
+ 
+ #include "tcc.h"
+ 
++#ifdef CONFIG_CC_EXT
++/* Default no-op token registrar; can be overridden by CC runtime. */
++__attribute__((weak)) void tcc_ext_register_tokens(void) {}
++
++/* CC extension stubs exposed via libtcc when CONFIG_CC_EXT is on. */
++PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* path, struct CCSymbolTable* symbols) {
++    (void)symbols; /* reserved for future constexpr tables */
++    if (!path) return NULL;
++
++    TCCState *s = tcc_new();
++    if (!s) return NULL;
++#ifdef CONFIG_CC_EXT
++    /* Ensure CC recorder state is initialized (defensive even if tcc_new() zeroes). */
++    s->cc_nodes = NULL;
++    s->cc_nodes_count = 0;
++    s->cc_nodes_cap = 0;
++    s->cc_node_stack = NULL;
++    s->cc_node_stack_top = -1;
++    s->cc_node_stack_cap = 0;
++    s->cc_last_member_tok = 0;
++    s->cc_last_member_flags = 0;
++    s->cc_last_member_line = 0;
++    s->cc_last_member_col = 0;
++    s->cc_last_rparen_line = 0;
++    s->cc_last_rparen_col = 0;
++    s->cc_ufcs_seq_line = 0;
++    s->cc_ufcs_seq_count = 0;
++    s->cc_call_stack = NULL;
++    s->cc_call_stack_top = -1;
++    s->cc_call_stack_cap = 0;
++#endif
++    tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
++    s->filetype = AFF_TYPE_C;
++    /* Add basic include paths for CC std headers (relative to caller cwd). */
++    tcc_add_include_path(s, ".");
++    tcc_add_include_path(s, "include");
++    tcc_add_include_path(s, "cc/include");
++    tcc_add_include_path(s, "./cc/include");
++    tcc_add_include_path(s, "../cc/include");
++    tcc_add_sysinclude_path(s, ".");
++    tcc_add_sysinclude_path(s, "include");
++    tcc_add_sysinclude_path(s, "cc/include");
++    tcc_add_sysinclude_path(s, "./cc/include");
++    tcc_add_sysinclude_path(s, "../cc/include");
++    /* Absolute fallbacks for CC headers. */
++    tcc_add_include_path(s, "/Users/skotay/Documents/code/concurrent-c");
++    tcc_add_include_path(s, "/Users/skotay/Documents/code/concurrent-c/cc/include");
++    tcc_add_include_path(s, "/Users/skotay/Documents/code/concurrent-c/include");
++    tcc_add_sysinclude_path(s, "/Users/skotay/Documents/code/concurrent-c");
++    tcc_add_sysinclude_path(s, "/Users/skotay/Documents/code/concurrent-c/cc/include");
++    tcc_add_sysinclude_path(s, "/Users/skotay/Documents/code/concurrent-c/include");
++    /* System SDK paths for std headers. */
++    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include");
++    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
++    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/usr/include");
++    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include");
++    tcc_add_sysinclude_path(s, "/usr/include");
++
++    /* Disable code emission side effects where possible. */
++    s->nostdinc = 0;
++    s->nostdlib = 1;
++
++    if (tcc_add_file(s, path) != 0) {
++        tcc_delete(s);
++        return NULL;
++    }
++
++    struct CCASTStubRoot *root = tcc_mallocz(sizeof(struct CCASTStubRoot));
++    if (!root) {
++        tcc_delete(s);
++        return NULL;
++    }
++    root->nodes = s->cc_nodes;
++    root->count = s->cc_nodes_count;
++    root->side = NULL;
++
++    /* Detach ownership so tcc_delete doesn't free the node slab. */
++    s->cc_nodes = NULL;
++    s->cc_nodes_count = 0;
++    if (s->cc_node_stack)
++        tcc_free(s->cc_node_stack);
++    s->cc_node_stack = NULL;
++    if (s->cc_call_stack)
++        tcc_free(s->cc_call_stack);
++    s->cc_call_stack = NULL;
++    tcc_delete(s);
++    return root;
++}
++
++PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root) {
++    if (!root) return;
++    if (root->nodes) {
++#ifdef CONFIG_CC_EXT
++        for (int i = 0; i < root->count; i++) {
++            if (root->nodes[i].file) tcc_free((void*)root->nodes[i].file);
++            if (root->nodes[i].aux_s1) tcc_free((void*)root->nodes[i].aux_s1);
++            if (root->nodes[i].aux_s2) tcc_free((void*)root->nodes[i].aux_s2);
++        }
++#endif
++        tcc_free(root->nodes);
++    }
++    tcc_free(root);
++}
++
++PUB_FUNC void cc_tcc_ast_set_side(struct CCASTStubRoot* root, void* side) {
++    if (root)
++        root->side = side;
++}
++
++PUB_FUNC void* cc_tcc_ast_get_side(struct CCASTStubRoot* root) {
++    return root ? root->side : NULL;
++}
++
++PUB_FUNC int cc_tcc_eval_constexpr(const char* expr, long long* out_val) {
++    (void)expr;
++    (void)out_val;
++    return -1;
++}
++#endif
++
+ /********************************************************/
+ /* global variables */
+ 
+@@ -738,6 +858,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+     bf->buf_ptr = bf->buffer;
+     bf->buf_end = bf->buffer + initlen;
+     bf->buf_end[0] = CH_EOB; /* put eob symbol */
++    bf->cc_line_start = bf->buffer;
+     pstrcpy(bf->filename, sizeof(bf->filename), filename);
+ #ifdef _WIN32
+     normalize_slashes(bf->filename);
 diff --git a/tcc.c b/tcc.c
-index e1819239..92369674 100644
+index e1819239..efc85a32 100644
 --- a/tcc.c
 +++ b/tcc.c
-@@ -426,3 +426,36 @@ redo:
+@@ -426,3 +426,8 @@ redo:
          fclose(ppfp);
      return ret;
  }
 +
- #ifdef CONFIG_CC_EXT
++#ifdef CONFIG_CC_EXT
 +/* Default no-op token registrar; can be overridden by CC runtime. */
 +__attribute__((weak)) void tcc_ext_register_tokens(void) {}
-+
- PUB_FUNC void tcc_set_ext_parser(struct TCCExtParser const *p) {
-     tcc_state->ext_parser = p;
- }
-
- PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* path, struct CCSymbolTable* symbols) {
-     (void)path;
-     (void)symbols;
-     return tcc_mallocz(sizeof(struct CCASTStubRoot));
- }
-
- PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root) {
-     tcc_free(root);
- }
-
- /* Optional side-table attachment for CC AST nodes. */
- PUB_FUNC void cc_tcc_ast_set_side(struct CCASTStubRoot* root, void* side) {
-     if (root)
-         root->side = side;
- }
-
- PUB_FUNC void* cc_tcc_ast_get_side(struct CCASTStubRoot* root) {
-     return root ? root->side : NULL;
- }
-
- /* Placeholder constexpr API: currently unsupported. */
- PUB_FUNC int cc_tcc_eval_constexpr(const char* expr, long long* out_val) {
-     (void)expr;
-     (void)out_val;
-     return -1;
- }
- #endif
++#endif
 diff --git a/tcc.h b/tcc.h
-index 1c2f6949..30455ae2 100644
+index 1c2f6949..f32a6f56 100644
 --- a/tcc.h
 +++ b/tcc.h
-@@ -452,6 +452,22 @@ typedef struct TokenSym {
+@@ -452,6 +452,47 @@ typedef struct TokenSym {
      char str[1];
  } TokenSym;
  
 +#ifdef CONFIG_CC_EXT
 +#define CC_TCC_EXT_AVAILABLE 1
 +struct CCSymbolTable;
++enum CCASTStubKind {
++    CC_AST_NODE_UNKNOWN = 0,
++    CC_AST_NODE_DECL    = 1,
++    CC_AST_NODE_BLOCK   = 2,
++    CC_AST_NODE_STMT    = 3,
++    CC_AST_NODE_ARENA   = 4,
++    CC_AST_NODE_CALL    = 5,
++};
++
++struct CCASTStubNode {
++    int kind;              /* enum CCASTStubKind */
++    int parent;            /* parent node index, -1 for root */
++    const char *file;      /* source filename */
++    int line_start;        /* starting line */
++    int line_end;          /* ending line (best-effort) */
++    int col_start;         /* starting column (1-based, best-effort) */
++    int col_end;           /* ending column (1-based, best-effort, exclusive) */
++    int aux1;              /* call: method token (tok); other nodes: reserved */
++    int aux2;              /* call: flags (bit0=recv_is_ptr); other nodes: reserved */
++    const char *aux_s1;    /* arena: name string (e.g. "arena" / "a") */
++    const char *aux_s2;    /* arena: size expression string (e.g. "kilobytes(4)") */
++};
++
 +struct CCASTStubRoot {
-+    void *side;
++    void *side;                /* reserved for CC */
++    struct CCASTStubNode *nodes;
++    int count;
 +};
 +struct TCCExtParser {
 +    int (*try_cc_decl)(void);
@@ -69,17 +202,48 @@ index 1c2f6949..30455ae2 100644
  #ifdef TCC_TARGET_PE
  typedef unsigned short nwchar_t;
  #else
-@@ -871,6 +887,9 @@ struct TCCState {
+@@ -642,6 +683,9 @@ typedef struct BufferedFile {
+     int fd;
+     struct BufferedFile *prev;
+     int line_num;    /* current line number - here to simplify code */
++    /* CC extension: best-effort column tracking within the current line.
++       Points at the start of the current line within the active buffer. */
++    uint8_t *cc_line_start;
+     int line_ref;    /* tcc -E: last printed line */
+     int ifndef_macro;  /* #ifndef macro / #endif search */
+     int ifndef_macro_saved; /* saved ifndef_macro */
+@@ -871,6 +915,30 @@ struct TCCState {
  
      int ifdef_stack[IFDEF_STACK_SIZE];
      int *ifdef_stack_ptr;
 +#ifdef CONFIG_CC_EXT
 +    const struct TCCExtParser *ext_parser; /* optional CC parser extensions */
++    /* CC AST recording (optional, populated when CONFIG_CC_EXT). */
++    struct CCASTStubNode *cc_nodes;
++    int cc_nodes_count;
++    int cc_nodes_cap;
++    int *cc_node_stack;
++    int cc_node_stack_top;
++    int cc_node_stack_cap;
++    /* CC UFCS scratch: last member access before a call. */
++    int cc_last_member_tok;
++    int cc_last_member_flags; /* bit0=recv_is_ptr (->) */
++    int cc_last_member_line;
++    int cc_last_member_col;
++    int cc_last_rparen_line;
++    int cc_last_rparen_col;
++    /* CC UFCS disambiguation: per-line occurrence counter for UFCS calls. */
++    int cc_ufcs_seq_line;
++    int cc_ufcs_seq_count;
++    /* CC call stack: indices of recorded CC_AST_NODE_CALL nodes (for nested span end update). */
++    int *cc_call_stack;
++    int cc_call_stack_top;
++    int cc_call_stack_cap;
 +#endif
  
      /* included files enclosed with #ifndef MACRO */
      int cached_includes_hash[CACHED_INCLUDES_HASH_SIZE];
-@@ -1223,6 +1242,16 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
+@@ -1223,6 +1291,16 @@ PUB_FUNC void *tcc_mallocz(unsigned long size);
  PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size);
  PUB_FUNC char *tcc_strdup(const char *str);
  
@@ -96,43 +260,518 @@ index 1c2f6949..30455ae2 100644
  #ifdef MEM_DEBUG
  #define tcc_free(ptr)           tcc_free_debug(ptr)
  #define tcc_malloc(size)        tcc_malloc_debug(size, __FILE__, __LINE__)
+@@ -1331,6 +1409,8 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2);
+ 
+ ST_DATA struct BufferedFile *file;
+ ST_DATA int tok;
++/* CC extension: best-effort 1-based starting column of the current token. */
++ST_DATA int tok_col;
+ ST_DATA CValue tokc;
+ ST_DATA const int *macro_ptr;
+ ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 6519a46b..7b33a829 100644
+index 6519a46b..284f8b5b 100644
 --- a/tccgen.c
 +++ b/tccgen.c
-@@ -7163,6 +7163,13 @@ static void gexpr_decl(void)
+@@ -58,6 +58,11 @@ ST_DATA int nocode_wanted; /* no code generation wanted */
+ #define CODE_OFF() if(!nocode_wanted)(nocode_wanted |= CODE_OFF_BIT)
+ #define CODE_ON() (nocode_wanted &= ~CODE_OFF_BIT)
+ 
++#ifdef CONFIG_CC_EXT
++static void cc_ast_record_start(int kind);
++static void cc_ast_record_end(void);
++#endif
++
+ /* no code output when parsing sizeof()/typeof() etc. (using nocode_wanted++/--) */
+ #define NOEVAL_MASK 0x0000FFFF
+ #define NOEVAL_WANTED (nocode_wanted & NOEVAL_MASK)
+@@ -131,6 +136,7 @@ static void init_prec(void);
+ static void block(int flags);
+ #define STMT_EXPR 1
+ #define STMT_COMPOUND 2
++#define STMT_ARENA 3
+ 
+ static void gen_cast(CType *type);
+ static void gen_cast_s(int t);
+@@ -144,6 +150,56 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
+ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r, int has_init, int v, int scope);
+ static int decl(int l);
+ static void expr_eq(void);
++#ifdef CONFIG_CC_EXT
++static void cc_ast_record_call(int method_tok, int flags) {
++    if (!tcc_state || !tcc_state->cc_nodes || tcc_state->cc_node_stack_top < 0)
++        return;
++    int parent = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++    int idx = tcc_state->cc_nodes_count++;
++    if (idx >= tcc_state->cc_nodes_cap) {
++        tcc_state->cc_nodes_cap *= 2;
++        tcc_state->cc_nodes = tcc_realloc(tcc_state->cc_nodes, tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
++    }
++    tcc_state->cc_nodes[idx].kind = CC_AST_NODE_CALL;
++    tcc_state->cc_nodes[idx].parent = parent;
++    tcc_state->cc_nodes[idx].file = (file) ? tcc_strdup(file->filename) : NULL;
++    tcc_state->cc_nodes[idx].line_start = (method_tok && tcc_state->cc_last_member_line) ? tcc_state->cc_last_member_line : (file ? file->line_num : 0);
++    tcc_state->cc_nodes[idx].line_end = tcc_state->cc_nodes[idx].line_start;
++    tcc_state->cc_nodes[idx].col_start = (method_tok && tcc_state->cc_last_member_col) ? tcc_state->cc_last_member_col : 0;
++    tcc_state->cc_nodes[idx].col_end = 0;
++    tcc_state->cc_nodes[idx].aux1 = method_tok;
++    /* Pack UFCS per-line occurrence into aux2 for disambiguation:
++       aux2 bit0 = recv_is_ptr, aux2 bits 8.. = ufcs_occurrence (1-based) */
++    int occ = 0;
++    if (method_tok) {
++        int line_for_occ = tcc_state->cc_nodes[idx].line_start;
++        if (tcc_state->cc_ufcs_seq_line != line_for_occ) {
++            tcc_state->cc_ufcs_seq_line = line_for_occ;
++            tcc_state->cc_ufcs_seq_count = 0;
++        }
++        occ = ++tcc_state->cc_ufcs_seq_count;
++    }
++    tcc_state->cc_nodes[idx].aux2 = flags | (occ << 8);
++    /* Copy method name now; token table is destroyed at tcc_delete(). */
++    tcc_state->cc_nodes[idx].aux_s1 = method_tok ? tcc_strdup(get_tok_str(method_tok, NULL)) : NULL;
++    tcc_state->cc_nodes[idx].aux_s2 = NULL;
++    /* Remember for later span end update once we finish parsing the arglist. */
++    if (!tcc_state->cc_call_stack) {
++        tcc_state->cc_call_stack_cap = 32;
++        tcc_state->cc_call_stack_top = -1;
++        tcc_state->cc_call_stack = tcc_mallocz(tcc_state->cc_call_stack_cap * sizeof(int));
++    }
++    if (tcc_state->cc_call_stack) {
++        if (tcc_state->cc_call_stack_top + 1 >= tcc_state->cc_call_stack_cap) {
++            tcc_state->cc_call_stack_cap *= 2;
++            tcc_state->cc_call_stack = tcc_realloc(tcc_state->cc_call_stack, tcc_state->cc_call_stack_cap * sizeof(int));
++        }
++        if (tcc_state->cc_call_stack) {
++            tcc_state->cc_call_stack[++tcc_state->cc_call_stack_top] = idx;
++        }
++    }
++}
++#endif
+ static void vpush_type_size(CType *type, int *a);
+ static int is_compatible_unqualified_types(CType *type1, CType *type2);
+ static inline int64_t expr_const64(void);
+@@ -159,6 +215,59 @@ static void cast_error(CType *st, CType *dt);
+ static void end_switch(void);
+ static void do_Static_assert(void);
+ 
++#ifdef CONFIG_CC_EXT
++static void cc_ast_record_start(int kind) {
++    if (!tcc_state)
++        return;
++    if (!tcc_state->cc_nodes) {
++        tcc_state->cc_nodes_cap = 64;
++        tcc_state->cc_nodes_count = 0;
++        tcc_state->cc_nodes = tcc_mallocz(tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
++    }
++    if (!tcc_state->cc_node_stack) {
++        tcc_state->cc_node_stack_cap = 64;
++        tcc_state->cc_node_stack_top = -1;
++        tcc_state->cc_node_stack = tcc_mallocz(tcc_state->cc_node_stack_cap * sizeof(int));
++    }
++    if (!tcc_state->cc_nodes || !tcc_state->cc_node_stack)
++        return;
++    if (tcc_state->cc_nodes_count >= tcc_state->cc_nodes_cap) {
++        tcc_state->cc_nodes_cap *= 2;
++        tcc_state->cc_nodes = tcc_realloc(tcc_state->cc_nodes, tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
++    }
++    if (tcc_state->cc_node_stack_top + 1 >= tcc_state->cc_node_stack_cap) {
++        tcc_state->cc_node_stack_cap *= 2;
++        tcc_state->cc_node_stack = tcc_realloc(tcc_state->cc_node_stack, tcc_state->cc_node_stack_cap * sizeof(int));
++    }
++    if (!tcc_state->cc_nodes || !tcc_state->cc_node_stack)
++        return;
++    int parent = (tcc_state->cc_node_stack_top >= 0) ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
++    int idx = tcc_state->cc_nodes_count++;
++    tcc_state->cc_nodes[idx].kind = kind;
++    tcc_state->cc_nodes[idx].parent = parent;
++    tcc_state->cc_nodes[idx].file = (file) ? tcc_strdup(file->filename) : NULL;
++    tcc_state->cc_nodes[idx].line_start = file ? file->line_num : 0;
++    tcc_state->cc_nodes[idx].line_end = tcc_state->cc_nodes[idx].line_start;
++    tcc_state->cc_nodes[idx].col_start = 0;
++    tcc_state->cc_nodes[idx].col_end = 0;
++    tcc_state->cc_nodes[idx].aux1 = 0;
++    tcc_state->cc_nodes[idx].aux2 = 0;
++    tcc_state->cc_nodes[idx].aux_s1 = NULL;
++    tcc_state->cc_nodes[idx].aux_s2 = NULL;
++    tcc_state->cc_node_stack_top++;
++    tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] = idx;
++}
++
++static void cc_ast_record_end(void) {
++    if (!tcc_state || !tcc_state->cc_nodes || tcc_state->cc_node_stack_top < 0)
++        return;
++    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++    if (file)
++        tcc_state->cc_nodes[idx].line_end = file->line_num;
++    tcc_state->cc_node_stack_top--;
++}
++#endif
++
+ /* ------------------------------------------------------------------------- */
+ /* Automagical code suppression */
+ 
+@@ -6119,6 +6228,15 @@ special_math_val:
+         s = sym_find(t);
+         if (!s || IS_ASM_SYM(s)) {
+             const char *name = get_tok_str(t, NULL);
++#ifdef CONFIG_CC_EXT
++            /* UFCS tolerance: allow an undeclared receiver identifier if it is
++               immediately used in a UFCS-style member call (x.method(...)).
++               We only need parsing/recording to continue; CC will lower it. */
++            if (tok == '.' || tok == TOK_ARROW) {
++                vpushi(0);
++                break;
++            }
++#endif
+             if (tok != '(')
+                 tcc_error("'%s' undeclared", name);
+             /* for simple function calls, we tolerate undeclared
+@@ -6162,13 +6280,54 @@ special_math_val:
+             next();
+         } else if (tok == '.' || tok == TOK_ARROW) {
+             int qualifiers, cumofs;
+-            /* field */ 
+-            if (tok == TOK_ARROW) 
++            /* field */
++            int cc_recv_is_ptr = (tok == TOK_ARROW);
++            int cc_member_col = tok_col;
++            int cc_member_line = file ? file->line_num : 0;
++            next(); /* consume '.'/'->', now at member identifier */
++
++#ifdef CONFIG_CC_EXT
++            /* UFCS tolerance: if we see x.method( ... ), treat it as a plain
++               function call to 'method' (discarding the receiver) so parsing
++               can continue and the recorder can capture the call site. The
++               CC frontend will later lower it properly. */
++            int cc_method_tok = tok;
++            int cc_is_ufcs = 0;
++            if (tok >= TOK_IDENT) {
++                next();
++                if (tok == '(')
++                    cc_is_ufcs = 1;
++                unget_tok(cc_method_tok);
++            }
++            if (cc_is_ufcs) {
++                tcc_state->cc_last_member_tok = cc_method_tok;
++                tcc_state->cc_last_member_flags = cc_recv_is_ptr ? 1 : 0;
++                tcc_state->cc_last_member_col = cc_member_col;
++                tcc_state->cc_last_member_line = cc_member_line;
++
++                /* Drop receiver expression; treat member name as function identifier. */
++                vpop();
++                s = sym_find(cc_method_tok);
++                if (!s || IS_ASM_SYM(s)) {
++                    s = external_global_sym(cc_method_tok, &func_old_type);
++                }
++                r = s->r;
++                if ((r & VT_VALMASK) < VT_CONST)
++                    r = (r & ~VT_VALMASK) | VT_LOCAL;
++                vset(&s->type, r, s->c);
++                vtop->sym = s;
++                if (r & VT_SYM)
++                    vtop->c.i = 0;
++                next(); /* consume member identifier, next token should be '(' */
++                continue;
++            }
++#endif
++
++            /* Normal C field access path. */
++            if (cc_recv_is_ptr)
+                 indir();
+             qualifiers = vtop->type.t & (VT_CONSTANT | VT_VOLATILE);
+             test_lvalue();
+-            /* expect pointer on structure */
+-            next();
+ 	    s = find_field(&vtop->type, tok, &cumofs);
+             /* add field offset to pointer */
+             gaddrof();
+@@ -6187,7 +6346,7 @@ special_math_val:
+                     vtop->r |= VT_MUSTBOUND;
+ #endif
+             }
+-            next();
++            next(); /* consume member identifier */
+         } else if (tok == '[') {
+             next();
+             gexpr();
+@@ -6201,6 +6360,12 @@ special_math_val:
+             TokenString *p, *p2;
+ 
+             /* function call  */
++#ifdef CONFIG_CC_EXT
++            /* Record a call node (best-effort). For UFCS, use last member token if present. */
++            cc_ast_record_call(tcc_state->cc_last_member_tok, tcc_state->cc_last_member_flags);
++            tcc_state->cc_last_member_tok = 0;
++            tcc_state->cc_last_member_flags = 0;
++#endif
+             if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
+                 /* pointer test (no array accepted) */
+                 if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
+@@ -6301,10 +6466,30 @@ special_math_val:
+                 vrev(n);
+             }
+ 
++            /* Record end position of this call's ')' before consuming it. */
++#ifdef CONFIG_CC_EXT
++            if (tcc_state && tok == ')' && file) {
++                tcc_state->cc_last_rparen_line = file->line_num;
++                tcc_state->cc_last_rparen_col = tok_col;
++            }
++#endif
+             next();
+             vcheck_cmp(); /* the generators don't like VT_CMP on vtop */
+             gfunc_call(nb_args);
+ 
++#ifdef CONFIG_CC_EXT
++            /* Update recorded call span end now that the arglist has been parsed. */
++            if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_call_stack && tcc_state->cc_call_stack_top >= 0) {
++                int call_idx = tcc_state->cc_call_stack[tcc_state->cc_call_stack_top--];
++                if (tcc_state->cc_last_rparen_line)
++                    tcc_state->cc_nodes[call_idx].line_end = tcc_state->cc_last_rparen_line;
++                if (tcc_state->cc_last_rparen_col)
++                    tcc_state->cc_nodes[call_idx].col_end = tcc_state->cc_last_rparen_col + 1;
++                tcc_state->cc_last_rparen_line = 0;
++                tcc_state->cc_last_rparen_col = 0;
++            }
++#endif
++
+             if (ret_nregs < 0) {
+                 vsetc(&ret.type, ret.r, &ret.c);
+ #ifdef TCC_TARGET_RISCV64
+@@ -7163,12 +7348,110 @@ static void gexpr_decl(void)
  
  static void block(int flags)
  {
-+    /* CC extension: allow external parser to consume statements. */
 +#ifdef CONFIG_CC_EXT
-+    if (tcc_state->ext_parser && tcc_state->ext_parser->try_cc_stmt) {
-+        if (tcc_state->ext_parser->try_cc_stmt())
-+            return;
-+    }
++    cc_ast_record_start(CC_AST_NODE_BLOCK);
 +#endif
      int a, b, c, d, e, t;
      struct scope o;
      Sym *s;
-@@ -8688,6 +8695,13 @@ static void pe_check_linkage(CType *type, AttributeDef *ad)
-    or VT_JMP if parsing c99 for decl: for (int i = 0, ...) */
- static int decl(int l)
- {
++    int cc_arena_wrap = 0;
++    int cc_arena_name_tok = 0;
++    char *cc_arena_name_str = NULL;
++    char *cc_arena_size_str = NULL;
+ 
+ again:
+     t = tok;
++    /* CC extension: @arena { ... } statement. */
++#ifdef CONFIG_CC_EXT
++    if (t == '@') {
++        next();
++        if (tok < TOK_UIDENT)
++            tcc_error("expected identifier after '@'");
++        if (strcmp(get_tok_str(tok, NULL), "arena") != 0)
++            tcc_error("unknown '@%s' block", get_tok_str(tok, NULL));
++        next();
++        /* Optional args: @arena(name?, size?) { ... } */
++        cc_arena_name_tok = tok_alloc_const("arena");
++        cc_arena_name_str = NULL;
++        cc_arena_size_str = NULL;
++        if (tok == '(') {
++            CString sz;
++            int depth = 1;
++            int had_comma = 0;
++
++            cstr_new(&sz);
++            next(); /* after '(' */
++
++            /* Parse first arg: if it's IDENT and then ',' or ')', it's the name. Otherwise it
++               is part of the size expression. */
++            if (tok >= TOK_IDENT) {
++                int first = tok;
++                next();
++                if (tok == ',' || tok == ')') {
++                    cc_arena_name_tok = first;
++                    cc_arena_name_str = tcc_strdup(get_tok_str(first, NULL));
++                    if (tok == ',') {
++                        had_comma = 1;
++                        next(); /* consume ','; start of size expr */
++                    } else {
++                        /* tok == ')' : no size */
++                    }
++                } else {
++                    /* Not a plain name; treat it as size expr starting with `first` + whatever
++                       we've already advanced to. */
++                    cstr_cat(&sz, get_tok_str(first, NULL), -1);
++                    cstr_ccat(&sz, ' ');
++                    cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
++                    cstr_ccat(&sz, ' ');
++                    had_comma = 1; /* we are now collecting size until matching ')' */
++                    next();
++                }
++            } else if (tok != ')') {
++                had_comma = 1; /* collect as size */
++            }
++
++            /* Collect remaining tokens into size expr until matching ')'. */
++            while (tok && depth > 0) {
++                if (tok == '(') {
++                    depth++;
++                } else if (tok == ')') {
++                    depth--;
++                    if (depth == 0)
++                        break;
++                }
++                if (had_comma) {
++                    cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
++                    cstr_ccat(&sz, ' ');
++                }
++                next();
++            }
++            if (depth != 0)
++                tcc_error("expected ')' after @arena(");
++
++            if (had_comma && sz.data && sz.size > 0) {
++                /* Trim trailing space. */
++                if (sz.size >= 1 && sz.data[sz.size - 1] == ' ')
++                    sz.data[sz.size - 1] = '\0', sz.size--;
++                cstr_ccat(&sz, '\0');
++                cc_arena_size_str = tcc_strdup(sz.data);
++            }
++            cstr_free(&sz);
++
++            next(); /* consume ')' */
++        }
++        if (tok != '{')
++            tcc_error("expected '{' after @arena");
++        cc_ast_record_start(CC_AST_NODE_ARENA);
++        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
++            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++            /* Store copied strings now; token tables get torn down by tcc_delete(). */
++            tcc_state->cc_nodes[idx].aux_s1 = cc_arena_name_str ? cc_arena_name_str : tcc_strdup("arena");
++            tcc_state->cc_nodes[idx].aux_s2 = cc_arena_size_str ? cc_arena_size_str : tcc_strdup("kilobytes(4)");
++        }
++        cc_arena_wrap = 1;
++        t = '{';
++    }
++#endif
+     /* If the token carries a value, next() might destroy it. Only with
+        invalid code such as f(){"123"4;} */
+     if (TOK_HAS_VALUE(t))
+@@ -7215,6 +7498,26 @@ again:
+             tcc_debug_stabn(tcc_state, N_LBRAC, ind - func_ind);
+         new_scope(&o);
+ 
++#ifdef CONFIG_CC_EXT
++        /* If this '{' came from an @arena block, inject a dummy arena symbol into scope
++           so parsing/typechecking can proceed. CC will lower the actual allocation. */
++        if (cc_arena_wrap) {
++            CType at = int_type;
++            Sym *ts;
++            int tok_ccarena = tok_alloc_const("CCArena");
++            ts = sym_find(tok_ccarena);
++            if (ts && (ts->type.t & VT_TYPEDEF)) {
++                at = ts->type;
++                at.t &= ~VT_TYPEDEF;
++            }
++            mk_pointer(&at);
++            sym_push(cc_arena_name_tok ? cc_arena_name_tok : tok_alloc_const("arena"),
++                     &at,
++                     VT_LOCAL | VT_LVAL,
++                     0);
++        }
++#endif
++
+         /* handle local labels declarations */
+         while (tok == TOK_LABEL) {
+             do {
+@@ -7242,6 +7545,13 @@ again:
+         else if (!nocode_wanted)
+             check_func_return();
+ 
++#ifdef CONFIG_CC_EXT
++        if (cc_arena_wrap) {
++            cc_ast_record_end(); /* arena */
++            cc_arena_wrap = 0;
++        }
++#endif
++
+     } else if (t == TOK_RETURN) {
+         b = (func_vt.t & VT_BTYPE) != VT_VOID;
+         if (tok != ';') {
+@@ -7507,6 +7817,9 @@ again:
+ 
+     if (debug_modes)
+         tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
++#ifdef CONFIG_CC_EXT
++    cc_ast_record_end(); /* block */
++#endif
+ }
+ 
+ /* This skips over a stream of tokens containing balanced {} and ()
+@@ -8694,6 +9007,15 @@ static int decl(int l)
+     AttributeDef ad, adbase;
+     ElfSym *esym;
+ 
 +    /* CC extension: allow external parser to consume declarations. */
 +#ifdef CONFIG_CC_EXT
 +    if (tcc_state->ext_parser && tcc_state->ext_parser->try_cc_decl) {
 +        if (tcc_state->ext_parser->try_cc_decl())
 +            return 0;
 +    }
++    cc_ast_record_start(CC_AST_NODE_DECL);
 +#endif
-     int v, has_init, r, oldint;
-     CType type, btype;
-     Sym *sym, *sa;
++
+     while (1) {
+ 
+         oldint = 0;
+@@ -8930,7 +9252,7 @@ static int decl(int l)
+                 }
+                 if (tok != ',') {
+                     if (l == VT_JMP)
+-                        return has_init ? v : 1;
++                        goto decl_done_return;
+                     skip(';');
+                     break;
+                 }
+@@ -8938,6 +9260,12 @@ static int decl(int l)
+             }
+         }
+     }
++#ifdef CONFIG_CC_EXT
++decl_done_return:
++    cc_ast_record_end();
++    if (l == VT_JMP)
++        return has_init ? v : 1;
++#endif
+     return 0;
+ }
+ 
 diff --git a/tccpp.c b/tccpp.c
-index b30df5ad..127e19e4 100644
+index b30df5ad..a9a6f13d 100644
 --- a/tccpp.c
 +++ b/tccpp.c
-@@ -3857,6 +3857,12 @@ ST_FUNC void tccpp_new(TCCState *s)
+@@ -32,6 +32,7 @@ ST_DATA int parse_flags;
+ 
+ ST_DATA struct BufferedFile *file;
+ ST_DATA int tok;
++ST_DATA int tok_col;
+ ST_DATA CValue tokc;
+ ST_DATA const int *macro_ptr;
+ ST_DATA CString tokcstr; /* current parsed string, if any */
+@@ -2676,6 +2677,11 @@ static void next_nomacro(void)
+ 
+     p = file->buf_ptr;
+  redo_no_start:
++    /* CC extension: best-effort token column tracking (1-based). */
++    if (file && file->cc_line_start && p >= file->cc_line_start)
++        tok_col = (int)(p - file->cc_line_start) + 1;
++    else
++        tok_col = 1;
+     c = *p;
+     switch(c) {
+     case ' ':
+@@ -2740,6 +2746,8 @@ static void next_nomacro(void)
+     case '\n':
+         file->line_num++;
+         p++;
++        if (file)
++            file->cc_line_start = p;
+ maybe_newline:
+         tok_flags |= TOK_FLAG_BOL;
+         if (0 == (parse_flags & PARSE_FLAG_LINEFEED))
+@@ -3857,6 +3865,12 @@ ST_FUNC void tccpp_new(TCCState *s)
          p = r;
      }
  

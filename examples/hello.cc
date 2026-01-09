@@ -1,14 +1,16 @@
 #define CC_ENABLE_SHORT_NAMES
 #include <std/prelude.h>
 
-// CC-flavored hello using stdlib String builder + UFCS style.
-int main() {
-    CCArena a = cc_heap_arena(kilobytes(1));
-    CCString s = string_new(&a);
-    string_append(&s, "Hello, ");
-    string_append(&s, "Concurrent-C via UFCS!\\n");
-    CCSlice sl = string_as_slice(&s);
-    cc_std_out_write(sl);
+// UFCS-style hello: requires CC compiler UFCS lowering.
+int main(void) {
+    Arena a = cc_heap_arena(kilobytes(1));
+    String s1 = string_new(&a);
+    @arena {
+        String s = string_new(arena);
+        s.append("Hello, ");
+        s.append("Concurrent-C via UFCS! - 2\n");
+        std_out.write(s);
+    }
     return 0;
 }
 

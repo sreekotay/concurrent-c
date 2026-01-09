@@ -12,24 +12,106 @@ static int is_ident_char(char c) {
 
 // Map a receiver+method to a desugared function call prefix.
 // Returns number of bytes written to out (not including args), or -1 on failure.
-static int emit_desugared_call(char* out, size_t cap, const char* recv, const char* method, bool has_args) {
+static const char* skip_ws(const char* s) {
+    while (s && *s && isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+static void trim_ws_in_place(char* s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    size_t a = 0;
+    while (a < n && isspace((unsigned char)s[a])) a++;
+    size_t b = n;
+    while (b > a && isspace((unsigned char)s[b - 1])) b--;
+    if (a > 0) memmove(s, s + a, b - a);
+    s[b - a] = '\0';
+}
+
+static int is_ident_only(const char* s) {
+    if (!s || !*s) return 0;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+    for (const char* p = s; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '_')) return 0;
+    }
+    return 1;
+}
+
+static int is_addr_of_ident(const char* s) {
+    if (!s) return 0;
+    s = skip_ws(s);
+    if (*s != '&') return 0;
+    s++;
+    s = skip_ws(s);
+    return is_ident_only(s);
+}
+
+static int emit_desugared_call(char* out,
+                               size_t cap,
+                               const char* recv,
+                               const char* method,
+                               bool recv_is_ptr,
+                               const char* args_rewritten,
+                               bool has_args) {
     if (!out || cap == 0 || !recv || !method) return -1;
 
     // Special cases for stdlib convenience.
     if (strcmp(method, "as_slice") == 0) {
-        return snprintf(out, cap, "string_as_slice(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "string_as_slice(%s)", recv)
+                           : snprintf(out, cap, "string_as_slice(&%s)", recv);
     }
     if (strcmp(method, "append") == 0) {
-        return snprintf(out, cap, "string_append(&%s, ", recv);
+        return recv_is_ptr ? snprintf(out, cap, "string_append(%s, ", recv)
+                           : snprintf(out, cap, "string_append(&%s, ", recv);
     }
     if (strcmp(recv, "std_out") == 0 && strcmp(method, "write") == 0) {
+        /* Overload selection lives in the compiler:
+           - String: cc_std_out_write_string(&s) (or pass-through if already &s)
+           - "literal"/char[:]: cc_std_out_write(cc_slice_from_buffer("lit", sizeof("lit")-1))
+           - Anything else: cc_std_out_write(expr) (expecting CCSlice) */
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "cc_std_out_write(");
+
+        char tmp[512];
+        strncpy(tmp, args_rewritten, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        trim_ws_in_place(tmp);
+
+        if (tmp[0] == '"') {
+            /* Wrap string literal as CCSlice. */
+            return snprintf(out, cap, "cc_std_out_write(cc_slice_from_buffer(%s, sizeof(%s) - 1))", tmp, tmp);
+        }
+        if (is_ident_only(tmp)) {
+            return snprintf(out, cap, "cc_std_out_write_string(&%s)", tmp);
+        }
+        if (is_addr_of_ident(tmp)) {
+            return snprintf(out, cap, "cc_std_out_write_string(%s)", tmp);
+        }
         return snprintf(out, cap, "cc_std_out_write(");
+    }
+    if (strcmp(recv, "std_err") == 0 && strcmp(method, "write") == 0) {
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "cc_std_err_write(");
+        char tmp[512];
+        strncpy(tmp, args_rewritten, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        trim_ws_in_place(tmp);
+        if (tmp[0] == '"') {
+            return snprintf(out, cap, "cc_std_err_write(cc_slice_from_buffer(%s, sizeof(%s) - 1))", tmp, tmp);
+        }
+        if (is_ident_only(tmp)) {
+            return snprintf(out, cap, "cc_std_err_write_string(&%s)", tmp);
+        }
+        if (is_addr_of_ident(tmp)) {
+            return snprintf(out, cap, "cc_std_err_write_string(%s)", tmp);
+        }
+        return snprintf(out, cap, "cc_std_err_write(");
     }
     // Generic UFCS: method(&recv,
     if (has_args) {
-        return snprintf(out, cap, "%s(&%s, ", method, recv);
+        return recv_is_ptr ? snprintf(out, cap, "%s(%s, ", method, recv)
+                           : snprintf(out, cap, "%s(&%s, ", method, recv);
     }
-    return snprintf(out, cap, "%s(&%s)", method, recv);
+    return recv_is_ptr ? snprintf(out, cap, "%s(%s)", method, recv)
+                       : snprintf(out, cap, "%s(&%s)", method, recv);
 }
 
 // Rewrite one line, handling nested method calls.
@@ -40,16 +122,21 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
     size_t cap = out_cap;
 
     while (*p && cap > 1) {
-        const char* dot = strchr(p, '.');
-        if (!dot) break;
+        const char* dot = strstr(p, ".");
+        const char* arrow = strstr(p, "->");
+        const char* sep = NULL;
+        bool recv_is_ptr = false;
+        if (arrow && (!dot || arrow < dot)) { sep = arrow; recv_is_ptr = true; }
+        else { sep = dot; recv_is_ptr = false; }
+        if (!sep) break;
         // Identify receiver
-        const char* r_end = dot - 1;
+        const char* r_end = sep - 1;
         while (r_end >= p && isspace((unsigned char)*r_end)) r_end--;
         if (r_end < p || !is_ident_char(*r_end)) {
-            size_t chunk = (size_t)((dot + 1) - p);
+            size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
-            p = dot + 1;
+            p = sep + (recv_is_ptr ? 2 : 1);
             continue;
         }
         const char* r_start = r_end;
@@ -57,13 +144,13 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
         size_t recv_len = (size_t)(r_end - r_start + 1);
 
         // Identify method
-        const char* m_start = dot + 1;
+        const char* m_start = sep + (recv_is_ptr ? 2 : 1);
         while (*m_start && isspace((unsigned char)*m_start)) m_start++;
         if (!is_ident_char(*m_start)) {
-            size_t chunk = (size_t)((dot + 1) - p);
+            size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
-            p = dot + 1;
+            p = sep + (recv_is_ptr ? 2 : 1);
             continue;
         }
         const char* m_end = m_start;
@@ -133,13 +220,19 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
         bool has_args = args_out_len > 0;
 
         // Emit desugared call
-        int n = emit_desugared_call(o, cap, recv, method, has_args);
+        int n = emit_desugared_call(o, cap, recv, method, recv_is_ptr, rewritten_args, has_args);
         if (n < 0 || (size_t)n >= cap) return -1;
         o += n; cap -= (size_t)n;
-        size_t copy_len = args_out_len;
-        if (copy_len >= cap) copy_len = cap - 1;
-        memcpy(o, rewritten_args, copy_len); o += copy_len; cap -= copy_len;
-        if (cap > 1 && has_args) { *o++ = ')'; cap--; }
+        /* If we emitted a full call for std_out/std_err.write overload, we don't
+           append args/closing paren. Detect that by checking for a trailing ')'. */
+        if (o > out && *(o - 1) == ')') {
+            /* already complete */
+        } else {
+            size_t copy_len = args_out_len;
+            if (copy_len >= cap) copy_len = cap - 1;
+            memcpy(o, rewritten_args, copy_len); o += copy_len; cap -= copy_len;
+            if (cap > 1 && has_args) { *o++ = ')'; cap--; }
+        }
 
         p = args_end + 1;
     }

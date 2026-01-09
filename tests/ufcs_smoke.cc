@@ -1,0 +1,17 @@
+#include "std/prelude.h"
+
+int main(void) {
+    @arena(a, kilobytes(8)) {
+        CCString s = string_new(a);
+        s.append("UFCS smoke\n");
+
+        CCString *sp = &s;
+        sp->append("pointer receiver ok\n");
+
+        // Nested UFCS: inner call rewritten inside outer call.
+        cc_std_out_write_string(&s);
+    }
+    return 0;
+}
+
+

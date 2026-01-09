@@ -9,10 +9,10 @@
 #include "comptime/symbols.h"
 
 // Parse the given file and return an AST handle. Returns NULL on failure.
-CCASTRoot* cc_tcc_parse_to_ast(const char* path, CCSymbolTable* symbols);
+CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* path, CCSymbolTable* symbols);
 
-// Free an AST returned by cc_tcc_parse_to_ast.
-void cc_tcc_free_ast(CCASTRoot* root);
+// Free an AST returned by cc_tcc_bridge_parse_to_ast.
+void cc_tcc_bridge_free_ast(CCASTRoot* root);
 
 #endif // CC_PARSER_TCC_BRIDGE_H
 

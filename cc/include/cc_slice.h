@@ -34,10 +34,16 @@ typedef int bool;
 #define CC_SLICE_ID_NONE 0ULL
 #endif
 
+// Slice id layout: lower 3 bits are flags, upper bits carry provenance token.
+#define CC_SLICE_FLAG_UNIQUE      (1ull << 0)
+#define CC_SLICE_FLAG_TRANSFERABLE (1ull << 1)
+#define CC_SLICE_FLAG_SUBSLICE    (1ull << 2)
+#define CC_SLICE_ID_MASK          (~(uint64_t)0x7)
+
 typedef struct {
     void *ptr;
     size_t len;
-    uint64_t id;
+    uint64_t id;   // provenance | flags
     size_t alen;
 } CCSlice;
 
@@ -46,8 +52,20 @@ static inline CCSlice cc_slice_empty(void) {
     return s;
 }
 
+static inline uint64_t cc_slice_make_id(uint64_t provenance, bool unique, bool transferable, bool is_sub) {
+    uint64_t id = (provenance & CC_SLICE_ID_MASK);
+    if (unique) id |= CC_SLICE_FLAG_UNIQUE;
+    if (transferable) id |= CC_SLICE_FLAG_TRANSFERABLE;
+    if (is_sub) id |= CC_SLICE_FLAG_SUBSLICE;
+    return id;
+}
+
+static inline uint64_t cc_slice_clear_flags(uint64_t id, uint64_t flags) {
+    return id & ~flags;
+}
+
 static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
-    CCSlice s = {ptr, len, CC_SLICE_ID_NONE, len};
+    CCSlice s = {ptr, len, cc_slice_make_id(CC_SLICE_ID_NONE, true, true, false), len};
     return s;
 }
 
@@ -75,7 +93,7 @@ static inline CCSlice cc_slice_sub(CCSlice s, size_t start, size_t end) {
     CCSlice sub = {
         .ptr = base ? (void *)(base + start) : NULL,
         .len = end - start,
-        .id = s.id,
+        .id = cc_slice_clear_flags(s.id, CC_SLICE_FLAG_UNIQUE) | CC_SLICE_FLAG_SUBSLICE,
         .alen = cc_slice_capacity(s) >= start ? cc_slice_capacity(s) - start : 0,
     };
     return sub;

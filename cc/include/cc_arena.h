@@ -9,14 +9,33 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdatomic.h>)
+#include <stdatomic.h>
+#define CC_ATOMIC_FETCH_ADD(ptr, val) atomic_fetch_add_explicit((ptr), (val), memory_order_relaxed)
+typedef _Atomic uint64_t cc_atomic_u64;
+#else
+typedef uint64_t cc_atomic_u64;
+#if defined(__TINYC__)
+// tcc lacks __sync builtins; fallback to non-atomic increment (provenance is best-effort)
+#define CC_ATOMIC_FETCH_ADD(ptr, val) ((*(ptr)) += (val))
+#else
+#define CC_ATOMIC_FETCH_ADD(ptr, val) __sync_fetch_and_add((ptr), (val))
+#endif
+#endif
 
 typedef struct {
     uint8_t *base;
     size_t capacity;
     size_t offset;
-    // padding for future flags; keeps struct 24 bytes on LP64
+    uint64_t provenance;      // monotonically increasing arena id
     uint32_t _reserved;
 } CCArena;
+
+// Global provenance counter (defined in runtime).
+extern cc_atomic_u64 cc_arena_prov_counter;
 
 // Allocation helpers --------------------------------------------------------
 
@@ -34,6 +53,7 @@ static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
     arena->base = (uint8_t *)buffer;
     arena->capacity = capacity;
     arena->offset = 0;
+    arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
     arena->_reserved = 0;
     return 0;
 }

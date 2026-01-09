@@ -3,7 +3,11 @@ TCC_BIN ?=
 TCC_EXT ?= 0
 TCC_INC ?= ../third_party/tcc
 TCC_LIB ?= ../third_party/tcc
-CFLAGS_COMMON := -Wall -Wextra -Isrc -Iinclude -DCC_ENABLE_ASYNC
+CC_ENABLE_ASYNC ?= 0
+CFLAGS_COMMON := -Wall -Wextra -Isrc -Iinclude
+ifeq ($(CC_ENABLE_ASYNC),1)
+  CFLAGS_COMMON += -DCC_ENABLE_ASYNC
+endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g
 else
@@ -11,6 +15,14 @@ else
 endif
 # Optional TCC extension (set TCC_EXT=1 and point TCC_INC/TCC_LIB at patched tcc)
 ifeq ($(TCC_EXT),1)
+  # Normalize paths (allow invoking from repo root with TCC_INC=third_party/tcc).
+  TCC_INC_ABS := $(shell cd $(TCC_INC) 2>/dev/null && pwd)
+  ifeq ($(TCC_INC_ABS),)
+    TCC_INC_ABS := $(shell cd ../$(TCC_INC) 2>/dev/null && pwd)
+  endif
+  ifneq ($(TCC_INC_ABS),)
+    override TCC_INC := $(TCC_INC_ABS)
+  endif
   CFLAGS += -DCC_TCC_EXT_AVAILABLE -I$(TCC_INC)
   # If TCC_LIB points to a directory, link -Ldir -ltcc; if it points to an
   # archive, link that archive directly.
@@ -24,11 +36,7 @@ endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/io/string/exec and async shards when CC_ENABLE_ASYNC.
 SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
-# When linking against patched TCC (TCC_EXT=1), skip our local bridge to avoid
-# duplicate symbols—the real implementations come from libtcc.
-ifeq ($(TCC_EXT),1)
-  SRCS := $(filter-out src/parser/tcc_bridge.c,$(SRCS))
-endif
+# Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJS := $(SRCS:.c=.o)
 BINARY := bin/cc
 

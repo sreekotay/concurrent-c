@@ -166,6 +166,20 @@ static inline CCResultSizeIoError cc_file_tell(CCFile *file) {
 // Stdout/Stderr convenience
 CCResultSizeIoError cc_std_out_write(CCSlice data);
 CCResultSizeIoError cc_std_err_write(CCSlice data);
+static inline CCResultSizeIoError cc_std_out_write_string(const CCString* s) {
+    return cc_std_out_write(cc_string_as_slice(s));
+}
+static inline CCResultSizeIoError cc_std_err_write_string(const CCString* s) {
+    return cc_std_err_write(cc_string_as_slice(s));
+}
+
+// Short-name UFCS helpers when CC_ENABLE_SHORT_NAMES is defined.
+#ifdef CC_ENABLE_SHORT_NAMES
+static inline CCResultSizeIoError std_out_write(CCSlice data) { return cc_std_out_write(data); }
+static inline CCResultSizeIoError std_out_write_string(const CCString* s) { return cc_std_out_write(cc_string_as_slice(s)); }
+static inline CCResultSizeIoError std_err_write(CCSlice data) { return cc_std_err_write(data); }
+static inline CCResultSizeIoError std_err_write_string(const CCString* s) { return cc_std_err_write(cc_string_as_slice(s)); }
+#endif
 
 // ------------------------- Path helpers ------------------------------------
 

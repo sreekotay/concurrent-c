@@ -12,6 +12,7 @@
 #include "io.c"
 #include "string.c"
 #include "exec.c"
+#include "arena_state.c"
 #ifdef CC_ENABLE_ASYNC
 #include "async_chan.c"
 #include "async_runtime.c"

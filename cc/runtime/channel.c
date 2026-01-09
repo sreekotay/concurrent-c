@@ -95,6 +95,12 @@ static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
     return 0;
 }
 
+// Initialize element size eagerly (typed channels). Allocates buffer once.
+int cc_chan_init_elem(CCChan* ch, size_t elem_size) {
+    if (!ch || elem_size == 0) return EINVAL;
+    return cc_chan_ensure_buf(ch, elem_size);
+}
+
 static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     int err = 0;
     while (!ch->closed && ch->count == ch->cap && err == 0) {

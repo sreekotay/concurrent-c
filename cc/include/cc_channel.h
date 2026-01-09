@@ -120,6 +120,9 @@ int cc_chan_match_select_async(CCExec* ex, CCChanMatchCase* cases, size_t n, siz
 // Future-based async select for ergonomic awaiting.
 int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, size_t* ready_index, CCFuture* f, const CCDeadline* deadline);
 
+// Typed-size initialization helper (eagerly sets elem_size and allocates buffer).
+int cc_chan_init_elem(CCChan* ch, size_t elem_size);
+
 // Convenience macros to build match cases.
 #define CC_CHAN_MATCH_SEND_CASE(CH, BUF, TYPE) (CCChanMatchCase){ .ch = (CH), .send_buf = (BUF), .recv_buf = NULL, .elem_size = sizeof(TYPE), .is_send = true }
 #define CC_CHAN_MATCH_RECV_CASE(CH, BUF, TYPE) (CCChanMatchCase){ .ch = (CH), .send_buf = NULL, .recv_buf = (BUF), .elem_size = sizeof(TYPE), .is_send = false }
@@ -127,7 +130,7 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
 // Typed wrapper macros: value and pointer variants with bool helpers for spec parity.
 #define CC_DECL_TYPED_CHAN_VAL(T, Name)                                                \
     typedef struct { CCChan* raw; } Name;                                              \
-    static inline Name Name##_create(size_t cap) { Name c = { cc_chan_create(cap) }; return c; } \
+    static inline Name Name##_create(size_t cap) { Name c = { cc_chan_create(cap) }; if (c.raw) cc_chan_init_elem(c.raw, sizeof(T)); return c; } \
     static inline void Name##_close(Name* c) { if (c && c->raw) cc_chan_close(c->raw); } \
     static inline void Name##_free(Name* c) { if (c && c->raw) cc_chan_free(c->raw); } \
     static inline int Name##_send(Name* c, T v) { return cc_chan_send(c ? c->raw : NULL, &v, sizeof(T)); } \
@@ -137,7 +140,7 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
 
 #define CC_DECL_TYPED_CHAN_PTR(T, Name)                                                \
     typedef struct { CCChan* raw; } Name;                                              \
-    static inline Name Name##_create(size_t cap) { Name c = { cc_chan_create_mode_take(cap, CC_CHAN_MODE_BLOCK, true) }; return c; } \
+    static inline Name Name##_create(size_t cap) { Name c = { cc_chan_create_mode_take(cap, CC_CHAN_MODE_BLOCK, true) }; if (c.raw) cc_chan_init_elem(c.raw, sizeof(void*)); return c; } \
     static inline void Name##_close(Name* c) { if (c && c->raw) cc_chan_close(c->raw); } \
     static inline void Name##_free(Name* c) { if (c && c->raw) cc_chan_free(c->raw); } \
     static inline int Name##_send(Name* c, T* ptr) { return cc_chan_send_take(c ? c->raw : NULL, ptr); } \

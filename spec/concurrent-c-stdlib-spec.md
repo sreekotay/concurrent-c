@@ -466,6 +466,18 @@ if (try File file = out) {
 // UFCS methods on stdout/stderr (singletons)
 void! std_out.write(char[:] data);
 void! std_err.write(char[:] data);
+// String overloads for ergonomics
+void! std_out.write(String s);
+void! std_err.write(String s);
+// Overload resolution is handled by the compiler's UFCS lowering; both map to prefixed C ABI (`cc_std_out_write`, `cc_std_out_write_string`, etc.).
+
+**UFCS receiver conversion (general rule):**
+- Overload selection prefers an exact receiver type match.
+- If no exact match, the compiler may apply these implicit receiver conversions (in order) to find a viable overload:
+  1) `String -> char[:]` (view of contents)
+  2) `char[N]` / string literal -> `char[:]`
+  3) `CCSlice` alias -> `char[:]`
+- If no overload is viable after these conversions, resolution fails.
 ```
 
 **Examples:**
@@ -473,6 +485,7 @@ void! std_err.write(char[:] data);
 ```c
 std_out.write("Hello, world!\n");
 std_err.write("An error occurred\n");
+std_out.write(my_string); // String overload
 ```
 
 #### 2.5 Structured Logging (`<std/log.h>`)
