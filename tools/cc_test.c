@@ -80,6 +80,27 @@ static int read_entire_file_alloc(const char* path, unsigned char** out_buf, siz
     return 0;
 }
 
+static void trim_trailing_ws_inplace(char* s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    while (n > 0) {
+        char c = s[n - 1];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            s[n - 1] = '\0';
+            n--;
+            continue;
+        }
+        break;
+    }
+}
+
+static void replace_newlines_with_spaces(char* s) {
+    if (!s) return;
+    for (char* p = s; *p; ++p) {
+        if (*p == '\n' || *p == '\r') *p = ' ';
+    }
+}
+
 static int wexitstatus_simple(int rc) {
     if (rc == -1) return 127;
     if (WIFEXITED(rc)) return WEXITSTATUS(rc);
@@ -147,24 +168,14 @@ static int run_one_test(const char* stem,
                         const char* input_path,
                         int compile_fail,
                         int verbose) {
-    char c_out[512];
     char bin_out[512];
+    char build_err_txt[512];
     char out_txt[512];
     char err_txt[512];
-    snprintf(c_out, sizeof(c_out), "out/%s.c", stem);
     snprintf(bin_out, sizeof(bin_out), "out/%s", stem);
+    snprintf(build_err_txt, sizeof(build_err_txt), "out/%s.build.stderr", stem);
     snprintf(out_txt, sizeof(out_txt), "out/%s.stdout", stem);
     snprintf(err_txt, sizeof(err_txt), "out/%s.stderr", stem);
-
-    /* 1) Lower via cc */
-    char lower_cmd[2048];
-    snprintf(lower_cmd, sizeof(lower_cmd),
-             "./cc/bin/cc --emit-c-only --no-runtime --keep-c %s %s",
-             input_path, c_out);
-    if (run_cmd_redirect(lower_cmd, NULL, err_txt, verbose) != 0) {
-        fprintf(stderr, "[FAIL] %s: cc lower failed\n", stem);
-        return 1;
-    }
 
     /* Sidecars */
     char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512];
@@ -180,21 +191,38 @@ static int run_one_test(const char* stem,
     (void)read_entire_file_alloc(exp_compile_err_path, &exp_compile_err, &exp_compile_err_len);
     (void)read_entire_file_alloc(ldflags_path, &ldflags, &ldflags_len);
 
-    /* 2) Host compile+link (expected fail or run) */
-    char compile_cmd[2048];
+    char ldflags_clean[1024];
+    ldflags_clean[0] = '\0';
+    if (ldflags && ldflags_len) {
+        size_t n = ldflags_len < sizeof(ldflags_clean) - 1 ? ldflags_len : sizeof(ldflags_clean) - 1;
+        memcpy(ldflags_clean, ldflags, n);
+        ldflags_clean[n] = '\0';
+        replace_newlines_with_spaces(ldflags_clean);
+        trim_trailing_ws_inplace(ldflags_clean);
+    }
+
+    /* 1) Build via cc build (this is the build system under test) */
+    char build_cmd[3072];
+    if (ldflags_clean[0]) {
+        snprintf(build_cmd, sizeof(build_cmd),
+                 "./cc/bin/cc build --link %s -o %s --ld-flags \"%s\"",
+                 input_path, bin_out, ldflags_clean);
+    } else {
+        snprintf(build_cmd, sizeof(build_cmd),
+                 "./cc/bin/cc build --link %s -o %s",
+                 input_path, bin_out);
+    }
+
+    int build_rc = run_cmd_redirect(build_cmd, NULL, build_err_txt, verbose);
     if (compile_fail) {
-        snprintf(compile_cmd, sizeof(compile_cmd),
-                 "cc -Icc/include -Icc -I. -Werror=implicit-function-declaration %s cc/runtime/concurrent_c.o -o %s %s",
-                 c_out, bin_out, ldflags ? (const char*)ldflags : "");
-        int cc_rc = run_cmd_redirect(compile_cmd, NULL, err_txt, verbose);
-        if (cc_rc == 0) {
-            fprintf(stderr, "[FAIL] %s: expected host compile to fail\n", stem);
+        if (build_rc == 0) {
+            fprintf(stderr, "[FAIL] %s: expected build to fail\n", stem);
             free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
             return 1;
         }
         unsigned char* err_buf = NULL;
         size_t err_len = 0;
-        (void)read_entire_file_alloc(err_txt, &err_buf, &err_len);
+        (void)read_entire_file_alloc(build_err_txt, &err_buf, &err_len);
         int bad = expect_contains_lines("compile_err", err_buf, err_len, exp_compile_err, exp_compile_err_len);
         free(err_buf);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
@@ -203,14 +231,12 @@ static int run_one_test(const char* stem,
         return 0;
     }
 
-    snprintf(compile_cmd, sizeof(compile_cmd),
-             "cc -Icc/include -Icc -I. %s cc/runtime/concurrent_c.o -o %s %s",
-             c_out, bin_out, ldflags ? (const char*)ldflags : "");
-    if (run_cmd_redirect(compile_cmd, NULL, err_txt, verbose) != 0) {
-        fprintf(stderr, "[FAIL] %s: host compile failed\n", stem);
+    if (build_rc != 0) {
+        fprintf(stderr, "[FAIL] %s: build failed\n", stem);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
         return 1;
     }
+
     if (run_cmd_redirect(bin_out, out_txt, err_txt, verbose) != 0) {
         fprintf(stderr, "[FAIL] %s: run failed\n", stem);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);

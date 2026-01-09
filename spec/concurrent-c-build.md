@@ -50,3 +50,11 @@ Status: draft. Purpose: define the `cc` driver behavior for C output, compilatio
 - Dependency emission (`-MMD` style) when invoking the C compiler.
 - Configurable out dir (`--out-dir`) and per-artifact cleanup policy.
 
+## Inspiration (non-normative): Zig `zig build`
+- Zig models builds as a **DAG of named steps** (build/install/run/test/custom), with project options registered and exposed via `zig build --help`.
+- We can mirror this shape in CC:
+  - `cc build <step>` where `<step>` is `default`/`run`/`test` etc.
+  - Project-specific settings as `-D` options (Zig’s pattern: `-Dtarget=...`, `-Doptimize=...`).
+
+See `docs/zig-build-inspiration.md`.
+

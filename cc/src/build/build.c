@@ -6,13 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Fixed stub bindings to exercise the pipeline.
-static const CCConstBinding kStubBindings[] = {
-    {"DEBUG", 1},
-    {"USE_TLS", 1},
-    {"NUM_WORKERS", 4},
-};
-
 // Very small existence check for build.cc.
 static bool file_exists(const char* path) {
     FILE* f = fopen(path, "r");
@@ -107,6 +100,57 @@ static int parse_build_file(const char* path, const CCBuildInputs* inputs, CCCon
     return err;
 }
 
+static int parse_build_options(const char* path, CCBuildOptionDecl* out_opts, size_t* out_count, size_t max) {
+    if (!out_opts || !out_count) return EINVAL;
+    FILE* f = fopen(path, "r");
+    if (!f) return errno ? errno : -1;
+    char line[1024];
+    int err = 0;
+    size_t lineno = 0;
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "CC_OPTION", 9) != 0) continue;
+        p += 9;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) continue;
+
+        // name is first token; help is remainder of line.
+        char name_buf[128];
+        int nread = 0;
+        if (sscanf(p, "%127s%n", name_buf, &nread) != 1) {
+            fprintf(stderr, "%s:%zu: malformed CC_OPTION line\n", path, lineno);
+            err = EINVAL;
+            break;
+        }
+        p += nread;
+        while (*p == ' ' || *p == '\t') p++;
+
+        // Trim trailing newline/CR.
+        char* end = p + strlen(p);
+        while (end > p && (end[-1] == '\n' || end[-1] == '\r')) end--;
+        *end = '\0';
+
+        if (*out_count >= max) {
+            err = ENOSPC;
+            break;
+        }
+        char* stored_name = strdup(name_buf);
+        if (!stored_name) { err = ENOMEM; break; }
+        char* stored_help = strdup(*p ? p : "");
+        if (!stored_help) { free(stored_name); err = ENOMEM; break; }
+        out_opts[*out_count].name = stored_name;
+        out_opts[*out_count].help = stored_help;
+        (*out_count)++;
+    }
+    fclose(f);
+    if (err == ENOSPC) {
+        fprintf(stderr, "cc: too many CC_OPTION lines in build.cc (max %zu)\n", max);
+    }
+    return err;
+}
+
 int cc_build_load_consts(const char* build_path, const CCBuildInputs* inputs, CCConstBinding* out_bindings, size_t* out_count) {
     if (!out_bindings || !out_count) {
         return EINVAL;
@@ -133,16 +177,24 @@ int cc_build_load_consts(const char* build_path, const CCBuildInputs* inputs, CC
         return err;
     }
 
-    if (*out_count == 0) {
-        // Fallback to stub defaults if nothing parsed.
-        size_t n = sizeof(kStubBindings) / sizeof(kStubBindings[0]);
-        if (n > max) return ENOSPC;
-        for (size_t i = 0; i < n; ++i) {
-            out_bindings[i] = kStubBindings[i];
-        }
-        *out_count = n;
-    }
-
     return 0;
+}
+
+int cc_build_list_options(const char* build_path, CCBuildOptionDecl* out_opts, size_t* out_count, size_t max) {
+    if (!out_opts || !out_count) return EINVAL;
+    *out_count = 0;
+    if (!build_path) return 0;
+    if (!file_exists(build_path)) return 0;
+    return parse_build_options(build_path, out_opts, out_count, max);
+}
+
+void cc_build_free_options(CCBuildOptionDecl* opts, size_t count) {
+    if (!opts) return;
+    for (size_t i = 0; i < count; ++i) {
+        free((void*)opts[i].name);
+        free((void*)opts[i].help);
+        opts[i].name = NULL;
+        opts[i].help = NULL;
+    }
 }
 
