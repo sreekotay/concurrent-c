@@ -42,7 +42,8 @@ endif
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/io/string/exec and async shards when CC_ENABLE_ASYNC.
 SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
-OBJS := $(SRCS:.c=.o)
+OBJDIR ?= ../out/cc/obj
+OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
 BINARY := bin/cc
 
 all: $(BINARY)
@@ -56,8 +57,13 @@ $(BINARY): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
+$(OBJDIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 clean:
-	rm -f $(OBJS) $(BINARY)
+	rm -f $(BINARY)
+	rm -rf $(OBJDIR)
 
 .PHONY: all clean
 

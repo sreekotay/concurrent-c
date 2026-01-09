@@ -22,6 +22,10 @@ static char g_cc_dir[PATH_MAX];
 static char g_cc_include[PATH_MAX];
 static char g_cc_runtime_o[PATH_MAX];
 static char g_cc_runtime_c[PATH_MAX];
+static char g_out_root[PATH_MAX];
+static char g_out_c[PATH_MAX];
+static char g_out_obj[PATH_MAX];
+static char g_out_bin[PATH_MAX];
 
 static void cc__dirname_inplace(char* path) {
     if (!path) return;
@@ -44,6 +48,65 @@ static void cc__dirname_inplace(char* path) {
         return;
     }
     *slash = '\0';
+}
+
+static int cc__is_abs_path(const char* p) {
+    if (!p || !p[0]) return 0;
+    return p[0] == '/';
+}
+
+static int cc__mkdir_one(const char* path) {
+    if (!path || !path[0]) return -1;
+    if (mkdir(path, 0777) == -1) {
+        if (errno == EEXIST) return 0;
+        return -1;
+    }
+    return 0;
+}
+
+static int cc__mkdir_p(const char* path) {
+    if (!path || !path[0]) return -1;
+    char tmp[PATH_MAX];
+    strncpy(tmp, path, sizeof(tmp));
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    // Strip trailing slashes.
+    size_t n = strlen(tmp);
+    while (n > 0 && tmp[n - 1] == '/') {
+        tmp[n - 1] = '\0';
+        n--;
+    }
+    if (n == 0) return 0;
+
+    // Walk components.
+    for (char* p = tmp + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            if (cc__mkdir_one(tmp) != 0) return -1;
+            *p = '/';
+        }
+    }
+    if (cc__mkdir_one(tmp) != 0) return -1;
+    return 0;
+}
+
+static void cc_set_out_dir(const char* out_dir_opt) {
+    const char* env = getenv("CC_OUT_DIR");
+    const char* p = out_dir_opt && out_dir_opt[0] ? out_dir_opt : (env && env[0] ? env : NULL);
+
+    if (!p) {
+        snprintf(g_out_root, sizeof(g_out_root), "%s/out", g_repo_root);
+    } else if (cc__is_abs_path(p)) {
+        strncpy(g_out_root, p, sizeof(g_out_root));
+        g_out_root[sizeof(g_out_root) - 1] = '\0';
+    } else {
+        // Relative paths are interpreted relative to repo root.
+        snprintf(g_out_root, sizeof(g_out_root), "%s/%s", g_repo_root, p);
+    }
+
+    snprintf(g_out_c, sizeof(g_out_c), "%s/c", g_out_root);
+    snprintf(g_out_obj, sizeof(g_out_obj), "%s/obj", g_out_root);
+    snprintf(g_out_bin, sizeof(g_out_bin), "%s/bin", g_out_root);
 }
 
 static void cc_init_paths(const char* argv0) {
@@ -86,8 +149,10 @@ static void cc_init_paths(const char* argv0) {
     g_repo_root[sizeof(g_repo_root) - 1] = '\0';
 
     snprintf(g_cc_include, sizeof(g_cc_include), "%s/cc/include", g_repo_root);
-    snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/cc/runtime/concurrent_c.o", g_repo_root);
+    // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
+    snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
     snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
+    cc_set_out_dir(NULL);
 }
 
 static void usage(const char *prog) {
@@ -115,13 +180,14 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --sysroot PATH      Forward sysroot to C compiler\n");
     fprintf(stderr, "  --no-runtime        Do not link runtime (default links bundled runtime)\n");
     fprintf(stderr, "  --keep-c            Do not delete generated C file\n");
+    fprintf(stderr, "  --out-dir DIR       Output directory root (default: <repo>/out; subdirs: c/, obj/, bin/)\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
 }
 
 static void usage_build(const char* prog) {
     fprintf(stderr, "Usage:\n");
     fprintf(stderr, "  %s build [options] <input.cc> [output]\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.cc> [-o out/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.cc> [-o out/bin/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Steps:\n");
     fprintf(stderr, "  (default)   Build (emit C, compile, link)\n");
@@ -210,10 +276,11 @@ static const char* choose_build_path(const char* in_path, char* buf, size_t buf_
 }
 
 static int ensure_out_dir(void) {
-    if (mkdir("out", 0777) == -1) {
-        if (errno == EEXIST) return 0;
-        return errno ? errno : -1;
-    }
+    // Ensure root + subdirs exist.
+    if (cc__mkdir_p(g_out_root) != 0) return -1;
+    if (cc__mkdir_p(g_out_c) != 0) return -1;
+    if (cc__mkdir_p(g_out_obj) != 0) return -1;
+    if (cc__mkdir_p(g_out_bin) != 0) return -1;
     return 0;
 }
 
@@ -227,14 +294,14 @@ static int derive_default_output(const char* in_path, char* out_buf, size_t out_
     if (dot && dot != base) {
         stem_len = (size_t)(dot - base);
     }
-    const char* dir = "out/";
-    size_t dir_len = strlen(dir);
-    if (dir_len + stem_len + 2 > out_buf_size) { // ".c" + NUL
+    size_t dir_len = strlen(g_out_c);
+    if (dir_len + 1 + stem_len + 2 > out_buf_size) { // "/" + ".c" + NUL
         return -1;
     }
-    memcpy(out_buf, dir, dir_len);
-    memcpy(out_buf + dir_len, base, stem_len);
-    out_buf[dir_len + stem_len] = '\0';
+    memcpy(out_buf, g_out_c, dir_len);
+    out_buf[dir_len] = '/';
+    memcpy(out_buf + dir_len + 1, base, stem_len);
+    out_buf[dir_len + 1 + stem_len] = '\0';
     strcat(out_buf, ".c");
     return 0;
 }
@@ -249,14 +316,14 @@ static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf
     if (dot && dot != base) {
         stem_len = (size_t)(dot - base);
     }
-    const char* dir = "out/";
-    size_t dir_len = strlen(dir);
-    if (dir_len + stem_len + 3 > out_buf_size) { // ".o"+NUL
+    size_t dir_len = strlen(g_out_obj);
+    if (dir_len + 1 + stem_len + 3 > out_buf_size) { // "/" + ".o"+NUL
         return -1;
     }
-    memcpy(out_buf, dir, dir_len);
-    memcpy(out_buf + dir_len, base, stem_len);
-    out_buf[dir_len + stem_len] = '\0';
+    memcpy(out_buf, g_out_obj, dir_len);
+    out_buf[dir_len] = '/';
+    memcpy(out_buf + dir_len + 1, base, stem_len);
+    out_buf[dir_len + 1 + stem_len] = '\0';
     strcat(out_buf, ".o");
     return 0;
 }
@@ -271,14 +338,14 @@ static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf
     if (dot && dot != base) {
         stem_len = (size_t)(dot - base);
     }
-    const char* dir = "out/";
-    size_t dir_len = strlen(dir);
-    if (dir_len + stem_len + 1 > out_buf_size) { // +NUL
+    size_t dir_len = strlen(g_out_bin);
+    if (dir_len + 1 + stem_len + 1 > out_buf_size) { // "/" + NUL
         return -1;
     }
-    memcpy(out_buf, dir, dir_len);
-    memcpy(out_buf + dir_len, base, stem_len);
-    out_buf[dir_len + stem_len] = '\0';
+    memcpy(out_buf, g_out_bin, dir_len);
+    out_buf[dir_len] = '/';
+    memcpy(out_buf + dir_len + 1, base, stem_len);
+    out_buf[dir_len + 1 + stem_len] = '\0';
     return 0;
 }
 
@@ -407,6 +474,7 @@ typedef struct {
     int dump_consts;
     int dry_run;
     int summary;
+    const char* out_dir;
     char** cli_names;
     long long* cli_values;
     size_t cli_count;
@@ -573,7 +641,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 summary_out->runtime_obj_path = g_cc_runtime_o;
             }
         } else {
-            snprintf(runtime_obj, sizeof(runtime_obj), "out/runtime.o");
+            snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_obj);
             snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
                      cc_bin,
                      ccflags_env ? ccflags_env : "",
@@ -594,7 +662,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             }
             if (summary_out) {
                 summary_out->runtime_reused = 0;
-                summary_out->runtime_obj_path = "out/runtime.o";
+                summary_out->runtime_obj_path = "out/obj/runtime.o";
             }
         }
         have_runtime = 1;
@@ -682,6 +750,7 @@ static int run_build_mode(int argc, char** argv) {
     const char* ld_flags = NULL;
     const char* target_flag = NULL;
     const char* sysroot_flag = NULL;
+    const char* out_dir = NULL;
     int dump_consts = 0;
     int dry_run = 0;
     int no_build = 0;
@@ -720,6 +789,11 @@ static int run_build_mode(int argc, char** argv) {
             return 0;
         }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
+        if (strcmp(argv[i], "--out-dir") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); goto parse_fail; }
+            out_dir = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
         if (strcmp(argv[i], "--compile") == 0) { mode = CC_MODE_COMPILE; continue; }
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
@@ -795,8 +869,11 @@ static int run_build_mode(int argc, char** argv) {
         goto parse_fail;
     }
 
+    // Apply output directory override before creating/deriving any outputs.
+    cc_set_out_dir(out_dir);
+
     if (ensure_out_dir() != 0) {
-        fprintf(stderr, "cc: failed to create out/ directory\n");
+        fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
         goto parse_fail;
     }
 
@@ -825,7 +902,7 @@ static int run_build_mode(int argc, char** argv) {
         exec_argv[idx] = NULL;
 
         if (summary) {
-            fprintf(stderr, "cc build summary:\n  step: test\n  tool: %s\n", tool_path);
+            fprintf(stderr, "cc build summary:\n  step: test\n  tool: %s\n  out_dir: %s\n", tool_path, g_out_root);
         }
         int rc = run_exec(tool_path, exec_argv, verbose);
         return rc;
@@ -892,6 +969,7 @@ static int run_build_mode(int argc, char** argv) {
         .dump_consts = dump_consts,
         .dry_run = dry_run,
         .summary = summary,
+        .out_dir = g_out_root,
         .cli_names = cli_names,
         .cli_values = cli_values,
         .cli_count = cli_count,
@@ -945,6 +1023,7 @@ int main(int argc, char **argv) {
     const char* ld_flags = NULL;
     const char* target_flag = NULL;
     const char* sysroot_flag = NULL;
+    const char* out_dir = NULL;
     int no_build = 0;
     int no_runtime = 0;
     int dump_consts = 0;
@@ -968,6 +1047,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--no-runtime") == 0) { no_runtime = 1; continue; }
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
+        if (strcmp(argv[i], "--out-dir") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); usage(argv[0]); return 1; }
+            out_dir = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--cc-bin") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --cc-bin requires a path\n"); usage(argv[0]); return 1; }
             cc_bin = argv[++i];
@@ -1015,8 +1099,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    cc_set_out_dir(out_dir);
     if (ensure_out_dir() != 0) {
-        fprintf(stderr, "cc: failed to create out/ directory\n");
+        fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
         return 1;
     }
 
@@ -1078,6 +1163,7 @@ int main(int argc, char **argv) {
         .dump_consts = dump_consts,
         .dry_run = dry_run,
         .summary = 0,
+        .out_dir = g_out_root,
         .cli_names = NULL,
         .cli_values = NULL,
         .cli_count = 0,

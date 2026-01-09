@@ -20,51 +20,14 @@ lint:
 
 # Build and run the UFCS hello example through our compiler.
 example: cc
-	@mkdir -p out
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c examples/hello.cc out/hello.c
-	@cc -Icc/include -Icc -I. out/hello.c cc/runtime/concurrent_c.o -o out/hello && ./out/hello
+	@$(CC_DIR)/bin/cc build run --out-dir out examples/hello.cc
 
 example-c:
 	@mkdir -p out
 	@cc examples/hello_c.c -o out/hello_c && ./out/hello_c
 
 smoke: cc
-	@mkdir -p out
-	@$(MAKE) example
-	@if [ "$(TCC_EXT)" = "1" ]; then \
-		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_smoke.cc out/ufcs_smoke.c; \
-		cc -Icc/include -Icc -I. out/ufcs_smoke.c cc/runtime/concurrent_c.o -o out/ufcs_smoke && ./out/ufcs_smoke; \
-		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_multiline.cc out/ufcs_multiline.c; \
-		cc -Icc/include -Icc -I. out/ufcs_multiline.c cc/runtime/concurrent_c.o -o out/ufcs_multiline && ./out/ufcs_multiline; \
-		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_stderr.cc out/ufcs_stderr.c; \
-		cc -Icc/include -Icc -I. out/ufcs_stderr.c cc/runtime/concurrent_c.o -o out/ufcs_stderr && ./out/ufcs_stderr; \
-		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_nested_multiline.cc out/ufcs_nested_multiline.c; \
-		cc -Icc/include -Icc -I. out/ufcs_nested_multiline.c cc/runtime/concurrent_c.o -o out/ufcs_nested_multiline && ./out/ufcs_nested_multiline; \
-	else \
-		echo "[smoke] skipping UFCS tests (set TCC_EXT=1 to enable)"; \
-	fi
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_double_write.cc out/ufcs_double_write.c
-	@cc -Icc/include -Icc -I. out/ufcs_double_write.c cc/runtime/concurrent_c.o -o out/ufcs_double_write && ./out/ufcs_double_write
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/vec_smoke.c out/vec_smoke.c
-	@cc -Icc/include -Icc -I. out/vec_smoke.c cc/runtime/concurrent_c.o -o out/vec_smoke && ./out/vec_smoke
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/io_smoke.c out/io_smoke.c
-	@cc -Icc/include -Icc -I. out/io_smoke.c cc/runtime/concurrent_c.o -o out/io_smoke && ./out/io_smoke
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/map_smoke.c out/map_smoke.c
-	@cc -Icc/include -Icc -I. out/map_smoke.c cc/runtime/concurrent_c.o -o out/map_smoke && ./out/map_smoke
-	@if [ "$$CC_ENABLE_ASYNC" = "1" ]; then \
-		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/channel_select_smoke.c out/channel_select_smoke.c; \
-		cc -Icc/include -Icc -I. out/channel_select_smoke.c cc/runtime/concurrent_c.o -o out/channel_select_smoke -lpthread && ./out/channel_select_smoke; \
-	else \
-		echo "[smoke] skipping channel_select_smoke (set CC_ENABLE_ASYNC=1 to enable)"; \
-	fi
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/channel_send_take_reject.c out/channel_send_take_reject.c
-	@cc -Icc/include -Icc -I. out/channel_send_take_reject.c cc/runtime/concurrent_c.o -o out/channel_send_take_reject && ./out/channel_send_take_reject
-	@echo "[sourcemap] expect compile error mapped to CC source"
-	@$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/sourcemap_fail.cc out/sourcemap_fail.c
-	@set -e; if cc -Icc/include -Icc -I. -Werror=implicit-function-declaration out/sourcemap_fail.c cc/runtime/concurrent_c.o -o out/sourcemap_fail 2> out/sourcemap_fail.err; then \
-		echo "expected sourcemap_fail to fail compilation" >&2; exit 1; \
-	fi; \
-	grep -q "tests/sourcemap_fail.cc:6" out/sourcemap_fail.err && echo "[sourcemap] mapped OK"
+	@$(CC_DIR)/bin/cc build test --out-dir out
 
 # Build tools (host C).
 tools:

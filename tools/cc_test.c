@@ -172,7 +172,7 @@ static int run_one_test(const char* stem,
     char build_err_txt[512];
     char out_txt[512];
     char err_txt[512];
-    snprintf(bin_out, sizeof(bin_out), "out/%s", stem);
+    snprintf(bin_out, sizeof(bin_out), "out/bin/%s", stem);
     snprintf(build_err_txt, sizeof(build_err_txt), "out/%s.build.stderr", stem);
     snprintf(out_txt, sizeof(out_txt), "out/%s.stdout", stem);
     snprintf(err_txt, sizeof(err_txt), "out/%s.stderr", stem);

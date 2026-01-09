@@ -3,8 +3,6 @@
 
 // UFCS-style hello: requires CC compiler UFCS lowering.
 int main(void) {
-    Arena a = cc_heap_arena(kilobytes(1));
-    String s1 = string_new(&a);
     @arena {
         String s = string_new(arena);
         s.append("Hello, ");
