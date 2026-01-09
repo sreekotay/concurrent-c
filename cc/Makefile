@@ -1,6 +1,6 @@
 CC ?= cc
 TCC_BIN ?=
-TCC_EXT ?= 0
+TCC_EXT ?= 1
 TCC_INC ?= ../third_party/tcc
 TCC_LIB ?= ../third_party/tcc
 CC_ENABLE_ASYNC ?= 0
@@ -13,7 +13,12 @@ ifeq ($(BUILD),debug)
 else
   CFLAGS := $(CFLAGS_COMMON) -O2
 endif
-# Optional TCC extension (set TCC_EXT=1 and point TCC_INC/TCC_LIB at patched tcc)
+# UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
+ifneq ($(TCC_EXT),1)
+  $(error TCC_EXT must be 1 (patched TCC extension required for UFCS); set TCC_EXT=1 and ensure TCC_INC/TCC_LIB point to the patched tcc)
+endif
+
+# TCC extension (set TCC_EXT=1 and point TCC_INC/TCC_LIB at patched tcc)
 ifeq ($(TCC_EXT),1)
   # Normalize paths (allow invoking from repo root with TCC_INC=third_party/tcc).
   TCC_INC_ABS := $(shell cd $(TCC_INC) 2>/dev/null && pwd)

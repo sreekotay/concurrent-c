@@ -4,9 +4,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include "build/build.h"
 #include "driver.h"
+
+// Forward decls for helpers used by multiple modes.
+static int file_exists(const char* path);
+static int ensure_out_dir(void);
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
@@ -33,10 +38,6 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --no-runtime        Do not link runtime (default links bundled runtime)\n");
     fprintf(stderr, "  --keep-c            Do not delete generated C file\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
-}
-
-static int run_simple(const char* in_path, const char* out_path) {
-    return cc_compile(in_path, out_path);
 }
 
 // Tiny helper to check for file existence.

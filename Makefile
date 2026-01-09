@@ -1,7 +1,7 @@
 CC_DIR := cc
 BUILD ?= debug
 
-.PHONY: all cc clean fmt lint example example-c smoke
+.PHONY: all cc clean fmt lint example example-c smoke test tools
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
 
 all: cc
@@ -31,11 +31,13 @@ example-c:
 smoke: cc
 	@mkdir -p out
 	@$(MAKE) example
-	@if [ "$$TCC_EXT" = "1" ]; then \
+	@if [ "$(TCC_EXT)" = "1" ]; then \
 		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_smoke.cc out/ufcs_smoke.c; \
 		cc -Icc/include -Icc -I. out/ufcs_smoke.c cc/runtime/concurrent_c.o -o out/ufcs_smoke && ./out/ufcs_smoke; \
 		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_multiline.cc out/ufcs_multiline.c; \
 		cc -Icc/include -Icc -I. out/ufcs_multiline.c cc/runtime/concurrent_c.o -o out/ufcs_multiline && ./out/ufcs_multiline; \
+		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_stderr.cc out/ufcs_stderr.c; \
+		cc -Icc/include -Icc -I. out/ufcs_stderr.c cc/runtime/concurrent_c.o -o out/ufcs_stderr && ./out/ufcs_stderr; \
 		$(CC_DIR)/bin/cc --emit-c-only --no-runtime --keep-c tests/ufcs_nested_multiline.cc out/ufcs_nested_multiline.c; \
 		cc -Icc/include -Icc -I. out/ufcs_nested_multiline.c cc/runtime/concurrent_c.o -o out/ufcs_nested_multiline && ./out/ufcs_nested_multiline; \
 	else \
@@ -63,6 +65,15 @@ smoke: cc
 		echo "expected sourcemap_fail to fail compilation" >&2; exit 1; \
 	fi; \
 	grep -q "tests/sourcemap_fail.cc:6" out/sourcemap_fail.err && echo "[sourcemap] mapped OK"
+
+# Build tools (host C).
+tools:
+	@mkdir -p tools
+	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
+
+# Prefer using cc itself for tests (the runner drives ./cc/bin/cc).
+test: cc tools
+	@./tools/cc_test
 
 # ---- TCC upgrade convenience ------------------------------------------------
 

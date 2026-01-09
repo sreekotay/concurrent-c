@@ -1,0 +1,326 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
+static int file_exists(const char* path) {
+    if (!path) return 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int ensure_out_dir(void) {
+    if (mkdir("out", 0777) == -1) {
+        /* EEXIST is fine; keep it simple and portable. */
+        return 0;
+    }
+    return 0;
+}
+
+static int ends_with(const char* s, const char* suf) {
+    if (!s || !suf) return 0;
+    size_t n = strlen(s), m = strlen(suf);
+    if (m > n) return 0;
+    return memcmp(s + (n - m), suf, m) == 0;
+}
+
+static void basename_no_ext(const char* path, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!path) return;
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    const char* dot = strrchr(base, '.');
+    size_t n = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+    if (n + 1 > cap) n = cap - 1;
+    memcpy(out, base, n);
+    out[n] = '\0';
+}
+
+static int str_contains(const char* hay, const char* needle) {
+    if (!needle || !needle[0]) return 1;
+    if (!hay) return 0;
+    return strstr(hay, needle) != NULL;
+}
+
+static void* memmem_simple(const void* haystack, size_t haystack_len, const void* needle, size_t needle_len) {
+    if (!needle || needle_len == 0) return (void*)haystack;
+    if (!haystack || haystack_len < needle_len) return NULL;
+    const unsigned char* h = (const unsigned char*)haystack;
+    const unsigned char* n = (const unsigned char*)needle;
+    for (size_t i = 0; i + needle_len <= haystack_len; ++i) {
+        if (h[i] == n[0] && memcmp(h + i, n, needle_len) == 0) return (void*)(h + i);
+    }
+    return NULL;
+}
+
+static int read_entire_file_alloc(const char* path, unsigned char** out_buf, size_t* out_len) {
+    if (!path || !out_buf || !out_len) return -1;
+    *out_buf = NULL;
+    *out_len = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return -1; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
+    size_t cap = (size_t)sz;
+    if (cap > 1024 * 1024) cap = 1024 * 1024;
+    unsigned char* buf = (unsigned char*)malloc(cap + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t n = fread(buf, 1, cap, f);
+    fclose(f);
+    buf[n] = 0;
+    *out_buf = buf;
+    *out_len = n;
+    return 0;
+}
+
+static int wexitstatus_simple(int rc) {
+    if (rc == -1) return 127;
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    if (WIFSIGNALED(rc)) return 128 + WTERMSIG(rc);
+    return 1;
+}
+
+static int run_cmd_redirect(const char* cmd,
+                            const char* out_path,
+                            const char* err_path,
+                            int verbose) {
+    if (!cmd) return -1;
+    char full[4096];
+    if (out_path && err_path) {
+        snprintf(full, sizeof(full), "sh -c '%s > %s 2> %s'", cmd, out_path, err_path);
+    } else if (out_path) {
+        snprintf(full, sizeof(full), "sh -c '%s > %s'", cmd, out_path);
+    } else if (err_path) {
+        snprintf(full, sizeof(full), "sh -c '%s 2> %s'", cmd, err_path);
+    } else {
+        snprintf(full, sizeof(full), "%s", cmd);
+    }
+    if (verbose) fprintf(stderr, "cc_test: %s\n", full);
+    int rc = system(full);
+    return wexitstatus_simple(rc);
+}
+
+static int expect_contains_lines(const char* stream_name,
+                                 const unsigned char* hay,
+                                 size_t hay_len,
+                                 const unsigned char* expectations,
+                                 size_t exp_len) {
+    if (!expectations || exp_len == 0) return 0;
+    size_t i = 0;
+    while (i < exp_len) {
+        size_t line_start = i;
+        while (i < exp_len && expectations[i] != '\n') i++;
+        size_t line_end = i;
+        if (i < exp_len && expectations[i] == '\n') i++;
+        if (line_end > line_start && expectations[line_end - 1] == '\r') line_end--;
+
+        size_t p = line_start;
+        while (p < line_end && (expectations[p] == ' ' || expectations[p] == '\t')) p++;
+        if (p == line_end) continue;
+        if (expectations[p] == '#') continue;
+
+        const unsigned char* needle = expectations + p;
+        size_t needle_len = line_end - p;
+        if (!memmem_simple(hay, hay_len, needle, needle_len)) {
+            fprintf(stderr, "[FAIL] expected %s to contain: %.*s\n",
+                    stream_name, (int)needle_len, (const char*)needle);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_requires_async(const char* stem) {
+    char p[512];
+    snprintf(p, sizeof(p), "tests/%s.requires_async", stem);
+    return file_exists(p);
+}
+
+static int run_one_test(const char* stem,
+                        const char* input_path,
+                        int compile_fail,
+                        int verbose) {
+    char c_out[512];
+    char bin_out[512];
+    char out_txt[512];
+    char err_txt[512];
+    snprintf(c_out, sizeof(c_out), "out/%s.c", stem);
+    snprintf(bin_out, sizeof(bin_out), "out/%s", stem);
+    snprintf(out_txt, sizeof(out_txt), "out/%s.stdout", stem);
+    snprintf(err_txt, sizeof(err_txt), "out/%s.stderr", stem);
+
+    /* 1) Lower via cc */
+    char lower_cmd[2048];
+    snprintf(lower_cmd, sizeof(lower_cmd),
+             "./cc/bin/cc --emit-c-only --no-runtime --keep-c %s %s",
+             input_path, c_out);
+    if (run_cmd_redirect(lower_cmd, NULL, err_txt, verbose) != 0) {
+        fprintf(stderr, "[FAIL] %s: cc lower failed\n", stem);
+        return 1;
+    }
+
+    /* Sidecars */
+    char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512];
+    snprintf(exp_stdout_path, sizeof(exp_stdout_path), "tests/%s.stdout", stem);
+    snprintf(exp_stderr_path, sizeof(exp_stderr_path), "tests/%s.stderr", stem);
+    snprintf(exp_compile_err_path, sizeof(exp_compile_err_path), "tests/%s.compile_err", stem);
+    snprintf(ldflags_path, sizeof(ldflags_path), "tests/%s.ldflags", stem);
+
+    unsigned char *exp_stdout = NULL, *exp_stderr = NULL, *exp_compile_err = NULL, *ldflags = NULL;
+    size_t exp_stdout_len = 0, exp_stderr_len = 0, exp_compile_err_len = 0, ldflags_len = 0;
+    (void)read_entire_file_alloc(exp_stdout_path, &exp_stdout, &exp_stdout_len);
+    (void)read_entire_file_alloc(exp_stderr_path, &exp_stderr, &exp_stderr_len);
+    (void)read_entire_file_alloc(exp_compile_err_path, &exp_compile_err, &exp_compile_err_len);
+    (void)read_entire_file_alloc(ldflags_path, &ldflags, &ldflags_len);
+
+    /* 2) Host compile+link (expected fail or run) */
+    char compile_cmd[2048];
+    if (compile_fail) {
+        snprintf(compile_cmd, sizeof(compile_cmd),
+                 "cc -Icc/include -Icc -I. -Werror=implicit-function-declaration %s cc/runtime/concurrent_c.o -o %s %s",
+                 c_out, bin_out, ldflags ? (const char*)ldflags : "");
+        int cc_rc = run_cmd_redirect(compile_cmd, NULL, err_txt, verbose);
+        if (cc_rc == 0) {
+            fprintf(stderr, "[FAIL] %s: expected host compile to fail\n", stem);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            return 1;
+        }
+        unsigned char* err_buf = NULL;
+        size_t err_len = 0;
+        (void)read_entire_file_alloc(err_txt, &err_buf, &err_len);
+        int bad = expect_contains_lines("compile_err", err_buf, err_len, exp_compile_err, exp_compile_err_len);
+        free(err_buf);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        if (bad) return 1;
+        fprintf(stderr, "[OK] %s\n", stem);
+        return 0;
+    }
+
+    snprintf(compile_cmd, sizeof(compile_cmd),
+             "cc -Icc/include -Icc -I. %s cc/runtime/concurrent_c.o -o %s %s",
+             c_out, bin_out, ldflags ? (const char*)ldflags : "");
+    if (run_cmd_redirect(compile_cmd, NULL, err_txt, verbose) != 0) {
+        fprintf(stderr, "[FAIL] %s: host compile failed\n", stem);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        return 1;
+    }
+    if (run_cmd_redirect(bin_out, out_txt, err_txt, verbose) != 0) {
+        fprintf(stderr, "[FAIL] %s: run failed\n", stem);
+        free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+        return 1;
+    }
+
+    unsigned char *out_buf = NULL, *err_buf = NULL;
+    size_t out_len = 0, err_len = 0;
+    (void)read_entire_file_alloc(out_txt, &out_buf, &out_len);
+    (void)read_entire_file_alloc(err_txt, &err_buf, &err_len);
+    int bad = 0;
+    bad |= expect_contains_lines("stdout", out_buf, out_len, exp_stdout, exp_stdout_len);
+    bad |= expect_contains_lines("stderr", err_buf, err_len, exp_stderr, exp_stderr_len);
+    free(out_buf);
+    free(err_buf);
+    free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+    if (bad) return 1;
+    fprintf(stderr, "[OK] %s\n", stem);
+    return 0;
+}
+
+static void usage(const char* prog) {
+    fprintf(stderr, "Usage:\n");
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose]\n", prog);
+}
+
+int main(int argc, char** argv) {
+    const char* filter = NULL;
+    int verbose = 0;
+    int list_only = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
+        if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
+        if (strcmp(argv[i], "--filter") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--filter requires a value\n"); return 2; }
+            filter = argv[++i];
+            continue;
+        }
+        usage(argv[0]);
+        return 2;
+    }
+
+    if (!file_exists("./cc/bin/cc")) {
+        fprintf(stderr, "cc_test: missing ./cc/bin/cc (build the compiler first)\n");
+        return 2;
+    }
+    if (!file_exists("cc/runtime/concurrent_c.o")) {
+        fprintf(stderr, "cc_test: missing cc/runtime/concurrent_c.o (run `make -C cc` first)\n");
+        return 2;
+    }
+
+    (void)ensure_out_dir();
+
+    DIR* d = opendir("tests");
+    if (!d) {
+        fprintf(stderr, "cc_test: failed to open tests/\n");
+        return 2;
+    }
+
+    int ran = 0;
+    int failed = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char* name = ent->d_name;
+        if (!name || name[0] == '.') continue;
+        if (!(ends_with(name, ".c") || ends_with(name, ".cc"))) continue;
+        char stem[256];
+        basename_no_ext(name, stem, sizeof(stem));
+        if (!stem[0]) continue;
+
+        if (test_requires_async(stem)) {
+            const char* env = getenv("CC_ENABLE_ASYNC");
+            if (!(env && strcmp(env, "1") == 0)) {
+                if (verbose) fprintf(stderr, "[SKIP] %s (set CC_ENABLE_ASYNC=1)\n", stem);
+                continue;
+            }
+        }
+
+        char path[512];
+        snprintf(path, sizeof(path), "tests/%s", name);
+        if (filter && !str_contains(stem, filter) && !str_contains(path, filter)) continue;
+
+        if (list_only) {
+            printf("%s\n", path);
+            continue;
+        }
+
+        int compile_fail = 0;
+        char ce[512];
+        snprintf(ce, sizeof(ce), "tests/%s.compile_err", stem);
+        if (file_exists(ce)) compile_fail = 1;
+        else if (ends_with(name, "_fail.cc")) compile_fail = 1;
+
+        ran++;
+        if (run_one_test(stem, path, compile_fail, verbose) != 0)
+            failed++;
+    }
+    closedir(d);
+
+    if (list_only) return 0;
+    if (ran == 0) {
+        fprintf(stderr, "cc_test: no tests selected\n");
+        return 1;
+    }
+    if (failed) {
+        fprintf(stderr, "cc_test: %d/%d failed\n", failed, ran);
+        return 1;
+    }
+    fprintf(stderr, "cc_test: %d passed\n", ran);
+    return 0;
+}
+
+
