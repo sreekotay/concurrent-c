@@ -107,7 +107,9 @@ static void cc__collect_caps_from_block(char*** scope_names,
         /* ignore member access */
         if (s > block && (s[-1] == '.' || (s[-1] == '>' && s > block + 1 && s[-2] == '-'))) continue;
         int found = 0;
-        for (int d = max_depth; d >= 0 && !found; d--) {
+        /* Only treat non-global names as captures for now.
+           Globals (depth 0) can be referenced directly and should not force capture/env. */
+        for (int d = max_depth; d >= 1 && !found; d--) {
             if (cc__name_in_list(scope_names[d], scope_counts[d], s, n)) found = 1;
         }
         if (!found) continue;
@@ -155,6 +157,8 @@ static int cc__scan_spawn_closures(const char* src,
                                   int* out_count,
                                   int** out_line_map,
                                   int* out_line_cap,
+                                  char** out_protos,
+                                  size_t* out_protos_len,
                                   char** out_defs,
                                   size_t* out_defs_len) {
     if (!src || !out_descs || !out_count || !out_line_map || !out_line_cap || !out_defs || !out_defs_len) return 0;
@@ -162,6 +166,8 @@ static int cc__scan_spawn_closures(const char* src,
     *out_count = 0;
     *out_line_map = NULL;
     *out_line_cap = 0;
+    if (out_protos) *out_protos = NULL;
+    if (out_protos_len) *out_protos_len = 0;
     *out_defs = NULL;
     *out_defs_len = 0;
 
@@ -172,6 +178,8 @@ static int cc__scan_spawn_closures(const char* src,
 
     CCClosureDesc* descs = NULL;
     int count = 0, cap = 0;
+    char* protos = NULL;
+    size_t protos_len = 0, protos_cap = 0;
     char* defs = NULL;
     size_t defs_len = 0, defs_cap = 0;
 
@@ -272,29 +280,27 @@ static int cc__scan_spawn_closures(const char* src,
                                 };
                                 if (line_no <= lines) line_map[line_no] = count; /* 1-based index */
 
-                                char hdr[256];
-                                snprintf(hdr, sizeof(hdr), "/* CC closure %d (from %s:%d) */\n", id, src_path ? src_path : "<src>", line_no);
-                                cc__append_str(&defs, &defs_len, &defs_cap, hdr);
+                                /* Always forward-declare the entry so spawn rewrite can reference it.
+                                   We emit definitions at end-of-file for better global visibility. */
                                 {
+                                    char pb[128];
+                                    snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*);\n", id);
+                                    cc__append_str(&protos, &protos_len, &protos_cap, pb);
+                                }
+                                /* Emit a runnable closure thunk only when it requires no captures.
+                                   Capturing locals will be implemented once we have type + escape checking. */
+                                if (cap_n == 0) {
+                                    char hdr[256];
+                                    snprintf(hdr, sizeof(hdr), "/* CC closure %d (from %s:%d) */\n", id, src_path ? src_path : "<src>", line_no);
+                                    cc__append_str(&defs, &defs_len, &defs_cap, hdr);
                                     char buf[8192];
                                     size_t off = 0;
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "typedef struct __cc_closure_env_%d {\n", id);
-                                    for (int ci = 0; ci < cap_n; ci++) {
-                                        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  __typeof__(%s) %s;\n", caps[ci], caps[ci]);
-                                    }
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "} __cc_closure_env_%d;\n", id);
                                     off += (size_t)snprintf(buf + off, sizeof(buf) - off, "static void* __cc_closure_entry_%d(void* __p) {\n", id);
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n", id, id);
-                                    for (int ci = 0; ci < cap_n; ci++) {
-                                        off += (size_t)snprintf(buf + off, sizeof(buf) - off,
-                                                                "  const __typeof__(__env->%s) %s = __env->%s;\n",
-                                                                caps[ci], caps[ci], caps[ci]);
-                                    }
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  (void)__p;\n");
                                     /* Source mapping: make closure body diagnostics point to original .ccs. */
                                     off += (size_t)snprintf(buf + off, sizeof(buf) - off, "#line %d \"%s\"\n", line_no, src_path ? src_path : "<src>");
                                     off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  %s\n", body);
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  return NULL;\n}\n");
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "static void __cc_closure_drop_%d(void* __p) { free(__p); }\n\n", id);
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  return NULL;\n}\n\n");
                                     cc__append_str(&defs, &defs_len, &defs_cap, buf);
                                 }
 
@@ -336,6 +342,8 @@ static int cc__scan_spawn_closures(const char* src,
     *out_count = count;
     *out_line_map = line_map;
     *out_line_cap = lines + 2;
+    if (out_protos) *out_protos = protos;
+    if (out_protos_len) *out_protos_len = protos_len;
     *out_defs = defs;
     *out_defs_len = defs_len;
     return 1;
@@ -932,18 +940,21 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     int closure_count = 0;
     int* closure_line_map = NULL; /* 1-based line -> (index+1) */
     int closure_line_cap = 0;
+    char* closure_protos = NULL;
+    size_t closure_protos_len = 0;
     char* closure_defs = NULL;
     size_t closure_defs_len = 0;
     if (src_ufcs) {
         cc__scan_spawn_closures(src_ufcs, src_ufcs_len, src_path,
                                 &closure_descs, &closure_count,
                                 &closure_line_map, &closure_line_cap,
+                                &closure_protos, &closure_protos_len,
                                 &closure_defs, &closure_defs_len);
     }
-    if (closure_defs && closure_defs_len > 0) {
-        fputs("/* --- CC generated closures --- */\n", out);
-        fwrite(closure_defs, 1, closure_defs_len, out);
-        fputs("/* --- end generated closures --- */\n\n", out);
+    if (closure_protos && closure_protos_len > 0) {
+        fputs("/* --- CC closure forward decls --- */\n", out);
+        fwrite(closure_protos, 1, closure_protos_len, out);
+        fputs("/* --- end closure forward decls --- */\n\n", out);
     }
 
     /* Preserve diagnostics mapping to the original input where possible. */
@@ -1185,16 +1196,14 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                             fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
                             fprintf(out, "{\n");
                             if (cd->cap_count > 0) {
-                                fprintf(out, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)malloc(sizeof(__cc_closure_env_%d));\n", cd->id, cd->id, cd->id);
-                                fprintf(out, "  if (!__env) abort();\n");
-                                for (int ci = 0; ci < cd->cap_count; ci++) {
-                                    fprintf(out, "  __env->%s = %s;\n", cd->cap_names[ci], cd->cap_names[ci]);
-                                }
-                                fprintf(out, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, __env, __cc_closure_drop_%d);\n", cd->id, cd->id);
+                                /* Hard error for now (compile-time), with good source mapping. */
+                                fprintf(out, "#line %d \"%s\"\n", cd->start_line, src_path);
+                                fprintf(out, "_Static_assert(0, \"CC: closure captures not implemented yet\");\n");
+                                fprintf(out, "(void)0;\n");
                             } else {
                                 fprintf(out, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, NULL, NULL);\n", cd->id);
+                                fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
                             }
-                            fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
                             fprintf(out, "}\n");
                             /* Skip original closure text lines (multiline). */
                             while (src_line_no < cd->end_line && fgets(line, sizeof(line), in)) {
@@ -1379,6 +1388,13 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
             free(closure_descs);
         }
         free(closure_line_map);
+        free(closure_protos);
+        if (closure_defs && closure_defs_len > 0) {
+            /* Emit closure definitions at end-of-file so global names are in scope. */
+            fputs("\n/* --- CC generated closures --- */\n", out);
+            fwrite(closure_defs, 1, closure_defs_len, out);
+            fputs("/* --- end generated closures --- */\n", out);
+        }
         free(closure_defs);
         if (src_ufcs != src_all) free(src_ufcs);
         free(src_all);

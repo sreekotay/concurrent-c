@@ -1,0 +1,2 @@
+# Closure expressions are parsed/recorded (Phase 2) but not lowered yet.
+expected expression

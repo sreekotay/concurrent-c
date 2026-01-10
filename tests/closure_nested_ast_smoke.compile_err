@@ -1,0 +1,2 @@
+# Nested closures/CC constructs inside closure bodies are not lowered yet.
+expected expression

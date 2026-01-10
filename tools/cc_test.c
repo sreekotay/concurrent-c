@@ -203,13 +203,15 @@ static int run_one_test(const char* stem,
 
     /* 1) Build via ccc build (this is the build system under test) */
     char build_cmd[3072];
+    /* Force fresh compilation: compiler is under active development, and we want tests to
+       reflect the current compiler behavior rather than an incremental cache. */
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build --link %s -o %s --ld-flags \"%s\"",
+                 "./cc/bin/ccc build --no-cache --link %s -o %s --ld-flags \"%s\"",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build --link %s -o %s",
+                 "./cc/bin/ccc build --no-cache --link %s -o %s",
                  input_path, bin_out);
     }
 
