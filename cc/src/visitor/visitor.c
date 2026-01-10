@@ -656,6 +656,28 @@ static int cc__append_n(char** buf, size_t* len, size_t* cap, const char* s, siz
     return 1;
 }
 
+static int cc__ab_only_ws_comments(const char* s, size_t a, size_t b) {
+    if (!s) return 0;
+    size_t i = a;
+    while (i < b) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
+        if (c == '/' && i + 1 < b && s[i + 1] == '/') {
+            i += 2;
+            while (i < b && s[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < b && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < b && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            if (i + 1 < b) i += 2;
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 #ifdef CC_TCC_EXT_AVAILABLE
 static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
 static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no);
@@ -1553,13 +1575,24 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_STMT_CALL = 0,
         CC_AB_REWRITE_RETURN_CALL = 1,
         CC_AB_REWRITE_ASSIGN_CALL = 2,
+        CC_AB_REWRITE_BATCH_STMT_CALLS = 3,
     } CCAutoBlockRewriteKind;
+
+    typedef struct {
+        size_t call_start;
+        size_t call_end;
+        int line_start;
+        const char* callee;
+        int argc;
+        char* param_types[16]; /* owned */
+    } CCAutoBlockBatchItem;
 
     typedef struct {
         size_t start;     /* statement start */
         size_t end;       /* statement end (inclusive of ';') */
         size_t call_start;
         size_t call_end;  /* end of ')' */
+        int line_start;
         const char* callee;
         const char* lhs_name; /* for assign */
         CCAutoBlockRewriteKind kind;
@@ -1570,6 +1603,8 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         char* param_types[16]; /* owned */
         size_t indent_start;
         size_t indent_len;
+        CCAutoBlockBatchItem* batch;
+        int batch_n;
     } Replace;
     Replace* reps = NULL;
     int rep_n = 0;
@@ -1823,6 +1858,7 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             .end = stmt_end,
             .call_start = call_start,
             .call_end = call_end,
+            .line_start = n[i].line_start,
             .callee = n[i].aux_s1,
             .lhs_name = lhs_name,
             .kind = kind,
@@ -1832,6 +1868,8 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             .ret_is_structy = ret_is_structy,
             .indent_start = indent_start,
             .indent_len = indent_len,
+            .batch = NULL,
+            .batch_n = 0,
         };
         for (int pi = 0; pi < paramc; pi++) reps[rep_n].param_types[pi] = param_types[pi];
         rep_n++;
@@ -1867,6 +1905,90 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
     }
     rep_n = out_n;
 
+    /* Batch consecutive statement-form sync calls in @async (coalescing/batching).
+       Only batches CC_AB_REWRITE_STMT_CALL nodes, and only when separated by whitespace/comments. */
+    {
+        /* Sort ASC for grouping */
+        for (int i = 0; i < rep_n - 1; i++) {
+            for (int k = i + 1; k < rep_n; k++) {
+                if (reps[k].start < reps[i].start) {
+                    Replace tmp = reps[i];
+                    reps[i] = reps[k];
+                    reps[k] = tmp;
+                }
+            }
+        }
+
+        Replace* out = (Replace*)calloc((size_t)rep_n, sizeof(Replace));
+        if (out) {
+            int on = 0;
+            for (int i = 0; i < rep_n; ) {
+                if (reps[i].kind != CC_AB_REWRITE_STMT_CALL) {
+                    out[on++] = reps[i++];
+                    continue;
+                }
+                int j = i + 1;
+                while (j < rep_n &&
+                       reps[j].kind == CC_AB_REWRITE_STMT_CALL &&
+                       cc__ab_only_ws_comments(in_src, reps[j - 1].end, reps[j].start)) {
+                    j++;
+                }
+                int group_n = j - i;
+                if (group_n <= 1) {
+                    out[on++] = reps[i++];
+                    continue;
+                }
+
+                Replace r = reps[i];
+                r.kind = CC_AB_REWRITE_BATCH_STMT_CALLS;
+                r.start = reps[i].start;
+                r.end = reps[j - 1].end;
+                r.call_start = reps[i].call_start;
+                r.call_end = reps[j - 1].call_end;
+                /* Batch carries per-item metadata; do not keep per-rep param_types to avoid double-free. */
+                r.argc = 0;
+                for (int pi = 0; pi < 16; pi++) r.param_types[pi] = NULL;
+                r.batch_n = group_n;
+                r.batch = (CCAutoBlockBatchItem*)calloc((size_t)group_n, sizeof(CCAutoBlockBatchItem));
+                if (!r.batch) {
+                    out[on++] = reps[i++];
+                    continue;
+                }
+                for (int bi = 0; bi < group_n; bi++) {
+                    Replace* src = &reps[i + bi];
+                    CCAutoBlockBatchItem* it = &r.batch[bi];
+                    it->call_start = src->call_start;
+                    it->call_end = src->call_end;
+                    it->line_start = src->line_start;
+                    it->callee = src->callee;
+                    it->argc = src->argc;
+                    for (int pi = 0; pi < src->argc; pi++) {
+                        it->param_types[pi] = src->param_types[pi];
+                        src->param_types[pi] = NULL; /* transfer ownership */
+                    }
+                }
+                out[on++] = r;
+                i = j;
+            }
+            free(reps);
+            reps = out;
+            rep_n = on;
+        } else {
+            /* if we couldn't allocate, keep unbatched and leave reps as-is */
+        }
+
+        /* Sort DESC again for splicing */
+        for (int i = 0; i < rep_n - 1; i++) {
+            for (int k = i + 1; k < rep_n; k++) {
+                if (reps[k].start > reps[i].start) {
+                    Replace tmp = reps[i];
+                    reps[i] = reps[k];
+                    reps[k] = tmp;
+                }
+            }
+        }
+    }
+
     char* cur_src = (char*)malloc(in_len + 1);
     if (!cur_src) { free(reps); return 0; }
     memcpy(cur_src, in_src, in_len);
@@ -1884,6 +2006,121 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (!stmt_txt) continue;
         memcpy(stmt_txt, cur_src + s, stmt_len);
         stmt_txt[stmt_len] = 0;
+
+        /* Batched statement calls: collapse adjacent sync calls into one blocking dispatch. */
+        if (reps[ri].kind == CC_AB_REWRITE_BATCH_STMT_CALLS && reps[ri].batch && reps[ri].batch_n > 0) {
+            char* ind = NULL;
+            if (reps[ri].indent_len > 0 && reps[ri].indent_start + reps[ri].indent_len <= cur_len) {
+                ind = (char*)malloc(reps[ri].indent_len + 1);
+                if (ind) {
+                    memcpy(ind, cur_src + reps[ri].indent_start, reps[ri].indent_len);
+                    ind[reps[ri].indent_len] = 0;
+                }
+            }
+            const char* I = ind ? ind : "";
+
+            char* repl = NULL;
+            size_t repl_len = 0;
+            size_t repl_cap = 0;
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s{\n", I);
+
+            /* Bind all args in order (in the async context), then do one run_blocking dispatch. */
+            for (int bi = 0; bi < reps[ri].batch_n; bi++) {
+                const CCAutoBlockBatchItem* it = &reps[ri].batch[bi];
+                size_t call_s = it->call_start - s;
+                size_t call_e = it->call_end - s;
+                if (call_e > stmt_len || call_s >= call_e) continue;
+                size_t call_len = call_e - call_s;
+                char* call_txt = (char*)malloc(call_len + 1);
+                if (!call_txt) continue;
+                memcpy(call_txt, stmt_txt + call_s, call_len);
+                call_txt[call_len] = 0;
+
+                const char* lpar = strchr(call_txt, '(');
+                const char* rpar = strrchr(call_txt, ')');
+                if (!lpar || !rpar || rpar <= lpar) { free(call_txt); continue; }
+                size_t args_s = (size_t)(lpar - call_txt) + 1;
+                size_t args_e = (size_t)(rpar - call_txt);
+
+                size_t arg_starts[16];
+                size_t arg_ends[16];
+                int argc = 0;
+                int par = 0, brk = 0, br = 0;
+                int ins = 0; char q = 0;
+                size_t cur_a = args_s;
+                for (size_t k = args_s; k < args_e; k++) {
+                    char ch = call_txt[k];
+                    if (ins) {
+                        if (ch == '\\' && k + 1 < args_e) { k++; continue; }
+                        if (ch == q) ins = 0;
+                        continue;
+                    }
+                    if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+                    if (ch == '(') par++;
+                    else if (ch == ')') { if (par) par--; }
+                    else if (ch == '[') brk++;
+                    else if (ch == ']') { if (brk) brk--; }
+                    else if (ch == '{') br++;
+                    else if (ch == '}') { if (br) br--; }
+                    else if (ch == ',' && par == 0 && brk == 0 && br == 0) {
+                        if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
+                            arg_starts[argc] = cur_a;
+                            arg_ends[argc] = k;
+                            argc++;
+                        }
+                        cur_a = k + 1;
+                    }
+                }
+                if (args_s == args_e) argc = 0;
+                else if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
+                    arg_starts[argc] = cur_a;
+                    arg_ends[argc] = args_e;
+                    argc++;
+                }
+
+                for (int ai = 0; ai < argc; ai++) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  intptr_t __cc_ab_b%d_a%d = (intptr_t)(%.*s);\n",
+                                   I, bi, ai,
+                                   (int)(arg_ends[ai] - arg_starts[ai]), call_txt + arg_starts[ai]);
+                }
+
+                free(call_txt);
+            }
+
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  cc_run_blocking_closure0(() => {\n", I);
+            for (int bi = 0; bi < reps[ri].batch_n; bi++) {
+                const CCAutoBlockBatchItem* it = &reps[ri].batch[bi];
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    %s(", I, it->callee ? it->callee : "");
+                for (int ai = 0; ai < it->argc; ai++) {
+                    if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                    if (it->param_types[ai]) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_b%d_a%d", it->param_types[ai], bi, ai);
+                    } else {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_b%d_a%d", bi, ai);
+                    }
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ");\n");
+            }
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    return NULL;\n%s  });\n%s}", I, I, I);
+
+            free(stmt_txt);
+            free(ind);
+            if (!repl) continue;
+
+            /* Splice */
+            size_t new_len = cur_len - (e - s) + repl_len;
+            char* next = (char*)malloc(new_len + 1);
+            if (!next) { free(repl); continue; }
+            memcpy(next, cur_src, s);
+            memcpy(next + s, repl, repl_len);
+            memcpy(next + s + repl_len, cur_src + e, cur_len - e);
+            next[new_len] = 0;
+            free(repl);
+            free(cur_src);
+            cur_src = next;
+            cur_len = new_len;
+            continue;
+        }
 
         /* Extract original call text (from statement slice) for arg parsing */
         size_t call_s = reps[ri].call_start - s;
@@ -2037,6 +2274,14 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
     for (int i = 0; i < rep_n; i++) {
         for (int j = 0; j < reps[i].argc; j++) free(reps[i].param_types[j]);
+        if (reps[i].kind == CC_AB_REWRITE_BATCH_STMT_CALLS && reps[i].batch) {
+            for (int bi = 0; bi < reps[i].batch_n; bi++) {
+                for (int pj = 0; pj < reps[i].batch[bi].argc; pj++) {
+                    free(reps[i].batch[bi].param_types[pj]);
+                }
+            }
+            free(reps[i].batch);
+        }
     }
     free(reps);
     *out_src = cur_src;

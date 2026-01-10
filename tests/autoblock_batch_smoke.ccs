@@ -1,0 +1,28 @@
+#include "cc_runtime.cch"
+#include "cc_closure.cch"
+#include <pthread.h>
+
+static pthread_t g_tid;
+static int g_ok = 1;
+
+static void mark_tid(void) {
+    g_tid = pthread_self();
+}
+
+static void check_same_tid(void) {
+    if (!pthread_equal(g_tid, pthread_self())) {
+        g_ok = 0;
+    }
+}
+
+@async void f(void) {
+    /* These should be batched into a single run_blocking dispatch, so they run on the same worker thread. */
+    mark_tid();
+    check_same_tid();
+}
+
+int main(void) {
+    f();
+    return g_ok ? 0 : 1;
+}
+
