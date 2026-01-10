@@ -1,0 +1,20 @@
+#include "cc_closure.cch"
+#include "cc_slice.cch"
+
+CCClosure0 g;
+
+void set_bad(void) {
+    int buf[2] = {1, 2};
+    CCSlice s = cc_slice_from_buffer(buf, 2); /* stack-backed */
+    g = () => {
+        int* p = (int*)s.ptr;
+        if (p) (void)p[0];
+        return NULL;
+    };
+}
+
+int main(void) {
+    set_bad();
+    return 0;
+}
+

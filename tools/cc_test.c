@@ -6,6 +6,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
+#include <time.h>
 
 static int file_exists(const char* path) {
     if (!path) return 0;
@@ -137,6 +139,64 @@ static int wexitstatus_simple(int rc) {
     return 1;
 }
 
+static long long now_ms_monotonic(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000LL);
+}
+
+// Runs command via `sh -c <full>` with optional timeout. Returns:
+// - exit code of the command (0..255)
+// - 124 on timeout (like GNU timeout)
+static int run_cmd_redirect_timeout(const char* cmd,
+                                    const char* out_path,
+                                    const char* err_path,
+                                    int verbose,
+                                    int timeout_sec) {
+    if (!cmd) return -1;
+    char full[4096];
+    if (out_path && err_path) {
+        snprintf(full, sizeof(full), "sh -c '%s > %s 2> %s'", cmd, out_path, err_path);
+    } else if (out_path) {
+        snprintf(full, sizeof(full), "sh -c '%s > %s'", cmd, out_path);
+    } else if (err_path) {
+        snprintf(full, sizeof(full), "sh -c '%s 2> %s'", cmd, err_path);
+    } else {
+        snprintf(full, sizeof(full), "%s", cmd);
+    }
+    if (verbose) fprintf(stderr, "cc_test: %s\n", full);
+
+    pid_t pid = fork();
+    if (pid < 0) return 127;
+    if (pid == 0) {
+        // New process group so we can kill the whole subtree on timeout.
+        (void)setpgid(0, 0);
+        execl("/bin/sh", "sh", "-c", full, (char*)NULL);
+        _exit(127);
+    }
+
+    long long start_ms = now_ms_monotonic();
+    for (;;) {
+        int st = 0;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) return wexitstatus_simple(st);
+        if (r < 0) return 127;
+
+        if (timeout_sec > 0) {
+            long long elapsed_ms = now_ms_monotonic() - start_ms;
+            if (elapsed_ms >= (long long)timeout_sec * 1000LL) {
+                // Kill the process group (child pid is its pgid).
+                (void)kill(-pid, SIGKILL);
+                (void)kill(pid, SIGKILL);
+                (void)waitpid(pid, &st, 0);
+                return 124;
+            }
+        }
+        // Sleep a bit to avoid busy waiting.
+        usleep(10 * 1000);
+    }
+}
+
 static void pid_pop(pid_t* pids_local, char** names_local, int* io_running, int* io_failed) {
     if (!pids_local || !names_local || !io_running || *io_running <= 0) return;
     int st = 0;
@@ -161,26 +221,6 @@ static void pid_pop(pid_t* pids_local, char** names_local, int* io_running, int*
         names_local[last] = NULL;
     }
     (*io_running)--;
-}
-
-static int run_cmd_redirect(const char* cmd,
-                            const char* out_path,
-                            const char* err_path,
-                            int verbose) {
-    if (!cmd) return -1;
-    char full[4096];
-    if (out_path && err_path) {
-        snprintf(full, sizeof(full), "sh -c '%s > %s 2> %s'", cmd, out_path, err_path);
-    } else if (out_path) {
-        snprintf(full, sizeof(full), "sh -c '%s > %s'", cmd, out_path);
-    } else if (err_path) {
-        snprintf(full, sizeof(full), "sh -c '%s 2> %s'", cmd, err_path);
-    } else {
-        snprintf(full, sizeof(full), "%s", cmd);
-    }
-    if (verbose) fprintf(stderr, "cc_test: %s\n", full);
-    int rc = system(full);
-    return wexitstatus_simple(rc);
 }
 
 static int expect_contains_lines(const char* stream_name,
@@ -225,7 +265,9 @@ static int run_one_test(const char* stem,
                         int verbose,
                         const char* out_dir,
                         const char* bin_dir,
-                        int use_cache) {
+                        int use_cache,
+                        int build_timeout_sec,
+                        int run_timeout_sec) {
     char bin_out[512];
     char build_err_txt[512];
     char out_txt[512];
@@ -278,10 +320,15 @@ static int run_one_test(const char* stem,
                  input_path, bin_out);
     }
 
-    int build_rc = run_cmd_redirect(build_cmd, NULL, build_err_txt, verbose);
+    int build_rc = run_cmd_redirect_timeout(build_cmd, NULL, build_err_txt, verbose, build_timeout_sec);
     if (compile_fail) {
         if (build_rc == 0) {
             fprintf(stderr, "[FAIL] %s: expected build to fail\n", stem);
+            free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
+            return 1;
+        }
+        if (build_rc == 124) {
+            fprintf(stderr, "[TIMEOUT] %s: build timed out after %ds\n", stem, build_timeout_sec);
             free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
             return 1;
         }
@@ -297,12 +344,19 @@ static int run_one_test(const char* stem,
     }
 
     if (build_rc != 0) {
+        if (build_rc == 124) {
+            fprintf(stderr, "[TIMEOUT] %s: build timed out after %ds\n", stem, build_timeout_sec);
+        }
         fprintf(stderr, "[FAIL] %s: build failed\n", stem);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
         return 1;
     }
 
-    if (run_cmd_redirect(bin_out, out_txt, err_txt, verbose) != 0) {
+    int run_rc = run_cmd_redirect_timeout(bin_out, out_txt, err_txt, verbose, run_timeout_sec);
+    if (run_rc != 0) {
+        if (run_rc == 124) {
+            fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, run_timeout_sec);
+        }
         fprintf(stderr, "[FAIL] %s: run failed\n", stem);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
         return 1;
@@ -325,7 +379,7 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--use-cache]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache]\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -334,10 +388,24 @@ int main(int argc, char** argv) {
     int list_only = 0;
     int jobs = 1;
     int use_cache = 0;
+    int build_timeout_sec = 300;
+    int run_timeout_sec = 5;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
+        if (strcmp(argv[i], "--build-timeout") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--build-timeout requires a value\n"); return 2; }
+            build_timeout_sec = atoi(argv[++i]);
+            if (build_timeout_sec < 0) build_timeout_sec = 0;
+            continue;
+        }
+        if (strcmp(argv[i], "--run-timeout") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--run-timeout requires a value\n"); return 2; }
+            run_timeout_sec = atoi(argv[++i]);
+            if (run_timeout_sec < 0) run_timeout_sec = 0;
+            continue;
+        }
         if (strcmp(argv[i], "--filter") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--filter requires a value\n"); return 2; }
             filter = argv[++i];
@@ -361,6 +429,20 @@ int main(int argc, char** argv) {
     {
         const char* env = getenv("CC_TEST_USE_CACHE");
         if (env && strcmp(env, "1") == 0) use_cache = 1;
+    }
+    {
+        const char* env = getenv("CC_TEST_BUILD_TIMEOUT");
+        if (env && *env) {
+            int t = atoi(env);
+            if (t >= 0) build_timeout_sec = t;
+        }
+    }
+    {
+        const char* env = getenv("CC_TEST_RUN_TIMEOUT");
+        if (env && *env) {
+            int t = atoi(env);
+            if (t >= 0) run_timeout_sec = t;
+        }
     }
 
     (void)ensure_out_dir();
@@ -413,7 +495,7 @@ int main(int argc, char** argv) {
 
         ran++;
         if (jobs <= 1) {
-            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache) != 0)
+            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache, build_timeout_sec, run_timeout_sec) != 0)
                 failed++;
             continue;
         }
@@ -435,7 +517,7 @@ int main(int argc, char** argv) {
             snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%d", (int)me);
             (void)ensure_dir_p(out_dir);
             (void)ensure_dir_p(bin_dir);
-            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir, use_cache);
+            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir, use_cache, build_timeout_sec, run_timeout_sec);
             _exit(rc == 0 ? 0 : 1);
         }
 

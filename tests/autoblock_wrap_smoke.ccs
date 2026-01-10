@@ -1,0 +1,18 @@
+#include "cc_runtime.cch"
+#include "cc_closure.cch"
+
+static void blocking_set(int* p) {
+    if (p) *p = 42;
+}
+
+@async void f(int* p) {
+    // Should be auto-wrapped into cc_run_blocking_closure0(...) by the CC visitor.
+    blocking_set(p);
+}
+
+int main(void) {
+    int x = 0;
+    f(&x);
+    return (x == 42) ? 0 : 1;
+}
+

@@ -27,5 +27,9 @@ int cc_symbols_add_predefined(CCSymbolTable* t, const CCConstBinding* bindings, 
 // Lookup const; returns 0 on success, non-zero on miss.
 int cc_symbols_lookup_const(CCSymbolTable* t, const char* name, long long* out_value);
 
+/* Function decl attributes (parsed from CC decl annotations like @async/@noblock). */
+int cc_symbols_set_fn_attrs(CCSymbolTable* t, const char* name, unsigned int attrs);
+int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int* out_attrs);
+
 #endif // CC_COMPTIME_SYMBOLS_H
 

@@ -1,0 +1,16 @@
+#include "cc_closure.cch"
+
+static int add1(int x) { return x + 1; }
+
+int main(void) {
+    CCClosure1 inc = (int x) => { return (void*)(intptr_t)add1(x); };
+    CCClosure1 twice = (int x) => { return inc(x); };
+
+    int r = (int)(intptr_t)(
+        twice(
+            41
+        )
+    );
+    return (r == 42) ? 0 : 1;
+}
+

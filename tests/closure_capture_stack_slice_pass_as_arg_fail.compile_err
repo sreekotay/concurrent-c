@@ -1,0 +1,2 @@
+CC: cannot capture stack slice in escaping closure
+

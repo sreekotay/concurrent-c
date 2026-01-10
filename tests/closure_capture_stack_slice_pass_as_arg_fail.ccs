@@ -1,0 +1,20 @@
+#include "cc_closure.cch"
+#include "cc_slice.cch"
+
+void take(CCClosure0 c) { (void)c; }
+
+void bad(void) {
+    int buf[2] = {1, 2};
+    CCSlice s = cc_slice_from_buffer(buf, 2); /* stack-backed */
+    take(() => {
+        int* p = (int*)s.ptr;
+        if (p) (void)p[0];
+        return NULL;
+    });
+}
+
+int main(void) {
+    bad();
+    return 0;
+}
+

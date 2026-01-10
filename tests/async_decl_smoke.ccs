@@ -1,0 +1,11 @@
+#include "cc_runtime.cch"
+
+@async void f(void) {
+    /* For now, @async is parsed and stripped during lowering; real async semantics land later. */
+}
+
+int main(void) {
+    f();
+    return 0;
+}
+

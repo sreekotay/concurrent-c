@@ -1,0 +1,22 @@
+#include "cc_closure.cch"
+#include "cc_slice.cch"
+#include "cc_nursery.cch"
+
+int g = 0;
+
+int main(void) {
+    int buf[4] = {1, 2, 3, 4};
+    CCSlice s = cc_slice_from_buffer(buf, 4); /* stack-backed */
+
+    CCClosure0 c = () => {
+        int* p = (int*)s.ptr;
+        if (p && s.len == 4 && p[0] == 1) g = 1;
+        return NULL;
+    };
+
+    @nursery {
+        spawn (c);
+    }
+    return (g == 1) ? 0 : 1;
+}
+

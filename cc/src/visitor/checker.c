@@ -120,6 +120,12 @@ enum {
     CC_STUB_PARAM = 16,
 };
 
+enum {
+    CC_FN_ATTR_ASYNC = 1u << 0,
+    CC_FN_ATTR_NOBLOCK = 1u << 1,
+    CC_FN_ATTR_LATENCY_SENSITIVE = 1u << 2,
+};
+
 typedef struct {
     int* child;
     int len;
@@ -144,6 +150,14 @@ static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const c
     int col = n ? n->col_start : 0;
     if (col <= 0) col = 1;
     fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
+}
+
+static void cc__emit_note(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
+    int line = n ? n->line_start : 0;
+    int col = n ? n->col_start : 0;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: note: %s\n", path, line, col, msg);
 }
 
 static int cc__call_has_unique_flag(const StubNodeView* nodes, const ChildList* kids, int call_idx) {
@@ -239,31 +253,11 @@ static int cc__subtree_collect_call_names(const StubNodeView* nodes,
     return 1;
 }
 
-static int cc__closure_allows_stack_capture(const StubNodeView* nodes, int closure_idx) {
-    /* Allowed only when directly under a nursery `spawn (...)` statement. */
-    int cur = nodes[closure_idx].parent;
-    while (cur >= 0) {
-        if (nodes[cur].kind == CC_STUB_STMT && nodes[cur].aux_s1 && strcmp(nodes[cur].aux_s1, "spawn") == 0)
-            return 1;
-        cur = nodes[cur].parent;
-    }
-    return 0;
-}
-
-static int cc__closure_is_escaping(const StubNodeView* nodes, int closure_idx) {
-    /* Conservative: anything not a nursery spawn is treated as escaping for stack-slice purposes. */
-    if (cc__closure_allows_stack_capture(nodes, closure_idx)) return 0;
-    return 1;
-}
-
-static int cc__closure_has_illegal_stack_capture(int closure_idx,
+static int cc__closure_captures_stack_slice_view(int closure_idx,
                                                  const StubNodeView* nodes,
                                                  const ChildList* kids,
                                                  CCScope* scopes,
                                                  int scope_n) {
-    /* If the closure is not escaping, allow. */
-    if (!cc__closure_is_escaping(nodes, closure_idx)) return 0;
-
     /* Build set of local names declared inside the closure (decl items + params). */
     const char* locals[256];
     int locals_n = 0;
@@ -315,6 +309,88 @@ static int cc__closure_has_illegal_stack_capture(int closure_idx,
     }
 
     return 0;
+}
+
+static int cc__subtree_find_first_kind(const StubNodeView* nodes,
+                                       const ChildList* kids,
+                                       int idx,
+                                       int kind,
+                                       int* out_idx) {
+    if (!nodes || !kids || !out_idx) return 0;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        if (nodes[cur].kind == kind) { *out_idx = cur; return 1; }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) stack[sp++] = cl->child[i];
+    }
+    return 0;
+}
+
+static int cc__subtree_has_kind(const StubNodeView* nodes,
+                                const ChildList* kids,
+                                int idx,
+                                int kind) {
+    if (!nodes || !kids) return 0;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        if (nodes[cur].kind == kind) return 1;
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) stack[sp++] = cl->child[i];
+    }
+    return 0;
+}
+
+static int cc__subtree_find_first_bound_ident(const StubNodeView* nodes,
+                                              const ChildList* kids,
+                                              int idx,
+                                              const char** bound_names,
+                                              const int* bound_closure_idx,
+                                              int bound_n,
+                                              int* out_closure_idx) {
+    if (!nodes || !kids || !bound_names || !bound_closure_idx || !out_closure_idx) return 0;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        if (nodes[cur].kind == CC_STUB_IDENT && nodes[cur].aux_s1) {
+            const char* nm = nodes[cur].aux_s1;
+            for (int i = 0; i < bound_n; i++) {
+                if (bound_names[i] && strcmp(bound_names[i], nm) == 0) { *out_closure_idx = bound_closure_idx[i]; return 1; }
+            }
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) stack[sp++] = cl->child[i];
+    }
+    return 0;
+}
+
+static int cc__closure_is_under_return(const StubNodeView* nodes, int closure_idx) {
+    if (!nodes) return 0;
+    int cur = nodes[closure_idx].parent;
+    while (cur >= 0) {
+        if (nodes[cur].kind == CC_STUB_STMT && nodes[cur].aux_s1 && strcmp(nodes[cur].aux_s1, "spawn") == 0)
+            return 0; /* nursery spawn context */
+        if (nodes[cur].kind == CC_STUB_RETURN)
+            return 1;
+        cur = nodes[cur].parent;
+    }
+    return 0;
+}
+
+static int cc__is_global_decl_item(const StubNodeView* nodes, int n, int idx) {
+    if (!nodes || idx < 0 || idx >= n) return 0;
+    if (nodes[idx].kind != CC_STUB_DECL_ITEM) return 0;
+    int p = nodes[idx].parent;
+    if (p < 0 || p >= n) return 0;
+    if (nodes[p].kind != CC_STUB_DECL) return 0;
+    return nodes[p].parent == -1;
 }
 
 static int cc__subtree_should_apply_slice_copy_rule(const StubNodeView* nodes,
@@ -498,19 +574,6 @@ static int cc__walk_closure(int idx,
     return 0;
 }
 
-static int cc__subtree_has_kind(const StubNodeView* nodes,
-                                const ChildList* kids,
-                                int idx,
-                                int kind) {
-    if (!nodes || !kids) return 0;
-    if (nodes[idx].kind == kind) return 1;
-    const ChildList* cl = &kids[idx];
-    for (int i = 0; i < cl->len; i++) {
-        if (cc__subtree_has_kind(nodes, kids, cl->child[i], kind)) return 1;
-    }
-    return 0;
-}
-
 static int cc__walk_assign(int idx,
                            const StubNodeView* nodes,
                            const ChildList* kids,
@@ -544,7 +607,8 @@ static int cc__walk_assign(int idx,
                     return -1;
                 }
                 if (rhs_v->move_only && has_move_marker) {
-                    rhs_v->moved = 1;
+                    /* cc_move(...) is handled by the move marker call; don't mark moved here,
+                       otherwise we can falsely report use-after-move within the same expression. */
                     if (lhs_v) lhs_v->move_only = 1;
                 } else if (lhs_v && !has_move_marker) {
                     lhs_v->move_only = 0;
@@ -581,7 +645,7 @@ static int cc__walk_return(int idx,
                 ctx->errors++;
                 return -1;
             }
-            if (v->move_only && has_move_marker) v->moved = 1;
+            /* cc_move(...) is handled by the move marker call + commit at expression boundary. */
         }
     }
 
@@ -601,6 +665,16 @@ static int cc__walk(int idx,
                     int* io_scope_n,
                     CCCheckerCtx* ctx) {
     const StubNodeView* n = &nodes[idx];
+
+    /* Only enforce semantic checks within the user's input file. We still recurse so
+       that we can reach user-file nodes that are parented under include contexts. */
+    if (ctx && ctx->input_path && n->file && strcmp(n->file, ctx->input_path) != 0) {
+        const ChildList* cl = &kids[idx];
+        for (int i = 0; i < cl->len; i++) {
+            if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        }
+        return 0;
+    }
 
     if (n->kind == CC_STUB_DECL_ITEM && n->aux_s1 && n->aux_s2) {
         CCScope* cur = &scopes[(*io_scope_n) - 1];
@@ -697,10 +771,12 @@ static int cc__walk(int idx,
 
     if (n->kind == CC_STUB_CLOSURE) {
         if (cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
-        if (cc__closure_has_illegal_stack_capture(idx, nodes, kids, scopes, *io_scope_n)) {
-            cc__emit_err(ctx, n, "CC: cannot capture stack slice in escaping closure");
-            ctx->errors++;
-            return -1;
+        if (cc__closure_is_under_return(nodes, idx)) {
+            if (cc__closure_captures_stack_slice_view(idx, nodes, kids, scopes, *io_scope_n)) {
+                cc__emit_err(ctx, n, "CC: cannot capture stack slice in escaping closure");
+                ctx->errors++;
+                return -1;
+            }
         }
         return 0;
     }
@@ -729,18 +805,263 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     if (!root || !ctx) return -1;
     ctx->errors = 0;
 
+    /* Fallback: if stub-AST parse fails (node list empty), still detect and reject `await`
+       so we don't pass through invalid CC to the backend. */
     if (!root->nodes || root->node_count <= 0) {
-        /* Transitional: no stub nodes, skip. */
+        if (ctx->input_path) {
+            FILE* f = fopen(ctx->input_path, "rb");
+            if (f) {
+                int line = 1, col = 1;
+                int c;
+                while ((c = fgetc(f)) != EOF) {
+                    if (c == '\n') { line++; col = 1; continue; }
+                    if (c == 'a') {
+                        int w = fgetc(f);
+                        int a2 = fgetc(f);
+                        int i2 = fgetc(f);
+                        int t2 = fgetc(f);
+                        if (w == 'w' && a2 == 'a' && i2 == 'i' && t2 == 't') {
+                            StubNodeView sn;
+                            memset(&sn, 0, sizeof(sn));
+                            sn.file = ctx->input_path;
+                            sn.line_start = line;
+                            sn.col_start = col;
+                            cc__emit_err(ctx, &sn, "CC: await is not implemented yet");
+                            ctx->errors++;
+                            fclose(f);
+                            return -1;
+                        }
+                        /* push back in reverse order if not matched */
+                        if (t2 != EOF) ungetc(t2, f);
+                        if (i2 != EOF) ungetc(i2, f);
+                        if (a2 != EOF) ungetc(a2, f);
+                        if (w != EOF) ungetc(w, f);
+                    }
+                    col++;
+                }
+                fclose(f);
+            }
+        }
+        /* Transitional: no stub nodes, skip other checks. */
         return 0;
     }
+
+    /* (Unreachable now: handled above.) */
     const StubNodeView* nodes = (const StubNodeView*)root->nodes;
     int n = root->node_count;
 
+    /* Performance/memory: stub AST can be huge due to headers (esp <std/prelude.cch>).
+       For now, all checker semantics are TU-local; compact to nodes whose `file` matches input_path. */
+    StubNodeView* owned_nodes = NULL;
+    int* idx_map = NULL;
+    if (ctx->input_path) {
+        idx_map = (int*)malloc((size_t)n * sizeof(int));
+        if (!idx_map) return -1;
+        for (int i = 0; i < n; i++) idx_map[i] = -1;
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            const char* f = nodes[i].file;
+            if (f && strcmp(f, ctx->input_path) != 0) continue;
+            idx_map[i] = m++;
+        }
+        if (m > 0 && m < n) {
+            owned_nodes = (StubNodeView*)calloc((size_t)m, sizeof(StubNodeView));
+            if (!owned_nodes) { free(idx_map); return -1; }
+            for (int i = 0; i < n; i++) {
+                int ni = idx_map[i];
+                if (ni < 0) continue;
+                owned_nodes[ni] = nodes[i];
+                int p = nodes[i].parent;
+                if (p >= 0 && p < n) {
+                    int np = idx_map[p];
+                    owned_nodes[ni].parent = (np >= 0) ? np : -1;
+                } else {
+                    owned_nodes[ni].parent = -1;
+                }
+            }
+            nodes = owned_nodes;
+            n = m;
+        }
+    }
+
+    /* Record function decl attrs from stub decl-items into symbols table (for future async/autoblocking).
+       Note: store default attrs=0 too, so callers can distinguish "known sync" vs "unknown". */
+    for (int i = 0; i < n; i++) {
+        const StubNodeView* dn = &nodes[i];
+        if (dn->kind != CC_STUB_DECL_ITEM) continue;
+        if (!ctx->symbols || !dn->aux_s1 || !dn->aux_s2) continue;
+        if (strchr(dn->aux_s2, '(')) {
+            (void)cc_symbols_set_fn_attrs(ctx->symbols, dn->aux_s1, (unsigned int)dn->aux2);
+        }
+    }
+
+    /* Temporary: reject await until async lowering exists. */
+    for (int i = 0; i < n; i++) {
+        const StubNodeView* an = &nodes[i];
+        if (an->kind != CC_STUB_AWAIT) continue;
+        cc__emit_err(ctx, an, "CC: await is not implemented yet");
+        ctx->errors++;
+        free(idx_map);
+        free(owned_nodes);
+        return -1;
+    }
+
+    /* Auto-blocking diagnostics (env-gated): identify direct calls to non-@async, non-@noblock
+       functions inside @async functions. This is the classification backbone for spec auto-wrapping. */
+    int dbg_autoblock = 0;
+    {
+        const char* e = getenv("CC_DEBUG_AUTOBLOCK");
+        dbg_autoblock = (e && e[0] == '1') ? 1 : 0;
+    }
+    if (dbg_autoblock && ctx->symbols) {
+        for (int i = 0; i < n; i++) {
+            const StubNodeView* cn = &nodes[i];
+            if (cn->kind != CC_STUB_CALL) continue;
+            if (!cn->aux_s1) continue; /* callee name */
+            /* Find containing @async function by walking parent chain to the nearest function decl-item. */
+            const char* owner = NULL;
+            int cur = cn->parent;
+            while (cur >= 0 && cur < n) {
+                const StubNodeView* pn = &nodes[cur];
+                if (pn->kind == CC_STUB_DECL_ITEM && pn->aux_s1 && pn->aux_s2 && strchr(pn->aux_s2, '(')) {
+                    unsigned int attrs = 0;
+                    if (cc_symbols_lookup_fn_attrs(ctx->symbols, pn->aux_s1, &attrs) == 0 &&
+                        (attrs & CC_FN_ATTR_ASYNC)) {
+                        owner = pn->aux_s1;
+                    }
+                    break;
+                }
+                cur = pn->parent;
+            }
+            if (!owner) continue;
+
+            unsigned int callee_attrs = 0;
+            int has = (cc_symbols_lookup_fn_attrs(ctx->symbols, cn->aux_s1, &callee_attrs) == 0);
+            if (has) {
+                if (callee_attrs & CC_FN_ATTR_ASYNC) continue;
+                if (callee_attrs & CC_FN_ATTR_NOBLOCK) continue;
+            }
+
+            /* Unknown callee => treat as non-@async (extern/FFI), but only note in debug mode. */
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                     "CC: auto-blocking candidate: call to '%s' inside @async '%s' would be wrapped in run_blocking",
+                     cn->aux_s1, owner ? owner : "<async>");
+            cc__emit_note(ctx, cn, msg);
+        }
+    }
+
     ChildList* kids = (ChildList*)calloc((size_t)n, sizeof(ChildList));
-    if (!kids) return -1;
+    if (!kids) { free(idx_map); free(owned_nodes); return -1; }
     for (int i = 0; i < n; i++) {
         int p = nodes[i].parent;
         if (p >= 0 && p < n) cc__child_push(&kids[p], i);
+    }
+
+    /* Closure escape-kind approximation for stack-slice captures:
+       - Allow: nursery-scoped spawn (direct literal or via local variable)
+       - Disallow: return / store to global / store through member lvalue / pass as arg */
+    unsigned char* closure_spawned = (unsigned char*)calloc((size_t)n, 1);
+    unsigned char* closure_escapes = (unsigned char*)calloc((size_t)n, 1);
+    const char* bound_names[256];
+    int bound_closure_idx[256];
+    int bound_n = 0;
+    const char* global_names[256];
+    int global_n = 0;
+    if (closure_spawned && closure_escapes) {
+        /* Bind `name -> closure_idx` from decl initializers: `CCClosureN name = () => ...;` */
+        for (int i = 0; i < n; i++) {
+            if (nodes[i].kind != CC_STUB_DECL_ITEM) continue;
+            if (!nodes[i].aux_s1) continue;
+            if (cc__is_global_decl_item(nodes, n, i)) {
+                if (global_n < (int)(sizeof(global_names)/sizeof(global_names[0]))) {
+                    global_names[global_n++] = nodes[i].aux_s1;
+                }
+            }
+            int cidx = -1;
+            if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx)) {
+                if (bound_n < (int)(sizeof(bound_names)/sizeof(bound_names[0]))) {
+                    bound_names[bound_n] = nodes[i].aux_s1;
+                    bound_closure_idx[bound_n] = cidx;
+                    bound_n++;
+                }
+            }
+        }
+        /* Propagate through simple assigns: `c2 = c;` */
+        for (int i = 0; i < n; i++) {
+            if (nodes[i].kind != CC_STUB_ASSIGN) continue;
+            if (!nodes[i].aux_s1) continue; /* lhs name */
+            int cidx = -1;
+            if (cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx)) {
+                if (cidx >= 0 && bound_n < (int)(sizeof(bound_names)/sizeof(bound_names[0]))) {
+                    bound_names[bound_n] = nodes[i].aux_s1;
+                    bound_closure_idx[bound_n] = cidx;
+                    bound_n++;
+                }
+            }
+        }
+        /* Mark nursery spawned closures: `spawn ( <closure> )` or `spawn ( ident )` */
+        for (int i = 0; i < n; i++) {
+            if (nodes[i].kind != CC_STUB_STMT) continue;
+            if (!nodes[i].aux_s1 || strcmp(nodes[i].aux_s1, "spawn") != 0) continue;
+            int cidx = -1;
+            if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx)) {
+                if (cidx >= 0 && cidx < n) closure_spawned[cidx] = 1;
+            } else if (cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx)) {
+                if (cidx >= 0 && cidx < n) closure_spawned[cidx] = 1;
+            }
+        }
+        /* Mark escaped closures:
+           - return <closure-or-bound-ident>
+           - assign to global
+           - assign through member lvalue (obj.field = ...)
+           - pass as arg to non-closure-call (foo(c) or foo(() => ...)) */
+        for (int i = 0; i < n; i++) {
+            if (nodes[i].kind == CC_STUB_RETURN) {
+                int cidx = -1;
+                if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx) ||
+                    cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx)) {
+                    if (cidx >= 0 && cidx < n) closure_escapes[cidx] = 1;
+                }
+            } else if (nodes[i].kind == CC_STUB_ASSIGN) {
+                int cidx = -1;
+                int rhs_has_closure = (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx) ||
+                                       cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &cidx));
+                if (!rhs_has_closure) continue;
+                int escapes = 0;
+                /* LHS global? */
+                if (nodes[i].aux_s1) {
+                    for (int g = 0; g < global_n; g++) {
+                        if (global_names[g] && strcmp(global_names[g], nodes[i].aux_s1) == 0) { escapes = 1; break; }
+                    }
+                }
+                /* Member lvalue? (best-effort) */
+                if (!escapes && cc__subtree_has_kind(nodes, kids, i, CC_STUB_MEMBER)) escapes = 1;
+                if (escapes && cidx >= 0 && cidx < n) closure_escapes[cidx] = 1;
+            } else if (nodes[i].kind == CC_STUB_CALL) {
+                /* If a closure is used as an argument to another call, treat as escaping.
+                   Exclude immediate closure calls `c(...)` by checking call name equals bound name. */
+                int cidx = -1;
+                if (cc__subtree_find_first_kind(nodes, kids, i, CC_STUB_CLOSURE, &cidx)) {
+                    if (cidx >= 0 && cidx < n) closure_escapes[cidx] = 1;
+                } else {
+                    int bcidx = -1;
+                    if (cc__subtree_find_first_bound_ident(nodes, kids, i, bound_names, bound_closure_idx, bound_n, &bcidx)) {
+                        /* If this CALL is itself the closure call (callee == var name), don't mark escape. */
+                        int is_immediate = 0;
+                        if (nodes[i].aux_s1) {
+                            for (int b = 0; b < bound_n; b++) {
+                                if (bound_closure_idx[b] == bcidx && bound_names[b] && strcmp(bound_names[b], nodes[i].aux_s1) == 0) {
+                                    is_immediate = 1;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!is_immediate && bcidx >= 0 && bcidx < n) closure_escapes[bcidx] = 1;
+                    }
+                }
+            }
+        }
     }
 
     CCScope scopes[256];
@@ -753,9 +1074,27 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
         if (cc__walk(i, nodes, kids, scopes, &scope_n, ctx) != 0) break;
     }
 
+    /* Post-check: stack-slice capture is illegal if the closure escapes (return/store/pass). */
+    if (closure_escapes) {
+        for (int i = 0; i < n; i++) {
+            if (nodes[i].kind != CC_STUB_CLOSURE) continue;
+            if (!closure_escapes[i]) continue;
+            /* Nursery-spawn does not make escaping safe; once it escapes, forbid stack-slice capture. */
+            if (cc__closure_captures_stack_slice_view(i, nodes, kids, scopes, scope_n)) {
+                cc__emit_err(ctx, &nodes[i], "CC: cannot capture stack slice in escaping closure");
+                ctx->errors++;
+                break;
+            }
+        }
+    }
+
     for (int i = 0; i < n; i++) free(kids[i].child);
     free(kids);
     for (int i = 0; i < scope_n; i++) cc__scope_free(&scopes[i]);
+    free(closure_spawned);
+    free(closure_escapes);
+    free(idx_map);
+    free(owned_nodes);
 
     return ctx->errors ? -1 : 0;
 }

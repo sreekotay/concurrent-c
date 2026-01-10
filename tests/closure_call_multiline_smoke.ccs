@@ -1,0 +1,16 @@
+#include "cc_closure.cch"
+
+int main(void) {
+    int g = 0;
+    int* gp = &g;
+
+    CCClosure2 c = (int x, int y) => { *gp = x + y; };
+
+    /* Force multiline closure call. */
+    c(
+        40,
+        2
+    );
+    return (g == 42) ? 0 : 1;
+}
+
