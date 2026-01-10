@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/skotay/Documents/code/concurrent-c/bin/hello'
+relocations:     []
+...

@@ -1337,6 +1337,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_i64(h, obj_sig.size);
         h = cc__fnv1a64_i64(h, rt_sig.mtime_sec);
         h = cc__fnv1a64_i64(h, rt_sig.size);
+        // Link output can depend on CFLAGS/--cc-flags (notably -g on macOS controls whether
+        // debug info is preserved in the linked binary).
+        h = cc__fnv1a64_str(h, opt->cc_flags);
+        h = cc__fnv1a64_str(h, ccflags_env);
         h = cc__fnv1a64_str(h, ldflags_env);
         h = cc__fnv1a64_str(h, opt->ld_flags);
         h = cc__fnv1a64_str(h, target_part);
@@ -1346,8 +1350,10 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (file_exists(opt->bin_out_path) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == link_key) {
             if (summary_out) { summary_out->reuse_link = 1; summary_out->did_link = 0; }
         } else {
-            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s -o %s",
+            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s -o %s",
                      cc_bin,
+                     ccflags_env ? ccflags_env : "",
+                     opt->cc_flags ? opt->cc_flags : "",
                      target_part,
                      sysroot_part,
                      ldflags_env ? ldflags_env : "",
@@ -1356,12 +1362,29 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                      have_runtime ? runtime_obj : "",
                      opt->bin_out_path);
             if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
+
+#if defined(__APPLE__)
+            // On macOS, DWARF debug info typically lives in a separate dSYM bundle.
+            // Generating it here makes LLDB breakpoints reliable (VS Code / Cursor).
+            {
+                const char* cflags_for_debug = (opt->cc_flags && *opt->cc_flags) ? opt->cc_flags : (ccflags_env ? ccflags_env : "");
+                if (cflags_for_debug && strstr(cflags_for_debug, "-g") && !strstr(cflags_for_debug, "-g0")) {
+                    char dsym_cmd[PATH_MAX * 2];
+                    char dsym_out[PATH_MAX];
+                    snprintf(dsym_out, sizeof(dsym_out), "%s.dSYM", opt->bin_out_path);
+                    snprintf(dsym_cmd, sizeof(dsym_cmd), "dsymutil %s -o %s", opt->bin_out_path, dsym_out);
+                    (void)run_cmd(dsym_cmd, opt->verbose);
+                }
+            }
+#endif
             (void)cc__write_u64_file(link_meta_path, link_key);
             if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
         }
     } else {
-        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s -o %s",
+        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s -o %s",
                  cc_bin,
+                 ccflags_env ? ccflags_env : "",
+                 opt->cc_flags ? opt->cc_flags : "",
                  target_part,
                  sysroot_part,
                  ldflags_env ? ldflags_env : "",
@@ -1370,6 +1393,19 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  have_runtime ? runtime_obj : "",
                  opt->bin_out_path);
         if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
+
+#if defined(__APPLE__)
+        {
+            const char* cflags_for_debug = (opt->cc_flags && *opt->cc_flags) ? opt->cc_flags : (ccflags_env ? ccflags_env : "");
+            if (cflags_for_debug && strstr(cflags_for_debug, "-g") && !strstr(cflags_for_debug, "-g0")) {
+                char dsym_cmd[PATH_MAX * 2];
+                char dsym_out[PATH_MAX];
+                snprintf(dsym_out, sizeof(dsym_out), "%s.dSYM", opt->bin_out_path);
+                snprintf(dsym_cmd, sizeof(dsym_cmd), "dsymutil %s -o %s", opt->bin_out_path, dsym_out);
+                (void)run_cmd(dsym_cmd, opt->verbose);
+            }
+        }
+#endif
         if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
     }
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #include "visitor/ufcs.h"
 
@@ -144,6 +145,29 @@ static int cc__append_str(char** buf, size_t* len, size_t* cap, const char* s) {
     return 1;
 }
 
+/* Forward decl: used by closure scan to recursively lower closure bodies. */
+static char* cc__lower_cc_in_block_text(const char* text,
+                                       size_t text_len,
+                                       const char* src_path,
+                                       int base_line,
+                                       int* io_next_closure_id,
+                                       char** out_more_protos,
+                                       size_t* out_more_protos_len,
+                                       char** out_more_defs,
+                                       size_t* out_more_defs_len);
+
+static int cc__append_fmt(char** buf, size_t* len, size_t* cap, const char* fmt, ...) {
+    if (!buf || !len || !cap || !fmt) return 0;
+    char tmp[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return 0;
+    tmp[sizeof(tmp) - 1] = '\0';
+    return cc__append_str(buf, len, cap, tmp);
+}
+
 /* Scan `src` for spawn closures and generate top-level thunks.
    Outputs:
    - `*out_descs`, `*out_count`
@@ -153,6 +177,8 @@ static int cc__append_str(char** buf, size_t* len, size_t* cap, const char* s) {
 static int cc__scan_spawn_closures(const char* src,
                                   size_t src_len,
                                   const char* src_path,
+                                  int line_base,
+                                  int* io_next_closure_id,
                                   CCClosureDesc** out_descs,
                                   int* out_count,
                                   int** out_line_map,
@@ -268,7 +294,8 @@ static int cc__scan_spawn_closures(const char* src,
                                     if (!nd) { free(body); free(line_map); return 0; }
                                     descs = nd;
                                 }
-                                int id = count + 1;
+                                int id = io_next_closure_id ? (*io_next_closure_id)++ : (count + 1);
+                                int abs_line = (line_base > 0 ? (line_base + line_no - 1) : line_no);
                                 descs[count++] = (CCClosureDesc){
                                     .start_line = line_no,
                                     .end_line = end_line,
@@ -290,18 +317,36 @@ static int cc__scan_spawn_closures(const char* src,
                                 /* Emit a runnable closure thunk only when it requires no captures.
                                    Capturing locals will be implemented once we have type + escape checking. */
                                 if (cap_n == 0) {
-                                    char hdr[256];
-                                    snprintf(hdr, sizeof(hdr), "/* CC closure %d (from %s:%d) */\n", id, src_path ? src_path : "<src>", line_no);
-                                    cc__append_str(&defs, &defs_len, &defs_cap, hdr);
-                                    char buf[8192];
-                                    size_t off = 0;
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "static void* __cc_closure_entry_%d(void* __p) {\n", id);
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  (void)__p;\n");
+                                    /* Recursively lower CC constructs inside the closure body (e.g. nested @nursery/spawn). */
+                                    char* more_protos = NULL;
+                                    size_t more_protos_len = 0;
+                                    char* more_defs = NULL;
+                                    size_t more_defs_len = 0;
+                                    char* lowered = cc__lower_cc_in_block_text(body, strlen(body),
+                                                                              src_path, abs_line,
+                                                                              io_next_closure_id,
+                                                                              &more_protos, &more_protos_len,
+                                                                              &more_defs, &more_defs_len);
+                                    if (more_protos && more_protos_len) cc__append_str(&protos, &protos_len, &protos_cap, more_protos);
+                                    /* IMPORTANT: nested closure defs must be top-level; append them BEFORE emitting this function body. */
+                                    if (more_defs && more_defs_len) cc__append_str(&defs, &defs_len, &defs_cap, more_defs);
+                                    free(more_protos);
+                                    free(more_defs);
+
+                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                                   "/* CC closure %d (from %s:%d) */\n",
+                                                   id, src_path ? src_path : "<src>", abs_line);
+                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                                   "static void* __cc_closure_entry_%d(void* __p) {\n  (void)__p;\n", id);
+
                                     /* Source mapping: make closure body diagnostics point to original .ccs. */
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "#line %d \"%s\"\n", line_no, src_path ? src_path : "<src>");
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  %s\n", body);
-                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  return NULL;\n}\n\n");
-                                    cc__append_str(&defs, &defs_len, &defs_cap, buf);
+                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                                   "#line %d \"%s\"\n",
+                                                   abs_line, src_path ? src_path : "<src>");
+                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                                   "  %s\n", lowered ? lowered : body);
+                                    free(lowered);
+                                    cc__append_str(&defs, &defs_len, &defs_cap, "  return NULL;\n}\n\n");
                                 }
 
                                 /* advance cursor */
@@ -347,6 +392,200 @@ static int cc__scan_spawn_closures(const char* src,
     *out_defs = defs;
     *out_defs_len = defs_len;
     return 1;
+}
+
+/* Lower a block-ish snippet of CC/C code in-memory (used for closure bodies).
+   Best-effort: currently handles @nursery + spawn closure-literals. */
+static char* cc__lower_cc_snippet(const char* text,
+                                 size_t text_len,
+                                 const char* src_path,
+                                 int base_line,
+                                 CCClosureDesc* closure_descs,
+                                 int closure_count,
+                                 int* closure_line_map,
+                                 int closure_line_cap) {
+    if (!text || text_len == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    int nursery_counter = 0;
+    int nursery_id_stack[128];
+    int nursery_depth_stack[128];
+    int nursery_top = -1;
+    int brace_depth = 0;
+
+    const char* cur = text;
+    int line_no = 1;
+    while ((size_t)(cur - text) < text_len && *cur) {
+        const char* line_start = cur;
+        const char* nl = memchr(cur, '\n', (size_t)(text + text_len - cur));
+        const char* line_end = nl ? nl : (text + text_len);
+        size_t line_len = (size_t)(line_end - line_start);
+
+        char line_buf[2048];
+        size_t cp = line_len < sizeof(line_buf) - 1 ? line_len : sizeof(line_buf) - 1;
+        memcpy(line_buf, line_start, cp);
+        line_buf[cp] = '\0';
+
+        const char* p = line_buf;
+        while (*p == ' ' || *p == '\t') p++;
+        int abs_line = (base_line > 0 ? (base_line + line_no - 1) : line_no);
+
+        /* Lower @nursery marker into a runtime nursery scope. */
+        if (strncmp(p, "@nursery", 8) == 0 && (p[8] == ' ' || p[8] == '\t' || p[8] == '\n' || p[8] == '\r' || p[8] == '{')) {
+            size_t indent_len = (size_t)(p - line_buf);
+            char indent[256];
+            if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
+            memcpy(indent, line_buf, indent_len);
+            indent[indent_len] = '\0';
+
+            int id = ++nursery_counter;
+            if (nursery_top + 1 < (int)(sizeof(nursery_id_stack) / sizeof(nursery_id_stack[0]))) {
+                nursery_id_stack[++nursery_top] = id;
+                nursery_depth_stack[nursery_top] = 0;
+            }
+            cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line, src_path ? src_path : "<src>");
+            cc__append_fmt(&out, &out_len, &out_cap, "%sCCNursery* __cc_nursery%d = cc_nursery_create();\n", indent, id);
+            cc__append_fmt(&out, &out_len, &out_cap, "%sif (!__cc_nursery%d) abort();\n", indent, id);
+            cc__append_fmt(&out, &out_len, &out_cap, "%s{\n", indent);
+            brace_depth++;
+            if (nursery_top >= 0) nursery_depth_stack[nursery_top] = brace_depth;
+            cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line + 1, src_path ? src_path : "<src>");
+            goto next_line;
+        }
+
+        /* Lower spawn(() => { ... }) inside a nursery to cc_nursery_spawn_closure0. */
+        if (strncmp(p, "spawn", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+            int cur_nursery_id = (nursery_top >= 0) ? nursery_id_stack[nursery_top] : 0;
+            const char* s0 = p + 5;
+            while (*s0 == ' ' || *s0 == '\t') s0++;
+            if (*s0 == '(') {
+                /* Closure literal: spawn(() => { ... }); uses closure_line_map from the pre-scan. */
+                if (closure_line_map && line_no > 0 && line_no < closure_line_cap) {
+                    int idx1 = closure_line_map[line_no];
+                    if (idx1 > 0 && idx1 <= closure_count) {
+                        CCClosureDesc* cd = &closure_descs[idx1 - 1];
+                        cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line, src_path ? src_path : "<src>");
+                        cc__append_str(&out, &out_len, &out_cap, "{\n");
+                        if (cd->cap_count > 0) {
+                            cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", base_line + cd->start_line - 1, src_path ? src_path : "<src>");
+                            cc__append_str(&out, &out_len, &out_cap, "_Static_assert(0, \"CC: closure captures not implemented yet\");\n");
+                            cc__append_str(&out, &out_len, &out_cap, "(void)0;\n");
+                        } else if (cur_nursery_id == 0) {
+                            cc__append_str(&out, &out_len, &out_cap, "/* TODO: spawn outside nursery */\n");
+                        } else {
+                            cc__append_fmt(&out, &out_len, &out_cap, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, NULL, NULL);\n", cd->id);
+                            cc__append_fmt(&out, &out_len, &out_cap, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
+                        }
+                        cc__append_str(&out, &out_len, &out_cap, "}\n");
+
+                        /* Skip original closure text lines (multiline). */
+                        int target_end = cd->end_line;
+                        while (line_no < target_end) {
+                            if (!nl) break;
+                            cur = nl + 1;
+                            line_no++;
+                            nl = memchr(cur, '\n', (size_t)(text + text_len - cur));
+                        }
+                        cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", base_line + line_no, src_path ? src_path : "<src>");
+                        goto next_line;
+                    }
+                }
+            }
+        }
+
+        /* Before emitting a close brace, emit nursery epilogue if this closes a nursery scope. */
+        if (p[0] == '}') {
+            if (nursery_top >= 0 && nursery_depth_stack[nursery_top] == brace_depth) {
+                size_t indent_len = (size_t)(p - line_buf);
+                char indent[256];
+                if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
+                memcpy(indent, line_buf, indent_len);
+                indent[indent_len] = '\0';
+
+                int id = nursery_id_stack[nursery_top--];
+                cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line, src_path ? src_path : "<src>");
+                cc__append_fmt(&out, &out_len, &out_cap, "%s  cc_nursery_wait(__cc_nursery%d);\n", indent, id);
+                cc__append_fmt(&out, &out_len, &out_cap, "%s  cc_nursery_free(__cc_nursery%d);\n", indent, id);
+                cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line, src_path ? src_path : "<src>");
+            }
+        }
+
+        /* Default: emit original line. */
+        cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line, src_path ? src_path : "<src>");
+        cc__append_str(&out, &out_len, &out_cap, line_buf);
+        cc__append_str(&out, &out_len, &out_cap, "\n");
+
+        /* Update brace depth. */
+        for (size_t i = 0; i < cp; i++) {
+            if (line_buf[i] == '{') brace_depth++;
+            else if (line_buf[i] == '}') { if (brace_depth > 0) brace_depth--; }
+        }
+
+    next_line:
+        if (!nl) break;
+        cur = nl + 1;
+        line_no++;
+    }
+
+    return out;
+}
+
+/* Recursively lower CC constructs inside a closure body, while collecting any additional closure thunks. */
+static char* cc__lower_cc_in_block_text(const char* text,
+                                       size_t text_len,
+                                       const char* src_path,
+                                       int base_line,
+                                       int* io_next_closure_id,
+                                       char** out_more_protos,
+                                       size_t* out_more_protos_len,
+                                       char** out_more_defs,
+                                       size_t* out_more_defs_len) {
+    if (out_more_protos) *out_more_protos = NULL;
+    if (out_more_protos_len) *out_more_protos_len = 0;
+    if (out_more_defs) *out_more_defs = NULL;
+    if (out_more_defs_len) *out_more_defs_len = 0;
+    if (!text || text_len == 0) return NULL;
+
+    /* Pre-scan this snippet for nested spawn closures; this will also recursively generate their thunks. */
+    CCClosureDesc* nested_descs = NULL;
+    int nested_count = 0;
+    int* nested_line_map = NULL;
+    int nested_line_cap = 0;
+    char* nested_protos = NULL;
+    size_t nested_protos_len = 0;
+    char* nested_defs = NULL;
+    size_t nested_defs_len = 0;
+    (void)cc__scan_spawn_closures(text, text_len, src_path,
+                                 base_line, io_next_closure_id,
+                                 &nested_descs, &nested_count,
+                                 &nested_line_map, &nested_line_cap,
+                                 &nested_protos, &nested_protos_len,
+                                 &nested_defs, &nested_defs_len);
+
+    if (out_more_protos) *out_more_protos = nested_protos;
+    else free(nested_protos);
+    if (out_more_protos_len) *out_more_protos_len = nested_protos_len;
+
+    if (out_more_defs) *out_more_defs = nested_defs;
+    else free(nested_defs);
+    if (out_more_defs_len) *out_more_defs_len = nested_defs_len;
+
+    char* lowered = cc__lower_cc_snippet(text, text_len, src_path, base_line,
+                                         nested_descs, nested_count,
+                                         nested_line_map, nested_line_cap);
+
+    if (nested_descs) {
+        for (int i = 0; i < nested_count; i++) {
+            for (int j = 0; j < nested_descs[i].cap_count; j++) free(nested_descs[i].cap_names[j]);
+            free(nested_descs[i].cap_names);
+            free(nested_descs[i].body);
+        }
+        free(nested_descs);
+    }
+    free(nested_line_map);
+
+    return lowered;
 }
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -945,7 +1184,9 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     char* closure_defs = NULL;
     size_t closure_defs_len = 0;
     if (src_ufcs) {
+        int closure_next_id = 1;
         cc__scan_spawn_closures(src_ufcs, src_ufcs_len, src_path,
+                                1, &closure_next_id,
                                 &closure_descs, &closure_count,
                                 &closure_line_map, &closure_line_cap,
                                 &closure_protos, &closure_protos_len,
