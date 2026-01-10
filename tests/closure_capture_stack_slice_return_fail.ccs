@@ -1,0 +1,18 @@
+// Compile-fail: stack-backed slice cannot be captured by a closure that escapes (returned).
+#include "cc_closure.cch"
+#include "cc_slice.cch"
+
+CCClosure0 make_bad(void) {
+    int buf[2] = {1, 2};
+    CCSlice s = cc_slice_from_buffer(buf, 2); // stack view
+    return () => {
+        int *p = (int*)s.ptr;
+        if (p) (void)p[0];
+    };
+}
+
+int main(void) {
+    (void)make_bad();
+    return 0;
+}
+

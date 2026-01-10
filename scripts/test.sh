@@ -11,6 +11,6 @@ if [ ! -x "./tools/cc_test" ]; then
   cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 fi
 
-exec ./tools/cc_test "$@"
+exec ./tools/cc_test --jobs 4 "$@"
 
 

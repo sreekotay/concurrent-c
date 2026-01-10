@@ -4,6 +4,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
+#include <errno.h>
 
 static int file_exists(const char* path) {
     if (!path) return 0;
@@ -18,6 +20,33 @@ static int ensure_out_dir(void) {
         /* EEXIST is fine; keep it simple and portable. */
         return 0;
     }
+    return 0;
+}
+
+static int ensure_dir(const char* path) {
+    if (!path || !path[0]) return -1;
+    if (mkdir(path, 0777) == -1) {
+        if (errno == EEXIST) return 0;
+        return -1;
+    }
+    return 0;
+}
+
+static int ensure_dir_p(const char* path) {
+    if (!path || !path[0]) return -1;
+    char tmp[1024];
+    size_t n = strlen(path);
+    if (n >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, n + 1);
+    // Skip leading slashes.
+    for (size_t i = 1; i < n; ++i) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            if (tmp[0] && ensure_dir(tmp) != 0) return -1;
+            tmp[i] = '/';
+        }
+    }
+    if (ensure_dir(tmp) != 0) return -1;
     return 0;
 }
 
@@ -108,6 +137,32 @@ static int wexitstatus_simple(int rc) {
     return 1;
 }
 
+static void pid_pop(pid_t* pids_local, char** names_local, int* io_running, int* io_failed) {
+    if (!pids_local || !names_local || !io_running || *io_running <= 0) return;
+    int st = 0;
+    pid_t pid = wait(&st);
+    if (pid <= 0) return;
+    int idx = -1;
+    for (int i = 0; i < *io_running; ++i) {
+        if (pids_local[i] == pid) { idx = i; break; }
+    }
+    if (idx >= 0) {
+        int rc = wexitstatus_simple(st);
+        if (rc != 0) (*io_failed)++;
+        free(names_local[idx]);
+        // Swap last into idx.
+        int last = *io_running - 1;
+        if (idx != last) {
+            pids_local[idx] = pids_local[last];
+            names_local[idx] = names_local[last];
+        }
+        // Clear last slot to avoid double frees.
+        pids_local[last] = 0;
+        names_local[last] = NULL;
+    }
+    (*io_running)--;
+}
+
 static int run_cmd_redirect(const char* cmd,
                             const char* out_path,
                             const char* err_path,
@@ -167,15 +222,17 @@ static int test_requires_async(const char* stem) {
 static int run_one_test(const char* stem,
                         const char* input_path,
                         int compile_fail,
-                        int verbose) {
+                        int verbose,
+                        const char* out_dir,
+                        const char* bin_dir) {
     char bin_out[512];
     char build_err_txt[512];
     char out_txt[512];
     char err_txt[512];
-    snprintf(bin_out, sizeof(bin_out), "bin/%s", stem);
-    snprintf(build_err_txt, sizeof(build_err_txt), "out/%s.build.stderr", stem);
-    snprintf(out_txt, sizeof(out_txt), "out/%s.stdout", stem);
-    snprintf(err_txt, sizeof(err_txt), "out/%s.stderr", stem);
+    snprintf(bin_out, sizeof(bin_out), "%s/%s", (bin_dir && bin_dir[0]) ? bin_dir : "bin", stem);
+    snprintf(build_err_txt, sizeof(build_err_txt), "%s/%s.build.stderr", (out_dir && out_dir[0]) ? out_dir : "out", stem);
+    snprintf(out_txt, sizeof(out_txt), "%s/%s.stdout", (out_dir && out_dir[0]) ? out_dir : "out", stem);
+    snprintf(err_txt, sizeof(err_txt), "%s/%s.stderr", (out_dir && out_dir[0]) ? out_dir : "out", stem);
 
     /* Sidecars */
     char exp_stdout_path[512], exp_stderr_path[512], exp_compile_err_path[512], ldflags_path[512];
@@ -207,11 +264,15 @@ static int run_one_test(const char* stem,
        reflect the current compiler behavior rather than an incremental cache. */
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build --no-cache --link %s -o %s --ld-flags \"%s\"",
+                 "./cc/bin/ccc build --no-cache --out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 (out_dir && out_dir[0]) ? out_dir : "out",
+                 (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build --no-cache --link %s -o %s",
+                 "./cc/bin/ccc build --no-cache --out-dir %s --bin-dir %s --link %s -o %s",
+                 (out_dir && out_dir[0]) ? out_dir : "out",
+                 (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out);
     }
 
@@ -262,19 +323,26 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N]\n", prog);
 }
 
 int main(int argc, char** argv) {
     const char* filter = NULL;
     int verbose = 0;
     int list_only = 0;
+    int jobs = 1;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
         if (strcmp(argv[i], "--filter") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--filter requires a value\n"); return 2; }
             filter = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--jobs") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "--jobs requires a value\n"); return 2; }
+            jobs = atoi(argv[++i]);
+            if (jobs < 1) jobs = 1;
             continue;
         }
         usage(argv[0]);
@@ -287,6 +355,7 @@ int main(int argc, char** argv) {
     }
 
     (void)ensure_out_dir();
+    (void)ensure_dir_p("bin");
 
     DIR* d = opendir("tests");
     if (!d) {
@@ -296,6 +365,11 @@ int main(int argc, char** argv) {
 
     int ran = 0;
     int failed = 0;
+    int running = 0;
+    pid_t* pids = NULL;
+    char** pid_names = NULL;
+    int pid_cap = 0;
+
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
         const char* name = ent->d_name;
@@ -329,10 +403,54 @@ int main(int argc, char** argv) {
         else if (ends_with(name, "_fail.ccs")) compile_fail = 1;
 
         ran++;
-        if (run_one_test(stem, path, compile_fail, verbose) != 0)
-            failed++;
+        if (jobs <= 1) {
+            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin") != 0)
+                failed++;
+            continue;
+        }
+
+        while (running >= jobs) {
+            pid_pop(pids, pid_names, &running, &failed);
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "cc_test: fork failed\n");
+            return 2;
+        }
+        if (pid == 0) {
+            pid_t me = getpid();
+            char out_dir[512];
+            char bin_dir[512];
+            snprintf(out_dir, sizeof(out_dir), "out/.cc_test/%d", (int)me);
+            snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%d", (int)me);
+            (void)ensure_dir_p(out_dir);
+            (void)ensure_dir_p(bin_dir);
+            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir);
+            _exit(rc == 0 ? 0 : 1);
+        }
+
+        if (running + 1 > pid_cap) {
+            int nc = pid_cap ? pid_cap * 2 : 32;
+            pid_t* np = (pid_t*)realloc(pids, (size_t)nc * sizeof(pid_t));
+            char** nn = (char**)realloc(pid_names, (size_t)nc * sizeof(char*));
+            if (!np || !nn) { fprintf(stderr, "cc_test: OOM\n"); return 2; }
+            pids = np; pid_names = nn; pid_cap = nc;
+        }
+        pids[running] = pid;
+        pid_names[running] = strdup(stem);
+        running++;
     }
     closedir(d);
+
+    while (running > 0) {
+        pid_pop(pids, pid_names, &running, &failed);
+    }
+    for (int i = 0; i < pid_cap; ++i) {
+        if (pid_names && pid_names[i]) { free(pid_names[i]); pid_names[i] = NULL; }
+    }
+    free(pids);
+    free(pid_names);
 
     if (list_only) return 0;
     if (ran == 0) {

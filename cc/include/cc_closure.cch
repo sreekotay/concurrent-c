@@ -13,22 +13,34 @@
 
 #include <stddef.h>
 
+#if defined(CC_PARSER_MODE)
+/* TCC parse-to-stub-AST runs after preprocessing. For CC syntax like `() => {}`,
+   we intentionally use a dummy type so the C parser doesn't reject otherwise-valid CC code.
+   The real ABI type is used for the final emitted C compilation. */
+typedef int CCClosure0;
+#else
 typedef struct {
     void* (*fn)(void* env);
     void* env;
     void (*drop)(void* env); /* optional; can be NULL */
 } CCClosure0;
+#endif
 
 /* Run a closure on a blocking OS thread and wait for completion.
    Early stub: implemented via pthread spawn + join. */
 int cc_run_blocking_closure0(CCClosure0 c);
 
 static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
+#if defined(CC_PARSER_MODE)
+    (void)fn; (void)env; (void)drop;
+    return 0;
+#else
     CCClosure0 c;
     c.fn = fn;
     c.env = env;
     c.drop = drop;
     return c;
+#endif
 }
 
 #endif /* CC_CLOSURE_H */

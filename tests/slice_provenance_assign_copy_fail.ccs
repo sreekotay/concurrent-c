@@ -1,0 +1,17 @@
+// Compile-fail: assignment copy of move-only slice must use cc_move.
+#include "cc_runtime.cch"
+
+int main(void) {
+    int* p0 = (int*)malloc(sizeof(int) * 2);
+    p0[0] = 1; p0[1] = 2;
+    CCSlice s = cc_slice_from_parts(p0, 2, cc_slice_make_id(2, true, false, false), 2);
+
+    int* p1 = (int*)malloc(sizeof(int) * 2);
+    p1[0] = 3; p1[1] = 4;
+    CCSlice t = cc_slice_from_parts(p1, 2, cc_slice_make_id(2, true, false, false), 2);
+
+    // illegal: copy move-only slice via assignment
+    t = s;
+    return 0;
+}
+

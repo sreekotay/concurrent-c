@@ -1,0 +1,17 @@
+// Smoke: stack-backed slice is allowed to be captured by a nursery-scoped spawn closure (joined before frame exits).
+#include "cc_slice.cch"
+
+int g = 0;
+
+int main(void) {
+    int buf[2] = {7, 8};
+    CCSlice s = cc_slice_from_buffer(buf, 2);
+    @nursery {
+        spawn (() => {
+            int *p = (int*)s.ptr;
+            if (p && p[0] == 7) g = 1;
+        });
+    }
+    return (g == 1) ? 0 : 1;
+}
+

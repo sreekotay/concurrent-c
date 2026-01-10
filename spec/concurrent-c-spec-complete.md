@@ -3144,7 +3144,9 @@ Non-cancellable tasks (e.g., main thread, task not in a nursery) do not get impl
 
 #### 6.5.2 Cancellation-Aware Operation Variants
 
-For operations **outside `@match`** (single await, channel recv/send, sleep), use explicit cancellation-aware variants:
+For operations **outside `@match`** (single await, channel recv/send, sleep), use explicit cancellation-aware variants.
+
+**Guidance:** Inside an active `with_deadline(...)` scope, suspension points are already cancellation-aware per **§ 3.2.2**, so cancellation-aware variants are usually redundant. They remain useful outside deadline scopes (e.g., when responding to explicit task cancellation or nursery sibling cancellation without introducing an artificial deadline scope).
 
 ```c
 // Channels
@@ -3380,13 +3382,14 @@ Duration deadline_remaining(Deadline d);
 }
 
 // Or on individual operations:
-DbResult result = try await db_query(parsed) @deadline(deadline);
+// (Optional) A standard-library helper MAY provide per-operation timeout sugar,
+// but it is not part of the core language surface. The canonical form is
+// `with_deadline(...) { ... }` around the relevant region.
 ```
 
 **Semantics:**
 
 - `with_deadline(d) { ... }` executes the block; if deadline exceeded, propagates cancellation
-- `@deadline(d)` on async operations is sugar for wrapping with timeout
 - Deadline exceeded triggers same cancellation mechanism as explicit cancellation
 - Cancellation is **cooperative** (tasks exit at awaitable points)
 
@@ -6079,6 +6082,67 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
 
 ---
 
+### Pattern 4: Connection Lifetime Template (Handshake → Serve → Teardown)
+
+This pattern is the recommended template for long-lived connections (WebSocket, gRPC streaming, custom protocols).
+
+**Strong recommendation:** Structure connections into three phases:
+
+1. **Handshake phase:** short, deadline-bounded
+2. **Serve phase:** potentially long-lived; structured as reader+writer tasks in a nursery (“first error/close cancels siblings”)
+3. **Teardown phase:** bounded, shielded cleanup to perform protocol-correct closes
+
+```c
+@async void!IoError handle_conn(Duplex* conn, Arena* conn_arena) {
+    // 1) Handshake (short deadline)
+    with_deadline(deadline_after(seconds(3))) {
+        try await protocol_handshake(conn, conn_arena);
+    }
+
+    // 2) Serve (long-lived)
+    @nursery {
+        spawn (reader_task(conn, conn_arena));
+        spawn (writer_task(conn, conn_arena));
+        // Any child failure/close cancels siblings; nursery joins all children.
+    }
+
+    // 3) Teardown (bounded, shielded)
+    with_shield {
+        try await protocol_close(conn);              // best-effort protocol close
+        try await drain_with_timeout(conn, ms(200)); // bounded drain/flush if applicable
+    }
+
+    return cc_ok(());
+}
+```
+
+---
+
+### Pattern 5: Bidi Stream “First-Close Wins”
+
+For bidi protocols, the default rule SHOULD be:
+
+- Any close/error in reader OR writer cancels the sibling task
+- Teardown happens exactly once, in one place, and is bounded + shielded
+
+This avoids “both sides race to close” bugs and makes shutdown reviewable.
+
+---
+
+### Pattern 6: Deadline Layering for Long-Lived Connections
+
+**Strong recommendation:** Avoid wrapping an entire long-lived serve loop in one large `with_deadline(...)` unless you are intentionally enforcing an end-to-end SLA.
+
+Prefer layered deadlines:
+
+- **Handshake deadlines:** short `with_deadline` around negotiation (TLS/WS upgrade/initial headers)
+- **Idle/heartbeat deadlines:** renewed on activity (timer task + cancellation, or per-iteration short deadline)
+- **Teardown deadlines:** short, bounded shutdown/drain inside `with_shield`
+
+This keeps deadlines precise and prevents “everything is always under a deadline” from becoming the default mental model.
+
+---
+
 ## Appendix G: Terminology Summary
 
 ### Keywords & Annotations
@@ -6096,6 +6160,7 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
 | `await` | Suspend on async | Call @async functions |
 | `nursery` | Structured concurrency | Scope with tasks |
 | `with_deadline` | Apply timeout | Enforce deadline |
+| `with_shield` | Suppress deadline cancellation observation | Bounded teardown/cleanup |
 
 ### Type Sugar
 

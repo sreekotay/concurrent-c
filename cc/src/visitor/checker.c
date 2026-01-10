@@ -17,8 +17,11 @@ typedef enum {
 typedef struct {
     const char* name; /* borrowed */
     int is_slice;
+    int is_array;
+    int is_stack_slice_view;
     int move_only;
     int moved;
+    int pending_move;
     int decl_line;
     int decl_col;
 } CCSliceVar;
@@ -71,6 +74,19 @@ static void cc__scope_free(CCScope* sc) {
     sc->vars_cap = 0;
 }
 
+static void cc__commit_pending_moves(CCScope* scopes, int scope_n) {
+    if (!scopes || scope_n <= 0) return;
+    for (int i = 0; i < scope_n; i++) {
+        CCScope* sc = &scopes[i];
+        for (int j = 0; j < sc->vars_len; j++) {
+            if (sc->vars[j].pending_move) {
+                sc->vars[j].moved = 1;
+                sc->vars[j].pending_move = 0;
+            }
+        }
+    }
+}
+
 typedef struct StubNodeView {
     int kind;
     int parent;
@@ -99,6 +115,9 @@ enum {
     CC_STUB_CONST = 11,
     CC_STUB_DECL_ITEM = 12,
     CC_STUB_MEMBER = 13,
+    CC_STUB_ASSIGN = 14,
+    CC_STUB_RETURN = 15,
+    CC_STUB_PARAM = 16,
 };
 
 typedef struct {
@@ -220,6 +239,84 @@ static int cc__subtree_collect_call_names(const StubNodeView* nodes,
     return 1;
 }
 
+static int cc__closure_allows_stack_capture(const StubNodeView* nodes, int closure_idx) {
+    /* Allowed only when directly under a nursery `spawn (...)` statement. */
+    int cur = nodes[closure_idx].parent;
+    while (cur >= 0) {
+        if (nodes[cur].kind == CC_STUB_STMT && nodes[cur].aux_s1 && strcmp(nodes[cur].aux_s1, "spawn") == 0)
+            return 1;
+        cur = nodes[cur].parent;
+    }
+    return 0;
+}
+
+static int cc__closure_is_escaping(const StubNodeView* nodes, int closure_idx) {
+    /* Conservative: anything not a nursery spawn is treated as escaping for stack-slice purposes. */
+    if (cc__closure_allows_stack_capture(nodes, closure_idx)) return 0;
+    return 1;
+}
+
+static int cc__closure_has_illegal_stack_capture(int closure_idx,
+                                                 const StubNodeView* nodes,
+                                                 const ChildList* kids,
+                                                 CCScope* scopes,
+                                                 int scope_n) {
+    /* If the closure is not escaping, allow. */
+    if (!cc__closure_is_escaping(nodes, closure_idx)) return 0;
+
+    /* Build set of local names declared inside the closure (decl items + params). */
+    const char* locals[256];
+    int locals_n = 0;
+    int stack[512];
+    int sp = 0;
+    stack[sp++] = closure_idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if ((n->kind == CC_STUB_DECL_ITEM || n->kind == CC_STUB_PARAM) && n->aux_s1) {
+            int seen = 0;
+            for (int i = 0; i < locals_n; i++) if (strcmp(locals[i], n->aux_s1) == 0) seen = 1;
+            if (!seen && locals_n < (int)(sizeof(locals)/sizeof(locals[0]))) locals[locals_n++] = n->aux_s1;
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) {
+            stack[sp++] = cl->child[i];
+        }
+    }
+
+    /* Collect call names so we can skip callee identifier tokens. */
+    const char* call_names[64];
+    int call_n = 0;
+    cc__subtree_collect_call_names(nodes, kids, closure_idx, call_names, &call_n, 64);
+
+    /* Scan ident uses in closure subtree. */
+    sp = 0;
+    stack[sp++] = closure_idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+            const char* nm = n->aux_s1;
+            int is_call = 0;
+            for (int i = 0; i < call_n; i++) if (strcmp(call_names[i], nm) == 0) is_call = 1;
+            if (!is_call) {
+                int is_local = 0;
+                for (int i = 0; i < locals_n; i++) if (strcmp(locals[i], nm) == 0) is_local = 1;
+                if (!is_local) {
+                    CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, nm);
+                    if (v && v->is_slice && v->is_stack_slice_view) return 1;
+                }
+            }
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) {
+            stack[sp++] = cl->child[i];
+        }
+    }
+
+    return 0;
+}
+
 static int cc__subtree_should_apply_slice_copy_rule(const StubNodeView* nodes,
                                                     const ChildList* kids,
                                                     int idx,
@@ -286,6 +383,8 @@ static int cc__walk_call(int idx,
     /* Move markers (parse-only): cc__move_marker_impl(&x) */
     if (strcmp(n->aux_s1, "cc__move_marker_impl") == 0) {
         const ChildList* cl = &kids[idx];
+        CCSliceVar* to_move[16];
+        int to_move_n = 0;
         for (int i = 0; i < cl->len; i++) {
             const StubNodeView* c = &nodes[cl->child[i]];
             if (c->kind == CC_STUB_IDENT && c->aux_s1) {
@@ -293,9 +392,20 @@ static int cc__walk_call(int idx,
                    mark any slice variable args as moved. */
                 if (strcmp(c->aux_s1, "cc__move_marker_impl") == 0) continue;
                 CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, c->aux_s1);
-                if (v && v->is_slice) v->moved = 1;
+                if (v && v->is_slice && to_move_n < (int)(sizeof(to_move)/sizeof(to_move[0]))) {
+                    to_move[to_move_n++] = v;
+                }
             }
         }
+
+        /* Walk children first: `cc_move(x)` should not report use-after-move of `x` inside the same expression. */
+        for (int i = 0; i < cl->len; i++) {
+            if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        }
+        for (int i = 0; i < to_move_n; i++) {
+            if (to_move[i]) to_move[i]->pending_move = 1;
+        }
+        return 0;
     }
 
     /* walk children */
@@ -361,6 +471,102 @@ static int cc__walk_closure(int idx,
     return 0;
 }
 
+static int cc__subtree_has_kind(const StubNodeView* nodes,
+                                const ChildList* kids,
+                                int idx,
+                                int kind) {
+    if (!nodes || !kids) return 0;
+    if (nodes[idx].kind == kind) return 1;
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__subtree_has_kind(nodes, kids, cl->child[i], kind)) return 1;
+    }
+    return 0;
+}
+
+static int cc__walk_assign(int idx,
+                           const StubNodeView* nodes,
+                           const ChildList* kids,
+                           CCScope* scopes,
+                           int* io_scope_n,
+                           CCCheckerCtx* ctx) {
+    const StubNodeView* n = &nodes[idx];
+    const char* lhs = n->aux_s1; /* best-effort from TCC recorder */
+    const char* rhs = NULL;
+
+    (void)cc__subtree_find_first_ident_matching_scope(nodes, kids, idx, scopes, *io_scope_n, lhs, &rhs);
+
+    if (lhs && rhs && strcmp(lhs, rhs) != 0) {
+        CCSliceVar* lhs_v = cc__scopes_lookup(scopes, *io_scope_n, lhs);
+        CCSliceVar* rhs_v = cc__scopes_lookup(scopes, *io_scope_n, rhs);
+        int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
+        int saw_member = cc__subtree_has_kind(nodes, kids, idx, CC_STUB_MEMBER);
+
+        if (rhs_v && rhs_v->is_slice) {
+            /* Overwrite clears moved-from status for lhs. */
+            if (lhs_v) lhs_v->moved = 0;
+
+            /* If we assign from a slice var, treat lhs as a slice var too. */
+            if (lhs_v) lhs_v->is_slice = 1;
+
+            /* Only treat as a slice copy/move when RHS isn't being projected via member access. */
+            if (!saw_member) {
+                if (rhs_v->move_only && !has_move_marker) {
+                    cc__emit_err(ctx, n, "CC: cannot copy move-only slice (use cc_move(x))");
+                    ctx->errors++;
+                    return -1;
+                }
+                if (rhs_v->move_only && has_move_marker) {
+                    rhs_v->moved = 1;
+                    if (lhs_v) lhs_v->move_only = 1;
+                } else if (lhs_v && !has_move_marker) {
+                    lhs_v->move_only = 0;
+                }
+            }
+        }
+    }
+
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+    }
+    /* Commit pending moves at full-expression boundary. */
+    cc__commit_pending_moves(scopes, *io_scope_n);
+    return 0;
+}
+
+static int cc__walk_return(int idx,
+                           const StubNodeView* nodes,
+                           const ChildList* kids,
+                           CCScope* scopes,
+                           int* io_scope_n,
+                           CCCheckerCtx* ctx) {
+    const StubNodeView* n = &nodes[idx];
+    const char* name = NULL;
+    (void)cc__subtree_find_first_ident_matching_scope(nodes, kids, idx, scopes, *io_scope_n, NULL, &name);
+    if (name) {
+        CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, name);
+        if (v && v->is_slice) {
+            int saw_member = cc__subtree_has_kind(nodes, kids, idx, CC_STUB_MEMBER);
+            int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
+            if (v->move_only && !has_move_marker && !saw_member) {
+                cc__emit_err(ctx, n, "CC: cannot return move-only slice (use cc_move(x))");
+                ctx->errors++;
+                return -1;
+            }
+            if (v->move_only && has_move_marker) v->moved = 1;
+        }
+    }
+
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+    }
+    /* Commit pending moves at full-expression boundary. */
+    cc__commit_pending_moves(scopes, *io_scope_n);
+    return 0;
+}
+
 static int cc__walk(int idx,
                     const StubNodeView* nodes,
                     const ChildList* kids,
@@ -376,6 +582,9 @@ static int cc__walk(int idx,
         v->decl_line = n->line_start;
         v->decl_col = n->col_start;
         v->is_slice = (strstr(n->aux_s2, "CCSlice") != NULL);
+        if (strchr(n->aux_s2, '[') && strchr(n->aux_s2, ']')) {
+            v->is_array = 1;
+        }
 
         /* Determine move_only from initializer subtree */
         {
@@ -397,6 +606,29 @@ static int cc__walk(int idx,
             if (v->is_slice) {
                 /* move-only by provenance: detect unique-id construction anywhere under initializer */
                 if (cc__subtree_has_unique_make_id(nodes, kids, idx)) v->move_only = 1;
+
+                /* Stack-slice view detection (best-effort): if init uses cc_slice_from_buffer/parts with a local array. */
+                int uses_buf = cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_buffer");
+                int uses_parts = cc__subtree_has_call_named(nodes, kids, idx, "cc_slice_from_parts");
+                if (uses_buf || uses_parts) {
+                    int st[256];
+                    int sp = 0;
+                    st[sp++] = idx;
+                    while (sp > 0) {
+                        int curi = st[--sp];
+                        const StubNodeView* nn = &nodes[curi];
+                        if (nn->kind == CC_STUB_IDENT && nn->aux_s1) {
+                            CCSliceVar* maybe = cc__scopes_lookup(scopes, *io_scope_n, nn->aux_s1);
+                            if (maybe && maybe->is_array) {
+                                v->is_stack_slice_view = 1;
+                                break;
+                            }
+                        }
+                        const ChildList* k = &kids[curi];
+                        for (int j = 0; j < k->len && sp < (int)(sizeof(st)/sizeof(st[0])); j++)
+                            st[sp++] = k->child[j];
+                    }
+                }
             }
 
             /* Find a candidate RHS identifier in the initializer (best-effort). */
@@ -437,13 +669,31 @@ static int cc__walk(int idx,
     }
 
     if (n->kind == CC_STUB_CLOSURE) {
-        return cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx);
+        if (cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+        if (cc__closure_has_illegal_stack_capture(idx, nodes, kids, scopes, *io_scope_n)) {
+            cc__emit_err(ctx, n, "CC: cannot capture stack slice in escaping closure");
+            ctx->errors++;
+            return -1;
+        }
+        return 0;
+    }
+
+    if (n->kind == CC_STUB_ASSIGN) {
+        return cc__walk_assign(idx, nodes, kids, scopes, io_scope_n, ctx);
+    }
+
+    if (n->kind == CC_STUB_RETURN) {
+        return cc__walk_return(idx, nodes, kids, scopes, io_scope_n, ctx);
     }
 
     /* default: recurse */
     const ChildList* cl = &kids[idx];
     for (int i = 0; i < cl->len; i++) {
         if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+    }
+    if (n->kind == CC_STUB_DECL_ITEM) {
+        /* Commit pending moves at full-expression boundary of an initializer. */
+        cc__commit_pending_moves(scopes, *io_scope_n);
     }
     return 0;
 }

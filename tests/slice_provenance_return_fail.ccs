@@ -1,0 +1,16 @@
+// Compile-fail: returning a move-only slice must use cc_move.
+#include "cc_runtime.cch"
+
+CCSlice make_bad(void) {
+    int* p0 = (int*)malloc(sizeof(int) * 2);
+    p0[0] = 7; p0[1] = 8;
+    CCSlice s = cc_slice_from_parts(p0, 2, cc_slice_make_id(2, true, false, false), 2);
+    return s; // illegal: return copies move-only slice unless moved
+}
+
+int main(void) {
+    CCSlice t = make_bad();
+    (void)t;
+    return 0;
+}
+
