@@ -146,6 +146,101 @@ static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const c
     fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
 }
 
+static void cc__emit_err_loc(const CCCheckerCtx* ctx, int line, int col, const char* msg) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : "<src>";
+    if (line <= 0) line = 1;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
+}
+
+/* Fallback: if the stub AST is unavailable (e.g. TCC choked on new syntax), do a
+   lightweight lexical scan to provide a friendly CC error instead of letting C fail later. */
+static int cc__fallback_reject_param_closures(const CCCheckerCtx* ctx) {
+    if (!ctx || !ctx->input_path) return 0;
+    FILE* f = fopen(ctx->input_path, "rb");
+    if (!f) return 0;
+
+    int line = 1;
+    int col = 0;
+    int c = 0;
+    int prev = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_char = 0;
+
+    /* Track the most recent identifier we saw (outside comments/strings). */
+    char ident_buf[128];
+    int ident_len = 0;
+    int ident_line = 0;
+    int ident_col = 0;
+
+    while ((c = fgetc(f)) != EOF) {
+        col++;
+        if (c == '\n') { line++; col = 0; in_line_comment = 0; prev = 0; ident_len = 0; continue; }
+
+        if (in_line_comment) { prev = c; continue; }
+        if (in_block_comment) {
+            if (prev == '*' && c == '/') in_block_comment = 0;
+            prev = c;
+            continue;
+        }
+        if (in_str) {
+            if (c == '"' && prev != '\\') in_str = 0;
+            prev = c;
+            continue;
+        }
+        if (in_char) {
+            if (c == '\'' && prev != '\\') in_char = 0;
+            prev = c;
+            continue;
+        }
+
+        if (prev == '/' && c == '/') { in_line_comment = 1; prev = c; continue; }
+        if (prev == '/' && c == '*') { in_block_comment = 1; prev = c; continue; }
+        if (c == '"') { in_str = 1; prev = c; continue; }
+        if (c == '\'') { in_char = 1; prev = c; continue; }
+
+        /* Identifier capture */
+        if ((c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) {
+            ident_len = 0;
+            ident_line = line;
+            ident_col = col;
+            ident_buf[ident_len++] = (char)c;
+            while ((c = fgetc(f)) != EOF) {
+                col++;
+                if (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+                    if (ident_len < (int)sizeof(ident_buf) - 1)
+                        ident_buf[ident_len++] = (char)c;
+                    continue;
+                }
+                ungetc(c, f);
+                col--;
+                break;
+            }
+            ident_buf[ident_len] = 0;
+            prev = 0;
+            continue;
+        }
+
+        /* Detect `=>` after an identifier. We currently only support `() => ...` (closure0). */
+        if (c == '=') {
+            int c2 = fgetc(f);
+            if (c2 != EOF) col++;
+            if (c2 == '>' && ident_len > 0) {
+                cc__emit_err_loc(ctx, ident_line, ident_col, "CC: closures with parameters are not supported yet");
+                fclose(f);
+                return -1;
+            }
+            if (c2 != EOF) { ungetc(c2, f); col--; }
+        }
+
+        prev = c;
+    }
+    fclose(f);
+    return 0;
+}
+
 static int cc__call_has_unique_flag(const StubNodeView* nodes, const ChildList* kids, int call_idx) {
     if (!nodes || !kids) return 0;
     const ChildList* cl = &kids[call_idx];
@@ -669,6 +764,11 @@ static int cc__walk(int idx,
     }
 
     if (n->kind == CC_STUB_CLOSURE) {
+        if (n->aux1 > 0) {
+            cc__emit_err(ctx, n, "CC: closures with parameters are not supported yet");
+            ctx->errors++;
+            return -1;
+        }
         if (cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
         if (cc__closure_has_illegal_stack_capture(idx, nodes, kids, scopes, *io_scope_n)) {
             cc__emit_err(ctx, n, "CC: cannot capture stack slice in escaping closure");
@@ -703,7 +803,12 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     ctx->errors = 0;
 
     if (!root->nodes || root->node_count <= 0) {
-        /* Transitional: no stub nodes, skip. */
+        /* Transitional: if we couldn't get stub nodes, still try to surface a useful CC error. */
+        int fb = cc__fallback_reject_param_closures(ctx);
+        if (fb != 0) {
+            ctx->errors++;
+            return -1;
+        }
         return 0;
     }
     const StubNodeView* nodes = (const StubNodeView*)root->nodes;

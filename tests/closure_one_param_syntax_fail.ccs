@@ -1,0 +1,9 @@
+// Compile-fail (for now): single-parameter closure syntax parses, but params are not supported yet.
+#include "cc_closure.cch"
+
+int main(void) {
+    CCClosure0 c = x => { (void)x; };
+    (void)c;
+    return 0;
+}
+

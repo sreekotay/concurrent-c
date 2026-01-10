@@ -1,0 +1,9 @@
+// Compile-fail (for now): `(x) => ...` parses, but params are not supported yet.
+#include "cc_closure.cch"
+
+int main(void) {
+    CCClosure0 c = (x) => x;
+    (void)c;
+    return 0;
+}
+

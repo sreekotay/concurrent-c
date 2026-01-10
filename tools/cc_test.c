@@ -224,7 +224,8 @@ static int run_one_test(const char* stem,
                         int compile_fail,
                         int verbose,
                         const char* out_dir,
-                        const char* bin_dir) {
+                        const char* bin_dir,
+                        int use_cache) {
     char bin_out[512];
     char build_err_txt[512];
     char out_txt[512];
@@ -260,17 +261,18 @@ static int run_one_test(const char* stem,
 
     /* 1) Build via ccc build (this is the build system under test) */
     char build_cmd[3072];
-    /* Force fresh compilation: compiler is under active development, and we want tests to
-       reflect the current compiler behavior rather than an incremental cache. */
+    const char* cache_flag = use_cache ? "" : "--no-cache ";
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build --no-cache --out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 "./cc/bin/ccc build %s--out-dir %s --bin-dir %s --link %s -o %s --ld-flags \"%s\"",
+                 cache_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/ccc build --no-cache --out-dir %s --bin-dir %s --link %s -o %s",
+                 "./cc/bin/ccc build %s--out-dir %s --bin-dir %s --link %s -o %s",
+                 cache_flag,
                  (out_dir && out_dir[0]) ? out_dir : "out",
                  (bin_dir && bin_dir[0]) ? bin_dir : "bin",
                  input_path, bin_out);
@@ -323,7 +325,7 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--use-cache]\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -331,9 +333,11 @@ int main(int argc, char** argv) {
     int verbose = 0;
     int list_only = 0;
     int jobs = 1;
+    int use_cache = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
+        if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
         if (strcmp(argv[i], "--filter") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--filter requires a value\n"); return 2; }
             filter = argv[++i];
@@ -352,6 +356,11 @@ int main(int argc, char** argv) {
     if (!file_exists("./cc/bin/ccc")) {
         fprintf(stderr, "cc_test: missing ./cc/bin/ccc (build the compiler first)\n");
         return 2;
+    }
+
+    {
+        const char* env = getenv("CC_TEST_USE_CACHE");
+        if (env && strcmp(env, "1") == 0) use_cache = 1;
     }
 
     (void)ensure_out_dir();
@@ -404,7 +413,7 @@ int main(int argc, char** argv) {
 
         ran++;
         if (jobs <= 1) {
-            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin") != 0)
+            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache) != 0)
                 failed++;
             continue;
         }
@@ -426,7 +435,7 @@ int main(int argc, char** argv) {
             snprintf(bin_dir, sizeof(bin_dir), "bin/.cc_test/%d", (int)me);
             (void)ensure_dir_p(out_dir);
             (void)ensure_dir_p(bin_dir);
-            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir);
+            int rc = run_one_test(stem, path, compile_fail, verbose, out_dir, bin_dir, use_cache);
             _exit(rc == 0 ? 0 : 1);
         }
 

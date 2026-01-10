@@ -20,6 +20,7 @@ static int ensure_out_dir(void);
 static int g_paths_inited = 0;
 static char g_repo_root[PATH_MAX];
 static char g_ccc_path[PATH_MAX];
+static char g_ccc_sig_path[PATH_MAX];
 static char g_cc_dir[PATH_MAX];
 static char g_cc_include[PATH_MAX];
 static char g_cc_runtime_o[PATH_MAX];
@@ -284,6 +285,14 @@ static void cc_init_paths(const char* argv0) {
     // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
     snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
     snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
+
+    // Fingerprint the *real* compiler binary for cache keys. `./cc/bin/ccc` is a small wrapper script
+    // that often doesn't change when the compiler is rebuilt, while `./out/cc/bin/ccc` does.
+    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+    if (!file_exists(g_ccc_sig_path)) {
+        strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
+        g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+    }
     cc_set_out_dir(NULL, NULL);
 }
 
@@ -2092,7 +2101,7 @@ static int run_build_mode(int argc, char** argv) {
             CCFileSig cc_sig;
             cc_sig.mtime_sec = 0;
             cc_sig.size = 0;
-            (void)cc__stat_sig(g_ccc_path[0] ? g_ccc_path : "", &cc_sig);
+            (void)cc__stat_sig(g_ccc_sig_path[0] ? g_ccc_sig_path : (g_ccc_path[0] ? g_ccc_path : ""), &cc_sig);
             const int cache_ok = !cc__cache_disabled(no_cache);
 
             // Load const bindings once.
@@ -2379,7 +2388,7 @@ static int run_build_mode(int argc, char** argv) {
         cc_sig_for_key.mtime_sec = 0;
         cc_sig_for_key.size = 0;
         // Cache key should include the ccc binary itself (driver/lowering changes), not just the host C compiler.
-        (void)cc__stat_sig(g_ccc_path[0] ? g_ccc_path : "cc", &cc_sig_for_key);
+        (void)cc__stat_sig(g_ccc_sig_path[0] ? g_ccc_sig_path : (g_ccc_path[0] ? g_ccc_path : "cc"), &cc_sig_for_key);
 
         int emit_reused = 0, emit_built = 0;
         int obj_reused = 0, obj_built = 0;
