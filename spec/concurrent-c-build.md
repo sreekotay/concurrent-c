@@ -12,10 +12,18 @@ Status: draft. Purpose: define the `ccc` driver behavior for C output, compilati
 - `ccc --emit-c-only ...` — stop after emitting C.
 - `ccc --compile ...` — emit C and compile to object; no link.
 - `ccc --link ...` — emit C, compile, link (default).
-- `ccc build ...` — same as above but integrates `build.cc` consts (as today).
+- `ccc build ...` — integrates `build.cc` (consts + targets).
+
+Build steps:
+- `ccc build` (default)
+- `ccc build run ...`
+- `ccc build test ...`
+- `ccc build list ...`
+- `ccc build graph ...`
+- `ccc build install ...`
 
 ## Outputs and Defaults
-- C output: `out/<stem>.c` by default (create `out/` if absent). Override with `-o` in `--emit-c-only` mode.
+- C output: `out/<stem>.c` by default. Override with `-o` in `--emit-c-only` mode.
 - Object output: `out/<stem>.o` by default in `--compile`/`--link` modes (override with `--obj-out`).
 - Binary output: `bin/<stem>` by default in `--link` mode (override with `-o`).
 - `--keep-c` preserves the generated C even when compiling/linking; otherwise it’s retained in `out/`.
@@ -34,7 +42,7 @@ Status: draft. Purpose: define the `ccc` driver behavior for C output, compilati
 - Target/cross: accept `--target TRIPLE` and forward to the C compiler; accept `--sysroot PATH` and forward.
 
 ## Runtime Linking
-- Default: link against the bundled runtime (single TU or archive) automatically.
+- Default: link against the bundled runtime automatically.
 - `--no-runtime` to skip adding the runtime (for external linkage).
 - `--libdir/--includedir` overrides where runtime headers/libs are found if separated.
 
@@ -91,10 +99,22 @@ Per-target properties (optional):
   - Tokens starting with `-` are passed through as-is; otherwise they are treated as a library name and lowered to `-l<LIB>`.
 - `CC_TARGET_DEPS <TARGET_NAME> <DEP_TARGET...>`
   - Declares dependencies on other `CC_TARGET` names.
-  - Minimal semantics (current): dependency targets contribute their sources and per-target properties (include/define/cflags/ldflags/libs) to the consuming target.
+  - Semantics: deps are built first (compiled into objects under `out/obj/<target>/`), and dependents link those objects.
+  - Dependency `ldflags`/`libs` are included in the final link.
   - Cycles and unknown target names are errors.
+- `CC_TARGET_OUT <TARGET_NAME> <BIN_NAME>`
+  - Sets the default output binary name (under `bin/`) for an `exe` target.
+- `CC_TARGET_TARGET <TARGET_NAME> <TRIPLE>`
+  - Per-target `--target` override for compilation and linking.
+- `CC_TARGET_SYSROOT <TARGET_NAME> <PATH>`
+  - Per-target `--sysroot` override for compilation and linking.
+- `CC_INSTALL <TARGET_NAME> <DEST>`
+  - Used by `ccc build install <target>` to copy the produced binary to `<DEST>`.
+  - `<DEST>` is resolved relative to repo root unless it is an absolute path.
 
 ### Introspection
+- `ccc build list` prints the declared target graph (and key per-target properties).
+- `ccc build graph` prints the target graph as `--format json` (default) or `--format dot`.
 - `--dump-consts` prints merged const bindings then compiles.
 - `--dry-run` resolves consts / prints commands, and skips compile/link.
 
@@ -104,14 +124,13 @@ Per-target properties (optional):
 - Build.cc parse errors: show file/line and message; fall back to defaults only if no consts emitted and no fatal error.
 
 ## Compatibility Guidance
-- For Make/CMake integration: use `ccc --emit-c-only` to generate C and let the existing build drive compile/link, or `ccc --compile` to produce objects. All outputs are deterministic under `out/` by default.
+- For Make/CMake integration: use `ccc --emit-c-only` to generate C and let the existing build drive compile/link, or `ccc --compile` to produce objects.
 - Keep generated C stable to aid caching and diagnostics.
 - Support `--verbose` to print all invoked commands.
 
 ## Future Extensions (non-normative)
-- Incremental recompilation keyed on input + build.cc hash.
-- Dependency emission (`-MMD` style) when invoking the C compiler.
-- Configurable out dir (`--out-dir`) and per-artifact cleanup policy.
+- More build graph features (explicit outputs/inputs, richer option types).
+- Depfile integration beyond per-translation-unit (`-MMD` style) as needed.
 
 ## Inspiration (non-normative): Zig `zig build`
 - Zig models builds as a **DAG of named steps** (build/install/run/test/custom), with project options registered and exposed via `zig build --help`.
@@ -131,12 +150,6 @@ Assuming you built the compiler (`make -C cc ...`) and are in the repo root.
 ./cc/bin/ccc build run examples/hello.ccs
 ```
 
-Pass args to the produced binary:
-
-```bash
-./cc/bin/ccc build run examples/hello.ccs -- --help
-```
-
 ### Emit generated C only (let your build system compile it)
 
 ```bash
@@ -144,30 +157,18 @@ Pass args to the produced binary:
 ls -l out/hello.c
 ```
 
-### Override output directories
+### Use a target graph
 
 ```bash
-CC_OUT_DIR=out2 CC_BIN_DIR=bin2 ./cc/bin/ccc build run examples/hello.ccs --summary
+./cc/bin/ccc build --build-file examples/mixed_c/build.cc --summary
+./cc/bin/ccc build list --build-file examples/mixed_c/build.cc
+./cc/bin/ccc build graph --format dot --build-file examples/mixed_c/build.cc
 ```
 
-### Use a target graph (`CC_TARGET` / `CC_DEFAULT`)
+### Install a target binary
 
 ```bash
-./cc/bin/ccc build --build-file examples/build_graph/build.cc --summary
-./cc/bin/ccc build multi --build-file examples/build_graph/build.cc --summary
-./cc/bin/ccc build run multi --build-file examples/build_graph/build.cc --summary
-```
-
-### See declared project options / targets
-
-```bash
-./cc/bin/ccc build --help --build-file examples/build_graph/build.cc
-```
-
-### Define comptime consts from the CLI
-
-```bash
-./cc/bin/ccc build --dump-consts --dry-run -DDEBUG -DNUM_WORKERS=8 examples/hello.ccs
+./cc/bin/ccc build install hello --build-file examples/mixed_c/build.cc --summary
 ```
 
 ### Disable the incremental cache
@@ -175,3 +176,4 @@ CC_OUT_DIR=out2 CC_BIN_DIR=bin2 ./cc/bin/ccc build run examples/hello.ccs --summ
 ```bash
 ./cc/bin/ccc build --no-cache run --summary examples/hello.ccs
 ```
+

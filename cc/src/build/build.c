@@ -361,6 +361,10 @@ static int parse_build_targets(const char* path,
         out_targets[*out_count].src_count = src_count;
         out_targets[*out_count].deps = NULL;
         out_targets[*out_count].dep_count = 0;
+        out_targets[*out_count].out_name = NULL;
+        out_targets[*out_count].target_triple = NULL;
+        out_targets[*out_count].sysroot = NULL;
+        out_targets[*out_count].install_dest = NULL;
         out_targets[*out_count].include_dirs = NULL;
         out_targets[*out_count].include_dir_count = 0;
         out_targets[*out_count].defines = NULL;
@@ -381,14 +385,29 @@ static int parse_build_targets(const char* path,
             while (*p == ' ' || *p == '\t') p++;
 
             const int is_deps = (strncmp(p, "CC_TARGET_DEPS", 14) == 0 && (p[14] == ' ' || p[14] == '\t'));
+            const int is_out = (strncmp(p, "CC_TARGET_OUT", 13) == 0 && (p[13] == ' ' || p[13] == '\t'));
+            const int is_tgt = (strncmp(p, "CC_TARGET_TARGET", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
+            const int is_sys = (strncmp(p, "CC_TARGET_SYSROOT", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
+            const int is_install = (strncmp(p, "CC_INSTALL", 10) == 0 && (p[10] == ' ' || p[10] == '\t'));
             const int is_inc = (strncmp(p, "CC_TARGET_INCLUDE", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
             const int is_cflags = (strncmp(p, "CC_TARGET_CFLAGS", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
             const int is_ldflags = (strncmp(p, "CC_TARGET_LDFLAGS", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
             const int is_def = (strncmp(p, "CC_TARGET_DEFINE", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
             const int is_libs = (strncmp(p, "CC_TARGET_LIBS", 14) == 0 && (p[14] == ' ' || p[14] == '\t'));
-            if (!is_deps && !is_inc && !is_cflags && !is_ldflags && !is_def && !is_libs) continue;
 
-            p += is_deps ? 14 : (is_inc ? 17 : (is_cflags ? 16 : (is_ldflags ? 17 : (is_def ? 16 : 14))));
+            if (!is_deps && !is_out && !is_tgt && !is_sys && !is_install && !is_inc && !is_cflags && !is_ldflags && !is_def && !is_libs) continue;
+
+            if (is_deps) p += 14;
+            else if (is_out) p += 13;
+            else if (is_tgt) p += 16;
+            else if (is_sys) p += 17;
+            else if (is_install) p += 10;
+            else if (is_inc) p += 17;
+            else if (is_cflags) p += 16;
+            else if (is_ldflags) p += 17;
+            else if (is_def) p += 16;
+            else p += 14; // libs
+
             while (*p == ' ' || *p == '\t') p++;
 
             char name_buf[128];
@@ -425,6 +444,31 @@ static int parse_build_targets(const char* path,
                     if (err) { free(tok); break; }
                 }
                 if (err) break;
+            } else if (is_out || is_tgt || is_sys || is_install) {
+                // Single string value after target name.
+                while (*p == ' ' || *p == '\t') p++;
+                if (!*p || *p == '\n' || *p == '\r') { err = EINVAL; break; }
+                char* start = p;
+                while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+                size_t len = (size_t)(p - start);
+                char* tok = (char*)malloc(len + 1);
+                if (!tok) { err = ENOMEM; break; }
+                memcpy(tok, start, len);
+                tok[len] = '\0';
+
+                if (is_out) {
+                    free((void*)t->out_name);
+                    t->out_name = tok;
+                } else if (is_tgt) {
+                    free((void*)t->target_triple);
+                    t->target_triple = tok;
+                } else if (is_sys) {
+                    free((void*)t->sysroot);
+                    t->sysroot = tok;
+                } else {
+                    free((void*)t->install_dest);
+                    t->install_dest = tok;
+                }
             } else if (is_inc) {
                 // Tokenize remaining include dirs.
                 while (*p) {
@@ -491,13 +535,24 @@ static int parse_build_targets(const char* path,
         // Free partial allocations on error.
         if (out_default_name && *out_default_name) { free(*out_default_name); *out_default_name = NULL; }
         for (size_t i = 0; i < *out_count; ++i) {
-            // free targets already emitted
             free((void*)out_targets[i].name);
             for (size_t j = 0; j < out_targets[i].src_count; ++j) free((void*)out_targets[i].srcs[j]);
             free((void*)out_targets[i].srcs);
-            out_targets[i].name = NULL;
-            out_targets[i].srcs = NULL;
-            out_targets[i].src_count = 0;
+            for (size_t j = 0; j < out_targets[i].dep_count; ++j) free((void*)out_targets[i].deps[j]);
+            free((void*)out_targets[i].deps);
+            free((void*)out_targets[i].out_name);
+            free((void*)out_targets[i].target_triple);
+            free((void*)out_targets[i].sysroot);
+            free((void*)out_targets[i].install_dest);
+            for (size_t j = 0; j < out_targets[i].include_dir_count; ++j) free((void*)out_targets[i].include_dirs[j]);
+            free((void*)out_targets[i].include_dirs);
+            for (size_t j = 0; j < out_targets[i].define_count; ++j) free((void*)out_targets[i].defines[j]);
+            free((void*)out_targets[i].defines);
+            for (size_t j = 0; j < out_targets[i].lib_count; ++j) free((void*)out_targets[i].libs[j]);
+            free((void*)out_targets[i].libs);
+            free((void*)out_targets[i].cflags);
+            free((void*)out_targets[i].ldflags);
+            memset(&out_targets[i], 0, sizeof(out_targets[i]));
         }
         *out_count = 0;
     }
@@ -522,6 +577,10 @@ void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* defau
         free((void*)targets[i].srcs);
         for (size_t j = 0; j < targets[i].dep_count; ++j) free((void*)targets[i].deps[j]);
         free((void*)targets[i].deps);
+        free((void*)targets[i].out_name);
+        free((void*)targets[i].target_triple);
+        free((void*)targets[i].sysroot);
+        free((void*)targets[i].install_dest);
         for (size_t j = 0; j < targets[i].include_dir_count; ++j) free((void*)targets[i].include_dirs[j]);
         free((void*)targets[i].include_dirs);
         for (size_t j = 0; j < targets[i].define_count; ++j) free((void*)targets[i].defines[j]);
@@ -530,18 +589,7 @@ void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* defau
         free((void*)targets[i].libs);
         free((void*)targets[i].cflags);
         free((void*)targets[i].ldflags);
-        targets[i].name = NULL;
-        targets[i].srcs = NULL;
-        targets[i].src_count = 0;
-        targets[i].deps = NULL;
-        targets[i].dep_count = 0;
-        targets[i].include_dirs = NULL;
-        targets[i].include_dir_count = 0;
-        targets[i].defines = NULL;
-        targets[i].define_count = 0;
-        targets[i].libs = NULL;
-        targets[i].lib_count = 0;
-        targets[i].cflags = NULL;
-        targets[i].ldflags = NULL;
+        memset(&targets[i], 0, sizeof(targets[i]));
     }
 }
+

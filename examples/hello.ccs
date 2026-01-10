@@ -6,7 +6,7 @@ int main(void) {
     @arena {
         String s = string_new(arena);
         s.append("Hello, ");
-        s.append("Concurrent-C via UFCS! - 4\n");
+        s.append("Concurrent-C via UFCS! - 5\n");
         std_out.write(s);
     }
     return 0;

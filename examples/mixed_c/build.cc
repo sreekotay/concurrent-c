@@ -22,4 +22,10 @@ CC_TARGET_DEFINE hello CCC_MIXED_C_EXAMPLE=1
 // - deps are other CC_TARGET names (their sources + build props are included)
 CC_TARGET_DEPS hello helper
 
+// - default output name under bin/ (optional; defaults to target name)
+CC_TARGET_OUT hello hello
+
+// - used by `ccc build install hello` (optional)
+CC_INSTALL hello bin/hello_installed
+
 

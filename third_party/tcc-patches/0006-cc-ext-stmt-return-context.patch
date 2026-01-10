@@ -1,0 +1,23 @@
+diff --git a/tccgen.c b/tccgen.c
+index abababab..cdcdcdcd 100644
+--- a/tccgen.c
++++ b/tccgen.c
+@@ -7372,7 +7372,9 @@ again:
+         if (tok == ';') next();
+         else skip(';');
+         cc_ast_record_end(); /* stmt */
+-        return; /* handled exactly one statement */
++        if (flags & STMT_COMPOUND)
++            return; /* handled exactly one statement */
++        goto again;  /* continue parsing statements in this block */
+     }
+ #endif
+     t = tok;
+@@ -7424,7 +7426,9 @@ again:
+             }
+             cc_ast_record_end(); /* stmt */
+-            return; /* handled exactly one statement */
++            if (flags & STMT_COMPOUND)
++                return; /* handled exactly one statement */
++            goto again;  /* continue parsing statements in this block */
+         }

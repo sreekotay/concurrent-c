@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ccc: build debug (current file)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cc/bin/ccc",
+      "args": [
+        "build",
+        "--no-cache",
+        "--keep-c",
+        "--summary",
+        "--cc-flags",
+        "-g -O0 -fno-omit-frame-pointer",
+        "${file}"
+      ],
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "ccc: run (current file)",
+      "type": "shell",
+      "command": "${workspaceFolder}/cc/bin/ccc",
+      "args": [
+        "build",
+        "run",
+        "${file}"
+      ],
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
+  ]
+}
+

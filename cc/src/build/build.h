@@ -36,6 +36,10 @@ typedef struct {
     size_t src_count;
     const char** deps;      // heap array of heap strings (target names)
     size_t dep_count;
+    const char* out_name;   // optional output binary name (heap)
+    const char* target_triple; // optional --target value (heap)
+    const char* sysroot;    // optional --sysroot value (heap)
+    const char* install_dest; // optional install destination (heap)
     const char** include_dirs; // heap array of heap strings (resolved by driver relative to build.cc dir)
     size_t include_dir_count;
     const char** defines;   // heap array of heap strings (NAME or NAME=VALUE)
@@ -62,6 +66,10 @@ void cc_build_free_options(CCBuildOptionDecl* opts, size_t count);
 //   CC_TARGET <NAME> exe <src1> <src2> ...
 //   CC_TARGET <NAME> obj <src1> <src2> ...
 //   CC_TARGET_DEPS <NAME> <dep1> <dep2> ...
+//   CC_TARGET_OUT <NAME> <binname>
+//   CC_TARGET_TARGET <NAME> <triple>
+//   CC_TARGET_SYSROOT <NAME> <path>
+//   CC_INSTALL <NAME> <dest>
 // Returns 0 on success. The returned strings/arrays are heap-allocated; caller must free via cc_build_free_targets().
 int cc_build_list_targets(const char* build_path, CCBuildTargetDecl* out_targets, size_t* out_count, size_t max, char** out_default_name);
 void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* default_name);

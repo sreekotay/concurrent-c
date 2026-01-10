@@ -83,6 +83,10 @@ You can also attach target-local build settings in `build.cc`:
 - `CC_TARGET_LDFLAGS <target> <flags...>`
 - `CC_TARGET_LIBS <target> <lib...>`
 - `CC_TARGET_DEPS <target> <dep_target...>`
+- `CC_TARGET_OUT <target> <bin_name>`
+- `CC_TARGET_TARGET <target> <triple>`
+- `CC_TARGET_SYSROOT <target> <path>`
+- `CC_INSTALL <target> <dest>`
 
 Target kinds:
 - `CC_TARGET <name> exe <src...>`

@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Concurrent-C (current file)",
+      "type": "lldb",
+      "request": "launch",
+      "preLaunchTask": "ccc: build debug (current file)",
+      "program": "${workspaceFolder}/bin/${fileBasenameNoExtension}",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "stopOnEntry": false
+    }
+  ]
+}
+

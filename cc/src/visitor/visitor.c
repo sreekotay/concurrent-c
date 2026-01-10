@@ -575,6 +575,23 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     fprintf(out, "#include <stdint.h>\n");
     fprintf(out, "#include \"cc_nursery.cch\"\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
+    fprintf(out, "\n");
+    fprintf(out, "/* --- CC spawn lowering helpers (best-effort) --- */\n");
+    fprintf(out, "typedef struct { void (*fn)(void); } __cc_spawn_void_arg;\n");
+    fprintf(out, "static void* __cc_spawn_thunk_void(void* p) {\n");
+    fprintf(out, "  __cc_spawn_void_arg* a = (__cc_spawn_void_arg*)p;\n");
+    fprintf(out, "  if (a && a->fn) a->fn();\n");
+    fprintf(out, "  free(a);\n");
+    fprintf(out, "  return NULL;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "typedef struct { void (*fn)(int); int arg; } __cc_spawn_int_arg;\n");
+    fprintf(out, "static void* __cc_spawn_thunk_int(void* p) {\n");
+    fprintf(out, "  __cc_spawn_int_arg* a = (__cc_spawn_int_arg*)p;\n");
+    fprintf(out, "  if (a && a->fn) a->fn(a->arg);\n");
+    fprintf(out, "  free(a);\n");
+    fprintf(out, "  return NULL;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "/* --- end spawn helpers --- */\n\n");
     /* Preserve diagnostics mapping to the original input where possible. */
     fprintf(out, "#line 1 \"%s\"\n", src_path);
 
@@ -647,7 +664,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
         int arena_stack[128];
         int arena_top = -1;
         int arena_counter = 0;
-        int nursery_end_stack[128];
+        int nursery_depth_stack[128];
         int nursery_id_stack[128];
         int nursery_top = -1;
         int nursery_counter = 0;
@@ -668,8 +685,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
         int defer_count = 0;
 
         int brace_depth = 0;
-        int spawn_thunk_counter = 0;
-        (void)spawn_thunk_counter;
+        /* nursery id stack is used for spawn lowering */
         int src_line_no = 0;
         char line[512];
         char rewritten[1024];
@@ -693,17 +709,6 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                 fprintf(out, "/* TODO: cancel %s; */\n", nm[0] ? nm : "<unknown>");
                 continue;
             }
-
-            /* If this line is the recorded end of an active nursery, emit epilogue. */
-#ifdef CC_TCC_EXT_AVAILABLE
-            if (nursery_top >= 0 && src_line_no == nursery_end_stack[nursery_top]) {
-                int id = nursery_id_stack[nursery_top--];
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                fprintf(out, "  cc_nursery_wait(__cc_nursery%d);\n", id);
-                fprintf(out, "  cc_nursery_free(__cc_nursery%d);\n", id);
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-            }
-#endif
 
             /* Lower @arena syntax marker into a plain C block. The preprocessor already injected
                the arena binding/free lines inside the block. */
@@ -783,15 +788,6 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
 
             /* Lower @nursery marker into a runtime nursery scope. */
             if (strncmp(p, "@nursery", 8) == 0 && (p[8] == ' ' || p[8] == '\t' || p[8] == '\n' || p[8] == '\r' || p[8] == '{')) {
-#ifdef CC_TCC_EXT_AVAILABLE
-                int end_line = 0;
-                const char* kind = NULL;
-                /* Use stub AST to find nursery end line; fallback to same line if missing. */
-                if (!cc__stmt_for_line(root, ctx, ctx->input_path, src_line_no, &kind, &end_line) && root && root->lowered_path) {
-                    cc__stmt_for_line(root, ctx, root->lowered_path, src_line_no, &kind, &end_line);
-                }
-                if (!end_line) end_line = src_line_no;
-#endif
                 size_t indent_len = (size_t)(p - line);
                 char indent[256];
                 if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
@@ -800,17 +796,17 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                 int id = ++nursery_counter;
                 if (nursery_top + 1 < (int)(sizeof(nursery_id_stack) / sizeof(nursery_id_stack[0]))) {
                     nursery_id_stack[++nursery_top] = id;
-#ifdef CC_TCC_EXT_AVAILABLE
-                    nursery_end_stack[nursery_top] = end_line;
-#else
-                    nursery_end_stack[nursery_top] = src_line_no;
-#endif
+                    /* Will be set after we account for the '{' we emit below. */
+                    nursery_depth_stack[nursery_top] = 0;
                 }
                 fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                /* Declare nursery in the surrounding scope, then emit a plain C block for the nursery body.
+                   This keeps the nursery pointer in-scope even if epilogues are emitted later (best-effort). */
+                fprintf(out, "%sCCNursery* __cc_nursery%d = cc_nursery_create();\n", indent, id);
+                fprintf(out, "%sif (!__cc_nursery%d) abort();\n", indent, id);
                 fprintf(out, "%s{\n", indent);
-                fprintf(out, "%s  CCNursery* __cc_nursery%d = cc_nursery_create();\n", indent, id);
-                fprintf(out, "%s  if (!__cc_nursery%d) abort();\n", indent, id);
-                brace_depth++; /* we emitted an opening brace */
+                brace_depth++; /* account for the '{' we emitted */
+                if (nursery_top >= 0) nursery_depth_stack[nursery_top] = brace_depth;
                 fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
                 continue;
             }
@@ -859,13 +855,20 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                         continue;
                     }
                     if (fn[0] && !has_arg) {
-                        fprintf(out, "cc_nursery_spawn(__cc_nursery%d, (void*(*)(void*))%s, NULL);\n", cur_nursery_id, fn);
+                        fprintf(out, "{ __cc_spawn_void_arg* __a = (__cc_spawn_void_arg*)malloc(sizeof(__cc_spawn_void_arg));\n");
+                        fprintf(out, "  if (!__a) abort();\n");
+                        fprintf(out, "  __a->fn = %s;\n", fn);
+                        fprintf(out, "  cc_nursery_spawn(__cc_nursery%d, __cc_spawn_thunk_void, __a);\n", cur_nursery_id);
+                        fprintf(out, "}\n");
                         continue;
                     }
                     if (fn[0] && has_arg) {
-                        /* Best-effort: until we have closures/arg packing, run the call inline.
-                           This preserves semantics (no concurrency) but unblocks compilation. */
-                        fprintf(out, "/* TODO: spawn lowering */ %s(%ld);\n", fn, arg);
+                        fprintf(out, "{ __cc_spawn_int_arg* __a = (__cc_spawn_int_arg*)malloc(sizeof(__cc_spawn_int_arg));\n");
+                        fprintf(out, "  if (!__a) abort();\n");
+                        fprintf(out, "  __a->fn = %s;\n", fn);
+                        fprintf(out, "  __a->arg = (int)%ld;\n", arg);
+                        fprintf(out, "  cc_nursery_spawn(__cc_nursery%d, __cc_spawn_thunk_int, __a);\n", cur_nursery_id);
+                        fprintf(out, "}\n");
                         continue;
                     }
                     fprintf(out, "/* TODO: spawn lowering */ %s", line);
@@ -887,6 +890,21 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
 
             /* Before emitting a close brace, emit any @defer statements at this depth. */
             if (p[0] == '}') {
+                /* If this brace closes an active nursery scope, emit nursery epilogue inside the scope. */
+                if (nursery_top >= 0 && nursery_depth_stack[nursery_top] == brace_depth) {
+                    size_t indent_len = (size_t)(p - line);
+                    char indent[256];
+                    if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
+                    memcpy(indent, line, indent_len);
+                    indent[indent_len] = '\0';
+
+                    int id = nursery_id_stack[nursery_top--];
+                    fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                    fprintf(out, "%s  cc_nursery_wait(__cc_nursery%d);\n", indent, id);
+                    fprintf(out, "%s  cc_nursery_free(__cc_nursery%d);\n", indent, id);
+                    fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                }
+
                 for (int i = defer_count - 1; i >= 0; i--) {
                     if (defers[i].active && defers[i].depth == brace_depth) {
                         fprintf(out, "#line %d \"%s\"\n", defers[i].line_no, src_path);
