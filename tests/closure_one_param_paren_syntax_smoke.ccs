@@ -1,0 +1,11 @@
+#include "cc_closure.cch"
+
+int main(void) {
+    int g = 0;
+    int* gp = &g;
+    int v = 9;
+    CCClosure1 c = (x) => { int* p = (int*)x; if (p) *gp = *p; };
+    c(&v);
+    return (g == 9) ? 0 : 1;
+}
+

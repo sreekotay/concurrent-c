@@ -53,3 +53,10 @@ int cc_run_blocking_closure0(CCClosure0 c) {
     cc_task_free(t);
     return j;
 }
+
+void* cc_closure1_call(CCClosure1 c, void* arg0) {
+    if (!c.fn) return NULL;
+    void* r = c.fn(c.env, arg0);
+    if (c.drop) c.drop(c.env);
+    return r;
+}
