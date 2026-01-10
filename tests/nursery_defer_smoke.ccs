@@ -1,0 +1,14 @@
+// Smoke test: ensure patched TCC parser can consume @nursery and @defer constructs.
+
+void worker(int n) {
+    (void)n;
+}
+
+void main() {
+    @defer cleanup: { int x = 0; (void)x; };
+    @nursery {
+        spawn (worker(1));
+    }
+}
+
+

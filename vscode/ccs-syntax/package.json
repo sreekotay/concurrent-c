@@ -1,0 +1,40 @@
+{
+  "name": "concurrent-c-syntax",
+  "displayName": "Concurrent-C Syntax",
+  "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch), a C-preprocessor-based language.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "concurrent-c",
+        "aliases": [
+          "Concurrent-C",
+          "concurrent-c",
+          "ccs"
+        ],
+        "extensions": [
+          ".ccs",
+          ".cch"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "concurrent-c",
+        "scopeName": "source.concurrent-c",
+        "path": "./syntaxes/concurrent-c.tmLanguage.json"
+      }
+    ]
+  }
+}
+
+

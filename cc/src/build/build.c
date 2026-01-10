@@ -545,4 +545,3 @@ void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* defau
         targets[i].ldflags = NULL;
     }
 }
-

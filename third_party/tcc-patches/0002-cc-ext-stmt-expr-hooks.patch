@@ -1,0 +1,75 @@
+diff --git a/libtcc.c b/libtcc.c
+index 9eace184..b6b6b6b6 100644
+--- a/libtcc.c
++++ b/libtcc.c
+@@ -69,6 +69,14 @@
+ #ifdef CONFIG_CC_EXT
+ /* Default no-op token registrar; can be overridden by CC runtime. */
+ __attribute__((weak)) void tcc_ext_register_tokens(void) {}
++
++/* Optional external parser extensions (set by the embedding CC frontend). */
++static struct TCCExtParser const *cc_ext_parser_global = NULL;
++
++PUB_FUNC void tcc_set_ext_parser(struct TCCExtParser const *p) {
++    cc_ext_parser_global = p;
++}
+ 
+ /* CC extension stubs exposed via libtcc when CONFIG_CC_EXT is on. */
+ PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, struct CCSymbolTable* symbols) {
+@@ -80,6 +88,8 @@ PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path
+     TCCState *s = tcc_new();
+     if (!s) return NULL;
+ #ifdef CONFIG_CC_EXT
++    /* Install optional parser hooks (decl/stmt extensions). */
++    s->ext_parser = cc_ext_parser_global;
+     /* Ensure CC recorder state is initialized (defensive even if tcc_new() zeroes). */
+     s->cc_nodes = NULL;
+     s->cc_nodes_count = 0;
+diff --git a/tcc.h b/tcc.h
+index f32a6f56..cccccccc 100644
+--- a/tcc.h
++++ b/tcc.h
+@@ -461,6 +461,9 @@ enum CCASTStubKind {
+     CC_AST_NODE_STMT    = 3,
+     CC_AST_NODE_ARENA   = 4,
+     CC_AST_NODE_CALL    = 5,
++    CC_AST_NODE_AWAIT   = 6,
++    CC_AST_NODE_SEND_TAKE = 7,
++    CC_AST_NODE_SUBSLICE  = 8,
+ };
+diff --git a/tccgen.c b/tccgen.c
+index 284f8b5b..dddddddd 100644
+--- a/tccgen.c
++++ b/tccgen.c
+@@ -6223,6 +6223,16 @@ tok_identifier:
+ #endif
+     default:
+     tok_identifier:
++#ifdef CONFIG_CC_EXT
++        /* CC extension: unary `await` (parsed as identifier in TCC).
++           Treat as a unary operator for parsing/recording; CC will lower it. */
++        if (tok >= TOK_IDENT && strcmp(get_tok_str(tok, NULL), "await") == 0) {
++            cc_ast_record_start(CC_AST_NODE_AWAIT);
++            next();
++            unary();
++            cc_ast_record_end();
++            break;
++        }
++#endif
+         if (tok < TOK_UIDENT)
+             tcc_error("expression expected before '%s'", get_tok_str(tok, &tokc));
+         t = tok;
+@@ -7362,6 +7372,14 @@ static void block(int flags)
+ again:
++#ifdef CONFIG_CC_EXT
++    /* CC extension: allow external parser to consume statements. If handled,
++       it must leave `tok` pointing at the next token after the statement. */
++    if (tcc_state->ext_parser && tcc_state->ext_parser->try_cc_stmt) {
++        if (tcc_state->ext_parser->try_cc_stmt())
++            goto again;
++    }
++#endif
+     t = tok;
+     /* CC extension: @arena { ... } statement. */
+ #ifdef CONFIG_CC_EXT
+

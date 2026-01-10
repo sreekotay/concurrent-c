@@ -15,7 +15,7 @@ typedef struct {
     int errors;
 } CCCheckerCtx;
 
-// Run the checker; returns 0 on success, non-zero on error.
+// Run the checker; returns 0 on success, non-zero on error. No-op until CC AST is populated.
 int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx);
 
 #endif // CC_VISITOR_CHECKER_H

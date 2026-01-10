@@ -24,12 +24,17 @@
    extension is absent, and fall back to stubs at runtime. */
 __attribute__((weak)) struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols);
 __attribute__((weak)) void cc_tcc_free_ast(struct CCASTStubRoot* r);
+__attribute__((weak)) void tcc_set_ext_parser(struct TCCExtParser const *p);
+extern const struct TCCExtParser cc_ext_parser;
 
 // Call into patched TCC to parse and return an opaque AST root.
 CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols) {
     if (!preprocessed_path || !cc_tcc_parse_to_ast) return NULL;
     // symbols currently unused; reserved for constexpr tables.
     (void)symbols;
+    if (tcc_set_ext_parser) {
+        tcc_set_ext_parser(&cc_ext_parser);
+    }
     struct CCASTStubRoot* r = cc_tcc_parse_to_ast(preprocessed_path, original_path, symbols);
     if (!r) return NULL;
     CCASTRoot* root = (CCASTRoot*)malloc(sizeof(CCASTRoot));

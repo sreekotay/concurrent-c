@@ -175,4 +175,3 @@ CC_OUT_DIR=out2 CC_BIN_DIR=bin2 ./cc/bin/ccc build run examples/hello.ccs --summ
 ```bash
 ./cc/bin/ccc build --no-cache run --summary examples/hello.ccs
 ```
-
