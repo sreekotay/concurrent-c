@@ -19,7 +19,7 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     int pp_err = cc_preprocess_file(input_path, tmp_path, sizeof(tmp_path));
     const char* use_path = (pp_err == 0) ? tmp_path : input_path;
 
-    CCASTRoot* root = cc_tcc_bridge_parse_to_ast(use_path, symbols);
+    CCASTRoot* root = cc_tcc_bridge_parse_to_ast(use_path, input_path, symbols);
     if (root) {
         root->original_path = input_path;
         if (pp_err == 0) {

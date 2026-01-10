@@ -597,6 +597,14 @@ typedef struct {
     size_t cli_count;
 } CCBuildOptions;
 
+static int cc__compile_c_to_obj(const CCBuildOptions* opt,
+                                const char* c_path,
+                                const char* obj_path,
+                                const char* dep_path,
+                                const char* extra_include_dir,
+                                const char* target_part,
+                                const char* sysroot_part);
+
 typedef struct {
     const char* c_out_path;
     const char* obj_out_path;
@@ -680,6 +688,12 @@ static int cc__derive_o_path_from_stem(const char* stem, char* out, size_t cap) 
     return 0;
 }
 
+static int cc__derive_d_path_from_stem(const char* stem, char* out, size_t cap) {
+    if (!stem || !stem[0] || !out || cap == 0) return -1;
+    snprintf(out, cap, "%s/%s.d", g_out_root, stem);
+    return 0;
+}
+
 static void cc__dir_of_path(const char* path, char* out, size_t cap) {
     if (!out || cap == 0) return;
     out[0] = '\0';
@@ -704,6 +718,80 @@ static void cc__join_path(const char* dir, const char* rel, char* out, size_t ca
         return;
     }
     snprintf(out, cap, "%s/%s", dir, rel);
+}
+
+static int cc__is_raw_c(const char* path) {
+    return path && cc__ends_with(path, ".c");
+}
+
+static int cc__copy_file(const char* src, const char* dst) {
+    if (!src || !dst || !src[0] || !dst[0]) return -1;
+    FILE* in = fopen(src, "rb");
+    if (!in) return -1;
+    FILE* out = fopen(dst, "wb");
+    if (!out) { fclose(in); return -1; }
+    unsigned char buf[64 * 1024];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { fclose(in); fclose(out); return -1; }
+    }
+    fclose(in);
+    fclose(out);
+    return 0;
+}
+
+static int cc__deps_require_rebuild(const char* dep_path, const char* obj_path) {
+    if (!dep_path || !obj_path) return 1;
+    struct stat st_obj;
+    if (stat(obj_path, &st_obj) != 0) return 1;
+    FILE* f = fopen(dep_path, "rb");
+    if (!f) return 1;
+
+    // Extremely simple dep parser: read whole file, strip continuations, skip until ':', then tokenize.
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return 0; } // empty/too big → don't force rebuild
+    char* text = (char*)malloc((size_t)sz + 1);
+    if (!text) { fclose(f); return 0; }
+    size_t rd = fread(text, 1, (size_t)sz, f);
+    fclose(f);
+    text[rd] = '\0';
+
+    // Remove backslash-newline continuations.
+    for (size_t i = 0; i + 1 < rd; ++i) {
+        if (text[i] == '\\' && (text[i + 1] == '\n' || text[i + 1] == '\r')) {
+            text[i] = ' ';
+            text[i + 1] = ' ';
+        }
+    }
+
+    char* p = strchr(text, ':');
+    if (!p) { free(text); return 0; }
+    p++; // after ':'
+
+    int rebuild = 0;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        char* start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+        char saved = *p;
+        *p = '\0';
+
+        struct stat st_dep;
+        if (stat(start, &st_dep) != 0) {
+            rebuild = 1;
+        } else if (st_dep.st_mtime > st_obj.st_mtime) {
+            rebuild = 1;
+        }
+
+        *p = saved;
+        if (rebuild) break;
+    }
+
+    free(text);
+    return rebuild;
 }
 
 static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bindings, size_t* count);
@@ -739,14 +827,38 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         return 0;
     }
 
-    // Incremental cache: emit C
+    int is_raw_c = cc__is_raw_c(opt->in_path);
+
+    // For raw C inputs, we skip CC lowering and treat the input itself as the C source.
+    if (is_raw_c) {
+        if (summary_out) {
+            summary_out->reuse_emit_c = 1;
+            summary_out->did_emit_c = 0;
+        }
+        if (opt->mode == CC_MODE_EMIT_C) {
+            // If user requested an output path, copy; otherwise do nothing.
+            if (opt->c_out_path && strcmp(opt->c_out_path, opt->in_path) != 0) {
+                if (cc__copy_file(opt->in_path, opt->c_out_path) != 0) {
+                    fprintf(stderr, "cc: failed to copy %s -> %s\n", opt->in_path, opt->c_out_path);
+                    return -1;
+                }
+                if (summary_out) {
+                    summary_out->reuse_emit_c = 0;
+                    summary_out->did_emit_c = 1;
+                }
+            }
+            return 0;
+        }
+    }
+
+    // Incremental cache: emit C (for .ccs inputs)
     uint64_t emit_key = 0;
     int cache_ok = !cc__cache_disabled(opt->no_cache);
     char stem[128];
     cc__stem_from_path(opt->in_path, stem, sizeof(stem));
     char meta_path[PATH_MAX];
     cc__cache_key_paths(meta_path, sizeof(meta_path), NULL, 0, stem);
-    if (cache_ok) {
+    if (!is_raw_c && cache_ok) {
         CCFileSig in_sig, build_sig, cc_sig;
         (void)cc__stat_sig(opt->in_path, &in_sig);
         char build_buf[512];
@@ -788,7 +900,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             (void)cc__write_u64_file(meta_path, emit_key);
             if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
         }
-    } else {
+    } else if (!is_raw_c) {
         int err = cc_compile_with_config(opt->in_path, opt->c_out_path, &cfg);
         if (err != 0) return err;
         if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
@@ -802,11 +914,11 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         return -1;
     }
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
+    const char* ccflags_env = getenv("CFLAGS");
+    const char* cppflags_env = getenv("CPPFLAGS");
     char cmd[2048];
 
     // Compile to object (with incremental cache)
-    const char* ccflags_env = getenv("CFLAGS");
-    const char* cppflags_env = getenv("CPPFLAGS");
     char target_part[256];
     char sysroot_part[256];
     target_part[0] = '\0';
@@ -820,9 +932,22 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     char obj_meta_path[PATH_MAX];
     snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, stem);
     uint64_t obj_key = 0;
+    char dep_path[PATH_MAX];
+    cc__derive_d_path_from_stem(stem, dep_path, sizeof(dep_path));
+    char src_dir[PATH_MAX];
+    cc__dir_of_path(opt->in_path, src_dir, sizeof(src_dir));
+    const char* c_for_compile = is_raw_c ? opt->in_path : opt->c_out_path;
     if (cache_ok) {
         uint64_t h = 1469598103934665603ULL;
-        h = cc__fnv1a64_i64(h, (long long)emit_key);
+        if (is_raw_c) {
+            CCFileSig in_sig;
+            (void)cc__stat_sig(opt->in_path, &in_sig);
+            h = cc__fnv1a64_str(h, opt->in_path);
+            h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
+            h = cc__fnv1a64_i64(h, in_sig.size);
+        } else {
+            h = cc__fnv1a64_i64(h, (long long)emit_key);
+        }
         h = cc__fnv1a64_str(h, target_part);
         h = cc__fnv1a64_str(h, sysroot_part);
         h = cc__fnv1a64_str(h, opt->cc_flags);
@@ -830,47 +955,16 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
         obj_key = h;
         uint64_t prev = 0;
-        if (file_exists(opt->obj_out_path) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key) {
+        if (file_exists(opt->obj_out_path) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key &&
+            !cc__deps_require_rebuild(dep_path, opt->obj_out_path)) {
             if (summary_out) { summary_out->reuse_compile_obj = 1; summary_out->did_compile_obj = 0; }
         } else {
-            char compile_cmd[2048];
-            snprintf(compile_cmd, sizeof(compile_cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
-                     cc_bin,
-                     ccflags_env ? ccflags_env : "",
-                     cppflags_env ? cppflags_env : "",
-                     target_part,
-                     sysroot_part,
-                     g_cc_include,
-                     g_cc_dir,
-                     g_repo_root,
-                     opt->c_out_path,
-                     opt->obj_out_path);
-            if (opt->cc_flags && *opt->cc_flags) {
-                strncat(compile_cmd, " ", sizeof(compile_cmd) - strlen(compile_cmd) - 1);
-                strncat(compile_cmd, opt->cc_flags, sizeof(compile_cmd) - strlen(compile_cmd) - 1);
-            }
-            if (run_cmd(compile_cmd, opt->verbose) != 0) return -1;
+            if (cc__compile_c_to_obj(opt, c_for_compile, opt->obj_out_path, dep_path, src_dir, target_part, sysroot_part) != 0) return -1;
             (void)cc__write_u64_file(obj_meta_path, obj_key);
             if (summary_out) { summary_out->reuse_compile_obj = 0; summary_out->did_compile_obj = 1; }
         }
     } else {
-        char compile_cmd[2048];
-        snprintf(compile_cmd, sizeof(compile_cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
-                 cc_bin,
-                 ccflags_env ? ccflags_env : "",
-                 cppflags_env ? cppflags_env : "",
-                 target_part,
-                 sysroot_part,
-                 g_cc_include,
-                 g_cc_dir,
-                 g_repo_root,
-                 opt->c_out_path,
-                 opt->obj_out_path);
-        if (opt->cc_flags && *opt->cc_flags) {
-            strncat(compile_cmd, " ", sizeof(compile_cmd) - strlen(compile_cmd) - 1);
-            strncat(compile_cmd, opt->cc_flags, sizeof(compile_cmd) - strlen(compile_cmd) - 1);
-        }
-        if (run_cmd(compile_cmd, opt->verbose) != 0) return -1;
+        if (cc__compile_c_to_obj(opt, c_for_compile, opt->obj_out_path, dep_path, src_dir, target_part, sysroot_part) != 0) return -1;
         if (summary_out) { summary_out->reuse_compile_obj = 0; summary_out->did_compile_obj = 1; }
     }
 
@@ -929,11 +1023,14 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     cc__cache_key_paths(NULL, 0, link_meta_path, sizeof(link_meta_path), stem);
     uint64_t link_key = 0;
     if (cache_ok) {
-        CCFileSig rt_sig, bin_sig;
+        CCFileSig obj_sig, rt_sig, bin_sig;
+        (void)cc__stat_sig(opt->obj_out_path, &obj_sig);
         (void)cc__stat_sig(have_runtime ? runtime_obj : "", &rt_sig);
         (void)cc__stat_sig(opt->bin_out_path, &bin_sig);
         uint64_t h = 1469598103934665603ULL;
         h = cc__fnv1a64_i64(h, (long long)obj_key);
+        h = cc__fnv1a64_i64(h, obj_sig.mtime_sec);
+        h = cc__fnv1a64_i64(h, obj_sig.size);
         h = cc__fnv1a64_i64(h, rt_sig.mtime_sec);
         h = cc__fnv1a64_i64(h, rt_sig.size);
         h = cc__fnv1a64_str(h, ldflags_env);
@@ -1024,26 +1121,43 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
 static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                                 const char* c_path,
                                 const char* obj_path,
+                                const char* dep_path,
+                                const char* extra_include_dir,
                                 const char* target_part,
                                 const char* sysroot_part) {
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s",
              cc_bin,
              ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",
              target_part ? target_part : "",
              sysroot_part ? sysroot_part : "",
+             dep_path ? dep_path : "/dev/null",
+             obj_path ? obj_path : "out.o",
              g_cc_include,
              g_cc_dir,
-             g_repo_root,
-             c_path,
-             obj_path);
+             g_repo_root);
+    if (extra_include_dir && *extra_include_dir) {
+        // Add -I<dir> so generated C can include headers relative to the original source directory.
+        char inc[PATH_MAX + 8];
+        snprintf(inc, sizeof(inc), " -I%s", extra_include_dir);
+        strncat(cmd, inc, sizeof(cmd) - strlen(cmd) - 1);
+    }
     if (opt->cc_flags && *opt->cc_flags) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    // Finally append the compilation inputs/outputs.
+    if (c_path && *c_path) {
+        strncat(cmd, " -c ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, c_path, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    if (obj_path && *obj_path) {
+        strncat(cmd, " -o ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, obj_path, sizeof(cmd) - strlen(cmd) - 1);
     }
     if (run_cmd(cmd, opt->verbose) != 0) return -1;
     return 0;
@@ -1594,6 +1708,8 @@ static int run_build_mode(int argc, char** argv) {
         const char* obj_paths[64];
         char obj_bufs[64][PATH_MAX];
         char c_bufs[64][PATH_MAX];
+        char dep_bufs[64][PATH_MAX];
+        char src_dir_bufs[64][PATH_MAX];
         uint64_t obj_keys[64];
         memset(obj_keys, 0, sizeof(obj_keys));
         for (int i = 0; i < input_count; ++i) {
@@ -1606,11 +1722,19 @@ static int run_build_mode(int argc, char** argv) {
             }
             cc__derive_c_path_from_stem(stem, c_bufs[i], sizeof(c_bufs[i]));
             cc__derive_o_path_from_stem(stem, obj_bufs[i], sizeof(obj_bufs[i]));
+            cc__derive_d_path_from_stem(stem, dep_bufs[i], sizeof(dep_bufs[i]));
+            cc__dir_of_path(inputs[i], src_dir_bufs[i], sizeof(src_dir_bufs[i]));
 
             uint64_t emit_key = 0;
             char meta_path[PATH_MAX];
             snprintf(meta_path, sizeof(meta_path), "%s/%s.meta", g_cache_root, stem);
-            if (cache_ok) {
+            int is_raw_c = cc__is_raw_c(inputs[i]);
+            const char* c_for_compile = is_raw_c ? inputs[i] : c_bufs[i];
+
+            if (is_raw_c) {
+                // No CC lowering for .c inputs.
+                emit_reused++;
+            } else if (cache_ok) {
                 CCFileSig in_sig;
                 in_sig.mtime_sec = 0;
                 in_sig.size = 0;
@@ -1648,16 +1772,27 @@ static int run_build_mode(int argc, char** argv) {
                     emit_built++;
                 }
             } else {
-                int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
-                if (err != 0) goto parse_fail;
-                emit_built++;
+                if (!is_raw_c) {
+                    int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                    if (err != 0) goto parse_fail;
+                    emit_built++;
+                }
             }
             if (mode != CC_MODE_EMIT_C) {
                 char obj_meta_path[PATH_MAX];
                 snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, stem);
                 if (cache_ok) {
                     uint64_t h = 1469598103934665603ULL;
-                    h = cc__fnv1a64_i64(h, (long long)emit_key);
+                    if (is_raw_c) {
+                        CCFileSig in_sig;
+                        in_sig.mtime_sec = 0; in_sig.size = 0;
+                        (void)cc__stat_sig(inputs[i], &in_sig);
+                        h = cc__fnv1a64_str(h, inputs[i]);
+                        h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
+                        h = cc__fnv1a64_i64(h, in_sig.size);
+                    } else {
+                        h = cc__fnv1a64_i64(h, (long long)emit_key);
+                    }
                     h = cc__fnv1a64_str(h, target_part);
                     h = cc__fnv1a64_str(h, sysroot_part);
                     h = cc__fnv1a64_str(h, cc_flags);
@@ -1666,15 +1801,16 @@ static int run_build_mode(int argc, char** argv) {
                     uint64_t obj_key = h;
                     obj_keys[i] = obj_key;
                     uint64_t prev = 0;
-                    if (file_exists(obj_bufs[i]) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key) {
+                    if (file_exists(obj_bufs[i]) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key &&
+                        !cc__deps_require_rebuild(dep_bufs[i], obj_bufs[i])) {
                         obj_reused++;
                     } else {
-                        if (cc__compile_c_to_obj(&base_opt, c_bufs[i], obj_bufs[i], target_part, sysroot_part) != 0) goto parse_fail;
+                        if (cc__compile_c_to_obj(&base_opt, c_for_compile, obj_bufs[i], dep_bufs[i], src_dir_bufs[i], target_part, sysroot_part) != 0) goto parse_fail;
                         (void)cc__write_u64_file(obj_meta_path, obj_key);
                         obj_built++;
                     }
                 } else {
-                    if (cc__compile_c_to_obj(&base_opt, c_bufs[i], obj_bufs[i], target_part, sysroot_part) != 0) goto parse_fail;
+                    if (cc__compile_c_to_obj(&base_opt, c_for_compile, obj_bufs[i], dep_bufs[i], src_dir_bufs[i], target_part, sysroot_part) != 0) goto parse_fail;
                     obj_built++;
                 }
                 obj_paths[i] = obj_bufs[i];
@@ -1710,8 +1846,13 @@ static int run_build_mode(int argc, char** argv) {
             h = cc__fnv1a64_i64(h, (long long)rt_sig.mtime_sec);
             h = cc__fnv1a64_i64(h, (long long)rt_sig.size);
             for (int i = 0; i < input_count; ++i) {
+                CCFileSig os;
+                os.mtime_sec = 0; os.size = 0;
+                (void)cc__stat_sig(obj_paths[i], &os);
                 h = cc__fnv1a64_str(h, obj_paths[i]);
                 h = cc__fnv1a64_i64(h, (long long)obj_keys[i]);
+                h = cc__fnv1a64_i64(h, (long long)os.mtime_sec);
+                h = cc__fnv1a64_i64(h, (long long)os.size);
             }
             uint64_t prev = 0;
             if (file_exists(user_out) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == h) {
@@ -1757,6 +1898,7 @@ static int run_build_mode(int argc, char** argv) {
     char obj_path[512];
     char bin_path[512];
 
+    int raw_c = cc__is_raw_c(in_path);
     if (mode == CC_MODE_EMIT_C) {
         if (user_out) {
             strncpy(c_out, user_out, sizeof(c_out));
@@ -1766,9 +1908,14 @@ static int run_build_mode(int argc, char** argv) {
             goto parse_fail;
         }
     } else {
-        if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
-            fprintf(stderr, "cc: failed to derive default C output\n");
-            goto parse_fail;
+        if (raw_c) {
+            strncpy(c_out, in_path, sizeof(c_out));
+            c_out[sizeof(c_out)-1] = '\0';
+        } else {
+            if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
+                fprintf(stderr, "cc: failed to derive default C output\n");
+                goto parse_fail;
+            }
         }
     }
 
@@ -2029,6 +2176,8 @@ int main(int argc, char **argv) {
         const char* obj_paths[64];
         char obj_bufs[64][PATH_MAX];
         char c_bufs[64][PATH_MAX];
+        char dep_bufs[64][PATH_MAX];
+        char src_dir_bufs[64][PATH_MAX];
         for (int i = 0; i < input_count; ++i) {
             char stem0[128];
             char stem[128];
@@ -2036,10 +2185,26 @@ int main(int argc, char **argv) {
             if (cc__unique_stem(stem0, used, &used_count, 64, stem, sizeof(stem)) != 0) return 1;
             cc__derive_c_path_from_stem(stem, c_bufs[i], sizeof(c_bufs[i]));
             cc__derive_o_path_from_stem(stem, obj_bufs[i], sizeof(obj_bufs[i]));
-            int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
-            if (err != 0) return 1;
+            cc__derive_d_path_from_stem(stem, dep_bufs[i], sizeof(dep_bufs[i]));
+            cc__dir_of_path(inputs[i], src_dir_bufs[i], sizeof(src_dir_bufs[i]));
+
+            int is_raw_c = cc__is_raw_c(inputs[i]);
+            const char* c_for_compile = is_raw_c ? inputs[i] : c_bufs[i];
+            if (mode == CC_MODE_EMIT_C) {
+                if (is_raw_c) {
+                    if (cc__copy_file(inputs[i], c_bufs[i]) != 0) return 1;
+                } else {
+                    int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                    if (err != 0) return 1;
+                }
+                continue;
+            }
+            if (!is_raw_c) {
+                int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                if (err != 0) return 1;
+            }
             if (mode != CC_MODE_EMIT_C) {
-                if (cc__compile_c_to_obj(&base_opt, c_bufs[i], obj_bufs[i], target_part, sysroot_part) != 0) return 1;
+                if (cc__compile_c_to_obj(&base_opt, c_for_compile, obj_bufs[i], dep_bufs[i], src_dir_bufs[i], target_part, sysroot_part) != 0) return 1;
                 obj_paths[i] = obj_bufs[i];
             }
         }
@@ -2056,6 +2221,7 @@ int main(int argc, char **argv) {
     char obj_path[512];
     char bin_path[512];
 
+    int raw_c = cc__is_raw_c(in_path);
     if (mode == CC_MODE_EMIT_C) {
         if (user_out) {
             strncpy(c_out, user_out, sizeof(c_out));
@@ -2065,9 +2231,15 @@ int main(int argc, char **argv) {
             return 1;
         }
     } else {
-        if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
-            fprintf(stderr, "cc: failed to derive default C output\n");
-            return 1;
+        // For .c inputs, treat the input itself as the C file (no CC lowering).
+        if (raw_c) {
+            strncpy(c_out, in_path, sizeof(c_out));
+            c_out[sizeof(c_out)-1] = '\0';
+        } else {
+            if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
+                fprintf(stderr, "cc: failed to derive default C output\n");
+                return 1;
+            }
         }
     }
 

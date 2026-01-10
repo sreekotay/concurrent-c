@@ -75,4 +75,34 @@ We can mirror the above *without* embedding Zig or changing the “emit C” con
 3) **Add a small build summary**
    - Similar to Zig’s `--summary`, print what got built / skipped, and why.
 
+---
+
+### Good ideas from other modern C build systems (worth copying)
+
+Even though we’re aiming for a Zig-like “compiler-as-build-runner” feel, the best modern C build systems converge on a few practical ideas:
+
+- **Meson**
+  - Strong **target-first** UX: targets own sources, include dirs, defines, and link deps.
+  - Fast incremental builds with good defaults.
+  - Takeaway for CC: keep flags/deps *attached to targets*, not global ambient state.
+
+- **Modern CMake (target-based)**
+  - Everything hangs off targets (`target_sources`, `target_include_directories`, `target_compile_definitions`, `target_link_libraries`).
+  - Takeaway for CC: `build.cc` should eventually describe target-local `includes/defines/cflags/ldflags/libs`.
+
+- **Bazel / Buck2**
+  - Explicit deps and hermetic builds enable robust caching.
+  - Takeaway for CC: long-term, make dependency inputs explicit (including generated headers) so caching is sound.
+
+### Mixed CC + C builds (the model)
+
+Zig’s approach maps cleanly:
+- `.ccs` sources: **lower** to generated C with `#line`, then compile to `.o`.
+- `.c` sources: compile directly to `.o` (no CC lowering).
+- headers (`.h` / `.cch`): never “built” as standalone artifacts; they’re discovered via include paths.
+
+The missing piece for correctness is **header dependency tracking**:
+- Emit depfiles via the host C compiler (e.g. `-MMD -MF out/obj/<stem>.d`).
+- Use depfile contents/mtimes to decide when to rebuild a `.o`.
+
 

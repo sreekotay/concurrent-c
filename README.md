@@ -67,6 +67,15 @@ ls -l out/hello.c
 ./cc/bin/ccc build multi --build-file examples/build_graph/build.cc --summary
 ```
 
+#### Mixed CC + C sources
+
+`ccc build` can link a target composed of both `.ccs` and `.c` translation units. Headers (`.h` / `.cch`) are included normally (not built as standalone artifacts).
+
+```bash
+./cc/bin/ccc build --build-file examples/mixed_c/build.cc --summary
+./bin/hello
+```
+
 Set comptime integer consts:
 
 ```bash

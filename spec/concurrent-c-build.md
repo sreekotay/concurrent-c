@@ -74,6 +74,7 @@ These are printed by `ccc build --help` when a `build.cc` is in scope (or when `
 Notes:
 - `<SRC...>` is a whitespace-separated list of source files.
 - Source paths are resolved **relative to the directory containing `build.cc`**.
+- Sources may be a mix of `.ccs` (CC, lowered first) and `.c` (compiled directly).
 
 ### Introspection
 - `--dump-consts` prints merged const bindings then compiles.

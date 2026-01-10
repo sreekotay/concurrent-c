@@ -1,0 +1,18 @@
+#define CC_ENABLE_SHORT_NAMES
+#include <std/prelude.cch>
+
+#include "helper.h"
+
+int main(void) {
+    @arena {
+        String s = string_new(arena);
+        int v = helper_add(2, 5);
+        s.append("mixed_c helper_add(2,5)=");
+        cc_string_append_int(arena, &s, v);
+        s.append("\n");
+        std_out.write(s);
+    }
+    return 0;
+}
+
+
