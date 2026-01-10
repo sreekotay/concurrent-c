@@ -1,5 +1,5 @@
 #define CC_ENABLE_SHORT_NAMES
-#include "cc/include/std/prelude.h"
+#include "cc/include/std/prelude.cch"
 #include <stdio.h>
 #include <string.h>
 

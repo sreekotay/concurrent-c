@@ -94,7 +94,7 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 | `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }` |
 | `cc_is_cancelled()` | Check if current task is cancelled | `if (cc_is_cancelled()) return;` |
 
-**C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. Short aliases (`String`, `Arena`, etc.) are only available when the user opts in via `#include <std/prelude.h>` and defining `CC_ENABLE_SHORT_NAMES` before inclusion. Default is prefixed-only.
+**C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. Short aliases (`String`, `Arena`, etc.) are only available when the user opts in via `#include <std/prelude.cch>` and defining `CC_ENABLE_SHORT_NAMES` before inclusion. Default is prefixed-only.
 
 ---
 
@@ -3313,7 +3313,7 @@ For request handling and other time-bounded operations, a simple `Deadline` type
 typedef struct Deadline Deadline;
 ```
 
-**Factory Functions (in <std/time.h>):**
+**Factory Functions (in <std/time.cch>):**
 
 ```c
 // Create deadline relative to now
@@ -5991,9 +5991,9 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
 ## Appendix H: Complete Example: HTTP Server
 
 ```c
-#include <std/prelude.h>
-#include <std/server.h>
-#include <std/log.h>
+#include <std/prelude.cch>
+#include <std/server.cch>
+#include <std/log.cch>
 
 // Handler: Mark @latency_sensitive to ensure predictable latency
 @async @latency_sensitive Response!IoError api_handler(Request* req, Arena* a) {
@@ -6039,7 +6039,7 @@ log_sample(trace, 0.05);             // Deterministic 5% kept
 
 ## Appendix I: Candidate Phase 1.1 Hoists
 
-Phase 1.0 is complete and canonical for unary request/response and long-lived connection patterns. However, early stdlib exploration (especially `<std/server.h>`) has revealed three patterns that appear repeatedly and suggest language-level hoists for Phase 1.1.
+Phase 1.0 is complete and canonical for unary request/response and long-lived connection patterns. However, early stdlib exploration (especially `<std/server.cch>`) has revealed three patterns that appear repeatedly and suggest language-level hoists for Phase 1.1.
 
 ### I.1 Implicit Cancellation Checks at Await Points (High Priority)
 
@@ -6161,7 +6161,7 @@ Real protocols often need unidirectional closure: proxies (forward until upstrea
 
 **Impact:** Proxies, gRPC bidirectional streams, and TLS multiplexing all become safe and idiomatic.
 
-**Note:** This is stdlib-level, not language-level. Already implemented in Phase 1.0 `<std/server.h>`.
+**Note:** This is stdlib-level, not language-level. Already implemented in Phase 1.0 `<std/server.cch>`.
 
 ---
 
@@ -6169,7 +6169,7 @@ Real protocols often need unidirectional closure: proxies (forward until upstrea
 
 The following patterns emerged but are deferred to Phase 2:
 
-**Arena checkpoint helpers:** Long-lived connections (WebSocket, gRPC streaming, HTTP/2) can run for hours. A stdlib helper (`with_arena_checkpoint()` or per-message `arena.reset()`) prevents unbounded growth. Stdlib pattern guideline is in `<std/server.h>` design notes; full stdlib support in Phase 2.
+**Arena checkpoint helpers:** Long-lived connections (WebSocket, gRPC streaming, HTTP/2) can run for hours. A stdlib helper (`with_arena_checkpoint()` or per-message `arena.reset()`) prevents unbounded growth. Stdlib pattern guideline is in `<std/server.cch>` design notes; full stdlib support in Phase 2.
 
 **MuxConn abstraction:** HTTP/2 and gRPC multiplex many independent streams over one TCP/TLS connection. A future `MuxConn` will wrap a Duplex, accept per-stream Duplex + stream_arena, and integrate with server_loop. For Phase 1.0, Duplex assumes 1:1 connection-to-stream; Protocol layers (HTTP/2, gRPC) implement multiplexing above Duplex.
 
@@ -6444,7 +6444,7 @@ Task_CharSliceOptIoErr result = vt->read(duplex.self, arena);
 
 5. **Optional -emit-lowered-c mode:** For debugging and spec validation:
    ```bash
-   cc compiler -emit-lowered-c -o output.c input.cc
+   cc compiler -emit-lowered-c -o output.c input.ccs
    ```
    Generates the lowered C with:
    - Comments mapping each line back to source location

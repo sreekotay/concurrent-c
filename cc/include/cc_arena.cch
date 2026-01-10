@@ -1,0 +1,147 @@
+/*
+ * Thread-safe bump allocator for per-request arenas.
+ *
+ * API is intentionally minimal and C11-only. The implementation lives in
+ * cc/runtime/arena.c.
+ */
+#ifndef CC_ARENA_H
+#define CC_ARENA_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include "cc_slice.cch"
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdatomic.h>)
+#include <stdatomic.h>
+#define CC_ATOMIC_FETCH_ADD(ptr, val) atomic_fetch_add_explicit((ptr), (val), memory_order_relaxed)
+#define CC_ATOMIC_LOAD(ptr) atomic_load_explicit((ptr), memory_order_relaxed)
+#define CC_ATOMIC_STORE(ptr, val) atomic_store_explicit((ptr), (val), memory_order_relaxed)
+#define CC_ATOMIC_CAS(ptr, expected_ptr, desired) atomic_compare_exchange_weak_explicit((ptr), (expected_ptr), (desired), memory_order_relaxed, memory_order_relaxed)
+typedef _Atomic uint64_t cc_atomic_u64;
+typedef _Atomic size_t cc_atomic_size;
+#else
+typedef uint64_t cc_atomic_u64;
+typedef size_t cc_atomic_size;
+#if defined(__TINYC__)
+// tcc lacks __sync builtins; fallback to non-atomic ops (best-effort thread safety)
+#define CC_ATOMIC_FETCH_ADD(ptr, val) ((*(ptr)) += (val))
+#define CC_ATOMIC_LOAD(ptr) (*(ptr))
+#define CC_ATOMIC_STORE(ptr, val) ((*(ptr)) = (val))
+#define CC_ATOMIC_CAS(ptr, expected_ptr, desired) (__extension__({ \
+    size_t old = *(ptr);                                           \
+    if (old == *(expected_ptr)) { *(ptr) = (desired); 1; } else { *(expected_ptr) = old; 0; } \
+}))
+#else
+#define CC_ATOMIC_FETCH_ADD(ptr, val) __sync_fetch_and_add((ptr), (val))
+#define CC_ATOMIC_LOAD(ptr) __sync_fetch_and_add((ptr), 0)
+#define CC_ATOMIC_STORE(ptr, val) (__sync_lock_test_and_set((ptr), (val)), (void)0)
+#define CC_ATOMIC_CAS(ptr, expected_ptr, desired) __sync_bool_compare_and_swap((ptr), *(expected_ptr), (desired))
+#endif
+#endif
+
+typedef struct {
+    uint8_t *base;
+    size_t capacity;
+    cc_atomic_size offset;
+    uint64_t provenance;      // monotonically increasing arena id
+    uint32_t _reserved;
+} CCArena;
+
+// Global provenance counter (defined in runtime).
+extern cc_atomic_u64 cc_arena_prov_counter;
+
+// Allocation helpers --------------------------------------------------------
+
+static inline size_t cc__align_up(size_t value, size_t align) {
+    size_t a = align ? align : sizeof(void *);
+    return (value + (a - 1)) & ~(a - 1);
+}
+
+// Initialize an arena with caller-provided backing storage.
+// Returns 0 on success, non-zero on invalid parameters.
+static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
+    if (!arena || !buffer || capacity == 0) {
+        return -1;
+    }
+    arena->base = (uint8_t *)buffer;
+    arena->capacity = capacity;
+    CC_ATOMIC_STORE(&arena->offset, 0);
+    arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+    arena->_reserved = 0;
+    return 0;
+}
+
+// Allocate `size` bytes aligned to `align` (power-of-two, >=1).
+// Returns NULL on exhaustion; no automatic growth.
+static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
+    if (!arena || !arena->base || size == 0) {
+        return NULL;
+    }
+    size_t aligned_offset = 0;
+    size_t new_offset = 0;
+    size_t expected = CC_ATOMIC_LOAD(&arena->offset);
+    for (;;) {
+        aligned_offset = cc__align_up(expected, align);
+        if (aligned_offset > arena->capacity) {
+            return NULL;
+        }
+        new_offset = aligned_offset + size;
+        if (new_offset > arena->capacity) {
+            return NULL;
+        }
+        size_t desired = new_offset;
+        size_t snapshot = expected;
+        if (CC_ATOMIC_CAS(&arena->offset, &expected, desired)) {
+            // CAS succeeded; expected now holds previous value.
+            break;
+        }
+        // CAS failed; expected updated with current value, retry.
+    }
+    return arena->base + aligned_offset;
+}
+
+// Reset arena to empty. Does not free backing storage.
+static inline void cc_arena_reset(CCArena *arena) {
+    if (!arena) return;
+    CC_ATOMIC_STORE(&arena->offset, 0);
+    // Bump provenance so new allocations get a fresh id (helps detect stale use).
+    arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+}
+
+// Convenience: compute how many bytes remain.
+static inline size_t cc_arena_remaining(const CCArena *arena) {
+    if (!arena || !arena->base) {
+        return 0;
+    }
+    size_t off = CC_ATOMIC_LOAD(&arena->offset);
+    if (arena->capacity < off) return 0;
+    return arena->capacity - off;
+}
+
+// Allocate a tracked slice of raw bytes from the arena. Returns an empty slice on failure.
+static inline CCSlice cc_arena_alloc_slice_bytes(CCArena *arena, size_t len) {
+    void *ptr = cc_arena_alloc(arena, len, 1);
+    if (!ptr || !arena) {
+        return cc_slice_empty();
+    }
+    uint64_t id = cc_slice_make_id(arena->provenance, false, false, false);
+    return cc_slice_from_parts(ptr, len, id, len);
+}
+
+// Allocate a tracked slice for `count` elements of size `elem_size`.
+static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, size_t count, size_t align) {
+    size_t bytes = elem_size * count;
+    void *ptr = cc_arena_alloc(arena, bytes, align ? align : elem_size);
+    if (!ptr || !arena) {
+        return cc_slice_empty();
+    }
+    uint64_t id = cc_slice_make_id(arena->provenance, false, false, false);
+    // len/alen expressed in element count, per slice ABI convention.
+    return cc_slice_from_parts(ptr, count, id, count);
+}
+
+#endif // CC_ARENA_H
+
+

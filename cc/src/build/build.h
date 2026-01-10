@@ -24,6 +24,17 @@ typedef struct {
     const char* help;
 } CCBuildOptionDecl;
 
+typedef enum {
+    CC_BUILD_TARGET_EXE = 1,
+} CCBuildTargetKind;
+
+typedef struct {
+    const char* name;
+    CCBuildTargetKind kind;
+    const char** srcs;      // heap array of heap strings
+    size_t src_count;
+} CCBuildTargetDecl;
+
 // Stub loader: if build.cc exists, return a fixed const set; else empty.
 // Returns 0 on success, non-zero on error. The returned bindings are owned
 // by the caller (no allocations are performed here).
@@ -34,6 +45,13 @@ int cc_build_load_consts(const char* build_path, const CCBuildInputs* inputs, CC
 // Returns 0 on success. The returned strings are heap-allocated; caller must free via cc_build_free_options().
 int cc_build_list_options(const char* build_path, CCBuildOptionDecl* out_opts, size_t* out_count, size_t max);
 void cc_build_free_options(CCBuildOptionDecl* opts, size_t count);
+
+// Targets (Zig-ish): lines in build.cc like:
+//   CC_DEFAULT <NAME>
+//   CC_TARGET <NAME> exe <src1> <src2> ...
+// Returns 0 on success. The returned strings/arrays are heap-allocated; caller must free via cc_build_free_targets().
+int cc_build_list_targets(const char* build_path, CCBuildTargetDecl* out_targets, size_t* out_count, size_t max, char** out_default_name);
+void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* default_name);
 
 #endif // CC_BUILD_BUILD_H
 

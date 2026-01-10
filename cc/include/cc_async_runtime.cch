@@ -1,0 +1,33 @@
+/*
+ * Native async runtime facade (stubbed to the portable executor for now).
+ * Provides a shared executor for async channels/I/O; can be swapped for
+ * platform backends in the future (io_uring/kqueue, etc.).
+ */
+#ifndef CC_ASYNC_RUNTIME_H
+#define CC_ASYNC_RUNTIME_H
+
+#include "cc_exec.cch"
+#include "cc_async_backend.cch"
+
+// Initialize the async runtime and shared executor. Returns 0 on success.
+int cc_async_runtime_init(size_t workers, size_t queue_cap);
+
+// Register a native async backend (io_uring/kqueue/etc). Must be done before use.
+// ctx is backend-owned state pointer; name is an informational identifier (e.g., "io_uring", "kqueue", "poll").
+int cc_async_runtime_set_backend(const CCAsyncBackendOps* ops, void* ctx, const char* name);
+
+// Retrieve registered backend (NULL if none). If out_ctx is non-NULL, backend ctx is stored there.
+const CCAsyncBackendOps* cc_async_runtime_backend(void** out_ctx);
+
+// Name of the active backend, or "executor" if falling back.
+const char* cc_async_runtime_backend_name(void);
+
+// Get shared executor (NULL if not initialized).
+CCExec* cc_async_runtime_exec(void);
+
+// Shutdown and free runtime resources.
+void cc_async_runtime_shutdown(void);
+
+#endif // CC_ASYNC_RUNTIME_H
+
+

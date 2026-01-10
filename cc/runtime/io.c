@@ -1,7 +1,7 @@
-#include "cc_io.h"
-#include "cc_arena.h"
-#include "cc_slice.h"
-#include "std/io.h"
+#include "cc_io.cch"
+#include "cc_arena.cch"
+#include "cc_slice.cch"
+#include "std/io.cch"
 
 #include <errno.h>
 #include <stdio.h>

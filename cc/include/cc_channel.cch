@@ -1,0 +1,163 @@
+/*
+ * Generic channel with blocking send/recv.
+ * Backed by mutex/condvar; capacity fixed at creation.
+ *
+ * Typing helpers:
+ *  - CC_DECL_TYPED_CHAN_PTR(T, Name): sends/receives pointers to T.
+ *  - CC_DECL_TYPED_CHAN_VAL(T, Name): sends/receives T by value (copied).
+ */
+#ifndef CC_CHANNEL_H
+#define CC_CHANNEL_H
+
+#include <stddef.h>
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+#include <time.h>
+
+#include "cc_sched.cch"
+#include "cc_slice.cch"
+#include "cc_nursery.cch"
+#include "cc_exec.cch"
+
+typedef struct CCAsyncHandle CCAsyncHandle;
+#include "std/future.cch"
+
+typedef struct CCChan CCChan;
+
+typedef enum {
+    CC_CHAN_MODE_BLOCK = 0,   // block when full/empty (default)
+    CC_CHAN_MODE_DROP_NEW,    // drop new send (return EAGAIN) when full
+    CC_CHAN_MODE_DROP_OLD     // drop oldest and enqueue new when full
+} CCChanMode;
+
+// Create a channel with the given capacity (>=1). Returns NULL on failure.
+// allow_send_take enables zero-copy pointer payloads via send_take API.
+// Note: send_take is pointer-only (elem_size must be sizeof(void*)); by-value payloads are not eligible.
+CCChan* cc_chan_create(size_t capacity);
+CCChan* cc_chan_create_mode(size_t capacity, CCChanMode mode);
+CCChan* cc_chan_create_mode_take(size_t capacity, CCChanMode mode, bool allow_send_take);
+
+// Close the channel: unblocks waiters. Further sends fail with EPIPE.
+void cc_chan_close(CCChan* ch);
+
+// Free channel resources. Safe to call on NULL. Undefined if called while
+// other threads are still using the channel.
+void cc_chan_free(CCChan* ch);
+
+// Blocking send/recv. Returns 0 on success or an errno-style error.
+int cc_chan_send(CCChan* ch, const void* value, size_t value_size);
+int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
+
+// Non-blocking: return EAGAIN if would block.
+int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size);
+int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size);
+
+// Timed send/recv honoring an absolute deadline.
+int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const struct timespec* abs_deadline);
+int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const struct timespec* abs_deadline);
+
+// CCDeadline-aware helpers.
+int cc_chan_deadline_send(CCChan* ch, const void* value, size_t value_size, const CCDeadline* deadline);
+int cc_chan_deadline_recv(CCChan* ch, void* out_value, size_t value_size, const CCDeadline* deadline);
+
+// Zero-copy pointer transfer (send_take). Valid only when elem_size == sizeof(void*) and channel was created with allow_send_take=true.
+int cc_chan_send_take(CCChan* ch, void* ptr);
+int cc_chan_try_send_take(CCChan* ch, void* ptr);
+int cc_chan_timed_send_take(CCChan* ch, void* ptr, const struct timespec* abs_deadline);
+int cc_chan_deadline_send_take(CCChan* ch, void* ptr, const CCDeadline* deadline);
+
+// Slice-aware transfer with eligibility checks (unique + transferable + not subslice).
+// Stores the slice descriptor in-channel (structure copy); ownership of the backing
+// allocation is transferred on success. Fails with EINVAL if eligibility fails.
+int cc_chan_send_take_slice(CCChan* ch, const CCSlice* slice);
+int cc_chan_try_send_take_slice(CCChan* ch, const CCSlice* slice);
+int cc_chan_timed_send_take_slice(CCChan* ch, const CCSlice* slice, const struct timespec* abs_deadline);
+int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSlice* slice, const CCDeadline* deadline);
+
+// Nursery-aware helpers: use nursery deadline/cancel state.
+int cc_chan_nursery_send(CCChan* ch, CCNursery* n, const void* value, size_t value_size);
+int cc_chan_nursery_recv(CCChan* ch, CCNursery* n, void* out_value, size_t value_size);
+int cc_chan_nursery_send_take(CCChan* ch, CCNursery* n, void* ptr);
+int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSlice* slice);
+
+// Async send/recv using executor; completion signaled on done channel.
+typedef enum {
+    CC_CHAN_ASYNC_PENDING = 0,
+    CC_CHAN_ASYNC_OK = 1,
+    CC_CHAN_ASYNC_ERR = 2,
+    CC_CHAN_ASYNC_TIMEOUT = 3,
+    CC_CHAN_ASYNC_CANCELLED = 4
+} CCChanAsyncStatus;
+
+typedef struct {
+    CCAsyncHandle handle;
+    CCChanAsyncStatus status;
+} CCChanAsync;
+
+int cc_chan_send_async(CCExec* ex, CCChan* ch, const void* value, size_t value_size, CCChanAsync* out, const CCDeadline* deadline);
+int cc_chan_recv_async(CCExec* ex, CCChan* ch, void* out_value, size_t value_size, CCChanAsync* out, const CCDeadline* deadline);
+
+// Non-blocking multi-case match helper: tries each case once, returns index of ready case.
+typedef struct {
+    CCChan* ch;
+    const void* send_buf; // for send
+    void* recv_buf;       // for recv
+    size_t elem_size;
+    bool is_send;
+} CCChanMatchCase;
+
+int cc_chan_match_try(CCChanMatchCase* cases, size_t n, size_t* ready_index);
+int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index, const CCDeadline* deadline);
+
+// Blocking select-style match over multiple channels with deadline support.
+// Returns 0 on success (ready_index set), ETIMEDOUT on timeout, EPIPE if a closed channel is encountered with no ready cases.
+int cc_chan_match_select(CCChanMatchCase* cases, size_t n, size_t* ready_index, const CCDeadline* deadline);
+
+// Async select over channels. Submits to executor; sets *ready_index on completion and signals via CCAsyncHandle done channel (err code).
+int cc_chan_match_select_async(CCExec* ex, CCChanMatchCase* cases, size_t n, size_t* ready_index, CCAsyncHandle* h, const CCDeadline* deadline);
+
+// Future-based async select for ergonomic awaiting.
+int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, size_t* ready_index, CCFuture* f, const CCDeadline* deadline);
+
+// Typed-size initialization helper (eagerly sets elem_size and allocates buffer).
+int cc_chan_init_elem(CCChan* ch, size_t elem_size);
+
+// Convenience macros to build match cases.
+#define CC_CHAN_MATCH_SEND_CASE(CH, BUF, TYPE) (CCChanMatchCase){ .ch = (CH), .send_buf = (BUF), .recv_buf = NULL, .elem_size = sizeof(TYPE), .is_send = true }
+#define CC_CHAN_MATCH_RECV_CASE(CH, BUF, TYPE) (CCChanMatchCase){ .ch = (CH), .send_buf = NULL, .recv_buf = (BUF), .elem_size = sizeof(TYPE), .is_send = false }
+
+// Typed wrapper macros: value and pointer variants with bool helpers for spec parity.
+#define CC_DECL_TYPED_CHAN_VAL(T, Name)                                                \
+    typedef struct { CCChan* raw; } Name;                                              \
+    static inline Name Name##_create(size_t cap) { Name c = { cc_chan_create(cap) }; if (c.raw) cc_chan_init_elem(c.raw, sizeof(T)); return c; } \
+    static inline void Name##_close(Name* c) { if (c && c->raw) cc_chan_close(c->raw); } \
+    static inline void Name##_free(Name* c) { if (c && c->raw) cc_chan_free(c->raw); } \
+    static inline int Name##_send(Name* c, T v) { return cc_chan_send(c ? c->raw : NULL, &v, sizeof(T)); } \
+    static inline int Name##_recv(Name* c, T* out_v) { return cc_chan_recv(c ? c->raw : NULL, out_v, sizeof(T)); } \
+    static inline bool Name##_try_send(Name* c, T v) { return cc_chan_try_send(c ? c->raw : NULL, &v, sizeof(T)) == 0; } \
+    static inline bool Name##_try_recv(Name* c, T* out_v) { return cc_chan_try_recv(c ? c->raw : NULL, out_v, sizeof(T)) == 0; }
+
+#define CC_DECL_TYPED_CHAN_PTR(T, Name)                                                \
+    typedef struct { CCChan* raw; } Name;                                              \
+    static inline Name Name##_create(size_t cap) { Name c = { cc_chan_create_mode_take(cap, CC_CHAN_MODE_BLOCK, true) }; if (c.raw) cc_chan_init_elem(c.raw, sizeof(void*)); return c; } \
+    static inline void Name##_close(Name* c) { if (c && c->raw) cc_chan_close(c->raw); } \
+    static inline void Name##_free(Name* c) { if (c && c->raw) cc_chan_free(c->raw); } \
+    static inline int Name##_send(Name* c, T* ptr) { return cc_chan_send_take(c ? c->raw : NULL, ptr); } \
+    static inline int Name##_recv(Name* c, T** out_ptr) { return cc_chan_recv(c ? c->raw : NULL, out_ptr, sizeof(void*)); } \
+    static inline bool Name##_try_send(Name* c, T* ptr) { return cc_chan_try_send_take(c ? c->raw : NULL, ptr) == 0; } \
+    static inline bool Name##_try_recv(Name* c, T** out_ptr) { return cc_chan_try_recv(c ? c->raw : NULL, out_ptr, sizeof(void*)) == 0; }
+
+#endif // CC_CHANNEL_H
+
+

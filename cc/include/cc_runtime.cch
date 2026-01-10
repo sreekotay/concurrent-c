@@ -1,0 +1,20 @@
+#ifndef CC_RUNTIME_H
+#define CC_RUNTIME_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "cc_slice.cch"
+#include "cc_arena.cch"
+#include "cc_io.cch"
+#include "cc_result.cch"
+#include "cc_channel.cch"
+#include "cc_sched.cch"
+#include "cc_nursery.cch"
+
+// Forward declarations for runtime handles.
+typedef struct CCChan CCChan;
+typedef struct CCTask CCTask;
+
+#endif // CC_RUNTIME_H
+

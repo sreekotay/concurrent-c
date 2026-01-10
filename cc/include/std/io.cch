@@ -1,0 +1,343 @@
+/*
+ * Header-only file I/O helpers for Concurrent-C stdlib (phase 1).
+ * C ABI uses prefixed names. Short aliases are opt-in via std/prelude.h.
+ */
+#ifndef CC_STD_IO_H
+#define CC_STD_IO_H
+
+#include <stddef.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+#include <limits.h>
+#include <stdlib.h>
+
+#include "../cc_runtime.cch"
+#include "../cc_io.cch"
+#include "../cc_result.cch"
+#include "../cc_exec.cch"
+#include "async_io.cch"
+#include "string.cch"
+
+typedef struct {
+    FILE *handle;
+} CCFile;
+
+typedef struct {
+    CCSlice data;       // allocated in arena
+    size_t bytes_read;  // number of bytes read into data
+    int eof;            // non-zero if EOF reached
+} CCFileReadResult;
+
+typedef struct {
+    CCFile *file;
+    char *buf;
+    size_t cap;
+    size_t len;
+    size_t pos;
+    int eof;
+} CCBufReader;
+
+typedef struct {
+    CCFile *file;
+    char *buf;
+    size_t cap;
+    size_t len;
+} CCBufWriter;
+
+// Result types used by this header.
+CC_DECL_RESULT(CCResultSliceIoError, CCSlice, CCIoError)
+CC_DECL_RESULT(CCResultSizeIoError, size_t, CCIoError)
+CC_DECL_RESULT(CCResultFileReadIoError, CCFileReadResult, CCIoError)
+
+// Open a file (mode like "r", "w", "a"). Returns 0 on success.
+int cc_file_open(CCFile *file, const char *path, const char *mode);
+#ifdef CC_ENABLE_ASYNC
+int cc_file_open_async(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h);
+int cc_file_open_async_deadline(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h, const CCDeadline* deadline);
+#endif
+
+// Close file (ignores errors).
+void cc_file_close(CCFile *file);
+#ifdef CC_ENABLE_ASYNC
+int cc_file_close_async(CCExec* ex, CCFile *file, CCAsyncHandle* h);
+int cc_file_close_async_deadline(CCExec* ex, CCFile *file, CCAsyncHandle* h, const CCDeadline* deadline);
+#endif
+
+// Read entire file into arena; returns slice view. On error, is_err is set.
+CCResultSliceIoError cc_file_read_all(CCFile *file, CCArena *arena);
+#ifdef CC_ENABLE_ASYNC
+int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h);
+int cc_file_read_all_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
+#endif
+
+// Read up to n bytes; eof is signaled via result.eof when 0 bytes read.
+static inline CCResultFileReadIoError cc_file_read(CCFile *file, CCArena *arena, size_t n) {
+    CCFileReadResult r = {0};
+    if (!file || !file->handle || !arena || n == 0) {
+        return cc_err_CCResultFileReadIoError(cc_io_from_errno(EINVAL));
+    }
+    char *buf = (char *)cc_arena_alloc(arena, n, sizeof(char));
+    if (!buf) {
+        return cc_err_CCResultFileReadIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+    }
+    size_t got = fread(buf, 1, n, file->handle);
+    if (got == 0) {
+        if (feof(file->handle)) { r.eof = 1; return cc_ok_CCResultFileReadIoError(r); }
+        if (ferror(file->handle)) return cc_err_CCResultFileReadIoError(cc_io_from_errno(errno));
+    }
+    r.data = cc_slice_from_parts(buf, got, CC_SLICE_ID_NONE, n);
+    r.bytes_read = got;
+    r.eof = feof(file->handle) ? 1 : 0;
+    return cc_ok_CCResultFileReadIoError(r);
+}
+
+#ifdef CC_ENABLE_ASYNC
+int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h);
+int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* deadline);
+#endif
+
+// Read one line (includes delimiter). EOF with no data -> eof=1 and empty slice.
+static inline CCResultFileReadIoError cc_file_read_line(CCFile *file, CCArena *arena) {
+    CCFileReadResult r = {0};
+    if (!file || !file->handle || !arena) {
+        return cc_err_CCResultFileReadIoError(cc_io_from_errno(EINVAL));
+    }
+    CCString line = cc_string_new(arena, 128);
+    if (!line.ptr) return cc_err_CCResultFileReadIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+    int c;
+    while ((c = fgetc(file->handle)) != EOF) {
+        cc_string_append_char(arena, &line, (char)c);
+        if (c == '\n') break;
+    }
+    if (line.len == 0 && c == EOF) {
+        r.eof = 1; return cc_ok_CCResultFileReadIoError(r);
+    }
+    r.data = cc_string_as_slice(&line);
+    r.bytes_read = line.len;
+    r.eof = feof(file->handle) ? 1 : 0;
+    return cc_ok_CCResultFileReadIoError(r);
+}
+
+#ifdef CC_ENABLE_ASYNC
+int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h);
+int cc_file_read_line_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* deadline);
+#endif
+
+// Write all bytes; returns number of bytes written or IoError.
+CCResultSizeIoError cc_file_write(CCFile *file, CCSlice data);
+#ifdef CC_ENABLE_ASYNC
+int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h);
+int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* deadline);
+#endif
+
+static inline CCResultSizeIoError cc_file_sync(CCFile *file) {
+    if (!file || !file->handle) return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+    if (fflush(file->handle) != 0) return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+    return cc_ok_CCResultSizeIoError(0);
+}
+
+static inline CCResultSizeIoError cc_file_seek(CCFile *file, long offset, int whence) {
+    if (!file || !file->handle) return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+    if (fseek(file->handle, offset, whence) != 0) return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+    return cc_ok_CCResultSizeIoError(0);
+}
+
+static inline CCResultSizeIoError cc_file_tell(CCFile *file) {
+    if (!file || !file->handle) return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+    long pos = ftell(file->handle);
+    if (pos < 0) return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+    return cc_ok_CCResultSizeIoError((size_t)pos);
+}
+
+// Stdout/Stderr convenience
+CCResultSizeIoError cc_std_out_write(CCSlice data);
+CCResultSizeIoError cc_std_err_write(CCSlice data);
+static inline CCResultSizeIoError cc_std_out_write_string(const CCString* s) {
+    return cc_std_out_write(cc_string_as_slice(s));
+}
+static inline CCResultSizeIoError cc_std_err_write_string(const CCString* s) {
+    return cc_std_err_write(cc_string_as_slice(s));
+}
+
+// Short-name UFCS helpers when CC_ENABLE_SHORT_NAMES is defined.
+#ifdef CC_ENABLE_SHORT_NAMES
+static inline CCResultSizeIoError std_out_write(CCSlice data) { return cc_std_out_write(data); }
+static inline CCResultSizeIoError std_out_write_string(const CCString* s) { return cc_std_out_write(cc_string_as_slice(s)); }
+static inline CCResultSizeIoError std_err_write(CCSlice data) { return cc_std_err_write(data); }
+static inline CCResultSizeIoError std_err_write_string(const CCString* s) { return cc_std_err_write(cc_string_as_slice(s)); }
+#endif
+
+// ------------------------- Path helpers ------------------------------------
+
+// Return path separator for this platform (POSIX '/'; adjust for Windows if needed).
+static inline char cc_path_sep(void) { return '/'; }
+
+static inline bool cc_path_is_abs(CCSlice path) {
+    if (!path.ptr || path.len == 0) return false;
+    const char *p = (const char *)path.ptr;
+    return p[0] == '/';
+}
+
+// Join two path segments with separator if needed. Allocates in arena.
+static inline CCSlice cc_path_join(CCArena *arena, CCSlice a, CCSlice b) {
+    if (!arena) return cc_slice_empty();
+    size_t need_sep = (a.len > 0 && ((char*)a.ptr)[a.len - 1] != cc_path_sep()) ? 1 : 0;
+    size_t total = a.len + need_sep + b.len;
+    char *buf = (char *)cc_arena_alloc(arena, total + 1, sizeof(char));
+    if (!buf) return cc_slice_empty();
+    size_t off = 0;
+    if (a.len) { memcpy(buf + off, a.ptr, a.len); off += a.len; }
+    if (need_sep) { buf[off++] = cc_path_sep(); }
+    if (b.len) { memcpy(buf + off, b.ptr, b.len); off += b.len; }
+    buf[off] = '\0';
+    return cc_slice_from_parts(buf, off, CC_SLICE_ID_NONE, off + 1);
+}
+
+// Dirname: returns parent directory (or "." if none). Allocates in arena.
+static inline CCSlice cc_path_dirname(CCArena *arena, CCSlice path) {
+    if (!arena || !path.ptr || path.len == 0) return cc_slice_from_buffer(".", 1);
+    const char *p = (const char *)path.ptr;
+    size_t len = path.len;
+    while (len > 0 && p[len - 1] == cc_path_sep()) len--;
+    if (len == 0) return cc_slice_from_buffer("/", 1);
+    size_t i = len;
+    while (i > 0 && p[i - 1] != cc_path_sep()) i--;
+    if (i == 0) return cc_slice_from_buffer(".", 1);
+    while (i > 1 && p[i - 1] == cc_path_sep()) i--;
+    char *buf = (char *)cc_arena_alloc(arena, i + 1, sizeof(char));
+    if (!buf) return cc_slice_empty();
+    memcpy(buf, p, i);
+    buf[i] = '\0';
+    return cc_slice_from_parts(buf, i, CC_SLICE_ID_NONE, i + 1);
+}
+
+// Basename: returns last path component (empty if path ends with separator). Allocates in arena.
+static inline CCSlice cc_path_basename(CCArena *arena, CCSlice path) {
+    if (!arena || !path.ptr || path.len == 0) return cc_slice_empty();
+    const char *p = (const char *)path.ptr;
+    size_t len = path.len;
+    while (len > 0 && p[len - 1] == cc_path_sep()) len--;
+    size_t end = len;
+    size_t start = 0;
+    for (size_t i = len; i > 0; --i) {
+        if (p[i - 1] == cc_path_sep()) { start = i; break; }
+    }
+    size_t out_len = (end > start) ? (end - start) : 0;
+    char *buf = (char *)cc_arena_alloc(arena, out_len + 1, sizeof(char));
+    if (!buf) return cc_slice_empty();
+    if (out_len) memcpy(buf, p + start, out_len);
+    buf[out_len] = '\0';
+    return cc_slice_from_parts(buf, out_len, CC_SLICE_ID_NONE, out_len + 1);
+}
+
+// ------------------------- Buffered reader/writer --------------------------
+
+static inline int cc_buf_reader_init(CCBufReader *r, CCFile *f, CCArena *arena, size_t cap) {
+    if (!r || !f || !arena || cap == 0) return -1;
+    memset(r, 0, sizeof(*r));
+    r->file = f;
+    r->buf = (char *)cc_arena_alloc(arena, cap, sizeof(char));
+    if (!r->buf) return -1;
+    r->cap = cap;
+    r->len = 0;
+    r->pos = 0;
+    r->eof = 0;
+    return 0;
+}
+
+static inline CCResultFileReadIoError cc_buf_reader_next(CCBufReader *r, size_t n) {
+    CCFileReadResult res = {0};
+    if (!r || !r->file || !r->file->handle || n == 0) return cc_err_CCResultFileReadIoError(cc_io_from_errno(EINVAL));
+    if (r->eof) { res.eof = 1; return cc_ok_CCResultFileReadIoError(res); }
+    if (n > r->cap) n = r->cap;
+    size_t got = fread(r->buf, 1, n, r->file->handle);
+    if (got == 0) {
+        if (feof(r->file->handle)) { r->eof = 1; res.eof = 1; return cc_ok_CCResultFileReadIoError(res); }
+        if (ferror(r->file->handle)) return cc_err_CCResultFileReadIoError(cc_io_from_errno(errno));
+    }
+    r->pos = 0;
+    r->len = got;
+    res.data = cc_slice_from_parts(r->buf, got, CC_SLICE_ID_NONE, r->cap);
+    res.bytes_read = got;
+    res.eof = feof(r->file->handle) ? 1 : 0;
+    if (res.eof) r->eof = 1;
+    return cc_ok_CCResultFileReadIoError(res);
+}
+
+static inline CCResultFileReadIoError cc_buf_reader_read_line(CCBufReader *r, CCArena *arena) {
+    CCFileReadResult res = {0};
+    if (!r || !r->file || !r->file->handle || !arena) return cc_err_CCResultFileReadIoError(cc_io_from_errno(EINVAL));
+    CCString line = cc_string_new(arena, 128);
+    if (!line.ptr) return cc_err_CCResultFileReadIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+    while (1) {
+        if (r->pos >= r->len) {
+            CCResultFileReadIoError fill = cc_buf_reader_next(r, r->cap);
+            if (fill.is_err) return fill;
+            if (fill.ok.eof && fill.ok.bytes_read == 0) { res.eof = 1; return cc_ok_CCResultFileReadIoError(res); }
+        }
+        if (r->pos >= r->len) break;
+        char c = r->buf[r->pos++];
+        cc_string_append_char(arena, &line, c);
+        if (c == '\n') break;
+    }
+    res.data = cc_string_as_slice(&line);
+    res.bytes_read = line.len;
+    res.eof = r->eof;
+    return cc_ok_CCResultFileReadIoError(res);
+}
+
+static inline int cc_buf_writer_init(CCBufWriter *w, CCFile *f, CCArena *arena, size_t cap) {
+    if (!w || !f || !arena || cap == 0) return -1;
+    memset(w, 0, sizeof(*w));
+    w->file = f;
+    w->buf = (char *)cc_arena_alloc(arena, cap, sizeof(char));
+    if (!w->buf) return -1;
+    w->cap = cap;
+    w->len = 0;
+    return 0;
+}
+
+static inline CCResultSizeIoError cc_buf_writer_flush(CCBufWriter *w) {
+    if (!w || !w->file || !w->file->handle) return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+    size_t written = fwrite(w->buf, 1, w->len, w->file->handle);
+    if (written != w->len) {
+        if (ferror(w->file->handle)) return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+    }
+    w->len = 0;
+    return cc_ok_CCResultSizeIoError(written);
+}
+
+static inline CCResultSizeIoError cc_buf_writer_write(CCBufWriter *w, CCSlice data) {
+    if (!w || !w->buf || !w->file || !w->file->handle) return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+    size_t off = 0;
+    while (off < data.len) {
+        size_t space = w->cap - w->len;
+        if (space == 0) {
+            CCResultSizeIoError fl = cc_buf_writer_flush(w);
+            if (fl.is_err) return fl;
+            space = w->cap;
+        }
+        size_t chunk = data.len - off;
+        if (chunk > space) chunk = space;
+        memcpy(w->buf + w->len, (char*)data.ptr + off, chunk);
+        w->len += chunk;
+        off += chunk;
+    }
+    return cc_ok_CCResultSizeIoError(data.len);
+}
+
+#endif // CC_STD_IO_H

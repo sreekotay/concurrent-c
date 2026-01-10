@@ -1,6 +1,6 @@
-### Zig build system inspiration for `cc build`
+### Zig build system inspiration for `ccc build`
 
-This note captures the **useful patterns from Zig’s `zig build` / `build.zig`** that we can mirror in Concurrent‑C’s `cc build`, while keeping outputs **plain C** and staying friendly to external build systems.
+This note captures the **useful patterns from Zig’s `zig build` / `build.zig`** that we can mirror in Concurrent‑C’s `ccc build`, while keeping outputs **plain C** and staying friendly to external build systems.
 
 ---
 
@@ -38,35 +38,35 @@ We can mirror the above *without* embedding Zig or changing the “emit C” con
 
 - **`build.cc` defines a build graph**
   - CC’s `build.cc` becomes the equivalent of Zig’s `build.zig`: it defines **targets/artifacts and steps**.
-  - `cc build <step>` runs a named step, with a default step (e.g. `default` or `install`).
+  - `ccc build <step>` runs a named step, with a default step (e.g. `default` or `install`).
 
 - **`-D` options become first-class build settings**
   - Keep using `-DNAME[=VALUE]`, but standardize a few “global” options:
     - `-Dtarget=<triple>` (or `--target`, but Zig’s pattern suggests `-Dtarget` integrates naturally with build scripts)
     - `-Doptimize=Debug|ReleaseSafe|ReleaseFast|ReleaseSmall`
     - `-Dout_dir=...` (optional, but useful early)
-  - `cc build --help` should list project-specific options declared by `build.cc`.
+  - `ccc build --help` should list project-specific options declared by `build.cc`.
 
 - **Install/Run/Test are steps, not ad-hoc flags**
-  - `cc build` produces artifacts in `out/` (our current convention), but step names provide workflows:
-    - `cc build` (default step)
-    - `cc build run`
-    - `cc build test`
+  - `ccc build` produces artifacts in `out/` (our current convention), but step names provide workflows:
+    - `ccc build` (default step)
+    - `ccc build run`
+    - `ccc build test`
 
 - **Cache as a first-class design constraint**
   - We should add a simple, inspectable cache key scheme early (even if it’s just “skip if output newer than inputs” initially).
   - Longer-term: a content-hash cache keyed by:
-    - input `.cc` contents
+    - input `.ccs` contents
     - `build.cc` contents + declared options
-    - `cc` version + TCC patch version (or git hash)
+    - `ccc` version + TCC patch version (or git hash)
     - toolchain selection (`$CC`, flags, target/sysroot)
 
 ---
 
 ### Concrete next implementation steps (incremental)
 
-1) **Add “named steps” to `cc build`**
-   - Minimal: `cc build run <input.cc>` behaves like `cc build --link ...` then runs the produced binary.
+1) **Add “named steps” to `ccc build`**
+   - Minimal: `ccc build run <input.ccs>` behaves like `ccc build --link ...` then runs the produced binary.
    - Keep current flags; steps are just shortcuts with consistent semantics.
 
 2) **Expose standard build options as `-D`**

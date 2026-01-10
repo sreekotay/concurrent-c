@@ -1,0 +1,22 @@
+#define CC_ENABLE_SHORT_NAMES
+#include <std/prelude.cch>
+
+// UFCS smoke: validate compiler-side overload selection for std_out.write:
+// - std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer(...))
+// - std_out.write(s) -> cc_std_out_write_string(&s)
+int main(void) {
+    @arena {
+        String s = string_new(arena);
+
+        // Multi-line UFCS call (args across lines)
+        s.append(
+            "multi-line\n"
+        );
+
+        std_out.write("literal\n");
+        std_out.write(s);
+    }
+    return 0;
+}
+
+

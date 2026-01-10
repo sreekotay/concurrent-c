@@ -172,7 +172,7 @@ static int run_one_test(const char* stem,
     char build_err_txt[512];
     char out_txt[512];
     char err_txt[512];
-    snprintf(bin_out, sizeof(bin_out), "out/bin/%s", stem);
+    snprintf(bin_out, sizeof(bin_out), "bin/%s", stem);
     snprintf(build_err_txt, sizeof(build_err_txt), "out/%s.build.stderr", stem);
     snprintf(out_txt, sizeof(out_txt), "out/%s.stdout", stem);
     snprintf(err_txt, sizeof(err_txt), "out/%s.stderr", stem);
@@ -201,15 +201,15 @@ static int run_one_test(const char* stem,
         trim_trailing_ws_inplace(ldflags_clean);
     }
 
-    /* 1) Build via cc build (this is the build system under test) */
+    /* 1) Build via ccc build (this is the build system under test) */
     char build_cmd[3072];
     if (ldflags_clean[0]) {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/cc build --link %s -o %s --ld-flags \"%s\"",
+                 "./cc/bin/ccc build --link %s -o %s --ld-flags \"%s\"",
                  input_path, bin_out, ldflags_clean);
     } else {
         snprintf(build_cmd, sizeof(build_cmd),
-                 "./cc/bin/cc build --link %s -o %s",
+                 "./cc/bin/ccc build --link %s -o %s",
                  input_path, bin_out);
     }
 
@@ -279,12 +279,8 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (!file_exists("./cc/bin/cc")) {
-        fprintf(stderr, "cc_test: missing ./cc/bin/cc (build the compiler first)\n");
-        return 2;
-    }
-    if (!file_exists("cc/runtime/concurrent_c.o")) {
-        fprintf(stderr, "cc_test: missing cc/runtime/concurrent_c.o (run `make -C cc` first)\n");
+    if (!file_exists("./cc/bin/ccc")) {
+        fprintf(stderr, "cc_test: missing ./cc/bin/ccc (build the compiler first)\n");
         return 2;
     }
 
@@ -302,7 +298,7 @@ int main(int argc, char** argv) {
     while ((ent = readdir(d)) != NULL) {
         const char* name = ent->d_name;
         if (!name || name[0] == '.') continue;
-        if (!(ends_with(name, ".c") || ends_with(name, ".cc"))) continue;
+        if (!(ends_with(name, ".c") || ends_with(name, ".ccs"))) continue;
         char stem[256];
         basename_no_ext(name, stem, sizeof(stem));
         if (!stem[0]) continue;
@@ -328,7 +324,7 @@ int main(int argc, char** argv) {
         char ce[512];
         snprintf(ce, sizeof(ce), "tests/%s.compile_err", stem);
         if (file_exists(ce)) compile_fail = 1;
-        else if (ends_with(name, "_fail.cc")) compile_fail = 1;
+        else if (ends_with(name, "_fail.ccs")) compile_fail = 1;
 
         ran++;
         if (run_one_test(stem, path, compile_fail, verbose) != 0)

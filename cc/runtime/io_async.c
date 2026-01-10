@@ -1,9 +1,9 @@
-#include "cc_exec.h"
-#include "std/io.h"
-#include "cc_sched.h"
-#include "std/async_io.h"
-#include "cc_async_runtime.h"
-#include "cc_async_backend.h"
+#include "cc_exec.cch"
+#include "std/io.cch"
+#include "cc_sched.cch"
+#include "std/async_io.cch"
+#include "cc_async_runtime.cch"
+#include "cc_async_backend.cch"
 
 #include <stdlib.h>
 #include <errno.h>

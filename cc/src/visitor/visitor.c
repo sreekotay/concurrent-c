@@ -722,7 +722,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     } else {
         // Fallback stub when input is unavailable.
         fprintf(out,
-                "#include \"std/prelude.h\"\n"
+                "#include \"std/prelude.cch\"\n"
                 "int main(void) {\n"
                 "  CCArena a = cc_heap_arena(kilobytes(1));\n"
                 "  CCString s = cc_string_new(&a, 0);\n"

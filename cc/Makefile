@@ -43,27 +43,40 @@ endif
 SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJDIR ?= ../out/cc/obj
+OUT_BINDIR ?= ../out/cc/bin
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
-BINARY := bin/cc
+REAL_BINARY := $(OUT_BINDIR)/ccc
+WRAPPER := bin/ccc
 
-all: $(BINARY)
+all: $(WRAPPER)
 
 .PHONY: test-build-stub
-test-build-stub: $(BINARY)
+test-build-stub: $(WRAPPER)
 	@echo "Running build stub test..."
 	@sh ../examples/build_stub/test-build-stub.sh
 
-$(BINARY): $(OBJS)
+$(REAL_BINARY): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
+
+$(WRAPPER): $(REAL_BINARY)
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '#!/bin/sh' > $@
+	@printf '%s\n' 'set -e' >> $@
+	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
+	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/ccc" "$$@"' >> $@
+	@chmod +x $@
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(WRAPPER) $(REAL_BINARY)
 	rm -rf $(OBJDIR)
+	# Clean legacy in-tree objects from earlier layouts.
+	@rm -f $(SRCS:.c=.o)
+	@rm -f bin/cc ../out/cc/bin/cc
 
 .PHONY: all clean
 

@@ -8,12 +8,13 @@
  * Match helpers for polling/selecting across channels.
  */
 
-#include "cc_channel.h"
-#include "cc_sched.h"
-#include "cc_nursery.h"
-#include "cc_exec.h"
-#include "std/async_io.h"
-#include "std/future.h"
+#include "cc_channel.cch"
+#include "cc_sched.cch"
+#include "cc_nursery.cch"
+#include "cc_exec.cch"
+#include "cc_slice.cch"
+#include "std/async_io.cch"
+#include "std/future.cch"
 
 #include <errno.h>
 #include <pthread.h>
@@ -273,6 +274,47 @@ int cc_chan_deadline_send_take(CCChan* ch, void* ptr, const CCDeadline* deadline
     return cc_chan_timed_send_take(ch, ptr, p);
 }
 
+static int cc_chan_check_slice_take(const CCSlice* slice) {
+    if (!slice) return EINVAL;
+    if (!cc_slice_is_unique(*slice)) return EINVAL;
+    if (!cc_slice_is_transferable(*slice)) return EINVAL;
+    if (cc_slice_is_subslice(*slice)) return EINVAL;
+    return 0;
+}
+
+int cc_chan_send_take_slice(CCChan* ch, const CCSlice* slice) {
+    if (!ch) return EINVAL;
+    if (!ch->allow_take) return EINVAL;
+    int elig = cc_chan_check_slice_take(slice);
+    if (elig != 0) return elig;
+    if (ch->elem_size && ch->elem_size != sizeof(CCSlice)) return EINVAL;
+    return cc_chan_send(ch, slice, sizeof(CCSlice));
+}
+
+int cc_chan_try_send_take_slice(CCChan* ch, const CCSlice* slice) {
+    if (!ch) return EINVAL;
+    if (!ch->allow_take) return EINVAL;
+    int elig = cc_chan_check_slice_take(slice);
+    if (elig != 0) return elig;
+    if (ch->elem_size && ch->elem_size != sizeof(CCSlice)) return EINVAL;
+    return cc_chan_try_send(ch, slice, sizeof(CCSlice));
+}
+
+int cc_chan_timed_send_take_slice(CCChan* ch, const CCSlice* slice, const struct timespec* abs_deadline) {
+    if (!ch) return EINVAL;
+    if (!ch->allow_take) return EINVAL;
+    int elig = cc_chan_check_slice_take(slice);
+    if (elig != 0) return elig;
+    if (ch->elem_size && ch->elem_size != sizeof(CCSlice)) return EINVAL;
+    return cc_chan_timed_send(ch, slice, sizeof(CCSlice), abs_deadline);
+}
+
+int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSlice* slice, const CCDeadline* deadline) {
+    struct timespec ts;
+    const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
+    return cc_chan_timed_send_take_slice(ch, slice, p);
+}
+
 int cc_chan_nursery_send(CCChan* ch, CCNursery* n, const void* value, size_t value_size) {
     CCDeadline d = cc_nursery_as_deadline(n);
     return cc_chan_deadline_send(ch, value, value_size, &d);
@@ -286,6 +328,11 @@ int cc_chan_nursery_recv(CCChan* ch, CCNursery* n, void* out_value, size_t value
 int cc_chan_nursery_send_take(CCChan* ch, CCNursery* n, void* ptr) {
     CCDeadline d = cc_nursery_as_deadline(n);
     return cc_chan_deadline_send_take(ch, ptr, &d);
+}
+
+int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSlice* slice) {
+    CCDeadline d = cc_nursery_as_deadline(n);
+    return cc_chan_deadline_send_take_slice(ch, slice, &d);
 }
 
 // Async channel operations via executor

@@ -1,6 +1,6 @@
-#include "cc_async_runtime.h"
-#include "cc_async_backend.h"
-#include "cc_async_backend_poll.h"
+#include "cc_async_runtime.cch"
+#include "cc_async_backend.cch"
+#include "cc_async_backend_poll.cch"
 
 #include <stdlib.h>
 #include <string.h>

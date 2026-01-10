@@ -1,9 +1,9 @@
-#include "cc_async_backend_poll.h"
-#include "cc_async_backend.h"
-#include "cc_async_runtime.h"
-#include "std/io.h"
-#include "std/async_io.h"
-#include "cc_sched.h"
+#include "cc_async_backend_poll.cch"
+#include "cc_async_backend.cch"
+#include "cc_async_runtime.cch"
+#include "std/io.cch"
+#include "std/async_io.cch"
+#include "cc_sched.cch"
 
 #include <unistd.h>
 #include <fcntl.h>

@@ -20,21 +20,21 @@ lint:
 
 # Build and run the UFCS hello example through our compiler.
 example: cc
-	@$(CC_DIR)/bin/cc build run --out-dir out examples/hello.cc
+	@$(CC_DIR)/bin/ccc build run --out-dir out examples/hello.ccs
 
 example-c:
 	@mkdir -p out
 	@cc examples/hello_c.c -o out/hello_c && ./out/hello_c
 
 smoke: cc
-	@$(CC_DIR)/bin/cc build test --out-dir out
+	@$(CC_DIR)/bin/ccc build test --out-dir out
 
 # Build tools (host C).
 tools:
 	@mkdir -p tools
 	@cc -O2 -Wall -Wextra tools/cc_test.c -o tools/cc_test
 
-# Prefer using cc itself for tests (the runner drives ./cc/bin/cc).
+# Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
 test: cc tools
 	@./tools/cc_test
 

@@ -1,0 +1,8 @@
+// Simple fixture to exercise ccc build stub flow.
+// The compiler currently copies input->output; the real check is via
+// `ccc build --dump-consts` to observe merged comptime consts.
+
+int main() {
+    return 0;
+}
+

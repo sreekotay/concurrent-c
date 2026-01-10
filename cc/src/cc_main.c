@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -15,7 +16,7 @@
 static int file_exists(const char* path);
 static int ensure_out_dir(void);
 
-// Resolved repo-relative paths so `./cc/bin/cc build ...` works from the repo root.
+// Resolved repo-relative paths so `./cc/bin/ccc build ...` works from the repo root.
 static int g_paths_inited = 0;
 static char g_repo_root[PATH_MAX];
 static char g_cc_dir[PATH_MAX];
@@ -23,9 +24,8 @@ static char g_cc_include[PATH_MAX];
 static char g_cc_runtime_o[PATH_MAX];
 static char g_cc_runtime_c[PATH_MAX];
 static char g_out_root[PATH_MAX];
-static char g_out_c[PATH_MAX];
-static char g_out_obj[PATH_MAX];
-static char g_out_bin[PATH_MAX];
+static char g_bin_root[PATH_MAX];
+static char g_cache_root[PATH_MAX];
 
 static void cc__dirname_inplace(char* path) {
     if (!path) return;
@@ -53,6 +53,13 @@ static void cc__dirname_inplace(char* path) {
 static int cc__is_abs_path(const char* p) {
     if (!p || !p[0]) return 0;
     return p[0] == '/';
+}
+
+static int cc__ends_with(const char* s, const char* suf) {
+    if (!s || !suf) return 0;
+    size_t n = strlen(s), m = strlen(suf);
+    if (m > n) return 0;
+    return memcmp(s + (n - m), suf, m) == 0;
 }
 
 static int cc__mkdir_one(const char* path) {
@@ -90,7 +97,77 @@ static int cc__mkdir_p(const char* path) {
     return 0;
 }
 
-static void cc_set_out_dir(const char* out_dir_opt) {
+typedef struct {
+    long long mtime_sec;
+    long long size;
+} CCFileSig;
+
+static int cc__stat_sig(const char* path, CCFileSig* out) {
+    if (!out) return -1;
+    out->mtime_sec = 0;
+    out->size = 0;
+    if (!path || !path[0]) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    out->mtime_sec = (long long)st.st_mtime;
+    out->size = (long long)st.st_size;
+    return 0;
+}
+
+static uint64_t cc__fnv1a64_update(uint64_t h, const void* data, size_t n) {
+    const unsigned char* p = (const unsigned char*)data;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= (uint64_t)p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t cc__fnv1a64_str(uint64_t h, const char* s) {
+    if (!s) s = "";
+    return cc__fnv1a64_update(h, s, strlen(s));
+}
+
+static uint64_t cc__fnv1a64_i64(uint64_t h, long long v) {
+    return cc__fnv1a64_update(h, &v, sizeof(v));
+}
+
+static int cc__read_u64_file(const char* path, uint64_t* out) {
+    if (!out) return -1;
+    *out = 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    unsigned long long v = 0;
+    int ok = fscanf(f, "%llu", &v);
+    fclose(f);
+    if (ok != 1) return -1;
+    *out = (uint64_t)v;
+    return 0;
+}
+
+static int cc__write_u64_file(const char* path, uint64_t v) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    fprintf(f, "%llu\n", (unsigned long long)v);
+    fclose(f);
+    return 0;
+}
+
+static int cc__cache_disabled(int opt_no_cache) {
+    if (opt_no_cache) return 1;
+    const char* env = getenv("CC_NO_CACHE");
+    return (env && env[0] == '1');
+}
+
+static void cc__cache_key_paths(char* out_meta, size_t meta_cap,
+                                char* out_link, size_t link_cap,
+                                const char* stem) {
+    if (!stem) stem = "unknown";
+    if (out_meta && meta_cap) snprintf(out_meta, meta_cap, "%s/%s.meta", g_cache_root, stem);
+    if (out_link && link_cap) snprintf(out_link, link_cap, "%s/%s.link", g_cache_root, stem);
+}
+
+static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
     const char* env = getenv("CC_OUT_DIR");
     const char* p = out_dir_opt && out_dir_opt[0] ? out_dir_opt : (env && env[0] ? env : NULL);
 
@@ -104,9 +181,19 @@ static void cc_set_out_dir(const char* out_dir_opt) {
         snprintf(g_out_root, sizeof(g_out_root), "%s/%s", g_repo_root, p);
     }
 
-    snprintf(g_out_c, sizeof(g_out_c), "%s/c", g_out_root);
-    snprintf(g_out_obj, sizeof(g_out_obj), "%s/obj", g_out_root);
-    snprintf(g_out_bin, sizeof(g_out_bin), "%s/bin", g_out_root);
+    const char* benv = getenv("CC_BIN_DIR");
+    const char* bp = bin_dir_opt && bin_dir_opt[0] ? bin_dir_opt : (benv && benv[0] ? benv : NULL);
+    if (!bp) {
+        snprintf(g_bin_root, sizeof(g_bin_root), "%s/bin", g_repo_root);
+    } else if (cc__is_abs_path(bp)) {
+        strncpy(g_bin_root, bp, sizeof(g_bin_root));
+        g_bin_root[sizeof(g_bin_root) - 1] = '\0';
+    } else {
+        // Relative bin dir is interpreted relative to repo root.
+        snprintf(g_bin_root, sizeof(g_bin_root), "%s/%s", g_repo_root, bp);
+    }
+
+    snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
 }
 
 static void cc_init_paths(const char* argv0) {
@@ -116,7 +203,7 @@ static void cc_init_paths(const char* argv0) {
     char exe_abs[PATH_MAX];
     exe_abs[0] = '\0';
     if (argv0 && argv0[0]) {
-        // Best effort: if argv0 is a path (common dev case: ./cc/bin/cc), realpath it.
+        // Best effort: if argv0 is a path (common dev case: ./cc/bin/ccc), realpath it.
         if (realpath(argv0, exe_abs) == NULL) {
             // Fallback: accept argv0 as-is.
             strncpy(exe_abs, argv0, sizeof(exe_abs));
@@ -124,19 +211,45 @@ static void cc_init_paths(const char* argv0) {
         }
     }
 
-    // Derive repo root from .../cc/bin/cc.
+    // Derive repo root from the executable location.
+    // Supported layouts:
+    //  - <repo>/cc/bin/ccc
+    //  - <repo>/out/cc/bin/ccc
     char tmp[PATH_MAX];
     strncpy(tmp, exe_abs[0] ? exe_abs : "", sizeof(tmp));
     tmp[sizeof(tmp) - 1] = '\0';
-    // tmp = .../cc/bin
-    cc__dirname_inplace(tmp);
-    // tmp = .../cc
-    cc__dirname_inplace(tmp);
-    strncpy(g_cc_dir, tmp[0] ? tmp : "", sizeof(g_cc_dir));
-    g_cc_dir[sizeof(g_cc_dir) - 1] = '\0';
 
-    // tmp = repo root
-    cc__dirname_inplace(tmp);
+    const char* suf1 = "/cc/bin/ccc";
+    const char* suf2 = "/out/cc/bin/ccc";
+    // Back-compat for older wrapper names.
+    const char* suf1_old = "/cc/bin/cc";
+    const char* suf2_old = "/out/cc/bin/cc";
+    char* cut = NULL;
+    if (tmp[0]) {
+        char* p2 = strstr(tmp, suf2);
+        if (p2) cut = p2;
+        else {
+            char* p1 = strstr(tmp, suf1);
+            if (p1) cut = p1;
+            else {
+                char* p2o = strstr(tmp, suf2_old);
+                if (p2o) cut = p2o;
+                else {
+                    char* p1o = strstr(tmp, suf1_old);
+                    if (p1o) cut = p1o;
+                }
+            }
+        }
+    }
+    if (cut) {
+        *cut = '\0';
+    } else {
+        // Fallback: old heuristic (dirname thrice).
+        cc__dirname_inplace(tmp); // .../bin
+        cc__dirname_inplace(tmp); // .../cc
+        cc__dirname_inplace(tmp); // repo root
+    }
+
     if (!tmp[0]) {
         // Final fallback: assume current working directory is the repo root.
         if (getcwd(tmp, sizeof(tmp)) == NULL) {
@@ -148,18 +261,19 @@ static void cc_init_paths(const char* argv0) {
     strncpy(g_repo_root, tmp, sizeof(g_repo_root));
     g_repo_root[sizeof(g_repo_root) - 1] = '\0';
 
+    snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/cc", g_repo_root);
     snprintf(g_cc_include, sizeof(g_cc_include), "%s/cc/include", g_repo_root);
     // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
     snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
     snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
-    cc_set_out_dir(NULL);
+    cc_set_out_dir(NULL, NULL);
 }
 
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [options] <input.cc> [output]\n", prog);
-    fprintf(stderr, "  %s build [options] <input.cc> <output>\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.cc> [-o out/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s [options] <input.ccs> [output]\n", prog);
+    fprintf(stderr, "  %s build [options] <input.ccs> <output>\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.ccs> [-o out/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
     fprintf(stderr, "  --compile           Emit C and compile to object (output defaults to out/<stem>.o)\n");
@@ -180,14 +294,16 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --sysroot PATH      Forward sysroot to C compiler\n");
     fprintf(stderr, "  --no-runtime        Do not link runtime (default links bundled runtime)\n");
     fprintf(stderr, "  --keep-c            Do not delete generated C file\n");
-    fprintf(stderr, "  --out-dir DIR       Output directory root (default: <repo>/out; subdirs: c/, obj/, bin/)\n");
+    fprintf(stderr, "  --out-dir DIR       Output dir for generated C + objects (default: <repo>/out)\n");
+    fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
+    fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
 }
 
 static void usage_build(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s build [options] <input.cc> [output]\n", prog);
-    fprintf(stderr, "  %s build run [options] <input.cc> [-o out/bin/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s build [options] <input.ccs> [output]\n", prog);
+    fprintf(stderr, "  %s build run [options] <input.ccs> [-o bin/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Steps:\n");
     fprintf(stderr, "  (default)   Build (emit C, compile, link)\n");
@@ -276,11 +392,10 @@ static const char* choose_build_path(const char* in_path, char* buf, size_t buf_
 }
 
 static int ensure_out_dir(void) {
-    // Ensure root + subdirs exist.
+    // Ensure output roots exist.
     if (cc__mkdir_p(g_out_root) != 0) return -1;
-    if (cc__mkdir_p(g_out_c) != 0) return -1;
-    if (cc__mkdir_p(g_out_obj) != 0) return -1;
-    if (cc__mkdir_p(g_out_bin) != 0) return -1;
+    if (cc__mkdir_p(g_bin_root) != 0) return -1;
+    if (cc__mkdir_p(g_cache_root) != 0) return -1;
     return 0;
 }
 
@@ -294,11 +409,11 @@ static int derive_default_output(const char* in_path, char* out_buf, size_t out_
     if (dot && dot != base) {
         stem_len = (size_t)(dot - base);
     }
-    size_t dir_len = strlen(g_out_c);
+    size_t dir_len = strlen(g_out_root);
     if (dir_len + 1 + stem_len + 2 > out_buf_size) { // "/" + ".c" + NUL
         return -1;
     }
-    memcpy(out_buf, g_out_c, dir_len);
+    memcpy(out_buf, g_out_root, dir_len);
     out_buf[dir_len] = '/';
     memcpy(out_buf + dir_len + 1, base, stem_len);
     out_buf[dir_len + 1 + stem_len] = '\0';
@@ -316,11 +431,11 @@ static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf
     if (dot && dot != base) {
         stem_len = (size_t)(dot - base);
     }
-    size_t dir_len = strlen(g_out_obj);
+    size_t dir_len = strlen(g_out_root);
     if (dir_len + 1 + stem_len + 3 > out_buf_size) { // "/" + ".o"+NUL
         return -1;
     }
-    memcpy(out_buf, g_out_obj, dir_len);
+    memcpy(out_buf, g_out_root, dir_len);
     out_buf[dir_len] = '/';
     memcpy(out_buf + dir_len + 1, base, stem_len);
     out_buf[dir_len + 1 + stem_len] = '\0';
@@ -338,11 +453,11 @@ static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf
     if (dot && dot != base) {
         stem_len = (size_t)(dot - base);
     }
-    size_t dir_len = strlen(g_out_bin);
+    size_t dir_len = strlen(g_bin_root);
     if (dir_len + 1 + stem_len + 1 > out_buf_size) { // "/" + NUL
         return -1;
     }
-    memcpy(out_buf, g_out_bin, dir_len);
+    memcpy(out_buf, g_bin_root, dir_len);
     out_buf[dir_len] = '/';
     memcpy(out_buf + dir_len + 1, base, stem_len);
     out_buf[dir_len + 1 + stem_len] = '\0';
@@ -475,6 +590,8 @@ typedef struct {
     int dry_run;
     int summary;
     const char* out_dir;
+    const char* bin_dir;
+    int no_cache;
     char** cli_names;
     long long* cli_values;
     size_t cli_count;
@@ -489,7 +606,107 @@ typedef struct {
     int did_link;
     int runtime_reused;
     const char* runtime_obj_path;
+    int reuse_emit_c;
+    int reuse_compile_obj;
+    int reuse_link;
 } CCBuildSummary;
+
+static void cc__stem_from_path(const char* path, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!path) return;
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    const char* dot = strrchr(base, '.');
+    size_t n = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+    if (n + 1 > cap) n = cap - 1;
+    memcpy(out, base, n);
+    out[n] = '\0';
+}
+
+static int cc__unique_stem(const char* desired,
+                           char used[][128],
+                           size_t* used_count,
+                           size_t used_cap,
+                           char* out,
+                           size_t out_cap) {
+    if (!desired || !used_count || !out || out_cap == 0) return -1;
+    // First try desired.
+    int taken = 0;
+    for (size_t i = 0; i < *used_count; ++i) {
+        if (strcmp(used[i], desired) == 0) { taken = 1; break; }
+    }
+    if (!taken) {
+        strncpy(out, desired, out_cap);
+        out[out_cap - 1] = '\0';
+        if (*used_count < used_cap) {
+            strncpy(used[*used_count], out, sizeof(used[*used_count]));
+            used[*used_count][sizeof(used[*used_count]) - 1] = '\0';
+            (*used_count)++;
+        }
+        return 0;
+    }
+    // Otherwise append _N.
+    for (int n = 2; n < 10000; ++n) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s_%d", desired, n);
+        taken = 0;
+        for (size_t i = 0; i < *used_count; ++i) {
+            if (strcmp(used[i], buf) == 0) { taken = 1; break; }
+        }
+        if (!taken) {
+            strncpy(out, buf, out_cap);
+            out[out_cap - 1] = '\0';
+            if (*used_count < used_cap) {
+                strncpy(used[*used_count], out, sizeof(used[*used_count]));
+                used[*used_count][sizeof(used[*used_count]) - 1] = '\0';
+                (*used_count)++;
+            }
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int cc__derive_c_path_from_stem(const char* stem, char* out, size_t cap) {
+    if (!stem || !stem[0] || !out || cap == 0) return -1;
+    snprintf(out, cap, "%s/%s.c", g_out_root, stem);
+    return 0;
+}
+
+static int cc__derive_o_path_from_stem(const char* stem, char* out, size_t cap) {
+    if (!stem || !stem[0] || !out || cap == 0) return -1;
+    snprintf(out, cap, "%s/%s.o", g_out_root, stem);
+    return 0;
+}
+
+static void cc__dir_of_path(const char* path, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!path) return;
+    strncpy(out, path, cap);
+    out[cap - 1] = '\0';
+    cc__dirname_inplace(out);
+}
+
+static void cc__join_path(const char* dir, const char* rel, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!rel || !rel[0]) return;
+    if (cc__is_abs_path(rel)) {
+        strncpy(out, rel, cap);
+        out[cap - 1] = '\0';
+        return;
+    }
+    if (!dir || !dir[0]) {
+        strncpy(out, rel, cap);
+        out[cap - 1] = '\0';
+        return;
+    }
+    snprintf(out, cap, "%s/%s", dir, rel);
+}
+
+static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bindings, size_t* count);
 
 // Core compile helper shared by default and build modes.
 static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary_out) {
@@ -506,51 +723,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     const int max_bindings = 128;
     CCConstBinding bindings[max_bindings];
     size_t count = 0;
-
-    char build_buf[512];
-    int multiple = 0;
-    const char* build_path = NULL;
-    if (!opt->no_build) {
-        build_path = opt->build_override ? opt->build_override : choose_build_path(opt->in_path, build_buf, sizeof(build_buf), &multiple);
-        if (multiple) {
-            fprintf(stderr, "cc: multiple build.cc files found (cwd and alongside input)\n");
-            return -1;
-        }
-    }
-
-    if (build_path) {
-        CCBuildTarget target;
-        detect_host_target(&target);
-        CCBuildInputs inputs = {
-            .target = &target,
-            .envp = NULL
-        };
-        int err = cc_build_load_consts(build_path, &inputs, bindings, &count);
-        if (err != 0) {
-            fprintf(stderr, "cc: build.cc load failed (err=%d)\n", err);
-            return err;
-        }
-    }
-
-    // Apply CLI -D defines (override build.cc) with warning on override.
-    for (size_t i = 0; i < opt->cli_count; ++i) {
-        const char* name = opt->cli_names[i];
-        long long value = opt->cli_values[i];
-        int existed = 0;
-        for (size_t j = 0; j < count; ++j) {
-            if (strcmp(bindings[j].name, name) == 0) {
-                existed = 1;
-                break;
-            }
-        }
-        if (upsert_binding(bindings, &count, max_bindings, name, value) != 0) {
-            fprintf(stderr, "cc: too many const bindings (max %d)\n", max_bindings);
-            return -1;
-        }
-        if (existed) {
-            fprintf(stderr, "cc: warning: overriding const %s from build.cc with CLI -D\n", name);
-        }
-    }
+    int load_err = cc__load_const_bindings(opt, bindings, &count);
+    if (load_err != 0) return load_err;
 
     CCCompileConfig cfg = {
         .consts = bindings,
@@ -565,12 +739,60 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         return 0;
     }
 
-    // Emit C
-    int err = cc_compile_with_config(opt->in_path, opt->c_out_path, &cfg);
-    if (err != 0) {
-        return err;
+    // Incremental cache: emit C
+    uint64_t emit_key = 0;
+    int cache_ok = !cc__cache_disabled(opt->no_cache);
+    char stem[128];
+    cc__stem_from_path(opt->in_path, stem, sizeof(stem));
+    char meta_path[PATH_MAX];
+    cc__cache_key_paths(meta_path, sizeof(meta_path), NULL, 0, stem);
+    if (cache_ok) {
+        CCFileSig in_sig, build_sig, cc_sig;
+        (void)cc__stat_sig(opt->in_path, &in_sig);
+        char build_buf[512];
+        int multiple = 0;
+        const char* build_path = opt->build_override ? opt->build_override : choose_build_path(opt->in_path, build_buf, sizeof(build_buf), &multiple);
+        if (multiple) build_path = NULL;
+        if (build_path && cc__stat_sig(build_path, &build_sig) != 0) { build_sig.mtime_sec = 0; build_sig.size = 0; }
+        if (cc__stat_sig(opt->cc_bin_override ? opt->cc_bin_override : "cc", &cc_sig) != 0) { cc_sig.mtime_sec = 0; cc_sig.size = 0; }
+
+        uint64_t h = 1469598103934665603ULL;
+        h = cc__fnv1a64_str(h, opt->in_path);
+        h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
+        h = cc__fnv1a64_i64(h, in_sig.size);
+        h = cc__fnv1a64_str(h, build_path ? build_path : "");
+        h = cc__fnv1a64_i64(h, build_sig.mtime_sec);
+        h = cc__fnv1a64_i64(h, build_sig.size);
+        h = cc__fnv1a64_i64(h, cc_sig.mtime_sec);
+        h = cc__fnv1a64_i64(h, cc_sig.size);
+        h = cc__fnv1a64_str(h, opt->target_flag);
+        h = cc__fnv1a64_str(h, opt->sysroot_flag);
+        h = cc__fnv1a64_str(h, opt->cc_flags);
+        h = cc__fnv1a64_str(h, getenv("CFLAGS"));
+        h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+        h = cc__fnv1a64_i64(h, (long long)opt->no_build);
+        h = cc__fnv1a64_i64(h, (long long)opt->cli_count);
+        for (size_t i = 0; i < opt->cli_count; ++i) {
+            h = cc__fnv1a64_str(h, opt->cli_names[i]);
+            h = cc__fnv1a64_i64(h, opt->cli_values[i]);
+        }
+        emit_key = h;
+
+        uint64_t prev = 0;
+        if (file_exists(opt->c_out_path) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
+            if (summary_out) { summary_out->reuse_emit_c = 1; summary_out->did_emit_c = 0; }
+            // skip emit
+        } else {
+            int err = cc_compile_with_config(opt->in_path, opt->c_out_path, &cfg);
+            if (err != 0) return err;
+            (void)cc__write_u64_file(meta_path, emit_key);
+            if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
+        }
+    } else {
+        int err = cc_compile_with_config(opt->in_path, opt->c_out_path, &cfg);
+        if (err != 0) return err;
+        if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
     }
-    if (summary_out) summary_out->did_emit_c = 1;
     if (opt->mode == CC_MODE_EMIT_C) {
         return 0;
     }
@@ -582,7 +804,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     char cmd[2048];
 
-    // Compile to object
+    // Compile to object (with incremental cache)
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
     char target_part[256];
@@ -595,27 +817,62 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     if (opt->sysroot_flag && *opt->sysroot_flag) {
         snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s", opt->sysroot_flag);
     }
-    char compile_cmd[2048];
-    snprintf(compile_cmd, sizeof(compile_cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
-             cc_bin,
-             ccflags_env ? ccflags_env : "",
-             cppflags_env ? cppflags_env : "",
-             target_part,
-             sysroot_part,
-             g_cc_include,
-             g_cc_dir,
-             g_repo_root,
-             opt->c_out_path,
-             opt->obj_out_path);
-    if (opt->cc_flags && *opt->cc_flags) {
-        // Append extra flags at end
-        strncat(compile_cmd, " ", sizeof(compile_cmd) - strlen(compile_cmd) - 1);
-        strncat(compile_cmd, opt->cc_flags, sizeof(compile_cmd) - strlen(compile_cmd) - 1);
+    char obj_meta_path[PATH_MAX];
+    snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, stem);
+    uint64_t obj_key = 0;
+    if (cache_ok) {
+        uint64_t h = 1469598103934665603ULL;
+        h = cc__fnv1a64_i64(h, (long long)emit_key);
+        h = cc__fnv1a64_str(h, target_part);
+        h = cc__fnv1a64_str(h, sysroot_part);
+        h = cc__fnv1a64_str(h, opt->cc_flags);
+        h = cc__fnv1a64_str(h, getenv("CFLAGS"));
+        h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+        obj_key = h;
+        uint64_t prev = 0;
+        if (file_exists(opt->obj_out_path) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key) {
+            if (summary_out) { summary_out->reuse_compile_obj = 1; summary_out->did_compile_obj = 0; }
+        } else {
+            char compile_cmd[2048];
+            snprintf(compile_cmd, sizeof(compile_cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
+                     cc_bin,
+                     ccflags_env ? ccflags_env : "",
+                     cppflags_env ? cppflags_env : "",
+                     target_part,
+                     sysroot_part,
+                     g_cc_include,
+                     g_cc_dir,
+                     g_repo_root,
+                     opt->c_out_path,
+                     opt->obj_out_path);
+            if (opt->cc_flags && *opt->cc_flags) {
+                strncat(compile_cmd, " ", sizeof(compile_cmd) - strlen(compile_cmd) - 1);
+                strncat(compile_cmd, opt->cc_flags, sizeof(compile_cmd) - strlen(compile_cmd) - 1);
+            }
+            if (run_cmd(compile_cmd, opt->verbose) != 0) return -1;
+            (void)cc__write_u64_file(obj_meta_path, obj_key);
+            if (summary_out) { summary_out->reuse_compile_obj = 0; summary_out->did_compile_obj = 1; }
+        }
+    } else {
+        char compile_cmd[2048];
+        snprintf(compile_cmd, sizeof(compile_cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
+                 cc_bin,
+                 ccflags_env ? ccflags_env : "",
+                 cppflags_env ? cppflags_env : "",
+                 target_part,
+                 sysroot_part,
+                 g_cc_include,
+                 g_cc_dir,
+                 g_repo_root,
+                 opt->c_out_path,
+                 opt->obj_out_path);
+        if (opt->cc_flags && *opt->cc_flags) {
+            strncat(compile_cmd, " ", sizeof(compile_cmd) - strlen(compile_cmd) - 1);
+            strncat(compile_cmd, opt->cc_flags, sizeof(compile_cmd) - strlen(compile_cmd) - 1);
+        }
+        if (run_cmd(compile_cmd, opt->verbose) != 0) return -1;
+        if (summary_out) { summary_out->reuse_compile_obj = 0; summary_out->did_compile_obj = 1; }
     }
-    if (run_cmd(compile_cmd, opt->verbose) != 0) {
-        return -1;
-    }
-    if (summary_out) summary_out->did_compile_obj = 1;
 
     if (opt->mode == CC_MODE_COMPILE) {
         return 0;
@@ -625,7 +882,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: internal error: missing binary output path\n");
         return -1;
     }
-    // Link to binary
+    // Link to binary (with incremental cache)
     const char* ldflags_env = getenv("LDFLAGS");
     char link_cmd[2048];
     // Optional runtime object
@@ -641,7 +898,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                 summary_out->runtime_obj_path = g_cc_runtime_o;
             }
         } else {
-            snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_obj);
+            snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_root);
             snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
                      cc_bin,
                      ccflags_env ? ccflags_env : "",
@@ -668,19 +925,52 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         have_runtime = 1;
     }
 
-    snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s -o %s",
-             cc_bin,
-             target_part,
-             sysroot_part,
-             ldflags_env ? ldflags_env : "",
-             opt->ld_flags ? opt->ld_flags : "",
-             opt->obj_out_path,
-             have_runtime ? runtime_obj : "",
-             opt->bin_out_path);
-    if (run_cmd(link_cmd, opt->verbose) != 0) {
-        return -1;
+    char link_meta_path[PATH_MAX];
+    cc__cache_key_paths(NULL, 0, link_meta_path, sizeof(link_meta_path), stem);
+    uint64_t link_key = 0;
+    if (cache_ok) {
+        CCFileSig rt_sig, bin_sig;
+        (void)cc__stat_sig(have_runtime ? runtime_obj : "", &rt_sig);
+        (void)cc__stat_sig(opt->bin_out_path, &bin_sig);
+        uint64_t h = 1469598103934665603ULL;
+        h = cc__fnv1a64_i64(h, (long long)obj_key);
+        h = cc__fnv1a64_i64(h, rt_sig.mtime_sec);
+        h = cc__fnv1a64_i64(h, rt_sig.size);
+        h = cc__fnv1a64_str(h, ldflags_env);
+        h = cc__fnv1a64_str(h, opt->ld_flags);
+        h = cc__fnv1a64_str(h, target_part);
+        h = cc__fnv1a64_str(h, sysroot_part);
+        link_key = h;
+        uint64_t prev = 0;
+        if (file_exists(opt->bin_out_path) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == link_key) {
+            if (summary_out) { summary_out->reuse_link = 1; summary_out->did_link = 0; }
+        } else {
+            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s -o %s",
+                     cc_bin,
+                     target_part,
+                     sysroot_part,
+                     ldflags_env ? ldflags_env : "",
+                     opt->ld_flags ? opt->ld_flags : "",
+                     opt->obj_out_path,
+                     have_runtime ? runtime_obj : "",
+                     opt->bin_out_path);
+            if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
+            (void)cc__write_u64_file(link_meta_path, link_key);
+            if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
+        }
+    } else {
+        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s -o %s",
+                 cc_bin,
+                 target_part,
+                 sysroot_part,
+                 ldflags_env ? ldflags_env : "",
+                 opt->ld_flags ? opt->ld_flags : "",
+                 opt->obj_out_path,
+                 have_runtime ? runtime_obj : "",
+                 opt->bin_out_path);
+        if (run_cmd(link_cmd, opt->verbose) != 0) return -1;
+        if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
     }
-    if (summary_out) summary_out->did_link = 1;
 
     if (!opt->keep_c && opt->mode != CC_MODE_EMIT_C) {
         // Leave C file in out/ by default; optional cleanup.
@@ -689,18 +979,165 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     return 0;
 }
 
+static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bindings, size_t* count) {
+    if (!opt || !bindings || !count) return -1;
+    *count = 0;
+    char build_buf[512];
+    int multiple = 0;
+    const char* build_path = NULL;
+    if (!opt->no_build) {
+        build_path = opt->build_override ? opt->build_override : choose_build_path(opt->in_path, build_buf, sizeof(build_buf), &multiple);
+        if (multiple) {
+            fprintf(stderr, "cc: multiple build.cc files found (cwd and alongside input)\n");
+            return -1;
+        }
+    }
+    if (build_path) {
+        CCBuildTarget target;
+        detect_host_target(&target);
+        CCBuildInputs inputs = {.target = &target, .envp = NULL};
+        int err = cc_build_load_consts(build_path, &inputs, bindings, count);
+        if (err != 0) {
+            fprintf(stderr, "cc: build.cc load failed (err=%d)\n", err);
+            return err;
+        }
+    }
+    // Apply CLI -D defines (override build.cc) with warning on override.
+    for (size_t i = 0; i < opt->cli_count; ++i) {
+        const char* name = opt->cli_names[i];
+        long long value = opt->cli_values[i];
+        int existed = 0;
+        for (size_t j = 0; j < *count; ++j) {
+            if (strcmp(bindings[j].name, name) == 0) { existed = 1; break; }
+        }
+        if (upsert_binding(bindings, count, 128, name, value) != 0) {
+            fprintf(stderr, "cc: too many const bindings (max %d)\n", 128);
+            return -1;
+        }
+        if (existed) {
+            fprintf(stderr, "cc: warning: overriding const %s from build.cc with CLI -D\n", name);
+        }
+    }
+    return 0;
+}
+
+static int cc__compile_c_to_obj(const CCBuildOptions* opt,
+                                const char* c_path,
+                                const char* obj_path,
+                                const char* target_part,
+                                const char* sysroot_part) {
+    const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
+    const char* ccflags_env = getenv("CFLAGS");
+    const char* cppflags_env = getenv("CPPFLAGS");
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
+             cc_bin,
+             ccflags_env ? ccflags_env : "",
+             cppflags_env ? cppflags_env : "",
+             target_part ? target_part : "",
+             sysroot_part ? sysroot_part : "",
+             g_cc_include,
+             g_cc_dir,
+             g_repo_root,
+             c_path,
+             obj_path);
+    if (opt->cc_flags && *opt->cc_flags) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    if (run_cmd(cmd, opt->verbose) != 0) return -1;
+    return 0;
+}
+
+static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
+                                 const char* target_part,
+                                 const char* sysroot_part,
+                                 char* out_runtime_path,
+                                 size_t out_runtime_cap,
+                                 int* out_reused) {
+    if (!out_runtime_path || out_runtime_cap == 0) return -1;
+    out_runtime_path[0] = '\0';
+    if (out_reused) *out_reused = 0;
+    if (opt->no_runtime) return 0;
+
+    if (file_exists(g_cc_runtime_o)) {
+        strncpy(out_runtime_path, g_cc_runtime_o, out_runtime_cap);
+        out_runtime_path[out_runtime_cap - 1] = '\0';
+        if (out_reused) *out_reused = 1;
+        return 0;
+    }
+
+    // Build a runtime object under out/obj/runtime.o
+    char runtime_obj[PATH_MAX];
+    snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_root);
+    const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
+    const char* ccflags_env = getenv("CFLAGS");
+    const char* cppflags_env = getenv("CPPFLAGS");
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
+             cc_bin,
+             ccflags_env ? ccflags_env : "",
+             cppflags_env ? cppflags_env : "",
+             target_part ? target_part : "",
+             sysroot_part ? sysroot_part : "",
+             g_cc_include,
+             g_cc_dir,
+             g_repo_root,
+             g_cc_runtime_c,
+             runtime_obj);
+    if (opt->cc_flags && *opt->cc_flags) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    if (run_cmd(cmd, opt->verbose) != 0) return -1;
+    strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
+    out_runtime_path[out_runtime_cap - 1] = '\0';
+    if (out_reused) *out_reused = 0;
+    return 0;
+}
+
+static int cc__link_many(const CCBuildOptions* opt,
+                         const char* const* obj_paths,
+                         size_t obj_count,
+                         const char* runtime_obj,
+                         const char* target_part,
+                         const char* sysroot_part,
+                         const char* bin_out_path) {
+    const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
+    const char* ldflags_env = getenv("LDFLAGS");
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s",
+             cc_bin,
+             target_part ? target_part : "",
+             sysroot_part ? sysroot_part : "",
+             ldflags_env ? ldflags_env : "",
+             opt->ld_flags ? opt->ld_flags : "");
+    for (size_t i = 0; i < obj_count; ++i) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, obj_paths[i], sizeof(cmd) - strlen(cmd) - 1);
+    }
+    if (runtime_obj && runtime_obj[0]) {
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, runtime_obj, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    strncat(cmd, " -o ", sizeof(cmd) - strlen(cmd) - 1);
+    strncat(cmd, bin_out_path, sizeof(cmd) - strlen(cmd) - 1);
+    if (run_cmd(cmd, opt->verbose) != 0) return -1;
+    return 0;
+}
+
 static void print_build_summary(const CCBuildOptions* opt, const CCBuildSummary* s, const char* step_name) {
     if (!opt || !opt->summary || !s) return;
     fprintf(stderr, "cc build summary:\n");
     if (step_name) fprintf(stderr, "  step: %s\n", step_name);
-    if (s->c_out_path) fprintf(stderr, "  c: %s%s\n", s->c_out_path, s->did_emit_c ? "" : " (skipped)");
-    if (s->obj_out_path) fprintf(stderr, "  obj: %s%s\n", s->obj_out_path, s->did_compile_obj ? "" : " (skipped)");
+    if (s->c_out_path) fprintf(stderr, "  c: %s (%s)\n", s->c_out_path, s->reuse_emit_c ? "reused" : "built");
+    if (s->obj_out_path) fprintf(stderr, "  obj: %s (%s)\n", s->obj_out_path, s->reuse_compile_obj ? "reused" : "built");
     if (s->runtime_obj_path) {
         fprintf(stderr, "  runtime: %s (%s)\n", s->runtime_obj_path, s->runtime_reused ? "reused" : "compiled");
     } else {
         fprintf(stderr, "  runtime: (none)\n");
     }
-    if (s->bin_out_path) fprintf(stderr, "  bin: %s%s\n", s->bin_out_path, s->did_link ? "" : " (skipped)");
+    if (s->bin_out_path) fprintf(stderr, "  bin: %s (%s)\n", s->bin_out_path, s->reuse_link ? "reused" : "built");
 }
 
 static int ensure_cc_test_tool(const char* cc_bin, const char* target_part, const char* sysroot_part, const char* cc_flags, int verbose) {
@@ -735,14 +1172,17 @@ static int ensure_cc_test_tool(const char* cc_bin, const char* target_part, cons
 }
 
 static int run_build_mode(int argc, char** argv) {
-    // cc build [step] [options] <input.cc> [output] [-- args...]
+    // cc build [step] [options] <input.ccs> [output] [-- args...]
     const int max_cli = 32;
     char* cli_names[max_cli];
     long long cli_values[max_cli];
     size_t cli_count = 0;
 
-    const char* in_path = NULL;
-    const char* user_out = NULL;
+    const int max_pos = 64;
+    const char* pos_args[max_pos];
+    int pos_count = 0;
+    const char* user_out = NULL; // from -o (preferred)
+    int saw_o = 0;
     const char* obj_out = NULL;
     const char* build_override = NULL;
     const char* cc_bin = NULL;
@@ -751,6 +1191,8 @@ static int run_build_mode(int argc, char** argv) {
     const char* target_flag = NULL;
     const char* sysroot_flag = NULL;
     const char* out_dir = NULL;
+    const char* bin_dir = NULL;
+    int help = 0;
     int dump_consts = 0;
     int dry_run = 0;
     int no_build = 0;
@@ -759,6 +1201,7 @@ static int run_build_mode(int argc, char** argv) {
     int verbose = 0;
     int summary = 0;
     CCMode mode = CC_MODE_LINK;
+    int no_cache = 0;
 
     enum { CC_BUILD_STEP_DEFAULT = 0, CC_BUILD_STEP_RUN = 1, CC_BUILD_STEP_TEST = 2 } step = CC_BUILD_STEP_DEFAULT;
     int run_argc = 0;
@@ -784,14 +1227,26 @@ static int run_build_mode(int argc, char** argv) {
             run_argv = &argv[i + 1];
             break;
         }
+        // Allow placing the step name after options (e.g. `cc build --no-cache run ...`).
+        if (argv[i] && argv[i][0] && argv[i][0] != '-' && step == CC_BUILD_STEP_DEFAULT && pos_count == 0) {
+            if (strcmp(argv[i], "run") == 0) { step = CC_BUILD_STEP_RUN; continue; }
+            if (strcmp(argv[i], "test") == 0) { step = CC_BUILD_STEP_TEST; continue; }
+            if (strcmp(argv[i], "help") == 0) { help = 1; continue; }
+        }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            usage_build(argv[0]);
-            return 0;
+            help = 1;
+            continue;
         }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
+        if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); goto parse_fail; }
             out_dir = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--bin-dir") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --bin-dir requires a path\n"); goto parse_fail; }
+            bin_dir = argv[++i];
             continue;
         }
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
@@ -856,21 +1311,66 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: -o requires a path\n"); goto parse_fail; }
             user_out = argv[++i];
+            saw_o = 1;
             continue;
         }
-        if (!in_path) { in_path = argv[i]; continue; }
-        if (!user_out) { user_out = argv[i]; continue; }
-        fprintf(stderr, "cc: unexpected argument: %s\n", argv[i]);
-        goto parse_fail;
-    }
-
-    if (step != CC_BUILD_STEP_TEST && !in_path) {
-        fprintf(stderr, "cc: missing input\n");
-        goto parse_fail;
+        // Positional.
+        if (pos_count >= max_pos) {
+            fprintf(stderr, "cc: too many input files (max %d)\n", max_pos);
+            goto parse_fail;
+        }
+        pos_args[pos_count++] = argv[i];
     }
 
     // Apply output directory override before creating/deriving any outputs.
-    cc_set_out_dir(out_dir);
+    cc_set_out_dir(out_dir, bin_dir);
+
+    // Determine build.cc path (if any) for help/targets.
+    const char* build_path_for_help = NULL;
+    char build_buf_help[512];
+    int multiple_help = 0;
+    if (build_override) build_path_for_help = build_override;
+    else if (pos_count > 0) build_path_for_help = choose_build_path(pos_args[0], build_buf_help, sizeof(build_buf_help), &multiple_help);
+    else if (file_exists("build.cc")) build_path_for_help = "build.cc";
+    if (multiple_help) build_path_for_help = NULL;
+
+    if (help) {
+        usage_build(argv[0]);
+        // If we can determine a build.cc, print CC_OPTION lines.
+        if (build_path_for_help) {
+            CCBuildOptionDecl opts[64];
+            size_t opt_count = 0;
+            if (cc_build_list_options(build_path_for_help, opts, &opt_count, 64) == 0 && opt_count) {
+                fprintf(stderr, "\nDeclared CC_OPTIONs in %s:\n", build_path_for_help);
+                for (size_t k = 0; k < opt_count; ++k) {
+                    fprintf(stderr, "  -D%s  %s\n", opts[k].name, opts[k].help ? opts[k].help : "");
+                }
+            }
+            cc_build_free_options(opts, opt_count);
+
+            CCBuildTargetDecl targets[32];
+            size_t target_count = 0;
+            char* def_name = NULL;
+            if (cc_build_list_targets(build_path_for_help, targets, &target_count, 32, &def_name) == 0 && (target_count || def_name)) {
+                fprintf(stderr, "\nDeclared CC_TARGETs in %s:\n", build_path_for_help);
+                if (def_name) fprintf(stderr, "  default: %s\n", def_name);
+                for (size_t i = 0; i < target_count; ++i) {
+                    fprintf(stderr, "  %s (exe)  [", targets[i].name);
+                    for (size_t j = 0; j < targets[i].src_count; ++j) {
+                        fprintf(stderr, "%s%s", (j ? " " : ""), targets[i].srcs[j]);
+                    }
+                    fprintf(stderr, "]\n");
+                }
+            }
+            cc_build_free_targets(targets, target_count, def_name);
+        }
+        return 0;
+    }
+
+    if (step != CC_BUILD_STEP_TEST && pos_count == 0 && !build_path_for_help) {
+        fprintf(stderr, "cc: missing input (and no build.cc in scope)\n");
+        goto parse_fail;
+    }
 
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
@@ -902,11 +1402,356 @@ static int run_build_mode(int argc, char** argv) {
         exec_argv[idx] = NULL;
 
         if (summary) {
-            fprintf(stderr, "cc build summary:\n  step: test\n  tool: %s\n  out_dir: %s\n", tool_path, g_out_root);
+            fprintf(stderr, "cc build summary:\n  step: test\n  tool: %s\n  out_dir: %s\n  bin_dir: %s\n", tool_path, g_out_root, g_bin_root);
         }
         int rc = run_exec(tool_path, exec_argv, verbose);
         return rc;
     }
+
+    // Determine inputs + legacy output behavior.
+    const char* inputs[max_pos];
+    int input_count = 0;
+    const char* legacy_out = NULL;
+    if (!saw_o && pos_count == 2) {
+        // Legacy: cc build <in> <out>
+        inputs[0] = pos_args[0];
+        input_count = 1;
+        legacy_out = pos_args[1];
+        // Safety: don't overwrite existing source-like files via legacy two-arg form.
+        if (legacy_out && file_exists(legacy_out) &&
+            (cc__ends_with(legacy_out, ".c") || cc__ends_with(legacy_out, ".ccs") || cc__ends_with(legacy_out, ".cch"))) {
+            fprintf(stderr, "cc: refusing to overwrite existing source file via legacy `cc build <in> <out>`: %s\n", legacy_out);
+            fprintf(stderr, "cc: use -o to set outputs, or delete the file explicitly if you really intend to overwrite it.\n");
+            goto parse_fail;
+        }
+    } else {
+        for (int i = 0; i < pos_count; ++i) inputs[i] = pos_args[i];
+        input_count = pos_count;
+    }
+
+    if (step == CC_BUILD_STEP_RUN) {
+        mode = CC_MODE_LINK; // run requires a binary
+    }
+
+    // Target-graph mode: if build.cc declares targets and user gave either:
+    //  - no inputs (build default target), or
+    //  - a single positional that is not an existing file (treat as target name).
+    if (build_path_for_help) {
+        int want_target = 0;
+        const char* target_name = NULL;
+        if (step != CC_BUILD_STEP_TEST && input_count == 0) {
+            want_target = 1;
+        } else if (step != CC_BUILD_STEP_TEST && input_count == 1 && inputs[0] && !file_exists(inputs[0])) {
+            want_target = 1;
+            target_name = inputs[0];
+        }
+        if (want_target) {
+            CCBuildTargetDecl targets[32];
+            size_t target_count = 0;
+            char* def_name = NULL;
+            int terr = cc_build_list_targets(build_path_for_help, targets, &target_count, 32, &def_name);
+            if (terr != 0) {
+                cc_build_free_targets(targets, target_count, def_name);
+                goto parse_fail;
+            }
+            if (target_count == 0) {
+                fprintf(stderr, "cc: build.cc has no CC_TARGET entries\n");
+                cc_build_free_targets(targets, target_count, def_name);
+                goto parse_fail;
+            }
+
+            const CCBuildTargetDecl* chosen = NULL;
+            if (target_name) {
+                for (size_t i = 0; i < target_count; ++i) {
+                    if (strcmp(targets[i].name, target_name) == 0) { chosen = &targets[i]; break; }
+                }
+                if (!chosen) {
+                    fprintf(stderr, "cc: unknown target '%s' (see `cc build --help`)\n", target_name);
+                    cc_build_free_targets(targets, target_count, def_name);
+                    goto parse_fail;
+                }
+            } else {
+                if (def_name) {
+                    for (size_t i = 0; i < target_count; ++i) {
+                        if (strcmp(targets[i].name, def_name) == 0) { chosen = &targets[i]; break; }
+                    }
+                }
+                if (!chosen) {
+                    for (size_t i = 0; i < target_count; ++i) {
+                        if (strcmp(targets[i].name, "default") == 0) { chosen = &targets[i]; break; }
+                    }
+                }
+                if (!chosen && target_count == 1) chosen = &targets[0];
+                if (!chosen) {
+                    fprintf(stderr, "cc: no default target; specify one with CC_DEFAULT or pass a target name\n");
+                    cc_build_free_targets(targets, target_count, def_name);
+                    goto parse_fail;
+                }
+            }
+
+            // Resolve source paths relative to the build.cc directory.
+            char build_dir[PATH_MAX];
+            cc__dir_of_path(build_path_for_help, build_dir, sizeof(build_dir));
+            if (chosen->src_count > (size_t)max_pos) {
+                fprintf(stderr, "cc: target has too many sources (max %d)\n", max_pos);
+                cc_build_free_targets(targets, target_count, def_name);
+                goto parse_fail;
+            }
+            static char resolved[64][PATH_MAX];
+            for (size_t i = 0; i < chosen->src_count; ++i) {
+                cc__join_path(build_dir, chosen->srcs[i], resolved[i], sizeof(resolved[i]));
+                inputs[i] = resolved[i];
+            }
+            input_count = (int)chosen->src_count;
+
+            if (mode == CC_MODE_LINK) {
+                // Default binary output for targets.
+                static char default_bin[PATH_MAX];
+                snprintf(default_bin, sizeof(default_bin), "%s/%s", g_bin_root, chosen->name);
+                if (!user_out) user_out = default_bin;
+            }
+
+            cc_build_free_targets(targets, target_count, def_name);
+        }
+    }
+
+    if (input_count > 1) {
+        if (mode == CC_MODE_EMIT_C && saw_o) {
+            fprintf(stderr, "cc: -o with multiple inputs in --emit-c-only mode is not supported\n");
+            goto parse_fail;
+        }
+        if (mode == CC_MODE_COMPILE && obj_out) {
+            fprintf(stderr, "cc: --obj-out with multiple inputs is not supported\n");
+            goto parse_fail;
+        }
+        if (mode == CC_MODE_LINK && !user_out) {
+            fprintf(stderr, "cc: linking multiple inputs requires -o <output>\n");
+            goto parse_fail;
+        }
+
+        // Load const bindings once (build.cc discovery uses the first input).
+        CCConstBinding bindings[128];
+        size_t binding_count = 0;
+        CCBuildOptions base_opt = {
+            .in_path = inputs[0],
+            .cc_bin_override = cc_bin,
+            .cc_flags = cc_flags,
+            .ld_flags = ld_flags,
+            .target_flag = target_flag ? target_flag : "",
+            .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+            .no_runtime = no_runtime,
+            .keep_c = keep_c,
+            .verbose = verbose,
+            .build_override = build_override,
+            .no_build = no_build,
+            .dump_consts = dump_consts,
+            .dry_run = dry_run,
+            .summary = summary,
+            .out_dir = g_out_root,
+            .bin_dir = g_bin_root,
+            .no_cache = no_cache,
+            .cli_names = cli_names,
+            .cli_values = cli_values,
+            .cli_count = cli_count,
+        };
+        int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
+        if (berr != 0) goto parse_fail;
+        if (dump_consts) {
+            for (size_t i = 0; i < binding_count; ++i) {
+                printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
+            }
+        }
+        if (dry_run) {
+            for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
+            return 0;
+        }
+        CCCompileConfig cfg = {.consts = bindings, .const_count = binding_count};
+
+        char target_part[256]; char sysroot_part[256];
+        target_part[0] = '\0'; sysroot_part[0] = '\0';
+        if (target_flag && *target_flag) snprintf(target_part, sizeof(target_part), "--target %s", target_flag);
+        if (sysroot_flag && *sysroot_flag) snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s", sysroot_flag);
+
+        // Emit + compile objects (with incremental cache per input).
+        int cache_ok = !cc__cache_disabled(no_cache);
+        char build_buf_for_key[512];
+        int multiple_for_key = 0;
+        const char* build_path_for_key = build_override ? build_override : choose_build_path(inputs[0], build_buf_for_key, sizeof(build_buf_for_key), &multiple_for_key);
+        if (multiple_for_key) build_path_for_key = NULL;
+        CCFileSig build_sig_for_key;
+        build_sig_for_key.mtime_sec = 0;
+        build_sig_for_key.size = 0;
+        if (build_path_for_key) (void)cc__stat_sig(build_path_for_key, &build_sig_for_key);
+        CCFileSig cc_sig_for_key;
+        cc_sig_for_key.mtime_sec = 0;
+        cc_sig_for_key.size = 0;
+        (void)cc__stat_sig(cc_bin ? cc_bin : "cc", &cc_sig_for_key);
+
+        int emit_reused = 0, emit_built = 0;
+        int obj_reused = 0, obj_built = 0;
+
+        char used[64][128]; size_t used_count = 0;
+        const char* obj_paths[64];
+        char obj_bufs[64][PATH_MAX];
+        char c_bufs[64][PATH_MAX];
+        uint64_t obj_keys[64];
+        memset(obj_keys, 0, sizeof(obj_keys));
+        for (int i = 0; i < input_count; ++i) {
+            char stem0[128];
+            char stem[128];
+            cc__stem_from_path(inputs[i], stem0, sizeof(stem0));
+            if (cc__unique_stem(stem0, used, &used_count, 64, stem, sizeof(stem)) != 0) {
+                fprintf(stderr, "cc: failed to derive unique stem for %s\n", inputs[i]);
+                goto parse_fail;
+            }
+            cc__derive_c_path_from_stem(stem, c_bufs[i], sizeof(c_bufs[i]));
+            cc__derive_o_path_from_stem(stem, obj_bufs[i], sizeof(obj_bufs[i]));
+
+            uint64_t emit_key = 0;
+            char meta_path[PATH_MAX];
+            snprintf(meta_path, sizeof(meta_path), "%s/%s.meta", g_cache_root, stem);
+            if (cache_ok) {
+                CCFileSig in_sig;
+                in_sig.mtime_sec = 0;
+                in_sig.size = 0;
+                (void)cc__stat_sig(inputs[i], &in_sig);
+                uint64_t h = 1469598103934665603ULL;
+                h = cc__fnv1a64_str(h, inputs[i]);
+                h = cc__fnv1a64_i64(h, in_sig.mtime_sec);
+                h = cc__fnv1a64_i64(h, in_sig.size);
+                h = cc__fnv1a64_str(h, build_path_for_key ? build_path_for_key : "");
+                h = cc__fnv1a64_i64(h, build_sig_for_key.mtime_sec);
+                h = cc__fnv1a64_i64(h, build_sig_for_key.size);
+                h = cc__fnv1a64_i64(h, cc_sig_for_key.mtime_sec);
+                h = cc__fnv1a64_i64(h, cc_sig_for_key.size);
+                h = cc__fnv1a64_str(h, target_flag ? target_flag : "");
+                h = cc__fnv1a64_str(h, sysroot_flag ? sysroot_flag : "");
+                h = cc__fnv1a64_str(h, cc_flags);
+                h = cc__fnv1a64_str(h, getenv("CFLAGS"));
+                h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+                h = cc__fnv1a64_i64(h, (long long)no_build);
+                // bake in const bindings + CLI -D (already merged into bindings)
+                h = cc__fnv1a64_i64(h, (long long)binding_count);
+                for (size_t bi = 0; bi < binding_count; ++bi) {
+                    h = cc__fnv1a64_str(h, bindings[bi].name);
+                    h = cc__fnv1a64_i64(h, bindings[bi].value);
+                }
+                emit_key = h;
+
+                uint64_t prev = 0;
+                if (file_exists(c_bufs[i]) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
+                    emit_reused++;
+                } else {
+                    int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                    if (err != 0) goto parse_fail;
+                    (void)cc__write_u64_file(meta_path, emit_key);
+                    emit_built++;
+                }
+            } else {
+                int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                if (err != 0) goto parse_fail;
+                emit_built++;
+            }
+            if (mode != CC_MODE_EMIT_C) {
+                char obj_meta_path[PATH_MAX];
+                snprintf(obj_meta_path, sizeof(obj_meta_path), "%s/%s.obj", g_cache_root, stem);
+                if (cache_ok) {
+                    uint64_t h = 1469598103934665603ULL;
+                    h = cc__fnv1a64_i64(h, (long long)emit_key);
+                    h = cc__fnv1a64_str(h, target_part);
+                    h = cc__fnv1a64_str(h, sysroot_part);
+                    h = cc__fnv1a64_str(h, cc_flags);
+                    h = cc__fnv1a64_str(h, getenv("CFLAGS"));
+                    h = cc__fnv1a64_str(h, getenv("CPPFLAGS"));
+                    uint64_t obj_key = h;
+                    obj_keys[i] = obj_key;
+                    uint64_t prev = 0;
+                    if (file_exists(obj_bufs[i]) && cc__read_u64_file(obj_meta_path, &prev) == 0 && prev == obj_key) {
+                        obj_reused++;
+                    } else {
+                        if (cc__compile_c_to_obj(&base_opt, c_bufs[i], obj_bufs[i], target_part, sysroot_part) != 0) goto parse_fail;
+                        (void)cc__write_u64_file(obj_meta_path, obj_key);
+                        obj_built++;
+                    }
+                } else {
+                    if (cc__compile_c_to_obj(&base_opt, c_bufs[i], obj_bufs[i], target_part, sysroot_part) != 0) goto parse_fail;
+                    obj_built++;
+                }
+                obj_paths[i] = obj_bufs[i];
+            }
+        }
+        if (mode == CC_MODE_EMIT_C) {
+            for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
+            return 0;
+        }
+        if (mode == CC_MODE_COMPILE) {
+            for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
+            return 0;
+        }
+
+        // Link all objects
+        char runtime_path[PATH_MAX];
+        int runtime_reused = 0;
+        if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) goto parse_fail;
+        int link_reused = 0;
+        if (cache_ok) {
+            char out_stem[128];
+            cc__stem_from_path(user_out, out_stem, sizeof(out_stem));
+            char link_meta_path[PATH_MAX];
+            snprintf(link_meta_path, sizeof(link_meta_path), "%s/%s.link", g_cache_root, out_stem);
+            CCFileSig rt_sig;
+            rt_sig.mtime_sec = 0; rt_sig.size = 0;
+            if (!no_runtime) (void)cc__stat_sig(runtime_path, &rt_sig);
+            uint64_t h = 1469598103934665603ULL;
+            h = cc__fnv1a64_str(h, target_part);
+            h = cc__fnv1a64_str(h, sysroot_part);
+            h = cc__fnv1a64_str(h, ld_flags);
+            h = cc__fnv1a64_str(h, getenv("LDFLAGS"));
+            h = cc__fnv1a64_i64(h, (long long)rt_sig.mtime_sec);
+            h = cc__fnv1a64_i64(h, (long long)rt_sig.size);
+            for (int i = 0; i < input_count; ++i) {
+                h = cc__fnv1a64_str(h, obj_paths[i]);
+                h = cc__fnv1a64_i64(h, (long long)obj_keys[i]);
+            }
+            uint64_t prev = 0;
+            if (file_exists(user_out) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == h) {
+                link_reused = 1;
+            } else {
+                if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) goto parse_fail;
+                (void)cc__write_u64_file(link_meta_path, h);
+            }
+        } else {
+            if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) goto parse_fail;
+        }
+
+        if (summary) {
+            fprintf(stderr, "cc build summary:\n  step: %s\n  out_dir: %s\n  inputs: %d\n  c: %d built, %d reused\n  obj: %d built, %d reused\n  bin: %s (%s)\n",
+                    step == CC_BUILD_STEP_RUN ? "run" : "default",
+                    g_out_root,
+                    input_count,
+                    emit_built, emit_reused,
+                    obj_built, obj_reused,
+                    user_out,
+                    link_reused ? "reused" : "built");
+        }
+
+        for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
+        if (step == CC_BUILD_STEP_RUN) {
+            char* exec_argv[64];
+            int idx = 0;
+            exec_argv[idx++] = (char*)user_out;
+            for (int j = 0; j < run_argc && idx < (int)(sizeof(exec_argv) / sizeof(exec_argv[0]) - 1); ++j) {
+                exec_argv[idx++] = run_argv[j];
+            }
+            exec_argv[idx] = NULL;
+            return run_exec(user_out, exec_argv, verbose);
+        }
+        return 0;
+    }
+
+    // Single-input path (existing behavior)
+    const char* in_path = inputs[0];
+    if (!user_out && legacy_out) user_out = legacy_out;
 
     char c_out[512];
     char obj_path[512];
@@ -937,9 +1782,6 @@ static int run_build_mode(int argc, char** argv) {
         }
     }
 
-    if (step == CC_BUILD_STEP_RUN) {
-        mode = CC_MODE_LINK; // run requires a binary
-    }
     if (mode == CC_MODE_LINK) {
         if (user_out) {
             strncpy(bin_path, user_out, sizeof(bin_path));
@@ -970,6 +1812,8 @@ static int run_build_mode(int argc, char** argv) {
         .dry_run = dry_run,
         .summary = summary,
         .out_dir = g_out_root,
+        .bin_dir = g_bin_root,
+        .no_cache = no_cache,
         .cli_names = cli_names,
         .cli_values = cli_values,
         .cli_count = cli_count,
@@ -1013,9 +1857,12 @@ int main(int argc, char **argv) {
         return run_build_mode(argc, argv) == 0 ? 0 : 1;
     }
 
-    // Default mode: cc [options] <input.cc> [output]
-    const char* in_path = NULL;
+    // Default mode: cc [options] <inputs...> [-o out/bin/<stem>] [--obj-out ...]
+    const int max_pos = 64;
+    const char* pos_args[max_pos];
+    int pos_count = 0;
     const char* user_out = NULL;
+    int saw_o = 0;
     const char* obj_out = NULL;
     const char* build_override = NULL;
     const char* cc_bin = NULL;
@@ -1024,12 +1871,14 @@ int main(int argc, char **argv) {
     const char* target_flag = NULL;
     const char* sysroot_flag = NULL;
     const char* out_dir = NULL;
+    const char* bin_dir = NULL;
     int no_build = 0;
     int no_runtime = 0;
     int dump_consts = 0;
     int dry_run = 0;
     int keep_c = 1;
     int verbose = 0;
+    int no_cache = 0;
     CCMode mode = CC_MODE_LINK;
 
     for (int i = 1; i < argc; ++i) {
@@ -1047,9 +1896,15 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--no-runtime") == 0) { no_runtime = 1; continue; }
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
+        if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); usage(argv[0]); return 1; }
             out_dir = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--bin-dir") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --bin-dir requires a path\n"); usage(argv[0]); return 1; }
+            bin_dir = argv[++i];
             continue;
         }
         if (strcmp(argv[i], "--cc-bin") == 0) {
@@ -1085,25 +1940,117 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: -o requires a path\n"); usage(argv[0]); return 1; }
             user_out = argv[++i];
+            saw_o = 1;
             continue;
         }
-        if (!in_path) { in_path = argv[i]; continue; }
-        if (!user_out) { user_out = argv[i]; continue; }
-        fprintf(stderr, "cc: unexpected argument: %s\n", argv[i]);
+        // Positional input.
+        if (pos_count >= max_pos) { fprintf(stderr, "cc: too many input files (max %d)\n", max_pos); return 1; }
+        pos_args[pos_count++] = argv[i];
+    }
+
+    if (pos_count == 0) {
         usage(argv[0]);
         return 1;
     }
 
-    if (!in_path) {
-        usage(argv[0]);
-        return 1;
-    }
-
-    cc_set_out_dir(out_dir);
+    cc_set_out_dir(out_dir, bin_dir);
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
         return 1;
     }
+
+    // Interpret legacy `cc <in> <out>` only when -o was not used and exactly 2 positionals.
+    const char* inputs[max_pos];
+    int input_count = 0;
+    const char* legacy_out = NULL;
+    if (!saw_o && pos_count == 2) {
+        inputs[0] = pos_args[0];
+        input_count = 1;
+        legacy_out = pos_args[1];
+    } else {
+        for (int i = 0; i < pos_count; ++i) inputs[i] = pos_args[i];
+        input_count = pos_count;
+    }
+    if (!user_out && legacy_out) user_out = legacy_out;
+
+    if (input_count > 1) {
+        if (mode == CC_MODE_EMIT_C && saw_o) {
+            fprintf(stderr, "cc: -o with multiple inputs in --emit-c-only mode is not supported\n");
+            return 1;
+        }
+        if (mode == CC_MODE_COMPILE && obj_out) {
+            fprintf(stderr, "cc: --obj-out with multiple inputs is not supported\n");
+            return 1;
+        }
+        if (mode == CC_MODE_LINK && !user_out) {
+            fprintf(stderr, "cc: linking multiple inputs requires -o <output>\n");
+            return 1;
+        }
+
+        CCConstBinding bindings[128];
+        size_t binding_count = 0;
+        CCBuildOptions base_opt = {
+            .in_path = inputs[0],
+            .cc_bin_override = cc_bin,
+            .cc_flags = cc_flags,
+            .ld_flags = ld_flags,
+            .target_flag = target_flag ? target_flag : "",
+            .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+            .no_runtime = no_runtime,
+            .keep_c = keep_c,
+            .verbose = verbose,
+            .build_override = build_override,
+            .no_build = no_build,
+            .dump_consts = dump_consts,
+            .dry_run = dry_run,
+            .summary = 0,
+            .out_dir = g_out_root,
+            .bin_dir = g_bin_root,
+            .cli_names = NULL,
+            .cli_values = NULL,
+            .cli_count = 0,
+        };
+        int berr = cc__load_const_bindings(&base_opt, bindings, &binding_count);
+        if (berr != 0) return 1;
+        if (dump_consts) {
+            for (size_t i = 0; i < binding_count; ++i) {
+                printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
+            }
+        }
+        if (dry_run) return 0;
+        CCCompileConfig cfg = {.consts = bindings, .const_count = binding_count};
+
+        char target_part[256]; char sysroot_part[256];
+        target_part[0] = '\0'; sysroot_part[0] = '\0';
+        if (target_flag && *target_flag) snprintf(target_part, sizeof(target_part), "--target %s", target_flag);
+        if (sysroot_flag && *sysroot_flag) snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s", sysroot_flag);
+
+        char used[64][128]; size_t used_count = 0;
+        const char* obj_paths[64];
+        char obj_bufs[64][PATH_MAX];
+        char c_bufs[64][PATH_MAX];
+        for (int i = 0; i < input_count; ++i) {
+            char stem0[128];
+            char stem[128];
+            cc__stem_from_path(inputs[i], stem0, sizeof(stem0));
+            if (cc__unique_stem(stem0, used, &used_count, 64, stem, sizeof(stem)) != 0) return 1;
+            cc__derive_c_path_from_stem(stem, c_bufs[i], sizeof(c_bufs[i]));
+            cc__derive_o_path_from_stem(stem, obj_bufs[i], sizeof(obj_bufs[i]));
+            int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+            if (err != 0) return 1;
+            if (mode != CC_MODE_EMIT_C) {
+                if (cc__compile_c_to_obj(&base_opt, c_bufs[i], obj_bufs[i], target_part, sysroot_part) != 0) return 1;
+                obj_paths[i] = obj_bufs[i];
+            }
+        }
+        if (mode == CC_MODE_EMIT_C || mode == CC_MODE_COMPILE) return 0;
+        char runtime_path[PATH_MAX]; int runtime_reused = 0;
+        if (cc__ensure_runtime_obj(&base_opt, target_part, sysroot_part, runtime_path, sizeof(runtime_path), &runtime_reused) != 0) return 1;
+        if (cc__link_many(&base_opt, obj_paths, (size_t)input_count, runtime_path, target_part, sysroot_part, user_out) != 0) return 1;
+        return 0;
+    }
+
+    const char* in_path = inputs[0];
 
     char c_out[512];
     char obj_path[512];
@@ -1164,6 +2111,8 @@ int main(int argc, char **argv) {
         .dry_run = dry_run,
         .summary = 0,
         .out_dir = g_out_root,
+        .bin_dir = g_bin_root,
+        .no_cache = no_cache,
         .cli_names = NULL,
         .cli_values = NULL,
         .cli_count = 0,

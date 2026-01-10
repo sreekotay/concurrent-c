@@ -3,9 +3,9 @@
 This repo is an early prototype of **Concurrent‑C (CC)** built by extending **Tiny C Compiler (TCC)** with small, upstream-friendly hooks (guarded behind `CONFIG_CC_EXT`).
 
 At this stage CC is a “C-with-extensions” toolchain:
-- A `cc` compiler (`cc/bin/cc`) that lowers `.cc` → C (with `#line` sourcemaps) and then optionally compiles/links using the host C compiler.
+- A `ccc` compiler (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then optionally compiles/links using the host C compiler.
 - A small runtime/stdlib (header-first, prefixed APIs) under `cc/include` and `cc/runtime`.
-- A test runner (`tools/cc_test`) that drives `cc/bin/cc` end-to-end.
+- A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
 
 ---
 
@@ -22,6 +22,9 @@ make -C cc BUILD=debug TCC_EXT=1 TCC_INC=../third_party/tcc TCC_LIB=../third_par
 Notes:
 - `TCC_EXT=1` builds `cc` against the patched `libtcc.a` so CC’s AST hooks are available.
 - Today the compiler build uses `make`. The longer-term goal is to move project builds under `cc` itself.
+ - Compiler outputs:
+   - `out/cc/bin/ccc` (real binary)
+   - `cc/bin/ccc` (thin wrapper that execs the real binary)
 
 ---
 
@@ -29,6 +32,51 @@ Notes:
 
 ```bash
 make example TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a
+```
+
+---
+
+### `ccc build` recipes (copy/paste)
+
+All commands below assume you’re in the repo root and have built the compiler (`make -C cc ...`).
+
+#### Build + run a single file
+
+```bash
+./cc/bin/ccc build run examples/hello.ccs
+```
+
+Pass args to the produced binary:
+
+```bash
+./cc/bin/ccc build run examples/hello.ccs -- --help
+```
+
+#### Emit generated C only (let another build system compile it)
+
+```bash
+./cc/bin/ccc --emit-c-only examples/hello.ccs
+ls -l out/hello.c
+```
+
+#### Use `build.cc` (targets + options + consts)
+
+```bash
+./cc/bin/ccc build --help --build-file examples/build_graph/build.cc
+./cc/bin/ccc build --build-file examples/build_graph/build.cc --summary     # builds CC_DEFAULT
+./cc/bin/ccc build multi --build-file examples/build_graph/build.cc --summary
+```
+
+Set comptime integer consts:
+
+```bash
+./cc/bin/ccc build --dump-consts --dry-run -DDEBUG -DNUM_WORKERS=8 examples/hello.ccs
+```
+
+#### Override output directories
+
+```bash
+CC_OUT_DIR=out2 CC_BIN_DIR=bin2 ./cc/bin/ccc build run examples/hello.ccs --summary
 ```
 
 ---
@@ -50,6 +98,23 @@ Or without `make` (builds only the runner; the compiler still needs to be built)
 ```
 
 Test conventions are documented in `tests/README.md`.
+
+---
+
+### Output layout (defaults)
+
+- **Generated C + objects**: `out/` (e.g. `out/foo.c`, `out/foo.o`)
+- **Linked executables**: `bin/` (e.g. `bin/foo`)
+
+Override:
+- `--out-dir DIR` or `CC_OUT_DIR=DIR`
+- `--bin-dir DIR` or `CC_BIN_DIR=DIR`
+
+### Incremental cache
+
+`ccc build` maintains a lightweight incremental cache under `out/.cc-build/` to skip re-emitting C, recompiling objects, and relinking when inputs/flags haven’t changed.
+
+- Disable: `--no-cache` or `CC_NO_CACHE=1`
 
 ---
 
@@ -75,7 +140,7 @@ Typical upgrade loop:
 ### Roadmap: “no make; cc is the build system”
 
 Near-term steps:
-- Extend `cc build` / `build.cc` so CC projects can be compiled without external makefiles.
+- Extend `ccc build` / `build.cc` so CC projects can be compiled without external makefiles.
 - Promote the test runner into a CC-driven build/test workflow (still keeping `tools/cc_test` small and generic).
 
 

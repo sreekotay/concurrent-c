@@ -1,9 +1,0 @@
-#define CC_ENABLE_SHORT_NAMES
-#include <std/prelude.h>
-
-// Intentional error to validate #line mapping back to this file.
-int main() {
-    missing_call();
-    return 0;
-}
-

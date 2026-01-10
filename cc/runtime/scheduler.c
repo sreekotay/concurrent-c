@@ -2,7 +2,7 @@
  * Minimal pthread-backed scheduler facade with cooperative deadlines.
  */
 
-#include "cc_sched.h"
+#include "cc_sched.cch"
 
 #include <errno.h>
 #include <pthread.h>

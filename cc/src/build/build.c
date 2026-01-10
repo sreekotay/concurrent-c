@@ -198,3 +198,141 @@ void cc_build_free_options(CCBuildOptionDecl* opts, size_t count) {
     }
 }
 
+static CCBuildTargetKind parse_target_kind(const char* s) {
+    if (!s) return 0;
+    if (strcmp(s, "exe") == 0) return CC_BUILD_TARGET_EXE;
+    return 0;
+}
+
+static int parse_build_targets(const char* path,
+                              CCBuildTargetDecl* out_targets,
+                              size_t* out_count,
+                              size_t max,
+                              char** out_default_name) {
+    if (!out_targets || !out_count) return EINVAL;
+    if (out_default_name) *out_default_name = NULL;
+    FILE* f = fopen(path, "r");
+    if (!f) return errno ? errno : -1;
+    char line[2048];
+    int err = 0;
+    size_t lineno = 0;
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "CC_DEFAULT", 10) == 0) {
+            p += 10;
+            while (*p == ' ' || *p == '\t') p++;
+            char name_buf[128];
+            if (sscanf(p, "%127s", name_buf) != 1) {
+                fprintf(stderr, "%s:%zu: malformed CC_DEFAULT line\n", path, lineno);
+                err = EINVAL;
+                break;
+            }
+            if (out_default_name) {
+                free(*out_default_name);
+                *out_default_name = strdup(name_buf);
+                if (!*out_default_name) { err = ENOMEM; break; }
+            }
+            continue;
+        }
+        if (strncmp(p, "CC_TARGET", 9) != 0) continue;
+        p += 9;
+        while (*p == ' ' || *p == '\t') p++;
+
+        char name_buf[128];
+        char kind_buf[32];
+        int nread = 0;
+        if (sscanf(p, "%127s %31s%n", name_buf, kind_buf, &nread) < 2) {
+            fprintf(stderr, "%s:%zu: malformed CC_TARGET line\n", path, lineno);
+            err = EINVAL;
+            break;
+        }
+        CCBuildTargetKind kind = parse_target_kind(kind_buf);
+        if (!kind) {
+            fprintf(stderr, "%s:%zu: unknown target kind: %s\n", path, lineno, kind_buf);
+            err = EINVAL;
+            break;
+        }
+        p += nread;
+
+        // Count remaining src tokens.
+        const size_t max_src = 64;
+        const char* srcs[max_src];
+        size_t src_count = 0;
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p || *p == '\n' || *p == '\r') break;
+            char* start = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+            if (src_count >= max_src) { err = ENOSPC; break; }
+            size_t len = (size_t)(p - start);
+            char* tok = (char*)malloc(len + 1);
+            if (!tok) { err = ENOMEM; break; }
+            memcpy(tok, start, len);
+            tok[len] = '\0';
+            srcs[src_count++] = tok;
+        }
+        if (err) break;
+        if (src_count == 0) {
+            fprintf(stderr, "%s:%zu: CC_TARGET must list at least 1 source\n", path, lineno);
+            err = EINVAL;
+            break;
+        }
+        if (*out_count >= max) { err = ENOSPC; break; }
+
+        char* stored_name = strdup(name_buf);
+        if (!stored_name) { err = ENOMEM; break; }
+        const char** stored_srcs = (const char**)calloc(src_count, sizeof(char*));
+        if (!stored_srcs) { free(stored_name); err = ENOMEM; break; }
+        for (size_t i = 0; i < src_count; ++i) stored_srcs[i] = srcs[i];
+
+        out_targets[*out_count].name = stored_name;
+        out_targets[*out_count].kind = kind;
+        out_targets[*out_count].srcs = stored_srcs;
+        out_targets[*out_count].src_count = src_count;
+        (*out_count)++;
+    }
+    fclose(f);
+    if (err == ENOSPC) {
+        fprintf(stderr, "cc: too many CC_TARGET entries or sources in build.cc\n");
+    }
+    if (err != 0) {
+        // Free partial allocations on error.
+        if (out_default_name && *out_default_name) { free(*out_default_name); *out_default_name = NULL; }
+        for (size_t i = 0; i < *out_count; ++i) {
+            // free targets already emitted
+            free((void*)out_targets[i].name);
+            for (size_t j = 0; j < out_targets[i].src_count; ++j) free((void*)out_targets[i].srcs[j]);
+            free((void*)out_targets[i].srcs);
+            out_targets[i].name = NULL;
+            out_targets[i].srcs = NULL;
+            out_targets[i].src_count = 0;
+        }
+        *out_count = 0;
+    }
+    return err;
+}
+
+int cc_build_list_targets(const char* build_path, CCBuildTargetDecl* out_targets, size_t* out_count, size_t max, char** out_default_name) {
+    if (!out_targets || !out_count) return EINVAL;
+    *out_count = 0;
+    if (out_default_name) *out_default_name = NULL;
+    if (!build_path) return 0;
+    if (!file_exists(build_path)) return 0;
+    return parse_build_targets(build_path, out_targets, out_count, max, out_default_name);
+}
+
+void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* default_name) {
+    if (default_name) free(default_name);
+    if (!targets) return;
+    for (size_t i = 0; i < count; ++i) {
+        free((void*)targets[i].name);
+        for (size_t j = 0; j < targets[i].src_count; ++j) free((void*)targets[i].srcs[j]);
+        free((void*)targets[i].srcs);
+        targets[i].name = NULL;
+        targets[i].srcs = NULL;
+        targets[i].src_count = 0;
+    }
+}
+

@@ -2,13 +2,13 @@
 
 The repo provides a minimal test runner: `./tools/cc_test`.
 
-It discovers `tests/*.c` and `tests/*.cc` and runs each as either:
+It discovers `tests/*.c` and `tests/*.ccs` and runs each as either:
 - **run test**: compile → link → run, expecting exit code 0
 - **compile-fail test**: compile is expected to fail
 
 #### Sidecar files (all optional)
 
-For a test `tests/foo.cc`:
+For a test `tests/foo.ccs`:
 
 - `tests/foo.stdout`
   - Each non-empty, non-`#` line is a **required substring** in the program’s stdout.

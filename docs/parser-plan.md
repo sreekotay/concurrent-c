@@ -2,7 +2,7 @@
 
 ## Goals (Phase 1)
 - Parse CC syntax via TCC overlay with minimal, rebasing-friendly hooks.
-- Run smoke tests through `cc/bin/cc` (replace host `cc`).
+- Run smoke tests through `cc/bin/ccc` (replace host `cc`).
 - Enable UFCS rewrite and const-pass feeding a real AST.
 
 ## Steps
@@ -29,7 +29,7 @@
    - Preserve source spans from TCC side-table for diagnostics and source maps.
 
 6) **cc-driven tests**  
-   - Convert smoke tests to CC sources and run via `cc/bin/cc --emit-c-only ... && cc ...` until we add direct link mode.
+   - Convert smoke tests to CC sources and run via `cc/bin/ccc --emit-c-only ... && cc ...` until we add direct link mode.
    - Add a `make smoke-cc` (or `scripts/run_smoke.sh`) that exercises hello + map/vec/io in CC.
 
 ## Open Questions

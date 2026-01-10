@@ -1,0 +1,13 @@
+#define CC_ENABLE_SHORT_NAMES
+#include <std/prelude.cch>
+
+int main(void) {
+    @arena {
+        String s = string_new(arena);
+        s.append("build_graph hello\n");
+        std_out.write(s);
+    }
+    return 0;
+}
+
+

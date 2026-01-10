@@ -15,7 +15,7 @@ This file tracks implementation vs. spec without modifying the spec docs.
 - Missing: forceful mid-flight cancellation (jobs check flag but no thread interruption), platform backends (io_uring/kqueue), fuller IoError mapping/platform nuances.
 
 ## Executor / Async offload
-- Current: portable pthread-backed executor (`cc_exec`) with bounded queue; async I/O wrappers (`std/io.h` + `std/async_io.h`) offload work and signal via channel-based handle; plugin-ready async backend interface with poll-based backend stub and lazy auto-probe (env `CC_RUNTIME_BACKEND`) defaulting poll→executor; future wrapper (`CCFuture`) for async ops and async channel select; smoke coverage includes async channel select.
+- Current: portable pthread-backed executor (`cc_exec`) with bounded queue; async I/O wrappers (`std/io.cch` + `std/async_io.cch`) offload work and signal via channel-based handle; plugin-ready async backend interface with poll-based backend stub and lazy auto-probe (env `CC_RUNTIME_BACKEND`) defaulting poll→executor; future wrapper (`CCFuture`) for async ops and async channel select; smoke coverage includes async channel select.
 - Missing: richer futures/promise ergonomics beyond the basic wrapper; higher-performance platform backends (io_uring/kqueue) and mid-flight cancellation improvements.
 
 ## Collections

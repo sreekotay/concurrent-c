@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
 set -euo pipefail
 
-# Simple sanity check: ensure cc build merges build.cc consts and CLI -D overrides.
-# Assumes the cc binary is at ./cc/bin/cc relative to repo root.
+# Simple sanity check: ensure ccc build merges build.cc consts and CLI -D overrides.
+# Assumes the ccc binary is at ./cc/bin/ccc relative to repo root.
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-CC_BIN="$ROOT/cc/bin/cc"
-SRC="$ROOT/examples/build_stub/main.cc"
-OUT="/tmp/cc_build_stub_out.c"
+CC_BIN="$ROOT/cc/bin/ccc"
+SRC="$ROOT/examples/build_stub/main.ccs"
+OUT="/tmp/ccc_build_stub_out.c"
 
 if [ ! -x "$CC_BIN" ]; then
   echo "cc binary not found at $CC_BIN" >&2
@@ -20,7 +20,8 @@ run_and_check() {
   expected="$1"
   shift
   echo "== $label"
-  out="$("$CC_BIN" build "$SRC" "$OUT" --dump-consts "$@" 2>&1)"
+  rm -f "$OUT"
+  out="$("$CC_BIN" build --emit-c-only "$SRC" -o "$OUT" --dump-consts "$@" 2>&1)"
   printf "%s\n" "$out" | grep -F "$expected" >/dev/null
 }
 

@@ -1,4 +1,4 @@
-#include "cc_async_chan.h"
+#include "cc_async_chan.cch"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -228,6 +228,21 @@ int cc_async_chan_send(CCAsyncChan* ch, const void* value, size_t value_size, CC
     }
     pthread_mutex_unlock(&ch->mu);
     return err;
+}
+
+static int cc_async_chan_check_slice_take(CCAsyncChan* ch, const CCSlice* slice) {
+    if (!ch || !slice) return EINVAL;
+    if (!ch->allow_take) return EINVAL;
+    if (!cc_slice_is_unique(*slice)) return EINVAL;
+    if (!cc_slice_is_transferable(*slice)) return EINVAL;
+    if (cc_slice_is_subslice(*slice)) return EINVAL;
+    return 0;
+}
+
+int cc_async_chan_send_take_slice(CCAsyncChan* ch, const CCSlice* slice, CCAsyncChanOp* op) {
+    int elig = cc_async_chan_check_slice_take(ch, slice);
+    if (elig != 0) return elig;
+    return cc_async_chan_send(ch, slice, sizeof(CCSlice), op);
 }
 
 int cc_async_chan_recv(CCAsyncChan* ch, void* out_value, size_t value_size, CCAsyncChanOp* op) {

@@ -43,7 +43,7 @@ split(&s, ",");
 7. **No Dependencies:** Stdlib depends only on C standard library and CC language primitives.
 8. **Integration with Async:** I/O functions have sync and `@async` variants where applicable.
 9. **Single runtime TU:** Runtime impls are aggregated in `cc/runtime/concurrent_c.c` (`#include` of arena, io, scheduler, channels) so consumers can link one object/archive without juggling multiple runtime objects.
-10. **Prefixed C ABI:** Public C names are prefixed (`CCString`, `CCArena`, `cc_file_*`) to avoid collisions. `std/prelude.h` can optionally expose short aliases when `CC_ENABLE_SHORT_NAMES` is defined; default is prefixed-only. Header implementations are `static inline` to keep stdlib header-only.
+10. **Prefixed C ABI:** Public C names are prefixed (`CCString`, `CCArena`, `cc_file_*`) to avoid collisions. `std/prelude.cch` can optionally expose short aliases when `CC_ENABLE_SHORT_NAMES` is defined; default is prefixed-only. Header implementations are `static inline` to keep stdlib header-only.
 11. **Arena-first collections:** Collections default to arena-backed, bounded growth. Vectors/maps grow by allocating new buffers/tables in the provided arena and reusing them; old buffers remain until the arena resets. Growth fails if the arena is exhausted. Heap-backed helpers (kvec/khash style) are optional, tool-only, and never used by generated code unless explicitly included.
 12. **Async backend auto-probe:** The runtime may auto-select a native async backend (io_uring/kqueue/poll) with a safe fallback to the portable executor. An environment override (e.g., `CC_RUNTIME_BACKEND=executor|poll|io_uring`) can force selection; otherwise a best-available backend is chosen lazily.
 
@@ -67,9 +67,9 @@ Thus: `T?!E` means `Result<Option<T>, E>` (error takes precedence over missing v
 
 The Phase 1 stdlib includes three core modules: strings (manipulation and parsing), I/O (file and stream operations), and collections (dynamic arrays and hash maps). All are header-only or minimal-linkage, arena-backed, and designed for concurrent systems programming.
 
-### 1. Strings (`<std/string.h>`)
+### 1. Strings (`<std/string.cch>`)
 
-**Naming:** Language surface keeps `String` for UFCS ergonomics, but the C ABI is prefixed (`CCString`, `cc_string_*`). Short aliases are available only if `CC_ENABLE_SHORT_NAMES` is defined before including `std/prelude.h`.
+**Naming:** Language surface keeps `String` for UFCS ergonomics, but the C ABI is prefixed (`CCString`, `cc_string_*`). Short aliases are available only if `CC_ENABLE_SHORT_NAMES` is defined before including `std/prelude.cch`.
 
 **Collections note:** Vectors/Maps are arena-backed by default. They may grow by allocating new buffers/tables in the arena and copying/rehashing; growth fails if the arena cannot satisfy the request. Optional heap-backed variants exist for tools/tests when explicitly included; generated code uses the arena-backed forms.
 
@@ -304,7 +304,7 @@ All strings are UTF-8. Basic operations (split, find, trim on whitespace) work o
 
 ---
 
-### 2. I/O (`<std/io.h>` and `<std/fs.h>`)
+### 2. I/O (`<std/io.cch>` and `<std/fs.cch>`)
 
 #### 2.1 Overview
 
@@ -488,7 +488,7 @@ std_err.write("An error occurred\n");
 std_out.write(my_string); // String overload
 ```
 
-#### 2.5 Structured Logging (`<std/log.h>`)
+#### 2.5 Structured Logging (`<std/log.cch>`)
 
 Structured logging for servers and production systems. Supports multiple backpressure strategies (block, drop, sample) for different log types.
 
@@ -543,7 +543,7 @@ void Runtime.set_log_level(LogLevel level);
 **Examples:**
 
 ```c
-#include <std/prelude.h>
+#include <std/prelude.cch>
 
 LogEvent evt = {
     .level = Info,
@@ -597,7 +597,7 @@ log_sample(evt, 0.05);
 
 **@latency_sensitive context:** Use `log_drop()` in `@latency_sensitive` handlers—it is `@noblock` and never yields. Avoid `log_block()` and `log_sample()` in deadline-sensitive code (they may suspend).
 
-#### 2.6 Path Utilities (`<std/path.h>`)
+#### 2.6 Path Utilities (`<std/path.cch>`)
 
 ```c
 // Path operations (mostly free functions, no state)
@@ -615,7 +615,7 @@ char[:] ext = path_extension(config);
 
 ---
 
-### 3. Collections (`<std/vec.h>` and `<std/map.h>`)
+### 3. Collections (`<std/vec.cch>` and `<std/map.cch>`)
 
 #### 3.1 Overview
 
@@ -757,23 +757,23 @@ if (Request? r = active.get(id)) {
 ## Module Structure
 
 ```
-<std/prelude.h>        // Common imports (String, File, Vec, Map, etc.)
-<std/string.h>         // String builder and char[:] methods
-<std/io.h>             // File, StdStream
-<std/log.h>            // Structured logging (LogEvent, log_drop/block/sample)
-<std/fs.h>             // Path utilities
-<std/vec.h>            // Vec<T> dynamic array with UFCS methods
-<std/map.h>            // Map<K, V> hash map with UFCS methods
-<std/server.h>         // server_loop canonical shell
-<std/error.h>          // Error enums (IoError, ParseError, etc.)
+<std/prelude.cch>        // Common imports (String, File, Vec, Map, etc.)
+<std/string.cch>         // String builder and char[:] methods
+<std/io.cch>             // File, StdStream
+<std/log.cch>            // Structured logging (LogEvent, log_drop/block/sample)
+<std/fs.cch>             // Path utilities
+<std/vec.cch>            // Vec<T> dynamic array with UFCS methods
+<std/map.cch>            // Map<K, V> hash map with UFCS methods
+<std/server.cch>         // server_loop canonical shell
+<std/error.cch>          // Error enums (IoError, ParseError, etc.)
 ```
 
-**Prelude Safety:** `<std/prelude.h>` performs no implicit allocation or runtime initialization. It is a pure header include with zero hidden costs.
+**Prelude Safety:** `<std/prelude.cch>` performs no implicit allocation or runtime initialization. It is a pure header include with zero hidden costs.
 
 **Updated Prelude Example:**
 
 ```c
-#include <std/prelude.h>
+#include <std/prelude.cch>
 
 @async void main() {
     Arena arena = arena(megabytes(1));
@@ -973,7 +973,7 @@ All functions are covered by **Spec Tests**—normative, executable tests in `.c
 
 ---
 
-### 4. Server Shell (`<std/server.h>`)
+### 4. Server Shell (`<std/server.cch>`)
 
 The `server_loop` function provides a canonical server shell that handles connection acceptance, worker spawning, deadline enforcement, arena management, TLS wrapping, and keep-alive. It supports unary request/response and long-lived connection patterns (WebSockets, SSE, streaming, keep-alive, raw TCP).
 
@@ -1237,8 +1237,8 @@ struct ServerConfig {
 **Usage Example: Unary Request/Response (HTTP/1.1 with Keep-Alive)**
 
 ```c
-#include <std/prelude.h>
-#include <std/server.h>
+#include <std/prelude.cch>
+#include <std/server.cch>
 
 @async @latency_sensitive ServerAction!IoError api_handler(Request* req, Arena* req_arena) {
     if (req.path == "/api/users") {
@@ -1480,7 +1480,7 @@ void process_csv(char* filename) {
 ### After (With UFCS Stdlib)
 
 ```c
-#include <std/prelude.h>
+#include <std/prelude.cch>
 
 @async void process_csv(char[:] filename) {
     Arena arena = arena(megabytes(1));
@@ -1511,7 +1511,7 @@ void process_csv(char* filename) {
 ### Advanced Example: Data Processing Pipeline
 
 ```c
-#include <std/prelude.h>
+#include <std/prelude.cch>
 
 @async void process_logs() {
     Arena arena = arena(megabytes(10));

@@ -2,8 +2,8 @@
  * Simple structured concurrency nursery built on the pthread-backed scheduler.
  */
 
-#include "cc_nursery.h"
-#include "cc_channel.h"
+#include "cc_nursery.cch"
+#include "cc_channel.cch"
 
 #include <errno.h>
 #include <pthread.h>
