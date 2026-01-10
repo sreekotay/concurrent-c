@@ -43,6 +43,10 @@ int cc_spawn_closure0(CCTask** out_task, CCClosure0 c);
 // Join a task; returns 0 on success.
 int cc_task_join(CCTask* task);
 
+// Join a task and retrieve its return value (the task function's `void*` result).
+// Returns 0 on success.
+int cc_task_join_result(CCTask* task, void** out_result);
+
 // Free task handle (after join or if spawn failed after allocation).
 void cc_task_free(CCTask* task);
 

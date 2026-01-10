@@ -1,0 +1,9 @@
+#include "cc_closure.cch"
+#include <stdint.h>
+
+int main(void) {
+    CCClosure0 c = () => { return (void*)(intptr_t)123; };
+    void* r = cc_run_blocking_closure0_ptr(c);
+    return ((int)(intptr_t)r == 123) ? 0 : 1;
+}
+

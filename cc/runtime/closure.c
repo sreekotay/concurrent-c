@@ -114,6 +114,17 @@ int cc_run_blocking_closure0(CCClosure0 c) {
     return j;
 }
 
+void* cc_run_blocking_closure0_ptr(CCClosure0 c) {
+    if (!c.fn) return NULL;
+    CCTask* t = NULL;
+    int err = cc_spawn_closure0(&t, c);
+    if (err != 0) return NULL;
+    void* r = NULL;
+    (void)cc_task_join_result(t, &r);
+    cc_task_free(t);
+    return r;
+}
+
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0) {
     if (!c.fn) return NULL;
     void* r = c.fn(c.env, arg0);

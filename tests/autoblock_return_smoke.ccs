@@ -1,0 +1,14 @@
+#include "cc_runtime.cch"
+#include "cc_closure.cch"
+#include <stdint.h>
+
+static int add1(int x) { return x + 1; }
+
+@async int f(int x) {
+    return add1(x);
+}
+
+int main(void) {
+    return f(1) == 2 ? 0 : 1;
+}
+

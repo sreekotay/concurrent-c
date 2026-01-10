@@ -49,6 +49,15 @@ int cc_task_join(CCTask* task) {
     return pthread_join(task->thread, NULL);
 }
 
+int cc_task_join_result(CCTask* task, void** out_result) {
+    if (!task) return EINVAL;
+    void* r = NULL;
+    int err = pthread_join(task->thread, &r);
+    if (err != 0) return err;
+    if (out_result) *out_result = r;
+    return 0;
+}
+
 void cc_task_free(CCTask* task) {
     if (!task) return;
     free(task);
