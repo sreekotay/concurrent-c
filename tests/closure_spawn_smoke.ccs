@@ -1,0 +1,10 @@
+// Smoke: closure literal spawn inside nursery should lower to CCClosure0 + cc_nursery_spawn_closure0.
+
+int g = 0;
+
+void main() {
+    @nursery {
+        spawn (() => { g = 7; });
+    }
+}
+

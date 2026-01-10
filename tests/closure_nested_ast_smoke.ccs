@@ -1,0 +1,15 @@
+// Smoke: nested closures should be *recorded* in stub AST (Phase 2).
+
+int g = 0;
+
+void main() {
+    int x = 1;
+    @nursery {
+        spawn (() => {
+            @nursery {
+                spawn (() => { g = x; });
+            }
+        });
+    }
+}
+

@@ -20,6 +20,7 @@ typedef int bool;
 #endif
 #endif
 #include "cc_sched.cch"
+#include "cc_closure.cch"
 
 typedef struct CCChan CCChan;
 
@@ -48,6 +49,8 @@ bool cc_nursery_is_cancelled(const CCNursery* n);
 
 // Spawn a task owned by the nursery. Returns 0 on success.
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg);
+// Spawn a CCClosure0 (env freed via drop, if provided). Returns 0 on success.
+int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c);
 
 // Wait for all tasks to finish. Returns first join error if any.
 int cc_nursery_wait(CCNursery* n);

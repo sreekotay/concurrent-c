@@ -1,0 +1,15 @@
+// Smoke: multiline closure body + capture-by-value (best-effort heuristic).
+
+int g = 0;
+
+void main() {
+    int x = 3;
+    @nursery {
+        spawn (() => {
+            if (x == 3) {
+                g = 9;
+            }
+        });
+    }
+}
+

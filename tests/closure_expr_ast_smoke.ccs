@@ -1,0 +1,7 @@
+// Smoke: closure literal used as an expression should be recorded as CC_AST_NODE_CLOSURE.
+int g = 0;
+void main() {
+    int z = sizeof(() => { g = 1; });
+    (void)z;
+}
+

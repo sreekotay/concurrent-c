@@ -8,6 +8,339 @@
 
 #include "visitor/ufcs.h"
 
+/* --- Closure scan/lowering helpers (best-effort, early) ---
+   Goal: allow `spawn(() => { ... })` to lower to valid C by generating a
+   top-level env+thunk and rewriting the spawn statement to use CCClosure0. */
+
+typedef struct {
+    int start_line;
+    int end_line;
+    int nursery_id;
+    int id;
+    char** cap_names;
+    int cap_count;
+    char* body; /* includes surrounding { ... } */
+} CCClosureDesc;
+
+static int cc__is_ident_start_char(char c) { return (c == '_' || isalpha((unsigned char)c)); }
+static int cc__is_ident_char2(char c) { return (c == '_' || isalnum((unsigned char)c)); }
+
+static int cc__is_keyword_tok(const char* s, size_t n) {
+    static const char* kw[] = {
+        "if","else","for","while","do","switch","case","default","break","continue","return",
+        "sizeof","struct","union","enum","typedef","static","extern","const","volatile","restrict",
+        "void","char","short","int","long","float","double","_Bool","signed","unsigned",
+        "goto","auto","register","_Atomic","_Alignas","_Alignof","_Thread_local",
+        "true","false","NULL"
+    };
+    for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) {
+        if (strlen(kw[i]) == n && strncmp(kw[i], s, n) == 0) return 1;
+    }
+    return 0;
+}
+
+static int cc__name_in_list(char** xs, int n, const char* s, size_t slen) {
+    for (int i = 0; i < n; i++) {
+        if (!xs[i]) continue;
+        if (strlen(xs[i]) == slen && strncmp(xs[i], s, slen) == 0) return 1;
+    }
+    return 0;
+}
+
+static void cc__maybe_record_decl(char*** scope_names, int* scope_counts, int depth, const char* line) {
+    if (!scope_names || !scope_counts || depth < 0 || depth >= 256 || !line) return;
+    const char* p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '#' || *p == '\0') return;
+    if (!strchr(p, ';')) return;
+    const char* types[] = {"int","char","size_t","ssize_t","bool","CCSlice","CCArena","CCChan","CCNursery","CCDeadline","CCFuture"};
+    const char* after = NULL;
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        size_t tn = strlen(types[i]);
+        if (strncmp(p, types[i], tn) == 0 && isspace((unsigned char)p[tn])) { after = p + tn; break; }
+    }
+    if (!after) return;
+    p = after;
+    while (*p == ' ' || *p == '\t') p++;
+    while (*p == '*') { p++; while (*p == ' ' || *p == '\t') p++; }
+    if (!cc__is_ident_start_char(*p)) return;
+    const char* s = p++;
+    while (cc__is_ident_char2(*p)) p++;
+    size_t n = (size_t)(p - s);
+    if (n == 0 || cc__is_keyword_tok(s, n)) return;
+    int cur_n = scope_counts[depth];
+    if (cc__name_in_list(scope_names[depth], cur_n, s, n)) return;
+    char* name = (char*)malloc(n + 1);
+    if (!name) return;
+    memcpy(name, s, n);
+    name[n] = '\0';
+    char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
+    if (!next) { free(name); return; }
+    scope_names[depth] = next;
+    scope_names[depth][cur_n] = name;
+    scope_counts[depth] = cur_n + 1;
+}
+
+static void cc__collect_caps_from_block(char*** scope_names,
+                                        int* scope_counts,
+                                        int max_depth,
+                                        const char* block,
+                                        char*** out_caps,
+                                        int* out_cap_count) {
+    if (!scope_names || !scope_counts || !block || !out_caps || !out_cap_count) return;
+    const char* p = block;
+    while (*p) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) { p += 2; continue; }
+                if (*p == q) { p++; break; }
+                p++;
+            }
+            continue;
+        }
+        if (!cc__is_ident_start_char(*p)) { p++; continue; }
+        const char* s = p++;
+        while (cc__is_ident_char2(*p)) p++;
+        size_t n = (size_t)(p - s);
+        if (cc__is_keyword_tok(s, n)) continue;
+        /* ignore member access */
+        if (s > block && (s[-1] == '.' || (s[-1] == '>' && s > block + 1 && s[-2] == '-'))) continue;
+        int found = 0;
+        for (int d = max_depth; d >= 0 && !found; d--) {
+            if (cc__name_in_list(scope_names[d], scope_counts[d], s, n)) found = 1;
+        }
+        if (!found) continue;
+        if (cc__name_in_list(*out_caps, *out_cap_count, s, n)) continue;
+        char* name = (char*)malloc(n + 1);
+        if (!name) continue;
+        memcpy(name, s, n);
+        name[n] = '\0';
+        char** next = (char**)realloc(*out_caps, (size_t)(*out_cap_count + 1) * sizeof(char*));
+        if (!next) { free(name); continue; }
+        *out_caps = next;
+        (*out_caps)[*out_cap_count] = name;
+        (*out_cap_count)++;
+    }
+}
+
+static int cc__append_str(char** buf, size_t* len, size_t* cap, const char* s) {
+    if (!buf || !len || !cap || !s) return 0;
+    size_t n = strlen(s);
+    size_t need = *len + n + 1;
+    if (need > *cap) {
+        size_t nc = *cap ? *cap * 2 : 1024;
+        while (nc < need) nc *= 2;
+        char* nb = (char*)realloc(*buf, nc);
+        if (!nb) return 0;
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+    return 1;
+}
+
+/* Scan `src` for spawn closures and generate top-level thunks.
+   Outputs:
+   - `*out_descs`, `*out_count`
+   - `*out_line_map`: 1-based line -> (index+1) into desc array, 0 if none
+   - `*out_line_cap`: number of lines allocated
+   - `*out_defs`: C defs to emit before #line 1 */
+static int cc__scan_spawn_closures(const char* src,
+                                  size_t src_len,
+                                  const char* src_path,
+                                  CCClosureDesc** out_descs,
+                                  int* out_count,
+                                  int** out_line_map,
+                                  int* out_line_cap,
+                                  char** out_defs,
+                                  size_t* out_defs_len) {
+    if (!src || !out_descs || !out_count || !out_line_map || !out_line_cap || !out_defs || !out_defs_len) return 0;
+    *out_descs = NULL;
+    *out_count = 0;
+    *out_line_map = NULL;
+    *out_line_cap = 0;
+    *out_defs = NULL;
+    *out_defs_len = 0;
+
+    int lines = 1;
+    for (size_t i = 0; i < src_len; i++) if (src[i] == '\n') lines++;
+    int* line_map = (int*)calloc((size_t)lines + 2, sizeof(int));
+    if (!line_map) return 0;
+
+    CCClosureDesc* descs = NULL;
+    int count = 0, cap = 0;
+    char* defs = NULL;
+    size_t defs_len = 0, defs_cap = 0;
+
+    char** scope_names[256];
+    int scope_counts[256];
+    for (int i = 0; i < 256; i++) { scope_names[i] = NULL; scope_counts[i] = 0; }
+    int depth = 0;
+    int nursery_stack[128];
+    int nursery_depth[128];
+    int nursery_top = -1;
+    int nursery_counter = 0;
+
+    const char* cur = src;
+    int line_no = 1;
+    while ((size_t)(cur - src) < src_len && *cur) {
+        const char* line_start = cur;
+        const char* nl = strchr(cur, '\n');
+        const char* line_end = nl ? nl : (src + src_len);
+        size_t line_len = (size_t)(line_end - line_start);
+
+        char tmp_line[1024];
+        size_t cp = line_len < sizeof(tmp_line) - 1 ? line_len : sizeof(tmp_line) - 1;
+        memcpy(tmp_line, line_start, cp);
+        tmp_line[cp] = '\0';
+        cc__maybe_record_decl(scope_names, scope_counts, depth, tmp_line);
+
+        /* nursery marker */
+        const char* t = line_start;
+        while (t < line_end && (*t == ' ' || *t == '\t')) t++;
+        if ((line_end - t) >= 8 && strncmp(t, "@nursery", 8) == 0) {
+            int nid = ++nursery_counter;
+            if (nursery_top + 1 < 128) {
+                nursery_stack[++nursery_top] = nid;
+                nursery_depth[nursery_top] = -1;
+            }
+        }
+
+        /* spawn closure */
+        const char* sp = strstr(line_start, "spawn");
+        if (sp && sp < line_end) {
+            const char* p = sp + 5;
+            while (p < line_end && (*p == ' ' || *p == '\t')) p++;
+            if (p < line_end && *p == '(') {
+                p++;
+                while (p < line_end && (*p == ' ' || *p == '\t')) p++;
+                if (p + 2 <= line_end && p[0] == '(' && p[1] == ')') {
+                    const char* a = p + 2;
+                    while (a < line_end && (*a == ' ' || *a == '\t')) a++;
+                    if ((a + 2) <= line_end && a[0] == '=' && a[1] == '>') {
+                        a += 2;
+                        while (a < line_end && (*a == ' ' || *a == '\t')) a++;
+                        if (a < line_end && *a == '{') {
+                            const char* b = a;
+                            int br = 0;
+                            int in_str = 0;
+                            char str_q = 0;
+                            while ((size_t)(b - src) < src_len) {
+                                char c = *b++;
+                                if (in_str) {
+                                    if (c == '\\' && (size_t)(b - src) < src_len) { b++; continue; }
+                                    if (c == str_q) in_str = 0;
+                                    continue;
+                                }
+                                if (c == '"' || c == '\'') { in_str = 1; str_q = c; continue; }
+                                if (c == '{') br++;
+                                else if (c == '}') { br--; if (br == 0) break; }
+                            }
+                            if (br == 0) {
+                                const char* block_end = b;
+                                int end_line = line_no;
+                                for (const char* x = a; x < block_end; x++) if (*x == '\n') end_line++;
+                                int nid = (nursery_top >= 0) ? nursery_stack[nursery_top] : 0;
+
+                                char* body = (char*)malloc((size_t)(block_end - a) + 1);
+                                if (!body) { free(line_map); return 0; }
+                                memcpy(body, a, (size_t)(block_end - a));
+                                body[(size_t)(block_end - a)] = '\0';
+
+                                char** caps = NULL;
+                                int cap_n = 0;
+                                cc__collect_caps_from_block(scope_names, scope_counts, depth, body, &caps, &cap_n);
+
+                                if (count == cap) {
+                                    cap = cap ? cap * 2 : 16;
+                                    CCClosureDesc* nd = (CCClosureDesc*)realloc(descs, (size_t)cap * sizeof(CCClosureDesc));
+                                    if (!nd) { free(body); free(line_map); return 0; }
+                                    descs = nd;
+                                }
+                                int id = count + 1;
+                                descs[count++] = (CCClosureDesc){
+                                    .start_line = line_no,
+                                    .end_line = end_line,
+                                    .nursery_id = nid,
+                                    .id = id,
+                                    .cap_names = caps,
+                                    .cap_count = cap_n,
+                                    .body = body,
+                                };
+                                if (line_no <= lines) line_map[line_no] = count; /* 1-based index */
+
+                                char hdr[256];
+                                snprintf(hdr, sizeof(hdr), "/* CC closure %d (from %s:%d) */\n", id, src_path ? src_path : "<src>", line_no);
+                                cc__append_str(&defs, &defs_len, &defs_cap, hdr);
+                                {
+                                    char buf[8192];
+                                    size_t off = 0;
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "typedef struct __cc_closure_env_%d {\n", id);
+                                    for (int ci = 0; ci < cap_n; ci++) {
+                                        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  __typeof__(%s) %s;\n", caps[ci], caps[ci]);
+                                    }
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "} __cc_closure_env_%d;\n", id);
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "static void* __cc_closure_entry_%d(void* __p) {\n", id);
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n", id, id);
+                                    for (int ci = 0; ci < cap_n; ci++) {
+                                        off += (size_t)snprintf(buf + off, sizeof(buf) - off,
+                                                                "  const __typeof__(__env->%s) %s = __env->%s;\n",
+                                                                caps[ci], caps[ci], caps[ci]);
+                                    }
+                                    /* Source mapping: make closure body diagnostics point to original .ccs. */
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "#line %d \"%s\"\n", line_no, src_path ? src_path : "<src>");
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  %s\n", body);
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "  return NULL;\n}\n");
+                                    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "static void __cc_closure_drop_%d(void* __p) { free(__p); }\n\n", id);
+                                    cc__append_str(&defs, &defs_len, &defs_cap, buf);
+                                }
+
+                                /* advance cursor */
+                                cur = block_end;
+                                line_no = end_line;
+                                if (*cur == '\n') { cur++; line_no++; }
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /* brace depth */
+        for (const char* x = line_start; x < line_end; x++) {
+            if (*x == '{') {
+                depth++;
+                if (nursery_top >= 0 && nursery_depth[nursery_top] < 0) nursery_depth[nursery_top] = depth;
+            } else if (*x == '}') {
+                if (nursery_top >= 0 && nursery_depth[nursery_top] == depth) nursery_top--;
+                if (depth > 0) depth--;
+            }
+        }
+
+        if (!nl) break;
+        cur = nl + 1;
+        line_no++;
+    }
+
+    /* scope names cleanup */
+    for (int d = 0; d < 256; d++) {
+        for (int i = 0; i < scope_counts[d]; i++) free(scope_names[d][i]);
+        free(scope_names[d]);
+    }
+
+    *out_descs = descs;
+    *out_count = count;
+    *out_line_map = line_map;
+    *out_line_cap = lines + 2;
+    *out_defs = defs;
+    *out_defs_len = defs_len;
+    return 1;
+}
+
 #ifndef CC_TCC_EXT_AVAILABLE
 // Minimal fallbacks when TCC extensions are not available.
 static int cc__read_entire_file(const char* path, char** out_buf, size_t* out_len) {
@@ -574,6 +907,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     fprintf(out, "#include <stdlib.h>\n");
     fprintf(out, "#include <stdint.h>\n");
     fprintf(out, "#include \"cc_nursery.cch\"\n");
+    fprintf(out, "#include \"cc_closure.cch\"\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
     fprintf(out, "\n");
     fprintf(out, "/* --- CC spawn lowering helpers (best-effort) --- */\n");
@@ -592,6 +926,26 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     fprintf(out, "  return NULL;\n");
     fprintf(out, "}\n");
     fprintf(out, "/* --- end spawn helpers --- */\n\n");
+
+    /* Pre-scan for spawn closures so we can emit valid top-level thunk defs. */
+    CCClosureDesc* closure_descs = NULL;
+    int closure_count = 0;
+    int* closure_line_map = NULL; /* 1-based line -> (index+1) */
+    int closure_line_cap = 0;
+    char* closure_defs = NULL;
+    size_t closure_defs_len = 0;
+    if (src_ufcs) {
+        cc__scan_spawn_closures(src_ufcs, src_ufcs_len, src_path,
+                                &closure_descs, &closure_count,
+                                &closure_line_map, &closure_line_cap,
+                                &closure_defs, &closure_defs_len);
+    }
+    if (closure_defs && closure_defs_len > 0) {
+        fputs("/* --- CC generated closures --- */\n", out);
+        fwrite(closure_defs, 1, closure_defs_len, out);
+        fputs("/* --- end generated closures --- */\n\n", out);
+    }
+
     /* Preserve diagnostics mapping to the original input where possible. */
     fprintf(out, "#line 1 \"%s\"\n", src_path);
 
@@ -822,6 +1176,36 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                 if (*s0 == '(') {
                     s0++;
                     while (*s0 == ' ' || *s0 == '\t') s0++;
+
+                    /* Closure literal: spawn(() => { ... }); uses pre-scan + top-level thunks. */
+                    if (closure_line_map && src_line_no > 0 && src_line_no < closure_line_cap) {
+                        int idx1 = closure_line_map[src_line_no];
+                        if (idx1 > 0 && idx1 <= closure_count) {
+                            CCClosureDesc* cd = &closure_descs[idx1 - 1];
+                            fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                            fprintf(out, "{\n");
+                            if (cd->cap_count > 0) {
+                                fprintf(out, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)malloc(sizeof(__cc_closure_env_%d));\n", cd->id, cd->id, cd->id);
+                                fprintf(out, "  if (!__env) abort();\n");
+                                for (int ci = 0; ci < cd->cap_count; ci++) {
+                                    fprintf(out, "  __env->%s = %s;\n", cd->cap_names[ci], cd->cap_names[ci]);
+                                }
+                                fprintf(out, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, __env, __cc_closure_drop_%d);\n", cd->id, cd->id);
+                            } else {
+                                fprintf(out, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, NULL, NULL);\n", cd->id);
+                            }
+                            fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
+                            fprintf(out, "}\n");
+                            /* Skip original closure text lines (multiline). */
+                            while (src_line_no < cd->end_line && fgets(line, sizeof(line), in)) {
+                                src_line_no++;
+                            }
+                            /* Resync source mapping after eliding original closure text. */
+                            fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
+                            continue;
+                        }
+                    }
+
                     char fn[64] = {0};
                     long arg = 0;
                     int has_arg = 0;
@@ -986,6 +1370,16 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
         free(ufcs_ml_end);
         free(ufcs_single);
         fclose(in);
+        if (closure_descs) {
+            for (int i = 0; i < closure_count; i++) {
+                for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_names[j]);
+                free(closure_descs[i].cap_names);
+                free(closure_descs[i].body);
+            }
+            free(closure_descs);
+        }
+        free(closure_line_map);
+        free(closure_defs);
         if (src_ufcs != src_all) free(src_ufcs);
         free(src_all);
     } else {

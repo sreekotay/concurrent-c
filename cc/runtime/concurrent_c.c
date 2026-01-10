@@ -9,6 +9,7 @@
 #include "channel.c"
 #include "scheduler.c"
 #include "nursery.c"
+#include "closure.c"
 #include "io.c"
 #include "string.c"
 #include "exec.c"

@@ -21,6 +21,8 @@ typedef int bool;
 #include <stdint.h>
 #include <time.h>
 
+#include "cc_closure.cch"
+
 typedef struct CCTask CCTask;
 
 typedef struct {
@@ -35,6 +37,8 @@ void cc_scheduler_shutdown(void);
 // Spawn a detached task. The task handle can be joined via cc_task_join.
 // Returns 0 on success, errno-style code on failure.
 int cc_spawn(CCTask** out_task, void* (*fn)(void*), void* arg);
+// Spawn a detached 0-arg closure (env freed via drop, if provided).
+int cc_spawn_closure0(CCTask** out_task, CCClosure0 c);
 
 // Join a task; returns 0 on success.
 int cc_task_join(CCTask* task);

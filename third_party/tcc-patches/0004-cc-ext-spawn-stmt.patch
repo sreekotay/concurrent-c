@@ -18,15 +18,16 @@ index dddddddd..ffffffff 100644
 +        next(); /* consume 'spawn' */
 +        if (tok != '(')
 +            tcc_error("expected '(' after spawn");
-+        int depth = 1;
-+        next();
-+        while (tok && tok != TOK_EOF && depth > 0) {
-+            if (tok == '(') depth++;
-+            else if (tok == ')') depth--;
-+            next();
++        next(); /* consume '(' */
++        {
++            int saved_ncw = nocode_wanted;
++            ++nocode_wanted;
++            expr_eq();
++            vpop();
++            nocode_wanted = saved_ncw;
 +        }
-+        if (tok == ';') next();
-+        else skip(';');
++        skip(')');
++        skip(';');
 +        cc_ast_record_end(); /* stmt */
 +        goto again;
 +    }

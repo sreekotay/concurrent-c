@@ -1,0 +1,31 @@
+/*
+ * CC closure ABI (early, minimal).
+ *
+ * This is the foundation for:
+ * - `() => { ... }` closures (capture-by-copy)
+ * - passing closures into runtimes (nursery spawn, blocking executor, etc.)
+ *
+ * NOTE: For now we only standardize a 0-arg closure returning void* (like pthread).
+ * Higher-arity + typed closures will layer on top as compiler support grows.
+ */
+#ifndef CC_CLOSURE_H
+#define CC_CLOSURE_H
+
+#include <stddef.h>
+
+typedef struct {
+    void* (*fn)(void* env);
+    void* env;
+    void (*drop)(void* env); /* optional; can be NULL */
+} CCClosure0;
+
+static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
+    CCClosure0 c;
+    c.fn = fn;
+    c.env = env;
+    c.drop = drop;
+    return c;
+}
+
+#endif /* CC_CLOSURE_H */
+
