@@ -1,0 +1,16 @@
+#include "cc_closure.cch"
+#include "cc_nursery.cch"
+
+int main(void) {
+    int g = 0;
+    int* gp = &g;
+    int v = 5;
+
+    CCClosure1 c = x => { int* p = (int*)x; if (p) *gp = *p; };
+
+    @nursery {
+        spawn (c, &v);
+    }
+    return (g == 5) ? 0 : 1;
+}
+

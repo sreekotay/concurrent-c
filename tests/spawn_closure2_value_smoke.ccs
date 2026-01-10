@@ -1,0 +1,17 @@
+#include "cc_closure.cch"
+#include "cc_nursery.cch"
+
+int main(void) {
+    int g = 0;
+    int* gp = &g;
+    int a = 6;
+    int b = 7;
+
+    CCClosure2 c = (x, y) => { int* px = (int*)x; int* py = (int*)y; if (px && py) *gp = *px + *py; };
+
+    @nursery {
+        spawn (c, &a, &b);
+    }
+    return (g == 13) ? 0 : 1;
+}
+

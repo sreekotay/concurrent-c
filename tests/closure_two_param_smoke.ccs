@@ -1,0 +1,13 @@
+#include "cc_closure.cch"
+
+int main(void) {
+    int g = 0;
+    int* gp = &g;
+    int a = 3;
+    int b = 4;
+
+    CCClosure2 c = (x, y) => { int* px = (int*)x; int* py = (int*)y; if (px && py) *gp = *px + *py; };
+
+    return (c(&a, &b), (g == 7 ? 0 : 1));
+}
+
