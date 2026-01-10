@@ -18,7 +18,10 @@ typedef struct {
     int end_line;
     int nursery_id;
     int id;
+    int start_col; /* 0-based, in start_line */
+    int end_col;   /* 0-based, in end_line (exclusive) */
     char** cap_names;
+    char** cap_types; /* parallel to cap_names; NULL if unknown */
     int cap_count;
     char* body; /* includes surrounding { ... } */
 } CCClosureDesc;
@@ -48,22 +51,28 @@ static int cc__name_in_list(char** xs, int n, const char* s, size_t slen) {
     return 0;
 }
 
-static void cc__maybe_record_decl(char*** scope_names, int* scope_counts, int depth, const char* line) {
-    if (!scope_names || !scope_counts || depth < 0 || depth >= 256 || !line) return;
+static void cc__maybe_record_decl(char*** scope_names,
+                                  char*** scope_types,
+                                  int* scope_counts,
+                                  int depth,
+                                  const char* line) {
+    if (!scope_names || !scope_types || !scope_counts || depth < 0 || depth >= 256 || !line) return;
     const char* p = line;
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '#' || *p == '\0') return;
     if (!strchr(p, ';')) return;
     const char* types[] = {"int","char","size_t","ssize_t","bool","CCSlice","CCArena","CCChan","CCNursery","CCDeadline","CCFuture"};
     const char* after = NULL;
+    const char* base_type = NULL;
     for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
         size_t tn = strlen(types[i]);
-        if (strncmp(p, types[i], tn) == 0 && isspace((unsigned char)p[tn])) { after = p + tn; break; }
+        if (strncmp(p, types[i], tn) == 0 && isspace((unsigned char)p[tn])) { after = p + tn; base_type = types[i]; break; }
     }
     if (!after) return;
     p = after;
     while (*p == ' ' || *p == '\t') p++;
-    while (*p == '*') { p++; while (*p == ' ' || *p == '\t') p++; }
+    int star_n = 0;
+    while (*p == '*') { star_n++; p++; while (*p == ' ' || *p == '\t') p++; }
     if (!cc__is_ident_start_char(*p)) return;
     const char* s = p++;
     while (cc__is_ident_char2(*p)) p++;
@@ -71,15 +80,41 @@ static void cc__maybe_record_decl(char*** scope_names, int* scope_counts, int de
     if (n == 0 || cc__is_keyword_tok(s, n)) return;
     int cur_n = scope_counts[depth];
     if (cc__name_in_list(scope_names[depth], cur_n, s, n)) return;
+
+    /* Build a file-scope-safe type string for simple decls (e.g. "int", "int*", "CCNursery*"). */
+    if (!base_type) return;
+    size_t bt = strlen(base_type);
+    char* ty = (char*)malloc(bt + (size_t)star_n + 1);
+    if (!ty) return;
+    memcpy(ty, base_type, bt);
+    for (int i = 0; i < star_n; i++) ty[bt + (size_t)i] = '*';
+    ty[bt + (size_t)star_n] = '\0';
+
     char* name = (char*)malloc(n + 1);
-    if (!name) return;
+    if (!name) { free(ty); return; }
     memcpy(name, s, n);
     name[n] = '\0';
     char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
-    if (!next) { free(name); return; }
+    if (!next) { free(name); free(ty); return; }
     scope_names[depth] = next;
+    char** tnext = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
+    if (!tnext) { free(name); free(ty); return; }
+    scope_types[depth] = tnext;
     scope_names[depth][cur_n] = name;
+    scope_types[depth][cur_n] = ty;
     scope_counts[depth] = cur_n + 1;
+}
+
+static const char* cc__lookup_decl_type(char** scope_names,
+                                        char** scope_types,
+                                        int n,
+                                        const char* name) {
+    if (!scope_names || !scope_types || !name) return NULL;
+    for (int i = 0; i < n; i++) {
+        if (!scope_names[i] || !scope_types[i]) continue;
+        if (strcmp(scope_names[i], name) == 0) return scope_types[i];
+    }
+    return NULL;
 }
 
 static void cc__collect_caps_from_block(char*** scope_names,
@@ -210,8 +245,9 @@ static int cc__scan_spawn_closures(const char* src,
     size_t defs_len = 0, defs_cap = 0;
 
     char** scope_names[256];
+    char** scope_types[256];
     int scope_counts[256];
-    for (int i = 0; i < 256; i++) { scope_names[i] = NULL; scope_counts[i] = 0; }
+    for (int i = 0; i < 256; i++) { scope_names[i] = NULL; scope_types[i] = NULL; scope_counts[i] = 0; }
     int depth = 0;
     int nursery_stack[128];
     int nursery_depth[128];
@@ -230,7 +266,7 @@ static int cc__scan_spawn_closures(const char* src,
         size_t cp = line_len < sizeof(tmp_line) - 1 ? line_len : sizeof(tmp_line) - 1;
         memcpy(tmp_line, line_start, cp);
         tmp_line[cp] = '\0';
-        cc__maybe_record_decl(scope_names, scope_counts, depth, tmp_line);
+        cc__maybe_record_decl(scope_names, scope_types, scope_counts, depth, tmp_line);
 
         /* nursery marker */
         const char* t = line_start;
@@ -243,122 +279,260 @@ static int cc__scan_spawn_closures(const char* src,
             }
         }
 
-        /* spawn closure */
-        const char* sp = strstr(line_start, "spawn");
-        if (sp && sp < line_end) {
-            const char* p = sp + 5;
-            while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-            if (p < line_end && *p == '(') {
+        /* closure literal: `() => { ... }` or `() => expr` (best-effort scan) */
+        {
+            int consumed_literal = 0;
+            const char* s = line_start;
+            int in_str = 0;
+            char str_q = 0;
+            while (s < line_end) {
+                char c = *s;
+                if (in_str) {
+                    if (c == '\\' && (s + 1) < line_end) { s += 2; continue; }
+                    if (c == str_q) in_str = 0;
+                    s++;
+                    continue;
+                }
+                if (c == '"' || c == '\'') { in_str = 1; str_q = c; s++; continue; }
+                if (c != '(') { s++; continue; }
+                const char* p = s + 1;
+                while (p < line_end && (*p == ' ' || *p == '\t')) p++;
+                if (p >= line_end || *p != ')') { s++; continue; }
                 p++;
                 while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                if (p + 2 <= line_end && p[0] == '(' && p[1] == ')') {
-                    const char* a = p + 2;
-                    while (a < line_end && (*a == ' ' || *a == '\t')) a++;
-                    if ((a + 2) <= line_end && a[0] == '=' && a[1] == '>') {
-                        a += 2;
-                        while (a < line_end && (*a == ' ' || *a == '\t')) a++;
-                        if (a < line_end && *a == '{') {
-                            const char* b = a;
-                            int br = 0;
-                            int in_str = 0;
-                            char str_q = 0;
-                            while ((size_t)(b - src) < src_len) {
-                                char c = *b++;
-                                if (in_str) {
-                                    if (c == '\\' && (size_t)(b - src) < src_len) { b++; continue; }
-                                    if (c == str_q) in_str = 0;
-                                    continue;
-                                }
-                                if (c == '"' || c == '\'') { in_str = 1; str_q = c; continue; }
-                                if (c == '{') br++;
-                                else if (c == '}') { br--; if (br == 0) break; }
-                            }
-                            if (br == 0) {
-                                const char* block_end = b;
-                                int end_line = line_no;
-                                for (const char* x = a; x < block_end; x++) if (*x == '\n') end_line++;
-                                int nid = (nursery_top >= 0) ? nursery_stack[nursery_top] : 0;
+                if ((p + 2) > line_end || p[0] != '=' || p[1] != '>') { s++; continue; }
+                p += 2;
+                while (p < line_end && (*p == ' ' || *p == '\t')) p++;
+                if (p >= line_end) { s++; continue; }
 
-                                char* body = (char*)malloc((size_t)(block_end - a) + 1);
-                                if (!body) { free(line_map); return 0; }
-                                memcpy(body, a, (size_t)(block_end - a));
-                                body[(size_t)(block_end - a)] = '\0';
+                const char* body_start = p;
+                const char* body_end = NULL; /* exclusive */
+                int end_line = line_no;
+                int end_col = 0;
+
+                if (*body_start == '{') {
+                    const char* b = body_start;
+                    int br = 0;
+                    int in_str2 = 0;
+                    char q2 = 0;
+                    while ((size_t)(b - src) < src_len) {
+                        char ch = *b++;
+                        if (in_str2) {
+                            if (ch == '\\' && (size_t)(b - src) < src_len) { b++; continue; }
+                            if (ch == q2) in_str2 = 0;
+                            continue;
+                        }
+                        if (ch == '"' || ch == '\'') { in_str2 = 1; q2 = ch; continue; }
+                        if (ch == '{') br++;
+                        else if (ch == '}') { br--; if (br == 0) break; }
+                    }
+                    if (br != 0) { s++; continue; }
+                    body_end = b;
+                } else {
+                    /* expression body: scan until delimiter at nesting depth 0 */
+                    const char* b = body_start;
+                    int par = 0, brk = 0;
+                    int in_str2 = 0;
+                    char q2 = 0;
+                    while ((size_t)(b - src) < src_len) {
+                        char ch = *b;
+                        if (in_str2) {
+                            if (ch == '\\' && (size_t)((b + 1) - src) < src_len) { b += 2; continue; }
+                            if (ch == q2) in_str2 = 0;
+                            b++;
+                            continue;
+                        }
+                        if (ch == '"' || ch == '\'') { in_str2 = 1; q2 = ch; b++; continue; }
+                        if (ch == '(') par++;
+                        else if (ch == ')') { if (par == 0 && brk == 0) break; par--; }
+                        else if (ch == '[') brk++;
+                        else if (ch == ']') { if (brk == 0 && par == 0) break; brk--; }
+                        if (par == 0 && brk == 0) {
+                            if (ch == ',' || ch == ';' || ch == '}' || ch == '\n') break;
+                        }
+                        b++;
+                    }
+                    body_end = b;
+                }
+
+                /* Compute end_line/end_col based on body_end */
+                for (const char* x = body_start; x < body_end; x++) if (*x == '\n') end_line++;
+                const char* last_nl = NULL;
+                for (const char* x = body_start; x < body_end; x++) if (*x == '\n') last_nl = x;
+                if (last_nl) end_col = (int)(body_end - (last_nl + 1));
+                else end_col = (int)(body_end - line_start);
+
+                int nid = (nursery_top >= 0) ? nursery_stack[nursery_top] : 0;
+
+                char* body = (char*)malloc((size_t)(body_end - body_start) + 1);
+                if (!body) { free(line_map); return 0; }
+                memcpy(body, body_start, (size_t)(body_end - body_start));
+                body[(size_t)(body_end - body_start)] = '\0';
 
                                 char** caps = NULL;
                                 int cap_n = 0;
                                 cc__collect_caps_from_block(scope_names, scope_counts, depth, body, &caps, &cap_n);
-
-                                if (count == cap) {
-                                    cap = cap ? cap * 2 : 16;
-                                    CCClosureDesc* nd = (CCClosureDesc*)realloc(descs, (size_t)cap * sizeof(CCClosureDesc));
-                                    if (!nd) { free(body); free(line_map); return 0; }
-                                    descs = nd;
+                                char** cap_types = NULL;
+                                if (cap_n > 0) {
+                                    cap_types = (char**)calloc((size_t)cap_n, sizeof(char*));
+                                    if (!cap_types) { free(body); free(line_map); return 0; }
+                                    for (int ci = 0; ci < cap_n; ci++) {
+                                        const char* ty = NULL;
+                                        for (int d = depth; d >= 1 && !ty; d--) {
+                                            ty = cc__lookup_decl_type(scope_names[d], scope_types[d], scope_counts[d], caps[ci]);
+                                        }
+                                        if (ty) {
+                                            cap_types[ci] = strdup(ty);
+                                        }
+                                    }
                                 }
-                                int id = io_next_closure_id ? (*io_next_closure_id)++ : (count + 1);
-                                int abs_line = (line_base > 0 ? (line_base + line_no - 1) : line_no);
+
+                if (count == cap) {
+                    cap = cap ? cap * 2 : 16;
+                    CCClosureDesc* nd = (CCClosureDesc*)realloc(descs, (size_t)cap * sizeof(CCClosureDesc));
+                    if (!nd) { free(body); free(line_map); return 0; }
+                    descs = nd;
+                }
+                int id = io_next_closure_id ? (*io_next_closure_id)++ : (count + 1);
+                int abs_line = (line_base > 0 ? (line_base + line_no - 1) : line_no);
+                int start_col = (int)(s - line_start);
                                 descs[count++] = (CCClosureDesc){
-                                    .start_line = line_no,
-                                    .end_line = end_line,
-                                    .nursery_id = nid,
-                                    .id = id,
-                                    .cap_names = caps,
-                                    .cap_count = cap_n,
-                                    .body = body,
-                                };
-                                if (line_no <= lines) line_map[line_no] = count; /* 1-based index */
+                    .start_line = line_no,
+                    .end_line = end_line,
+                    .nursery_id = nid,
+                    .id = id,
+                    .start_col = start_col,
+                    .end_col = end_col,
+                    .cap_names = caps,
+                                    .cap_types = cap_types,
+                    .cap_count = cap_n,
+                    .body = body,
+                };
+                if (line_no <= lines) line_map[line_no] = count; /* 1-based index */
 
-                                /* Always forward-declare the entry so spawn rewrite can reference it.
-                                   We emit definitions at end-of-file for better global visibility. */
-                                {
-                                    char pb[128];
-                                    snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*);\n", id);
-                                    cc__append_str(&protos, &protos_len, &protos_cap, pb);
-                                }
-                                /* Emit a runnable closure thunk only when it requires no captures.
-                                   Capturing locals will be implemented once we have type + escape checking. */
-                                if (cap_n == 0) {
-                                    /* Recursively lower CC constructs inside the closure body (e.g. nested @nursery/spawn). */
-                                    char* more_protos = NULL;
-                                    size_t more_protos_len = 0;
-                                    char* more_defs = NULL;
-                                    size_t more_defs_len = 0;
-                                    char* lowered = cc__lower_cc_in_block_text(body, strlen(body),
-                                                                              src_path, abs_line,
-                                                                              io_next_closure_id,
-                                                                              &more_protos, &more_protos_len,
-                                                                              &more_defs, &more_defs_len);
-                                    if (more_protos && more_protos_len) cc__append_str(&protos, &protos_len, &protos_cap, more_protos);
-                                    /* IMPORTANT: nested closure defs must be top-level; append them BEFORE emitting this function body. */
-                                    if (more_defs && more_defs_len) cc__append_str(&defs, &defs_len, &defs_cap, more_defs);
-                                    free(more_protos);
-                                    free(more_defs);
-
-                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
-                                                   "/* CC closure %d (from %s:%d) */\n",
-                                                   id, src_path ? src_path : "<src>", abs_line);
-                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
-                                                   "static void* __cc_closure_entry_%d(void* __p) {\n  (void)__p;\n", id);
-
-                                    /* Source mapping: make closure body diagnostics point to original .ccs. */
-                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
-                                                   "#line %d \"%s\"\n",
-                                                   abs_line, src_path ? src_path : "<src>");
-                                    cc__append_fmt(&defs, &defs_len, &defs_cap,
-                                                   "  %s\n", lowered ? lowered : body);
-                                    free(lowered);
-                                    cc__append_str(&defs, &defs_len, &defs_cap, "  return NULL;\n}\n\n");
-                                }
-
-                                /* advance cursor */
-                                cur = block_end;
-                                line_no = end_line;
-                                if (*cur == '\n') { cur++; line_no++; }
-                                continue;
-                            }
+                {
+                    char pb[128];
+                    snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*);\n", id);
+                    cc__append_str(&protos, &protos_len, &protos_cap, pb);
+                }
+                {
+                    /* Factory that captures by value into a heap env and returns a CCClosure0. */
+                    cc__append_fmt(&protos, &protos_len, &protos_cap, "static CCClosure0 __cc_closure_make_%d(", id);
+                    if (cap_n == 0) {
+                        cc__append_str(&protos, &protos_len, &protos_cap, "void");
+                    } else {
+                        for (int ci = 0; ci < cap_n; ci++) {
+                            if (ci) cc__append_str(&protos, &protos_len, &protos_cap, ", ");
+                            cc__append_fmt(&protos, &protos_len, &protos_cap,
+                                           "%s %s",
+                                           cap_types && cap_types[ci] ? cap_types[ci] : "int",
+                                           caps[ci] ? caps[ci] : "__cap");
                         }
                     }
+                    cc__append_str(&protos, &protos_len, &protos_cap, ");\n");
                 }
+
+                /* Always emit a closure definition. If there are captures, emit an env + make() helper. */
+                {
+                    char* more_protos = NULL;
+                    size_t more_protos_len = 0;
+                    char* more_defs = NULL;
+                    size_t more_defs_len = 0;
+                    char* lowered = cc__lower_cc_in_block_text(body, strlen(body),
+                                                              src_path, abs_line,
+                                                              io_next_closure_id,
+                                                              &more_protos, &more_protos_len,
+                                                              &more_defs, &more_defs_len);
+                    if (more_protos && more_protos_len) cc__append_str(&protos, &protos_len, &protos_cap, more_protos);
+                    if (more_defs && more_defs_len) cc__append_str(&defs, &defs_len, &defs_cap, more_defs);
+                    free(more_protos);
+                    free(more_defs);
+
+                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                   "/* CC closure %d (from %s:%d) */\n",
+                                   id, src_path ? src_path : "<src>", abs_line);
+
+                    if (cap_n > 0) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "typedef struct __cc_closure_env_%d {\n", id);
+                        for (int ci = 0; ci < cap_n; ci++) {
+                            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                           "  %s %s;\n",
+                                           cap_types && cap_types[ci] ? cap_types[ci] : "int",
+                                           caps[ci] ? caps[ci] : "__cap");
+                        }
+                        cc__append_str(&defs, &defs_len, &defs_cap, "} ");
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "__cc_closure_env_%d;\n", id);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "static void __cc_closure_env_%d_drop(void* p) { if (p) free(p); }\n",
+                                       id);
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "static CCClosure0 __cc_closure_make_%d(", id);
+                        for (int ci = 0; ci < cap_n; ci++) {
+                            if (ci) cc__append_str(&defs, &defs_len, &defs_cap, ", ");
+                            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                           "%s %s",
+                                           cap_types && cap_types[ci] ? cap_types[ci] : "int",
+                                           caps[ci] ? caps[ci] : "__cap");
+                        }
+                        cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)malloc(sizeof(__cc_closure_env_%d));\n",
+                                       id, id, id);
+                        cc__append_str(&defs, &defs_len, &defs_cap, "  if (!__env) abort();\n");
+                        for (int ci = 0; ci < cap_n; ci++) {
+                            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                           "  __env->%s = %s;\n",
+                                           caps[ci] ? caps[ci] : "__cap",
+                                           caps[ci] ? caps[ci] : "__cap");
+                        }
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  return cc_closure0_make(__cc_closure_entry_%d, __env, __cc_closure_env_%d_drop);\n",
+                                       id, id);
+                        cc__append_str(&defs, &defs_len, &defs_cap, "}\n");
+                    } else {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "static CCClosure0 __cc_closure_make_%d(void) { return cc_closure0_make(__cc_closure_entry_%d, NULL, NULL); }\n",
+                                       id, id);
+                    }
+
+                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                   "static void* __cc_closure_entry_%d(void* __p) {\n",
+                                   id);
+                    if (cap_n > 0) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                       "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n",
+                                       id, id);
+                        for (int ci = 0; ci < cap_n; ci++) {
+                            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                           "  %s %s = __env->%s;\n",
+                                           cap_types && cap_types[ci] ? cap_types[ci] : "int",
+                                           caps[ci] ? caps[ci] : "__cap",
+                                           caps[ci] ? caps[ci] : "__cap");
+                        }
+                    } else {
+                        cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__p;\n");
+                    }
+
+                    cc__append_fmt(&defs, &defs_len, &defs_cap,
+                                   "#line %d \"%s\"\n",
+                                   abs_line, src_path ? src_path : "<src>");
+                    if (body && body[0] == '{') {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered ? lowered : body);
+                    } else {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  (void)(%s);\n", lowered ? lowered : body);
+                    }
+                    free(lowered);
+                    cc__append_str(&defs, &defs_len, &defs_cap, "  return NULL;\n}\n\n");
+                }
+
+                /* advance cursor to end of literal */
+                cur = body_end;
+                line_no = end_line;
+                /* If we ended at newline boundary, allow outer loop to progress normally. */
+                if (*cur == '\n') { cur++; line_no++; }
+                consumed_literal = 1;
+                break;
             }
+            if (consumed_literal) continue;
         }
 
         /* brace depth */
@@ -377,10 +551,12 @@ static int cc__scan_spawn_closures(const char* src,
         line_no++;
     }
 
-    /* scope names cleanup */
+    /* scope names/types cleanup */
     for (int d = 0; d < 256; d++) {
         for (int i = 0; i < scope_counts[d]; i++) free(scope_names[d][i]);
         free(scope_names[d]);
+        for (int i = 0; i < scope_counts[d]; i++) free(scope_types[d][i]);
+        free(scope_types[d]);
     }
 
     *out_descs = descs;
@@ -467,14 +643,19 @@ static char* cc__lower_cc_snippet(const char* text,
                         CCClosureDesc* cd = &closure_descs[idx1 - 1];
                         cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", abs_line, src_path ? src_path : "<src>");
                         cc__append_str(&out, &out_len, &out_cap, "{\n");
-                        if (cd->cap_count > 0) {
-                            cc__append_fmt(&out, &out_len, &out_cap, "#line %d \"%s\"\n", base_line + cd->start_line - 1, src_path ? src_path : "<src>");
-                            cc__append_str(&out, &out_len, &out_cap, "_Static_assert(0, \"CC: closure captures not implemented yet\");\n");
-                            cc__append_str(&out, &out_len, &out_cap, "(void)0;\n");
-                        } else if (cur_nursery_id == 0) {
+                        if (cur_nursery_id == 0) {
                             cc__append_str(&out, &out_len, &out_cap, "/* TODO: spawn outside nursery */\n");
                         } else {
-                            cc__append_fmt(&out, &out_len, &out_cap, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, NULL, NULL);\n", cd->id);
+                            cc__append_fmt(&out, &out_len, &out_cap, "  CCClosure0 __c = __cc_closure_make_%d(", cd->id);
+                            if (cd->cap_count == 0) {
+                                cc__append_str(&out, &out_len, &out_cap, ");\n");
+                            } else {
+                                for (int ci = 0; ci < cd->cap_count; ci++) {
+                                    if (ci) cc__append_str(&out, &out_len, &out_cap, ", ");
+                                    cc__append_str(&out, &out_len, &out_cap, cd->cap_names[ci] ? cd->cap_names[ci] : "0");
+                                }
+                                cc__append_str(&out, &out_len, &out_cap, ");\n");
+                            }
                             cc__append_fmt(&out, &out_len, &out_cap, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
                         }
                         cc__append_str(&out, &out_len, &out_cap, "}\n");
@@ -579,6 +760,8 @@ static char* cc__lower_cc_in_block_text(const char* text,
         for (int i = 0; i < nested_count; i++) {
             for (int j = 0; j < nested_descs[i].cap_count; j++) free(nested_descs[i].cap_names[j]);
             free(nested_descs[i].cap_names);
+            for (int j = 0; j < nested_descs[i].cap_count; j++) free(nested_descs[i].cap_types ? nested_descs[i].cap_types[j] : NULL);
+            free(nested_descs[i].cap_types);
             free(nested_descs[i].body);
         }
         free(nested_descs);
@@ -1192,6 +1375,40 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                                 &closure_protos, &closure_protos_len,
                                 &closure_defs, &closure_defs_len);
     }
+
+    /* Capture type check (best-effort):
+       We can only lower captures when we can infer a file-scope-safe type string for each captured name. */
+    if (closure_descs) {
+        for (int i = 0; i < closure_count; i++) {
+            for (int ci = 0; ci < closure_descs[i].cap_count; ci++) {
+                if (closure_descs[i].cap_types && closure_descs[i].cap_types[ci]) continue;
+                int col1 = closure_descs[i].start_col >= 0 ? (closure_descs[i].start_col + 1) : 1;
+                fprintf(stderr,
+                        "%s:%d:%d: error: CC: cannot infer type for captured name '%s' (capture-by-copy currently supports simple decls like 'int x = ...;' or 'T* p = ...;')\n",
+                        src_path,
+                        closure_descs[i].start_line,
+                        col1,
+                        closure_descs[i].cap_names && closure_descs[i].cap_names[ci] ? closure_descs[i].cap_names[ci] : "?");
+                fclose(out);
+                for (int k = 0; k < closure_count; k++) {
+                    for (int j = 0; j < closure_descs[k].cap_count; j++) free(closure_descs[k].cap_names[j]);
+                    free(closure_descs[k].cap_names);
+                    for (int j = 0; j < closure_descs[k].cap_count; j++) free(closure_descs[k].cap_types ? closure_descs[k].cap_types[j] : NULL);
+                    free(closure_descs[k].cap_types);
+                    free(closure_descs[k].body);
+                }
+                free(closure_descs);
+                free(closure_line_map);
+                free(closure_protos);
+                free(closure_defs);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                return EINVAL;
+            }
+        }
+    }
+
+    /* Captures are lowered via __cc_closure_make_N factories. */
     if (closure_protos && closure_protos_len > 0) {
         fputs("/* --- CC closure forward decls --- */\n", out);
         fwrite(closure_protos, 1, closure_protos_len, out);
@@ -1436,15 +1653,17 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                             CCClosureDesc* cd = &closure_descs[idx1 - 1];
                             fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
                             fprintf(out, "{\n");
-                            if (cd->cap_count > 0) {
-                                /* Hard error for now (compile-time), with good source mapping. */
-                                fprintf(out, "#line %d \"%s\"\n", cd->start_line, src_path);
-                                fprintf(out, "_Static_assert(0, \"CC: closure captures not implemented yet\");\n");
-                                fprintf(out, "(void)0;\n");
+                            fprintf(out, "  CCClosure0 __c = __cc_closure_make_%d(", cd->id);
+                            if (cd->cap_count == 0) {
+                                fprintf(out, ");\n");
                             } else {
-                                fprintf(out, "  CCClosure0 __c = cc_closure0_make(__cc_closure_entry_%d, NULL, NULL);\n", cd->id);
-                                fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
+                                for (int ci = 0; ci < cd->cap_count; ci++) {
+                                    if (ci) fprintf(out, ", ");
+                                    fprintf(out, "%s", cd->cap_names[ci] ? cd->cap_names[ci] : "0");
+                                }
+                                fprintf(out, ");\n");
                             }
+                            fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
                             fprintf(out, "}\n");
                             /* Skip original closure text lines (multiline). */
                             while (src_line_no < cd->end_line && fgets(line, sizeof(line), in)) {
@@ -1453,6 +1672,51 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                             /* Resync source mapping after eliding original closure text. */
                             fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
                             continue;
+                        }
+                    }
+
+                    /* spawn(<closure_expr>); where the expression is a CCClosure0 value.
+                       Best-effort heuristic: accept identifiers and cc_closure0_make(...). */
+                    {
+                        const char* expr_start = s0;
+                        const char* p2 = expr_start;
+                        int par = 0;
+                        while (*p2) {
+                            if (*p2 == '(') par++;
+                            else if (*p2 == ')') {
+                                if (par == 0) break;
+                                par--;
+                            }
+                            p2++;
+                        }
+                        if (*p2 == ')') {
+                            const char* expr_end = p2;
+                            while (expr_end > expr_start && (expr_end[-1] == ' ' || expr_end[-1] == '\t')) expr_end--;
+                            size_t expr_len = (size_t)(expr_end - expr_start);
+                            int looks_ident = 0;
+                            if (expr_len > 0 && (isalpha((unsigned char)expr_start[0]) || expr_start[0] == '_')) {
+                                looks_ident = 1;
+                                for (size_t i = 1; i < expr_len; i++) {
+                                    char c = expr_start[i];
+                                    if (!(isalnum((unsigned char)c) || c == '_')) { looks_ident = 0; break; }
+                                }
+                            }
+                            int looks_make = 0;
+                            if (expr_len >= 15) {
+                                for (size_t i = 0; i + 15 <= expr_len; i++) {
+                                    if (memcmp(expr_start + i, "cc_closure0_make", 15) == 0) { looks_make = 1; break; }
+                                }
+                            }
+                            if (looks_ident || looks_make) {
+                                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                                if (cur_nursery_id == 0) {
+                                    fprintf(out, "/* TODO: spawn outside nursery */ %s", line);
+                                } else {
+                                    fprintf(out, "{ CCClosure0 __c = %.*s; cc_nursery_spawn_closure0(__cc_nursery%d, __c); }\n",
+                                            (int)expr_len, expr_start, cur_nursery_id);
+                                }
+                                continue;
+                            }
                         }
                     }
 
@@ -1507,6 +1771,56 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                     }
                     fprintf(out, "/* TODO: spawn lowering */ %s", line);
                     continue;
+                }
+            }
+
+            /* Closure literal used as an expression:
+               rewrite `() => { ... }` / `() => expr` to a CCClosure0 value. */
+            if (closure_line_map && src_line_no > 0 && src_line_no < closure_line_cap) {
+                int idx1 = closure_line_map[src_line_no];
+                if (idx1 > 0 && idx1 <= closure_count) {
+                    CCClosureDesc* cd = &closure_descs[idx1 - 1];
+                    size_t line_len2 = strlen(line);
+                    if (cd->start_col < 0 || (size_t)cd->start_col > line_len2) {
+                        /* Unexpected; just pass through. */
+                    } else {
+                        fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                        fwrite(line, 1, (size_t)cd->start_col, out);
+                        if (cd->cap_count > 0) {
+                            fprintf(out, "__cc_closure_make_%d(", cd->id);
+                            for (int ci = 0; ci < cd->cap_count; ci++) {
+                                if (ci) fputs(", ", out);
+                                fputs(cd->cap_names[ci] ? cd->cap_names[ci] : "0", out);
+                            }
+                            fputs(")", out);
+                        } else {
+                            fprintf(out, "__cc_closure_make_%d()", cd->id);
+                        }
+
+                        if (cd->end_line == src_line_no) {
+                            if (cd->end_col >= 0 && (size_t)cd->end_col < line_len2) {
+                                fputs(line + cd->end_col, out);
+                            } else {
+                                fputc('\n', out);
+                            }
+                            continue;
+                        }
+
+                        /* Multiline literal: skip until end_line, then emit suffix. */
+                        fputc('\n', out);
+                        while (src_line_no < cd->end_line && fgets(line, sizeof(line), in)) {
+                            src_line_no++;
+                        }
+                        line_len2 = strlen(line);
+                        fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
+                        if (cd->end_col >= 0 && (size_t)cd->end_col < line_len2) {
+                            fputs(line + cd->end_col, out);
+                        } else {
+                            fputc('\n', out);
+                        }
+                        fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
+                        continue;
+                    }
                 }
             }
             if (arena_top >= 0 && p[0] == '}') {
@@ -1624,6 +1938,8 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
             for (int i = 0; i < closure_count; i++) {
                 for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_names[j]);
                 free(closure_descs[i].cap_names);
+            for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_types ? closure_descs[i].cap_types[j] : NULL);
+            free(closure_descs[i].cap_types);
                 free(closure_descs[i].body);
             }
             free(closure_descs);

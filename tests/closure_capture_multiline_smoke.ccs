@@ -2,7 +2,7 @@
 
 int g = 0;
 
-void main() {
+int main(void) {
     int x = 3;
     @nursery {
         spawn (() => {
@@ -11,5 +11,6 @@ void main() {
             }
         });
     }
+    return (g == 9) ? 0 : 1;
 }
 

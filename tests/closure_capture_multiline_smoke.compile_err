@@ -1,2 +1,0 @@
-# CC should fail compilation for closures requiring local captures (until implemented)
-CC: closure captures not implemented yet

@@ -19,6 +19,10 @@ typedef struct {
     void (*drop)(void* env); /* optional; can be NULL */
 } CCClosure0;
 
+/* Run a closure on a blocking OS thread and wait for completion.
+   Early stub: implemented via pthread spawn + join. */
+int cc_run_blocking_closure0(CCClosure0 c);
+
 static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
     CCClosure0 c;
     c.fn = fn;

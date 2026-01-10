@@ -9,6 +9,9 @@
       "program": "${workspaceFolder}/bin/${fileBasenameNoExtension}",
       "args": [],
       "cwd": "${workspaceFolder}",
+      "sourceMap": {
+        "examples": "${workspaceFolder}/examples"
+      },
       "terminal": "integrated",
       "stopOnEntry": false
     }

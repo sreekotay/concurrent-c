@@ -1,0 +1,11 @@
+// Smoke: run_blocking on a closure should execute closure body and wait for it.
+#include "cc_closure.cch"
+
+int g = 0;
+
+int main(void) {
+    int err = cc_run_blocking_closure0(() => { g = 42; });
+    if (err != 0) return 2;
+    return (g == 42) ? 0 : 1;
+}
+

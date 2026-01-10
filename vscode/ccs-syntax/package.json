@@ -27,6 +27,11 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "breakpoints": [
+      {
+        "language": "concurrent-c"
+      }
+    ],
     "grammars": [
       {
         "language": "concurrent-c",

@@ -44,3 +44,12 @@ int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
     return err;
 }
 
+int cc_run_blocking_closure0(CCClosure0 c) {
+    if (!c.fn) return EINVAL;
+    CCTask* t = NULL;
+    int err = cc_spawn_closure0(&t, c);
+    if (err != 0) return err;
+    int j = cc_task_join(t);
+    cc_task_free(t);
+    return j;
+}

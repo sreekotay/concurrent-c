@@ -2578,21 +2578,35 @@ static int run_build_mode(int argc, char** argv) {
     char obj_path[512];
     char bin_path[512];
 
-    int raw_c = cc__is_raw_c(in_path);
+    // Normalize input path to an absolute path so debug info (via #line) matches editor paths.
+    // This matters for LLDB breakpoint binding in VS Code / Cursor.
+    char in_abs[PATH_MAX];
+    const char* in_path_abs = in_path;
+    if (in_path && in_path[0]) {
+        if (realpath(in_path, in_abs) != NULL) {
+            in_path_abs = in_abs;
+        } else if (!cc__is_abs_path(in_path)) {
+            // Best-effort fallback: interpret relative inputs as repo-root-relative.
+            snprintf(in_abs, sizeof(in_abs), "%s/%s", g_repo_root, in_path);
+            in_path_abs = in_abs;
+        }
+    }
+
+    int raw_c = cc__is_raw_c(in_path_abs);
     if (mode == CC_MODE_EMIT_C) {
         if (user_out) {
             strncpy(c_out, user_out, sizeof(c_out));
             c_out[sizeof(c_out)-1] = '\0';
-        } else if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
+        } else if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
             fprintf(stderr, "cc: failed to derive default C output\n");
             goto parse_fail;
         }
     } else {
         if (raw_c) {
-            strncpy(c_out, in_path, sizeof(c_out));
+            strncpy(c_out, in_path_abs, sizeof(c_out));
             c_out[sizeof(c_out)-1] = '\0';
         } else {
-            if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
+            if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
                 fprintf(stderr, "cc: failed to derive default C output\n");
                 goto parse_fail;
             }
@@ -2603,7 +2617,7 @@ static int run_build_mode(int argc, char** argv) {
         if (obj_out) {
             strncpy(obj_path, obj_out, sizeof(obj_path));
             obj_path[sizeof(obj_path)-1] = '\0';
-        } else if (derive_default_obj(in_path, obj_path, sizeof(obj_path)) != 0) {
+        } else if (derive_default_obj(in_path_abs, obj_path, sizeof(obj_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default object output\n");
             goto parse_fail;
         }
@@ -2613,14 +2627,14 @@ static int run_build_mode(int argc, char** argv) {
         if (user_out) {
             strncpy(bin_path, user_out, sizeof(bin_path));
             bin_path[sizeof(bin_path)-1] = '\0';
-        } else if (derive_default_bin(in_path, bin_path, sizeof(bin_path)) != 0) {
+        } else if (derive_default_bin(in_path_abs, bin_path, sizeof(bin_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default binary output\n");
             goto parse_fail;
         }
     }
 
     CCBuildOptions opt = {
-        .in_path = in_path,
+        .in_path = in_path_abs,
         .c_out_path = c_out,
         .obj_out_path = (mode == CC_MODE_EMIT_C) ? NULL : obj_path,
         .bin_out_path = (mode == CC_MODE_LINK) ? bin_path : NULL,
@@ -2901,22 +2915,35 @@ int main(int argc, char **argv) {
     char obj_path[512];
     char bin_path[512];
 
-    int raw_c = cc__is_raw_c(in_path);
+    // Normalize input path to an absolute path so debug info (via #line) matches editor paths.
+    // This matters for LLDB breakpoint binding in VS Code / Cursor.
+    char in_abs[PATH_MAX];
+    const char* in_path_abs = in_path;
+    if (in_path && in_path[0]) {
+        if (realpath(in_path, in_abs) != NULL) {
+            in_path_abs = in_abs;
+        } else if (!cc__is_abs_path(in_path)) {
+            snprintf(in_abs, sizeof(in_abs), "%s/%s", g_repo_root, in_path);
+            in_path_abs = in_abs;
+        }
+    }
+
+    int raw_c = cc__is_raw_c(in_path_abs);
     if (mode == CC_MODE_EMIT_C) {
         if (user_out) {
             strncpy(c_out, user_out, sizeof(c_out));
             c_out[sizeof(c_out)-1] = '\0';
-        } else if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
+        } else if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
             fprintf(stderr, "cc: failed to derive default C output\n");
             return 1;
         }
     } else {
         // For .c inputs, treat the input itself as the C file (no CC lowering).
         if (raw_c) {
-            strncpy(c_out, in_path, sizeof(c_out));
+            strncpy(c_out, in_path_abs, sizeof(c_out));
             c_out[sizeof(c_out)-1] = '\0';
         } else {
-            if (derive_default_output(in_path, c_out, sizeof(c_out)) != 0) {
+            if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
                 fprintf(stderr, "cc: failed to derive default C output\n");
                 return 1;
             }
@@ -2927,7 +2954,7 @@ int main(int argc, char **argv) {
         if (obj_out) {
             strncpy(obj_path, obj_out, sizeof(obj_path));
             obj_path[sizeof(obj_path)-1] = '\0';
-        } else if (derive_default_obj(in_path, obj_path, sizeof(obj_path)) != 0) {
+        } else if (derive_default_obj(in_path_abs, obj_path, sizeof(obj_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default object output\n");
             return 1;
         }
@@ -2937,14 +2964,14 @@ int main(int argc, char **argv) {
         if (user_out) {
             strncpy(bin_path, user_out, sizeof(bin_path));
             bin_path[sizeof(bin_path)-1] = '\0';
-        } else if (derive_default_bin(in_path, bin_path, sizeof(bin_path)) != 0) {
+        } else if (derive_default_bin(in_path_abs, bin_path, sizeof(bin_path)) != 0) {
             fprintf(stderr, "cc: failed to derive default binary output\n");
             return 1;
         }
     }
 
     CCBuildOptions opt = {
-        .in_path = in_path,
+        .in_path = in_path_abs,
         .c_out_path = c_out,
         .obj_out_path = (mode == CC_MODE_EMIT_C) ? NULL : obj_path,
         .bin_out_path = (mode == CC_MODE_LINK) ? bin_path : NULL,
