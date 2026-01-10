@@ -201,6 +201,73 @@ void cc_build_free_options(CCBuildOptionDecl* opts, size_t count) {
 static CCBuildTargetKind parse_target_kind(const char* s) {
     if (!s) return 0;
     if (strcmp(s, "exe") == 0) return CC_BUILD_TARGET_EXE;
+    if (strcmp(s, "obj") == 0) return CC_BUILD_TARGET_OBJ;
+    return 0;
+}
+
+static int find_target_index(CCBuildTargetDecl* targets, size_t count, const char* name) {
+    if (!targets || !name) return -1;
+    for (size_t i = 0; i < count; ++i) {
+        if (targets[i].name && strcmp(targets[i].name, name) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static char* dup_trim_eol(const char* s) {
+    if (!s) return strdup("");
+    const char* end = s + strlen(s);
+    while (end > s && (end[-1] == '\n' || end[-1] == '\r')) end--;
+    size_t n = (size_t)(end - s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+static int append_str_list(const char*** io_list, size_t* io_count, const char* s) {
+    if (!io_list || !io_count || !s) return EINVAL;
+    const char** new_list = (const char**)realloc((void*)(*io_list), (*io_count + 1) * sizeof(char*));
+    if (!new_list) return ENOMEM;
+    new_list[*io_count] = s;
+    *io_list = new_list;
+    (*io_count)++;
+    return 0;
+}
+
+static int append_flags_str(const char** io_dst, const char* more) {
+    if (!io_dst || !more) return EINVAL;
+    // Trim leading ws.
+    while (*more == ' ' || *more == '\t') more++;
+    if (!*more) return 0;
+
+    if (!*io_dst) {
+        char* d = dup_trim_eol(more);
+        if (!d) return ENOMEM;
+        // Trim trailing ws.
+        size_t n = strlen(d);
+        while (n > 0 && (d[n - 1] == ' ' || d[n - 1] == '\t')) { d[n - 1] = '\0'; n--; }
+        *io_dst = d;
+        return 0;
+    }
+    // concat: "<old> <more>"
+    const char* old = *io_dst;
+    char* more2 = dup_trim_eol(more);
+    if (!more2) return ENOMEM;
+    size_t n2 = strlen(more2);
+    while (n2 > 0 && (more2[n2 - 1] == ' ' || more2[n2 - 1] == '\t')) { more2[n2 - 1] = '\0'; n2--; }
+    if (!more2[0]) { free(more2); return 0; }
+
+    size_t n1 = strlen(old);
+    char* out = (char*)malloc(n1 + 1 + n2 + 1);
+    if (!out) { free(more2); return ENOMEM; }
+    memcpy(out, old, n1);
+    out[n1] = ' ';
+    memcpy(out + n1 + 1, more2, n2);
+    out[n1 + 1 + n2] = '\0';
+    free((void*)old);
+    free(more2);
+    *io_dst = out;
     return 0;
 }
 
@@ -216,6 +283,7 @@ static int parse_build_targets(const char* path,
     char line[2048];
     int err = 0;
     size_t lineno = 0;
+    // Pass 1: parse CC_DEFAULT + CC_TARGET entries.
     while (fgets(line, sizeof(line), f)) {
         lineno++;
         char* p = line;
@@ -236,7 +304,7 @@ static int parse_build_targets(const char* path,
             }
             continue;
         }
-        if (strncmp(p, "CC_TARGET", 9) != 0) continue;
+        if (strncmp(p, "CC_TARGET", 9) != 0 || !(p[9] == ' ' || p[9] == '\t')) continue;
         p += 9;
         while (*p == ' ' || *p == '\t') p++;
 
@@ -291,8 +359,130 @@ static int parse_build_targets(const char* path,
         out_targets[*out_count].kind = kind;
         out_targets[*out_count].srcs = stored_srcs;
         out_targets[*out_count].src_count = src_count;
+        out_targets[*out_count].deps = NULL;
+        out_targets[*out_count].dep_count = 0;
+        out_targets[*out_count].include_dirs = NULL;
+        out_targets[*out_count].include_dir_count = 0;
+        out_targets[*out_count].defines = NULL;
+        out_targets[*out_count].define_count = 0;
+        out_targets[*out_count].libs = NULL;
+        out_targets[*out_count].lib_count = 0;
+        out_targets[*out_count].cflags = NULL;
+        out_targets[*out_count].ldflags = NULL;
         (*out_count)++;
     }
+    // Pass 2: attach per-target properties.
+    if (err == 0) {
+        rewind(f);
+        lineno = 0;
+        while (fgets(line, sizeof(line), f)) {
+            lineno++;
+            char* p = line;
+            while (*p == ' ' || *p == '\t') p++;
+
+            const int is_deps = (strncmp(p, "CC_TARGET_DEPS", 14) == 0 && (p[14] == ' ' || p[14] == '\t'));
+            const int is_inc = (strncmp(p, "CC_TARGET_INCLUDE", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
+            const int is_cflags = (strncmp(p, "CC_TARGET_CFLAGS", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
+            const int is_ldflags = (strncmp(p, "CC_TARGET_LDFLAGS", 17) == 0 && (p[17] == ' ' || p[17] == '\t'));
+            const int is_def = (strncmp(p, "CC_TARGET_DEFINE", 16) == 0 && (p[16] == ' ' || p[16] == '\t'));
+            const int is_libs = (strncmp(p, "CC_TARGET_LIBS", 14) == 0 && (p[14] == ' ' || p[14] == '\t'));
+            if (!is_deps && !is_inc && !is_cflags && !is_ldflags && !is_def && !is_libs) continue;
+
+            p += is_deps ? 14 : (is_inc ? 17 : (is_cflags ? 16 : (is_ldflags ? 17 : (is_def ? 16 : 14))));
+            while (*p == ' ' || *p == '\t') p++;
+
+            char name_buf[128];
+            int nread = 0;
+            if (sscanf(p, "%127s%n", name_buf, &nread) != 1) {
+                fprintf(stderr, "%s:%zu: malformed target property line\n", path, lineno);
+                err = EINVAL;
+                break;
+            }
+            p += nread;
+            while (*p == ' ' || *p == '\t') p++;
+
+            int idx = find_target_index(out_targets, *out_count, name_buf);
+            if (idx < 0) {
+                fprintf(stderr, "%s:%zu: unknown target for property: %s\n", path, lineno, name_buf);
+                err = EINVAL;
+                break;
+            }
+            CCBuildTargetDecl* t = &out_targets[(size_t)idx];
+
+            if (is_deps) {
+                // Tokenize remaining dep target names.
+                while (*p) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (!*p || *p == '\n' || *p == '\r') break;
+                    char* start = p;
+                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+                    size_t len = (size_t)(p - start);
+                    char* tok = (char*)malloc(len + 1);
+                    if (!tok) { err = ENOMEM; break; }
+                    memcpy(tok, start, len);
+                    tok[len] = '\0';
+                    err = append_str_list(&t->deps, &t->dep_count, tok);
+                    if (err) { free(tok); break; }
+                }
+                if (err) break;
+            } else if (is_inc) {
+                // Tokenize remaining include dirs.
+                while (*p) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (!*p || *p == '\n' || *p == '\r') break;
+                    char* start = p;
+                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+                    size_t len = (size_t)(p - start);
+                    char* tok = (char*)malloc(len + 1);
+                    if (!tok) { err = ENOMEM; break; }
+                    memcpy(tok, start, len);
+                    tok[len] = '\0';
+                    err = append_str_list(&t->include_dirs, &t->include_dir_count, tok);
+                    if (err) { free(tok); break; }
+                }
+                if (err) break;
+            } else if (is_cflags) {
+                err = append_flags_str(&t->cflags, p);
+                if (err) break;
+            } else if (is_ldflags) {
+                err = append_flags_str(&t->ldflags, p);
+                if (err) break;
+            } else if (is_def) {
+                // Tokenize remaining define tokens (NAME or NAME=VALUE).
+                while (*p) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (!*p || *p == '\n' || *p == '\r') break;
+                    char* start = p;
+                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+                    size_t len = (size_t)(p - start);
+                    char* tok = (char*)malloc(len + 1);
+                    if (!tok) { err = ENOMEM; break; }
+                    memcpy(tok, start, len);
+                    tok[len] = '\0';
+                    err = append_str_list(&t->defines, &t->define_count, tok);
+                    if (err) { free(tok); break; }
+                }
+                if (err) break;
+            } else if (is_libs) {
+                // Tokenize remaining libs tokens (either "m" or "-lm" etc).
+                while (*p) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    if (!*p || *p == '\n' || *p == '\r') break;
+                    char* start = p;
+                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+                    size_t len = (size_t)(p - start);
+                    char* tok = (char*)malloc(len + 1);
+                    if (!tok) { err = ENOMEM; break; }
+                    memcpy(tok, start, len);
+                    tok[len] = '\0';
+                    err = append_str_list(&t->libs, &t->lib_count, tok);
+                    if (err) { free(tok); break; }
+                }
+                if (err) break;
+            }
+        }
+    }
+
     fclose(f);
     if (err == ENOSPC) {
         fprintf(stderr, "cc: too many CC_TARGET entries or sources in build.cc\n");
@@ -330,9 +520,29 @@ void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* defau
         free((void*)targets[i].name);
         for (size_t j = 0; j < targets[i].src_count; ++j) free((void*)targets[i].srcs[j]);
         free((void*)targets[i].srcs);
+        for (size_t j = 0; j < targets[i].dep_count; ++j) free((void*)targets[i].deps[j]);
+        free((void*)targets[i].deps);
+        for (size_t j = 0; j < targets[i].include_dir_count; ++j) free((void*)targets[i].include_dirs[j]);
+        free((void*)targets[i].include_dirs);
+        for (size_t j = 0; j < targets[i].define_count; ++j) free((void*)targets[i].defines[j]);
+        free((void*)targets[i].defines);
+        for (size_t j = 0; j < targets[i].lib_count; ++j) free((void*)targets[i].libs[j]);
+        free((void*)targets[i].libs);
+        free((void*)targets[i].cflags);
+        free((void*)targets[i].ldflags);
         targets[i].name = NULL;
         targets[i].srcs = NULL;
         targets[i].src_count = 0;
+        targets[i].deps = NULL;
+        targets[i].dep_count = 0;
+        targets[i].include_dirs = NULL;
+        targets[i].include_dir_count = 0;
+        targets[i].defines = NULL;
+        targets[i].define_count = 0;
+        targets[i].libs = NULL;
+        targets[i].lib_count = 0;
+        targets[i].cflags = NULL;
+        targets[i].ldflags = NULL;
     }
 }
 

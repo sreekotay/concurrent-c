@@ -76,6 +76,18 @@ ls -l out/hello.c
 ./bin/hello
 ```
 
+You can also attach target-local build settings in `build.cc`:
+- `CC_TARGET_INCLUDE <target> <dir...>`
+- `CC_TARGET_DEFINE <target> <NAME[=VALUE]...>`
+- `CC_TARGET_CFLAGS <target> <flags...>`
+- `CC_TARGET_LDFLAGS <target> <flags...>`
+- `CC_TARGET_LIBS <target> <lib...>`
+- `CC_TARGET_DEPS <target> <dep_target...>`
+
+Target kinds:
+- `CC_TARGET <name> exe <src...>`
+- `CC_TARGET <name> obj <src...>`
+
 Set comptime integer consts:
 
 ```bash

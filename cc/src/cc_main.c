@@ -62,6 +62,20 @@ static int cc__ends_with(const char* s, const char* suf) {
     return memcmp(s + (n - m), suf, m) == 0;
 }
 
+static void cc__append_flag(char* buf, size_t cap, const char* prefix, const char* val) {
+    if (!buf || cap == 0 || !val || !val[0]) return;
+    if (prefix && prefix[0]) {
+        strncat(buf, prefix, cap - strlen(buf) - 1);
+    }
+    strncat(buf, val, cap - strlen(buf) - 1);
+}
+
+static void cc__append_spaced(char* buf, size_t cap, const char* val) {
+    if (!buf || cap == 0 || !val || !val[0]) return;
+    if (buf[0]) strncat(buf, " ", cap - strlen(buf) - 1);
+    strncat(buf, val, cap - strlen(buf) - 1);
+}
+
 static int cc__mkdir_one(const char* path) {
     if (!path || !path[0]) return -1;
     if (mkdir(path, 0777) == -1) {
@@ -309,6 +323,7 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "  (default)   Build (emit C, compile, link)\n");
     fprintf(stderr, "  run         Build then run the produced binary\n");
     fprintf(stderr, "  test        Run the repo test suite (builds tools/cc_test if needed)\n");
+    fprintf(stderr, "  list        List targets declared in build.cc\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Options: same as main help (use `%s --help` for full list)\n", prog);
     fprintf(stderr, "\n");
@@ -792,6 +807,89 @@ static int cc__deps_require_rebuild(const char* dep_path, const char* obj_path) 
 
     free(text);
     return rebuild;
+}
+
+typedef struct {
+    const CCBuildTargetDecl* targets;
+    size_t target_count;
+    const char* build_dir;
+    const int max_pos;
+    const char** inputs;
+    char (*resolved)[PATH_MAX];
+    size_t* io_input_count;
+    unsigned char* vis; // 0=unseen, 1=visiting, 2=done
+    char* cc_flags_buf;
+    size_t cc_flags_cap;
+    char* ld_flags_buf;
+    size_t ld_flags_cap;
+} CCDepCtx;
+
+static int cc__find_target_idx_by_name(const CCBuildTargetDecl* targets, size_t target_count, const char* name) {
+    if (!targets || !name) return -1;
+    for (size_t i = 0; i < target_count; ++i) {
+        if (targets[i].name && strcmp(targets[i].name, name) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static void cc__merge_target_props_into_flags(const CCBuildTargetDecl* t, const char* build_dir,
+                                              char* cc_flags, size_t cc_cap,
+                                              char* ld_flags, size_t ld_cap) {
+    if (!t) return;
+    // include dirs
+    for (size_t i = 0; i < t->include_dir_count; ++i) {
+        char inc_abs[PATH_MAX];
+        cc__join_path(build_dir, t->include_dirs[i], inc_abs, sizeof(inc_abs));
+        cc__append_flag(cc_flags, cc_cap, " -I", inc_abs);
+    }
+    // defines
+    for (size_t i = 0; i < t->define_count; ++i) {
+        cc__append_flag(cc_flags, cc_cap, " -D", t->defines[i]);
+    }
+    // raw cflags/ldflags
+    if (t->cflags && t->cflags[0]) cc__append_spaced(cc_flags, cc_cap, t->cflags);
+    if (t->ldflags && t->ldflags[0]) cc__append_spaced(ld_flags, ld_cap, t->ldflags);
+    // libs
+    for (size_t i = 0; i < t->lib_count; ++i) {
+        const char* lib = t->libs[i];
+        if (!lib || !lib[0]) continue;
+        if (lib[0] == '-') cc__append_spaced(ld_flags, ld_cap, lib);
+        else {
+            char tmp[256];
+            snprintf(tmp, sizeof(tmp), "-l%s", lib);
+            cc__append_spaced(ld_flags, ld_cap, tmp);
+        }
+    }
+}
+
+static int cc__dfs_add_deps_sources(int idx, CCDepCtx* ctx) {
+    if (!ctx || idx < 0 || (size_t)idx >= ctx->target_count) return -1;
+    if (ctx->vis[idx] == 1) return -2; // cycle
+    if (ctx->vis[idx] == 2) return 0;
+    ctx->vis[idx] = 1;
+
+    const CCBuildTargetDecl* t = &ctx->targets[(size_t)idx];
+
+    for (size_t di = 0; di < t->dep_count; ++di) {
+        int d = cc__find_target_idx_by_name(ctx->targets, ctx->target_count, t->deps[di]);
+        if (d < 0) return -3;
+        int r = cc__dfs_add_deps_sources(d, ctx);
+        if (r != 0) return r;
+    }
+
+    // Merge this target's properties into the overall flags.
+    cc__merge_target_props_into_flags(t, ctx->build_dir, ctx->cc_flags_buf, ctx->cc_flags_cap, ctx->ld_flags_buf, ctx->ld_flags_cap);
+
+    // Append sources.
+    for (size_t si = 0; si < t->src_count; ++si) {
+        if (*ctx->io_input_count >= (size_t)ctx->max_pos) return -4;
+        cc__join_path(ctx->build_dir, t->srcs[si], ctx->resolved[*ctx->io_input_count], sizeof(ctx->resolved[*ctx->io_input_count]));
+        ctx->inputs[*ctx->io_input_count] = ctx->resolved[*ctx->io_input_count];
+        (*ctx->io_input_count)++;
+    }
+
+    ctx->vis[idx] = 2;
+    return 0;
 }
 
 static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bindings, size_t* count);
@@ -1317,7 +1415,7 @@ static int run_build_mode(int argc, char** argv) {
     CCMode mode = CC_MODE_LINK;
     int no_cache = 0;
 
-    enum { CC_BUILD_STEP_DEFAULT = 0, CC_BUILD_STEP_RUN = 1, CC_BUILD_STEP_TEST = 2 } step = CC_BUILD_STEP_DEFAULT;
+    enum { CC_BUILD_STEP_DEFAULT = 0, CC_BUILD_STEP_RUN = 1, CC_BUILD_STEP_TEST = 2, CC_BUILD_STEP_LIST = 3 } step = CC_BUILD_STEP_DEFAULT;
     int run_argc = 0;
     char** run_argv = NULL;
 
@@ -1328,6 +1426,9 @@ static int run_build_mode(int argc, char** argv) {
             argi = 3;
         } else if (strcmp(argv[2], "test") == 0) {
             step = CC_BUILD_STEP_TEST;
+            argi = 3;
+        } else if (strcmp(argv[2], "list") == 0) {
+            step = CC_BUILD_STEP_LIST;
             argi = 3;
         } else if (strcmp(argv[2], "help") == 0) {
             usage_build(argv[0]);
@@ -1345,6 +1446,7 @@ static int run_build_mode(int argc, char** argv) {
         if (argv[i] && argv[i][0] && argv[i][0] != '-' && step == CC_BUILD_STEP_DEFAULT && pos_count == 0) {
             if (strcmp(argv[i], "run") == 0) { step = CC_BUILD_STEP_RUN; continue; }
             if (strcmp(argv[i], "test") == 0) { step = CC_BUILD_STEP_TEST; continue; }
+            if (strcmp(argv[i], "list") == 0) { step = CC_BUILD_STEP_LIST; continue; }
             if (strcmp(argv[i], "help") == 0) { help = 1; continue; }
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -1469,7 +1571,7 @@ static int run_build_mode(int argc, char** argv) {
                 fprintf(stderr, "\nDeclared CC_TARGETs in %s:\n", build_path_for_help);
                 if (def_name) fprintf(stderr, "  default: %s\n", def_name);
                 for (size_t i = 0; i < target_count; ++i) {
-                    fprintf(stderr, "  %s (exe)  [", targets[i].name);
+                    fprintf(stderr, "  %s (%s)  [", targets[i].name, targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe");
                     for (size_t j = 0; j < targets[i].src_count; ++j) {
                         fprintf(stderr, "%s%s", (j ? " " : ""), targets[i].srcs[j]);
                     }
@@ -1489,6 +1591,55 @@ static int run_build_mode(int argc, char** argv) {
     if (ensure_out_dir() != 0) {
         fprintf(stderr, "cc: failed to create out dirs under: %s\n", g_out_root);
         goto parse_fail;
+    }
+
+    if (step == CC_BUILD_STEP_LIST) {
+        if (!build_path_for_help) {
+            fprintf(stderr, "cc: no build.cc in scope (use --build-file)\n");
+            goto parse_fail;
+        }
+        CCBuildTargetDecl targets[64];
+        size_t target_count = 0;
+        char* def_name = NULL;
+        int terr = cc_build_list_targets(build_path_for_help, targets, &target_count, 64, &def_name);
+        if (terr != 0) {
+            cc_build_free_targets(targets, target_count, def_name);
+            goto parse_fail;
+        }
+        printf("build_file=%s\n", build_path_for_help);
+        if (def_name) printf("default=%s\n", def_name);
+        for (size_t i = 0; i < target_count; ++i) {
+            const char* kind = targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe";
+            printf("target %s kind=%s\n", targets[i].name, kind);
+            printf("  src:");
+            for (size_t j = 0; j < targets[i].src_count; ++j) printf(" %s", targets[i].srcs[j]);
+            printf("\n");
+            if (targets[i].dep_count) {
+                printf("  deps:");
+                for (size_t j = 0; j < targets[i].dep_count; ++j) printf(" %s", targets[i].deps[j]);
+                printf("\n");
+            }
+            if (targets[i].include_dir_count) {
+                printf("  include:");
+                for (size_t j = 0; j < targets[i].include_dir_count; ++j) printf(" %s", targets[i].include_dirs[j]);
+                printf("\n");
+            }
+            if (targets[i].define_count) {
+                printf("  define:");
+                for (size_t j = 0; j < targets[i].define_count; ++j) printf(" %s", targets[i].defines[j]);
+                printf("\n");
+            }
+            if (targets[i].lib_count) {
+                printf("  libs:");
+                for (size_t j = 0; j < targets[i].lib_count; ++j) printf(" %s", targets[i].libs[j]);
+                printf("\n");
+            }
+            if (targets[i].cflags && targets[i].cflags[0]) printf("  cflags: %s\n", targets[i].cflags);
+            if (targets[i].ldflags && targets[i].ldflags[0]) printf("  ldflags: %s\n", targets[i].ldflags);
+        }
+        cc_build_free_targets(targets, target_count, def_name);
+        for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
+        return 0;
     }
 
     // Special step: test (no input file required).
@@ -1617,6 +1768,86 @@ static int run_build_mode(int argc, char** argv) {
                 inputs[i] = resolved[i];
             }
             input_count = (int)chosen->src_count;
+
+            if (chosen->kind == CC_BUILD_TARGET_OBJ) {
+                mode = CC_MODE_COMPILE; // object-only target, do not link
+            }
+
+            // Build per-target include flags and extra cflags/ldflags.
+            static char target_cc_flags[2048];
+            static char target_ld_flags[2048];
+            target_cc_flags[0] = '\0';
+            target_ld_flags[0] = '\0';
+
+            // Merge chosen target properties into the overall flags.
+            cc__merge_target_props_into_flags(chosen, build_dir, target_cc_flags, sizeof(target_cc_flags), target_ld_flags, sizeof(target_ld_flags));
+
+            // Target deps: append all dep target sources to this target (simple, Zig-ish module composition).
+            // This is a minimal implementation: deps are treated as "also compile/link these sources".
+            // Cycles/unknown deps are rejected.
+            if (chosen->dep_count > 0) {
+                size_t ic = (size_t)input_count;
+                for (size_t di = 0; di < chosen->dep_count; ++di) {
+                    int d = cc__find_target_idx_by_name(targets, target_count, chosen->deps[di]);
+                    if (d < 0) {
+                        fprintf(stderr, "cc: unknown dep target: %s\n", chosen->deps[di]);
+                        cc_build_free_targets(targets, target_count, def_name);
+                        goto parse_fail;
+                    }
+                    unsigned char vis[32];
+                    memset(vis, 0, sizeof(vis));
+                    CCDepCtx dep_ctx = {
+                        .targets = targets,
+                        .target_count = target_count,
+                        .build_dir = build_dir,
+                        .max_pos = max_pos,
+                        .inputs = inputs,
+                        .resolved = resolved,
+                        .io_input_count = &ic,
+                        .vis = vis,
+                        .cc_flags_buf = target_cc_flags,
+                        .cc_flags_cap = sizeof(target_cc_flags),
+                        .ld_flags_buf = target_ld_flags,
+                        .ld_flags_cap = sizeof(target_ld_flags),
+                    };
+
+                    int r = cc__dfs_add_deps_sources(d, &dep_ctx);
+                    if (r == -2) {
+                        fprintf(stderr, "cc: cycle in CC_TARGET_DEPS\n");
+                        cc_build_free_targets(targets, target_count, def_name);
+                        goto parse_fail;
+                    } else if (r != 0) {
+                        fprintf(stderr, "cc: failed to resolve deps (err=%d)\n", r);
+                        cc_build_free_targets(targets, target_count, def_name);
+                        goto parse_fail;
+                    }
+                }
+                input_count = (int)ic;
+            }
+
+            // Merge with CLI-provided flags (CLI wins by being appended last).
+            static char merged_cc_flags[4096];
+            static char merged_ld_flags[4096];
+            merged_cc_flags[0] = '\0';
+            merged_ld_flags[0] = '\0';
+            // target flags first
+            if (target_cc_flags[0]) { strncat(merged_cc_flags, target_cc_flags, sizeof(merged_cc_flags) - 1); }
+            // then CLI flags
+            if (cc_flags && cc_flags[0]) {
+                if (merged_cc_flags[0]) strncat(merged_cc_flags, " ", sizeof(merged_cc_flags) - strlen(merged_cc_flags) - 1);
+                strncat(merged_cc_flags, cc_flags, sizeof(merged_cc_flags) - strlen(merged_cc_flags) - 1);
+            }
+
+            // target ldflags first
+            if (target_ld_flags[0]) { strncat(merged_ld_flags, target_ld_flags, sizeof(merged_ld_flags) - 1); }
+            // then CLI ldflags
+            if (ld_flags && ld_flags[0]) {
+                if (merged_ld_flags[0]) strncat(merged_ld_flags, " ", sizeof(merged_ld_flags) - strlen(merged_ld_flags) - 1);
+                strncat(merged_ld_flags, ld_flags, sizeof(merged_ld_flags) - strlen(merged_ld_flags) - 1);
+            }
+
+            cc_flags = merged_cc_flags[0] ? merged_cc_flags : cc_flags;
+            ld_flags = merged_ld_flags[0] ? merged_ld_flags : ld_flags;
 
             if (mode == CC_MODE_LINK) {
                 // Default binary output for targets.

@@ -70,11 +70,29 @@ These are printed by `ccc build --help` when a `build.cc` is in scope (or when `
 `build.cc` may declare buildable targets:
 - `CC_DEFAULT <TARGET_NAME>`
 - `CC_TARGET <TARGET_NAME> exe <SRC...>`
+- `CC_TARGET <TARGET_NAME> obj <SRC...>`
 
 Notes:
 - `<SRC...>` is a whitespace-separated list of source files.
 - Source paths are resolved **relative to the directory containing `build.cc`**.
 - Sources may be a mix of `.ccs` (CC, lowered first) and `.c` (compiled directly).
+
+Per-target properties (optional):
+- `CC_TARGET_INCLUDE <TARGET_NAME> <DIR...>`
+  - Adds per-target include directories (each resolved relative to `build.cc` dir).
+- `CC_TARGET_DEFINE <TARGET_NAME> <NAME[=VALUE]...>`
+  - Adds per-target compile defines (equivalent to `-DNAME[=VALUE]`).
+- `CC_TARGET_CFLAGS <TARGET_NAME> <FLAGS...>`
+  - Extra per-target compile flags (appended before CLI `--cc-flags`).
+- `CC_TARGET_LDFLAGS <TARGET_NAME> <FLAGS...>`
+  - Extra per-target link flags (appended before CLI `--ld-flags`).
+- `CC_TARGET_LIBS <TARGET_NAME> <LIB...>`
+  - Adds per-target link libraries.
+  - Tokens starting with `-` are passed through as-is; otherwise they are treated as a library name and lowered to `-l<LIB>`.
+- `CC_TARGET_DEPS <TARGET_NAME> <DEP_TARGET...>`
+  - Declares dependencies on other `CC_TARGET` names.
+  - Minimal semantics (current): dependency targets contribute their sources and per-target properties (include/define/cflags/ldflags/libs) to the consuming target.
+  - Cycles and unknown target names are errors.
 
 ### Introspection
 - `--dump-consts` prints merged const bindings then compiles.

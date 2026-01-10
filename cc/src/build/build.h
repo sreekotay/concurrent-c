@@ -26,6 +26,7 @@ typedef struct {
 
 typedef enum {
     CC_BUILD_TARGET_EXE = 1,
+    CC_BUILD_TARGET_OBJ = 2,
 } CCBuildTargetKind;
 
 typedef struct {
@@ -33,6 +34,16 @@ typedef struct {
     CCBuildTargetKind kind;
     const char** srcs;      // heap array of heap strings
     size_t src_count;
+    const char** deps;      // heap array of heap strings (target names)
+    size_t dep_count;
+    const char** include_dirs; // heap array of heap strings (resolved by driver relative to build.cc dir)
+    size_t include_dir_count;
+    const char** defines;   // heap array of heap strings (NAME or NAME=VALUE)
+    size_t define_count;
+    const char** libs;      // heap array of heap strings (either "m" or "-lm" style)
+    size_t lib_count;
+    const char* cflags;     // optional raw flags string (heap)
+    const char* ldflags;    // optional raw flags string (heap)
 } CCBuildTargetDecl;
 
 // Stub loader: if build.cc exists, return a fixed const set; else empty.
@@ -49,6 +60,8 @@ void cc_build_free_options(CCBuildOptionDecl* opts, size_t count);
 // Targets (Zig-ish): lines in build.cc like:
 //   CC_DEFAULT <NAME>
 //   CC_TARGET <NAME> exe <src1> <src2> ...
+//   CC_TARGET <NAME> obj <src1> <src2> ...
+//   CC_TARGET_DEPS <NAME> <dep1> <dep2> ...
 // Returns 0 on success. The returned strings/arrays are heap-allocated; caller must free via cc_build_free_targets().
 int cc_build_list_targets(const char* build_path, CCBuildTargetDecl* out_targets, size_t* out_count, size_t max, char** out_default_name);
 void cc_build_free_targets(CCBuildTargetDecl* targets, size_t count, char* default_name);

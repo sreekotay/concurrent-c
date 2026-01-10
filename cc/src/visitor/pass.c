@@ -20,6 +20,8 @@ int cc_run_main_pass(const char* input_path, CCSymbolTable* symbols, const char*
     CCASTRoot* root = NULL;
     int err = cc_parse_to_ast(input_path, symbols, &root);
     if (err != 0) return err;
+    // NOTE: A semantic checker stage will live here (slice transfer eligibility, etc).
+    // The old `visitor/checker.*` scaffold targeted a deprecated AST and is currently disabled.
     err = cc_visit_ast(root, symbols, input_path, output_path);
     cc_free_ast(root);
     return err;
