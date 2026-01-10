@@ -1,0 +1,11 @@
+#include "cc_closure.cch"
+
+int main(void) {
+    int g = 0;
+    int* gp = &g;
+
+    CCClosure1 c = (int x) => { *gp = x; };
+    c(123);
+    return (g == 123) ? 0 : 1;
+}
+

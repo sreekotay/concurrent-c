@@ -23,6 +23,8 @@ typedef struct {
     int param_count;   /* 0..2 (early) */
     char* param0_name; /* owned; NULL if param_count<1 */
     char* param1_name; /* owned; NULL if param_count<2 */
+    char* param0_type; /* owned; NULL if inferred */
+    char* param1_type; /* owned; NULL if inferred */
     char** cap_names;
     char** cap_types; /* parallel to cap_names; NULL if unknown */
     unsigned char* cap_flags; /* parallel; bit0=is_slice, bit1=move-only */
@@ -531,6 +533,8 @@ static int cc__check_slice_use_after_move(const char* src, size_t src_len, const
             free(closure_descs[i].cap_flags);
             free(closure_descs[i].param0_name);
             free(closure_descs[i].param1_name);
+            free(closure_descs[i].param0_type);
+            free(closure_descs[i].param1_type);
             free(closure_descs[i].body);
         }
         free(closure_descs);
@@ -556,6 +560,8 @@ fail:
             free(closure_descs[i].cap_flags);
             free(closure_descs[i].param0_name);
             free(closure_descs[i].param1_name);
+            free(closure_descs[i].param0_type);
+            free(closure_descs[i].param1_type);
             free(closure_descs[i].body);
         }
         free(closure_descs);
@@ -835,15 +841,78 @@ static int cc__rewrite_closure_calls_in_line(char*** scope_names,
             size_t call_fn_n = strlen(call_fn);
             size_t args_n = args_e - args_s;
 
-            size_t need = call_fn_n + 1 + name_n + 2 + args_n + 1; /* fn( name, args ) */
-            if (o + need >= out_cap) return 0;
-            memcpy(out + o, call_fn, call_fn_n); o += call_fn_n;
-            out[o++] = '(';
-            memcpy(out + o, name, name_n); o += name_n;
-            out[o++] = ',';
-            out[o++] = ' ';
-            memcpy(out + o, line + args_s, args_n); o += args_n;
-            out[o++] = ')';
+            if (arity == 1) {
+                const char* castp = "(intptr_t)(";
+                const char* cclose = ")";
+                size_t need = call_fn_n + 1 + name_n + 2 + strlen(castp) + args_n + strlen(cclose) + 1;
+                if (o + need >= out_cap) return 0;
+                memcpy(out + o, call_fn, call_fn_n); o += call_fn_n;
+                out[o++] = '(';
+                memcpy(out + o, name, name_n); o += name_n;
+                out[o++] = ',';
+                out[o++] = ' ';
+                memcpy(out + o, castp, strlen(castp)); o += strlen(castp);
+                memcpy(out + o, line + args_s, args_n); o += args_n;
+                memcpy(out + o, cclose, strlen(cclose)); o += strlen(cclose);
+                out[o++] = ')';
+            } else {
+                /* Split arg0,arg1 at the first top-level comma */
+                size_t comma_i = 0;
+                {
+                    size_t z = args_s;
+                    int p2 = 0, b2 = 0, r2 = 0;
+                    int ins2 = 0;
+                    char q2 = 0;
+                    while (z < args_e) {
+                        char ch = line[z];
+                        if (ins2) {
+                            if (ch == '\\' && (z + 1) < args_e) { z += 2; continue; }
+                            if (ch == q2) ins2 = 0;
+                            z++;
+                            continue;
+                        }
+                        if (ch == '"' || ch == '\'') { ins2 = 1; q2 = ch; z++; continue; }
+                        if (ch == '(') p2++;
+                        else if (ch == ')') { if (p2) p2--; }
+                        else if (ch == '[') b2++;
+                        else if (ch == ']') { if (b2) b2--; }
+                        else if (ch == '{') r2++;
+                        else if (ch == '}') { if (r2) r2--; }
+                        else if (ch == ',' && p2 == 0 && b2 == 0 && r2 == 0) { comma_i = z; break; }
+                        z++;
+                    }
+                }
+                if (comma_i <= args_s || comma_i >= args_e) return 0;
+                size_t a0_s = args_s;
+                size_t a0_e = comma_i;
+                size_t a1_s = comma_i + 1;
+                size_t a1_e = args_e;
+                while (a0_e > a0_s && (line[a0_e - 1] == ' ' || line[a0_e - 1] == '\t')) a0_e--;
+                while (a1_s < a1_e && (line[a1_s] == ' ' || line[a1_s] == '\t')) a1_s++;
+                while (a1_e > a1_s && (line[a1_e - 1] == ' ' || line[a1_e - 1] == '\t')) a1_e--;
+                size_t a0_n = a0_e - a0_s;
+                size_t a1_n = a1_e - a1_s;
+                const char* castp = "(intptr_t)(";
+                const char* cclose = ")";
+                size_t need = call_fn_n + 1 + name_n + 2 +
+                              strlen(castp) + a0_n + strlen(cclose) + 2 +
+                              strlen(castp) + a1_n + strlen(cclose) + 1;
+                if (o + need >= out_cap) return 0;
+                memcpy(out + o, call_fn, call_fn_n); o += call_fn_n;
+                out[o++] = '(';
+                memcpy(out + o, name, name_n); o += name_n;
+                out[o++] = ',';
+                out[o++] = ' ';
+                memcpy(out + o, castp, strlen(castp)); o += strlen(castp);
+                memcpy(out + o, line + a0_s, a0_n); o += a0_n;
+                memcpy(out + o, cclose, strlen(cclose)); o += strlen(cclose);
+                out[o++] = ',';
+                out[o++] = ' ';
+                memcpy(out + o, castp, strlen(castp)); o += strlen(castp);
+                memcpy(out + o, line + a1_s, a1_n); o += a1_n;
+                memcpy(out + o, cclose, strlen(cclose)); o += strlen(cclose);
+                out[o++] = ')';
+            }
             changed = 1;
 
             /* advance i to after ')' */
@@ -959,66 +1028,82 @@ static int cc__scan_spawn_closures(const char* src,
                 int param_count = 0;
                 char param0[128] = {0};
                 char param1[128] = {0};
+                char param0_type[128] = {0};
+                char param1_type[128] = {0};
                 const char* p = NULL;
 
                 if (c == '(') {
-                    p = s + 1;
-                    while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                    if (p < line_end && *p == ')') {
-                        /* () => ... */
-                        p++;
-                        while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                        if ((p + 2) <= line_end && p[0] == '=' && p[1] == '>') {
-                            param_count = 0;
-                            p += 2;
-                        } else {
-                            s++; continue;
-                        }
-                    } else if (p < line_end && cc__is_ident_start_char(*p)) {
-                        /* (x) => ... */
-                        const char* n0 = p++;
-                        while (p < line_end && cc__is_ident_char2(*p)) p++;
-                        size_t nn = (size_t)(p - n0);
-                        if (nn == 0 || nn >= sizeof(param0) || cc__is_keyword_tok(n0, nn)) { s++; continue; }
-                        while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                        if (p < line_end && *p == ',') {
-                            /* (x, y) => ... */
-                            p++;
-                            while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                            if (p >= line_end || !cc__is_ident_start_char(*p)) { s++; continue; }
-                            const char* n1 = p++;
-                            while (p < line_end && cc__is_ident_char2(*p)) p++;
-                            size_t nn1 = (size_t)(p - n1);
-                            if (nn1 == 0 || nn1 >= sizeof(param1) || cc__is_keyword_tok(n1, nn1)) { s++; continue; }
-                            while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                            if (p >= line_end || *p != ')') { s++; continue; }
-                            p++; /* consume ')' */
-                            while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                            if ((p + 2) <= line_end && p[0] == '=' && p[1] == '>') {
-                                memcpy(param0, n0, nn);
-                                param0[nn] = '\0';
-                                memcpy(param1, n1, nn1);
-                                param1[nn1] = '\0';
+                    /* Parse `( ... ) =>` where `...` is empty, `x`, `x,y`, `int x`, `int x, int y`, etc. */
+                    const char* rp = s + 1;
+                    while (rp < line_end && *rp != ')') rp++;
+                    if (rp >= line_end || *rp != ')') { s++; continue; }
+
+                    const char* after_rp = rp + 1;
+                    while (after_rp < line_end && (*after_rp == ' ' || *after_rp == '\t')) after_rp++;
+                    if ((after_rp + 2) > line_end || after_rp[0] != '=' || after_rp[1] != '>') { s++; continue; }
+                    p = after_rp + 2;
+
+                    /* Parse params substring [s+1, rp). */
+                    const char* ps = s + 1;
+                    const char* pe = rp;
+                    while (ps < pe && (*ps == ' ' || *ps == '\t')) ps++;
+                    while (pe > ps && (pe[-1] == ' ' || pe[-1] == '\t')) pe--;
+
+                    param_count = 0;
+                    if (ps < pe) {
+                        /* Split by top-level commas (no nesting expected in early param list). */
+                        const char* seg_s = ps;
+                        int seg_idx = 0;
+                        for (const char* z = ps; z <= pe; z++) {
+                            int at_end = (z == pe);
+                            if (!at_end && *z != ',') continue;
+                            const char* seg_e = z;
+                            while (seg_s < seg_e && (*seg_s == ' ' || *seg_s == '\t')) seg_s++;
+                            while (seg_e > seg_s && (seg_e[-1] == ' ' || seg_e[-1] == '\t')) seg_e--;
+                            if (seg_e <= seg_s) { seg_s = z + 1; continue; }
+
+                            /* Find last identifier in segment: it's the param name; prefix is type (optional). */
+                            const char* nm_e = seg_e;
+                            while (nm_e > seg_s && !cc__is_ident_char2(nm_e[-1])) nm_e--;
+                            const char* nm_s = nm_e;
+                            while (nm_s > seg_s && cc__is_ident_char2(nm_s[-1])) nm_s--;
+                            if (nm_s >= nm_e || !cc__is_ident_start_char(*nm_s)) { break; }
+
+                            size_t nm_n = (size_t)(nm_e - nm_s);
+                            if (nm_n >= sizeof(param0)) { break; }
+
+                            const char* ty_s = seg_s;
+                            const char* ty_e = nm_s;
+                            while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t')) ty_e--;
+
+                            if (seg_idx == 0) {
+                                memcpy(param0, nm_s, nm_n); param0[nm_n] = '\0';
+                                if (ty_e > ty_s) {
+                                    size_t tn = (size_t)(ty_e - ty_s);
+                                    if (tn >= sizeof(param0_type)) tn = sizeof(param0_type) - 1;
+                                    memcpy(param0_type, ty_s, tn); param0_type[tn] = '\0';
+                                } else {
+                                    param0_type[0] = '\0';
+                                }
+                                param_count = 1;
+                            } else if (seg_idx == 1) {
+                                memcpy(param1, nm_s, nm_n); param1[nm_n] = '\0';
+                                if (ty_e > ty_s) {
+                                    size_t tn = (size_t)(ty_e - ty_s);
+                                    if (tn >= sizeof(param1_type)) tn = sizeof(param1_type) - 1;
+                                    memcpy(param1_type, ty_s, tn); param1_type[tn] = '\0';
+                                } else {
+                                    param1_type[0] = '\0';
+                                }
                                 param_count = 2;
-                                p += 2;
                             } else {
-                                s++; continue;
+                                break;
                             }
-                        } else {
-                            if (p >= line_end || *p != ')') { s++; continue; }
-                        p++; /* consume ')' */
-                        while (p < line_end && (*p == ' ' || *p == '\t')) p++;
-                        if ((p + 2) <= line_end && p[0] == '=' && p[1] == '>') {
-                            memcpy(param0, n0, nn);
-                            param0[nn] = '\0';
-                            param_count = 1;
-                            p += 2;
-                        } else {
-                            s++; continue;
+
+                            seg_idx++;
+                            seg_s = z + 1;
                         }
-                        }
-                    } else {
-                        s++; continue;
+                        if (param_count == 0) { s++; continue; }
                     }
                 } else if (cc__is_ident_start_char(c)) {
                     /* x => ... */
@@ -1033,6 +1118,7 @@ static int cc__scan_spawn_closures(const char* src,
                         memcpy(param0, n0, nn);
                         param0[nn] = '\0';
                         param_count = 1;
+                        param0_type[0] = '\0';
                         p = r + 2;
                     } else {
                         s++; continue;
@@ -1153,6 +1239,8 @@ static int cc__scan_spawn_closures(const char* src,
                     .param_count = param_count,
                     .param0_name = (param_count >= 1) ? strdup(param0) : NULL,
                     .param1_name = (param_count >= 2) ? strdup(param1) : NULL,
+                    .param0_type = (param_count >= 1 && param0_type[0]) ? strdup(param0_type) : NULL,
+                    .param1_type = (param_count >= 2 && param1_type[0]) ? strdup(param1_type) : NULL,
                     .cap_names = caps,
                                     .cap_types = cap_types,
                                     .cap_flags = cap_flags,
@@ -1166,9 +1254,9 @@ static int cc__scan_spawn_closures(const char* src,
                     if (param_count == 0)
                         snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*);\n", id);
                     else if (param_count == 1)
-                        snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*, void*);\n", id);
+                        snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*, intptr_t);\n", id);
                     else
-                        snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*, void*, void*);\n", id);
+                        snprintf(pb, sizeof(pb), "static void* __cc_closure_entry_%d(void*, intptr_t, intptr_t);\n", id);
                     cc__append_str(&protos, &protos_len, &protos_cap, pb);
                 }
                 {
@@ -1269,7 +1357,7 @@ static int cc__scan_spawn_closures(const char* src,
                     cc__append_fmt(&defs, &defs_len, &defs_cap,
                                    "static void* __cc_closure_entry_%d(%s) {\n",
                                    id,
-                                   (param_count == 0 ? "void* __p" : (param_count == 1 ? "void* __p, void* __arg0" : "void* __p, void* __arg0, void* __arg1")));
+                                   (param_count == 0 ? "void* __p" : (param_count == 1 ? "void* __p, intptr_t __arg0" : "void* __p, intptr_t __arg0, intptr_t __arg1")));
                     if (cap_n > 0) {
                         cc__append_fmt(&defs, &defs_len, &defs_cap,
                                        "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n",
@@ -1288,12 +1376,30 @@ static int cc__scan_spawn_closures(const char* src,
                         cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__p;\n");
                     }
                     if (param_count == 1) {
-                        if (param0[0]) cc__append_fmt(&defs, &defs_len, &defs_cap, "  void* %s = __arg0;\n", param0);
+                        if (param0[0]) {
+                            if (param0_type[0]) {
+                                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__arg0;\n", param0_type, param0, param0_type);
+                            } else {
+                                cc__append_fmt(&defs, &defs_len, &defs_cap, "  intptr_t %s = __arg0;\n", param0);
+                            }
+                        }
                         else cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__arg0;\n");
                     } else if (param_count == 2) {
-                        if (param0[0]) cc__append_fmt(&defs, &defs_len, &defs_cap, "  void* %s = __arg0;\n", param0);
+                        if (param0[0]) {
+                            if (param0_type[0]) {
+                                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__arg0;\n", param0_type, param0, param0_type);
+                            } else {
+                                cc__append_fmt(&defs, &defs_len, &defs_cap, "  intptr_t %s = __arg0;\n", param0);
+                            }
+                        }
                         else cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__arg0;\n");
-                        if (param1[0]) cc__append_fmt(&defs, &defs_len, &defs_cap, "  void* %s = __arg1;\n", param1);
+                        if (param1[0]) {
+                            if (param1_type[0]) {
+                                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__arg1;\n", param1_type, param1, param1_type);
+                            } else {
+                                cc__append_fmt(&defs, &defs_len, &defs_cap, "  intptr_t %s = __arg1;\n", param1);
+                            }
+                        }
                         else cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__arg1;\n");
                     }
 
@@ -2200,6 +2306,8 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                     free(closure_descs[k].cap_types);
                     free(closure_descs[k].param1_name);
                     free(closure_descs[k].param0_name);
+                    free(closure_descs[k].param0_type);
+                    free(closure_descs[k].param1_type);
                     free(closure_descs[k].body);
                 }
                 free(closure_descs);
@@ -2567,11 +2675,11 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
 
                                     fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
                                     if (comma_n == 1) {
-                                        fprintf(out, "{ CCClosure1 __c = %.*s; cc_nursery_spawn_closure1(__cc_nursery%d, __c, %.*s); }\n",
+                                        fprintf(out, "{ CCClosure1 __c = %.*s; cc_nursery_spawn_closure1(__cc_nursery%d, __c, (intptr_t)(%.*s)); }\n",
                                                 (int)c0_len, c0, cur_nursery_id,
                                                 (int)c1_len, c1);
                                     } else {
-                                        fprintf(out, "{ CCClosure2 __c = %.*s; cc_nursery_spawn_closure2(__cc_nursery%d, __c, %.*s, %.*s); }\n",
+                                        fprintf(out, "{ CCClosure2 __c = %.*s; cc_nursery_spawn_closure2(__cc_nursery%d, __c, (intptr_t)(%.*s), (intptr_t)(%.*s)); }\n",
                                                 (int)c0_len, c0, cur_nursery_id,
                                                 (int)c1_len, c1,
                                                 (int)c2_len, c2 ? c2 : "0");
@@ -2850,6 +2958,8 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                 free(closure_descs[i].cap_flags);
                     free(closure_descs[i].param1_name);
                     free(closure_descs[i].param0_name);
+                    free(closure_descs[i].param0_type);
+                    free(closure_descs[i].param1_type);
                 free(closure_descs[i].body);
             }
             free(closure_descs);

@@ -12,6 +12,7 @@
 #define CC_CLOSURE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Forward declaration to avoid include cycles (`cc_nursery.cch` may include runtime types). */
 typedef struct CCNursery CCNursery;
@@ -31,13 +32,13 @@ typedef struct {
 } CCClosure0;
 
 typedef struct {
-    void* (*fn)(void* env, void* arg0);
+    void* (*fn)(void* env, intptr_t arg0);
     void* env;
     void (*drop)(void* env); /* optional; can be NULL */
 } CCClosure1;
 
 typedef struct {
-    void* (*fn)(void* env, void* arg0, void* arg1);
+    void* (*fn)(void* env, intptr_t arg0, intptr_t arg1);
     void* env;
     void (*drop)(void* env); /* optional; can be NULL */
 } CCClosure2;
@@ -48,13 +49,13 @@ typedef struct {
 int cc_run_blocking_closure0(CCClosure0 c);
 
 /* Invoke a 1-arg closure. */
-void* cc_closure1_call(CCClosure1 c, void* arg0);
+void* cc_closure1_call(CCClosure1 c, intptr_t arg0);
 /* Invoke a 2-arg closure. */
-void* cc_closure2_call(CCClosure2 c, void* arg0, void* arg1);
+void* cc_closure2_call(CCClosure2 c, intptr_t arg0, intptr_t arg1);
 
 /* Spawn arity-1/2 closures in a nursery (bridge for `spawn(c, arg...)`). */
-int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, void* arg0);
-int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, void* arg0, void* arg1);
+int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0);
+int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_t arg1);
 
 static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
@@ -69,7 +70,7 @@ static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*
 #endif
 }
 
-static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, void*), void* env, void (*drop)(void*)) {
+static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
@@ -82,7 +83,7 @@ static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, void*), void* env, 
 #endif
 }
 
-static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, void*, void*), void* env, void (*drop)(void*)) {
+static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t), void* env, void (*drop)(void*)) {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
