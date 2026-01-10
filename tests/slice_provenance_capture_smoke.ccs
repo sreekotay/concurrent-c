@@ -1,0 +1,18 @@
+// Smoke: move-only slice can be captured into a closure (implicit move into env).
+#include "cc_runtime.cch"
+
+int g = 0;
+
+int main(void) {
+    int* p0 = (int*)malloc(sizeof(int) * 2);
+    p0[0] = 7; p0[1] = 8;
+    CCSlice s = cc_slice_from_parts(p0, 2, cc_slice_make_id(2, true, false, false), 2);
+    @nursery {
+        spawn (() => {
+            int* p = (int*)s.ptr;
+            if (p && p[0] == 7) g = 1;
+        });
+    }
+    return g == 1 ? 0 : 1;
+}
+

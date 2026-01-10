@@ -1,0 +1,19 @@
+// Compile-fail: closure uses a moved CCSlice.
+#include "cc_runtime.cch"
+
+int g = 0;
+
+int main(void) {
+    int buf[2] = {1, 2};
+    CCSlice s = cc_slice_from_buffer(buf, 2);
+    CCSlice t = cc_move(s);
+    (void)t;
+    @nursery {
+        spawn (() => {
+            // illegal: s was moved before closure creation
+            if (s.len == 2) g = 1;
+        });
+    }
+    return g;
+}
+

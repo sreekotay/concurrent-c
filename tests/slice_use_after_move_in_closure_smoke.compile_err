@@ -1,0 +1,3 @@
+# CC should fail compilation for use-after-move of CCSlice inside a closure
+CC: use after move of slice
+

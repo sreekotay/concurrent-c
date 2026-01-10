@@ -1,0 +1,16 @@
+// Compile-fail: using a move-only slice after it was moved into a closure capture.
+#include "cc_runtime.cch"
+
+int main(void) {
+    int* p = (int*)malloc(sizeof(int) * 2);
+    p[0] = 3; p[1] = 4;
+    CCSlice s = cc_slice_from_parts(p, 2, cc_slice_make_id(3, true, false, false), 2);
+    @nursery {
+        spawn (() => {
+            (void)s.len;
+        });
+    }
+    // ERROR: moved into closure capture above
+    return (int)s.len;
+}
+

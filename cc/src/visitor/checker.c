@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
 // populate flags on expressions and enforce send_take eligibility.
@@ -13,14 +14,472 @@ typedef enum {
     CC_SLICE_SUBSLICE = 1 << 2,
 } CCSliceFlags;
 
+typedef struct {
+    const char* name; /* borrowed */
+    int is_slice;
+    int move_only;
+    int moved;
+    int decl_line;
+    int decl_col;
+} CCSliceVar;
+
+typedef struct {
+    CCSliceVar* vars;
+    int vars_len;
+    int vars_cap;
+} CCScope;
+
+static CCSliceVar* cc__scope_find(CCScope* sc, const char* name) {
+    if (!sc || !name) return NULL;
+    for (int i = 0; i < sc->vars_len; i++) {
+        if (sc->vars[i].name && strcmp(sc->vars[i].name, name) == 0)
+            return &sc->vars[i];
+    }
+    return NULL;
+}
+
+static CCSliceVar* cc__scopes_lookup(CCScope* scopes, int n, const char* name) {
+    for (int i = n - 1; i >= 0; i--) {
+        CCSliceVar* v = cc__scope_find(&scopes[i], name);
+        if (v) return v;
+    }
+    return NULL;
+}
+
+static CCSliceVar* cc__scope_add(CCScope* sc, const char* name) {
+    if (!sc || !name) return NULL;
+    CCSliceVar* ex = cc__scope_find(sc, name);
+    if (ex) return ex;
+    if (sc->vars_len == sc->vars_cap) {
+        int nc = sc->vars_cap ? sc->vars_cap * 2 : 32;
+        CCSliceVar* nv = (CCSliceVar*)realloc(sc->vars, (size_t)nc * sizeof(CCSliceVar));
+        if (!nv) return NULL;
+        sc->vars = nv;
+        sc->vars_cap = nc;
+    }
+    CCSliceVar* v = &sc->vars[sc->vars_len++];
+    memset(v, 0, sizeof(*v));
+    v->name = name;
+    return v;
+}
+
+static void cc__scope_free(CCScope* sc) {
+    if (!sc) return;
+    free(sc->vars);
+    sc->vars = NULL;
+    sc->vars_len = 0;
+    sc->vars_cap = 0;
+}
+
+typedef struct StubNodeView {
+    int kind;
+    int parent;
+    const char* file;
+    int line_start;
+    int line_end;
+    int col_start;
+    int col_end;
+    int aux1;
+    int aux2;
+    const char* aux_s1;
+    const char* aux_s2;
+} StubNodeView;
+
+enum {
+    CC_STUB_DECL = 1,
+    CC_STUB_BLOCK = 2,
+    CC_STUB_STMT = 3,
+    CC_STUB_ARENA = 4,
+    CC_STUB_CALL = 5,
+    CC_STUB_AWAIT = 6,
+    CC_STUB_SEND_TAKE = 7,
+    CC_STUB_SUBSLICE = 8,
+    CC_STUB_CLOSURE = 9,
+    CC_STUB_IDENT = 10,
+    CC_STUB_CONST = 11,
+    CC_STUB_DECL_ITEM = 12,
+    CC_STUB_MEMBER = 13,
+};
+
+typedef struct {
+    int* child;
+    int len;
+    int cap;
+} ChildList;
+
+static void cc__child_push(ChildList* cl, int idx) {
+    if (!cl) return;
+    if (cl->len == cl->cap) {
+        int nc = cl->cap ? cl->cap * 2 : 8;
+        int* nv = (int*)realloc(cl->child, (size_t)nc * sizeof(int));
+        if (!nv) return;
+        cl->child = nv;
+        cl->cap = nc;
+    }
+    cl->child[cl->len++] = idx;
+}
+
+static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
+    int line = n ? n->line_start : 0;
+    int col = n ? n->col_start : 0;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
+}
+
+static int cc__call_has_unique_flag(const StubNodeView* nodes, const ChildList* kids, int call_idx) {
+    if (!nodes || !kids) return 0;
+    const ChildList* cl = &kids[call_idx];
+    /* We care about the 2nd argument to cc_slice_make_id(alloc_id, unique, transferable, is_sub). */
+    int arg_pos = 0;
+    for (int i = 0; i < cl->len; i++) {
+        const StubNodeView* c = &nodes[cl->child[i]];
+        if (c->kind == CC_STUB_CONST && c->aux_s1) {
+            arg_pos++;
+            if (arg_pos == 2 && strcmp(c->aux_s1, "1") == 0) return 1;
+        }
+        if (c->kind == CC_STUB_IDENT && c->aux_s1) {
+            arg_pos++;
+            if (arg_pos == 2 && strcmp(c->aux_s1, "true") == 0) return 1;
+            if (strcmp(c->aux_s1, "CC_SLICE_ID_UNIQUE") == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__subtree_has_call_named(const StubNodeView* nodes,
+                                      const ChildList* kids,
+                                      int idx,
+                                      const char* name) {
+    if (!nodes || !kids || !name) return 0;
+    const StubNodeView* n = &nodes[idx];
+    if (n->kind == CC_STUB_CALL && n->aux_s1 && strcmp(n->aux_s1, name) == 0) return 1;
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__subtree_has_call_named(nodes, kids, cl->child[i], name)) return 1;
+    }
+    return 0;
+}
+
+static int cc__subtree_find_first_ident_matching_scope(const StubNodeView* nodes,
+                                                       const ChildList* kids,
+                                                       int idx,
+                                                       CCScope* scopes,
+                                                       int scope_n,
+                                                       const char* exclude_name,
+                                                       const char** out_name) {
+    if (!nodes || !kids || !scopes || !out_name) return 0;
+    const StubNodeView* n = &nodes[idx];
+    if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+        if (!exclude_name || strcmp(n->aux_s1, exclude_name) != 0) {
+            CCSliceVar* v = cc__scopes_lookup(scopes, scope_n, n->aux_s1);
+            if (v) { *out_name = n->aux_s1; return 1; }
+        }
+    }
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__subtree_find_first_ident_matching_scope(nodes, kids, cl->child[i], scopes, scope_n, exclude_name, out_name))
+            return 1;
+    }
+    return 0;
+}
+
+static int cc__subtree_has_unique_make_id(const StubNodeView* nodes,
+                                          const ChildList* kids,
+                                          int idx) {
+    if (!nodes || !kids) return 0;
+    const StubNodeView* n = &nodes[idx];
+    if (n->kind == CC_STUB_CALL && n->aux_s1 && strcmp(n->aux_s1, "cc_slice_make_id") == 0) {
+        return cc__call_has_unique_flag(nodes, kids, idx);
+    }
+    if (n->kind == CC_STUB_IDENT && n->aux_s1 && strcmp(n->aux_s1, "CC_SLICE_ID_UNIQUE") == 0) return 1;
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__subtree_has_unique_make_id(nodes, kids, cl->child[i])) return 1;
+    }
+    return 0;
+}
+
+static int cc__subtree_collect_call_names(const StubNodeView* nodes,
+                                         const ChildList* kids,
+                                         int idx,
+                                         const char** out_names,
+                                         int* io_n,
+                                         int cap) {
+    if (!nodes || !kids || !out_names || !io_n) return 0;
+    const StubNodeView* n = &nodes[idx];
+    if (n->kind == CC_STUB_CALL && n->aux_s1) {
+        int seen = 0;
+        for (int i = 0; i < *io_n; i++) if (strcmp(out_names[i], n->aux_s1) == 0) seen = 1;
+        if (!seen && *io_n < cap) out_names[(*io_n)++] = n->aux_s1;
+    }
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        cc__subtree_collect_call_names(nodes, kids, cl->child[i], out_names, io_n, cap);
+    }
+    return 1;
+}
+
+static int cc__subtree_should_apply_slice_copy_rule(const StubNodeView* nodes,
+                                                    const ChildList* kids,
+                                                    int idx,
+                                                    const char* lhs_name,
+                                                    const char* rhs_name) {
+    if (!nodes || !kids || !rhs_name) return 0;
+    const char* call_names[64];
+    int call_n = 0;
+    cc__subtree_collect_call_names(nodes, kids, idx, call_names, &call_n, 64);
+
+    /* Count non-function identifier tokens in the subtree. If we see more than the rhs itself,
+       this is likely a projection (e.g. `s.ptr`) rather than a slice copy. */
+    int rhs_seen = 0;
+    int other_ident = 0;
+    int saw_member = 0;
+
+    /* Simple DFS stack */
+    int stack[256];
+    int sp = 0;
+    stack[sp++] = idx;
+    while (sp > 0) {
+        int cur = stack[--sp];
+        const StubNodeView* n = &nodes[cur];
+        if (n->kind == CC_STUB_MEMBER) {
+            saw_member = 1;
+        }
+        if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+            const char* nm = n->aux_s1;
+            if (lhs_name && strcmp(nm, lhs_name) == 0) {
+                /* ignore lhs */
+            } else {
+                int is_call = 0;
+                for (int i = 0; i < call_n; i++) if (strcmp(call_names[i], nm) == 0) is_call = 1;
+                if (!is_call && strcmp(nm, "true") != 0 && strcmp(nm, "false") != 0 && strcmp(nm, "NULL") != 0) {
+                    if (strcmp(nm, rhs_name) == 0) rhs_seen = 1;
+                    else other_ident = 1;
+                }
+            }
+        }
+        const ChildList* cl = &kids[cur];
+        for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) {
+            stack[sp++] = cl->child[i];
+        }
+    }
+    return rhs_seen && !other_ident && !saw_member;
+}
+
+static int cc__walk(int idx,
+                    const StubNodeView* nodes,
+                    const ChildList* kids,
+                    CCScope* scopes,
+                    int* io_scope_n,
+                    CCCheckerCtx* ctx);
+
+static int cc__walk_call(int idx,
+                         const StubNodeView* nodes,
+                         const ChildList* kids,
+                         CCScope* scopes,
+                         int* io_scope_n,
+                         CCCheckerCtx* ctx) {
+    const StubNodeView* n = &nodes[idx];
+    if (!n->aux_s1) return 0;
+
+    /* Move markers (parse-only): cc__move_marker_impl(&x) */
+    if (strcmp(n->aux_s1, "cc__move_marker_impl") == 0) {
+        const ChildList* cl = &kids[idx];
+        for (int i = 0; i < cl->len; i++) {
+            const StubNodeView* c = &nodes[cl->child[i]];
+            if (c->kind == CC_STUB_IDENT && c->aux_s1) {
+                /* The recorder also emits the callee as an IDENT child; ignore that and
+                   mark any slice variable args as moved. */
+                if (strcmp(c->aux_s1, "cc__move_marker_impl") == 0) continue;
+                CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, c->aux_s1);
+                if (v && v->is_slice) v->moved = 1;
+            }
+        }
+    }
+
+    /* walk children */
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+    }
+    return 0;
+}
+
+static int cc__walk_closure(int idx,
+                            const StubNodeView* nodes,
+                            const ChildList* kids,
+                            CCScope* scopes,
+                            int* io_scope_n,
+                            CCCheckerCtx* ctx) {
+    /* Walk closure body in a nested scope, collecting captures of move-only slices. */
+    CCScope closure_scope = {0};
+    scopes[(*io_scope_n)++] = closure_scope;
+
+    /* Collect identifier uses in the closure subtree (we'll filter out locals after walking). */
+    const char* used_names[256];
+    int used_n = 0;
+    {
+        /* DFS over closure subtree */
+        int stack[512];
+        int sp = 0;
+        stack[sp++] = idx;
+        while (sp > 0) {
+            int cur = stack[--sp];
+            const StubNodeView* n = &nodes[cur];
+            if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+                int seen = 0;
+                for (int k = 0; k < used_n; k++) if (strcmp(used_names[k], n->aux_s1) == 0) seen = 1;
+                if (!seen && used_n < (int)(sizeof(used_names)/sizeof(used_names[0]))) used_names[used_n++] = n->aux_s1;
+            }
+            const ChildList* cl = &kids[cur];
+            for (int i = 0; i < cl->len && sp < (int)(sizeof(stack)/sizeof(stack[0])); i++) {
+                stack[sp++] = cl->child[i];
+            }
+        }
+    }
+
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        int ch = cl->child[i];
+        if (cc__walk(ch, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+    }
+
+    /* Apply implicit move for captured move-only slices (names used but not declared locally). */
+    for (int i = 0; i < used_n; i++) {
+        const char* nm = used_names[i];
+        if (!nm) continue;
+        CCSliceVar* local = cc__scope_find(&scopes[(*io_scope_n) - 1], nm);
+        if (local) continue; /* local to closure */
+        CCSliceVar* outer = cc__scopes_lookup(scopes, (*io_scope_n) - 1, nm);
+        if (outer && outer->is_slice && outer->move_only) outer->moved = 1;
+    }
+
+    /* Pop closure scope */
+    cc__scope_free(&scopes[(*io_scope_n) - 1]);
+    (*io_scope_n)--;
+    return 0;
+}
+
+static int cc__walk(int idx,
+                    const StubNodeView* nodes,
+                    const ChildList* kids,
+                    CCScope* scopes,
+                    int* io_scope_n,
+                    CCCheckerCtx* ctx) {
+    const StubNodeView* n = &nodes[idx];
+
+    if (n->kind == CC_STUB_DECL_ITEM && n->aux_s1 && n->aux_s2) {
+        CCScope* cur = &scopes[(*io_scope_n) - 1];
+        CCSliceVar* v = cc__scope_add(cur, n->aux_s1);
+        if (!v) return -1;
+        v->decl_line = n->line_start;
+        v->decl_col = n->col_start;
+        v->is_slice = (strstr(n->aux_s2, "CCSlice") != NULL);
+
+        /* Determine move_only from initializer subtree */
+        {
+            const ChildList* cl = &kids[idx];
+            const char* copy_from = NULL;
+            int saw_slice_ctor = 0;
+
+            for (int i = 0; i < cl->len; i++) {
+                const StubNodeView* c = &nodes[cl->child[i]];
+                if (c->kind == CC_STUB_CALL && c->aux_s1) {
+                    if (strncmp(c->aux_s1, "cc_slice_", 9) == 0) saw_slice_ctor = 1;
+                }
+            }
+
+            /* If initializer is a known slice constructor, treat as slice even if the type string
+               prints as 'struct <anonymous>' (CCSlice is a typedef of an anonymous struct). */
+            if (saw_slice_ctor) v->is_slice = 1;
+
+            if (v->is_slice) {
+                /* move-only by provenance: detect unique-id construction anywhere under initializer */
+                if (cc__subtree_has_unique_make_id(nodes, kids, idx)) v->move_only = 1;
+            }
+
+            /* Find a candidate RHS identifier in the initializer (best-effort). */
+            (void)cc__subtree_find_first_ident_matching_scope(nodes, kids, idx, scopes, *io_scope_n, v->name, &copy_from);
+
+            /* Copy rule for decl initializers: `CCSlice t = s;` */
+            if (copy_from && copy_from != v->name) {
+                CCSliceVar* rhs = cc__scopes_lookup(scopes, *io_scope_n, copy_from);
+                /* If we see assignment from an existing slice var, treat this decl as slice too
+                   (CCSlice prints as 'struct <anonymous>' in type_to_str). */
+                if (rhs && rhs->is_slice) v->is_slice = 1;
+                int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
+                int is_simple_copy = cc__subtree_should_apply_slice_copy_rule(nodes, kids, idx, v->name, copy_from);
+                if (rhs && rhs->is_slice && rhs->move_only && !has_move_marker && is_simple_copy) {
+                    cc__emit_err(ctx, n, "CC: cannot copy move-only slice (use cc_move(x))");
+                    ctx->errors++;
+                    return -1;
+                }
+                if (rhs && rhs->is_slice && rhs->move_only && has_move_marker) {
+                    /* Moving a move-only slice produces a move-only slice value. */
+                    v->move_only = 1;
+                }
+            }
+        }
+    }
+
+    if (n->kind == CC_STUB_IDENT && n->aux_s1) {
+        CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, n->aux_s1);
+        if (v && v->is_slice && v->moved) {
+            cc__emit_err(ctx, n, "CC: use after move of slice");
+            ctx->errors++;
+            return -1;
+        }
+    }
+
+    if (n->kind == CC_STUB_CALL) {
+        return cc__walk_call(idx, nodes, kids, scopes, io_scope_n, ctx);
+    }
+
+    if (n->kind == CC_STUB_CLOSURE) {
+        return cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx);
+    }
+
+    /* default: recurse */
+    const ChildList* cl = &kids[idx];
+    for (int i = 0; i < cl->len; i++) {
+        if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
+    }
+    return 0;
+}
+
 int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     if (!root || !ctx) return -1;
-    if (!root->items || root->items_len == 0) {
-        // Transitional: no CC AST yet, skip.
+    ctx->errors = 0;
+
+    if (!root->nodes || root->node_count <= 0) {
+        /* Transitional: no stub nodes, skip. */
         return 0;
     }
-    ctx->errors = 0;
-    // TODO: walk root->items once populated.
+    const StubNodeView* nodes = (const StubNodeView*)root->nodes;
+    int n = root->node_count;
+
+    ChildList* kids = (ChildList*)calloc((size_t)n, sizeof(ChildList));
+    if (!kids) return -1;
+    for (int i = 0; i < n; i++) {
+        int p = nodes[i].parent;
+        if (p >= 0 && p < n) cc__child_push(&kids[p], i);
+    }
+
+    CCScope scopes[256];
+    int scope_n = 0;
+    memset(scopes, 0, sizeof(scopes));
+    scopes[scope_n++] = (CCScope){0};
+
+    for (int i = 0; i < n; i++) {
+        if (nodes[i].parent != -1) continue;
+        if (cc__walk(i, nodes, kids, scopes, &scope_n, ctx) != 0) break;
+    }
+
+    for (int i = 0; i < n; i++) free(kids[i].child);
+    free(kids);
+    for (int i = 0; i < scope_n; i++) cc__scope_free(&scopes[i]);
+
     return ctx->errors ? -1 : 0;
 }
 

@@ -1,0 +1,17 @@
+// Smoke: closures should be able to capture CCSlice by copy (best-effort; move semantics enforced later).
+#include "cc_slice.cch"
+
+int g = 0;
+
+int main(void) {
+    int buf[4] = {1, 2, 3, 4};
+    CCSlice s = cc_slice_from_buffer(buf, 4);
+    @nursery {
+        spawn (() => {
+            int *p = (int*)s.ptr;
+            if (p && s.len == 4 && p[0] == 1) g = 1;
+        });
+    }
+    return (g == 1) ? 0 : 1;
+}
+

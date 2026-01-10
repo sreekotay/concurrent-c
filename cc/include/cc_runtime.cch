@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "cc_slice.cch"
 #include "cc_arena.cch"
@@ -15,6 +16,20 @@
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;
 typedef struct CCTask CCTask;
+
+/* Explicit move primitive.
+   Best-effort: uses GNU statement-expr supported by Clang/GCC.
+   For now we "poison" the moved-from value by zeroing it.
+   The compiler will enforce use-after-move for certain move-only values (e.g. unique slices) over time. */
+#if defined(CC_PARSER_MODE)
+/* During TCC parse-to-stub-AST, macros expand before recording. We emit a real call the recorder can see. */
+static inline void cc__move_marker_impl(void* p) { (void)p; }
+#define cc_move(x) (cc__move_marker_impl(&(x)), (x))
+#elif (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
+#define cc_move(x) ({ __typeof__(x) __cc_tmp = (x); memset(&(x), 0, sizeof(x)); __cc_tmp; })
+#else
+#define cc_move(x) (x)
+#endif
 
 #endif // CC_RUNTIME_H
 

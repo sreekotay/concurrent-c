@@ -989,13 +989,16 @@ If a function has `@scoped` values in scope at a suspension point, that's a comp
 
 ### 3.2 Suspension Points
 
-A **suspension point** is where execution might yield to the scheduler, requiring that no scope-bound values be held.
+#### 3.2.1 Definition
+
+A **suspension point** is any program point at which execution of the current task may suspend and later resume. At suspension points, **no scope-bound (`@scoped`) values may be held**.
 
 **Suspension points:**
 
 - `await` expression (any await)
 - `@match` statement
 - Call to `@async` function
+- Async iteration (`@for await`) (contains an `await` per iteration)
 - Call to cancellation-aware channel operation (`recv_cancellable`, `send_cancellable`)
 - Call to `block_on()` (rare, explicit blocking)
 
@@ -1006,7 +1009,24 @@ A **suspension point** is where execution might yield to the scheduler, requirin
 - Arithmetic, logic, control flow
 - Non-blocking operations (`try_send`, `try_recv`, `close`)
 
-**Cancellation rule:** When a suspension point occurs inside an active `with_deadline()` scope, the suspension point is implicitly cancellation-aware: it must check for cancellation before and after suspension. This applies uniformly to all suspension points (`await`, `@async` calls, `@match`, cancellation-aware channel ops) — not just explicit `await`.
+#### 3.2.2 Cancellation Observation at Suspension Points (Normative)
+
+When a suspension point is executed inside an active `with_deadline(...)` scope, the suspension point MUST be treated as **cancellation-aware**.
+
+**Rule:**
+
+- Before suspending, and again immediately after resuming, the runtime MUST check whether cancellation has been requested for the current task.
+- If cancellation has been requested, the suspension point MUST complete by returning `err(Cancelled)`.
+
+**Requirements:**
+
+- The enclosing function’s error type MUST be able to represent `Cancelled`.
+- If the error type cannot represent `Cancelled`, the program is ill-formed and compilation MUST fail.
+
+**Notes:**
+
+- Cancellation remains cooperative. No suspension point is required to interrupt an in-progress blocking operation.
+- Cancellation is only observed at suspension points; purely CPU-bound code is unaffected unless it explicitly checks cancellation (e.g., `cc_is_cancelled()` / `is_cancelled()`).
 
 For complete deadline semantics, scoping rules, and runtime behavior, see **§ 7.5 (Cancellation & Deadline)**. This section defines the compiler-level guarantee; § 7.5 specifies the full runtime semantics.
 
@@ -1189,6 +1209,11 @@ Arena arena(size_t size);
 void  arena_free(Arena* a);            // free all memory
 void  arena_reset(Arena* a);           // reclaim memory, invalidate slices
 
+// Checkpoints
+typedef struct ArenaCheckpoint ArenaCheckpoint;
+ArenaCheckpoint arena_checkpoint(Arena* a);
+void  arena_restore(ArenaCheckpoint checkpoint);
+
 // Allocation
 void* arena_alloc(Arena* a, size_t nbytes);       // raw bytes (no provenance)
 T[:]  arena_alloc<T>(Arena* a, size_t nelems);    // tracked, nelems elements
@@ -1203,6 +1228,13 @@ size_t gigabytes(size_t n);            // n * 1024 * 1024 * 1024
 **Rule:** All arenas use atomic operations internally and are safe to share across threads. Arena-allocated slices can be sent through channels or captured in thread closures.
 
 **Rule (arena lifetime obligation):** `arena_reset` and `arena_free` must not be called while any slice derived from that arena may still be used on any thread. This is a programmer obligation. Debug builds may detect some violations; in release builds, violating this rule is undefined behavior.
+
+**Arena checkpoints (normative):**
+
+- An arena checkpoint captures the current allocation state of an arena and allows later restoration.
+- Restoring a checkpoint releases all allocations performed after the checkpoint.
+- Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
+- Arena checkpoints do not alter arena ownership or lifetime rules.
 
 ```c
 Arena a = arena(megabytes(1));
@@ -2286,9 +2318,11 @@ Every `spawn` inside a nursery creates a child task. The nursery implicitly wait
 **Error Propagation:**
 
 If any spawned task returns an error or panics:
-1. The nursery cancels all remaining child tasks
-2. The nursery waits for all children to observe cancellation and exit
+1. The nursery MUST cancel all remaining child tasks
+2. The nursery MUST NOT complete until all child tasks have terminated (including observing cancellation and exiting)
 3. The nursery block terminates with that error
+
+Cancellation is observed according to **§ 3.2.2** and may be deferred by `with_shield` regions (**§ 7.5.2**).
 
 ```c
 @nursery {
@@ -3181,11 +3215,11 @@ This is still supported but should be rare—most code uses `@match` or variants
   - `recv_cancellable()` / `send_cancellable()` (immediate)
   - `cc_is_cancelled()` (polling, manual)
 - No async context unwinding or stack unwinding
-- Non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv()` keeps waiting)
+- Outside an active `with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv()` keeps waiting). Inside `with_deadline(...)`, suspension points are cancellation-aware per **§ 3.2.2** (and may be deferred by `with_shield`, **§ 7.5.2**).
 
 **Rule:** `t.cancel()` is only valid if `t` is a task with a `Cancelled` error variant. Attempting to cancel a task without `Cancelled` in its error type is a compile error.
 
-**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation.
+**Rule (nursery cancellation propagation):** When a task in a nursery fails or is cancelled, the nursery cancels all sibling tasks. Siblings that use `@match` or cancellation-aware variants will observe the cancellation immediately. Siblings using plain `await` will continue waiting until they return or reach a cancellation-aware operation (unless they are inside an active `with_deadline(...)` scope, where suspension points are cancellation-aware per **§ 3.2.2**).
 
 ---
 
@@ -3356,6 +3390,12 @@ DbResult result = try await db_query(parsed) @deadline(deadline);
 - Deadline exceeded triggers same cancellation mechanism as explicit cancellation
 - Cancellation is **cooperative** (tasks exit at awaitable points)
 
+**Deadline propagation (clarification):**
+
+- A `with_deadline(d)` scope establishes a deadline that applies to all **descendant tasks created within the scope**.
+- If the deadline expires, cancellation is requested for all tasks within the scope (and descendants).
+- Cancellation is observed according to **§ 3.2.2** (and may be deferred by shielded regions; see **§ 7.5.2**).
+
 **Design Notes:**
 
 - Deadline is **just a timestamp** (u64 nanoseconds); no allocation
@@ -3364,6 +3404,69 @@ DbResult result = try await db_query(parsed) @deadline(deadline);
 - Idiomatic for request-scoped deadlines (every request gets one)
 
 ---
+
+### 7.5.2 Shielded Regions (`with_shield`)
+
+A **shielded region** temporarily suppresses observation of cancellation originating from enclosing deadline scopes for the duration of the region.
+
+**Syntax:**
+
+```c
+with_shield {
+    /* statements */
+}
+```
+
+**Semantics:**
+
+- While executing inside a `with_shield` region, suspension points MUST NOT observe cancellation requested by enclosing `with_deadline(...)` scopes.
+- Explicit cancellation requests originating inside the shielded region (e.g., calling `cc_cancel()` from within the region) MUST still be observable.
+
+**Exit rule:**
+
+- Upon exiting a `with_shield` region, if cancellation has been requested, the next suspension point MUST observe it immediately (per **§ 3.2.2**).
+
+**Constraints:**
+
+- Shielded regions MUST NOT be unbounded.
+- Shielded regions are intended for short, bounded cleanup operations (e.g., protocol shutdown, flushing buffers).
+- Long-running or unbounded loops inside `with_shield` are ill-formed and SHOULD be rejected by static analysis.
+
+---
+
+### 7.5.3 Cancel-Safe API Surface (Recommended Contracts)
+
+This subsection defines minimal vocabulary for documenting async APIs in the presence of cancellation at suspension points (**§ 3.2.2**).
+
+**Cancellation-safe operation (contract):**
+
+An `@async` operation is **cancellation-safe** if, when it returns `err(Cancelled)` at any suspension point during its execution, it leaves the program state:
+
+- memory-safe
+- resource-safe (no leaked ownership obligations)
+- invariant-preserving for the operation’s abstraction boundary
+
+Partial work MAY occur; if externally visible, it MUST be consistent and documented.
+
+**Cancellation-unsafe operation (contract):**
+
+An `@async` operation is **cancellation-unsafe** if observing cancellation mid-operation can leave externally visible state such that the caller lacks a well-defined recovery procedure (e.g., half-finished protocol state, transient invariants, ambiguous commit).
+
+**Documentation tags (recommended):**
+
+Async APIs SHOULD be documented as `@cancel_safe` or `@cancel_unsafe` (documentation metadata; not language syntax).
+
+**Defaulting rule (recommended):** Standard library `@async` operations SHOULD be assumed `@cancel_safe` unless explicitly documented as `@cancel_unsafe`.
+
+If an API is `@cancel_unsafe`, its documentation MUST specify:
+
+- commit points (what may already have happened before cancellation is observed)
+- required recovery action on cancellation (e.g., close/reset/retry)
+- any externally visible partial state that may remain
+
+**Lint rule (recommended):**
+
+Tooling SHOULD warn/error when a `@cancel_unsafe` operation is awaited inside an active `with_deadline(...)` scope unless it is awaited within a `with_shield { ... }` region (or the API’s documented recovery action is performed on cancellation).
 
 ### 7.7 Streaming
 
@@ -4484,13 +4587,21 @@ for (size_t __i = 0; __i < slice.len; __i++) {
 **`@for await` lowering:**
 
 ```c
-// @for await (T x : ch) { BODY }
+// @for await (T x : expr) { BODY }
 // lowers to:
-while (T? __tmp = await ch.recv()) {
+while (true) {
+    T? __tmp = try await expr.next();
+    if (!__tmp) break;     // Ok(None) indicates end-of-stream (EOF)
     T x = *__tmp;
     BODY
 }
 ```
+
+**Rules (async iteration):**
+
+- `Ok(None)` indicates end-of-stream (EOF).
+- Errors propagate normally.
+- Suspension points inside async iteration are subject to **§ 3.2.2** and **§ 7.5.2**.
 
 **`@for await` on pointers:**
 
@@ -5159,6 +5270,18 @@ At compile time, the following are forbidden:
 **Rule:** A violation is a compile-time error.
 
 ---
+
+## 13. Non-Goals and Explicit Omissions
+
+The following are explicitly out of scope for this specification:
+
+- Preemptive cancellation
+- Implicit fairness or scheduler guarantees
+- Ambient or thread-local cancellation contexts
+- Effect typing for async or cancellation
+- Automatic memory reclamation beyond arena semantics
+
+These omissions are intentional and preserve explicit control, predictable C lowering, and implementability across platforms.
 
 ## Appendix A: FFI Details & Unsafe Code
 

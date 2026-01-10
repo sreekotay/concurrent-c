@@ -1,0 +1,12 @@
+// Compile-fail: use-after-move for CCSlice.
+#include "cc_runtime.cch"
+
+int main(void) {
+    int buf[2] = {1, 2};
+    CCSlice s = cc_slice_from_buffer(buf, 2);
+    CCSlice t = cc_move(s);
+    (void)t;
+    // illegal: s was moved
+    return (s.len == 0) ? 0 : 1;
+}
+

@@ -22,9 +22,25 @@ typedef struct {
     int end_col;   /* 0-based, in end_line (exclusive) */
     char** cap_names;
     char** cap_types; /* parallel to cap_names; NULL if unknown */
+    unsigned char* cap_flags; /* parallel; bit0=is_slice, bit1=move-only */
     int cap_count;
     char* body; /* includes surrounding { ... } */
 } CCClosureDesc;
+
+/* Forward decl (used by early checkers). */
+static int cc__scan_spawn_closures(const char* src,
+                                  size_t src_len,
+                                  const char* src_path,
+                                  int line_base,
+                                  int* io_next_closure_id,
+                                  CCClosureDesc** out_descs,
+                                  int* out_count,
+                                  int** out_line_map,
+                                  int* out_line_cap,
+                                  char** out_protos,
+                                  size_t* out_protos_len,
+                                  char** out_defs,
+                                  size_t* out_defs_len);
 
 static int cc__is_ident_start_char(char c) { return (c == '_' || isalpha((unsigned char)c)); }
 static int cc__is_ident_char2(char c) { return (c == '_' || isalnum((unsigned char)c)); }
@@ -53,55 +69,159 @@ static int cc__name_in_list(char** xs, int n, const char* s, size_t slen) {
 
 static void cc__maybe_record_decl(char*** scope_names,
                                   char*** scope_types,
+                                  unsigned char** scope_flags,
                                   int* scope_counts,
                                   int depth,
                                   const char* line) {
-    if (!scope_names || !scope_types || !scope_counts || depth < 0 || depth >= 256 || !line) return;
+    if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !line) return;
     const char* p = line;
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '#' || *p == '\0') return;
-    if (!strchr(p, ';')) return;
-    const char* types[] = {"int","char","size_t","ssize_t","bool","CCSlice","CCArena","CCChan","CCNursery","CCDeadline","CCFuture"};
-    const char* after = NULL;
-    const char* base_type = NULL;
-    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
-        size_t tn = strlen(types[i]);
-        if (strncmp(p, types[i], tn) == 0 && isspace((unsigned char)p[tn])) { after = p + tn; base_type = types[i]; break; }
+    const char* semi = strchr(p, ';');
+    if (!semi) return;
+    /* Ignore function prototypes (best-effort):
+       if we see '(' before ';' and there is no '=' before that '(', it's likely a prototype/declarator. */
+    const char* lp = strchr(p, '(');
+    if (lp && lp < semi) {
+        const char* eq = strchr(p, '=');
+        if (!eq || eq > lp) return;
     }
-    if (!after) return;
-    p = after;
-    while (*p == ' ' || *p == '\t') p++;
-    int star_n = 0;
-    while (*p == '*') { star_n++; p++; while (*p == ' ' || *p == '\t') p++; }
-    if (!cc__is_ident_start_char(*p)) return;
-    const char* s = p++;
-    while (cc__is_ident_char2(*p)) p++;
-    size_t n = (size_t)(p - s);
-    if (n == 0 || cc__is_keyword_tok(s, n)) return;
+
+    /* Find the declared variable name as the last identifier before '=', ',', or ';'. */
+    const char* name_s = NULL;
+    size_t name_n = 0;
+    const char* cur = p;
+    while (cur < semi) {
+        if (*cur == '"' || *cur == '\'') {
+            char q = *cur++;
+            while (cur < semi) {
+                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                if (*cur == q) { cur++; break; }
+                cur++;
+            }
+            continue;
+        }
+        if (*cur == '=' || *cur == ',' || *cur == ';') break;
+        if (!cc__is_ident_start_char(*cur)) { cur++; continue; }
+        const char* s = cur++;
+        while (cur < semi && cc__is_ident_char2(*cur)) cur++;
+        size_t n = (size_t)(cur - s);
+        if (n == 0 || cc__is_keyword_tok(s, n)) continue;
+        name_s = s;
+        name_n = n;
+    }
+    if (!name_s || name_n == 0) return;
+    /* Type is everything from p to name_s (trimmed). */
+    const char* ty_s = p;
+    const char* ty_e = name_s;
+    while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t')) ty_s++;
+    while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t')) ty_e--;
+    if (ty_e <= ty_s) return;
+
     int cur_n = scope_counts[depth];
-    if (cc__name_in_list(scope_names[depth], cur_n, s, n)) return;
+    if (cc__name_in_list(scope_names[depth], cur_n, name_s, name_n)) return;
 
-    /* Build a file-scope-safe type string for simple decls (e.g. "int", "int*", "CCNursery*"). */
-    if (!base_type) return;
-    size_t bt = strlen(base_type);
-    char* ty = (char*)malloc(bt + (size_t)star_n + 1);
-    if (!ty) return;
-    memcpy(ty, base_type, bt);
-    for (int i = 0; i < star_n; i++) ty[bt + (size_t)i] = '*';
-    ty[bt + (size_t)star_n] = '\0';
+    /* Build a file-scope-safe type string.
+       If the type uses CC slice syntax (`T[:]`/`T[:!]`), map it to CCSlice (plus pointer stars if present). */
+    int is_slice = 0;
+    int slice_has_bang = 0;
+    int ptr_n = 0;
+    for (const char* s = ty_s; s < ty_e; s++) {
+        if (*s == '*') ptr_n++;
+        if (*s == '[') {
+            const char* t = s;
+            /* allow spaces: [ : ] or [ : ! ] */
+            while (t < ty_e && *t != ']') t++;
+            if (t < ty_e) {
+                /* very small heuristic: contains ':' inside brackets => slice-ish */
+                for (const char* u = s; u < t; u++) {
+                    if (*u == ':') is_slice = 1;
+                    if (*u == '!') slice_has_bang = 1;
+                }
+            }
+        }
+    }
 
-    char* name = (char*)malloc(n + 1);
+    char* ty = NULL;
+    if (is_slice) {
+        const char* base = "CCSlice";
+        size_t bt = strlen(base);
+        ty = (char*)malloc(bt + (size_t)ptr_n + 1);
+        if (!ty) return;
+        memcpy(ty, base, bt);
+        for (int i = 0; i < ptr_n; i++) ty[bt + (size_t)i] = '*';
+        ty[bt + (size_t)ptr_n] = '\0';
+    } else {
+        size_t tn = (size_t)(ty_e - ty_s);
+        ty = (char*)malloc(tn + 1);
+        if (!ty) return;
+        memcpy(ty, ty_s, tn);
+        ty[tn] = '\0';
+    }
+
+    char* name = (char*)malloc(name_n + 1);
     if (!name) { free(ty); return; }
-    memcpy(name, s, n);
-    name[n] = '\0';
+    memcpy(name, name_s, name_n);
+    name[name_n] = '\0';
     char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
     if (!next) { free(name); free(ty); return; }
     scope_names[depth] = next;
     char** tnext = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
     if (!tnext) { free(name); free(ty); return; }
     scope_types[depth] = tnext;
+    unsigned char* fnext = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n + 1) * sizeof(unsigned char));
+    if (!fnext) { free(name); free(ty); return; }
+    scope_flags[depth] = fnext;
+
+    /* Flags: bit0 = is_slice(CCSlice), bit1 = move-only slice hint. */
+    unsigned char flags = 0;
+    if (strcmp(ty, "CCSlice") == 0) flags |= 1;
+    if (is_slice && slice_has_bang) flags |= 2;
+    /* Provenance hint (more "real"): detect unique-id construction in initializer.
+       - cc_slice_make_id(..., true/1, ...)
+       - CC_SLICE_ID_UNIQUE bit present in an id expression
+       This is still best-effort text parsing until we have a typed AST. */
+    if ((flags & 1) != 0) {
+        const char* eq = strchr(name_s, '=');
+        if (eq && eq < semi) {
+            if (strstr(eq, "CC_SLICE_ID_UNIQUE")) flags |= 2;
+            const char* mk = strstr(eq, "cc_slice_make_id");
+            if (mk) {
+                const char* lp = strchr(mk, '(');
+                if (lp) {
+                    /* Parse 2nd argument (unique) in cc_slice_make_id(a, unique, ...). */
+                    const char* t = lp + 1;
+                    int comma = 0;
+                    while (*t && t < semi) {
+                        if (*t == '"' || *t == '\'') {
+                            char qq = *t++;
+                            while (*t && t < semi) {
+                                if (*t == '\\' && t[1]) { t += 2; continue; }
+                                if (*t == qq) { t++; break; }
+                                t++;
+                            }
+                            continue;
+                        }
+                        if (*t == ',') {
+                            comma++;
+                            if (comma == 1) {
+                                /* now at start of arg2 */
+                                t++;
+                                while (*t == ' ' || *t == '\t') t++;
+                                if (strncmp(t, "true", 4) == 0) { flags |= 2; break; }
+                                if (*t == '1') { flags |= 2; break; }
+                            }
+                        }
+                        t++;
+                    }
+                }
+            }
+        }
+    }
+
     scope_names[depth][cur_n] = name;
     scope_types[depth][cur_n] = ty;
+    scope_flags[depth][cur_n] = flags;
     scope_counts[depth] = cur_n + 1;
 }
 
@@ -115,6 +235,327 @@ static const char* cc__lookup_decl_type(char** scope_names,
         if (strcmp(scope_names[i], name) == 0) return scope_types[i];
     }
     return NULL;
+}
+
+static unsigned char cc__lookup_decl_flags(char** scope_names,
+                                           unsigned char* scope_flags,
+                                           int n,
+                                           const char* name) {
+    if (!scope_names || !scope_flags || !name) return 0;
+    for (int i = 0; i < n; i++) {
+        if (!scope_names[i]) continue;
+        if (strcmp(scope_names[i], name) == 0) return scope_flags[i];
+    }
+    return 0;
+}
+
+typedef struct {
+    char* name;
+    int depth;
+} CCMovedName;
+
+static int cc__moved_contains(CCMovedName* moved, int moved_n, const char* s, size_t n) {
+    for (int i = 0; i < moved_n; i++) {
+        if (!moved[i].name) continue;
+        if (strlen(moved[i].name) == n && strncmp(moved[i].name, s, n) == 0) return 1;
+    }
+    return 0;
+}
+
+static void cc__moved_push(CCMovedName** io_moved, int* io_n, int* io_cap, const char* s, size_t n, int depth) {
+    if (!io_moved || !io_n || !io_cap || !s || n == 0) return;
+    if (cc__moved_contains(*io_moved, *io_n, s, n)) return;
+    if (*io_n == *io_cap) {
+        int nc = (*io_cap) ? (*io_cap) * 2 : 16;
+        CCMovedName* nm = (CCMovedName*)realloc(*io_moved, (size_t)nc * sizeof(CCMovedName));
+        if (!nm) return;
+        *io_moved = nm;
+        *io_cap = nc;
+    }
+    char* name = (char*)malloc(n + 1);
+    if (!name) return;
+    memcpy(name, s, n);
+    name[n] = '\0';
+    (*io_moved)[*io_n] = (CCMovedName){ .name = name, .depth = depth };
+    (*io_n)++;
+}
+
+static void cc__moved_pop_depth(CCMovedName* moved, int* io_n, int depth) {
+    if (!moved || !io_n) return;
+    int n = *io_n;
+    for (int i = 0; i < n; ) {
+        if (moved[i].name && moved[i].depth > depth) {
+            free(moved[i].name);
+            moved[i] = moved[n - 1];
+            n--;
+            continue;
+        }
+        i++;
+    }
+    *io_n = n;
+}
+
+/* Best-effort checker: reject use-after-move for CCSlice locals moved via cc_move(x).
+   This is an early slice-safety step until we have a real typed AST. */
+static int cc__check_slice_use_after_move(const char* src, size_t src_len, const char* src_path) {
+    if (!src || src_len == 0) return 0;
+    /* Pre-scan closures so we can treat move-only slice captures as implicit moves. */
+    CCClosureDesc* closure_descs = NULL;
+    int closure_count = 0;
+    int* closure_line_map = NULL;
+    int closure_line_cap = 0;
+    char* dummy_protos = NULL;
+    size_t dummy_protos_len = 0;
+    char* dummy_defs = NULL;
+    size_t dummy_defs_len = 0;
+    int closure_next_id = 1;
+    (void)cc__scan_spawn_closures(src, src_len, src_path,
+                                 1, &closure_next_id,
+                                 &closure_descs, &closure_count,
+                                 &closure_line_map, &closure_line_cap,
+                                 &dummy_protos, &dummy_protos_len,
+                                 &dummy_defs, &dummy_defs_len);
+    free(closure_line_map);
+    free(dummy_protos);
+    free(dummy_defs);
+
+    char** scope_names[256];
+    char** scope_types[256];
+    unsigned char* scope_flags[256];
+    int scope_counts[256];
+    for (int i = 0; i < 256; i++) { scope_names[i] = NULL; scope_types[i] = NULL; scope_flags[i] = NULL; scope_counts[i] = 0; }
+    int depth = 0;
+
+    CCMovedName* moved = NULL;
+    int moved_n = 0, moved_cap = 0;
+
+    const char* cur = src;
+    int line_no = 1;
+    while ((size_t)(cur - src) < src_len && *cur) {
+        const char* line_start = cur;
+        const char* nl = strchr(cur, '\n');
+        const char* line_end = nl ? nl : (src + src_len);
+        size_t line_len = (size_t)(line_end - line_start);
+
+        char tmp_line[2048];
+        size_t cp = line_len < sizeof(tmp_line) - 1 ? line_len : sizeof(tmp_line) - 1;
+        memcpy(tmp_line, line_start, cp);
+        tmp_line[cp] = '\0';
+
+        /* record decls */
+        cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, depth, tmp_line);
+
+        /* Implicit moves: move-only slice captures into closures move the captured value.
+           To avoid falsely flagging uses inside the closure body, we apply the move *after* the closure ends. */
+        if (closure_descs) {
+            for (int ci = 0; ci < closure_count; ci++) {
+                if ((closure_descs[ci].end_line + 1) != line_no) continue;
+                for (int k = 0; k < closure_descs[ci].cap_count; k++) {
+                    unsigned char fl = (closure_descs[ci].cap_flags ? closure_descs[ci].cap_flags[k] : 0);
+                    if ((fl & 1) != 0 && (fl & 2) != 0) {
+                        const char* nm = closure_descs[ci].cap_names ? closure_descs[ci].cap_names[k] : NULL;
+                        if (nm) {
+                            int md = depth;
+                            int found_decl = 0;
+                            /* Move should apply at the decl's scope depth so it survives exiting inner blocks. */
+                            for (int d = depth; d >= 1 && !found_decl; d--) {
+                                for (int i = 0; i < scope_counts[d]; i++) {
+                                    if (!scope_names[d][i]) continue;
+                                    if (strcmp(scope_names[d][i], nm) == 0) { md = d; found_decl = 1; break; }
+                                }
+                            }
+                            cc__moved_push(&moved, &moved_n, &moved_cap, nm, strlen(nm), md);
+                        }
+                    }
+                }
+            }
+        }
+
+        /* scan tokens */
+        const char* p = tmp_line;
+        int in_str = 0;
+        char q = 0;
+        /* (reserved for future richer parsing) */
+        while (*p) {
+            char c = *p;
+            if (in_str) {
+                if (c == '\\' && p[1]) { p += 2; continue; }
+                if (c == q) in_str = 0;
+                p++;
+                continue;
+            }
+            if (c == '"' || c == '\'') { in_str = 1; q = c; p++; continue; }
+            if (!cc__is_ident_start_char(c)) { p++; continue; }
+
+            const char* s = p++;
+            while (cc__is_ident_char2(*p)) p++;
+            size_t n = (size_t)(p - s);
+            if (cc__is_keyword_tok(s, n)) continue;
+
+            /* cc_move(name) marks name as moved if it's a CCSlice local */
+            if (n == 7 && strncmp(s, "cc_move", 7) == 0) {
+                const char* t = p;
+                while (*t == ' ' || *t == '\t') t++;
+                if (*t == '(') {
+                    t++;
+                    while (*t == ' ' || *t == '\t') t++;
+                    const char* a = t;
+                    if (cc__is_ident_start_char(*a)) {
+                        a++;
+                        while (cc__is_ident_char2(*a)) a++;
+                        size_t an = (size_t)(a - t);
+                        unsigned char fl = 0;
+                        for (int d = depth; d >= 1 && fl == 0; d--) {
+                            for (int i = 0; i < scope_counts[d]; i++) {
+                                if (!scope_names[d][i]) continue;
+                                if (strlen(scope_names[d][i]) == an && strncmp(scope_names[d][i], t, an) == 0) {
+                                    fl = scope_flags[d] ? scope_flags[d][i] : 0;
+                                    break;
+                                }
+                            }
+                        }
+                        if ((fl & 1) != 0) {
+                            cc__moved_push(&moved, &moved_n, &moved_cap, t, an, depth);
+                        }
+                    }
+                }
+                continue;
+            }
+
+            /* If this identifier is being assigned to (simple `name =`), treat it as reinit (not a read). */
+            const char* t2 = p;
+            while (*t2 == ' ' || *t2 == '\t') t2++;
+            if (*t2 == '=' && t2[1] != '=') {
+                /* Reinitialization: allow assigning to a moved name. */
+                continue;
+            }
+
+            /* Any later use of a moved slice is an error (best-effort). */
+            if (cc__moved_contains(moved, moved_n, s, n)) {
+                /* ignore member access like moved.ptr or moved->ptr? still use-after-move, so keep error */
+                fprintf(stderr, "%s:%d: error: CC: use after move of slice '%.*s'\n",
+                        src_path ? src_path : "<src>", line_no, (int)n, s);
+                goto fail;
+            }
+        }
+
+        /* Best-effort copy check: `lhs = rhs` where rhs is a move-only slice and lhs is a slice, and rhs is not cc_move(rhs). */
+        {
+            const char* eq = strchr(tmp_line, '=');
+            if (eq && (eq[1] != '=')) {
+                /* lhs: last identifier before '=' */
+                const char* lhsp = tmp_line;
+                const char* lhs_s = NULL;
+                size_t lhs_n = 0;
+                while (lhsp < eq) {
+                    if (!cc__is_ident_start_char(*lhsp)) { lhsp++; continue; }
+                    const char* ss = lhsp++;
+                    while (cc__is_ident_char2(*lhsp)) lhsp++;
+                    size_t nn = (size_t)(lhsp - ss);
+                    if (cc__is_keyword_tok(ss, nn)) continue;
+                    lhs_s = ss; lhs_n = nn;
+                }
+                /* rhs: first identifier after '=' (unless it's `cc_move(`). */
+                const char* rhsp = eq + 1;
+                while (*rhsp == ' ' || *rhsp == '\t') rhsp++;
+                int rhs_is_move = 0;
+                if (strncmp(rhsp, "cc_move", 7) == 0) rhs_is_move = 1;
+                if (!rhs_is_move) {
+                    while (*rhsp && !cc__is_ident_start_char(*rhsp)) rhsp++;
+                    if (lhs_s && cc__is_ident_start_char(*rhsp)) {
+                        const char* rs = rhsp++;
+                        while (cc__is_ident_char2(*rhsp)) rhsp++;
+                        size_t rn = (size_t)(rhsp - rs);
+
+                        /* Look up lhs/rhs flags. */
+                        unsigned char lhs_fl = 0, rhs_fl = 0;
+                        for (int d = depth; d >= 1; d--) {
+                            for (int i = 0; i < scope_counts[d]; i++) {
+                                if (!scope_names[d][i]) continue;
+                                if (lhs_fl == 0 && strlen(scope_names[d][i]) == lhs_n && strncmp(scope_names[d][i], lhs_s, lhs_n) == 0)
+                                    lhs_fl = scope_flags[d] ? scope_flags[d][i] : 0;
+                                if (rhs_fl == 0 && strlen(scope_names[d][i]) == rn && strncmp(scope_names[d][i], rs, rn) == 0)
+                                    rhs_fl = scope_flags[d] ? scope_flags[d][i] : 0;
+                            }
+                        }
+                        if ((lhs_fl & 1) != 0 && (rhs_fl & 1) != 0 && (rhs_fl & 2) != 0) {
+                            fprintf(stderr, "%s:%d: error: CC: cannot copy move-only slice '%.*s' (use cc_move(%.*s))\n",
+                                    src_path ? src_path : "<src>", line_no, (int)rn, rs, (int)rn, rs);
+                            goto fail;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Update scope depth using braces in the original line (best-effort). */
+        for (size_t i = 0; i < cp; i++) {
+            if (tmp_line[i] == '{') depth++;
+            else if (tmp_line[i] == '}') {
+                /* leaving scope: drop decl tables for this depth */
+                if (depth > 0) {
+                    for (int j = 0; j < scope_counts[depth]; j++) free(scope_names[depth][j]);
+                    free(scope_names[depth]); scope_names[depth] = NULL;
+                    for (int j = 0; j < scope_counts[depth]; j++) free(scope_types[depth][j]);
+                    free(scope_types[depth]); scope_types[depth] = NULL;
+                    free(scope_flags[depth]); scope_flags[depth] = NULL;
+                    scope_counts[depth] = 0;
+                    depth--;
+                }
+                cc__moved_pop_depth(moved, &moved_n, depth);
+            }
+        }
+
+        if (!nl) break;
+        cur = nl + 1;
+        line_no++;
+    }
+
+    /* cleanup */
+    for (int d = 0; d < 256; d++) {
+        for (int i = 0; i < scope_counts[d]; i++) free(scope_names[d][i]);
+        free(scope_names[d]);
+        for (int i = 0; i < scope_counts[d]; i++) free(scope_types[d][i]);
+        free(scope_types[d]);
+        free(scope_flags[d]);
+    }
+    if (closure_descs) {
+        for (int i = 0; i < closure_count; i++) {
+            for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_names[j]);
+            free(closure_descs[i].cap_names);
+            for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_types ? closure_descs[i].cap_types[j] : NULL);
+            free(closure_descs[i].cap_types);
+            free(closure_descs[i].cap_flags);
+            free(closure_descs[i].body);
+        }
+        free(closure_descs);
+    }
+    for (int i = 0; i < moved_n; i++) free(moved[i].name);
+    free(moved);
+    return 0;
+
+fail:
+    for (int d = 0; d < 256; d++) {
+        for (int i = 0; i < scope_counts[d]; i++) free(scope_names[d][i]);
+        free(scope_names[d]);
+        for (int i = 0; i < scope_counts[d]; i++) free(scope_types[d][i]);
+        free(scope_types[d]);
+        free(scope_flags[d]);
+    }
+    if (closure_descs) {
+        for (int i = 0; i < closure_count; i++) {
+            for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_names[j]);
+            free(closure_descs[i].cap_names);
+            for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_types ? closure_descs[i].cap_types[j] : NULL);
+            free(closure_descs[i].cap_types);
+            free(closure_descs[i].cap_flags);
+            free(closure_descs[i].body);
+        }
+        free(closure_descs);
+    }
+    for (int i = 0; i < moved_n; i++) free(moved[i].name);
+    free(moved);
+    return -1;
 }
 
 static void cc__collect_caps_from_block(char*** scope_names,
@@ -246,8 +687,9 @@ static int cc__scan_spawn_closures(const char* src,
 
     char** scope_names[256];
     char** scope_types[256];
+    unsigned char* scope_flags[256];
     int scope_counts[256];
-    for (int i = 0; i < 256; i++) { scope_names[i] = NULL; scope_types[i] = NULL; scope_counts[i] = 0; }
+    for (int i = 0; i < 256; i++) { scope_names[i] = NULL; scope_types[i] = NULL; scope_flags[i] = NULL; scope_counts[i] = 0; }
     int depth = 0;
     int nursery_stack[128];
     int nursery_depth[128];
@@ -266,7 +708,7 @@ static int cc__scan_spawn_closures(const char* src,
         size_t cp = line_len < sizeof(tmp_line) - 1 ? line_len : sizeof(tmp_line) - 1;
         memcpy(tmp_line, line_start, cp);
         tmp_line[cp] = '\0';
-        cc__maybe_record_decl(scope_names, scope_types, scope_counts, depth, tmp_line);
+        cc__maybe_record_decl(scope_names, scope_types, scope_flags, scope_counts, depth, tmp_line);
 
         /* nursery marker */
         const char* t = line_start;
@@ -373,17 +815,22 @@ static int cc__scan_spawn_closures(const char* src,
                                 int cap_n = 0;
                                 cc__collect_caps_from_block(scope_names, scope_counts, depth, body, &caps, &cap_n);
                                 char** cap_types = NULL;
+                                unsigned char* cap_flags = NULL;
                                 if (cap_n > 0) {
                                     cap_types = (char**)calloc((size_t)cap_n, sizeof(char*));
-                                    if (!cap_types) { free(body); free(line_map); return 0; }
+                                    cap_flags = (unsigned char*)calloc((size_t)cap_n, sizeof(unsigned char));
+                                    if (!cap_types || !cap_flags) { free(cap_types); free(cap_flags); free(body); free(line_map); return 0; }
                                     for (int ci = 0; ci < cap_n; ci++) {
                                         const char* ty = NULL;
+                                        unsigned char fl = 0;
                                         for (int d = depth; d >= 1 && !ty; d--) {
                                             ty = cc__lookup_decl_type(scope_names[d], scope_types[d], scope_counts[d], caps[ci]);
+                                            if (ty) fl = cc__lookup_decl_flags(scope_names[d], scope_flags[d], scope_counts[d], caps[ci]);
                                         }
                                         if (ty) {
                                             cap_types[ci] = strdup(ty);
                                         }
+                                        cap_flags[ci] = fl;
                                     }
                                 }
 
@@ -405,6 +852,7 @@ static int cc__scan_spawn_closures(const char* src,
                     .end_col = end_col,
                     .cap_names = caps,
                                     .cap_types = cap_types,
+                                    .cap_flags = cap_flags,
                     .cap_count = cap_n,
                     .body = body,
                 };
@@ -421,7 +869,7 @@ static int cc__scan_spawn_closures(const char* src,
                     if (cap_n == 0) {
                         cc__append_str(&protos, &protos_len, &protos_cap, "void");
                     } else {
-                        for (int ci = 0; ci < cap_n; ci++) {
+                for (int ci = 0; ci < cap_n; ci++) {
                             if (ci) cc__append_str(&protos, &protos_len, &protos_cap, ", ");
                             cc__append_fmt(&protos, &protos_len, &protos_cap,
                                            "%s %s",
@@ -479,10 +927,13 @@ static int cc__scan_spawn_closures(const char* src,
                                        id, id, id);
                         cc__append_str(&defs, &defs_len, &defs_cap, "  if (!__env) abort();\n");
                         for (int ci = 0; ci < cap_n; ci++) {
+                            int mo = (cap_flags && (cap_flags[ci] & 2) != 0);
                             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                                           "  __env->%s = %s;\n",
+                                           "  __env->%s = %s%s%s;\n",
                                            caps[ci] ? caps[ci] : "__cap",
-                                           caps[ci] ? caps[ci] : "__cap");
+                                           mo ? "cc_move(" : "",
+                                           caps[ci] ? caps[ci] : "__cap",
+                                           mo ? ")" : "");
                         }
                         cc__append_fmt(&defs, &defs_len, &defs_cap,
                                        "  return cc_closure0_make(__cc_closure_entry_%d, __env, __cc_closure_env_%d_drop);\n",
@@ -502,11 +953,14 @@ static int cc__scan_spawn_closures(const char* src,
                                        "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n",
                                        id, id);
                         for (int ci = 0; ci < cap_n; ci++) {
+                            int mo = (cap_flags && (cap_flags[ci] & 2) != 0);
                             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                                           "  %s %s = __env->%s;\n",
+                                           "  %s %s = %s__env->%s%s;\n",
                                            cap_types && cap_types[ci] ? cap_types[ci] : "int",
                                            caps[ci] ? caps[ci] : "__cap",
-                                           caps[ci] ? caps[ci] : "__cap");
+                                           mo ? "cc_move(" : "",
+                                           caps[ci] ? caps[ci] : "__cap",
+                                           mo ? ")" : "");
                         }
                     } else {
                         cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__p;\n");
@@ -535,14 +989,22 @@ static int cc__scan_spawn_closures(const char* src,
             if (consumed_literal) continue;
         }
 
-        /* brace depth */
+        /* brace depth + scope cleanup (best-effort) */
         for (const char* x = line_start; x < line_end; x++) {
             if (*x == '{') {
                 depth++;
                 if (nursery_top >= 0 && nursery_depth[nursery_top] < 0) nursery_depth[nursery_top] = depth;
             } else if (*x == '}') {
                 if (nursery_top >= 0 && nursery_depth[nursery_top] == depth) nursery_top--;
-                if (depth > 0) depth--;
+                if (depth > 0) {
+                    for (int j = 0; j < scope_counts[depth]; j++) free(scope_names[depth][j]);
+                    free(scope_names[depth]); scope_names[depth] = NULL;
+                    for (int j = 0; j < scope_counts[depth]; j++) free(scope_types[depth][j]);
+                    free(scope_types[depth]); scope_types[depth] = NULL;
+                    free(scope_flags[depth]); scope_flags[depth] = NULL;
+                    scope_counts[depth] = 0;
+                    depth--;
+                }
             }
         }
 
@@ -557,6 +1019,7 @@ static int cc__scan_spawn_closures(const char* src,
         free(scope_names[d]);
         for (int i = 0; i < scope_counts[d]; i++) free(scope_types[d][i]);
         free(scope_types[d]);
+        free(scope_flags[d]);
     }
 
     *out_descs = descs;
@@ -652,7 +1115,10 @@ static char* cc__lower_cc_snippet(const char* text,
                             } else {
                                 for (int ci = 0; ci < cd->cap_count; ci++) {
                                     if (ci) cc__append_str(&out, &out_len, &out_cap, ", ");
+                                    int mo = (cd->cap_flags && (cd->cap_flags[ci] & 2) != 0);
+                                    if (mo) cc__append_str(&out, &out_len, &out_cap, "cc_move(");
                                     cc__append_str(&out, &out_len, &out_cap, cd->cap_names[ci] ? cd->cap_names[ci] : "0");
+                                    if (mo) cc__append_str(&out, &out_len, &out_cap, ")");
                                 }
                                 cc__append_str(&out, &out_len, &out_cap, ");\n");
                             }
@@ -762,6 +1228,7 @@ static char* cc__lower_cc_in_block_text(const char* text,
             free(nested_descs[i].cap_names);
             for (int j = 0; j < nested_descs[i].cap_count; j++) free(nested_descs[i].cap_types ? nested_descs[i].cap_types[j] : NULL);
             free(nested_descs[i].cap_types);
+            free(nested_descs[i].cap_flags);
             free(nested_descs[i].body);
         }
         free(nested_descs);
@@ -1333,11 +1800,16 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     }
 #endif
 
+    /* NOTE: slice move/provenance checking is now handled by the stub-AST checker pass
+       (`cc/src/visitor/checker.c`) before visitor lowering. */
+
     fprintf(out, "/* CC visitor: passthrough of lowered C (preprocess + TCC parse) */\n");
     fprintf(out, "#include <stdlib.h>\n");
     fprintf(out, "#include <stdint.h>\n");
     fprintf(out, "#include \"cc_nursery.cch\"\n");
     fprintf(out, "#include \"cc_closure.cch\"\n");
+    fprintf(out, "#include \"cc_slice.cch\"\n");
+    fprintf(out, "#include \"cc_runtime.cch\"\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
     fprintf(out, "\n");
     fprintf(out, "/* --- CC spawn lowering helpers (best-effort) --- */\n");
@@ -1659,7 +2131,10 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                             } else {
                                 for (int ci = 0; ci < cd->cap_count; ci++) {
                                     if (ci) fprintf(out, ", ");
+                                    int mo = (cd->cap_flags && (cd->cap_flags[ci] & 2) != 0);
+                                    if (mo) fprintf(out, "cc_move(");
                                     fprintf(out, "%s", cd->cap_names[ci] ? cd->cap_names[ci] : "0");
+                                    if (mo) fprintf(out, ")");
                                 }
                                 fprintf(out, ");\n");
                             }
@@ -1790,7 +2265,10 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                             fprintf(out, "__cc_closure_make_%d(", cd->id);
                             for (int ci = 0; ci < cd->cap_count; ci++) {
                                 if (ci) fputs(", ", out);
+                                int mo = (cd->cap_flags && (cd->cap_flags[ci] & 2) != 0);
+                                if (mo) fputs("cc_move(", out);
                                 fputs(cd->cap_names[ci] ? cd->cap_names[ci] : "0", out);
+                                if (mo) fputs(")", out);
                             }
                             fputs(")", out);
                         } else {
@@ -1938,8 +2416,9 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
             for (int i = 0; i < closure_count; i++) {
                 for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_names[j]);
                 free(closure_descs[i].cap_names);
-            for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_types ? closure_descs[i].cap_types[j] : NULL);
-            free(closure_descs[i].cap_types);
+                for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_types ? closure_descs[i].cap_types[j] : NULL);
+                free(closure_descs[i].cap_types);
+                free(closure_descs[i].cap_flags);
                 free(closure_descs[i].body);
             }
             free(closure_descs);

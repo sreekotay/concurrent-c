@@ -827,6 +827,25 @@ if (Request? r = active.get(id)) {
 
 **Future:** If complex (e.g., async I/O needing thread pool integration), provide optional libstd.a. Users can link or provide custom implementations.
 
+### Arena Checkpoints
+
+An **arena checkpoint** captures the current allocation state of an arena and allows later restoration (to bound memory growth in long-lived tasks).
+
+**Standard library interface:**
+
+```c
+typedef struct ArenaCheckpoint ArenaCheckpoint;
+
+ArenaCheckpoint arena_checkpoint(Arena*);
+void arena_restore(ArenaCheckpoint);
+```
+
+**Semantics:**
+
+- Restoring a checkpoint releases all allocations performed after the checkpoint.
+- Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
+- Arena checkpoints do not alter arena ownership or lifetime rules.
+
 ### Blocking Pool and Saturation Handling
 
 Certain stdlib operations may stall indefinitely: file I/O, sync locks, sleep, DNS, etc. These use a bounded thread pool to avoid blocking the async reactor thread.
@@ -1405,13 +1424,15 @@ struct ServerConfig {
     ```c
     @async void!IoError long_lived_handler(Duplex* conn, Arena* conn_arena) {
         size_t message_count = 0;
+        ArenaCheckpoint cp = arena_checkpoint(conn_arena);
         while (char[:]?!IoError msg = try await conn.read(conn_arena)) {
             if (!msg) break;
             process(msg);
             message_count++;
-            // Reset arena every N messages to prevent unlimited growth
+            // Restore arena every N messages to prevent unlimited growth
             if (message_count % 100 == 0) {
-                arena_reset(conn_arena);
+                arena_restore(cp);
+                cp = arena_checkpoint(conn_arena);
                 message_count = 0;
             }
         }
