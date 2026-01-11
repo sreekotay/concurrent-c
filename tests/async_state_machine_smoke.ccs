@@ -1,0 +1,18 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+@async int g(void) {
+    return 7;
+}
+
+@async int f(void) {
+    return await g();
+}
+
+int main(void) {
+    /* Calling @async from sync returns a task handle (non-blocking); choose to block here. */
+    CCTaskIntptr t = f();
+    intptr_t r = cc_block_on_intptr(t);
+    return (r == 7) ? 0 : 1;
+}
+

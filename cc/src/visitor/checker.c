@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
 // populate flags on expressions and enforce send_take eligibility.
@@ -805,31 +806,107 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     if (!root || !ctx) return -1;
     ctx->errors = 0;
 
-    /* Fallback: if stub-AST parse fails (node list empty), still detect and reject `await`
-       so we don't pass through invalid CC to the backend. */
+    /* Transitional: allow only the very small `return await foo();` shape for now.
+       Ignore `await` in comments/strings so tests can mention it in prose. */
+    if (ctx->input_path) {
+        FILE* f = fopen(ctx->input_path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (n > 0 && n < (1 << 20)) {
+                char* buf = (char*)malloc((size_t)n + 1);
+                if (buf) {
+                    size_t got = fread(buf, 1, (size_t)n, f);
+                    buf[got] = 0;
+
+                    int in_line_comment = 0;
+                    int in_block_comment = 0;
+                    int in_str = 0;
+                    int in_chr = 0;
+
+                    int saw_await = 0;
+                    int saw_async = 0;
+                    for (size_t i = 0; i + 5 <= got; i++) {
+                        char c = buf[i];
+                        char c2 = (i + 1 < got) ? buf[i + 1] : 0;
+                        if (in_line_comment) {
+                            if (c == '\n') in_line_comment = 0;
+                            continue;
+                        }
+                        if (in_block_comment) {
+                            if (c == '*' && c2 == '/') { in_block_comment = 0; i++; }
+                            continue;
+                        }
+                        if (in_str) {
+                            if (c == '\\' && i + 1 < got) { i++; continue; }
+                            if (c == '"') in_str = 0;
+                            continue;
+                        }
+                        if (in_chr) {
+                            if (c == '\\' && i + 1 < got) { i++; continue; }
+                            if (c == '\'') in_chr = 0;
+                            continue;
+                        }
+
+                        if (c == '/' && c2 == '/') { in_line_comment = 1; i++; continue; }
+                        if (c == '/' && c2 == '*') { in_block_comment = 1; i++; continue; }
+                        if (c == '"') { in_str = 1; continue; }
+                        if (c == '\'') { in_chr = 1; continue; }
+
+                        /* Track presence of @async and await (outside comments/strings). */
+                        if (c == '@' && i + 6 <= got && memcmp(buf + i + 1, "async", 5) == 0) {
+                            char after = (i + 6 < got) ? buf[i + 6] : ' ';
+                            if (!(isalnum((unsigned char)after) || after == '_')) saw_async = 1;
+                        }
+                        if (buf[i] == 'a' &&
+                            buf[i + 1] == 'w' &&
+                            buf[i + 2] == 'a' &&
+                            buf[i + 3] == 'i' &&
+                            buf[i + 4] == 't') {
+                            char before = (i > 0) ? buf[i - 1] : ' ';
+                            char after = (i + 5 < got) ? buf[i + 5] : ' ';
+                            int before_ok = !(isalnum((unsigned char)before) || before == '_');
+                            int after_ok = !(isalnum((unsigned char)after) || after == '_');
+                            if (before_ok && after_ok) saw_await = 1;
+                        }
+                    }
+                    if (saw_await && !saw_async) {
+                        StubNodeView sn;
+                        memset(&sn, 0, sizeof(sn));
+                        sn.file = ctx->input_path;
+                        sn.line_start = 1;
+                        sn.col_start = 1;
+                        cc__emit_err(ctx, &sn, "CC: await is only valid inside @async functions");
+                        ctx->errors++;
+                        free(buf);
+                        fclose(f);
+                        return -1;
+                    }
+                    free(buf);
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    /* Fallback: if stub-AST parse fails (node list empty), avoid passing through raw CC markers.
+       NOTE: `await` is now allowed in-progress, so we no longer hard-error here. */
     if (!root->nodes || root->node_count <= 0) {
         if (ctx->input_path) {
             FILE* f = fopen(ctx->input_path, "rb");
             if (f) {
-                int line = 1, col = 1;
                 int c;
                 while ((c = fgetc(f)) != EOF) {
-                    if (c == '\n') { line++; col = 1; continue; }
+                    if (c == '\n') { continue; }
                     if (c == 'a') {
                         int w = fgetc(f);
                         int a2 = fgetc(f);
                         int i2 = fgetc(f);
                         int t2 = fgetc(f);
                         if (w == 'w' && a2 == 'a' && i2 == 'i' && t2 == 't') {
-                            StubNodeView sn;
-                            memset(&sn, 0, sizeof(sn));
-                            sn.file = ctx->input_path;
-                            sn.line_start = line;
-                            sn.col_start = col;
-                            cc__emit_err(ctx, &sn, "CC: await is not implemented yet");
-                            ctx->errors++;
                             fclose(f);
-                            return -1;
+                            return 0;
                         }
                         /* push back in reverse order if not matched */
                         if (t2 != EOF) ungetc(t2, f);
@@ -837,7 +914,6 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         if (a2 != EOF) ungetc(a2, f);
                         if (w != EOF) ungetc(w, f);
                     }
-                    col++;
                 }
                 fclose(f);
             }
@@ -895,16 +971,8 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
         }
     }
 
-    /* Temporary: reject await until async lowering exists. */
-    for (int i = 0; i < n; i++) {
-        const StubNodeView* an = &nodes[i];
-        if (an->kind != CC_STUB_AWAIT) continue;
-        cc__emit_err(ctx, an, "CC: await is not implemented yet");
-        ctx->errors++;
-        free(idx_map);
-        free(owned_nodes);
-        return -1;
-    }
+    /* Temporary: allow `await` (async lowering is in-progress).
+       Unsupported await shapes may still fail later in visitor/codegen. */
 
     /* Auto-blocking diagnostics (env-gated): identify direct calls to non-@async, non-@noblock
        functions inside @async functions. This is the classification backbone for spec auto-wrapping. */

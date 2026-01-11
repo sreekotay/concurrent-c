@@ -1,0 +1,9 @@
+#include "cc_closure.cch"
+#include "std/task_intptr.cch"
+
+int main(void) {
+    CCTaskIntptr t = cc_run_blocking_task_intptr(() => { return (void*)(intptr_t)123; });
+    intptr_t r = cc_block_on(intptr_t, t);
+    return (r == 123) ? 0 : 1;
+}
+

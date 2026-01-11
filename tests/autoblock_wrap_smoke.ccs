@@ -1,5 +1,6 @@
 #include "cc_runtime.cch"
 #include "cc_closure.cch"
+#include "std/task_intptr.cch"
 
 static void blocking_set(int* p) {
     if (p) *p = 42;
@@ -12,7 +13,7 @@ static void blocking_set(int* p) {
 
 int main(void) {
     int x = 0;
-    f(&x);
+    (void)cc_block_on_intptr(f(&x));
     return (x == 42) ? 0 : 1;
 }
 

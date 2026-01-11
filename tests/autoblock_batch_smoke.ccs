@@ -1,6 +1,7 @@
 #include "cc_runtime.cch"
 #include "cc_closure.cch"
 #include <pthread.h>
+#include "std/task_intptr.cch"
 
 static pthread_t g_tid;
 static int g_ok = 1;
@@ -22,7 +23,7 @@ static void check_same_tid(void) {
 }
 
 int main(void) {
-    f();
+    (void)cc_block_on(intptr_t, f());
     return g_ok ? 0 : 1;
 }
 

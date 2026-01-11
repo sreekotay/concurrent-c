@@ -1,2 +1,2 @@
-CC: await is not implemented yet
+CC: await is only valid inside @async functions
 

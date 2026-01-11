@@ -9,6 +9,9 @@
 
 #include "visitor/ufcs.h"
 
+/* Text-based async lowering (implemented in `cc/src/visitor/async_text.c`). */
+int cc_async_rewrite_state_machine_text(const char* in_src, size_t in_len, char** out_src, size_t* out_len);
+
 /* --- Closure scan/lowering helpers (best-effort, early) ---
    Goal: allow `spawn(() => { ... })` to lower to valid C by generating a
    top-level env+thunk and rewriting the spawn statement to use CCClosure0. */
@@ -1540,6 +1543,239 @@ static int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
+#ifdef CC_TCC_EXT_AVAILABLE
+static int cc__rewrite_async_state_machine_noarg(const CCASTRoot* root,
+                                                 const CCVisitorCtx* ctx,
+                                                 const char* in_src,
+                                                 size_t in_len,
+                                                 char** out_src,
+                                                 size_t* out_len) {
+    if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
+    *out_src = NULL;
+    *out_len = 0;
+    if (!root->nodes || root->node_count <= 0) return 0;
+
+    typedef struct NodeView {
+        int kind;
+        int parent;
+        const char* file;
+        int line_start;
+        int line_end;
+        int col_start;
+        int col_end;
+        int aux1;
+        int aux2;
+        const char* aux_s1;
+        const char* aux_s2;
+    } NodeView;
+    const NodeView* n = (const NodeView*)root->nodes;
+
+    typedef struct {
+        size_t start;
+        size_t end;
+        int line_start;
+        int line_end;
+        const char* name;
+        int is_await;
+        char expr[256];
+        char callee[128];
+        int is_intptr;
+    } AsyncFn;
+    AsyncFn fns[64];
+    int fn_n = 0;
+
+    for (int i = 0; i < root->node_count && fn_n < (int)(sizeof(fns)/sizeof(fns[0])); i++) {
+        if (n[i].kind != 12) continue; /* DECL_ITEM */
+        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+        if (!n[i].aux_s1 || !n[i].aux_s2) continue;
+        if (((unsigned int)n[i].aux2 & (1u << 0)) == 0) continue; /* CC_FN_ATTR_ASYNC */
+
+        /* We only support `@async int|intptr_t name(void) { return ...; }` for now. */
+        if (!strchr(n[i].aux_s2, '(')) continue;
+        const char* lp = strchr(n[i].aux_s2, '(');
+        const char* rp = strrchr(n[i].aux_s2, ')');
+        if (!lp || !rp || rp < lp) continue;
+        /* Ensure params are empty or void. */
+        int ok_params = 0;
+        {
+            const char* p = lp + 1;
+            while (p < rp && (*p == ' ' || *p == '\t')) p++;
+            if (p == rp) ok_params = 1;
+            else if ((rp - p) == 4 && memcmp(p, "void", 4) == 0) ok_params = 1;
+        }
+        if (!ok_params) continue;
+
+        int is_intptr = (strstr(n[i].aux_s2, "intptr_t") != NULL);
+        if (!is_intptr && strstr(n[i].aux_s2, "int") == NULL) continue;
+
+        /* Compute function span by scanning for the first `{` and matching braces. */
+        int ls = n[i].line_start;
+        if (ls <= 0) continue;
+        size_t start = cc__offset_of_line_1based(in_src, in_len, ls);
+        if (start >= in_len) continue;
+        size_t p = start;
+        /* Find `{` */
+        while (p < in_len && in_src[p] != '{') p++;
+        if (p >= in_len) continue;
+        size_t body_lbrace = p;
+        /* Match braces */
+        int depth = 0;
+        size_t q = body_lbrace;
+        for (; q < in_len; q++) {
+            char ch = in_src[q];
+            if (ch == '"' || ch == '\'') {
+                char quote = ch;
+                q++;
+                while (q < in_len) {
+                    char c2 = in_src[q];
+                    if (c2 == '\\' && q + 1 < in_len) { q += 2; continue; }
+                    if (c2 == quote) break;
+                    q++;
+                }
+                continue;
+            }
+            if (ch == '{') depth++;
+            else if (ch == '}') {
+                depth--;
+                if (depth == 0) { q++; break; } /* include '}' */
+            }
+        }
+        if (depth != 0) continue;
+        size_t end = q;
+        if (end > in_len) end = in_len;
+        /* Extend to include trailing newline, if any. */
+        while (end < in_len && in_src[end] != '\n') end++;
+        if (end < in_len) end++;
+        if (end <= start) continue;
+
+        const char* body = in_src + body_lbrace + 1;
+        const char* body_end = in_src + (q - 1); /* points at matching '}' */
+        while (body < body_end && (*body == ' ' || *body == '\t' || *body == '\n' || *body == '\r')) body++;
+        /* Expect `return ...;` */
+        if ((body_end - body) < 6 || memcmp(body, "return", 6) != 0) continue;
+        body += 6;
+        while (body < body_end && (*body == ' ' || *body == '\t')) body++;
+        int is_await = 0;
+        if ((body_end - body) >= 5 && memcmp(body, "await", 5) == 0) {
+            is_await = 1;
+            body += 5;
+            while (body < body_end && (*body == ' ' || *body == '\t')) body++;
+        }
+        const char* semi = memchr(body, ';', (size_t)(body_end - body));
+        if (!semi) continue;
+        /* Ensure only whitespace after ';' up to '}' */
+        const char* tail = semi + 1;
+        while (tail < body_end && (*tail == ' ' || *tail == '\t' || *tail == '\n' || *tail == '\r')) tail++;
+        if (tail != body_end) continue;
+
+        AsyncFn fn;
+        memset(&fn, 0, sizeof(fn));
+        fn.start = start;
+        fn.end = end;
+        fn.line_start = ls;
+        fn.line_end = n[i].line_end ? n[i].line_end : n[i].line_start;
+        fn.name = n[i].aux_s1;
+        fn.is_await = is_await;
+        fn.is_intptr = is_intptr;
+        size_t expr_n = (size_t)(semi - body);
+        if (expr_n >= sizeof(fn.expr)) continue;
+        memcpy(fn.expr, body, expr_n);
+        fn.expr[expr_n] = 0;
+
+        if (is_await) {
+            /* Require expr is a no-arg call: ident() */
+            const char* lpc = strchr(fn.expr, '(');
+            const char* rpc = strrchr(fn.expr, ')');
+            if (!lpc || !rpc || rpc < lpc) continue;
+            /* require inside parens whitespace only */
+            const char* ap = lpc + 1;
+            while (ap < rpc && (*ap == ' ' || *ap == '\t' || *ap == '\n' || *ap == '\r')) ap++;
+            if (ap != rpc) continue;
+            size_t callee_n = (size_t)(lpc - fn.expr);
+            while (callee_n > 0 && (fn.expr[callee_n - 1] == ' ' || fn.expr[callee_n - 1] == '\t')) callee_n--;
+            if (callee_n == 0 || callee_n >= sizeof(fn.callee)) continue;
+            memcpy(fn.callee, fn.expr, callee_n);
+            fn.callee[callee_n] = 0;
+        }
+
+        fns[fn_n++] = fn;
+    }
+
+    if (fn_n == 0) return 0;
+
+    /* Apply replacements from end to start. Keep newline count identical by emitting one-line replacements
+       and padding with newlines to match the original slice newline count. */
+    char* cur = (char*)malloc(in_len + 1);
+    if (!cur) return 0;
+    memcpy(cur, in_src, in_len);
+    cur[in_len] = 0;
+    size_t cur_len = in_len;
+
+    static int g_async_id = 1;
+    for (int fi = fn_n - 1; fi >= 0; fi--) {
+        AsyncFn* fn = &fns[fi];
+        if (fn->start >= fn->end || fn->end > cur_len) continue;
+
+        /* Count original newlines */
+        int orig_nl = 0;
+        for (size_t k = fn->start; k < fn->end; k++) if (cur[k] == '\n') orig_nl++;
+
+        int id = g_async_id++;
+        char repl[4096];
+        int rn = 0;
+        if (!fn->is_await) {
+            rn = snprintf(repl, sizeof(repl),
+                          "typedef struct{int __st; intptr_t __r;}__cc_af%d_f;"
+                          "static CCFutureStatus __cc_af%d_poll(void*__p,intptr_t*__o,int*__e){(void)__e;__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(!__f)return CC_FUTURE_ERR;switch(__f->__st){case 0:__f->__r=(intptr_t)(%s);__f->__st=1;/*fall*/case 1:if(__o)*__o=__f->__r;return CC_FUTURE_READY;}return CC_FUTURE_ERR;}"
+                          "static void __cc_af%d_drop(void*__p){free(__p);}"
+                          "CCTaskIntptr %s(void){__cc_af%d_f*__f=(__cc_af%d_f*)calloc(1,sizeof(__cc_af%d_f));if(!__f){CCTaskIntptr __t;memset(&__t,0,sizeof(__t));return __t;}__f->__st=0;return cc_task_intptr_make_poll(__cc_af%d_poll,__f,__cc_af%d_drop);}",
+                          id, id, id, id, fn->expr, id, fn->name, id, id, id, id, id);
+        } else {
+            rn = snprintf(repl, sizeof(repl),
+                          "typedef struct{int __st; CCTaskIntptr __t; intptr_t __r;}__cc_af%d_f;"
+                          "static CCFutureStatus __cc_af%d_poll(void*__p,intptr_t*__o,int*__e){__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(!__f)return CC_FUTURE_ERR;switch(__f->__st){case 0:__f->__t=%s();__f->__st=1;/*fall*/case 1:{intptr_t __v=0;int __err=0;CCFutureStatus __st=cc_task_intptr_poll(&__f->__t,&__v,&__err);if(__st==CC_FUTURE_PENDING){return CC_FUTURE_PENDING;}cc_task_intptr_free(&__f->__t);(void)__e; if(__o)*__o=__v; __f->__r=__v; __f->__st=2;return CC_FUTURE_READY;}case 2:if(__o)*__o=__f->__r;return CC_FUTURE_READY;}return CC_FUTURE_ERR;}"
+                          "static void __cc_af%d_drop(void*__p){__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(__f){cc_task_intptr_free(&__f->__t);free(__f);}}"
+                          "CCTaskIntptr %s(void){__cc_af%d_f*__f=(__cc_af%d_f*)calloc(1,sizeof(__cc_af%d_f));if(!__f){CCTaskIntptr __t;memset(&__t,0,sizeof(__t));return __t;}__f->__st=0;memset(&__f->__t,0,sizeof(__f->__t));return cc_task_intptr_make_poll(__cc_af%d_poll,__f,__cc_af%d_drop);}",
+                          id, id, id, id, fn->callee, id, id, id, fn->name, id, id, id, id, id);
+        }
+        if (rn <= 0 || (size_t)rn >= sizeof(repl)) continue;
+
+        /* Count repl newlines */
+        int repl_nl = 0;
+        for (int k = 0; k < rn; k++) if (repl[k] == '\n') repl_nl++;
+        if (repl_nl > orig_nl) {
+            /* We promised not to increase lines; skip. */
+            continue;
+        }
+
+        /* Pad with newlines to keep line mapping stable */
+        char* padded = NULL;
+        size_t padded_len = (size_t)rn + (size_t)(orig_nl - repl_nl);
+        padded = (char*)malloc(padded_len + 1);
+        if (!padded) continue;
+        memcpy(padded, repl, (size_t)rn);
+        for (int k = 0; k < (orig_nl - repl_nl); k++) padded[rn + k] = '\n';
+        padded[padded_len] = 0;
+
+        size_t new_len = cur_len - (fn->end - fn->start) + padded_len;
+        char* next = (char*)malloc(new_len + 1);
+        if (!next) { free(padded); continue; }
+        memcpy(next, cur, fn->start);
+        memcpy(next + fn->start, padded, padded_len);
+        memcpy(next + fn->start + padded_len, cur + fn->end, cur_len - fn->end);
+        next[new_len] = 0;
+        free(padded);
+        free(cur);
+        cur = next;
+        cur_len = new_len;
+    }
+
+    *out_src = cur;
+    *out_len = cur_len;
+    return 1;
+}
+#endif
+
 enum {
     CC_FN_ATTR_ASYNC = 1u << 0,
     CC_FN_ATTR_NOBLOCK = 1u << 1,
@@ -1576,6 +1812,8 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_RETURN_CALL = 1,
         CC_AB_REWRITE_ASSIGN_CALL = 2,
         CC_AB_REWRITE_BATCH_STMT_CALLS = 3,
+        CC_AB_REWRITE_BATCH_STMTS_THEN_RETURN = 4,
+        CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN = 5,
     } CCAutoBlockRewriteKind;
 
     typedef struct {
@@ -1605,6 +1843,15 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         size_t indent_len;
         CCAutoBlockBatchItem* batch;
         int batch_n;
+        /* Optional trailing value-producing call to fold into the same dispatch. */
+        int tail_kind; /* 0 none, 1 return, 2 assign */
+        size_t tail_call_start;
+        size_t tail_call_end;
+        const char* tail_callee;
+        const char* tail_lhs_name;
+        int tail_argc;
+        int tail_ret_is_ptr;
+        char* tail_param_types[16]; /* owned */
     } Replace;
     Replace* reps = NULL;
     int rep_n = 0;
@@ -1632,9 +1879,9 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
         if (!owner || ((owner_attrs & CC_FN_ATTR_ASYNC) == 0)) continue;
 
-        /* Only wrap calls where we know the callee and it is non-@async and non-@noblock. */
+        /* Only skip known-nonblocking callees; if we don't know attrs, assume blocking. */
         unsigned int callee_attrs = 0;
-        if (cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs) != 0) continue;
+        (void)cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs);
         if (callee_attrs & CC_FN_ATTR_ASYNC) continue;
         if (callee_attrs & CC_FN_ATTR_NOBLOCK) continue;
 
@@ -1773,8 +2020,9 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
         if (ret_idx >= 0 && n[ret_idx].line_start == n[i].line_start) {
             /* return <call>; */
-            size_t rs = cc__offset_of_line_col_1based(in_src, in_len, n[ret_idx].line_start, n[ret_idx].col_start > 0 ? n[ret_idx].col_start : 1);
-            if (rs < in_len && memcmp(in_src + rs, "return", 6) == 0) {
+            size_t rs = lb;
+            while (rs < in_len && (in_src[rs] == ' ' || in_src[rs] == '\t')) rs++;
+            if (rs + 6 <= in_len && memcmp(in_src + rs, "return", 6) == 0) {
                 size_t after = rs + 6;
                 while (after < in_len && (in_src[after] == ' ' || in_src[after] == '\t')) after++;
                 /* require call is the expression root */
@@ -1870,8 +2118,17 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             .indent_len = indent_len,
             .batch = NULL,
             .batch_n = 0,
+            .tail_kind = 0,
+            .tail_call_start = 0,
+            .tail_call_end = 0,
+            .tail_callee = NULL,
+            .tail_lhs_name = NULL,
+            .tail_argc = 0,
+            .tail_ret_is_ptr = 0,
         };
         for (int pi = 0; pi < paramc; pi++) reps[rep_n].param_types[pi] = param_types[pi];
+        for (int pi = paramc; pi < 16; pi++) reps[rep_n].param_types[pi] = NULL;
+        for (int pi = 0; pi < 16; pi++) reps[rep_n].tail_param_types[pi] = NULL;
         rep_n++;
     }
 
@@ -1934,17 +2191,28 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     j++;
                 }
                 int group_n = j - i;
-                if (group_n <= 1) {
+                int tail_idx = -1;
+                if (j < rep_n &&
+                    (reps[j].kind == CC_AB_REWRITE_RETURN_CALL || reps[j].kind == CC_AB_REWRITE_ASSIGN_CALL) &&
+                    cc__ab_only_ws_comments(in_src, reps[j - 1].end, reps[j].start)) {
+                    tail_idx = j;
+                    j++;
+                }
+                if (group_n <= 1 && tail_idx < 0) {
                     out[on++] = reps[i++];
                     continue;
                 }
 
                 Replace r = reps[i];
-                r.kind = CC_AB_REWRITE_BATCH_STMT_CALLS;
+                r.kind = (tail_idx >= 0 && reps[tail_idx].kind == CC_AB_REWRITE_RETURN_CALL)
+                             ? CC_AB_REWRITE_BATCH_STMTS_THEN_RETURN
+                             : (tail_idx >= 0 && reps[tail_idx].kind == CC_AB_REWRITE_ASSIGN_CALL)
+                                   ? CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN
+                                   : CC_AB_REWRITE_BATCH_STMT_CALLS;
                 r.start = reps[i].start;
-                r.end = reps[j - 1].end;
+                r.end = reps[(tail_idx >= 0) ? tail_idx : (j - 1)].end;
                 r.call_start = reps[i].call_start;
-                r.call_end = reps[j - 1].call_end;
+                r.call_end = reps[(tail_idx >= 0) ? tail_idx : (j - 1)].call_end;
                 /* Batch carries per-item metadata; do not keep per-rep param_types to avoid double-free. */
                 r.argc = 0;
                 for (int pi = 0; pi < 16; pi++) r.param_types[pi] = NULL;
@@ -1965,6 +2233,21 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     for (int pi = 0; pi < src->argc; pi++) {
                         it->param_types[pi] = src->param_types[pi];
                         src->param_types[pi] = NULL; /* transfer ownership */
+                    }
+                }
+
+                if (tail_idx >= 0) {
+                    Replace* tail = &reps[tail_idx];
+                    r.tail_kind = (tail->kind == CC_AB_REWRITE_RETURN_CALL) ? 1 : 2;
+                    r.tail_call_start = tail->call_start;
+                    r.tail_call_end = tail->call_end;
+                    r.tail_callee = tail->callee;
+                    r.tail_lhs_name = tail->lhs_name;
+                    r.tail_argc = tail->argc;
+                    r.tail_ret_is_ptr = tail->ret_is_ptr;
+                    for (int pi = 0; pi < tail->argc; pi++) {
+                        r.tail_param_types[pi] = tail->param_types[pi];
+                        tail->param_types[pi] = NULL; /* transfer ownership */
                     }
                 }
                 out[on++] = r;
@@ -2008,7 +2291,10 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         stmt_txt[stmt_len] = 0;
 
         /* Batched statement calls: collapse adjacent sync calls into one blocking dispatch. */
-        if (reps[ri].kind == CC_AB_REWRITE_BATCH_STMT_CALLS && reps[ri].batch && reps[ri].batch_n > 0) {
+        if ((reps[ri].kind == CC_AB_REWRITE_BATCH_STMT_CALLS ||
+             reps[ri].kind == CC_AB_REWRITE_BATCH_STMTS_THEN_RETURN ||
+             reps[ri].kind == CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN) &&
+            reps[ri].batch && reps[ri].batch_n > 0) {
             char* ind = NULL;
             if (reps[ri].indent_len > 0 && reps[ri].indent_start + reps[ri].indent_len <= cur_len) {
                 ind = (char*)malloc(reps[ri].indent_len + 1);
@@ -2022,7 +2308,7 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             char* repl = NULL;
             size_t repl_len = 0;
             size_t repl_cap = 0;
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s{\n", I);
+            /* No extra block wrapper: we use per-line unique temp names to avoid collisions. */
 
             /* Bind all args in order (in the async context), then do one run_blocking dispatch. */
             for (int bi = 0; bi < reps[ri].batch_n; bi++) {
@@ -2079,29 +2365,121 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                 }
 
                 for (int ai = 0; ai < argc; ai++) {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  intptr_t __cc_ab_b%d_a%d = (intptr_t)(%.*s);\n",
-                                   I, bi, ai,
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCAbIntptr __cc_ab_l%d_b%d_a%d = (CCAbIntptr)(%.*s);\n",
+                                   I, reps[ri].line_start, bi, ai,
                                    (int)(arg_ends[ai] - arg_starts[ai]), call_txt + arg_starts[ai]);
                 }
 
                 free(call_txt);
             }
 
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  cc_run_blocking_closure0(() => {\n", I);
+            /* If we have a trailing return/assign, bind its args too. */
+            if (reps[ri].tail_kind != 0 && reps[ri].tail_call_end > reps[ri].tail_call_start) {
+                size_t call_s = reps[ri].tail_call_start - s;
+                size_t call_e = reps[ri].tail_call_end - s;
+                if (call_e <= stmt_len && call_s < call_e) {
+                    size_t call_len = call_e - call_s;
+                    char* call_txt = (char*)malloc(call_len + 1);
+                    if (call_txt) {
+                        memcpy(call_txt, stmt_txt + call_s, call_len);
+                        call_txt[call_len] = 0;
+                        const char* lpar = strchr(call_txt, '(');
+                        const char* rpar = strrchr(call_txt, ')');
+                        if (lpar && rpar && rpar > lpar) {
+                            size_t args_s = (size_t)(lpar - call_txt) + 1;
+                            size_t args_e = (size_t)(rpar - call_txt);
+                            size_t arg_starts[16];
+                            size_t arg_ends[16];
+                            int argc = 0;
+                            int par = 0, brk = 0, br = 0;
+                            int ins = 0; char q = 0;
+                            size_t cur_a = args_s;
+                            for (size_t k = args_s; k < args_e; k++) {
+                                char ch = call_txt[k];
+                                if (ins) {
+                                    if (ch == '\\' && k + 1 < args_e) { k++; continue; }
+                                    if (ch == q) ins = 0;
+                                    continue;
+                                }
+                                if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+                                if (ch == '(') par++;
+                                else if (ch == ')') { if (par) par--; }
+                                else if (ch == '[') brk++;
+                                else if (ch == ']') { if (brk) brk--; }
+                                else if (ch == '{') br++;
+                                else if (ch == '}') { if (br) br--; }
+                                else if (ch == ',' && par == 0 && brk == 0 && br == 0) {
+                                    if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
+                                        arg_starts[argc] = cur_a;
+                                        arg_ends[argc] = k;
+                                        argc++;
+                                    }
+                                    cur_a = k + 1;
+                                }
+                            }
+                            if (args_s == args_e) argc = 0;
+                            else if (argc < (int)(sizeof(arg_starts)/sizeof(arg_starts[0]))) {
+                                arg_starts[argc] = cur_a;
+                                arg_ends[argc] = args_e;
+                                argc++;
+                            }
+                            for (int ai = 0; ai < argc; ai++) {
+                                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCAbIntptr __cc_ab_l%d_t_a%d = (CCAbIntptr)(%.*s);\n",
+                                               I, reps[ri].line_start, ai,
+                                               (int)(arg_ends[ai] - arg_starts[ai]), call_txt + arg_starts[ai]);
+                            }
+                        }
+                        free(call_txt);
+                    }
+                }
+            }
+
+            /* Task-based auto-blocking: create a CCClosure0 value first, then await the task.
+               This avoids embedding multiline `() => { ... }` directly inside `await <expr>` which
+               interacts badly with later closure-elision + #line resync. */
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => {\n", I, reps[ri].line_start);
             for (int bi = 0; bi < reps[ri].batch_n; bi++) {
                 const CCAutoBlockBatchItem* it = &reps[ri].batch[bi];
                 cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    %s(", I, it->callee ? it->callee : "");
                 for (int ai = 0; ai < it->argc; ai++) {
                     if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
                     if (it->param_types[ai]) {
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_b%d_a%d", it->param_types[ai], bi, ai);
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_b%d_a%d", it->param_types[ai], reps[ri].line_start, bi, ai);
                     } else {
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_b%d_a%d", bi, ai);
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_b%d_a%d", reps[ri].line_start, bi, ai);
                     }
                 }
                 cc__append_str(&repl, &repl_len, &repl_cap, ");\n");
             }
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    return NULL;\n%s  });\n%s}", I, I, I);
+            if (reps[ri].tail_kind != 0) {
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    return ", I);
+                if (!reps[ri].tail_ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+                else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+                cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].tail_callee ? reps[ri].tail_callee : "");
+                cc__append_str(&repl, &repl_len, &repl_cap, "(");
+                for (int ai = 0; ai < reps[ri].tail_argc; ai++) {
+                    if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                    if (reps[ri].tail_param_types[ai]) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_t_a%d", reps[ri].tail_param_types[ai], reps[ri].line_start, ai);
+                    } else {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_t_a%d", reps[ri].line_start, ai);
+                    }
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ");\n");
+            } else {
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    return NULL;\n", I);
+            }
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  };\n", I);
+            if (reps[ri].tail_kind == 0) {
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
+            } else if (reps[ri].tail_kind == 1) {
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  return await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
+            } else {
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                               I,
+                               reps[ri].tail_lhs_name ? reps[ri].tail_lhs_name : "__cc_ab_lhs",
+                               reps[ri].line_start);
+            }
 
             free(stmt_txt);
             free(ind);
@@ -2199,59 +2577,63 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
         const char* I = ind ? ind : "";
 
-        cc__append_fmt(&repl, &repl_len, &repl_cap, "%s{\n", I);
         for (int ai = 0; ai < argc; ai++) {
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  intptr_t __cc_ab_arg%d = (intptr_t)(%.*s);\n",
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCAbIntptr __cc_ab_l%d_arg%d = (CCAbIntptr)(%.*s);\n",
                            I,
+                           reps[ri].line_start,
                            ai,
                            (int)(arg_ends[ai] - arg_starts[ai]), call_txt + arg_starts[ai]);
         }
         if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  cc_run_blocking_closure0(() => { ", I);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { ", I, reps[ri].line_start);
             cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
             cc__append_str(&repl, &repl_len, &repl_cap, "(");
             for (int ai = 0; ai < argc; ai++) {
                 if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
                 if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_arg%d", reps[ri].param_types[ai], ai);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
                 } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_arg%d", ai);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
                 }
             }
-            cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; });\n");
+            cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
         } else {
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  void* __cc_ab_r = cc_run_blocking_closure0_ptr(() => { return ", I);
-            if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
-            else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
-            cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
-            cc__append_str(&repl, &repl_len, &repl_cap, "(");
-            for (int ai = 0; ai < argc; ai++) {
-                if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_arg%d", reps[ri].param_types[ai], ai);
-                } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_arg%d", ai);
-                }
-            }
-            cc__append_str(&repl, &repl_len, &repl_cap, "); });\n");
             if (reps[ri].kind == CC_AB_REWRITE_RETURN_CALL) {
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  return (__typeof__(%s(",
-                               I, reps[ri].callee);
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
+                if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+                else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+                cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+                cc__append_str(&repl, &repl_len, &repl_cap, "(");
                 for (int ai = 0; ai < argc; ai++) {
                     if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                    cc__append_str(&repl, &repl_len, &repl_cap, "0");
+                    if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
+                    } else {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    }
                 }
-                cc__append_str(&repl, &repl_len, &repl_cap, ")))");
-                if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(intptr_t)__cc_ab_r;\n");
-                else cc__append_str(&repl, &repl_len, &repl_cap, "__cc_ab_r;\n");
+                cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  return await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
             } else if (reps[ri].kind == CC_AB_REWRITE_ASSIGN_CALL && reps[ri].lhs_name) {
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = (__typeof__(%s))",
-                               I, reps[ri].lhs_name, reps[ri].lhs_name);
-                if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(intptr_t)__cc_ab_r;\n");
-                else cc__append_str(&repl, &repl_len, &repl_cap, "__cc_ab_r;\n");
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
+                if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+                else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+                cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+                cc__append_str(&repl, &repl_len, &repl_cap, "(");
+                for (int ai = 0; ai < argc; ai++) {
+                    if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                    if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
+                    } else {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    }
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                               I, reps[ri].lhs_name, reps[ri].line_start);
             }
         }
-        cc__append_fmt(&repl, &repl_len, &repl_cap, "%s}", I);
 
         free(call_txt);
         free(stmt_txt);
@@ -2274,13 +2656,20 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
     for (int i = 0; i < rep_n; i++) {
         for (int j = 0; j < reps[i].argc; j++) free(reps[i].param_types[j]);
-        if (reps[i].kind == CC_AB_REWRITE_BATCH_STMT_CALLS && reps[i].batch) {
+        if ((reps[i].kind == CC_AB_REWRITE_BATCH_STMT_CALLS ||
+             reps[i].kind == CC_AB_REWRITE_BATCH_STMTS_THEN_RETURN ||
+             reps[i].kind == CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN) &&
+            reps[i].batch) {
             for (int bi = 0; bi < reps[i].batch_n; bi++) {
                 for (int pj = 0; pj < reps[i].batch[bi].argc; pj++) {
                     free(reps[i].batch[bi].param_types[pj]);
                 }
             }
             free(reps[i].batch);
+            reps[i].batch = NULL;
+        }
+        if (reps[i].tail_kind != 0) {
+            for (int pj = 0; pj < reps[i].tail_argc; pj++) free(reps[i].tail_param_types[pj]);
         }
     }
     free(reps);
@@ -3094,6 +3483,229 @@ static int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, 
     return 1;
 }
 
+static char* cc__rewrite_idents_to_repls(const char* s,
+                                        const char* const* names,
+                                        const char* const* repls,
+                                        int n) {
+    if (!s) return NULL;
+    if (n <= 0) return strdup(s);
+    size_t sl = strlen(s);
+    size_t out_cap = sl * 3 + 64;
+    char* out = (char*)malloc(out_cap);
+    if (!out) return NULL;
+    size_t out_len = 0;
+
+    for (size_t i = 0; i < sl; ) {
+        if (cc__is_ident_start_char(s[i])) {
+            size_t j = i + 1;
+            while (j < sl && cc__is_ident_char2(s[j])) j++;
+            int did = 0;
+            for (int k = 0; k < n; k++) {
+                size_t nl = strlen(names[k]);
+                if (nl == (j - i) && memcmp(s + i, names[k], nl) == 0) {
+                    const char* r = repls[k];
+                    size_t rl = strlen(r);
+                    if (out_len + rl + 1 >= out_cap) {
+                        out_cap = out_cap * 2 + rl + 64;
+                        out = (char*)realloc(out, out_cap);
+                        if (!out) return NULL;
+                    }
+                    memcpy(out + out_len, r, rl);
+                    out_len += rl;
+                    did = 1;
+                    break;
+                }
+            }
+            if (!did) {
+                size_t tl = j - i;
+                if (out_len + tl + 1 >= out_cap) {
+                    out_cap = out_cap * 2 + tl + 64;
+                    out = (char*)realloc(out, out_cap);
+                    if (!out) return NULL;
+                }
+                memcpy(out + out_len, s + i, tl);
+                out_len += tl;
+            }
+            i = j;
+            continue;
+        }
+        if (out_len + 2 >= out_cap) {
+            out_cap = out_cap * 2 + 64;
+            out = (char*)realloc(out, out_cap);
+            if (!out) return NULL;
+        }
+        out[out_len++] = s[i++];
+    }
+    out[out_len] = 0;
+    return out;
+}
+
+static int cc__rewrite_async_state_machine_noarg_text(const char* in_src,
+                                                      size_t in_len,
+                                                      char** out_src,
+                                                      size_t* out_len) {
+    if (!in_src || !out_src || !out_len) return 0;
+    *out_src = NULL;
+    *out_len = 0;
+
+    typedef struct {
+        size_t start;
+        size_t end;
+        int orig_nl;
+        int is_await;
+        char name[128];
+        char expr[256];
+        char callee[128];
+    } AsyncFn;
+    AsyncFn fns[64];
+    int fn_n = 0;
+
+    size_t i = 0;
+    while (i + 6 < in_len && fn_n < (int)(sizeof(fns)/sizeof(fns[0]))) {
+        if (in_src[i] != '@') { i++; continue; }
+        size_t j = i + 1;
+        while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t')) j++;
+        if (j + 5 > in_len || memcmp(in_src + j, "async", 5) != 0) { i++; continue; }
+        size_t p = j + 5;
+        if (p < in_len && (isalnum((unsigned char)in_src[p]) || in_src[p] == '_')) { i++; continue; }
+        while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t' || in_src[p] == '\n' || in_src[p] == '\r')) p++;
+        if (p + 3 > in_len || memcmp(in_src + p, "int", 3) != 0) { i++; continue; } /* int or intptr_t; keep simple */
+        if (p + 8 <= in_len && memcmp(in_src + p, "intptr_t", 8) == 0) p += 8;
+        else p += 3;
+        while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t')) p++;
+        if (p >= in_len || !cc__is_ident_start_char(in_src[p])) { i++; continue; }
+        size_t ns = p++;
+        while (p < in_len && cc__is_ident_char2(in_src[p])) p++;
+        size_t nn = p - ns;
+        if (nn == 0 || nn >= 128) { i++; continue; }
+        while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t')) p++;
+        if (p >= in_len || in_src[p] != '(') { i++; continue; }
+        p++;
+        while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t')) p++;
+        if (p + 4 <= in_len && memcmp(in_src + p, "void", 4) == 0) p += 4;
+        while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t')) p++;
+        if (p >= in_len || in_src[p] != ')') { i++; continue; }
+        p++;
+        while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t' || in_src[p] == '\n' || in_src[p] == '\r')) p++;
+        if (p >= in_len || in_src[p] != '{') { i++; continue; }
+        size_t body_lbrace = p;
+        int depth = 0;
+        size_t q = body_lbrace;
+        for (; q < in_len; q++) {
+            char ch = in_src[q];
+            if (ch == '"' || ch == '\'') {
+                char quote = ch;
+                q++;
+                while (q < in_len) {
+                    char c2 = in_src[q];
+                    if (c2 == '\\' && q + 1 < in_len) { q += 2; continue; }
+                    if (c2 == quote) break;
+                    q++;
+                }
+                continue;
+            }
+            if (ch == '{') depth++;
+            else if (ch == '}') { depth--; if (depth == 0) { q++; break; } }
+        }
+        if (depth != 0) { i++; continue; }
+        size_t end = q;
+        while (end < in_len && in_src[end] != '\n') end++;
+        if (end < in_len) end++;
+
+        const char* body = in_src + body_lbrace + 1;
+        const char* body_end = in_src + (q - 1);
+        while (body < body_end && (*body == ' ' || *body == '\t' || *body == '\n' || *body == '\r')) body++;
+        if ((body_end - body) < 6 || memcmp(body, "return", 6) != 0) { i++; continue; }
+        body += 6;
+        while (body < body_end && (*body == ' ' || *body == '\t')) body++;
+        int is_await = 0;
+        if ((body_end - body) >= 5 && memcmp(body, "await", 5) == 0) { is_await = 1; body += 5; while (body < body_end && (*body == ' ' || *body == '\t')) body++; }
+        const char* semi = memchr(body, ';', (size_t)(body_end - body));
+        if (!semi) { i++; continue; }
+        const char* tail = semi + 1;
+        while (tail < body_end && (*tail == ' ' || *tail == '\t' || *tail == '\n' || *tail == '\r')) tail++;
+        if (tail != body_end) { i++; continue; }
+
+        AsyncFn fn;
+        memset(&fn, 0, sizeof(fn));
+        fn.start = i;
+        fn.end = end;
+        fn.is_await = is_await;
+        memcpy(fn.name, in_src + ns, nn);
+        fn.name[nn] = 0;
+        size_t expr_n = (size_t)(semi - body);
+        if (expr_n >= sizeof(fn.expr)) { i++; continue; }
+        memcpy(fn.expr, body, expr_n);
+        fn.expr[expr_n] = 0;
+        if (is_await) {
+            const char* lpc = strchr(fn.expr, '(');
+            const char* rpc = strrchr(fn.expr, ')');
+            if (!lpc || !rpc || rpc < lpc) { i++; continue; }
+            const char* ap = lpc + 1;
+            while (ap < rpc && (*ap == ' ' || *ap == '\t' || *ap == '\n' || *ap == '\r')) ap++;
+            if (ap != rpc) { i++; continue; }
+            size_t cn = (size_t)(lpc - fn.expr);
+            while (cn > 0 && (fn.expr[cn - 1] == ' ' || fn.expr[cn - 1] == '\t')) cn--;
+            if (cn == 0 || cn >= sizeof(fn.callee)) { i++; continue; }
+            memcpy(fn.callee, fn.expr, cn);
+            fn.callee[cn] = 0;
+        }
+        fn.orig_nl = 0;
+        for (size_t t = fn.start; t < fn.end; t++) if (in_src[t] == '\n') fn.orig_nl++;
+        fns[fn_n++] = fn;
+        i = end;
+    }
+
+    if (fn_n == 0) return 0;
+    char* cur = (char*)malloc(in_len + 1);
+    if (!cur) return 0;
+    memcpy(cur, in_src, in_len);
+    cur[in_len] = 0;
+    size_t cur_len = in_len;
+
+    static int g_async_id_text = 20000;
+    for (int fi = fn_n - 1; fi >= 0; fi--) {
+        AsyncFn* fn = &fns[fi];
+        int id = g_async_id_text++;
+        char repl[4096];
+        int rn = 0;
+        if (!fn->is_await) {
+            rn = snprintf(repl, sizeof(repl),
+                          "typedef struct{int __st; intptr_t __r;}__cc_af%d_f;static CCFutureStatus __cc_af%d_poll(void*__p,intptr_t*__o,int*__e){(void)__e;__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(!__f)return CC_FUTURE_ERR;switch(__f->__st){case 0:__f->__r=(intptr_t)(%s);__f->__st=1;/*fall*/case 1:if(__o)*__o=__f->__r;return CC_FUTURE_READY;}return CC_FUTURE_ERR;}static void __cc_af%d_drop(void*__p){free(__p);}CCTaskIntptr %s(void){__cc_af%d_f*__f=(__cc_af%d_f*)calloc(1,sizeof(__cc_af%d_f));if(!__f){CCTaskIntptr __t;memset(&__t,0,sizeof(__t));return __t;}__f->__st=0;return cc_task_intptr_make_poll(__cc_af%d_poll,__f,__cc_af%d_drop);}",
+                          id, id, id, id, fn->expr, id, fn->name, id, id, id, id, id);
+        } else {
+            rn = snprintf(repl, sizeof(repl),
+                          "typedef struct{int __st; CCTaskIntptr __t; intptr_t __r;}__cc_af%d_f;static CCFutureStatus __cc_af%d_poll(void*__p,intptr_t*__o,int*__e){__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(!__f)return CC_FUTURE_ERR;switch(__f->__st){case 0:__f->__t=%s();__f->__st=1;/*fall*/case 1:{intptr_t __v=0;int __err=0;CCFutureStatus __st=cc_task_intptr_poll(&__f->__t,&__v,&__err);if(__st==CC_FUTURE_PENDING){return CC_FUTURE_PENDING;}cc_task_intptr_free(&__f->__t);(void)__e; if(__o)*__o=__v; __f->__r=__v; __f->__st=2;return CC_FUTURE_READY;}case 2:if(__o)*__o=__f->__r;return CC_FUTURE_READY;}return CC_FUTURE_ERR;}static void __cc_af%d_drop(void*__p){__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(__f){cc_task_intptr_free(&__f->__t);free(__f);}}CCTaskIntptr %s(void){__cc_af%d_f*__f=(__cc_af%d_f*)calloc(1,sizeof(__cc_af%d_f));if(!__f){CCTaskIntptr __t;memset(&__t,0,sizeof(__t));return __t;}__f->__st=0;memset(&__f->__t,0,sizeof(__f->__t));return cc_task_intptr_make_poll(__cc_af%d_poll,__f,__cc_af%d_drop);}",
+                          id, id, id, id, fn->callee, id, id, id, fn->name, id, id, id, id, id);
+        }
+        if (rn <= 0 || (size_t)rn >= sizeof(repl)) continue;
+        int repl_nl = 0;
+        for (int kk = 0; kk < rn; kk++) if (repl[kk] == '\n') repl_nl++;
+        if (repl_nl > fn->orig_nl) continue;
+        size_t padded_len = (size_t)rn + (size_t)(fn->orig_nl - repl_nl);
+        char* padded = (char*)malloc(padded_len + 1);
+        if (!padded) continue;
+        memcpy(padded, repl, (size_t)rn);
+        for (int kk = 0; kk < (fn->orig_nl - repl_nl); kk++) padded[rn + kk] = '\n';
+        padded[padded_len] = 0;
+        size_t new_len = cur_len - (fn->end - fn->start) + padded_len;
+        char* next = (char*)malloc(new_len + 1);
+        if (!next) { free(padded); continue; }
+        memcpy(next, cur, fn->start);
+        memcpy(next + fn->start, padded, padded_len);
+        memcpy(next + fn->start + padded_len, cur + fn->end, cur_len - fn->end);
+        next[new_len] = 0;
+        free(padded);
+        free(cur);
+        cur = next;
+        cur_len = new_len;
+    }
+
+    *out_src = cur;
+    *out_len = cur_len;
+    return 1;
+}
+
 #ifndef CC_TCC_EXT_AVAILABLE
 // Minimal fallbacks when TCC extensions are not available.
 static int cc__node_file_matches_this_tu(const CCASTRoot* root,
@@ -3607,6 +4219,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
 
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
+
 #ifdef CC_TCC_EXT_AVAILABLE
     if (src_all && root && root->nodes && root->node_count > 0) {
         char* rewritten = NULL;
@@ -3617,18 +4230,6 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
         }
     }
 #endif
-
-    /* Strip CC decl markers so output is valid C (do this after UFCS rewriting, which
-       uses original source spans). */
-    if (src_ufcs) {
-        char* stripped = NULL;
-        size_t stripped_len = 0;
-        if (cc__strip_cc_decl_markers(src_ufcs, src_ufcs_len, &stripped, &stripped_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = stripped;
-            src_ufcs_len = stripped_len;
-        }
-    }
 
     /* Rewrite closure calls anywhere (including nested + multiline) using stub CALL nodes. */
 #ifdef CC_TCC_EXT_AVAILABLE
@@ -3657,6 +4258,29 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     }
 #endif
 
+    /* Text-based @async lowering (state machine) after all span-driven rewrites.
+       This pass is allowed to change offsets because it runs last in the pipeline. */
+    if (src_ufcs) {
+        char* rewritten = NULL;
+        size_t rewritten_len = 0;
+        if (cc_async_rewrite_state_machine_text(src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = rewritten_len;
+        }
+    }
+
+    /* Strip CC decl markers so output is valid C (run after async lowering so it can see `@async`). */
+    if (src_ufcs) {
+        char* stripped = NULL;
+        size_t stripped_len = 0;
+        if (cc__strip_cc_decl_markers(src_ufcs, src_ufcs_len, &stripped, &stripped_len)) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = stripped;
+            src_ufcs_len = stripped_len;
+        }
+    }
+
     /* NOTE: slice move/provenance checking is now handled by the stub-AST checker pass
        (`cc/src/visitor/checker.c`) before visitor lowering. */
 
@@ -3667,6 +4291,9 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     fprintf(out, "#include \"cc_closure.cch\"\n");
     fprintf(out, "#include \"cc_slice.cch\"\n");
     fprintf(out, "#include \"cc_runtime.cch\"\n");
+    fprintf(out, "#include \"std/task_intptr.cch\"\n");
+    /* Helper alias: used for auto-blocking arg binding so async_text doesn't hoist/rewrite these temps. */
+    fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
     fprintf(out, "\n");
     fprintf(out, "/* --- CC spawn lowering helpers (best-effort) --- */\n");
@@ -3917,9 +4544,20 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
         int brace_depth = 0;
         /* nursery id stack is used for spawn lowering */
         int src_line_no = 0;
-        char line[512];
-        char rewritten[1024];
-        while (fgets(line, sizeof(line), in)) {
+        const int cc_line_cap = 65536;
+        const int cc_rewritten_cap = 131072;
+        char* line = (char*)malloc((size_t)cc_line_cap);
+        char* rewritten = (char*)malloc((size_t)cc_rewritten_cap);
+        if (!line || !rewritten) {
+            free(line);
+            free(rewritten);
+            fclose(in);
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return ENOMEM;
+        }
+        while (fgets(line, cc_line_cap, in)) {
             src_line_no++;
             char *p = line;
             while (*p == ' ' || *p == '\t') p++;
@@ -3942,14 +4580,14 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                 if (!buf) { /* fallthrough */ }
                 else {
                     buf[0] = '\0';
-                    size_t ll = strnlen(line, sizeof(line));
+                    size_t ll = strnlen(line, (size_t)cc_line_cap);
                     if (buf_len + ll + 1 > buf_cap) { while (buf_len + ll + 1 > buf_cap) buf_cap *= 2; buf = (char*)realloc(buf, buf_cap); }
                     if (!buf) { /* fallthrough */ }
                     else {
                         memcpy(buf + buf_len, line, ll); buf_len += ll; buf[buf_len] = '\0';
-                        while (src_line_no < end_line && fgets(line, sizeof(line), in)) {
+                        while (src_line_no < end_line && fgets(line, cc_line_cap, in)) {
                             src_line_no++;
-                            ll = strnlen(line, sizeof(line));
+                            ll = strnlen(line, (size_t)cc_line_cap);
                             if (buf_len + ll + 1 > buf_cap) { while (buf_len + ll + 1 > buf_cap) buf_cap *= 2; buf = (char*)realloc(buf, buf_cap); if (!buf) break; }
                             if (!buf) break;
                             memcpy(buf + buf_len, line, ll); buf_len += ll; buf[buf_len] = '\0';
@@ -4238,7 +4876,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                             fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
                             fprintf(out, "}\n");
                             /* Skip original closure text lines (multiline). */
-                            while (src_line_no < cd->end_line && fgets(line, sizeof(line), in)) {
+                            while (src_line_no < cd->end_line && fgets(line, cc_line_cap, in)) {
                                 src_line_no++;
                             }
                             /* Resync source mapping after eliding original closure text. */
@@ -4442,7 +5080,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
 
                         /* Multiline literal: skip until end_line, then emit suffix. */
                         fputc('\n', out);
-                        while (src_line_no < cd->end_line && fgets(line, sizeof(line), in)) {
+                        while (src_line_no < cd->end_line && fgets(line, cc_line_cap, in)) {
                             src_line_no++;
                         }
                         line_len2 = strlen(line);
@@ -4519,7 +5157,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                     continue;
                 }
                 buf[0] = '\0';
-                size_t ll = strnlen(line, sizeof(line));
+                size_t ll = strnlen(line, (size_t)cc_line_cap);
                 if (buf_len + ll + 1 > buf_cap) {
                     while (buf_len + ll + 1 > buf_cap) buf_cap *= 2;
                     buf = (char*)realloc(buf, buf_cap);
@@ -4529,9 +5167,9 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
                 buf_len += ll;
                 buf[buf_len] = '\0';
 
-                while (src_line_no < end_line && fgets(line, sizeof(line), in)) {
+                while (src_line_no < end_line && fgets(line, cc_line_cap, in)) {
                     src_line_no++;
-                    ll = strnlen(line, sizeof(line));
+                    ll = strnlen(line, (size_t)cc_line_cap);
                     if (buf_len + ll + 1 > buf_cap) {
                         while (buf_len + ll + 1 > buf_cap) buf_cap *= 2;
                         buf = (char*)realloc(buf, buf_cap);
@@ -4556,15 +5194,17 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
 
             /* Single-line UFCS lowering: only on lines where TCC recorded a UFCS-marked call. */
             if (ufcs_single && src_line_no > 0 && src_line_no <= ufcs_single_cap && ufcs_single[src_line_no]) {
-                if (cc_ufcs_rewrite_line(line, rewritten, sizeof(rewritten)) != 0) {
-                    strncpy(rewritten, line, sizeof(rewritten) - 1);
-                    rewritten[sizeof(rewritten) - 1] = '\0';
+                if (cc_ufcs_rewrite_line(line, rewritten, (size_t)cc_rewritten_cap) != 0) {
+                    strncpy(rewritten, line, (size_t)cc_rewritten_cap - 1);
+                    rewritten[(size_t)cc_rewritten_cap - 1] = '\0';
                 }
                 fputs(rewritten, out);
             } else {
                 fputs(line, out);
             }
         }
+        free(line);
+        free(rewritten);
         free(ufcs_ml_end);
         free(ufcs_single);
         free(spawn_ml_end);

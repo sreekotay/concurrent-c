@@ -1,0 +1,24 @@
+#include "cc_runtime.cch"
+#include "cc_closure.cch"
+#include <pthread.h>
+#include "std/task_intptr.cch"
+
+static pthread_t g_tid;
+
+static void mark_tid(void) { g_tid = pthread_self(); }
+
+static int add1_checked(int x) {
+    /* Must run on same worker thread as mark_tid() if batching works. */
+    return pthread_equal(g_tid, pthread_self()) ? (x + 1) : -999;
+}
+
+@async int f(int x) {
+    mark_tid();
+    return add1_checked(x);
+}
+
+int main(void) {
+    intptr_t r = cc_block_on_intptr(f(1));
+    return (r == 2) ? 0 : 1;
+}
+
