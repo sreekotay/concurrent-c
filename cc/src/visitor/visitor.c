@@ -6,11 +6,23 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <unistd.h>
 
 #include "visitor/ufcs.h"
+#include "parser/tcc_bridge.h"
+#include "preprocess/preprocess.h"
 
-/* Text-based async lowering (implemented in `cc/src/visitor/async_text.c`). */
-int cc_async_rewrite_state_machine_text(const char* in_src, size_t in_len, char** out_src, size_t* out_len);
+#ifndef CC_TCC_EXT_AVAILABLE
+#error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
+#endif
+
+/* AST-driven async lowering (implemented in `cc/src/visitor/async_ast.c`). */
+int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
+                                       const CCVisitorCtx* ctx,
+                                       const char* in_src,
+                                       size_t in_len,
+                                       char** out_src,
+                                       size_t* out_len);
 
 /* --- Closure scan/lowering helpers (best-effort, early) ---
    Goal: allow `spawn(() => { ... })` to lower to valid C by generating a
@@ -257,54 +269,11 @@ static unsigned char cc__lookup_decl_flags(char** scope_names,
     return 0;
 }
 
-typedef struct {
-    char* name;
-    int depth;
-} CCMovedName;
-
-static int cc__moved_contains(CCMovedName* moved, int moved_n, const char* s, size_t n) {
-    for (int i = 0; i < moved_n; i++) {
-        if (!moved[i].name) continue;
-        if (strlen(moved[i].name) == n && strncmp(moved[i].name, s, n) == 0) return 1;
-    }
-    return 0;
-}
-
-static void cc__moved_push(CCMovedName** io_moved, int* io_n, int* io_cap, const char* s, size_t n, int depth) {
-    if (!io_moved || !io_n || !io_cap || !s || n == 0) return;
-    if (cc__moved_contains(*io_moved, *io_n, s, n)) return;
-    if (*io_n == *io_cap) {
-        int nc = (*io_cap) ? (*io_cap) * 2 : 16;
-        CCMovedName* nm = (CCMovedName*)realloc(*io_moved, (size_t)nc * sizeof(CCMovedName));
-        if (!nm) return;
-        *io_moved = nm;
-        *io_cap = nc;
-    }
-    char* name = (char*)malloc(n + 1);
-    if (!name) return;
-    memcpy(name, s, n);
-    name[n] = '\0';
-    (*io_moved)[*io_n] = (CCMovedName){ .name = name, .depth = depth };
-    (*io_n)++;
-}
-
-static void cc__moved_pop_depth(CCMovedName* moved, int* io_n, int depth) {
-    if (!moved || !io_n) return;
-    int n = *io_n;
-    for (int i = 0; i < n; ) {
-        if (moved[i].name && moved[i].depth > depth) {
-            free(moved[i].name);
-            moved[i] = moved[n - 1];
-            n--;
-            continue;
-        }
-        i++;
-    }
-    *io_n = n;
-}
+/* (deleted deprecated moved-name tracking; superseded by stub-AST checker.c) */
 
 /* Best-effort checker: reject use-after-move for CCSlice locals moved via cc_move(x).
    This is an early slice-safety step until we have a real typed AST. */
+#if 0 /* deprecated: superseded by stub-AST checker.c */
 static int cc__check_slice_use_after_move(const char* src, size_t src_len, const char* src_path) {
     if (!src || src_len == 0) return 0;
     /* Pre-scan closures so we can treat move-only slice captures as implicit moves. */
@@ -573,6 +542,7 @@ fail:
     free(moved);
     return -1;
 }
+#endif /* deprecated */
 
 static void cc__collect_caps_from_block(char*** scope_names,
                                         int* scope_counts,
@@ -712,6 +682,7 @@ static int cc__append_fmt(char** buf, size_t* len, size_t* cap, const char* fmt,
     return cc__append_str(buf, len, cap, tmp);
 }
 
+#if 0 /* deprecated: superseded by stub-AST based closure-call rewrite */
 static int cc__rewrite_closure_calls_in_line(char*** scope_names,
                                              char*** scope_types,
                                              int* scope_counts,
@@ -979,6 +950,7 @@ static int cc__rewrite_closure_calls_in_line(char*** scope_names,
     out[o] = '\0';
     return changed;
 }
+#endif /* deprecated */
 
 typedef struct {
     int line_start;
@@ -987,6 +959,7 @@ typedef struct {
     int col_end;   /* 1-based, exclusive */
 } CCStubCallSpan;
 
+#if 0 /* deprecated: old helper; not used */
 static int cc__linecol_to_offset(const char* s, size_t n, int line1, int col1, size_t* out_off) {
     if (!s || !out_off || line1 <= 0 || col1 <= 0) return 0;
     int line = 1;
@@ -1000,7 +973,9 @@ static int cc__linecol_to_offset(const char* s, size_t n, int line1, int col1, s
     if (line == line1 && col == col1) { *out_off = n; return 1; }
     return 0;
 }
+#endif /* deprecated */
 
+#if 0 /* deprecated: superseded by stub-AST based closure-call rewrite */
 static int cc__rewrite_multiline_closure_call_chunk(char*** scope_names,
                                                     char*** scope_types,
                                                     int* scope_counts,
@@ -1141,6 +1116,7 @@ static int cc__rewrite_multiline_closure_call_chunk(char*** scope_names,
     *out_len = outn;
     return 1;
 }
+#endif /* deprecated */
 
 typedef struct {
     int line_start;
@@ -1543,7 +1519,7 @@ static int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
-#ifdef CC_TCC_EXT_AVAILABLE
+#if 0 /* deprecated: legacy no-arg async lowering (pre async_ast.c) */
 static int cc__rewrite_async_state_machine_noarg(const CCASTRoot* root,
                                                  const CCVisitorCtx* ctx,
                                                  const char* in_src,
@@ -1774,7 +1750,7 @@ static int cc__rewrite_async_state_machine_noarg(const CCASTRoot* root,
     *out_len = cur_len;
     return 1;
 }
-#endif
+#endif /* deprecated */
 
 enum {
     CC_FN_ATTR_ASYNC = 1u << 0,
@@ -2039,7 +2015,7 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             }
             if (kind != CC_AB_REWRITE_RETURN_CALL) {
                 /* Not a root `return <call>;` -> rewrite the whole return statement as
-                   `tmp = await run_blocking(...); return ...tmp...;` (no braces; async_text can't handle blocks). */
+                   `tmp = await run_blocking(...); return ...tmp...;` */
                 if (!ret_is_void && !ret_is_structy) {
                     /* Find statement end ';' at top-level from the start of the line. */
                     size_t endp = lb;
@@ -3545,6 +3521,46 @@ static int cc__read_entire_file(const char* path, char** out_buf, size_t* out_le
     return 1;
 }
 
+static char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_path) {
+    if (!buf || !original_path) return NULL;
+    char tmpl[] = "/tmp/cc_reparse_XXXXXX.c";
+#ifdef __APPLE__
+    int fd = mkstemps(tmpl, 2);
+#else
+    int fd = mkstemp(tmpl);
+#endif
+    if (fd < 0) return NULL;
+    /* Minimal prelude so patched TCC can type-check rewritten intermediate code during the reparse step. */
+    const char* prelude =
+        "#define CC_PARSER_MODE 1\n"
+        "#include <stdint.h>\n"
+        "typedef intptr_t CCAbIntptr;\n";
+    size_t pre_len = strlen(prelude);
+    size_t off = 0;
+    while (off < pre_len) {
+        ssize_t n = write(fd, prelude + off, pre_len - off);
+        if (n <= 0) { close(fd); unlink(tmpl); return NULL; }
+        off += (size_t)n;
+    }
+    char line_buf[1024];
+    int ln = snprintf(line_buf, sizeof(line_buf), "#line 1 \"%s\"\n", original_path);
+    if (ln <= 0 || (size_t)ln >= sizeof(line_buf)) { close(fd); unlink(tmpl); return NULL; }
+    off = 0;
+    while (off < (size_t)ln) {
+        ssize_t n = write(fd, line_buf + off, (size_t)ln - off);
+        if (n <= 0) { close(fd); unlink(tmpl); return NULL; }
+        off += (size_t)n;
+    }
+    off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, buf + off, len - off);
+        if (n <= 0) { close(fd); unlink(tmpl); return NULL; }
+        off += (size_t)n;
+    }
+    close(fd);
+    return strdup(tmpl);
+}
+
 static int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t* out_len) {
     if (!in || !out || !out_len) return 0;
     *out = NULL;
@@ -3584,7 +3600,7 @@ static int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, 
 
 #ifdef CC_TCC_EXT_AVAILABLE
 static int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
-                                              const CCVisitorCtx* ctx,
+                                        const CCVisitorCtx* ctx,
                                               const char* in_src,
                                               size_t in_len,
                                               char** out_src,
@@ -3861,6 +3877,7 @@ static int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
 }
 #endif
 
+#if 0 /* deprecated: kept around during refactors; not used */
 static char* cc__rewrite_idents_to_repls(const char* s,
                                         const char* const* names,
                                         const char* const* repls,
@@ -3917,7 +3934,9 @@ static char* cc__rewrite_idents_to_repls(const char* s,
     out[out_len] = 0;
     return out;
 }
+#endif /* deprecated */
 
+#if 0 /* deprecated: text-based legacy no-arg async lowering (pre stub-AST) */
 static int cc__rewrite_async_state_machine_noarg_text(const char* in_src,
                                                       size_t in_len,
                                                       char** out_src,
@@ -4083,17 +4102,7 @@ static int cc__rewrite_async_state_machine_noarg_text(const char* in_src,
     *out_len = cur_len;
     return 1;
 }
-
-#ifndef CC_TCC_EXT_AVAILABLE
-// Minimal fallbacks when TCC extensions are not available.
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* node_file) {
-    (void)root;
-    if (!ctx || !ctx->input_path || !node_file) return 0;
-    return strcmp(ctx->input_path, node_file) == 0;
-}
-#endif
+#endif /* deprecated */
 
 static const char* cc__basename(const char* path) {
     if (!path) return NULL;
@@ -4496,6 +4505,7 @@ static int cc__arena_args_for_line(const CCASTRoot* root,
 #endif
 
 #ifdef CC_TCC_EXT_AVAILABLE
+#if 0 /* deprecated: old statement finder; not used */
 static int cc__stmt_for_line(const CCASTRoot* root,
                              const CCVisitorCtx* ctx,
                              const char* src_path,
@@ -4534,6 +4544,7 @@ static int cc__stmt_for_line(const CCASTRoot* root,
     }
     return 0;
 }
+#endif /* deprecated */
 #endif
 
 int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) {
@@ -4663,14 +4674,49 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     }
 #endif
 
-    /* Text-based @async lowering (state machine) after all span-driven rewrites.
-       This pass is allowed to change offsets because it runs last in the pipeline. */
-    if (src_ufcs) {
+    /* AST-driven @async lowering (state machine).
+       IMPORTANT: earlier rewrites can introduce new statements (auto-blocking temps, await-hoists, etc).
+       We re-parse the rewritten TU with patched TCC to get an updated stub-AST before lowering async. */
+    if (src_ufcs && ctx && ctx->symbols) {
+        char* tmp_path = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
+        char pp_path[128];
+        int pp_err = tmp_path ? cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path)) : EINVAL;
+        const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
+        if (getenv("CC_DEBUG_REPARSE")) {
+            fprintf(stderr, "CC: reparse: tmp=%s pp=%s pp_err=%d use=%s\n",
+                    tmp_path ? tmp_path : "<null>",
+                    (pp_err == 0) ? pp_path : "<n/a>",
+                    pp_err,
+                    use_path ? use_path : "<null>");
+        }
+        CCASTRoot* root2 = use_path ? cc_tcc_bridge_parse_to_ast(use_path, ctx->input_path, ctx->symbols) : NULL;
+        if (!root2) {
+            if (tmp_path) {
+                if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
+                free(tmp_path);
+            }
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return EINVAL;
+        }
+        if (pp_err == 0) root2->lowered_is_temp = 1;
+        if (getenv("CC_DEBUG_REPARSE")) {
+            fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2->node_count);
+        }
+
         char* rewritten = NULL;
         size_t rewritten_len = 0;
-        int ar = cc_async_rewrite_state_machine_text(src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        int ar = cc_async_rewrite_state_machine_ast(root2, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        cc_tcc_bridge_free_ast(root2);
+        if (tmp_path) {
+            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
+            free(tmp_path);
+        }
+        if (pp_err == 0 && !(getenv("CC_KEEP_REPARSE"))) {
+            unlink(pp_path);
+        }
         if (ar < 0) {
-            /* async_text already printed an error */
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
             free(src_all);
@@ -4705,7 +4751,7 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     fprintf(out, "#include \"cc_slice.cch\"\n");
     fprintf(out, "#include \"cc_runtime.cch\"\n");
     fprintf(out, "#include \"std/task_intptr.cch\"\n");
-    /* Helper alias: used for auto-blocking arg binding so async_text doesn't hoist/rewrite these temps. */
+    /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
     fprintf(out, "\n");

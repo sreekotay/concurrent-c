@@ -45,6 +45,7 @@ SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runt
 OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
+DEPS := $(OBJS:.o=.d)
 REAL_BINARY := $(OUT_BINDIR)/ccc
 WRAPPER := bin/ccc
 
@@ -69,7 +70,7 @@ $(WRAPPER): $(REAL_BINARY)
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 clean:
 	rm -f $(WRAPPER) $(REAL_BINARY)
@@ -80,3 +81,5 @@ clean:
 
 .PHONY: all clean
 
+# Auto-generated dependency files for objects (includes runtime/concurrent_c.c -> runtime/*.c).
+-include $(DEPS)
