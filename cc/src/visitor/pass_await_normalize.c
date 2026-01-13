@@ -35,6 +35,7 @@ int cc__rewrite_await_exprs_with_nodes(const struct CCASTRoot* root,
                                       size_t in_len,
                                       char** out_src,
                                       size_t* out_len) {
+    fprintf(stderr, "CC: await_normalize: starting, root->node_count=%d\n", root ? root->node_count : 0);
     if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
     *out_src = NULL;
     *out_len = 0;

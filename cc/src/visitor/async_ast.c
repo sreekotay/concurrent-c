@@ -1732,6 +1732,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                        size_t in_len,
                                        char** out_src,
                                        size_t* out_len) {
+    fprintf(stderr, "CC: async_ast: starting async lowering, root->node_count=%d\n", root ? root->node_count : 0);
     if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
     *out_src = NULL;
     *out_len = 0;

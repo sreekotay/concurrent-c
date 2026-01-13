@@ -114,6 +114,7 @@ static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t re
 
 /* Main visitor pipeline: orchestrates all lowering passes */
 int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) {
+    fprintf(stderr, "CC: cc_visit_pipeline called, root=%p\n", (void*)root);
     if (!ctx || !ctx->symbols || !output_path) return EINVAL;
     const char* src_path = ctx->input_path ? ctx->input_path : "<cc_input>";
     FILE* out = fopen(output_path, "w");
@@ -162,22 +163,30 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     }
 
     /* PASS 4: Normalize await <expr> so the async state machine can lower it */
+    fprintf(stderr, "CC: visitor_pipeline: PASS 4 condition: root=%p, nodes=%p, count=%d\n",
+            (void*)root, root ? root->nodes : NULL, root ? root->node_count : 0);
     if (root && root->nodes && root->node_count > 0) {
+        fprintf(stderr, "CC: visitor_pipeline: running PASS 4\n");
         char* rewritten = NULL;
         size_t rewritten_len = 0;
         if (cc__rewrite_await_exprs_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
+            fprintf(stderr, "CC: visitor_pipeline: PASS 4 succeeded\n");
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
             src_ufcs_len = rewritten_len;
+        } else {
+            fprintf(stderr, "CC: visitor_pipeline: PASS 4 failed\n");
         }
     }
 
     /* PASS 5: AST-driven @async lowering (state machine). IMPORTANT: reparse after earlier rewrites */
     char* rewritten_async = NULL;
     size_t rewritten_async_len = 0;
-    if (src_ufcs && ctx && ctx->symbols) {
+    if (src_ufcs) {
+        fprintf(stderr, "CC: visitor_pipeline: starting async lowering pass\n");
         char* tmp_path = NULL;
         CCASTRoot* root2 = cc__reparse_after_rewrite(src_ufcs, src_ufcs_len, src_path, ctx->symbols, &tmp_path);
+        fprintf(stderr, "CC: visitor_pipeline: reparse result: root2=%p\n", (void*)root2);
         if (!root2) {
             if (src_ufcs != src_all) free(src_ufcs);
             free(src_all);
