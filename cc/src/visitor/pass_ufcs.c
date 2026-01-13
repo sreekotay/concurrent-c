@@ -1,0 +1,342 @@
+#include "pass_ufcs.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "parser/parse.h"
+#include "visitor/ufcs.h"
+#include "visitor/visitor.h"
+
+struct CC__UFCSSpan {
+    size_t start; /* inclusive */
+    size_t end;   /* exclusive */
+};
+
+static int cc__same_source_file(const char* a, const char* b);
+static const char* cc__basename(const char* path);
+static const char* cc__path_suffix2(const char* path);
+static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
+static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no);
+static int cc__span_from_anchor_and_end(const char* s,
+                                       size_t range_start,
+                                       size_t sep_pos,
+                                       size_t end_pos_excl,
+                                       struct CC__UFCSSpan* out_span);
+static int cc__find_ufcs_span_in_range(const char* s,
+                                      size_t range_start,
+                                      size_t range_end,
+                                      const char* method,
+                                      int occurrence_1based,
+                                      struct CC__UFCSSpan* out_span);
+
+int cc__rewrite_ufcs_spans_with_nodes(const struct CCASTRoot* root,
+                                     const CCVisitorCtx* ctx,
+                                     const char* in_src,
+                                     size_t in_len,
+                                     char** out_src,
+                                     size_t* out_len) {
+    if (!root || !ctx || !ctx->input_path || !in_src || !out_src || !out_len) return 0;
+    *out_src = NULL;
+    *out_len = 0;
+    if (!root->nodes || root->node_count <= 0) return 0;
+
+    struct NodeView {
+        int kind;
+        int parent;
+        const char* file;
+        int line_start;
+        int line_end;
+        int col_start;
+        int col_end;
+        int aux1;
+        int aux2;
+        const char* aux_s1;
+        const char* aux_s2;
+    };
+    const struct NodeView* n = (const struct NodeView*)root->nodes;
+
+    /* Collect UFCS call nodes (line spans + method), then rewrite each span in-place. */
+    struct UFCSNode {
+        int line_start;
+        int line_end;
+        int col_start;
+        int col_end;
+        const char* method;
+        int occurrence_1based;
+    };
+    struct UFCSNode* nodes = NULL;
+    int node_count = 0;
+    int node_cap = 0;
+
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != 5) continue;         /* CALL */
+        if (!n[i].aux_s1) continue;           /* only UFCS calls */
+        if (!cc__same_source_file(ctx->input_path, n[i].file) &&
+            !(root->lowered_path && cc__same_source_file(root->lowered_path, n[i].file)))
+            continue;
+        int ls = n[i].line_start;
+        int le = n[i].line_end;
+        if (ls <= 0) continue;
+        if (le < ls) le = ls;
+        if (node_count == node_cap) {
+            node_cap = node_cap ? node_cap * 2 : 32;
+            nodes = (struct UFCSNode*)realloc(nodes, (size_t)node_cap * sizeof(*nodes));
+            if (!nodes) return 0;
+        }
+        int occ = (n[i].aux2 >> 8) & 0x00ffffff;
+        if (occ <= 0) occ = 1;
+        nodes[node_count++] = (struct UFCSNode){
+            .line_start = ls,
+            .line_end = le,
+            .col_start = n[i].col_start,
+            .col_end = n[i].col_end,
+            .method = n[i].aux_s1,
+            .occurrence_1based = occ,
+        };
+    }
+
+    char* cur = (char*)malloc(in_len + 1);
+    if (!cur) { free(nodes); return 0; }
+    memcpy(cur, in_src, in_len);
+    cur[in_len] = '\0';
+    size_t cur_len = in_len;
+
+    /* Sort nodes by decreasing span length so outer rewrites happen before inner,
+       then by increasing start line for determinism. */
+    for (int i = 0; i < node_count; i++) {
+        for (int j = i + 1; j < node_count; j++) {
+            int li = nodes[i].line_end - nodes[i].line_start;
+            int lj = nodes[j].line_end - nodes[j].line_start;
+            int swap = 0;
+            if (lj > li) swap = 1;
+            else if (lj == li && nodes[j].line_start < nodes[i].line_start) swap = 1;
+            if (swap) {
+                struct UFCSNode tmp = nodes[i];
+                nodes[i] = nodes[j];
+                nodes[j] = tmp;
+            }
+        }
+    }
+
+    for (int i = 0; i < node_count; i++) {
+        int ls = nodes[i].line_start;
+        int le = nodes[i].line_end;
+        if (ls <= 0) continue;
+        if (le < ls) le = ls;
+        size_t rs = cc__offset_of_line_1based(cur, cur_len, ls);
+        size_t re = (le == ls) ? cc__offset_of_line_1based(cur, cur_len, le + 1) : cc__offset_of_line_1based(cur, cur_len, le + 1);
+        if (re > cur_len) re = cur_len;
+        if (rs >= re) continue;
+
+        struct CC__UFCSSpan sp;
+        if (nodes[i].col_start > 0 && nodes[i].col_end > 0 && nodes[i].line_end > 0) {
+            size_t sep_pos = cc__offset_of_line_col_1based(cur, cur_len, nodes[i].line_start, nodes[i].col_start);
+            size_t end_pos = cc__offset_of_line_col_1based(cur, cur_len, nodes[i].line_end, nodes[i].col_end);
+            if (!cc__span_from_anchor_and_end(cur, rs, sep_pos, end_pos, &sp))
+                continue;
+        } else {
+            if (!cc__find_ufcs_span_in_range(cur, rs, re, nodes[i].method, nodes[i].occurrence_1based, &sp))
+                continue;
+        }
+        if (sp.end > cur_len || sp.start >= sp.end) continue;
+
+        size_t expr_len = sp.end - sp.start;
+        size_t out_cap = expr_len * 2 + 128;
+        char* out_buf = (char*)malloc(out_cap);
+        if (!out_buf) continue;
+        char* expr = (char*)malloc(expr_len + 1);
+        if (!expr) { free(out_buf); continue; }
+        memcpy(expr, cur + sp.start, expr_len);
+        expr[expr_len] = '\0';
+        if (cc_ufcs_rewrite_line(expr, out_buf, out_cap) == 0) {
+            size_t repl_len = strlen(out_buf);
+            size_t new_len = cur_len - expr_len + repl_len;
+            char* next = (char*)malloc(new_len + 1);
+            if (next) {
+                memcpy(next, cur, sp.start);
+                memcpy(next + sp.start, out_buf, repl_len);
+                memcpy(next + sp.start + repl_len, cur + sp.end, cur_len - sp.end);
+                next[new_len] = '\0';
+                free(cur);
+                cur = next;
+                cur_len = new_len;
+            }
+        }
+        free(expr);
+        free(out_buf);
+    }
+
+    free(nodes);
+    *out_src = cur;
+    *out_len = cur_len;
+    return 1;
+}
+
+/* Helper implementations (extracted from visitor.c) */
+
+static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
+    if (!s || line_no <= 1) return 0;
+    int cur = 1;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\n') {
+            cur++;
+            if (cur == line_no) return i + 1;
+        }
+    }
+    return len;
+}
+
+static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no) {
+    if (!s) return 0;
+    if (line_no <= 1 && col_no <= 1) return 0;
+    if (col_no <= 1) return cc__offset_of_line_1based(s, len, line_no);
+    size_t loff = cc__offset_of_line_1based(s, len, line_no);
+    size_t off = loff + (size_t)(col_no - 1);
+    if (off > len) off = len;
+    return off;
+}
+
+static int cc__span_from_anchor_and_end(const char* s,
+                                       size_t range_start,
+                                       size_t sep_pos,
+                                       size_t end_pos_excl,
+                                       struct CC__UFCSSpan* out_span) {
+    if (!s || !out_span) return 0;
+    if (sep_pos < range_start) return 0;
+    if (end_pos_excl <= sep_pos) return 0;
+    out_span->start = range_start;
+    out_span->end = end_pos_excl;
+    return out_span->start < out_span->end;
+}
+
+static int cc__find_ufcs_span_in_range(const char* s,
+                                      size_t range_start,
+                                      size_t range_end,
+                                      const char* method,
+                                      int occurrence_1based,
+                                      struct CC__UFCSSpan* out_span) {
+    if (!s || !method || !out_span) return 0;
+    const size_t method_len = strlen(method);
+    if (method_len == 0) return 0;
+    if (occurrence_1based <= 0) occurrence_1based = 1;
+    int seen = 0;
+
+    /* Find ".method" or "->method" followed by optional whitespace then '(' */
+    for (size_t i = range_start; i + method_len + 2 < range_end; i++) {
+        int is_arrow = 0;
+        size_t sep_pos = 0;
+        if (s[i] == '.' ) { is_arrow = 0; sep_pos = i; }
+        else if (s[i] == '-' && i + 1 < range_end && s[i + 1] == '>') { is_arrow = 1; sep_pos = i; }
+        else continue;
+
+        size_t mpos = sep_pos + (is_arrow ? 2 : 1);
+        while (mpos < range_end && (s[mpos] == ' ' || s[mpos] == '\t')) mpos++;
+        if (mpos + method_len >= range_end) continue;
+        if (memcmp(s + mpos, method, method_len) != 0) continue;
+
+        size_t after = mpos + method_len;
+        while (after < range_end && (s[after] == ' ' || s[after] == '\t')) after++;
+        if (after >= range_end || s[after] != '(') continue;
+
+        /* Match Nth occurrence. */
+        seen++;
+        if (seen != occurrence_1based) continue;
+
+        /* Receiver: allow non-trivial expressions like (foo()).bar, arr[i].m, (*p).m.
+           Find the start by scanning left with bracket balancing until a delimiter. */
+        size_t r_end = sep_pos;
+        while (r_end > range_start && (s[r_end - 1] == ' ' || s[r_end - 1] == '\t')) r_end--;
+        if (r_end == range_start) continue;
+
+        int par = 0, br = 0, brc = 0;
+        size_t r = r_end;
+        while (r > range_start) {
+            char c = s[r - 1];
+            if (c == ')') { par++; r--; continue; }
+            if (c == ']') { br++; r--; continue; }
+            if (c == '}') { brc++; r--; continue; }
+            if (c == '(' && par > 0) { par--; r--; continue; }
+            if (c == '[' && br > 0) { br--; r--; continue; }
+            if (c == '{' && brc > 0) { brc--; r--; continue; }
+            if (par || br || brc) { r--; continue; }
+
+            /* At top-level: stop on likely expression delimiters. */
+            if (c == ',' || c == ';' || c == '=' || c == '\n' ||
+                c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
+                c == '&' || c == '|' || c == '^' || c == '!' || c == '~' ||
+                c == '<' || c == '>' || c == '?' || c == ':' ) {
+                break;
+            }
+            /* Otherwise keep consuming (identifiers, dots, brackets, parens, spaces). */
+            r--;
+        }
+        /* Trim any leading whitespace included in the backward scan. */
+        while (r < r_end && (s[r] == ' ' || s[r] == '\t')) r++;
+        if (r >= r_end) continue;
+
+        /* Find matching ')' for the call, skipping strings/chars. */
+        size_t p = after;
+        int depth = 0;
+        while (p < range_end) {
+            char c = s[p++];
+            if (c == '(') depth++;
+            else if (c == ')') {
+                depth--;
+                if (depth == 0) {
+                    out_span->start = r;
+                    out_span->end = p;
+                    return 1;
+                }
+            } else if (c == '"' || c == '\'') {
+                char q = c;
+                while (p < range_end) {
+                    char d = s[p++];
+                    if (d == '\\' && p < range_end) { p++; continue; }
+                    if (d == q) break;
+                }
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static const char* cc__basename(const char* path) {
+    if (!path) return NULL;
+    const char* last = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') last = p + 1;
+    }
+    return last;
+}
+
+static const char* cc__path_suffix2(const char* path) {
+    if (!path) return NULL;
+    const char* end = path + strlen(path);
+    int seps = 0;
+    for (const char* p = end; p > path; ) {
+        p--;
+        if (*p == '/' || *p == '\\') {
+            seps++;
+            if (seps == 2) return p + 1;
+        }
+    }
+    return cc__basename(path);
+}
+
+static int cc__same_source_file(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    if (strcmp(a, b) == 0) return 1;
+
+    const char* a_base = cc__basename(a);
+    const char* b_base = cc__basename(b);
+    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
+
+    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
+    const char* a_suf = cc__path_suffix2(a);
+    const char* b_suf = cc__path_suffix2(b);
+    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
+
+    /* Fallback: basename-only match. */
+    return 1;
+}

@@ -1,0 +1,589 @@
+#include "pass_closure_calls.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "parser/parse.h"
+
+typedef struct {
+    int line_start;
+    int col_start;
+    int line_end;
+    int col_end;
+    const char* callee; /* identifier */
+    int occ_1based;     /* Nth occurrence of this callee call on the start line */
+    int arity;          /* 1 or 2 */
+} CCClosureCallNode;
+
+typedef struct {
+    size_t name_start;
+    size_t lparen;
+    size_t rparen_end;
+    int arity;
+    int parent;          /* index in spans array, -1 if none */
+    int* children;
+    int child_n;
+    int child_cap;
+} CCClosureCallSpan;
+
+/* Helper functions (extracted from visitor.c) */
+
+static int cc__is_ident_start_char(char c) { return (c == '_' || isalpha((unsigned char)c)); }
+static int cc__is_ident_char2(char c) { return (c == '_' || isalnum((unsigned char)c)); }
+
+static int cc__is_word_boundary(char c) {
+    return !(cc__is_ident_char2(c));
+}
+
+static int cc__find_nth_callee_call_span_in_range(const char* s,
+                                                  size_t range_start,
+                                                  size_t range_end,
+                                                  const char* callee,
+                                                  int occ_1based,
+                                                  size_t* out_name_start,
+                                                  size_t* out_lparen,
+                                                  size_t* out_rparen_end) {
+    if (!s || !callee || !out_name_start || !out_lparen || !out_rparen_end) return 0;
+    if (occ_1based <= 0) occ_1based = 1;
+    size_t n = strlen(callee);
+    if (n == 0) return 0;
+    if (range_end <= range_start) return 0;
+
+    int occ = 0;
+    for (size_t i = range_start; i + n < range_end; i++) {
+        if (!cc__is_word_boundary(i > range_start ? s[i - 1] : 0)) continue;
+        if (memcmp(s + i, callee, n) != 0) continue;
+        if (!cc__is_word_boundary(s[i + n])) continue;
+
+        /* Skip if not followed by whitespace or '(', or if preceded by '.' or '->' (UFCS). */
+        size_t after = i + n;
+        while (after < range_end && (s[after] == ' ' || s[after] == '\t')) after++;
+        if (after >= range_end || s[after] != '(') continue;
+
+        /* Check for UFCS prefix. */
+        int ufcs = 0;
+        if (i >= 2) {
+            if (s[i - 2] == '-' && s[i - 1] == '>') ufcs = 1;
+            else if (s[i - 1] == '.') ufcs = 1;
+        } else if (i >= 1) {
+            if (s[i - 1] == '.') ufcs = 1;
+        }
+        if (ufcs) continue;
+
+        occ++;
+        if (occ != occ_1based) continue;
+
+        *out_name_start = i;
+        *out_lparen = after;
+
+        /* Find matching ')'. */
+        size_t p = after;
+        int depth = 0;
+        while (p < range_end) {
+            char c = s[p++];
+            if (c == '(') depth++;
+            else if (c == ')') {
+                depth--;
+                if (depth == 0) {
+                    *out_rparen_end = p;
+                    return 1;
+                }
+            } else if (c == '"' || c == '\'') {
+                char q = c;
+                while (p < range_end) {
+                    char d = s[p++];
+                    if (d == '\\' && p < range_end) { p++; continue; }
+                    if (d == q) break;
+                }
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static int cc__is_keyword_tok(const char* s, size_t n) {
+    static const char* kw[] = {
+        "if","else","for","while","do","switch","case","default","break","continue","return",
+        "sizeof","struct","union","enum","typedef","static","extern","const","volatile","restrict",
+        "void","char","short","int","long","float","double","_Bool","signed","unsigned",
+        "goto","auto","register","_Atomic","_Alignas","_Alignof","_Thread_local",
+        "true","false","NULL"
+    };
+    for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) {
+        if (strlen(kw[i]) == n && strncmp(kw[i], s, n) == 0) return 1;
+    }
+    return 0;
+}
+
+static int cc__name_in_list(char** xs, int n, const char* s, size_t slen) {
+    for (int i = 0; i < n; i++) {
+        if (!xs[i]) continue;
+        if (strlen(xs[i]) == slen && strncmp(xs[i], s, slen) == 0) return 1;
+    }
+    return 0;
+}
+
+static void cc__maybe_record_decl(char*** scope_names,
+                                  char*** scope_types,
+                                  unsigned char** scope_flags,
+                                  int* scope_counts,
+                                  int depth,
+                                  const char* line) {
+    if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !line) return;
+    const char* p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '#' || *p == '\0') return;
+    const char* semi = strchr(p, ';');
+    if (!semi) return;
+    /* Ignore function prototypes (best-effort):
+       if we see '(' before ';' and there is no '=' before that '(', it's likely a prototype/declarator. */
+    const char* lp = strchr(p, '(');
+    if (lp && lp < semi) {
+        const char* eq = strchr(p, '=');
+        if (!eq || eq > lp) return;
+    }
+
+    /* Find the declared variable name as the last identifier before '=', ',', or ';'. */
+    const char* name_s = NULL;
+    size_t name_n = 0;
+    const char* cur = p;
+    while (cur < semi) {
+        if (*cur == '"' || *cur == '\'') {
+            char q = *cur++;
+            while (cur < semi) {
+                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                if (*cur == q) { cur++; break; }
+                cur++;
+            }
+            continue;
+        }
+        if (*cur == '=' || *cur == ',' || *cur == ';') break;
+        if (!cc__is_ident_start_char(*cur)) { cur++; continue; }
+        const char* s = cur++;
+        while (cur < semi && cc__is_ident_char2(*cur)) cur++;
+        size_t n = (size_t)(cur - s);
+        if (n == 0 || cc__is_keyword_tok(s, n)) continue;
+        name_s = s;
+        name_n = n;
+    }
+    if (!name_s || name_n == 0) return;
+    /* Type is everything from p to name_s (trimmed). */
+    const char* ty_s = p;
+    const char* ty_e = name_s;
+    while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t')) ty_s++;
+    while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t')) ty_e--;
+    if (ty_e <= ty_s) return;
+
+    int cur_n = scope_counts[depth];
+    if (cc__name_in_list(scope_names[depth], cur_n, name_s, name_n)) return;
+
+    /* Build a file-scope-safe type string.
+       If the type uses CC slice syntax (`T[:]`/`T[:!]`), map it to CCSlice (plus pointer stars if present). */
+    int is_slice = 0;
+    int slice_has_bang = 0;
+    int ptr_n = 0;
+    for (const char* s = ty_s; s < ty_e; s++) {
+        if (*s == '*' || *s == '[' || *s == ']') ptr_n++;
+        if (*s == ':') is_slice = 1;
+        if (*s == '!') slice_has_bang = 1;
+    }
+
+    char ty_buf[1024];
+    size_t ty_len = (size_t)(ty_e - ty_s);
+    if (ty_len >= sizeof(ty_buf)) return;
+    memcpy(ty_buf, ty_s, ty_len);
+    ty_buf[ty_len] = '\0';
+
+    if (is_slice) {
+        /* Replace `T[:]` or `T[:!]` with `CCSlice` and preserve pointer stars. */
+        char* col = strchr(ty_buf, ':');
+        if (col) {
+            *col = '\0';
+            /* Preserve const/volatile qualifiers. */
+            const char* base_ty = ty_buf;
+            while (*base_ty == ' ' || *base_ty == '\t') base_ty++;
+            char* after_base = (char*)base_ty;
+            while (*after_base && !(*after_base == ' ' || *after_base == '\t' || *after_base == '*')) after_base++;
+            char qualifiers[256];
+            size_t q_len = (size_t)(after_base - base_ty);
+            if (q_len < sizeof(qualifiers)) {
+                memcpy(qualifiers, base_ty, q_len);
+                qualifiers[q_len] = '\0';
+            } else {
+                qualifiers[0] = '\0';
+            }
+            int stars = 0;
+            while (*after_base == '*') { stars++; after_base++; }
+            /* Build CCSlice type with preserved qualifiers and stars. */
+            char stars_str[32] = "";
+            for (int i = 0; i < stars && i < 31; i++) stars_str[i] = '*';
+            stars_str[stars] = '\0';
+            snprintf(ty_buf, sizeof(ty_buf), "%sCCSlice%s%s", qualifiers, stars ? " " : "", stars ? stars_str : "");
+            if (slice_has_bang) {
+                size_t len = strlen(ty_buf);
+                if (len + 3 < sizeof(ty_buf)) strcat(ty_buf + len, "/*!");
+            }
+            ty_len = strlen(ty_buf);
+        }
+    }
+
+    scope_names[depth] = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
+    scope_types[depth] = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
+    scope_flags[depth] = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n + 1) * sizeof(unsigned char));
+    if (!scope_names[depth] || !scope_types[depth] || !scope_flags[depth]) return;
+
+    scope_names[depth][cur_n] = strndup(name_s, name_n);
+    scope_types[depth][cur_n] = strdup(ty_buf);
+    scope_flags[depth][cur_n] = 0;
+    scope_counts[depth]++;
+}
+
+static const char* cc__lookup_decl_type(char** names, char** types, int count, const char* name) {
+    for (int i = 0; i < count; i++) {
+        if (!names[i] || !types[i]) continue;
+        if (strcmp(names[i], name) == 0) return types[i];
+    }
+    return NULL;
+}
+
+static void cc__span_add_child(CCClosureCallSpan* spans, int parent, int child) {
+    if (!spans || parent < 0 || child < 0) return;
+    CCClosureCallSpan* p = &spans[parent];
+    if (p->child_n == p->child_cap) {
+        p->child_cap = p->child_cap ? p->child_cap * 2 : 4;
+        p->children = (int*)realloc(p->children, (size_t)p->child_cap * sizeof(int));
+        if (!p->children) return;
+    }
+    p->children[p->child_n++] = child;
+}
+
+static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* src, size_t n) {
+    if (!out || !out_len || !out_cap || !src) return;
+    if (*out_len + n >= *out_cap) {
+        *out_cap = *out_cap ? *out_cap * 2 : 256;
+        if (*out_cap < *out_len + n) *out_cap = *out_len + n + 256;
+        *out = (char*)realloc(*out, *out_cap);
+        if (!*out) return;
+    }
+    memcpy(*out + *out_len, src, n);
+    *out_len += n;
+}
+
+static void cc__emit_call_replacement(const char* src,
+                                     const char* name,
+                                     const CCClosureCallSpan* spans,
+                                     int span_idx,
+                                     char** out,
+                                     size_t* out_len,
+                                     size_t* out_cap) {
+    if (!src || !name || !spans || !out || !out_len || !out_cap) return;
+    const CCClosureCallSpan* sp = &spans[span_idx];
+
+    /* Emit closure call syntax: name(args) -> __cc_closure_call_1/2(name, args) */
+    char buf[1024];
+    int len = snprintf(buf, sizeof(buf), "__cc_closure_call_%d(%s", sp->arity, name);
+    if (len < 0 || (size_t)len >= sizeof(buf)) return;
+    cc__append_n(out, out_len, out_cap, buf, (size_t)len);
+
+    /* Copy args unchanged */
+    size_t args_start = sp->lparen + 1;
+    size_t args_end = sp->rparen_end - 1;
+    if (args_start < args_end) {
+        cc__append_n(out, out_len, out_cap, ", ", 2);
+        cc__append_n(out, out_len, out_cap, src + args_start, args_end - args_start);
+    } else {
+        cc__append_n(out, out_len, out_cap, ", ", 2);
+    }
+
+    cc__append_n(out, out_len, out_cap, ")", 1);
+
+    /* Recursively emit children */
+    for (int i = 0; i < sp->child_n; i++) {
+        cc__emit_call_replacement(src, name, spans, sp->children[i], out, out_len, out_cap);
+    }
+}
+
+static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
+
+static int cc__same_source_file(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    if (strcmp(a, b) == 0) return 1;
+
+    const char* a_base = cc__basename(a);
+    const char* b_base = cc__basename(b);
+    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
+
+    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
+    const char* a_suf = cc__path_suffix2(a);
+    const char* b_suf = cc__path_suffix2(b);
+    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
+
+    /* Fallback: basename-only match. */
+    return 1;
+}
+
+static const char* cc__basename(const char* path) {
+    if (!path) return NULL;
+    const char* last = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') last = p + 1;
+    }
+    return last;
+}
+
+static const char* cc__path_suffix2(const char* path) {
+    if (!path) return NULL;
+    const char* end = path + strlen(path);
+    int seps = 0;
+    for (const char* p = end; p > path; ) {
+        p--;
+        if (*p == '/' || *p == '\\') {
+            seps++;
+            if (seps == 2) return p + 1;
+        }
+    }
+    return cc__basename(path);
+}
+
+static int cc__node_file_matches_this_tu(const struct CCASTRoot* root,
+                                        const CCVisitorCtx* ctx,
+                                        const char* file) {
+    if (!ctx || !ctx->input_path || !file) return 0;
+    if (cc__same_source_file(ctx->input_path, file)) return 1;
+    if (root && root->lowered_path && cc__same_source_file(root->lowered_path, file)) return 1;
+    return 0;
+}
+
+int cc__rewrite_all_closure_calls_with_nodes(const struct CCASTRoot* root,
+                                           const CCVisitorCtx* ctx,
+                                           const char* in_src,
+                                           size_t in_len,
+                                           char** out_src,
+                                           size_t* out_len) {
+    if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
+    *out_src = NULL;
+    *out_len = 0;
+    if (!root->nodes || root->node_count <= 0) return 0;
+
+    struct NodeView {
+        int kind;
+        int parent;
+        const char* file;
+        int line_start;
+        int line_end;
+        int col_start;
+        int col_end;
+        int aux1;
+        int aux2;
+        const char* aux_s1;
+        const char* aux_s2;
+    };
+    const struct NodeView* n = (const struct NodeView*)root->nodes;
+
+    /* Collect non-UFCS CALL nodes with a callee name. */
+    CCClosureCallNode* calls = NULL;
+    int call_n = 0;
+    int call_cap = 0;
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != 5) continue; /* CALL */
+        int is_ufcs = (n[i].aux2 & 2) != 0;
+        if (is_ufcs) continue;
+        if (!n[i].aux_s1) continue;
+        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+        if (call_n == call_cap) {
+            call_cap = call_cap ? call_cap * 2 : 64;
+            calls = (CCClosureCallNode*)realloc(calls, (size_t)call_cap * sizeof(*calls));
+            if (!calls) return 0;
+        }
+        calls[call_n++] = (CCClosureCallNode){
+            .line_start = n[i].line_start,
+            .col_start = n[i].col_start,
+            .line_end = n[i].line_end,
+            .col_end = n[i].col_end,
+            .callee = n[i].aux_s1,
+            .occ_1based = 1,
+            .arity = 0,
+        };
+    }
+    if (call_n == 0) { free(calls); return 0; }
+
+    /* Sort by (line_start, col_start). */
+    for (int i = 0; i < call_n; i++) {
+        for (int j = i + 1; j < call_n; j++) {
+            int swap = 0;
+            if (calls[j].line_start < calls[i].line_start) swap = 1;
+            else if (calls[j].line_start == calls[i].line_start && calls[j].col_start < calls[i].col_start) swap = 1;
+            if (swap) { CCClosureCallNode t = calls[i]; calls[i] = calls[j]; calls[j] = t; }
+        }
+    }
+
+    /* Assign occurrence per (line_start, callee) so we can find spans after prior rewrites. */
+    for (int i = 0; i < call_n; i++) {
+        int occ = 1;
+        for (int j = 0; j < i; j++) {
+            if (calls[j].line_start == calls[i].line_start && calls[j].callee && calls[i].callee &&
+                strcmp(calls[j].callee, calls[i].callee) == 0) occ++;
+        }
+        calls[i].occ_1based = occ;
+    }
+
+    /* Best-effort: build a global decl table (depth 0) for CCClosure1/2 vars. */
+    char** decl_names[1] = {0};
+    char** decl_types[1] = {0};
+    unsigned char* decl_flags[1] = {0};
+    int decl_counts[1] = {0};
+    {
+        const char* cur = in_src;
+        const char* end = in_src + in_len;
+        while (cur < end) {
+            const char* nl = memchr(cur, (size_t)(end - cur), '\n');
+            size_t ll = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+            char tmp[1024];
+            size_t cp = ll < sizeof(tmp) - 1 ? ll : sizeof(tmp) - 1;
+            memcpy(tmp, cur, cp);
+            tmp[cp] = '\0';
+            cc__maybe_record_decl(decl_names, decl_types, decl_flags, decl_counts, 0, tmp);
+            if (!nl) break;
+            cur = nl + 1;
+        }
+    }
+
+    /* Determine arity for each call based on declared type of the callee identifier. */
+    int rewrite_n = 0;
+    for (int i = 0; i < call_n; i++) {
+        const char* ty = cc__lookup_decl_type(decl_names[0], decl_types[0], decl_counts[0], calls[i].callee);
+        if (!ty) continue;
+        if (strstr(ty, "CCClosure2")) calls[i].arity = 2;
+        else if (strstr(ty, "CCClosure1")) calls[i].arity = 1;
+        if (calls[i].arity) rewrite_n++;
+    }
+    if (rewrite_n == 0) {
+        for (int i = 0; i < decl_counts[0]; i++) { free(decl_names[0][i]); free(decl_types[0][i]); }
+        free(decl_names[0]); free(decl_types[0]); free(decl_flags[0]);
+        free(calls);
+        return 0;
+    }
+
+    /* Build call spans for closure calls. */
+    CCClosureCallSpan* spans = (CCClosureCallSpan*)calloc((size_t)rewrite_n, sizeof(*spans));
+    if (!spans) return 0;
+    int sn = 0;
+    for (int i = 0; i < call_n; i++) {
+        if (!calls[i].arity) continue;
+        /* Range based on lines [line_start, line_end]. */
+        size_t rs = cc__offset_of_line_1based(in_src, in_len, calls[i].line_start);
+        size_t re = cc__offset_of_line_1based(in_src, in_len, calls[i].line_end + 1);
+        if (re > in_len) re = in_len;
+        size_t nm_s = 0, lp = 0, rp_end = 0;
+        if (!cc__find_nth_callee_call_span_in_range(in_src, rs, re, calls[i].callee, calls[i].occ_1based, &nm_s, &lp, &rp_end))
+            continue;
+        spans[sn++] = (CCClosureCallSpan){
+            .name_start = nm_s,
+            .lparen = lp,
+            .rparen_end = rp_end,
+            .arity = calls[i].arity,
+            .parent = -1,
+            .children = NULL,
+            .child_n = 0,
+            .child_cap = 0,
+        };
+    }
+    if (sn == 0) { free(spans); spans = NULL; }
+
+    /* Clean decl table */
+    for (int i = 0; i < decl_counts[0]; i++) { free(decl_names[0][i]); free(decl_types[0][i]); }
+    free(decl_names[0]); free(decl_types[0]); free(decl_flags[0]);
+    free(calls);
+    if (!spans) return 0;
+
+    /* Sort spans by (name_start asc, rparen_end desc) to build nesting. */
+    for (int i = 0; i < sn; i++) {
+        for (int j = i + 1; j < sn; j++) {
+            int swap = 0;
+            if (spans[j].name_start < spans[i].name_start) swap = 1;
+            else if (spans[j].name_start == spans[i].name_start && spans[j].rparen_end > spans[i].rparen_end) swap = 1;
+            if (swap) { CCClosureCallSpan t = spans[i]; spans[i] = spans[j]; spans[j] = t; }
+        }
+    }
+
+    /* Build parent-child relationships */
+    int stack[256];
+    int sp = 0;
+    for (int i = 0; i < sn; i++) {
+        while (sp > 0) {
+            int top = stack[sp - 1];
+            if (spans[i].name_start >= spans[top].rparen_end) { sp--; continue; }
+            break;
+        }
+        if (sp > 0) {
+            int parent = stack[sp - 1];
+            spans[i].parent = parent;
+            cc__span_add_child(spans, parent, i);
+        }
+        if (sp < (int)(sizeof(stack)/sizeof(stack[0]))) stack[sp++] = i;
+    }
+
+    /* Emit rewritten source */
+    char* out = NULL;
+    size_t out_len2 = 0, out_cap2 = 0;
+    size_t cur = 0;
+    for (int i = 0; i < sn; i++) {
+        if (spans[i].parent != -1) continue;
+        if (spans[i].name_start > cur) cc__append_n(&out, &out_len2, &out_cap2, in_src + cur, spans[i].name_start - cur);
+        /* Emit rewritten call */
+        size_t nm_s = spans[i].name_start;
+        size_t nm_e = spans[i].lparen;
+        while (nm_e > nm_s && (in_src[nm_e - 1] == ' ' || in_src[nm_e - 1] == '\t' || in_src[nm_e - 1] == '\n' || in_src[nm_e - 1] == '\r')) nm_e--;
+        char nm[128];
+        size_t nn = nm_e > nm_s ? (nm_e - nm_s) : 0;
+        if (nn > 0 && nn < sizeof(nm)) {
+            memcpy(nm, in_src + nm_s, nn);
+            nm[nn] = '\0';
+            cc__emit_call_replacement(in_src, nm, spans, i, &out, &out_len2, &out_cap2);
+        } else {
+            cc__append_n(&out, &out_len2, &out_cap2, in_src + spans[i].name_start, spans[i].rparen_end - spans[i].name_start);
+        }
+        cur = spans[i].rparen_end;
+    }
+    if (cur < in_len) cc__append_n(&out, &out_len2, &out_cap2, in_src + cur, in_len - cur);
+
+    for (int i = 0; i < sn; i++) free(spans[i].children);
+    free(spans);
+
+    if (!out) return 0;
+    *out_src = out;
+    *out_len = out_len2;
+    return 1;
+}
+
+/* Helper implementations */
+static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
+    if (!s || line_no <= 1) return 0;
+    int cur = 1;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\n') {
+            cur++;
+            if (cur == line_no) return i + 1;
+        }
+    }
+    return len;
+}
+
+static int cc__same_source_file(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    if (strcmp(a, b) == 0) return 1;
+
+    const char* a_base = cc__basename(a);
+    const char* b_base = cc__basename(b);
+    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
+
+    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
+    const char* a_suf = cc__path_suffix2(a);
+    const char* b_suf = cc__path_suffix2(b);
+    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
+
+    /* Fallback: basename-only match. */
+    return 1;
