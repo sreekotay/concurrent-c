@@ -806,7 +806,7 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     if (!root || !ctx) return -1;
     ctx->errors = 0;
 
-    /* Transitional: allow only the very small `return await foo();` shape for now.
+    /* `await` is allowed, but only inside @async functions.
        Ignore `await` in comments/strings so tests can mention it in prose. */
     if (ctx->input_path) {
         FILE* f = fopen(ctx->input_path, "rb");
@@ -905,8 +905,15 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         int i2 = fgetc(f);
                         int t2 = fgetc(f);
                         if (w == 'w' && a2 == 'a' && i2 == 'i' && t2 == 't') {
+                            StubNodeView sn;
+                            memset(&sn, 0, sizeof(sn));
+                            sn.file = ctx->input_path;
+                            sn.line_start = 1;
+                            sn.col_start = 1;
+                            cc__emit_err(ctx, &sn, "CC: await is only valid inside @async functions");
+                            ctx->errors++;
                             fclose(f);
-                            return 0;
+                            return -1;
                         }
                         /* push back in reverse order if not matched */
                         if (t2 != EOF) ungetc(t2, f);
@@ -971,8 +978,28 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
         }
     }
 
-    /* Temporary: allow `await` (async lowering is in-progress).
-       Unsupported await shapes may still fail later in visitor/codegen. */
+    /* Enforce: `await` only inside @async functions (shape is handled by lowering). */
+    for (int i = 0; i < n; i++) {
+        const StubNodeView* an = &nodes[i];
+        if (an->kind != CC_STUB_AWAIT) continue;
+        int cur = an->parent;
+        int ok = 0;
+        while (cur >= 0 && cur < n) {
+            const StubNodeView* pn = &nodes[cur];
+            if (pn->kind == CC_STUB_DECL_ITEM && pn->aux_s1 && pn->aux_s2 && strchr(pn->aux_s2, '(')) {
+                if (((unsigned int)pn->aux2 & CC_FN_ATTR_ASYNC) != 0) ok = 1;
+                break;
+            }
+            cur = pn->parent;
+        }
+        if (!ok) {
+            cc__emit_err(ctx, an, "CC: await is only valid inside @async functions");
+            ctx->errors++;
+            free(idx_map);
+            free(owned_nodes);
+            return -1;
+        }
+    }
 
     /* Auto-blocking diagnostics (env-gated): identify direct calls to non-@async, non-@noblock
        functions inside @async functions. This is the classification backbone for spec auto-wrapping. */

@@ -1814,6 +1814,8 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_BATCH_STMT_CALLS = 3,
         CC_AB_REWRITE_BATCH_STMTS_THEN_RETURN = 4,
         CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN = 5,
+        CC_AB_REWRITE_RETURN_EXPR_CALL = 6,
+        CC_AB_REWRITE_ASSIGN_EXPR_CALL = 7,
     } CCAutoBlockRewriteKind;
 
     typedef struct {
@@ -1901,11 +1903,11 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             if (s2 < call_start) call_start = s2;
         }
 
-        /* Only statement-form calls: next non-ws must be ';' */
+        /* Next non-ws token after call. */
         size_t j = call_end;
         while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t' || in_src[j] == '\n' || in_src[j] == '\r')) j++;
-        if (j >= in_len || in_src[j] != ';') continue;
-        size_t stmt_end = j + 1;
+        int is_stmt_form = (j < in_len && in_src[j] == ';') ? 1 : 0;
+        size_t stmt_end = is_stmt_form ? (j + 1) : call_end;
 
         /* Line + indent info */
         size_t lb = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
@@ -2018,7 +2020,7 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             if (n[cur2].kind == 14) { assign_idx = cur2; break; } /* ASSIGN */
         }
 
-        if (ret_idx >= 0 && n[ret_idx].line_start == n[i].line_start) {
+        if (ret_idx >= 0 && n[ret_idx].line_start == n[i].line_start && is_stmt_form) {
             /* return <call>; */
             size_t rs = lb;
             while (rs < in_len && (in_src[rs] == ' ' || in_src[rs] == '\t')) rs++;
@@ -2035,12 +2037,40 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     }
                 }
             }
-            /* If this CALL is within a return statement but not a root `return <call>;`, skip. */
             if (kind != CC_AB_REWRITE_RETURN_CALL) {
-                for (int pi = 0; pi < paramc; pi++) free(param_types[pi]);
-                continue;
+                /* Not a root `return <call>;` -> rewrite the whole return statement as
+                   `tmp = await run_blocking(...); return ...tmp...;` (no braces; async_text can't handle blocks). */
+                if (!ret_is_void && !ret_is_structy) {
+                    /* Find statement end ';' at top-level from the start of the line. */
+                    size_t endp = lb;
+                    int par = 0, brk = 0, br = 0;
+                    int ins = 0; char q = 0;
+                    int in_lc = 0, in_bc = 0;
+                    for (size_t k = lb; k < in_len; k++) {
+                        char ch = in_src[k];
+                        char ch2 = (k + 1 < in_len) ? in_src[k + 1] : 0;
+                        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
+                        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; k++; } continue; }
+                        if (ins) { if (ch == '\\' && k + 1 < in_len) { k++; continue; } if (ch == q) ins = 0; continue; }
+                        if (ch == '/' && ch2 == '/') { in_lc = 1; k++; continue; }
+                        if (ch == '/' && ch2 == '*') { in_bc = 1; k++; continue; }
+                        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+                        if (ch == '(') par++;
+                        else if (ch == ')') { if (par) par--; }
+                        else if (ch == '[') brk++;
+                        else if (ch == ']') { if (brk) brk--; }
+                        else if (ch == '{') br++;
+                        else if (ch == '}') { if (br) br--; }
+                        else if (ch == ';' && par == 0 && brk == 0 && br == 0) { endp = k + 1; break; }
+                    }
+                    if (endp > lb && endp <= in_len) {
+                        kind = CC_AB_REWRITE_RETURN_EXPR_CALL;
+                        stmt_start = lb;
+                        stmt_end = endp;
+                    }
+                }
             }
-        } else if (assign_idx >= 0 && n[assign_idx].line_start == n[i].line_start) {
+        } else if (assign_idx >= 0 && n[assign_idx].line_start == n[i].line_start && is_stmt_form) {
             /* <lhs> = <call>; */
             const char* op = n[assign_idx].aux_s2;
             if (op && strcmp(op, "=") == 0 && n[assign_idx].aux_s1) {
@@ -2064,30 +2094,68 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     }
                 }
             }
-            /* If this CALL is within an assignment but not a root `<lhs> = <call>;`, skip. */
             if (kind != CC_AB_REWRITE_ASSIGN_CALL) {
-                for (int pi = 0; pi < paramc; pi++) free(param_types[pi]);
-                continue;
+                if (!ret_is_void && !ret_is_structy) {
+                    /* Find statement end ';' at top-level from the start of the line. */
+                    size_t endp = lb;
+                    int par = 0, brk = 0, br = 0;
+                    int ins = 0; char q = 0;
+                    int in_lc = 0, in_bc = 0;
+                    for (size_t k = lb; k < in_len; k++) {
+                        char ch = in_src[k];
+                        char ch2 = (k + 1 < in_len) ? in_src[k + 1] : 0;
+                        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
+                        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; k++; } continue; }
+                        if (ins) { if (ch == '\\' && k + 1 < in_len) { k++; continue; } if (ch == q) ins = 0; continue; }
+                        if (ch == '/' && ch2 == '/') { in_lc = 1; k++; continue; }
+                        if (ch == '/' && ch2 == '*') { in_bc = 1; k++; continue; }
+                        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+                        if (ch == '(') par++;
+                        else if (ch == ')') { if (par) par--; }
+                        else if (ch == '[') brk++;
+                        else if (ch == ']') { if (brk) brk--; }
+                        else if (ch == '{') br++;
+                        else if (ch == '}') { if (br) br--; }
+                        else if (ch == ';' && par == 0 && brk == 0 && br == 0) { endp = k + 1; break; }
+                    }
+                    if (endp > lb && endp <= in_len) {
+                        kind = CC_AB_REWRITE_ASSIGN_EXPR_CALL;
+                        stmt_start = lb;
+                        stmt_end = endp;
+                    }
+                }
             }
         } else {
             /* plain statement call: require call begins statement token */
-            int ok = 1;
-            for (size_t k = first; k < call_start; k++) {
-                char ch = in_src[k];
-                if (ch == ' ' || ch == '\t') continue;
-                ok = 0;
-                break;
-            }
-            if (!ok) {
+            if (is_stmt_form) {
+                int ok = 1;
+                for (size_t k = first; k < call_start; k++) {
+                    char ch = in_src[k];
+                    if (ch == ' ' || ch == '\t') continue;
+                    ok = 0;
+                    break;
+                }
+                if (ok) {
+                    kind = CC_AB_REWRITE_STMT_CALL;
+                    stmt_start = lb;
+                } else {
+                    /* Don't try to rewrite general expression contexts yet (e.g. for-loop headers). */
+                    for (int pi = 0; pi < paramc; pi++) free(param_types[pi]);
+                    continue;
+                }
+            } else {
+                /* Don't try to rewrite general expression contexts yet (e.g. for-loop headers). */
                 for (int pi = 0; pi < paramc; pi++) free(param_types[pi]);
                 continue;
             }
-            kind = CC_AB_REWRITE_STMT_CALL;
-            stmt_start = lb;
         }
 
         /* If we didn't select a kind (due to conservative checks), skip. */
-        if (kind != CC_AB_REWRITE_STMT_CALL && kind != CC_AB_REWRITE_RETURN_CALL && kind != CC_AB_REWRITE_ASSIGN_CALL) {
+        if (kind != CC_AB_REWRITE_STMT_CALL &&
+            kind != CC_AB_REWRITE_RETURN_CALL &&
+            kind != CC_AB_REWRITE_ASSIGN_CALL &&
+            kind != CC_AB_REWRITE_RETURN_EXPR_CALL &&
+            kind != CC_AB_REWRITE_ASSIGN_EXPR_CALL) {
             for (int pi = 0; pi < paramc; pi++) free(param_types[pi]);
             continue;
         }
@@ -2137,10 +2205,12 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         return 0;
     }
 
-    /* Sort replacements by start descending so offsets remain valid as we rewrite. */
+    /* Filter overlaps (keep outermost). */
+    /* Sort ASC by start, tie-break by larger end first (outer spans first). */
     for (int i = 0; i < rep_n - 1; i++) {
         for (int k = i + 1; k < rep_n; k++) {
-            if (reps[k].start > reps[i].start) {
+            if (reps[k].start < reps[i].start ||
+                (reps[k].start == reps[i].start && reps[k].end > reps[i].end)) {
                 Replace tmp = reps[i];
                 reps[i] = reps[k];
                 reps[k] = tmp;
@@ -2148,7 +2218,6 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
     }
 
-    /* Filter overlaps (keep outermost). */
     int out_n = 0;
     for (int i = 0; i < rep_n; i++) {
         int overlap = 0;
@@ -2584,7 +2653,37 @@ static int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                            ai,
                            (int)(arg_ends[ai] - arg_starts[ai]), call_txt + arg_starts[ai]);
         }
-        if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {
+        if (reps[ri].kind == CC_AB_REWRITE_RETURN_EXPR_CALL || reps[ri].kind == CC_AB_REWRITE_ASSIGN_EXPR_CALL) {
+            char tmp_name[96];
+            snprintf(tmp_name, sizeof(tmp_name), "__cc_ab_expr_l%d", reps[ri].line_start);
+
+            /* Emit a CCClosure0 value first (avoid embedding closure literal directly in `await <expr>`),
+               then await the task into an intptr temp, then emit the original statement with the call
+               replaced by that temp. */
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
+            if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+            else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+            cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+            cc__append_str(&repl, &repl_len, &repl_cap, "(");
+            for (int ai = 0; ai < argc; ai++) {
+                if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
+                } else {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                }
+            }
+            cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sintptr_t %s = 0;\n", I, tmp_name);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s%s = await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                           I, tmp_name, reps[ri].line_start);
+
+            /* Original statement with call replaced by tmp. */
+            cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt, call_s);
+            cc__append_str(&repl, &repl_len, &repl_cap, tmp_name);
+            cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
+            if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
+        } else if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {
             cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { ", I, reps[ri].line_start);
             cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
             cc__append_str(&repl, &repl_len, &repl_cap, "(");
@@ -3483,6 +3582,285 @@ static int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, 
     return 1;
 }
 
+#ifdef CC_TCC_EXT_AVAILABLE
+static int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
+                                              const CCVisitorCtx* ctx,
+                                              const char* in_src,
+                                              size_t in_len,
+                                              char** out_src,
+                                              size_t* out_len) {
+    if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
+    *out_src = NULL;
+    *out_len = 0;
+    if (!root->nodes || root->node_count <= 0) return 0;
+
+    typedef struct NodeView {
+        int kind;
+        int parent;
+        const char* file;
+        int line_start;
+        int line_end;
+        int col_start;
+        int col_end;
+        int aux1;
+        int aux2;
+        const char* aux_s1;
+        const char* aux_s2;
+    } NodeView;
+    const NodeView* n = (const NodeView*)root->nodes;
+
+    enum { CC_FN_ATTR_ASYNC = 1u << 0 };
+
+    typedef struct {
+        size_t start;
+        size_t end;
+        size_t insert_off;
+        size_t trim_start;
+        size_t trim_end;
+        char tmp[64];
+        char* insert_text; /* owned */
+    } AwaitRep;
+    AwaitRep reps[128];
+    int rep_n = 0;
+
+    if (getenv("CC_DEBUG_AWAIT_REWRITE")) {
+        int aw = 0;
+        for (int i = 0; i < root->node_count; i++) if (n[i].kind == 6) aw++;
+        fprintf(stderr, "CC_DEBUG_AWAIT_REWRITE: await nodes in stub AST: %d\n", aw);
+        int shown = 0;
+        for (int i = 0; i < root->node_count && shown < 5; i++) {
+            if (n[i].kind != 6) continue;
+            if (n[i].line_start <= 0 || n[i].col_start <= 0) continue;
+            size_t os = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_start, n[i].col_start);
+            fprintf(stderr, "CC_DEBUG_AWAIT_REWRITE:  node[%d] file=%s line=%d col=%d off=%zu head='%.16s'\n",
+                    i, n[i].file ? n[i].file : "<null>", n[i].line_start, n[i].col_start, os,
+                    (os < in_len) ? (in_src + os) : "<oob>");
+            shown++;
+        }
+    }
+
+    for (int i = 0; i < root->node_count && rep_n < (int)(sizeof(reps) / sizeof(reps[0])); i++) {
+        if (n[i].kind != 6) continue; /* AWAIT */
+        if (n[i].line_start <= 0 || n[i].col_start <= 0) continue;
+        if (n[i].line_end <= 0 || n[i].col_end <= 0) continue;
+        size_t a_s = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_start, n[i].col_start);
+        size_t a_e = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);
+        if (a_e <= a_s || a_e > in_len) continue;
+        /* Best-effort: many nodes record `col_start` at the operand; recover the `await` keyword
+           by scanning backward on the same line for the nearest `await` token. */
+        {
+            size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
+            size_t k = a_s;
+            size_t found = (size_t)-1;
+            while (k > line_off + 4) {
+                size_t s0 = k - 5;
+                if (memcmp(in_src + s0, "await", 5) == 0) {
+                    char before = (s0 > line_off) ? in_src[s0 - 1] : ' ';
+                    char after = (s0 + 5 < in_len) ? in_src[s0 + 5] : ' ';
+                    int before_ok = !(before == '_' || isalnum((unsigned char)before));
+                    int after_ok = !(after == '_' || isalnum((unsigned char)after));
+                    if (before_ok && after_ok) { found = s0; break; }
+                }
+                k--;
+            }
+            if (found != (size_t)-1) a_s = found;
+            if (a_s + 5 > in_len || memcmp(in_src + a_s, "await", 5) != 0) continue;
+        }
+
+        /* Require inside an @async function (otherwise leave it; checker will error). */
+        int cur = n[i].parent;
+        int is_async = 0;
+        int best_line = n[i].line_start;
+        while (cur >= 0 && cur < root->node_count) {
+            if (n[cur].kind == 12) {
+                /* Any enclosing decl-item marked async implies we're inside @async. */
+                if (((unsigned int)n[cur].aux2 & (unsigned int)CC_FN_ATTR_ASYNC) != 0) is_async = 1;
+            }
+            /* Find earliest line start among nearby statement-ish ancestors. */
+            if ((n[cur].kind == 15 || n[cur].kind == 14 || n[cur].kind == 5) &&
+                n[cur].line_start > 0 && n[cur].line_start < best_line) {
+                best_line = n[cur].line_start;
+            }
+            cur = n[cur].parent;
+        }
+        if (!is_async) continue;
+
+        /* Skip if await is already statement-root-ish: `await ...;`, `x = await ...;`, `return await ...;` */
+        {
+            size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
+            size_t p = line_off;
+            while (p < in_len && (in_src[p] == ' ' || in_src[p] == '\t')) p++;
+            if (p == a_s) continue; /* await at start of statement line */
+            /* Check if immediate lhs assignment `= await` by scanning backward for '=' on same line before await. */
+            for (size_t k = a_s; k > line_off; k--) {
+                char c = in_src[k - 1];
+                if (c == '\n') break;
+                if (c == '=') { goto skip_this_await; }
+            }
+            /* Check `return await` by scanning from line start. */
+            if (p + 6 <= in_len && memcmp(in_src + p, "return", 6) == 0) {
+                size_t q = p + 6;
+                while (q < in_len && (in_src[q] == ' ' || in_src[q] == '\t')) q++;
+                if (q == a_s) continue;
+            }
+        }
+
+        /* Compute insertion offset at start of the enclosing statement line. */
+        size_t insert_off = cc__offset_of_line_1based(in_src, in_len, best_line);
+        if (insert_off > in_len) insert_off = in_len;
+
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "__cc_aw_l%d_%d", n[i].line_start, rep_n);
+
+        AwaitRep r;
+        memset(&r, 0, sizeof(r));
+        r.start = a_s;
+        r.end = a_e;
+        r.insert_off = insert_off;
+        /* Trim bounds computed later (after all reps known) */
+        strncpy(r.tmp, tmp, sizeof(r.tmp) - 1);
+        reps[rep_n++] = r;
+        continue;
+    skip_this_await:
+        (void)0;
+    }
+
+    if (rep_n == 0) return 0;
+
+    /* Compute trimmed ranges now. */
+    for (int i = 0; i < rep_n; i++) {
+        size_t t0 = reps[i].start;
+        size_t t1 = reps[i].end;
+        while (t0 < t1 && (in_src[t0] == ' ' || in_src[t0] == '\t' || in_src[t0] == '\n' || in_src[t0] == '\r')) t0++;
+        while (t1 > t0 && (in_src[t1 - 1] == ' ' || in_src[t1 - 1] == '\t' || in_src[t1 - 1] == '\n' || in_src[t1 - 1] == '\r')) t1--;
+        reps[i].trim_start = t0;
+        reps[i].trim_end = t1;
+    }
+
+    /* Build insertion texts. Ensure nested awaits inside an await-expression are replaced
+       by the corresponding temp names (so outer hoists don't contain raw inner `await`). */
+    for (int i = 0; i < rep_n; i++) {
+        /* Indent prefix for this insertion */
+        size_t insert_off = reps[i].insert_off;
+        size_t ind_end = insert_off;
+        while (ind_end < in_len && (in_src[ind_end] == ' ' || in_src[ind_end] == '\t')) ind_end++;
+        size_t ind_len = ind_end - insert_off;
+
+        /* Build await text with nested replacements. */
+        char* await_txt = NULL;
+        size_t await_len = 0, await_cap = 0;
+        size_t cur = reps[i].trim_start;
+        size_t end = reps[i].trim_end;
+        while (cur < end) {
+            int did = 0;
+            for (int j = 0; j < rep_n; j++) {
+                if (j == i) continue;
+                if (reps[j].trim_start >= reps[i].trim_start &&
+                    reps[j].trim_end <= reps[i].trim_end &&
+                    reps[j].trim_start == cur) {
+                    cc__append_str(&await_txt, &await_len, &await_cap, reps[j].tmp);
+                    cur = reps[j].trim_end;
+                    did = 1;
+                    break;
+                }
+            }
+            if (did) continue;
+            cc__append_n(&await_txt, &await_len, &await_cap, in_src + cur, 1);
+            cur++;
+        }
+        if (!await_txt || await_len == 0) { free(await_txt); continue; }
+
+        /* Insert two statements: decl + assignment */
+        size_t ins_cap = ind_len * 2 + await_len + 256;
+        char* ins = (char*)malloc(ins_cap);
+        if (!ins) { free(await_txt); continue; }
+        int wn = 0;
+        wn += snprintf(ins + (size_t)wn, ins_cap - (size_t)wn, "%.*sintptr_t %s = 0;\n",
+                       (int)ind_len, in_src + insert_off, reps[i].tmp);
+        wn += snprintf(ins + (size_t)wn, ins_cap - (size_t)wn, "%.*s%s = %.*s;\n",
+                       (int)ind_len, in_src + insert_off, reps[i].tmp, (int)await_len, await_txt);
+        free(await_txt);
+        if (wn <= 0) { free(ins); continue; }
+        reps[i].insert_text = ins;
+    }
+
+    /* Sort by start asc for replacements; insertions will be handled by bucketed offsets. */
+    for (int i = 0; i < rep_n; i++) {
+        for (int j = i + 1; j < rep_n; j++) {
+            if (reps[j].start < reps[i].start) {
+                AwaitRep t = reps[i];
+                reps[i] = reps[j];
+                reps[j] = t;
+            }
+        }
+    }
+
+    /* Build output streaming: emit insertions when reaching an insertion offset. */
+    char* out = NULL;
+    size_t outl = 0, outc = 0;
+
+    int ins_idx[128];
+    for (int i = 0; i < rep_n; i++) ins_idx[i] = i;
+    /* sort indices by insert_off asc */
+    for (int i = 0; i < rep_n; i++) {
+        for (int j = i + 1; j < rep_n; j++) {
+            if (reps[ins_idx[j]].insert_off < reps[ins_idx[i]].insert_off) {
+                int t = ins_idx[i]; ins_idx[i] = ins_idx[j]; ins_idx[j] = t;
+            }
+        }
+    }
+    int ins_p = 0;
+
+    size_t cur_off = 0;
+    int rep_i = 0;
+    while (cur_off < in_len) {
+        /* Emit any insertions at this offset (may be multiple). */
+        if (ins_p < rep_n && reps[ins_idx[ins_p]].insert_off == cur_off) {
+            /* Collect all with this insert_off, then emit in descending start order (inner first). */
+            int tmp_idx[128];
+            int tmp_n = 0;
+            size_t off = reps[ins_idx[ins_p]].insert_off;
+            while (ins_p < rep_n && reps[ins_idx[ins_p]].insert_off == off) {
+                tmp_idx[tmp_n++] = ins_idx[ins_p++];
+            }
+            for (int a = 0; a < tmp_n; a++) {
+                for (int b = a + 1; b < tmp_n; b++) {
+                    if (reps[tmp_idx[b]].start > reps[tmp_idx[a]].start) {
+                        int t = tmp_idx[a]; tmp_idx[a] = tmp_idx[b]; tmp_idx[b] = t;
+                    }
+                }
+            }
+            for (int k = 0; k < tmp_n; k++) {
+                const char* it = reps[tmp_idx[k]].insert_text;
+                if (it) cc__append_str(&out, &outl, &outc, it);
+            }
+        }
+        /* Apply next replacement if it starts here. */
+        if (rep_i < rep_n && reps[rep_i].start == cur_off) {
+            cc__append_str(&out, &outl, &outc, reps[rep_i].tmp);
+            cur_off = reps[rep_i].end;
+            rep_i++;
+            continue;
+        }
+        /* Otherwise copy one byte */
+        cc__append_n(&out, &outl, &outc, in_src + cur_off, 1);
+        cur_off++;
+    }
+    /* Insertions at EOF */
+    while (ins_p < rep_n && reps[ins_idx[ins_p]].insert_off == cur_off) {
+        const char* it = reps[ins_idx[ins_p]].insert_text;
+        if (it) cc__append_str(&out, &outl, &outc, it);
+        ins_p++;
+    }
+
+    for (int i = 0; i < rep_n; i++) free(reps[i].insert_text);
+    if (!out) return 0;
+    *out_src = out;
+    *out_len = outl;
+    return 1;
+}
+#endif
+
 static char* cc__rewrite_idents_to_repls(const char* s,
                                         const char* const* names,
                                         const char* const* repls,
@@ -4258,12 +4636,47 @@ int cc_visit(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) 
     }
 #endif
 
+    /* Normalize `await <expr>` used inside larger expressions into temp hoists so the
+       text-based async state machine can lower it (AST-driven span rewrite). */
+#ifdef CC_TCC_EXT_AVAILABLE
+    if (src_ufcs && root && root->nodes && root->node_count > 0) {
+        char* rewritten = NULL;
+        size_t rewritten_len = 0;
+        if (cc__rewrite_await_exprs_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = rewritten_len;
+        }
+        if (getenv("CC_DEBUG_AWAIT_REWRITE") && src_ufcs) {
+            const char* needle = "@async int f";
+            const char* p = strstr(src_ufcs, needle);
+            if (!p) p = strstr(src_ufcs, "@async");
+            if (p) {
+                fprintf(stderr, "CC_DEBUG_AWAIT_REWRITE: ---- snippet ----\n");
+                size_t off = (size_t)(p - src_ufcs);
+                size_t take = 800;
+                if (off + take > src_ufcs_len) take = src_ufcs_len - off;
+                fwrite(p, 1, take, stderr);
+                fprintf(stderr, "\nCC_DEBUG_AWAIT_REWRITE: ---- end ----\n");
+            }
+        }
+    }
+#endif
+
     /* Text-based @async lowering (state machine) after all span-driven rewrites.
        This pass is allowed to change offsets because it runs last in the pipeline. */
     if (src_ufcs) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
-        if (cc_async_rewrite_state_machine_text(src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
+        int ar = cc_async_rewrite_state_machine_text(src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        if (ar < 0) {
+            /* async_text already printed an error */
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return EINVAL;
+        }
+        if (ar > 0) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
             src_ufcs_len = rewritten_len;

@@ -1,0 +1,14 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+@async int add1(int x) {
+    return x + 1;
+}
+
+int main(void) {
+    /* Sync call to @async returns a task (non-blocking). */
+    CCTaskIntptr t = add1(41);
+    int r = cc_block_on(int, t);
+    return (r == 42) ? 0 : 1;
+}
+

@@ -45,6 +45,7 @@ typedef struct {
 
 typedef struct {
     cc_task_intptr_poll_fn poll;
+    int (*wait)(void* frame); /* optional: block until poll can make progress (no busy-spin) */
     void* frame;
     void (*drop)(void* frame);
 } CCTaskIntptrPoll;
@@ -64,6 +65,8 @@ CCTaskIntptr cc_run_blocking_task_intptr(CCClosure0 c);
 
 /* Construct a task backed by a poll-based state machine. */
 CCTaskIntptr cc_task_intptr_make_poll(cc_task_intptr_poll_fn poll, void* frame, void (*drop)(void* frame));
+/* Like cc_task_intptr_make_poll, but also provides an optional wait hook for block_on. */
+CCTaskIntptr cc_task_intptr_make_poll_ex(cc_task_intptr_poll_fn poll, int (*wait)(void* frame), void* frame, void (*drop)(void* frame));
 
 /* Block current OS thread until task completes and return result. Frees task resources. */
 intptr_t cc_block_on_intptr(CCTaskIntptr t);

@@ -1,0 +1,17 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+@async int f(int x) {
+    if (x) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+int main(void) {
+    int a = cc_block_on(int, f(1));
+    int b = cc_block_on(int, f(0));
+    return (a == 1 && b == 2) ? 0 : 1;
+}
+

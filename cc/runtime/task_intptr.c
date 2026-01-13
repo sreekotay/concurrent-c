@@ -113,6 +113,19 @@ CCTaskIntptr cc_task_intptr_make_poll(cc_task_intptr_poll_fn poll, void* frame, 
     if (!poll || !frame) return t;
     t.kind = CC_TASK_INTPTR_KIND_POLL;
     t.poll.poll = poll;
+    t.poll.wait = NULL;
+    t.poll.frame = frame;
+    t.poll.drop = drop;
+    return t;
+}
+
+CCTaskIntptr cc_task_intptr_make_poll_ex(cc_task_intptr_poll_fn poll, int (*wait)(void*), void* frame, void (*drop)(void*)) {
+    CCTaskIntptr t;
+    memset(&t, 0, sizeof(t));
+    if (!poll || !frame) return t;
+    t.kind = CC_TASK_INTPTR_KIND_POLL;
+    t.poll.poll = poll;
+    t.poll.wait = wait;
     t.poll.frame = frame;
     t.poll.drop = drop;
     return t;
@@ -144,7 +157,17 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
     for (;;) {
         CCFutureStatus st = cc_task_intptr_poll(&t, &r, &err);
         if (st == CC_FUTURE_PENDING) {
-            (void)cc_sleep_ms(1);
+            if (t.kind == CC_TASK_INTPTR_KIND_FUTURE) {
+                /* For "future" tasks, block directly on the done channel once and then return the result.
+                   This avoids spin-polling and avoids needing to preserve the completion for poll(). */
+                err = cc_async_wait(&t.future.fut.handle);
+                if (err == 0 && t.future.fut.result) r = *(const intptr_t*)t.future.fut.result;
+                break;
+            } else if (t.kind == CC_TASK_INTPTR_KIND_POLL && t.poll.wait) {
+                (void)t.poll.wait(t.poll.frame);
+            } else {
+                (void)cc_sleep_ms(1);
+            }
             continue;
         }
         break;

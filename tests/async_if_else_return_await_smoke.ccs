@@ -1,0 +1,24 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+static int add1(int x) { return x + 1; }
+
+@async int add1_async(int x) {
+    /* sync call -> auto-blocked into an await point */
+    return add1(x);
+}
+
+@async int f(int x) {
+    if (x) {
+        return await add1_async(40);
+    } else {
+        return await add1_async(0);
+    }
+}
+
+int main(void) {
+    int a = cc_block_on(int, f(1));
+    int b = cc_block_on(int, f(0));
+    return (a == 41 && b == 1) ? 0 : 1;
+}
+

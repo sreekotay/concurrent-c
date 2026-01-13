@@ -46,21 +46,36 @@ static inline CCFutureStatus cc_future_poll(CCFuture *f, int *out_err) {
 static inline CCFutureStatus cc_future_wait(CCFuture *f, int *out_err) {
     if (!f) return CC_FUTURE_ERR;
     int err = cc_async_wait(&f->handle);
-    if (err == 0) return 0;
+    if (err == 0) return CC_FUTURE_READY;
     if (out_err) *out_err = err;
-    if (err == ECANCELED) return ECANCELED;
-    if (err == ETIMEDOUT) return ETIMEDOUT;
-    return err;
+    if (err == ECANCELED) return CC_FUTURE_CANCELLED;
+    if (err == ETIMEDOUT) return CC_FUTURE_TIMEOUT;
+    return CC_FUTURE_ERR;
 }
 
 static inline CCFutureStatus cc_future_wait_deadline(CCFuture *f, const CCDeadline* deadline, int *out_err) {
     if (!f) return CC_FUTURE_ERR;
     int err = cc_async_wait_deadline(&f->handle, deadline);
-    if (err == 0) return 0;
+    if (err == 0) return CC_FUTURE_READY;
     if (out_err) *out_err = err;
-    if (err == ECANCELED) return ECANCELED;
-    if (err == ETIMEDOUT) return ETIMEDOUT;
-    return err;
+    if (err == ECANCELED) return CC_FUTURE_CANCELLED;
+    if (err == ETIMEDOUT) return CC_FUTURE_TIMEOUT;
+    return CC_FUTURE_ERR;
+}
+
+/* Block until the future has a completion code available, but do NOT consume it.
+   This is useful for `block_on` wait hooks: we want to avoid busy spin, while still
+   letting a later `cc_future_poll()` consume the completion and free the channel. */
+static inline int cc_future_wait_peek_err(CCFuture* f, int* out_err) {
+    if (!f || !f->handle.done) return EINVAL;
+    int err = 0;
+    int rc = cc_chan_recv(f->handle.done, &err, sizeof(int));
+    if (rc != 0) return rc;
+    /* Put it back so poll can observe it later. */
+    rc = cc_chan_send(f->handle.done, &err, sizeof(int));
+    if (rc != 0) return rc;
+    if (out_err) *out_err = err;
+    return 0;
 }
 
 static inline void cc_future_cancel(CCFuture *f) {

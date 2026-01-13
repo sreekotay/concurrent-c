@@ -1,0 +1,15 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+static int add1(int x) { return x + 1; } /* sync */
+
+@async int f(int x) {
+    /* Sync call inside a larger return expression: should be auto-blocked. */
+    return 1 + add1(x);
+}
+
+int main(void) {
+    int r = cc_block_on(int, f(40));
+    return (r == 42) ? 0 : 1;
+}
+

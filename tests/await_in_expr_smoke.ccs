@@ -1,0 +1,17 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+@async int add1(int x) {
+    return x + 1;
+}
+
+@async int f(void) {
+    /* Await used inside larger expressions (should be normalized + lowered). */
+    return 1 + (int)(await add1((int)(await add1(40))));
+}
+
+int main(void) {
+    int r = cc_block_on(int, f());
+    return (r == 43) ? 0 : 1;
+}
+
