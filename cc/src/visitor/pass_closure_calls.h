@@ -4,10 +4,9 @@
 #include <stddef.h>
 
 #include "visitor/visitor.h"
-struct CCASTRoot;
 
 /* Closure call rewriting pass: transforms closure calls to __cc_closure_call_N syntax */
-int cc__rewrite_all_closure_calls_with_nodes(const struct CCASTRoot* root,
+int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
                                            const CCVisitorCtx* ctx,
                                            const char* in_src,
                                            size_t in_len,

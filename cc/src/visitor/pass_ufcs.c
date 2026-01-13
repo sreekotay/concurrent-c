@@ -1,35 +1,39 @@
+/* Extracted from the working implementation in `cc/src/visitor/visitor.c`.
+   Goal: keep semantics identical while shrinking visitor.c over time. */
+
 #include "pass_ufcs.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "parser/parse.h"
 #include "visitor/ufcs.h"
-#include "visitor/visitor.h"
+
+static const char* cc__basename(const char* path);
+static const char* cc__path_suffix2(const char* path);
+static int cc__same_source_file(const char* a, const char* b);
 
 struct CC__UFCSSpan {
     size_t start; /* inclusive */
     size_t end;   /* exclusive */
 };
 
-static int cc__same_source_file(const char* a, const char* b);
-static const char* cc__basename(const char* path);
-static const char* cc__path_suffix2(const char* path);
 static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
 static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no);
+static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, size_t sep_pos);
 static int cc__span_from_anchor_and_end(const char* s,
                                        size_t range_start,
                                        size_t sep_pos,
                                        size_t end_pos_excl,
                                        struct CC__UFCSSpan* out_span);
 static int cc__find_ufcs_span_in_range(const char* s,
-                                      size_t range_start,
-                                      size_t range_end,
-                                      const char* method,
-                                      int occurrence_1based,
-                                      struct CC__UFCSSpan* out_span);
+                                       size_t range_start,
+                                       size_t range_end,
+                                       const char* method,
+                                       int occurrence_1based,
+                                       struct CC__UFCSSpan* out_span);
 
-int cc__rewrite_ufcs_spans_with_nodes(const struct CCASTRoot* root,
+int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
                                      const CCVisitorCtx* ctx,
                                      const char* in_src,
                                      size_t in_len,
@@ -172,8 +176,6 @@ int cc__rewrite_ufcs_spans_with_nodes(const struct CCASTRoot* root,
     return 1;
 }
 
-/* Helper implementations (extracted from visitor.c) */
-
 static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
     if (!s || line_no <= 1) return 0;
     int cur = 1;
@@ -196,6 +198,35 @@ static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_
     return off;
 }
 
+static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, size_t sep_pos) {
+    if (!s || sep_pos <= range_start) return range_start;
+    size_t r_end = sep_pos;
+    while (r_end > range_start && isspace((unsigned char)s[r_end - 1])) r_end--;
+    if (r_end == range_start) return range_start;
+
+    int par = 0, br = 0, brc = 0;
+    size_t r = r_end;
+    while (r > range_start) {
+        char c = s[r - 1];
+        if (c == ')') { par++; r--; continue; }
+        if (c == ']') { br++; r--; continue; }
+        if (c == '}') { brc++; r--; continue; }
+        if (c == '(' && par > 0) { par--; r--; continue; }
+        if (c == '[' && br > 0) { br--; r--; continue; }
+        if (c == '{' && brc > 0) { brc--; r--; continue; }
+        if (par || br || brc) { r--; continue; }
+        if (c == ',' || c == ';' || c == '=' || c == '\n' ||
+            c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
+            c == '&' || c == '|' || c == '^' || c == '!' || c == '~' ||
+            c == '<' || c == '>' || c == '?' || c == ':' ) {
+            break;
+        }
+        r--;
+    }
+    while (r < r_end && isspace((unsigned char)s[r])) r++;
+    return r;
+}
+
 static int cc__span_from_anchor_and_end(const char* s,
                                        size_t range_start,
                                        size_t sep_pos,
@@ -204,17 +235,17 @@ static int cc__span_from_anchor_and_end(const char* s,
     if (!s || !out_span) return 0;
     if (sep_pos < range_start) return 0;
     if (end_pos_excl <= sep_pos) return 0;
-    out_span->start = range_start;
+    out_span->start = cc__scan_receiver_start_left(s, range_start, sep_pos);
     out_span->end = end_pos_excl;
     return out_span->start < out_span->end;
 }
 
 static int cc__find_ufcs_span_in_range(const char* s,
-                                      size_t range_start,
-                                      size_t range_end,
-                                      const char* method,
-                                      int occurrence_1based,
-                                      struct CC__UFCSSpan* out_span) {
+                                       size_t range_start,
+                                       size_t range_end,
+                                       const char* method,
+                                       int occurrence_1based,
+                                       struct CC__UFCSSpan* out_span) {
     if (!s || !method || !out_span) return 0;
     const size_t method_len = strlen(method);
     if (method_len == 0) return 0;
@@ -230,12 +261,12 @@ static int cc__find_ufcs_span_in_range(const char* s,
         else continue;
 
         size_t mpos = sep_pos + (is_arrow ? 2 : 1);
-        while (mpos < range_end && (s[mpos] == ' ' || s[mpos] == '\t')) mpos++;
+        while (mpos < range_end && isspace((unsigned char)s[mpos])) mpos++;
         if (mpos + method_len >= range_end) continue;
         if (memcmp(s + mpos, method, method_len) != 0) continue;
 
         size_t after = mpos + method_len;
-        while (after < range_end && (s[after] == ' ' || s[after] == '\t')) after++;
+        while (after < range_end && isspace((unsigned char)s[after])) after++;
         if (after >= range_end || s[after] != '(') continue;
 
         /* Match Nth occurrence. */
@@ -245,7 +276,7 @@ static int cc__find_ufcs_span_in_range(const char* s,
         /* Receiver: allow non-trivial expressions like (foo()).bar, arr[i].m, (*p).m.
            Find the start by scanning left with bracket balancing until a delimiter. */
         size_t r_end = sep_pos;
-        while (r_end > range_start && (s[r_end - 1] == ' ' || s[r_end - 1] == '\t')) r_end--;
+        while (r_end > range_start && isspace((unsigned char)s[r_end - 1])) r_end--;
         if (r_end == range_start) continue;
 
         int par = 0, br = 0, brc = 0;
@@ -271,7 +302,7 @@ static int cc__find_ufcs_span_in_range(const char* s,
             r--;
         }
         /* Trim any leading whitespace included in the backward scan. */
-        while (r < r_end && (s[r] == ' ' || s[r] == '\t')) r++;
+        while (r < r_end && isspace((unsigned char)s[r])) r++;
         if (r >= r_end) continue;
 
         /* Find matching ')' for the call, skipping strings/chars. */
@@ -310,6 +341,8 @@ static const char* cc__basename(const char* path) {
     return last;
 }
 
+/* Return pointer to a stable suffix (last 2 path components) inside `path`.
+   If `path` has fewer than 2 components, returns basename. */
 static const char* cc__path_suffix2(const char* path) {
     if (!path) return NULL;
     const char* end = path + strlen(path);

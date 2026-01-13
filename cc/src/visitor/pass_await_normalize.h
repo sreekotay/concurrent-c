@@ -4,10 +4,9 @@
 #include <stddef.h>
 
 #include "visitor/visitor.h"
-struct CCASTRoot;
 
 /* Await expression normalization pass: transforms complex await expressions into temp variables */
-int cc__rewrite_await_exprs_with_nodes(const struct CCASTRoot* root,
+int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
                                       const CCVisitorCtx* ctx,
                                       const char* in_src,
                                       size_t in_len,

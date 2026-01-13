@@ -4,10 +4,9 @@
 #include <stddef.h>
 
 #include "visitor/visitor.h"
-struct CCASTRoot;
 
 /* Auto-blocking pass: transforms sync calls in @async functions to await cc_run_blocking_task_intptr(...) */
-int cc__rewrite_autoblocking_calls_with_nodes(const struct CCASTRoot* root,
+int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                                              const CCVisitorCtx* ctx,
                                              const char* in_src,
                                              size_t in_len,
