@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 #include "comptime/symbols.h"
 #include "parser/parse.h"
@@ -20,81 +19,18 @@
 #include "visitor/pass_strip_markers.h"
 #include "visitor/pass_ufcs.h"
 #include "visitor/pass.h"
+#include "visitor/text_span.h"
 #include "visitor/visitor.h"
+#include "visitor/visitor_fileutil.h"
 #include "visitor/walk.h"
 
 
 static const char* cc__basename(const char* path);
 static const char* cc__path_suffix2(const char* path);
 static int cc__same_source_file(const char* a, const char* b);
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no);
 static int cc__node_file_matches_this_tu(const CCASTRoot* root,
                                         const CCVisitorCtx* ctx,
                                         const char* file);
-
-static int cc__read_entire_file(const char* path, char** out_buf, size_t* out_len) {
-    if (!path || !out_buf || !out_len) return 0;
-    *out_buf = NULL;
-    *out_len = 0;
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return 0; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
-    char* buf = (char*)malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return 0; }
-    size_t n = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    buf[n] = '\0';
-    *out_buf = buf;
-    *out_len = n;
-    return 1;
-}
-
-/* Helper: write temp C file for reparse */
-static char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_path) {
-    if (!buf || !original_path) return NULL;
-    char tmpl[] = "/tmp/cc_reparse_XXXXXX.c";
-#ifdef __APPLE__
-    int fd = mkstemps(tmpl, 2);
-#else
-    int fd = mkstemp(tmpl);
-#endif
-    if (fd < 0) return NULL;
-    /* Prelude for reparse: must provide CC runtime types used by intermediate rewrites
-       (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers. */
-    const char* prelude =
-        "#define CC_PARSER_MODE 1\n"
-        "#include <stdlib.h>\n"
-        "#include <stdint.h>\n"
-        "typedef intptr_t CCAbIntptr;\n"
-        "#include \"cc_closure.cch\"\n"
-        "#include \"cc_nursery.cch\"\n"
-        "#include \"cc_arena.cch\"\n"
-        "#include \"cc_slice.cch\"\n"
-        "#include \"std/task_intptr.cch\"\n"
-        "typedef struct { void (*fn)(void); } __cc_spawn_void_arg;\n"
-        "typedef struct { void (*fn)(int); int arg; } __cc_spawn_int_arg;\n"
-        "static void* __cc_spawn_thunk_void(void*);\n"
-        "static void* __cc_spawn_thunk_int(void*);\n";
-    size_t pre_len = strlen(prelude);
-    size_t off = 0;
-    while (off < pre_len) {
-        ssize_t n = write(fd, prelude + off, pre_len - off);
-        if (n <= 0) { close(fd); unlink(tmpl); return NULL; }
-        off += (size_t)n;
-    }
-    off = 0;
-    while (off < len) {
-        ssize_t n = write(fd, buf + off, len - off);
-        if (n <= 0) { close(fd); unlink(tmpl); return NULL; }
-        off += (size_t)n;
-    }
-    close(fd);
-    return strdup(tmpl);
-}
 
 /* Helper: reparse rewritten source to get updated stub AST */
 static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t rewritten_len,
@@ -327,27 +263,6 @@ static int cc__same_source_file(const char* a, const char* b) {
     return 1;
 }
 
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
-    if (!s || line_no <= 1) return 0;
-    int cur = 1;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\n') {
-            cur++;
-            if (cur == line_no) return i + 1;
-        }
-    }
-    return len;
-}
-
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no) {
-    if (!s) return 0;
-    if (line_no <= 1 && col_no <= 1) return 0;
-    if (col_no <= 1) return cc__offset_of_line_1based(s, len, line_no);
-    size_t loff = cc__offset_of_line_1based(s, len, line_no);
-    size_t off = loff + (size_t)(col_no - 1);
-    if (off > len) off = len;
-    return off;
-}
 
 static int cc__node_file_matches_this_tu(const CCASTRoot* root,
                                         const CCVisitorCtx* ctx,

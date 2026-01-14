@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "visitor/text_span.h"
 #include "visitor/visitor.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -67,25 +68,6 @@ static int cc__node_in_this_tu(const CCASTRoot* root, const CCVisitorCtx* ctx, c
     return 0;
 }
 
-static size_t cc__offset_of_line_1based(const char* s, size_t n, int line_1based) {
-    if (!s) return 0;
-    if (line_1based <= 1) return 0;
-    int line = 1;
-    for (size_t i = 0; i < n; i++) {
-        if (line == line_1based) return i;
-        if (s[i] == '\n') line++;
-    }
-    return n;
-}
-
-static size_t cc__offset_of_line_col_1based(const char* s, size_t n, int line_1based, int col_1based) {
-    size_t ls = cc__offset_of_line_1based(s, n, line_1based);
-    if (ls >= n) return n;
-    if (col_1based <= 1) return ls;
-    size_t p = ls + (size_t)(col_1based - 1);
-    if (p > n) p = n;
-    return p;
-}
 
 static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
     if (!nd || nd->line_start <= 0) return 0;

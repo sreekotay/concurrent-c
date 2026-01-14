@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "visitor/text_span.h"
 #include "visitor/ufcs.h"
 
 static const char* cc__basename(const char* path);
@@ -18,8 +19,6 @@ struct CC__UFCSSpan {
     size_t end;   /* exclusive */
 };
 
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no);
 static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, size_t sep_pos);
 static int cc__span_from_anchor_and_end(const char* s,
                                        size_t range_start,
@@ -176,27 +175,6 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
-    if (!s || line_no <= 1) return 0;
-    int cur = 1;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\n') {
-            cur++;
-            if (cur == line_no) return i + 1;
-        }
-    }
-    return len;
-}
-
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no) {
-    if (!s) return 0;
-    if (line_no <= 1 && col_no <= 1) return 0;
-    if (col_no <= 1) return cc__offset_of_line_1based(s, len, line_no);
-    size_t loff = cc__offset_of_line_1based(s, len, line_no);
-    size_t off = loff + (size_t)(col_no - 1);
-    if (off > len) off = len;
-    return off;
-}
 
 static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, size_t sep_pos) {
     if (!s || sep_pos <= range_start) return range_start;

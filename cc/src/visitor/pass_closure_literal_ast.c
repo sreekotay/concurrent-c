@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "visitor/text_span.h"
+
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
 #endif
@@ -72,27 +74,6 @@ static int cc__node_file_matches_this_tu(const CCASTRoot* root,
     return 0;
 }
 
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
-    if (!s || line_no <= 1) return 0;
-    int cur = 1;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\n') {
-            cur++;
-            if (cur == line_no) return i + 1;
-        }
-    }
-    return len;
-}
-
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no) {
-    if (!s) return 0;
-    if (line_no <= 1 && col_no <= 1) return 0;
-    if (col_no <= 1) return cc__offset_of_line_1based(s, len, line_no);
-    size_t loff = cc__offset_of_line_1based(s, len, line_no);
-    size_t off = loff + (size_t)(col_no - 1);
-    if (off > len) off = len;
-    return off;
-}
 
 static int cc__is_ident_start_char(char c) { return (c == '_' || isalpha((unsigned char)c)); }
 static int cc__is_ident_char2(char c) { return (c == '_' || isalnum((unsigned char)c)); }

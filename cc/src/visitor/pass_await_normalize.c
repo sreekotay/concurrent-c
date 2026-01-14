@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no);
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no);
+#include "visitor/text_span.h"
+
 static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* src, size_t n);
 static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const char* src);
 
@@ -295,27 +295,6 @@ int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
-static size_t cc__offset_of_line_1based(const char* s, size_t len, int line_no) {
-    if (!s || line_no <= 1) return 0;
-    int cur = 1;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\n') {
-            cur++;
-            if (cur == line_no) return i + 1;
-        }
-    }
-    return len;
-}
-
-static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_no, int col_no) {
-    if (!s) return 0;
-    if (line_no <= 1 && col_no <= 1) return 0;
-    if (col_no <= 1) return cc__offset_of_line_1based(s, len, line_no);
-    size_t loff = cc__offset_of_line_1based(s, len, line_no);
-    size_t off = loff + (size_t)(col_no - 1);
-    if (off > len) off = len;
-    return off;
-}
 
 static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* src, size_t n) {
     if (!out || !out_len || !out_cap || !src) return;
