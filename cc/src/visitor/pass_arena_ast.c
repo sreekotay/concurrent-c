@@ -275,18 +275,26 @@ int cc__rewrite_arena_blocks_with_nodes(const CCASTRoot* root,
         if (e.indent_off + indent_len > cur_len) { indent = ""; indent_len = 0; }
 
         char pro[512];
+        /* Heap-allocate the arena object so it can be safely referenced across @async suspension
+           (the pointer can be hoisted into the async frame). */
         int pn = snprintf(pro, sizeof(pro),
                           "%.*s{\n"
-                          "%.*s  CCArena __cc_arena%d = cc_heap_arena(%s);\n"
-                          "%.*s  CCArena* %s = &__cc_arena%d;\n",
+                          "%.*s  CCArena* __cc_arena%d = (CCArena*)malloc(sizeof(CCArena));\n"
+                          "%.*s  if (!__cc_arena%d) abort();\n"
+                          "%.*s  *__cc_arena%d = cc_heap_arena(%s);\n"
+                          "%.*s  CCArena* %s = __cc_arena%d;\n",
                           (int)indent_len, indent,
+                          (int)indent_len, indent, e.id,
+                          (int)indent_len, indent, e.id,
                           (int)indent_len, indent, e.id, e.size_expr,
                           (int)indent_len, indent, e.name, e.id);
         if (pn <= 0 || (size_t)pn >= sizeof(pro)) continue;
 
         char epi[256];
         int en = snprintf(epi, sizeof(epi),
-                          "%.*s  cc_heap_arena_free(&__cc_arena%d);\n",
+                          "%.*s  cc_heap_arena_free(__cc_arena%d);\n"
+                          "%.*s  free(__cc_arena%d);\n",
+                          (int)indent_len, indent, e.id,
                           (int)indent_len, indent, e.id);
         if (en <= 0 || (size_t)en >= sizeof(epi)) continue;
 

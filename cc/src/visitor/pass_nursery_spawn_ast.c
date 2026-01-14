@@ -97,6 +97,44 @@ static int cc__find_substr_in_range(const char* s,
     return 0;
 }
 
+static int cc__scan_matching_rbrace(const char* s, size_t len, size_t lbrace_off, size_t* out_rbrace_off) {
+    if (!s || lbrace_off >= len || s[lbrace_off] != '{') return 0;
+    int depth = 0;
+    int in_str = 0;
+    char qch = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    for (size_t i = lbrace_off; i < len; i++) {
+        char ch = s[i];
+        if (in_line_comment) {
+            if (ch == '\n') in_line_comment = 0;
+            continue;
+        }
+        if (in_block_comment) {
+            if (ch == '*' && i + 1 < len && s[i + 1] == '/') { in_block_comment = 0; i++; }
+            continue;
+        }
+        if (in_str) {
+            if (ch == '\\' && i + 1 < len) { i++; continue; }
+            if (ch == qch) in_str = 0;
+            continue;
+        }
+        if (ch == '/' && i + 1 < len && s[i + 1] == '/') { in_line_comment = 1; i++; continue; }
+        if (ch == '/' && i + 1 < len && s[i + 1] == '*') { in_block_comment = 1; i++; continue; }
+        if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
+
+        if (ch == '{') depth++;
+        else if (ch == '}') {
+            depth--;
+            if (depth == 0) {
+                if (out_rbrace_off) *out_rbrace_off = i;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* Best-effort start offset for stmt markers when stub-AST columns are missing.
    Uses AST-provided line spans; hard-errors if the marker can't be located within that span. */
 static int cc__stmt_marker_start_off(const CCASTRoot* root,
@@ -661,23 +699,23 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
         }
         if (brace == (size_t)-1) continue;
         size_t close = (size_t)-1;
-        for (size_t p = end; p-- > start; ) {
-            if (in_src[p] == '}') { close = p; break; }
-        }
+        if (!cc__scan_matching_rbrace(in_src, in_len, brace, &close)) continue;
         if (close == (size_t)-1 || close <= brace) continue;
 
         size_t ind_len = cc__line_indent_len(in_src, in_len, n[i].line_start);
         size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
         const char* indent = (line_off + ind_len <= in_len) ? (in_src + line_off) : "";
 
+        /* IMPORTANT: wrap in a compound statement so this lowering is valid in statement contexts like:
+           `if (cond) @nursery { ... }` (C does not allow declarations as the controlled statement). */
         char pro[512];
         int pn = snprintf(pro, sizeof(pro),
+                          "%.*s{\n"
                           "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
-                          "%.*sif (!__cc_nursery%d) abort();\n"
-                          "%.*s{\n",
+                          "%.*sif (!__cc_nursery%d) abort();\n",
+                          (int)ind_len, indent,
                           (int)ind_len, indent, id,
-                          (int)ind_len, indent, id,
-                          (int)ind_len, indent);
+                          (int)ind_len, indent, id);
         if (pn <= 0 || (size_t)pn >= sizeof(pro)) continue;
 
         /* Replace [start, brace+1) with prologue. */

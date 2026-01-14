@@ -220,61 +220,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 #endif
 
-    /* AST-driven @async lowering (state machine).
-       IMPORTANT: earlier rewrites can introduce new statements (auto-blocking temps, await-hoists, etc).
-       We re-parse the rewritten TU with patched TCC to get an updated stub-AST before lowering async. */
-    if (src_ufcs && ctx && ctx->symbols) {
-        char* tmp_path = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
-        char pp_path[128];
-        int pp_err = tmp_path ? cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path)) : EINVAL;
-        const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
-        if (getenv("CC_DEBUG_REPARSE")) {
-            fprintf(stderr, "CC: reparse: tmp=%s pp=%s pp_err=%d use=%s\n",
-                    tmp_path ? tmp_path : "<null>",
-                    (pp_err == 0) ? pp_path : "<n/a>",
-                    pp_err,
-                    use_path ? use_path : "<null>");
-        }
-        CCASTRoot* root2 = use_path ? cc_tcc_bridge_parse_to_ast(use_path, ctx->input_path, ctx->symbols) : NULL;
-        if (!root2) {
-            if (tmp_path) {
-                if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
-                free(tmp_path);
-            }
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            return EINVAL;
-        }
-        if (pp_err == 0) root2->lowered_is_temp = 1;
-        if (getenv("CC_DEBUG_REPARSE")) {
-            fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2->node_count);
-        }
-
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        int ar = cc_async_rewrite_state_machine_ast(root2, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
-        cc_tcc_bridge_free_ast(root2);
-        if (tmp_path) {
-            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
-            free(tmp_path);
-        }
-        if (pp_err == 0 && !(getenv("CC_KEEP_REPARSE"))) {
-            unlink(pp_path);
-        }
-        if (ar < 0) {
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            return EINVAL;
-        }
-        if (ar > 0) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
-    }
-
     /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
        (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
@@ -423,19 +368,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc_tcc_bridge_free_ast(root5);
     }
 
-    /* Strip CC decl markers so output is valid C (run after async lowering so it can see `@async`). */
-    if (src_ufcs) {
-        char* stripped = NULL;
-        size_t stripped_len = 0;
-        if (cc__strip_cc_decl_markers(src_ufcs, src_ufcs_len, &stripped, &stripped_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = stripped;
-            src_ufcs_len = stripped_len;
-        }
-    }
-
     /* Lower @defer (and hard-error on cancel) using a syntax-driven pass.
-       NOTE: stub-AST does not currently provide reliable scope targets for @defer, so we do a robust token/brace scan. */
+       IMPORTANT: this must run BEFORE async lowering so `@defer` can be made suspend-safe. */
     if (src_ufcs) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
@@ -452,6 +386,75 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
             src_ufcs_len = rewritten_len;
+        }
+    }
+
+    /* AST-driven @async lowering (state machine).
+       IMPORTANT: run AFTER CC statement-level lowering so @nursery/@arena/spawn/closures are real C. */
+    if (src_ufcs && ctx && ctx->symbols) {
+        char* tmp_path = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
+        char pp_path[128];
+        int pp_err = tmp_path ? cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path)) : EINVAL;
+        const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
+        if (getenv("CC_DEBUG_REPARSE")) {
+            fprintf(stderr, "CC: reparse: tmp=%s pp=%s pp_err=%d use=%s\n",
+                    tmp_path ? tmp_path : "<null>",
+                    (pp_err == 0) ? pp_path : "<n/a>",
+                    pp_err,
+                    use_path ? use_path : "<null>");
+        }
+        CCASTRoot* root2 = use_path ? cc_tcc_bridge_parse_to_ast(use_path, ctx->input_path, ctx->symbols) : NULL;
+        if (!root2) {
+            if (tmp_path) {
+                if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
+                free(tmp_path);
+            }
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (pp_err == 0) root2->lowered_is_temp = 1;
+        if (getenv("CC_DEBUG_REPARSE")) {
+            fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2->node_count);
+        }
+
+        char* rewritten = NULL;
+        size_t rewritten_len = 0;
+        int ar = cc_async_rewrite_state_machine_ast(root2, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        cc_tcc_bridge_free_ast(root2);
+        if (tmp_path) {
+            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
+            free(tmp_path);
+        }
+        if (pp_err == 0 && !(getenv("CC_KEEP_REPARSE"))) {
+            unlink(pp_path);
+        }
+        if (ar < 0) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (ar > 0) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = rewritten_len;
+        }
+    }
+
+    /* Strip CC decl markers so output is valid C (run after async lowering so it can see `@async`). */
+    if (src_ufcs) {
+        char* stripped = NULL;
+        size_t stripped_len = 0;
+        if (cc__strip_cc_decl_markers(src_ufcs, src_ufcs_len, &stripped, &stripped_len)) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = stripped;
+            src_ufcs_len = stripped_len;
         }
     }
 

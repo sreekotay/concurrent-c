@@ -1,0 +1,21 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+int g = 0;
+
+@async int noop(int v) { return v; }
+
+@async int f(void) {
+    g = 0;
+    @defer cleanup: { g = 7; };
+    int x = await noop(1);
+    (void)x;
+    return g;
+}
+
+int main(void) {
+    CCTaskIntptr t = f();
+    intptr_t r = cc_block_on_intptr(t);
+    return (r == 7 && g == 7) ? 0 : 1;
+}
+

@@ -113,6 +113,18 @@ static int cc__is_async_owner(const CCASTRoot* root,
     return 0;
 }
 
+static int cc__is_inside_arena(const CCASTRoot* root,
+                              const CCVisitorCtx* ctx,
+                              const NodeView* n,
+                              int idx) {
+    if (!root || !ctx || !n) return 0;
+    for (int cur = idx; cur >= 0 && cur < root->node_count; cur = n[cur].parent) {
+        if (!cc__node_in_this_tu(root, ctx, n[cur].file)) continue;
+        if (n[cur].kind == CC_AST_NODE_ARENA) return 1;
+    }
+    return 0;
+}
+
 
 static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
     if (!nd || nd->line_start <= 0) return 0;
@@ -130,6 +142,33 @@ static int cc__is_ident_start(char c) {
 
 static int cc__is_ident_char(char c) {
     return cc__is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static int cc__range_contains_token(const char* s, size_t n, const char* tok) {
+    if (!s || !tok) return 0;
+    size_t tn = strlen(tok);
+    if (tn == 0 || n < tn) return 0;
+    for (size_t i = 0; i + tn <= n; i++) {
+        if (memcmp(s + i, tok, tn) != 0) continue;
+        if (i > 0 && cc__is_ident_char(s[i - 1])) continue;
+        if (i + tn < n && cc__is_ident_char(s[i + tn])) continue;
+        return 1;
+    }
+    return 0;
+}
+
+static char* cc__strndup_trim_ws(const char* s, size_t n) {
+    if (!s) return NULL;
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+    size_t j = n;
+    while (j > i && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\n' || s[j - 1] == '\r')) j--;
+    size_t m = (j > i) ? (j - i) : 0;
+    char* out = (char*)malloc(m + 1);
+    if (!out) return NULL;
+    if (m) memcpy(out, s + i, m);
+    out[m] = 0;
+    return out;
 }
 
 static const char* cc__skip_ws(const char* p) {
@@ -919,15 +958,18 @@ static int cc__build_stmt_from_stmt_node(const CCASTRoot* root,
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
 
-    /* IMPORTANT: earlier visitor passes may rewrite within the same line while preserving line counts.
-       Column spans from the stub-AST can drift after those rewrites. For statement extraction we therefore
-       default to a whole-line slice (line_start..line_end), and only later do small token parsing within it. */
-    int ls = n[stmt_idx].line_start > 0 ? n[stmt_idx].line_start : 1;
-    int le = n[stmt_idx].line_end > 0 ? n[stmt_idx].line_end : ls;
-    size_t ss = cc__offset_of_line_1based(src, src_len, ls);
-    size_t se = (le + 1 > le) ? cc__offset_of_line_1based(src, src_len, le + 1) : src_len;
-    if (se > src_len) se = src_len;
-    if (se < ss) se = ss;
+    /* Prefer node span slicing. With our pipeline, async lowering runs on a freshly reparsed TU,
+       so (line,col) spans should match `src`. Fall back to line slicing only if spans are missing. */
+    size_t ss = cc__node_start_off(src, src_len, &n[stmt_idx]);
+    size_t se = cc__node_end_off(src, src_len, &n[stmt_idx]);
+    if (!(se > ss && se <= src_len)) {
+        int ls = n[stmt_idx].line_start > 0 ? n[stmt_idx].line_start : 1;
+        int le = n[stmt_idx].line_end > 0 ? n[stmt_idx].line_end : ls;
+        ss = cc__offset_of_line_1based(src, src_len, ls);
+        se = (le + 1 > le) ? cc__offset_of_line_1based(src, src_len, le + 1) : src_len;
+        if (se > src_len) se = src_len;
+        if (se < ss) se = ss;
+    }
     char* full = cc__dup_slice(src, ss, se);
     if (!full) full = strdup("");
     const char* kw = n[stmt_idx].aux_s1;
@@ -1199,6 +1241,9 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
         if (n[i].kind != CC_AST_NODE_STMT) continue;
         if (n[i].parent != block_idx) continue;
         if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        /* If the statement start column is missing, spans are not usable enough to safely
+           slice the statement text. Prefer falling back to brace-bounded text parsing. */
+        if (n[i].col_start <= 0) continue;
         refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(src, src_len, &n[i]) };
     }
 
@@ -1211,10 +1256,8 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
             if (n[i].parent != d) continue;
             if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
             if (n[i].kind == CC_AST_NODE_STMT) {
+                if (n[i].col_start <= 0) continue;
                 refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(src, src_len, &n[i]) };
-            } else if (n[i].kind == CC_AST_NODE_DECL_ITEM) {
-                /* local var decls are stored as decl items; include as pseudo-stmts so we can hoist/init them */
-                refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_DECL_ITEM, .idx = i, .start = cc__node_start_off(src, src_len, &n[i]) };
             }
         }
     }
@@ -1539,6 +1582,54 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         return 0;
     }
 
+    /* pointer-like declaration (e.g. `CCNursery* n = ...;`, `CCArena* a = ...;`) hoisted into frame:
+       rewrite as assignment to the frame slot so we don't emit invalid `T __f->x = ...`. */
+    {
+        const char* q = p;
+        if (cc__is_ident_start(*q)) {
+            /* parse base type ident */
+            q++;
+            while (cc__is_ident_char(*q)) q++;
+            q = cc__skip_ws(q);
+            int saw_ptr = 0;
+            while (*q == '*') { saw_ptr = 1; q++; q = cc__skip_ws(q); }
+            if (saw_ptr) {
+                const char* ns = q;
+                if (cc__is_ident_start(*q)) {
+                    q++;
+                    while (cc__is_ident_char(*q)) q++;
+                    size_t nn = (size_t)(q - ns);
+                    if (nn > 0 && nn < 128) {
+                        char nm[128];
+                        memcpy(nm, ns, nn);
+                        nm[nn] = 0;
+                        int is_frame = 0;
+                        for (int k = 0; k < e->map_n; k++) {
+                            if (e->map_names[k] && strcmp(e->map_names[k], nm) == 0) { is_frame = 1; break; }
+                        }
+                        if (is_frame) {
+                            q = cc__skip_ws(q);
+                            if (*q == '=') {
+                                q++;
+                                q = cc__skip_ws(q);
+                                int aw_next = 0;
+                                char* init2 = cc__emit_awaits_in_expr(e, q, &aw_next);
+                                if (!init2) return 0;
+                                char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
+                                char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
+                                free(init2);
+                                if (lhs2 && rhs2) cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "%s=(%s);\n", lhs2, rhs2);
+                                free(lhs2);
+                                free(rhs2);
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /* declaration-like (int/intptr_t/CCAbIntptr) -> hoisted; emit initializer as assignment */
     if (strncmp(p, "int ", 4) == 0 || strncmp(p, "intptr_t ", 9) == 0 || strncmp(p, "CCAbIntptr ", 10) == 0) {
         /* parse name */
@@ -1795,15 +1886,22 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
     const NodeView* n = (const NodeView*)root->nodes;
 
-    /* Diagnose await outside @async early. */
+    /* Diagnose await outside @async and unsupported await contexts early. */
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != CC_AST_NODE_AWAIT) continue;
         if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
-        if (cc__is_async_owner(root, ctx, n, n[i].parent)) continue;
-        const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-        fprintf(stderr, "CC: error: 'await' outside @async at %s:%d:%d\n",
-                f, n[i].line_start, n[i].col_start);
-        return -1;
+        if (!cc__is_async_owner(root, ctx, n, n[i].parent)) {
+            const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            fprintf(stderr, "CC: await is only valid inside @async functions\n");
+            fprintf(stderr, "CC: note: at %s:%d:%d\n", f, n[i].line_start, n[i].col_start);
+            return -1;
+        }
+        if (cc__is_inside_arena(root, ctx, n, n[i].parent)) {
+            const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            fprintf(stderr, "CC: error: await inside @arena is not supported yet\n");
+            fprintf(stderr, "CC: note: at %s:%d:%d\n", f, n[i].line_start, n[i].col_start);
+            return -1;
+        }
     }
 
     typedef struct {
@@ -1943,43 +2041,75 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         AF* fn = &fns[fi];
         int id = g_async_id++;
 
-        /* Build structured stmt list from the function body braces.
-           Stub-AST statement nodes are not reliable for function bodies (they can be missing,
-           too-wide, or even point at the function declaration line). Parsing from the
-           block-level `{ ... }` text keeps us scoped correctly. */
+        /* Build structured stmt list from stub-AST statement nodes under the body BLOCK.
+           Fall back to brace-bounded text parsing if STMT nodes are missing. */
         Stmt* st = NULL;
         int st_n = 0;
-        if (fn->lbrace > 0 && fn->rbrace > fn->lbrace && fn->rbrace <= cur_len) {
-            if (!cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n)) {
-                fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body)\n", fn->name);
+        int built = 0;
+        if (fn->body_block_idx >= 0) {
+            built = cc__build_stmt_list_from_block(root, ctx, n, cur, cur_len, fn->body_block_idx, &st, &st_n);
+        }
+        if (!built) {
+            if (fn->lbrace > 0 && fn->rbrace > fn->lbrace && fn->rbrace <= cur_len) {
+                if (!cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n)) {
+                    fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body)\n", fn->name);
+                    free(cur);
+                    return -1;
+                }
+            } else {
+                fprintf(stderr, "CC: async_ast: failed to build statement list for @async function '%s' (no body block + no braces)\n", fn->name);
                 free(cur);
                 return -1;
             }
-        } else if (fn->body_block_idx >= 0) {
-            if (!cc__build_stmt_list_from_block(root, ctx, n, cur, cur_len, fn->body_block_idx, &st, &st_n)) {
-                fprintf(stderr, "CC: async_ast: failed to build statement list for @async function '%s' (body block idx=%d)\n",
-                        fn->name, fn->body_block_idx);
-                free(cur);
-                return -1;
-            }
-        } else {
-            fprintf(stderr, "CC: async_ast: failed to locate body braces for @async function '%s'\n", fn->name);
-            free(cur);
-            return -1;
         }
         cc__debug_dump_stmt_list(fn->name, st, st_n, 0);
 
-        /* Collect locals names using DECL_ITEM nodes in function subtree. */
+        /* Collect locals names (+ best-effort type) using DECL_ITEM nodes in function subtree. */
         char* locals[256];
+        char* local_tys[256]; /* only used for pointer-like locals; NULL => keep as intptr_t */
         int local_n = 0;
         memset(locals, 0, sizeof(locals));
+        memset(local_tys, 0, sizeof(local_tys));
         for (int i = 0; i < root->node_count && local_n < 256; i++) {
             if (n[i].kind != CC_AST_NODE_DECL_ITEM) continue;
             if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
             if (!n[i].aux_s1) continue;
-            /* Only hoist scalar locals we currently model in the frame as intptr_t. */
             if (!n[i].aux_s2) continue;
-            if (!(strcmp(n[i].aux_s2, "int") == 0 || strcmp(n[i].aux_s2, "intptr_t") == 0)) continue;
+            /* Hoist scalar locals (modeled as intptr_t) and pointer locals (modeled with their type).
+               IMPORTANT: TCC parses CC headers in CC_PARSER_MODE where some CC ABI types are dummy `int`
+               (e.g. CCClosure0). To avoid accidentally hoisting those as scalar locals, require that the
+               *source text* for the declarator starts with an actual scalar keyword when aux_s2 says "int". */
+            int is_scalar = (strcmp(n[i].aux_s2, "int") == 0 || strcmp(n[i].aux_s2, "intptr_t") == 0);
+            int is_ptr = (strchr(n[i].aux_s2, '*') != NULL);
+            if (!is_scalar && !is_ptr) continue;
+            /* Ensure this declaration is actually inside the brace-bounded function body.
+               This prevents accidentally hoisting decls from other functions when stub-AST parentage is noisy. */
+            if (fn->lbrace && fn->rbrace) {
+                size_t decl_off = cc__offset_of_line_1based(cur, cur_len, n[i].line_start > 0 ? n[i].line_start : 1);
+                if (n[i].col_start > 0) decl_off = cc__offset_of_line_col_1based(cur, cur_len, n[i].line_start, n[i].col_start);
+                if (!(decl_off > fn->lbrace && decl_off < fn->rbrace)) continue;
+            }
+            if (is_scalar) {
+                size_t lo = cc__offset_of_line_1based(cur, cur_len, n[i].line_start > 0 ? n[i].line_start : 1);
+                size_t hi = lo;
+                if (n[i].col_start > 0) {
+                    hi = cc__offset_of_line_col_1based(cur, cur_len, n[i].line_start, n[i].col_start);
+                    if (hi > cur_len) hi = cur_len;
+                    if (hi < lo) hi = lo;
+                } else {
+                    hi = cc__offset_of_line_1based(cur, cur_len, (n[i].line_start > 0 ? n[i].line_start : 1) + 1);
+                    if (hi > cur_len) hi = cur_len;
+                }
+                const char* seg = (lo < cur_len) ? (cur + lo) : "";
+                size_t seg_n = (hi > lo) ? (hi - lo) : 0;
+                /* Accept true scalar decls anywhere on the line (e.g. `for (int i=0; ...)`) but reject
+                   CC_PARSER_MODE dummy `int` ABI types like `CCClosure0` by requiring the token. */
+                if (!(cc__range_contains_token(seg, seg_n, "int") ||
+                      cc__range_contains_token(seg, seg_n, "intptr_t") ||
+                      cc__range_contains_token(seg, seg_n, "CCAbIntptr"))) {
+                    continue;
+                }
+            }
             /* Avoid hoisting compiler-introduced temporaries / closure locals; keep them as locals in the current state. */
             if (strncmp(n[i].aux_s1, "__cc_ab_", 7) == 0) continue;
             if (i == fn->decl_item_idx) continue;
@@ -1992,6 +2122,35 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             for (int k = 0; k < local_n; k++) if (locals[k] && strcmp(locals[k], n[i].aux_s1) == 0) dup = 1;
             if (dup) continue;
             locals[local_n++] = strdup(n[i].aux_s1);
+            if (is_ptr) {
+                /* Prefer the type text from the actual (rewritten) source so we don't emit
+                   non-C spellings like `struct <anonymous>*` in the final output. */
+                if (n[i].line_start > 0 && n[i].aux_s1) {
+                    size_t lo = cc__offset_of_line_1based(cur, cur_len, n[i].line_start);
+                    size_t hi = cc__offset_of_line_1based(cur, cur_len, n[i].line_start + 1);
+                    if (hi > cur_len) hi = cur_len;
+                    if (lo < hi) {
+                        const char* ls = cur + lo;
+                        size_t ln = hi - lo;
+                        const char* hit = NULL;
+                        /* Find the name within the line; don't trust col_start for macro/pinned nodes. */
+                        size_t nn = strlen(n[i].aux_s1);
+                        for (size_t q = 0; q + nn <= ln; q++) {
+                            if (memcmp(ls + q, n[i].aux_s1, nn) != 0) continue;
+                            if (q > 0 && cc__is_ident_char(ls[q - 1])) continue;
+                            if (q + nn < ln && cc__is_ident_char(ls[q + nn])) continue;
+                            hit = ls + q;
+                            break;
+                        }
+                        if (hit) {
+                            local_tys[local_n - 1] = cc__strndup_trim_ws(ls, (size_t)(hit - ls));
+                        }
+                    }
+                }
+                if (!local_tys[local_n - 1] && n[i].aux_s2) {
+                    local_tys[local_n - 1] = strdup(n[i].aux_s2);
+                }
+            }
         }
 
         /* Also collect declaration-like names from the already-built statement list.
@@ -2119,7 +2278,13 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         size_t repl_len = 0, repl_cap = 0;
 
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "typedef struct{int __st; intptr_t __r;");
-        for (int k = 0; k < local_n; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t %s;", locals[k]);
+        for (int k = 0; k < local_n; k++) {
+            if (local_tys[k] && strchr(local_tys[k], '*')) {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " %s %s;", local_tys[k], locals[k]);
+            } else {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t %s;", locals[k]);
+            }
+        }
         for (int k = 0; k < aw_total; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t %s;", aw_names[k]);
         for (int k = 0; k < param_n; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t __p_%s;", param_names[k]);
         for (int k = 0; k < 16; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " CCTaskIntptr __t%d;", k);
@@ -2195,7 +2360,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__free_stmt_list(st, st_n);
         free(st);
 
-        for (int k = 0; k < local_n; k++) free(locals[k]);
+        for (int k = 0; k < local_n; k++) { free(locals[k]); free(local_tys[k]); }
         for (int k = 0; k < aw_total; k++) free(aw_names[k]);
         for (int k = 0; k < param_n; k++) free(param_names[k]);
         for (int k = 0; k < map_n; k++) free((void*)map_repls[k]);

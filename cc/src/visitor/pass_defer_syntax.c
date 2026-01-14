@@ -172,6 +172,49 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             return -1;
         }
 
+        /* `return ...;` should execute all active defers (current scope and outers). */
+        if (cc__token_is(in_src, in_len, i, "return")) {
+            size_t stmt_end = 0;
+            if (!cc__scan_stmt_end_semicolon(in_src, in_len, i, &stmt_end)) {
+                const char* f = ctx->input_path ? ctx->input_path : "<input>";
+                fprintf(stderr, "%s:%d:1: error: CC: malformed 'return' (expected ';')\n", f, line_no);
+                for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
+                free(out);
+                return -1;
+            }
+            const char* f = ctx->input_path ? ctx->input_path : "<input>";
+            for (int d = depth; d >= 0; d--) {
+                int dd = d;
+                if (dd < 0) dd = 0;
+                if (dd >= 256) dd = 255;
+                for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                    char ln[256];
+                    int nn = snprintf(ln, sizeof(ln), "#line %d \"%s\"\n", defers[dd][k].line_no, f);
+                    if (nn > 0 && (size_t)nn < sizeof(ln)) {
+                        cc__append_n(&out, &outl, &outc, ln, (size_t)nn);
+                    }
+                    cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                    cc__append_n(&out, &outl, &outc, "\n", 1);
+                }
+                /* clear: return exits, but avoids accidental duplicates if source continues */
+                cc__free_defer_list(defers[dd], defer_counts[dd]);
+                defers[dd] = NULL;
+                defer_counts[dd] = 0;
+                defer_caps[dd] = 0;
+            }
+
+            /* Emit the original return statement. */
+            cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
+            changed = 1;
+
+            /* Skip original text (keep line_no tracking correct via the main loop's '\n' handler). */
+            for (size_t k = i; k < stmt_end; k++) {
+                if (in_src[k] == '\n') line_no++;
+            }
+            i = stmt_end - 1;
+            continue;
+        }
+
         /* `@defer ...;` */
         if (cc__token_is(in_src, in_len, i, "@defer")) {
             int defer_line = line_no;
