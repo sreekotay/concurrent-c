@@ -284,96 +284,104 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         size_t indent_start = lb;
         size_t indent_len = first > lb ? (first - lb) : 0;
 
-        /* Find callee signature string (best-effort) from decl items in this TU. */
-        const char* callee_sig = NULL;
+        /* Prefer FUNC/PARAM stub nodes; fallback to DECL_ITEM text signature. */
+        const char* ret_str = NULL;
+        char* param_types[16] = {0};
+        int paramc = 0;
+        int ret_is_ptr = 0, ret_is_void = 0, ret_is_structy = 0;
+
+        int found_func = 0;
         for (int k = 0; k < root->node_count; k++) {
-            if (n[k].kind != 12) continue; /* DECL_ITEM */
-            if (!n[k].aux_s1 || !n[k].aux_s2) continue;
+            if (n[k].kind != 17) continue; /* CC_AST_NODE_FUNC */
+            if (!n[k].aux_s1 || strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
             if (!cc__node_file_matches_this_tu(root, ctx, n[k].file)) continue;
-            if (strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
-            if (!strchr(n[k].aux_s2, '(')) continue;
-            callee_sig = n[k].aux_s2;
+            found_func = 1;
+            ret_str = n[k].aux_s2;
+            /* collect params */
+            for (int p = 0; p < root->node_count && paramc < 16; p++) {
+                if (n[p].parent != k || n[p].kind != 16) continue; /* PARAM */
+                if (n[p].aux_s2) param_types[paramc++] = strdup(n[p].aux_s2);
+            }
             break;
         }
-        if (!callee_sig) continue;
 
-        /* Parse parameter types + return shape from signature "(...)" */
-        int ret_is_ptr = 0, ret_is_void = 0, ret_is_structy = 0;
-        {
+        const char* param_list_from_decl = NULL;
+        if (!found_func) {
+            const char* callee_sig = NULL;
+            for (int k = 0; k < root->node_count; k++) {
+                if (n[k].kind != 12) continue; /* DECL_ITEM */
+                if (!n[k].aux_s1 || !n[k].aux_s2) continue;
+                if (!cc__node_file_matches_this_tu(root, ctx, n[k].file)) continue;
+                if (strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
+                if (!strchr(n[k].aux_s2, '(')) continue;
+                callee_sig = n[k].aux_s2;
+                break;
+            }
+            if (!callee_sig) continue;
             const char* l = strchr(callee_sig, '(');
             if (!l) continue;
-            /* Prefix before '(' */
             size_t pre_n = (size_t)(l - callee_sig);
             if (pre_n > 255) pre_n = 255;
-            char pre[256];
+            static char pre[256];
             memcpy(pre, callee_sig, pre_n);
             pre[pre_n] = 0;
-            /* Trim */
             size_t a = 0;
             while (pre[a] == ' ' || pre[a] == '\t') a++;
             size_t b = strlen(pre);
             while (b > a && (pre[b - 1] == ' ' || pre[b - 1] == '\t')) b--;
             pre[b] = 0;
-            const char* t = pre + a;
-            if (strstr(t, "struct") || strstr(t, "CCSlice")) ret_is_structy = 1;
-            if (strchr(t, '*')) ret_is_ptr = 1;
-            /* best-effort void detect */
-            if (!ret_is_ptr && !ret_is_structy) {
-                const char* v = strstr(t, "void");
-                if (v && (v[4] == 0 || v[4] == ' ' || v[4] == '\t')) {
-                    /* ensure last token ends in void */
-                    const char* endt = t + strlen(t);
-                    while (endt > t && (endt[-1] == ' ' || endt[-1] == '\t')) endt--;
-                    if (endt - t >= 4 && memcmp(endt - 4, "void", 4) == 0) ret_is_void = 1;
-                }
-            }
-        }
-
-        const char* ps = strchr(callee_sig, '(');
-        const char* pe = strrchr(callee_sig, ')');
-        if (!ps || !pe || pe <= ps) continue;
-        ps++; /* inside parens */
-        /* Trim outer spaces */
-        while (ps < pe && (*ps == ' ' || *ps == '\t')) ps++;
-        while (pe > ps && (pe[-1] == ' ' || pe[-1] == '\t')) pe--;
-
-        char* param_buf = NULL;
-        size_t param_len = 0;
-        {
+            ret_str = pre + a;
+            const char* ps = strchr(callee_sig, '(');
+            const char* pe = strrchr(callee_sig, ')');
+            if (!ps || !pe || pe <= ps) continue;
+            ps++; while (ps < pe && (*ps == ' ' || *ps == '\t')) ps++;
+            while (pe > ps && (pe[-1] == ' ' || pe[-1] == '\t')) pe--;
             size_t ncp = (size_t)(pe - ps);
-            param_buf = (char*)malloc(ncp + 1);
+            char* param_buf = (char*)malloc(ncp + 1);
             if (!param_buf) continue;
             memcpy(param_buf, ps, ncp);
             param_buf[ncp] = 0;
-            param_len = ncp;
+            param_list_from_decl = param_buf;
         }
 
-        /* Split parameter list on commas (no nested types supported yet). */
-        char* param_types[16] = {0};
-        int paramc = 0;
-        if (param_len == 0 || (param_len == 4 && memcmp(param_buf, "void", 4) == 0)) {
-            paramc = 0;
-        } else {
-            char* pcur = param_buf;
-            while (*pcur && paramc < 16) {
-                while (*pcur == ' ' || *pcur == '\t') pcur++;
-                char* startp = pcur;
-                while (*pcur && *pcur != ',') pcur++;
-                char* endp = pcur;
-                while (endp > startp && (endp[-1] == ' ' || endp[-1] == '\t')) endp--;
-                size_t ln = (size_t)(endp - startp);
-                if (ln > 0) {
-                    char* ty = (char*)malloc(ln + 1);
-                    if (!ty) break;
-                    memcpy(ty, startp, ln);
-                    ty[ln] = 0;
-                    param_types[paramc++] = ty;
+        if (ret_str) {
+            if (strstr(ret_str, "struct") || strstr(ret_str, "CCSlice")) ret_is_structy = 1;
+            if (strchr(ret_str, '*')) ret_is_ptr = 1;
+            if (!ret_is_ptr && !ret_is_structy) {
+                const char* v = strstr(ret_str, "void");
+                if (v) {
+                    const char* endt = ret_str + strlen(ret_str);
+                    while (endt > ret_str && (endt[-1] == ' ' || endt[-1] == '\t')) endt--;
+                    if (endt - ret_str >= 4 && memcmp(endt - 4, "void", 4) == 0) ret_is_void = 1;
                 }
-                if (*pcur == ',') { pcur++; continue; }
-                break;
             }
         }
-        free(param_buf);
+
+        if (!found_func && param_list_from_decl) {
+            if (strlen(param_list_from_decl) == 0 || strcmp(param_list_from_decl, "void") == 0) {
+                paramc = 0;
+            } else {
+                char* pcur = (char*)param_list_from_decl;
+                while (*pcur && paramc < 16) {
+                    while (*pcur == ' ' || *pcur == '\t') pcur++;
+                    char* startp = pcur;
+                    while (*pcur && *pcur != ',') pcur++;
+                    char* endp = pcur;
+                    while (endp > startp && (endp[-1] == ' ' || endp[-1] == '\t')) endp--;
+                    size_t ln = (size_t)(endp - startp);
+                    if (ln > 0) {
+                        char* ty = (char*)malloc(ln + 1);
+                        if (!ty) break;
+                        memcpy(ty, startp, ln);
+                        ty[ln] = 0;
+                        param_types[paramc++] = ty;
+                    }
+                    if (*pcur == ',') { pcur++; continue; }
+                    break;
+                }
+            }
+            free((void*)param_list_from_decl);
+        }
 
         /* Determine rewrite kind + statement start + validity checks for return/assign roots. */
         CCAutoBlockRewriteKind kind = CC_AB_REWRITE_STMT_CALL;
