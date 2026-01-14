@@ -1,0 +1,26 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+@async int inc(int v) {
+    return v + 1;
+}
+
+@async int dec(int v) {
+    return v - 1;
+}
+
+@async int branch_await(int v) {
+    if (v > 0) {
+        return await inc(v);
+    } else {
+        return await dec(v);
+    }
+}
+
+int main(void) {
+    CCTaskIntptr t1 = branch_await(3);
+    CCTaskIntptr t2 = branch_await(-2);
+    intptr_t r1 = cc_block_on_intptr(t1);
+    intptr_t r2 = cc_block_on_intptr(t2);
+    return (r1 == 4 && r2 == -3) ? 0 : 1;
+}
