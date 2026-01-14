@@ -23,6 +23,9 @@
 #include <time.h>
 #include <stdio.h>
 
+/* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
+extern __thread CCNursery* cc__tls_current_nursery;
+
 struct CCChan {
     size_t cap;
     size_t count;
@@ -33,10 +36,22 @@ struct CCChan {
     int closed;
     CCChanMode mode;
     int allow_take;
+    /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
+    CCNursery* autoclose_owner;
+    int warned_autoclose_block;
     pthread_mutex_t mu;
     pthread_cond_t not_empty;
     pthread_cond_t not_full;
 };
+
+/* Called by nursery.c when registering `closing(ch)` (same TU). */
+void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner) {
+    if (!ch) return;
+    pthread_mutex_lock(&ch->mu);
+    if (!ch->autoclose_owner) ch->autoclose_owner = owner;
+    ch->warned_autoclose_block = 0;
+    pthread_mutex_unlock(&ch->mu);
+}
 
 static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take) {
     size_t cap = capacity ? capacity : 64;
@@ -117,6 +132,22 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
 
 static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     int err = 0;
+    /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
+       is a common deadlock foot-gun (recv-until-close inside the nursery). */
+    if (!deadline && !ch->closed && ch->count == 0 &&
+        ch->autoclose_owner && cc__tls_current_nursery &&
+        ch->autoclose_owner == cc__tls_current_nursery) {
+        const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
+        if (g && g[0] == '1') {
+            if (!ch->warned_autoclose_block) {
+                ch->warned_autoclose_block = 1;
+                fprintf(stderr,
+                        "CC: runtime guard: blocking cc_chan_recv() on a `closing(...)` channel from inside the same nursery "
+                        "may deadlock (use a sentinel/explicit close, or drain outside the nursery)\n");
+            }
+            return EDEADLK;
+        }
+    }
     while (!ch->closed && ch->count == 0 && err == 0) {
         if (deadline) {
             err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
@@ -162,6 +193,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+    if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
     if (ch->count == ch->cap) {
         err = cc_chan_handle_full_send(ch, value, NULL);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -214,6 +246,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+    if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
     if (ch->count == ch->cap) {
         err = cc_chan_handle_full_send(ch, value, abs_deadline);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }

@@ -220,6 +220,81 @@ static void cc__append_fmt(char** out, size_t* out_len, size_t* out_cap, const c
     free(big);
 }
 
+static int cc__is_ident_start(char c) {
+    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+static int cc__is_ident_char(char c) {
+    return cc__is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static size_t cc__skip_ws(const char* s, size_t i, size_t end) {
+    while (i < end && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+    return i;
+}
+
+/* Parse `closing(a, b, c)` within [start, end). Returns count (0 if not present), or -1 on error. */
+static int cc__parse_closing_clause(const CCVisitorCtx* ctx,
+                                   const NodeView* n,
+                                   int nursery_node_i,
+                                   const char* src,
+                                   size_t start,
+                                   size_t end,
+                                   char names[][64],
+                                   int cap) {
+    (void)ctx;
+    if (!src || start >= end || !names || cap <= 0) return 0;
+
+    size_t pos = (size_t)-1;
+    if (!cc__find_substr_in_range(src, start, end, "closing", 7, &pos)) return 0;
+
+    size_t i = pos + 7;
+    i = cc__skip_ws(src, i, end);
+    if (i >= end || src[i] != '(') {
+        const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
+        fprintf(stderr, "%s:%d:1: error: expected '(' after @nursery closing\n", f, (n ? n[nursery_node_i].line_start : 1));
+        return -1;
+    }
+    i++; /* consume '(' */
+    int nn = 0;
+    for (;;) {
+        i = cc__skip_ws(src, i, end);
+        if (i >= end) break;
+        if (src[i] == ')') { i++; break; }
+        if (!cc__is_ident_start(src[i])) {
+            const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
+            fprintf(stderr, "%s:%d:1: error: expected identifier in @nursery closing(...)\n", f, (n ? n[nursery_node_i].line_start : 1));
+            return -1;
+        }
+        size_t s0 = i;
+        i++;
+        while (i < end && cc__is_ident_char(src[i])) i++;
+        size_t sl = i - s0;
+        if (nn >= cap) {
+            const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
+            fprintf(stderr, "%s:%d:1: error: too many channels in @nursery closing(...) (max %d)\n",
+                    f, (n ? n[nursery_node_i].line_start : 1), cap);
+            return -1;
+        }
+        if (sl >= 64) sl = 63;
+        memcpy(names[nn], src + s0, sl);
+        names[nn][sl] = '\0';
+        nn++;
+        i = cc__skip_ws(src, i, end);
+        if (i < end && src[i] == ',') { i++; continue; }
+        if (i < end && src[i] == ')') { i++; break; }
+        /* Anything else is malformed. */
+        const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
+        fprintf(stderr, "%s:%d:1: error: malformed @nursery closing(...) clause\n", f, (n ? n[nursery_node_i].line_start : 1));
+        return -1;
+    }
+    if (nn == 0) {
+        const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
+        fprintf(stderr, "%s:%d:1: error: @nursery closing(...) requires at least one channel\n", f, (n ? n[nursery_node_i].line_start : 1));
+        return -1;
+    }
+    return nn;
+}
+
 typedef struct {
     size_t start;
     size_t end;
@@ -708,23 +783,32 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
 
         /* IMPORTANT: wrap in a compound statement so this lowering is valid in statement contexts like:
            `if (cond) @nursery { ... }` (C does not allow declarations as the controlled statement). */
-        char pro[512];
-        int pn = snprintf(pro, sizeof(pro),
-                          "%.*s{\n"
-                          "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
-                          "%.*sif (!__cc_nursery%d) abort();\n",
-                          (int)ind_len, indent,
-                          (int)ind_len, indent, id,
-                          (int)ind_len, indent, id);
-        if (pn <= 0 || (size_t)pn >= sizeof(pro)) continue;
+        char* pro = NULL;
+        size_t pro_len = 0, pro_cap = 0;
+        cc__append_fmt(&pro, &pro_len, &pro_cap,
+                       "%.*s{\n"
+                       "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
+                       "%.*sif (!__cc_nursery%d) abort();\n",
+                       (int)ind_len, indent,
+                       (int)ind_len, indent, id,
+                       (int)ind_len, indent, id);
+        if (!pro) continue;
+
+        /* Optional: closing(ch1, ch2) clause -> register channels for auto-close. */
+        {
+            char chans[16][64];
+            int cn = cc__parse_closing_clause(ctx, n, i, in_src, start, brace, chans, 16);
+            if (cn < 0) { free(pro); free(id_by_node); return -1; }
+            for (int ci = 0; ci < cn; ci++) {
+                cc__append_fmt(&pro, &pro_len, &pro_cap,
+                               "%.*scc_nursery_add_closing_chan(__cc_nursery%d, %s);\n",
+                               (int)ind_len, indent, id, chans[ci]);
+            }
+        }
 
         /* Replace [start, brace+1) with prologue. */
         {
-            char* r = (char*)malloc((size_t)pn + 1);
-            if (!r) continue;
-            memcpy(r, pro, (size_t)pn);
-            r[pn] = 0;
-            edits[en++] = (Edit){ .start = start, .end = brace + 1, .repl = r };
+            edits[en++] = (Edit){ .start = start, .end = brace + 1, .repl = pro };
         }
 
         /* Insert epilogue right before the closing brace. */

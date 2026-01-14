@@ -104,7 +104,7 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 
 **Why a preprocessor?** C is portable, mature, and ubiquitous. Rather than replace it, CC enhances it: add concurrency syntax, generate efficient C, link with a minimal task scheduler and channel implementation. Users get modern concurrent programming without leaving the C ecosystem—mix CC and C freely in the same codebase.
 
-**Core concepts:** Async functions (`@async`) desugar to state machines; channels (`T[~n]`) desugar to wait-free queue types; arenas desugar to bump allocators with atomic ops; slices desugar to `{ ptr, len }` structs with provenance metadata. Everything has a clean C lowering; no mystery.
+**Core concepts:** Async functions (`@async`) desugar to state machines; channels (a `T[~... >]`/`T[~... <]` handle pair) desugar to queue types + two capability handles; arenas desugar to bump allocators with atomic ops; slices desugar to `{ ptr, len }` structs with provenance metadata. Everything has a clean C lowering; no mystery.
 
 **Design philosophy:** Stay close to C (syntax, semantics, compilation model), make concurrency explicit (visible in function signatures and lowering), catch errors at compile time (via type system and provenance checking), and generate efficient C code (no intermediate VM or GC—just C + library).
 
@@ -212,7 +212,7 @@ When I/O queues are full, three canonical strategies handle saturation. See **Ap
 - **Block:** Block sender until space (backpressure; audit logs)
 - **Sample:** Keep ~rate% deterministically (sparse; trace logs)
 
-**Used in:** Channels (`T[~N, Drop]`), logging (`log_drop()`, `log_block()`, `log_sample()`)
+**Used in:** Channels (`T[~N >, Drop]` / `T[~N <, Drop]`), logging (`log_drop()`, `log_block()`, `log_sample()`)
 
 ---
 
@@ -228,7 +228,7 @@ When I/O queues are full, three canonical strategies handle saturation. See **Ap
 
 5. **Scoped safety** — Arenas + tracked slices catch common lifetime errors; raw pointers remain unsafe. Compile-time provenance tracking (via slice metadata) enables `send_take` zero-copy transfers without runtime checks.
 
-**Rule:** Types with runtime-managed invariants (`T[~n]`, `Task<T>`, `Mutex<T>`, `Atomic<T>`) are always initialized on declaration. Plain C types follow C initialization rules.
+**Rule:** Types with runtime-managed invariants (channel handles `T[~... >]` / `T[~... <]`, `Task<T>`, `Mutex<T>`, `Atomic<T>`) are always initialized on declaration. Plain C types follow C initialization rules.
 
 **Exception:** `T!E` (Result types) do not require immediate initialization and instead follow **definite assignment** rules. A `T!E` variable may be declared without an initializer if the compiler can prove it is assigned on all control-flow paths before any use or before scope exit.
 
@@ -461,8 +461,8 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 | `T?` | Optional type | Postfix, not ternary `?:` |
 | `T!E` | Result type | Postfix, binds error type `E` |
 | `T[:]` | Slice type | Distinct from C array `T[]` |
-| `T[~n]` | Channel type | `~` is not bitwise-not here |
-| `T[~n N:M]` | Channel with topology | `N:M` is topology, not label |
+| `T[~... >]` / `T[~... <]` | Channel handle type | `~` is not bitwise-not here |
+| `T[~n N:M >]` / `T[~n N:M <]` | Channel with topology | `N:M` is topology, not label |
 
 ## Concurrent-C Language Constructs: Complete Reference
 
@@ -513,7 +513,7 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 - **Contextual keywords:** `async`, `arena`, `lock`, `noblock`, `closing` are recognized only in specific contexts (after `@`, in nursery, etc.), not reserved globally. Safer for identifier reuse.
 - **Library functions:** `ok`, `err`, `move`, `cancel`, `with_deadline`, `is_cancelled` are normal functions in `concurrent_c.h`. No special parsing needed.
 
-**Rule:** In type contexts, `?`, `!`, `[:]`, `[~]` are type constructors. In expression contexts, they retain C semantics (ternary, logical-not, etc.) or are syntax errors if ambiguous.
+**Rule:** In type contexts, `?`, `!`, `[:]`, `[~ ...]` are type constructors. In expression contexts, they retain C semantics (ternary, logical-not, etc.) or are syntax errors if ambiguous.
 
 **Rule:** `@for await (T x : expr)` is parsed as a single statement form, not `for` followed by `await`.
 
@@ -1648,18 +1648,18 @@ AsyncMutex<int> counter = async_mutex(0);
 **Rule (scope-bound guard types):** `LockGuard<T>` and `AsyncGuard<T>` are `@scoped` types (see § 3.1). They cannot be held across suspension points. The compiler enforces this at compile time to prevent deadlocks and keep critical sections short.
 
 ```c
-@async void bad(AsyncMutex<int>* m, int[~]* ch) {
+@async void bad(AsyncMutex<int>* m, int[~ >]* tx) {
     auto g = await m.lock();
-    await ch.send(*g);  // ❌ ERROR: @scoped value guard held across suspension
+    await tx.send(*g);  // ❌ ERROR: @scoped value guard held across suspension
 }
 
-@async void good(AsyncMutex<int>* m, int[~]* ch) {
+@async void good(AsyncMutex<int>* m, int[~ >]* tx) {
     int val;
     {
         auto g = await m.lock();
         val = *g;
     }  // guard released: scope-bound value is out of scope
-    await ch.send(val);  // ✅ OK: no @scoped value held
+    await tx.send(val);  // ✅ OK: no @scoped value held
 }
 ```
 
@@ -1814,38 +1814,51 @@ Channels are categorized by **mode** (async vs sync) and **topology/direction**.
 
 | Type        | Meaning                        |
 | ----------- | ------------------------------ |
-| `T[~]`      | async channel (default)        |
-| `T[~ async]` | explicit async                 |
-| `T[~ sync]` | sync channel (blocking)        |
+| `T[~ ... async ...]` | async channel (default) |
+| `T[~ ... sync ...]` | sync channel (blocking) |
+
+**Spec change (breaking): Combined channels removed**
+
+- The combined channel type `T[~...]` (which could both send and receive) is **no longer allowed**.
+- A channel is represented by **two distinct handles**:
+  - `T[~... >]` — **send-only** handle (tx)
+  - `T[~... <]` — **recv-only** handle (rx)
+- A channel is created only by producing a `(tx, rx)` pair (see **Creation** below).
+- `close(...)` is only valid on a **send** handle (`>`). Closing affects the underlying channel and is observed by the `recv` handle (`<`) as termination.
 
 **Async channel topology:**
 | Type        | Meaning                        |
 | ----------- | ------------------------------ |
-| `T[~]`      | unbuffered, many-to-many (N:N) |
-| `T[~n]`     | buffered (n slots), N:N        |
-| `T[~n 1:1]` | single producer, single consumer |
-| `T[~n N:1]` | many producers, one consumer   |
-| `T[~n 1:N]` | broadcast (one producer, many subscribers) |
-| `T[~n >]`   | send-only view                 |
-| `T[~n <]`   | recv-only view                 |
+| `T[~ ... >]` | send-only handle (tx) |
+| `T[~ ... <]` | recv-only handle (rx) |
+| `T[~n N:N >]` | buffered N:N sender |
+| `T[~n N:N <]` | buffered N:N receiver |
+| `T[~n 1:1 >]` | single producer sender |
+| `T[~n 1:1 <]` | single consumer receiver |
+| `T[~n N:1 >]` | many producers sender |
+| `T[~n N:1 <]` | one consumer receiver |
+| `T[~n 1:N >]` | broadcast publisher (one producer) |
+| `T[~n 1:N <]` | broadcast subscriber (receiver view) |
 
 **Sync channel topology:**
 | Type        | Meaning                        |
 | ----------- | ------------------------------ |
-| `T[~ sync]` | unbuffered, many-to-many (N:N) |
-| `T[~n sync]` | buffered (n slots), N:N        |
-| `T[~n sync 1:1]` | single producer, single consumer |
+| `T[~ ... sync ... >]` | send-only handle (tx), blocking |
+| `T[~ ... sync ... <]` | recv-only handle (rx), blocking |
+| `T[~n sync N:N >]` | buffered N:N sender (blocking) |
+| `T[~n sync N:N <]` | buffered N:N receiver (blocking) |
+| `T[~n sync 1:1 >]` | single producer sender (blocking) |
+| `T[~n sync 1:1 <]` | single consumer receiver (blocking) |
 | etc. | (all topologies available) |
 
 **Grammar:**
 
 ```
-channel_type := 'async' | 'sync'
-                element_type '[~' capacity? mode? topology? direction? ']'
+channel_handle := element_type '[~' capacity? mode? topology? direction ']'
 capacity     := integer_constant_expr
 mode         := 'async' | 'sync'
 topology     := '1:1' | '1:N' | 'N:1' | 'N:N'
-direction    := '>' | '<'
+direction    := '>' | '<'   // REQUIRED (combined channels removed)
 ```
 
 - `capacity` must be a compile-time integer constant expression (or omitted for unbuffered).
@@ -1854,20 +1867,38 @@ direction    := '>' | '<'
 - Whitespace between components is optional: `T[~10 async N:1]` and `T[~10asyncN:1]` are equivalent.
 - When both `topology` and `direction` appear, `topology` comes first: `T[~10 1:N <]`.
 
-**Rule:** A full channel `T[~n]` (or `T[~n sync]`) implicitly converts to send-only (`T[~n >]`) and recv-only (`T[~n <]`) views. Mode is preserved in the view.
-
 **Topology meanings:**
 - `N:N` — any number of senders, any number of receivers
 - `N:1` — any number of senders, exactly one receiver
 - `1:N` — broadcast: one sender, subscribers get independent copies
+
+**Creation (normative):**
+
+Channels are created by producing a `(tx, rx)` pair:
+
+```c
+int[~10 >] tx;
+int[~10 <] rx;
+channel_pair(&tx, &rx);  // the only way to create a channel
+```
+
+Notes:
+- `channel_pair` initializes both handles to the same underlying channel.
+- `close(&tx)` closes the underlying channel.
+- `free(&tx)` and `free(&rx)` free their respective handles; freeing requires no other threads are using the channel (same as today).
 
 **Error channels:**
 
 Channels can carry results using `T!E` as the element type:
 
 ```c
-int!ParseError[~100] results;        // async channel of Result<int, ParseError>
-int!ParseError[~100 sync] results;   // sync channel of Result<int, ParseError>
+int!ParseError[~100 >] results_tx;        // async sender of Result<int, ParseError>
+int!ParseError[~100 <] results_rx;        // async receiver of Result<int, ParseError>
+channel_pair(&results_tx, &results_rx);
+
+int!ParseError[~100 sync >] sync_results_tx;   // sync sender
+int!ParseError[~100 sync <] sync_results_rx;   // sync receiver
+channel_pair(&sync_results_tx, &sync_results_rx);
 ```
 
 **Rule (recv return type):** `recv()` always returns `(ElemType)?`. For a channel with element type `T!E`, `recv()` returns `(T!E)?` which is spelled `T!E?`. The outer `?` indicates channel state (null = closed+drained); the inner `!E` is application-level success/failure.
@@ -1897,10 +1928,10 @@ if (!r) {
 **Broadcast subscription:**
 
 ```c
-int[~10 1:N] events;                // async broadcast
-int[~10 1:N <] sub = events.subscribe();  // subscribe to async broadcast
+int[~10 1:N >] events;                     // async broadcast publisher (send-capable)
+int[~10 1:N <] sub = events.subscribe();   // subscribe to async broadcast
 
-int[~10 1:N sync] sync_events;      // sync broadcast
+int[~10 1:N sync >] sync_events;                // sync broadcast publisher
 int[~10 1:N sync <] sync_sub = sync_events.subscribe();  // subscribe to sync
 ```
 
@@ -1913,7 +1944,7 @@ replaced_5 Semantics
 * **Close** does not drop buffered values; they remain available for recv.
 * **Termination** is observed when the channel is both closed and drained (`recv()` returns `null`).
 
-**Rule:** `recv()` returns `null` only when the channel is closed and drained. It never returns `null` to represent an application-level error. For per-item errors, use `T!E[~]` channels where `recv()` returns `T!E?`.
+**Rule:** `recv()` returns `null` only when the channel is closed and drained. It never returns `null` to represent an application-level error. For per-item errors, use `T!E[~ <]` channels where `recv()` returns `T!E?`.
 
 **Rule (slice element ownership):** For slice element types, `send` deep-copies into channel-internal storage. While queued, the channel owns the copy. On successful `recv`, the receiver gets a **unique slice**; the receiver frees it on scope exit (or transfers it via `send_take` / return). If the value is never received (still buffered when channel is freed), the channel frees it.
 
@@ -2074,66 +2105,63 @@ int? v = null;
 replaced_5 Channel API
 
 ```c
-// Creation (declaration constructs initialized channel)
-int[~] ch;                              // async channel, unbuffered
-int[~10] ch;                            // async channel, buffered (capacity 10)
-int[~ sync] ch;                         // sync channel, unbuffered
-int[~10 sync] ch;                       // sync channel, buffered
+// Creation (normative): produce a (tx, rx) pair. Combined channels are not allowed.
+int[~10 >] tx;
+int[~10 <] rx;
+channel_pair(&tx, &rx);
 
-// === ASYNC CHANNELS (int[~], int[~n], etc.) ===
-// All operations require await
+// === ASYNC CHANNELS (int[~ ... >] / int[~ ... <]) ===
+// send/recv operations require await in @async code
 
 // Core operations (must await)
-bool ok = await send(&ch, value);      // suspends until sent
-T? x = await recv(&ch);                 // suspends until received
+bool ok = await send(&tx, value);      // suspends until sent
+T? x = await recv(&rx);                // suspends until received
 
-// Slice transfer (must await)
-bool ok = await send_take(&ch, slice);  // suspends, transfers ownership
+// Slice transfer (must await; send handle only)
+bool ok = await send_take(&tx, slice);  // suspends, transfers ownership
 
-// Close (no await)
-void close(&ch);                        // idempotent, no await
+// Close (no await; send handle only)
+void close(&tx);                        // idempotent, no await
 
 // Cancellation-aware variants (must await)
-bool ok = await send_cancellable(&ch, value);  // returns false if cancelled
-T!Cancelled? x = await recv_cancellable(&ch);  // returns err(Cancelled) if cancelled
+bool ok = await send_cancellable(&tx, value);   // returns false if cancelled
+T!Cancelled? x = await recv_cancellable(&rx);   // returns err(Cancelled) if cancelled
 
 // Non-blocking (no await, either context)
-bool ok = try_send(&ch, value);        // returns false if full/closed, never awaits
-T!RecvStatus x = try_recv(&ch);        // returns immediately
+bool ok = try_send(&tx, value);        // returns false if full/closed, never awaits
+T!RecvStatus x = try_recv(&rx);        // returns immediately
 
 // Timeout (must await)
-T? x = await recv_timeout(&ch, Duration d);
+T? x = await recv_timeout(&rx, Duration d);
 
-// Broadcast subscription (no await)
-int[< async] sub = subscribe(&broadcast_ch);
-
-// === SYNC CHANNELS (int[~ sync], int[~10 sync], etc.) ===
+// === SYNC CHANNELS (int[~ ... sync ... >] / int[~ ... sync ... <]) ===
 // All operations block, no await allowed
 
+int[~10 sync >] stx;
+int[~10 sync <] srx;
+channel_pair(&stx, &srx);
+
 // Core operations (no await, blocks)
-bool ok = send(&ch, value);            // blocks OS thread until sent
-T? x = recv(&ch);                       // blocks OS thread until received
+bool ok = send(&stx, value);            // blocks OS thread until sent
+T? x = recv(&srx);                      // blocks OS thread until received
 
-// Slice transfer (no await, blocks)
-bool ok = send_take(&ch, slice);       // blocks, transfers ownership
+// Slice transfer (no await, blocks; send handle only)
+bool ok = send_take(&stx, slice);       // blocks, transfers ownership
 
-// Close (no await)
-void close(&ch);                        // idempotent
+// Close (no await; send handle only)
+void close(&stx);                       // idempotent
 
 // Non-blocking (no await, either context)
-bool ok = try_send(&ch, value);        // returns false if full/closed
-T!RecvStatus x = try_recv(&ch);        // returns immediately
+bool ok = try_send(&stx, value);        // returns false if full/closed
+T!RecvStatus x = try_recv(&srx);        // returns immediately
 
 // Timeout (blocks up to duration, no await)
-T? x = recv_timeout(&ch, Duration d);
-
-// Broadcast subscription (no await)
-int[< sync] sub = subscribe(&broadcast_ch);
+T? x = recv_timeout(&srx, Duration d);
 ```
 
 **Operations Comparison:**
 
-| Operation | Async `T[~]` | Sync `T[~ sync]` |
+| Operation | Async `T[~ ... >]` / `T[~ ... <]` | Sync `T[~ ... sync ... >]` / `T[~ ... sync ... <]` |
 |-----------|---|---|
 | `send(ch, v)` | `await send(...)` ✅ | `send(...)` ✅ |
 | `recv(ch)` | `await recv(...)` ✅ | `recv(...)` ✅ |
@@ -2146,9 +2174,9 @@ int[< sync] sub = subscribe(&broadcast_ch);
 | `close(ch)` | `close(...)` ✅ | `close(...)` ✅ |
 | `subscribe(ch)` | `subscribe(...)` ✅ | `subscribe(...)` ✅ |
 
-**Rule (async channel operations):** All operations on async channels (`T[~]` or `T[~ async]`) that may suspend require `await`. These include `send()`, `recv()`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `await` is a compile error.
+**Rule (async channel operations):** All operations on async channel handles (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`) that may suspend require `await`. These include `send()`, `recv()`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `await` is a compile error.
 
-**Rule (sync channel operations):** All operations on sync channels (`T[~ sync]`) that may block have no `await`. These include `send()`, `recv()`, `send_take()`, and `recv_timeout()`. Adding `await` is a compile error.
+**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `await`. These include `send()`, `recv()`, `send_take()`, and `recv_timeout()`. Adding `await` is a compile error.
 
 **Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `await`. They return immediately or have no return value.
 
@@ -2199,19 +2227,19 @@ use(*u);                         // OK: u still owns the buffer
 
 **Note (try_recv vs recv):** Both `recv()` and `try_recv()` return values from a closed channel as long as buffered values remain. The "closed" status is only reported after all buffered values have been drained. `recv()` signals this via `null`; `try_recv()` signals it via `err(Closed)`.
 
-**Note (schematic signatures):** Signatures use `T[~]*` as shorthand for the channel family. The actual type system uses the full channel type including capacity and topology:
+**Note (schematic signatures):** Signatures use `T[~ ... >]*` / `T[~ ... <]*` as shorthand for the channel handle family. The actual type system uses the full channel handle type including capacity, mode, topology, and direction:
 
 ```c
 // Full type signatures (what the compiler sees):
-bool send<T, N, Topo>(T[~N Topo >]* ch, T value);  // send-only or full
-T?   recv<T, N, Topo>(T[~N Topo <]* ch);           // recv-only or full
+bool send<T, N, Topo>(T[~N Topo >]* ch, T value);  // send-only
+T?   recv<T, N, Topo>(T[~N Topo <]* ch);           // recv-only
 ```
 
 Capacity `N` and topology `Topo` are erased at runtime (all use the same implementation), but the type system enforces view restrictions at compile time.
 
 **Rule:** Calling `send` on a recv-only channel view (`T[~n <]`), or `recv` on a send-only channel view (`T[~n >]`), is a compile-time error.
 
-**Rule:** Channel declarations construct an initialized channel value. `T[~n] ch;` allocates and initializes the channel backing store with capacity `n`.
+**Rule:** Channel handles must be initialized via `channel_pair(&tx, &rx)` (or equivalent constructor for special topologies). The combined form `T[~n]` is not allowed.
 
 ---
 
@@ -2402,7 +2430,7 @@ Every `@async` function has an implicit nursery available for automatic wrapping
 This applies to:
 - Extern functions (`extern int read(...)`)
 - Concurrent-C functions without `@async` (`void helper(...)`)
-- **Sync channel operations** (`recv()`, `send()` on `T[~ sync]` channels)
+- **Sync channel operations** (`recv()`, `send()` on `T[~ ... sync ...]` handles)
 - **Synchronous mutex operations** (`Mutex<T>.lock_guard()`, `Mutex<T>.with_lock()` via `@lock` syntax)
 
 **Async channels do NOT get wrapped** — they suspend cooperatively and work naturally in `@async` code via `await`.
@@ -2410,15 +2438,15 @@ This applies to:
 ```c
 extern int sys_read(int fd, void* buf, int n);  // non-@async
 
-@async void handler(int fd, int[~] async_ch, int[~ sync] sync_ch) {
+@async void handler(int fd, int[~ <] async_rx, int[~ sync <] sync_rx) {
     char buf[128];
     sys_read(fd, buf, 128);        // Compiler auto-wraps: await __implicit_nursery.run_blocking(...)
     
     // Async channel: no wrapping needed, just await
-    int x = await recv(&async_ch);  // Suspends cooperatively, no run_blocking
+    int x = await recv(&async_rx);  // Suspends cooperatively, no run_blocking
     
     // Sync channel: gets auto-wrapped
-    int y = recv(&sync_ch);         // Compiler auto-wraps: await run_blocking(...)
+    int y = recv(&sync_rx);         // Compiler auto-wraps: await run_blocking(...)
     
     Mutex<int> m;
     @lock (m) as val {             // lock_guard() auto-wrapped: await run_blocking(...)
@@ -2718,12 +2746,18 @@ enum BackpressureMode {
 **Channel syntax with backpressure:**
 
 ```c
-T[~N]                      // Bounded async channel, Block mode (default)
-T[~N, Block]               // Explicit Block mode
-T[~N, Drop]                // Drop mode: silently drops oldest on full
-T[~N, Sample(0.1)]         // Sample mode: keep ~10% of messages
-T[~N sync]                 // Bounded sync channel, Block mode
-T[~N sync, Drop]           // Bounded sync channel, Drop mode
+T[~N >]                    // Bounded async sender, Block mode (default)
+T[~N <]                    // Bounded async receiver, Block mode (default)
+T[~N >, Block]             // Explicit Block mode (sender handle)
+T[~N <, Block]             // Explicit Block mode (receiver handle)
+T[~N >, Drop]              // Drop mode sender
+T[~N <, Drop]              // Drop mode receiver
+T[~N >, Sample(0.1)]       // Sample mode sender
+T[~N <, Sample(0.1)]       // Sample mode receiver
+T[~N sync >]               // Bounded sync sender, Block mode
+T[~N sync <]               // Bounded sync receiver, Block mode
+T[~N sync >, Drop]         // Bounded sync sender, Drop mode
+T[~N sync <, Drop]         // Bounded sync receiver, Drop mode
 ```
 
 **Behavior:** See Appendix C for full backpressure modes comparison.
@@ -2748,39 +2782,42 @@ In brief:
 
 **Async channels** (most common):
 ```c
-int[~] ch;              // Shorthand for async channel
-int[~ async] ch;        // Explicit async marker
-AsyncChan<int> ch;      // Full type name
+int[~ >] tx;
+int[~ <] rx;
+channel_pair(&tx, &rx);
 ```
 
 **Sync channels:**
 ```c
-int[~ sync] ch;         // Shorthand for sync channel
-SyncChan<int> ch;       // Full type name
+int[~ sync >] tx;
+int[~ sync <] rx;
+channel_pair(&tx, &rx);
 ```
 
-**Rule:** Channel type is fixed at declaration. An `int[~]` channel is always async; an `int[~ sync]` channel is always sync. Operations must match the type.
+**Rule:** Channel mode is fixed in the handle type. An `int[~ ...]` handle is always async; an `int[~ sync ...]` handle is always sync. Operations must match the handle type.
 
 ---
 
-#### 7.4.3 Async Channels (`int[~]` or `int[~ async]`)
+#### 7.4.3 Async Channels (`int[~ ... >]` and `int[~ ... <]`)
 
 Async channels **suspend cooperatively** and require `await`. They are used in `@async` functions and with `@nursery`.
 
 **Operations:**
 
 ```c
-int[~] ch;
+int[~ >] tx;
+int[~ <] rx;
+channel_pair(&tx, &rx);
 
 // Must use await
-int? x = await recv(&ch);            // suspends, returns optional
-bool ok = await send(&ch, 42);       // suspends, returns success
-int? x = await recv_cancellable(&ch);  // returns err(Cancelled) if cancelled
-bool ok = await send_cancellable(&ch, 42);
+int? x = await recv(&rx);                 // suspends, returns optional
+bool ok = await send(&tx, 42);            // suspends, returns success
+int? x = await recv_cancellable(&rx);     // returns err(Cancelled) if cancelled
+bool ok = await send_cancellable(&tx, 42);
 
 // Cannot use await
-int x = recv(&ch);                   // ❌ ERROR: missing await
-send(&ch, 42);                       // ❌ ERROR: missing await
+int x = recv(&rx);                        // ❌ ERROR: missing await
+send(&tx, 42);                            // ❌ ERROR: missing await
 ```
 
 **Rule:** All operations on async channels require `await`. Omitting `await` is a compile error (regardless of context).
@@ -2788,7 +2825,7 @@ send(&ch, 42);                       // ❌ ERROR: missing await
 **Cancellation integration:**
 
 ```c
-@async void!Error reader(int[~] ch) {
+@async void!Error reader(int[~ <] ch) {
     @match {
         case int x = await ch.recv():
             process(x);
@@ -2801,23 +2838,25 @@ Async channels work with `@match` and have implicit cancellation cases.
 
 ---
 
-#### 7.4.4 Sync Channels (`int[~ sync]`)
+#### 7.4.4 Sync Channels (`int[~ ... sync ... >]` and `int[~ ... sync ... <]`)
 
 Sync channels **block the OS thread** and do NOT use `await`. They are used for thread coordination and blocking operations.
 
 **Operations:**
 
 ```c
-int[~ sync] ch;
+int[~ sync >] tx;
+int[~ sync <] rx;
+channel_pair(&tx, &rx);
 
 // No await allowed
-int? x = recv(&ch);                  // blocks OS thread
-bool ok = send(&ch, 42);             // blocks OS thread
+int? x = recv(&rx);                  // blocks OS thread
+bool ok = send(&tx, 42);             // blocks OS thread
 int? x = recv_cancellable(&ch);      // N/A: sync channels don't auto-support cancellation
 
 // Cannot use await
-int? x = await recv(&ch);            // ❌ ERROR: cannot await sync channel
-bool ok = await send(&ch, 42);       // ❌ ERROR: cannot await sync channel
+int? x = await recv(&rx);            // ❌ ERROR: cannot await sync channel
+bool ok = await send(&tx, 42);       // ❌ ERROR: cannot await sync channel
 ```
 
 **Rule:** All operations on sync channels do NOT use `await`. Adding `await` is a compile error.
@@ -2825,9 +2864,9 @@ bool ok = await send(&ch, 42);       // ❌ ERROR: cannot await sync channel
 **No @match on sync channels:**
 
 ```c
-int[~ sync] ch;
+int[~ sync <] rx;
 @match {
-    case x = recv(&ch):  // ❌ ERROR: @match requires async channel
+    case x = recv(&rx):  // ❌ ERROR: @match requires async channel
         process(x);
 }
 ```
@@ -2855,13 +2894,13 @@ Function signatures make clear what context is required:
 
 ```c
 // Clearly async
-@async void!Error async_reader(int[~] ch) {
+@async void!Error async_reader(int[~ <] ch) {
     int x = await recv(&ch);  // obvious: must await
     return cc_ok(x);
 }
 
 // Clearly sync (blocks)
-void sync_worker(int[~ sync] requests) {
+void sync_worker(int[~ sync <] requests) {
     int req = recv(&requests);  // obvious: blocks
     process(req);
 }
@@ -2879,19 +2918,19 @@ When refactoring a sync function to async, the compiler enforces correctness:
 
 ```c
 // Original: sync
-void sync_handler(int[~ sync] requests) {
+void sync_handler(int[~ sync <] requests) {
     int req = recv(&requests);
     process(req);
 }
 
 // Refactored to async with wrong channel type:
-@async void async_handler(int[~ sync] requests) {
+@async void async_handler(int[~ sync <] requests) {
     // int req = recv(&requests);  // ❌ ERROR: cannot await, but needs to
     // This won't compile—we need to change the channel type
 }
 
 // Refactored correctly:
-@async void async_handler(int[~] requests) {
+@async void async_handler(int[~ <] requests) {
     int req = await recv(&requests);  // ✅ CORRECT
     process(req);
 }
@@ -2906,13 +2945,13 @@ The compiler forces you to fix the channel type when refactoring. No silent beha
 **Async channels:**
 
 ```c
-int[~]? x = await recv(&ch);
+int[~ <]? x = await recv(&rx);
 if (!x) {
     // Channel closed and drained
 }
 
 // With error values
-int!Error[~]? x = await recv(&error_ch);
+int!Error[~ <]? x = await recv(&error_rx);
 if (try int val = *x) {
     process(val);
 } else if (is_none(*x)) {
@@ -2923,7 +2962,7 @@ if (try int val = *x) {
 **Sync channels:**
 
 ```c
-int[~ sync]? x = recv(&ch);
+int[~ sync <]? x = recv(&rx);
 if (!x) {
     // Channel closed and drained
 }
@@ -2935,7 +2974,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 
 #### 6.4.7 Comparison Table
 
-| Aspect | Async `int[~]` | Sync `int[~ sync]` |
+| Aspect | Async handles (`int[~ ... >]` / `int[~ ... <]`) | Sync handles (`int[~ ... sync ... >]` / `int[~ ... sync ... <]`) |
 |--------|---|---|
 | **Must await** | Yes, always | No, never |
 | **Blocks OS thread** | No | Yes |
@@ -2952,23 +2991,25 @@ Same error handling semantics; only difference is blocking vs suspending.
 **Pattern 1: Producer-Consumer (Async)**
 
 ```c
-int[~] work_queue;
+int[~ >] work_tx;
+int[~ <] work_rx;
+channel_pair(&work_tx, &work_rx);
 
 @async void producer() {
     for (int i = 0; i < 100; i++) {
-        await send(&work_queue, i);
+        await send(&work_tx, i);
     }
 }
 
 @async void consumer() {
     @match {
-        case int work = await recv(&work_queue):
+        case int work = await recv(&work_rx):
             process(work);
         // implicit cancel case
     }
 }
 
-@nursery closing(work_queue) {
+@nursery closing(work_tx) {
     spawn (producer());
     spawn (consumer());
 }
@@ -2977,14 +3018,19 @@ int[~] work_queue;
 **Pattern 2: Thread Pool (Sync)**
 
 ```c
-int[~ sync] requests;
-int[~ sync] responses;
+int[~ sync >] requests_tx;
+int[~ sync <] requests_rx;
+channel_pair(&requests_tx, &requests_rx);
+
+int[~ sync >] responses_tx;
+int[~ sync <] responses_rx;
+channel_pair(&responses_tx, &responses_rx);
 
 void worker_thread() {
     while (true) {
-        int req = recv(&requests);  // blocks
+        int req = recv(&requests_rx);  // blocks
         int resp = process(req);
-        send(&responses, resp);  // blocks
+        send(&responses_tx, resp);  // blocks
     }
 }
 
@@ -2992,10 +3038,10 @@ void main() {
     Thread t = spawn_thread(worker_thread);
     
     // Send request
-    send(&requests, 42);
+    send(&requests_tx, 42);
     
     // Get response
-    int resp = recv(&responses);
+    int resp = recv(&responses_rx);
     
     t.join();
 }
@@ -3011,7 +3057,7 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
     spawn (timeout_enforcer());
 }
 
-@async void!Error reader(int[~] ch) {
+@async void!Error reader(int[~ <] ch) {
     @match {
         case int x = await ch.recv():
             return cc_ok(x);
@@ -3034,7 +3080,7 @@ No manual polling or timeouts in reader. Cancellation handles it.
 
 #### 6.4.9 Migration from Dual-Mode
 
-**Before (confusing):**
+**Before (confusing, legacy combined channel):**
 ```c
 int[~] ch;
 int x = recv(&ch);  // What does this do? Depends on context!
@@ -3042,11 +3088,15 @@ int x = recv(&ch);  // What does this do? Depends on context!
 
 **After (clear):**
 ```c
-int[~] ch;
-int x = await recv(&ch);  // Async channel, must await (always)
+int[~ >] tx;
+int[~ <] rx;
+channel_pair(&tx, &rx);
+int x = await recv(&rx);  // Async receive handle, must await (always)
 
-int[~ sync] ch;
-int x = recv(&ch);  // Sync channel, no await (always)
+int[~ sync >] stx;
+int[~ sync <] srx;
+channel_pair(&stx, &srx);
+int x = recv(&srx);       // Sync receive handle, no await (always)
 ```
 
 Each channel type has one clear set of operations. No context-dependent surprises.
@@ -3066,12 +3116,12 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 
 #### 6.5.1 Implicit Cancellation Case in `@match`
 
-**Rule (@match requires async channels):** `@match` works **only with async channels** (`T[~]` or `T[~ async]`). Sync channels (`T[~ sync]`) do not support `@match`. If you need to multiplex sync channels, use low-level primitives outside of `@match` (rare).
+**Rule (@match requires async channels):** `@match` works **only with async channel handles** (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`). Sync handles (`T[~ ... sync ... >/<]`) do not support `@match`. If you need to multiplex sync channels, use low-level primitives outside of `@match` (rare).
 
 **Rule (implicit cancel case):** When `@match` appears inside a cancellable context (nursery, spawned task, or any task that can be cancelled), the compiler implicitly adds a cancellation case:
 
 ```c
-@async void!Error worker(int[~] ch) {  // async channel
+@async void!Error worker(int[~ <] ch) {  // async recv handle
     while (true) {
         @match {
             case int x = ch.recv():    // async channel recv, naturally awaitable
@@ -3084,7 +3134,7 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 }
 
 // Sync channels don't work with @match:
-@async void!Error bad_sync(int[~ sync] ch) {
+@async void!Error bad_sync(int[~ sync <] ch) {
     @match {
         case int x = ch.recv():  // ❌ ERROR: @match requires async channel
             process(x);
@@ -3150,8 +3200,8 @@ For operations **outside `@match`** (single await, channel recv/send, sleep), us
 
 ```c
 // Channels
-T!Cancelled? recv_cancellable(T[~]* ch);      // returns err(Cancelled) if cancelled
-bool send_cancellable(T[~]* ch, T value);     // returns false if cancelled
+T!Cancelled? recv_cancellable(T[~ <]* rx);      // returns err(Cancelled) if cancelled
+bool send_cancellable(T[~ >]* tx, T value);     // returns false if cancelled
 
 // Tasks
 T!Cancelled await task_cancellable<T>(Task<T!Cancelled> t);
@@ -3240,7 +3290,7 @@ enum WorkerError {
     spawn (timeout_enforcer());
 }
 
-@async void!WorkerError reader(int[~] requests) {
+@async void!WorkerError reader(int[~ <] requests) {
     while (true) {
         @match {
             case int req = requests.recv():
@@ -3250,7 +3300,7 @@ enum WorkerError {
     }
 }
 
-@async void!WorkerError writer(int[~] responses) {
+@async void!WorkerError writer(int[~ >] responses) {
     for (Response r : response_queue) {
         @match {
             case responses.send(r):
@@ -3476,18 +3526,20 @@ Tooling SHOULD warn/error when a `@cancel_unsafe` operation is awaited inside an
 Streaming uses explicit channel parameters:
 
 ```c
-@async void produce(int n, int[~]* out) {
-    defer out.close();
+@async void produce(int n, int[~ >]* out) {
+    defer out.close();  // close is only valid on send handles
     for (int i = 0; i < n; i++) {
         await out.send(i);
     }
 }
 
 @async void consume() {
-    int[~10] ch;
-    @nursery closing(ch) {
-        spawn (produce(100, &ch));
-        @for await (int x : ch) use(x);
+    int[~10 >] tx;
+    int[~10 <] rx;
+    channel_pair(&tx, &rx);
+    @nursery closing(tx) {
+        spawn (produce(100, &tx));
+        @for await (int x : rx) use(x);
     }
 }
 ```
@@ -3536,8 +3588,8 @@ void   Task<T>.cancel();               // request cooperative cancellation
 
 // Cancellation-aware variants (observe cancellation when awaited)
 T!Cancelled      await task_cancellable<T>(Task<T!Cancelled> t);
-T!Cancelled?     recv_cancellable<T>(T[~]* ch);      // returns err(Cancelled) if cancelled
-bool             send_cancellable<T>(T[~]* ch, T value);
+T!Cancelled?     recv_cancellable<T>(T[~ <]* rx);      // returns err(Cancelled) if cancelled
+bool             send_cancellable<T>(T[~ >]* tx, T value);
 Task<void!Cancelled> sleep_cancellable(Duration d);
 Task<T!Cancelled> with_timeout_cancellable<T>(Task<T!Cancelled> t, Duration d);
 
@@ -4540,8 +4592,8 @@ This section documents syntactic sugar and conventions:
 `x.method(args)` is syntax sugar for `method(&x, args)` (value) or `method(x, args)` (pointer).
 
 ```c
-ch.send(v);        // lowers to send(&ch, v)
-ch.close();        // lowers to close(&ch)
+tx.send(v);        // lowers to send(&tx, v)
+tx.close();        // lowers to close(&tx)
 slice.len;         // field access (not a call)
 ```
 
@@ -4552,19 +4604,19 @@ slice.len;         // field access (not a call)
 UFCS auto-dereferences one pointer level. If `p` has type `T*`, `p.method(v)` lowers to `method(p, v)`.
 
 ```c
-int[~10]* ch_ptr = &ch;
-ch_ptr.send(42);   // lowers to send(ch_ptr, 42)
-ch_ptr.close();    // lowers to close(ch_ptr)
+int[~10 >]* tx_ptr = &tx;
+tx_ptr.send(42);   // lowers to send(tx_ptr, 42)
+tx_ptr.close();    // lowers to close(tx_ptr)
 ```
 
 **Rule (UFCS in defer):** UFCS works uniformly in `defer` statements regardless of whether the receiver is a value or pointer:
 
 ```c
-int[~10] ch;
-defer ch.close();        // OK: lowers to close(&ch)
+int[~10 >] tx;
+defer tx.close();        // OK: lowers to close(&tx)
 
-int[~10]* ch_ptr = get_channel();
-defer ch_ptr.close();    // OK: lowers to close(ch_ptr)
+int[~10 >]* tx_ptr = get_tx();
+defer tx_ptr.close();    // OK: lowers to close(tx_ptr)
 ```
 
 **Loops:**
@@ -4708,7 +4760,7 @@ if (e is IoError.Other(code)) { use(code); }
 * `AsyncGuard<T>` — RAII lock guard (from `AsyncMutex<T>.lock()`)
 * `Atomic<T>` — lock-free atomic (primitives only)
 * `Map<K, V>` — hash map
-* `T[~n]` — channel of T
+* `T[~... >]` / `T[~... <]` — channel handles for element type T
 
 **Built-in non-generic types:**
 
@@ -4782,7 +4834,7 @@ generic_param  := ident
 
 **Rule:** A `comptime` value parameter is always a compile-time constant and may be used in:
 - array lengths `T[N]`
-- channel capacities `T[~N]`
+- channel capacities `T[~N ... >]` / `T[~N ... <]`
 - other constant-expression contexts (see §12)
 
 ---
@@ -5859,13 +5911,13 @@ Channel operations (`send`, `recv`, `close`) are function calls to runtime libra
 
 ```c
 // Async variant
-@async void chan_send<T>(T[~]* ch, T value);
-@async T? chan_recv<T>(T[~]* ch);
-void chan_close<T>(T[~]* ch);
+@async void chan_send<T>(T[~ >]* tx, T value);
+@async T? chan_recv<T>(T[~ <]* rx);
+void chan_close<T>(T[~ >]* tx);
 
 // Sync variant
-void chan_send_blocking<T>(T[~ sync]* ch, T value);
-T? chan_recv_blocking<T>(T[~ sync]* ch);
+void chan_send_blocking<T>(T[~ sync >]* tx, T value);
+T? chan_recv_blocking<T>(T[~ sync <]* rx);
 ```
 
 The channel handle is passed as the first argument.
@@ -6001,7 +6053,7 @@ enum BoundsError {
 | **Sample** | Keep ~rate% | Deterministic drop | Succeeds immediately | ~rate% of msgs | Sparse traces, fair sampling |
 
 **Used in:**
-- Channels: `T[~N, Drop]`, `T[~N, Block]`, `T[~N, Sample(0.05)]`
+- Channels: `T[~N >, Drop]` / `T[~N <, Drop]`, `T[~N >, Block]` / `T[~N <, Block]`, `T[~N >, Sample(0.05)]` / `T[~N <, Sample(0.05)]`
 - Logging: `log_drop()`, `log_block()`, `log_sample()`
 
 **Key property:** Sampling is deterministic (reproducible, fair), not random.
@@ -6169,10 +6221,10 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | `T?` | `Option<T>` | Optional value |
 | `T!E` | `Result<T, E>` | Either T or error E |
 | `T[:]` | Slice of T | Pointer + length |
-| `T[~]` | `AsyncChan<T>` | Async channel |
-| `T[~N]` | `AsyncChan<T, N>` | Async channel, capacity N |
-| `T[~N, Mode]` | `AsyncChan<T, N, Mode>` | Async with backpressure |
-| `T[~ sync]` | `SyncChan<T>` | Sync channel |
+| `T[~... >]` / `T[~... <]` | `AsyncChanTx<T>` / `AsyncChanRx<T>` | Async channel handles |
+| `T[~N ... >]` / `T[~N ... <]` | `AsyncChanTx<T, N>` / `AsyncChanRx<T, N>` | Async handles, capacity N |
+| `T[~N, Mode ... >]` / `T[~N, Mode ... <]` | `AsyncChanTx<T, N, Mode>` / `AsyncChanRx<T, N, Mode>` | Async handles with backpressure |
+| `T[~ ... sync ... >]` / `T[~ ... sync ... <]` | `SyncChanTx<T>` / `SyncChanRx<T>` | Sync channel handles |
 
 ---
 

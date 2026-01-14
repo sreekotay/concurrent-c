@@ -10,6 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Thread-local: current nursery for code running inside nursery-spawned tasks.
+   Used by optional runtime deadlock guard in channel.c. */
+__thread CCNursery* cc__tls_current_nursery = NULL;
+
 struct CCNursery {
     CCTask** tasks;
     size_t count;
@@ -21,6 +25,28 @@ struct CCNursery {
     size_t closing_cap;
     pthread_mutex_t mu;
 };
+
+/* Defined in channel.c (same translation unit via runtime/concurrent_c.c). */
+void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner);
+
+typedef struct {
+    CCNursery* n;
+    void* (*fn)(void*);
+    void* arg;
+} CCNurseryThunk;
+
+static void* cc__nursery_task_trampoline(void* p) {
+    CCNurseryThunk* th = (CCNurseryThunk*)p;
+    if (!th) return NULL;
+    CCNursery* nn = th->n;
+    void* (*ff)(void*) = th->fn;
+    void* aa = th->arg;
+    free(th);
+    cc__tls_current_nursery = nn;
+    void* r = ff ? ff(aa) : NULL;
+    cc__tls_current_nursery = NULL;
+    return r;
+}
 
 CCNursery* cc_nursery_create(void) {
     CCNursery* n = (CCNursery*)malloc(sizeof(CCNursery));
@@ -102,9 +128,16 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     }
     pthread_mutex_unlock(&n->mu);
 
+    CCNurseryThunk* th = (CCNurseryThunk*)malloc(sizeof(CCNurseryThunk));
+    if (!th) return ENOMEM;
+    th->n = n;
+    th->fn = fn;
+    th->arg = arg;
+
     CCTask* t = NULL;
-    int err = cc_spawn(&t, fn, arg);
+    int err = cc_spawn(&t, cc__nursery_task_trampoline, th);
     if (err != 0) {
+        free(th);
         return err;
     }
 
@@ -117,10 +150,8 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
     int first_err = 0;
-    // Close registered channels first
-    for (size_t i = 0; i < n->closing_count; ++i) {
-        if (n->closing[i]) cc_chan_close(n->closing[i]);
-    }
+    // IMPORTANT (spec): join children first, then close registered channels.
+    // The closing(...) clause exists to avoid close-before-send races.
     for (size_t i = 0; i < n->count; ++i) {
         if (!n->tasks[i]) continue;
         int err = cc_task_join(n->tasks[i]);
@@ -130,19 +161,23 @@ int cc_nursery_wait(CCNursery* n) {
         cc_task_free(n->tasks[i]);
         n->tasks[i] = NULL;
     }
+    for (size_t i = 0; i < n->closing_count; ++i) {
+        if (n->closing[i]) cc_chan_close(n->closing[i]);
+    }
     n->count = 0;
     return first_err;
 }
 
 void cc_nursery_free(CCNursery* n) {
     if (!n) return;
-    for (size_t i = 0; i < n->closing_count; ++i) {
-        if (n->closing[i]) cc_chan_close(n->closing[i]);
-    }
     for (size_t i = 0; i < n->count; ++i) {
         if (n->tasks[i]) {
             cc_task_free(n->tasks[i]);
         }
+    }
+    // Close registered channels as a last step (best-effort safety if user never waited).
+    for (size_t i = 0; i < n->closing_count; ++i) {
+        if (n->closing[i]) cc_chan_close(n->closing[i]);
     }
     free(n->tasks);
     free(n->closing);
@@ -163,6 +198,8 @@ int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch) {
     }
     n->closing[n->closing_count++] = ch;
     pthread_mutex_unlock(&n->mu);
+    /* Mark channel with its autoclose owner for optional runtime guard. */
+    cc__chan_set_autoclose_owner(ch, n);
     return 0;
 }
 

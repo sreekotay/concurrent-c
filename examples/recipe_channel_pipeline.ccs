@@ -2,12 +2,12 @@
  * Recipe: Channel Pipeline (Producer/Consumer)
  *
  * Demonstrates:
- *   - Channel for message passing between tasks
- *   - Producer explicitly closes channel when done sending
- *   - Consumer receives until channel is closed
- *   - Nursery waits for both tasks to complete
+ *   - Nested nurseries for structured channel lifetime
+ *   - closing(ch) on inner nursery closes channel when producers done
+ *   - Consumer in outer nursery drains until close, then exits
  *
- * Key insight: Producer owns the "write end", closes it when done.
+ * Key insight: Nest producers inside closing() so channel closes
+ * exactly when producers finish, while consumer keeps running.
  */
 #include "cc_nursery.cch"
 #include "cc_channel.cch"
@@ -20,16 +20,7 @@ int main(void) {
     if (!ch) return 1;
 
     @nursery {
-        /* Producer: sends values 1, 2, 3, then closes channel. */
-        spawn(() => {
-            for (int i = 1; i <= 3; i++) {
-                cc_chan_send(ch, &i, sizeof(i));
-                printf("sent %d\n", i);
-            }
-            cc_chan_close(ch);  /* Signal "no more data" */
-        });
-
-        /* Consumer: receives until channel is closed and drained. */
+        /* Consumer: lives in outer nursery, drains until close. */
         spawn(() => {
             int v;
             while (cc_chan_recv(ch, &v, sizeof(v)) == 0) {
@@ -37,8 +28,20 @@ int main(void) {
                 received_sum += v;
             }
         });
+
+        /* Producers: live in inner nursery with closing(ch). */
+        @nursery closing(ch) {
+            spawn(() => {
+                for (int i = 1; i <= 3; i++) {
+                    cc_chan_send(ch, &i, sizeof(i));
+                    printf("sent %d\n", i);
+                }
+            });
+        }
+        /* Inner nursery done → producers finished → ch closed. */
+        /* Consumer sees close, drains remaining, exits. */
     }
-    /* Nursery done → both tasks finished. */
+    /* Outer nursery done → consumer finished → all clean. */
 
     cc_chan_free(ch);
     printf("sum = %d\n", received_sum);

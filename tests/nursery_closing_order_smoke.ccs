@@ -1,0 +1,74 @@
+#include "cc_runtime.cch"
+#include "cc_channel.cch"
+
+#include <errno.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static volatile int g_err = 0;
+static volatile int g_got = 0;
+
+void producer(CCChan* ch) {
+    int v1 = 1;
+    int v2 = 2;
+    int e = 0;
+
+    e = cc_chan_send(ch, &v1, sizeof(v1));
+    if (e != 0) { g_err = e; return; }
+
+    // Ensure nursery end is reached while producer is still running.
+    usleep(50 * 1000);
+
+    e = cc_chan_send(ch, &v2, sizeof(v2));
+    if (e != 0) { g_err = e; return; }
+}
+
+void consumer(CCChan* ch) {
+    int v = 0;
+    int e = 0;
+
+    e = cc_chan_recv(ch, &v, sizeof(v));
+    if (e != 0) { g_err = e; return; }
+    g_got += v;
+
+    e = cc_chan_recv(ch, &v, sizeof(v));
+    if (e != 0) { g_err = e; return; }
+    g_got += v;
+}
+
+int main(void) {
+    CCChan* ch = cc_chan_create(1);
+    if (!ch) return 2;
+    (void)cc_chan_init_elem(ch, sizeof(int));
+
+    g_err = 0;
+    g_got = 0;
+
+    // Spec: closing(ch) must close after all children exit (i.e., after joining).
+    @nursery closing(ch) {
+        spawn(() => { producer(ch); });
+        spawn(() => { consumer(ch); });
+    }
+
+    // If closing happened before join, producer/consumer likely saw EPIPE.
+    if (g_err != 0) return 10;
+    if (g_got != 3) return 11;
+
+    // After nursery exit, channel should now be closed.
+    int tmp = 0;
+    int tr = cc_chan_try_recv(ch, &tmp, sizeof(tmp));
+    if (tr != EPIPE) {
+        fprintf(stderr, "nursery_closing_order_smoke: expected channel closed after nursery; try_recv=%d (EPIPE=%d)\n", tr, EPIPE);
+        return 12;
+    }
+    int v3 = 3;
+    int e = cc_chan_send(ch, &v3, sizeof(v3));
+    if (e != EPIPE) {
+        fprintf(stderr, "nursery_closing_order_smoke: expected send EPIPE after nursery; send=%d (EPIPE=%d)\n", e, EPIPE);
+        return 13;
+    }
+
+    cc_chan_free(ch);
+    return 0;
+}
+

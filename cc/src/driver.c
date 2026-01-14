@@ -1,6 +1,7 @@
 #include "driver.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "comptime/symbols.h"
 #include "visitor/pass.h"

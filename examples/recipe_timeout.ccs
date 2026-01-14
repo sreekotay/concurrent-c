@@ -1,0 +1,38 @@
+/*
+ * Recipe: Timeout / Deadline
+ *
+ * Demonstrates:
+ *   - Setting a deadline on a nursery
+ *   - Cooperative cancellation via cc_nursery_is_cancelled()
+ *   - Tasks exit gracefully when deadline expires
+ *
+ * Key insight: Cancellation is cooperative - tasks must check the flag.
+ */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+int work_completed = 0;
+
+int main(void) {
+    CCNursery* n = cc_nursery_create();
+    if (!n) return 1;
+
+    /* Set deadline: 50ms from now. */
+    CCDeadline d = cc_deadline_after_ms(50);
+    cc_nursery_set_deadline(n, d.deadline);
+
+    /* Worker: does work until cancelled. */
+    cc_nursery_spawn_closure0(n, () => {
+        while (!cc_nursery_is_cancelled(n)) {
+            work_completed++;
+            cc_sleep_ms(10);  /* simulate work */
+        }
+        printf("worker: cancelled after %d iterations\n", work_completed);
+    });
+
+    cc_nursery_wait(n);
+    cc_nursery_free(n);
+
+    printf("done, work_completed = %d\n", work_completed);
+    return (work_completed >= 1 && work_completed <= 10) ? 0 : 1;
+}

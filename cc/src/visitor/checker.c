@@ -161,6 +161,163 @@ static void cc__emit_note(const CCCheckerCtx* ctx, const StubNodeView* n, const 
     fprintf(stderr, "%s:%d:%d: note: %s\n", path, line, col, msg);
 }
 
+static int cc__is_ident_start_ch(char c) {
+    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+static int cc__is_ident_ch(char c) {
+    return cc__is_ident_start_ch(c) || (c >= '0' && c <= '9');
+}
+
+static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, const char* chname) {
+    if (!line || len == 0 || !chname || !chname[0]) return 0;
+
+    /* Cheap filters. */
+    if (!memmem(line, len, "while", 5)) return 0;
+    if (!memmem(line, len, "cc_chan_recv", 12)) return 0;  /* 12 chars in "cc_chan_recv" */
+    if (!memmem(line, len, chname, strlen(chname))) return 0;
+
+    /* Normalize by removing whitespace so we can match many formatting variants. */
+    char tmp[1024];
+    size_t tn = 0;
+    size_t cap = sizeof(tmp) - 1;
+    for (size_t i = 0; i < len && tn < cap; i++) {
+        char c = line[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        tmp[tn++] = c;
+    }
+    tmp[tn] = '\0';
+
+    /* Catch:
+       - while(cc_chan_recv(ch,...)==0)
+       - while((cc_chan_recv(ch,...)==0))
+       - while(!cc_chan_recv(ch,...)) */
+    char pat1[256];
+    snprintf(pat1, sizeof(pat1), "while(cc_chan_recv(%s", chname);
+    char pat2[256];
+    snprintf(pat2, sizeof(pat2), "while(!cc_chan_recv(%s", chname);
+    if (strstr(tmp, pat1) && strstr(tmp, "==0")) return 1;
+    if (strstr(tmp, pat2)) return 1;
+    return 0;
+}
+
+/* Very small heuristic: detect the most common deadlock footgun:
+     @nursery closing(ch) { spawn(() => { while (cc_chan_recv(ch, ...) == 0) { ... } }); }
+   Under the spec, closing(...) happens after children exit, so "recv until close" inside the same nursery can wait forever. */
+static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const char* buf, size_t n) {
+    if (!ctx || !ctx->input_path || !buf || n == 0) return;
+    if (getenv("CC_ALLOW_NURSERY_CLOSING_DRAIN")) return; /* escape hatch */
+
+    /* NOTE: We removed the broken "fast-path" heuristic that searched for the pattern anywhere
+       after the first `@nursery`. It incorrectly flagged nested nursery patterns where the consumer
+       is in an outer nursery and `closing(ch)` is on an inner one. We now rely solely on the
+       more careful per-nursery scan below. */
+
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    int line = 1;
+    int col = 1;
+
+    for (size_t i = 0; i + 8 < n; i++) {
+        char c = buf[i];
+        char c2 = (i + 1 < n) ? buf[i + 1] : 0;
+
+        if (in_line_comment) { if (c == '\n') { in_line_comment = 0; line++; col = 1; } else col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i++; col += 2; } else { if (c == '\n') { line++; col = 1; } else col++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col += 2; continue; } if (c == '"') in_str = 0; if (c == '\n') { line++; col = 1; } else col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col += 2; continue; } if (c == '\'') in_chr = 0; if (c == '\n') { line++; col = 1; } else col++; continue; }
+
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i++; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i++; col += 2; continue; }
+        if (c == '"') { in_str = 1; col++; continue; }
+        if (c == '\'') { in_chr = 1; col++; continue; }
+
+        if (c == '\n') { line++; col = 1; continue; }
+
+        /* Find '@nursery'. "@nursery" is 8 chars: '@' + "nursery" (7 chars). */
+        if (c == '@' && i + 8 <= n && memcmp(buf + i + 1, "nursery", 7) == 0) {
+            int nur_line = line;
+            int nur_col = col;
+
+            size_t j = i + 8;  /* Skip past "@nursery" */
+            while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+            if (j + 7 >= n) { col++; continue; }
+            if (memcmp(buf + j, "closing", 7) != 0) { col++; continue; }
+            j += 7;
+            while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+            if (j >= n || buf[j] != '(') { col++; continue; }
+            j++;
+            while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+            if (j >= n || !cc__is_ident_start_ch(buf[j])) { col++; continue; }
+            size_t s0 = j;
+            j++;
+            while (j < n && cc__is_ident_ch(buf[j])) j++;
+            size_t sl = j - s0;
+            if (sl == 0 || sl >= 64) { col++; continue; }
+            char chname[64];
+            memcpy(chname, buf + s0, sl);
+            chname[sl] = '\0';
+
+            /* Find '{' for nursery body. */
+            while (j < n && buf[j] != '{') j++;
+            if (j >= n) { col++; continue; }
+            size_t body_s = j;
+
+            /* Find matching '}' (naive depth, ignores strings/comments; good enough for our limited heuristic). */
+            int depth = 0;
+            size_t k = body_s;
+            for (; k < n; k++) {
+                if (buf[k] == '{') depth++;
+                else if (buf[k] == '}') {
+                    depth--;
+                    if (depth == 0) { k++; break; }
+                }
+            }
+            size_t body_e = k;
+            if (body_e <= body_s || body_e > n) { col++; continue; }
+
+            /* If user explicitly closes the channel in the nursery, don't flag. */
+            {
+                char pat[96];
+                snprintf(pat, sizeof(pat), "cc_chan_close(%s", chname);
+                const char* hit = strstr(buf + body_s, pat);
+                if (hit && (size_t)(hit - (buf + body_s)) < (body_e - body_s)) { col++; continue; }
+            }
+
+            /* Hard-error only on the direct footgun form (catches the common case). */
+            {
+                int hit = 0;
+                const char* cur = buf + body_s;
+                const char* end = buf + body_e;
+                while (cur < end) {
+                    const char* nl = memchr(cur, '\n', (size_t)(end - cur));
+                    size_t ll = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+                    if (cc__line_has_deadlock_recv_until_close(cur, ll, chname)) { hit = 1; break; }
+                    if (!nl) break;
+                    cur = nl + 1;
+                }
+                if (hit) {
+                    StubNodeView sn;
+                    memset(&sn, 0, sizeof(sn));
+                    sn.file = ctx->input_path;
+                    sn.line_start = nur_line;
+                    sn.col_start = nur_col;
+                    cc__emit_err(ctx, &sn,
+                                 "CC: deadlock: `@nursery closing(ch)` closes channels only after all children exit; "
+                                 "`while (cc_chan_recv(ch, ...) == 0)` inside the same nursery can wait forever. "
+                                 "Move the draining loop outside the nursery, or close explicitly / send a sentinel.");
+                    cc__emit_note(ctx, &sn, "Set CC_ALLOW_NURSERY_CLOSING_DRAIN=1 to bypass this heuristic check.");
+                    ctx->errors++;
+                    return;
+                }
+            }
+        }
+
+        col++;
+    }
+}
+
 static int cc__call_has_unique_flag(const StubNodeView* nodes, const ChildList* kids, int call_idx) {
     if (!nodes || !kids) return 0;
     const ChildList* cl = &kids[call_idx];
@@ -806,6 +963,7 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
     if (!root || !ctx) return -1;
     ctx->errors = 0;
 
+
     /* `await` is allowed, but only inside @async functions.
        Ignore `await` in comments/strings so tests can mention it in prose. */
     if (ctx->input_path) {
@@ -879,6 +1037,14 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         sn.col_start = 1;
                         cc__emit_err(ctx, &sn, "CC: await is only valid inside @async functions");
                         ctx->errors++;
+                        free(buf);
+                        fclose(f);
+                        return -1;
+                    }
+
+                    /* Heuristic deadlock check for `@nursery closing(...)` misuse. */
+                    cc__check_nursery_closing_deadlock_text(ctx, buf, got);
+                    if (ctx->errors) {
                         free(buf);
                         fclose(f);
                         return -1;

@@ -454,8 +454,8 @@ int main(int argc, char** argv) {
     (void)ensure_out_dir();
     (void)ensure_dir_p("bin");
     if (clean && !list_only) {
-        // Best-effort: wipe per-test artifacts + incremental cache (matches what most devs want).
-        (void)run_cmd_redirect_timeout("./cc/bin/ccc clean --all", NULL, NULL, verbose, 0);
+        // Best-effort: wipe per-test artifacts + incremental cache (NOT --all which would delete the compiler).
+        (void)run_cmd_redirect_timeout("./cc/bin/ccc clean", NULL, NULL, verbose, 0);
     }
 
     DIR* d = opendir("tests");
