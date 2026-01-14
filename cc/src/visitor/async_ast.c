@@ -68,6 +68,27 @@ static int cc__node_in_this_tu(const CCASTRoot* root, const CCVisitorCtx* ctx, c
     return 0;
 }
 
+static int cc__find_func_ret_is_void(const CCASTRoot* root,
+                                     const CCVisitorCtx* ctx,
+                                     const char* fn_name,
+                                     const char* file) {
+    if (!root || !fn_name) return 0;
+    const NodeView* n = (const NodeView*)root->nodes;
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
+        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, fn_name) != 0) continue;
+        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (file && !cc__same_source_file(file, n[i].file)) continue;
+        if (n[i].aux_s2) {
+            const char* r = n[i].aux_s2;
+            const char* endt = r + strlen(r);
+            while (endt > r && (endt[-1] == ' ' || endt[-1] == '\t')) endt--;
+            if (endt - r >= 4 && memcmp(endt - 4, "void", 4) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
 
 static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
     if (!nd || nd->line_start <= 0) return 0;
@@ -1813,8 +1834,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         fn.lbrace = lbrace;
         fn.rbrace = rbrace;
         strncpy(fn.name, n[i].aux_s1, sizeof(fn.name) - 1);
-        fn.ret_is_void = 0;
-        if (n[i].aux_s2 && strstr(n[i].aux_s2, "void") == n[i].aux_s2) fn.ret_is_void = 1;
+        fn.ret_is_void = cc__find_func_ret_is_void(root, ctx, n[i].aux_s1, n[i].file);
+        if (!fn.ret_is_void && n[i].aux_s2 && strstr(n[i].aux_s2, "void") == n[i].aux_s2)
+            fn.ret_is_void = 1; /* fallback to DECL_ITEM string */
         fns[fn_n++] = fn;
     }
 
