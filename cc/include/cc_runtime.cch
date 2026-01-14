@@ -12,6 +12,7 @@
 #include "cc_channel.cch"
 #include "cc_sched.cch"
 #include "cc_nursery.cch"
+#include "std/task_intptr.cch"
 
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;

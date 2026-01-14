@@ -15,6 +15,10 @@
 #include "visitor/pass_ufcs.h"
 #include "visitor/pass_closure_calls.h"
 #include "visitor/pass_autoblock.h"
+#include "visitor/pass_arena_ast.h"
+#include "visitor/pass_nursery_spawn_ast.h"
+#include "visitor/pass_closure_literal_ast.h"
+#include "visitor/pass_defer_syntax.h"
 #include "visitor/visitor_fileutil.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
@@ -1083,8 +1087,8 @@ static char* cc__lower_cc_snippet(const char* text,
         while (*p == ' ' || *p == '\t') p++;
         int abs_line = (base_line > 0 ? (base_line + line_no - 1) : line_no);
 
-        /* Lower @nursery marker into a runtime nursery scope. */
-        if (strncmp(p, "@nursery", 8) == 0 && (p[8] == ' ' || p[8] == '\t' || p[8] == '\n' || p[8] == '\r' || p[8] == '{')) {
+        /* Legacy @nursery lowering (disabled; handled via AST-span pass). */
+        if (0 && strncmp(p, "@nursery", 8) == 0 && (p[8] == ' ' || p[8] == '\t' || p[8] == '\n' || p[8] == '\r' || p[8] == '{')) {
             size_t indent_len = (size_t)(p - line_buf);
             char indent[256];
             if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
@@ -1106,8 +1110,8 @@ static char* cc__lower_cc_snippet(const char* text,
             goto next_line;
         }
 
-        /* Lower spawn(() => { ... }) inside a nursery to cc_nursery_spawn_closure0. */
-        if (strncmp(p, "spawn", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
+        /* Legacy spawn lowering (disabled; handled via AST-span pass). */
+        if (0 && strncmp(p, "spawn", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
             int cur_nursery_id = (nursery_top >= 0) ? nursery_id_stack[nursery_top] : 0;
             const char* s0 = p + 5;
             while (*s0 == ' ' || *s0 == '\t') s0++;
@@ -1413,6 +1417,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
 
+    /* Produced by the closure-literal AST pass (emitted into the output TU). */
+    char* closure_protos = NULL;
+    size_t closure_protos_len = 0;
+    char* closure_defs = NULL;
+    size_t closure_defs_len = 0;
+
 #ifdef CC_TCC_EXT_AVAILABLE
     if (src_all && root && root->nodes && root->node_count > 0) {
         char* rewritten = NULL;
@@ -1533,6 +1543,154 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
+       (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
+    if (src_ufcs && ctx && ctx->symbols) {
+        char* tmp_path = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
+        char pp_path[128];
+        int pp_err = tmp_path ? cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path)) : EINVAL;
+        const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
+        CCASTRoot* root3 = use_path ? cc_tcc_bridge_parse_to_ast(use_path, ctx->input_path, ctx->symbols) : NULL;
+        if (pp_err == 0 && !(getenv("CC_KEEP_REPARSE"))) unlink(pp_path);
+        if (tmp_path) {
+            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
+            free(tmp_path);
+        }
+        if (!root3) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return EINVAL;
+        }
+
+        /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */
+        {
+            char* rewritten = NULL;
+            size_t rewritten_len = 0;
+            char* protos = NULL;
+            size_t protos_len = 0;
+            char* defs = NULL;
+            size_t defs_len = 0;
+            int r = cc__rewrite_closure_literals_with_nodes(root3, ctx, src_ufcs, src_ufcs_len,
+                                                           &rewritten, &rewritten_len,
+                                                           &protos, &protos_len,
+                                                           &defs, &defs_len);
+            if (r < 0) {
+                cc_tcc_bridge_free_ast(root3);
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                return EINVAL;
+            }
+            if (r > 0) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = rewritten_len;
+            } else {
+                free(rewritten);
+            }
+            if (protos) { free(closure_protos); closure_protos = protos; closure_protos_len = protos_len; }
+            if (defs) { free(closure_defs); closure_defs = defs; closure_defs_len = defs_len; }
+        }
+        cc_tcc_bridge_free_ast(root3);
+
+        /* Reparse after closure rewrite so spawn/nursery/arena spans are correct. */
+        char* tmp2 = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
+        char pp2[128];
+        int pp2_err = tmp2 ? cc_preprocess_file(tmp2, pp2, sizeof(pp2)) : EINVAL;
+        const char* use2 = (pp2_err == 0) ? pp2 : tmp2;
+        CCASTRoot* root4 = use2 ? cc_tcc_bridge_parse_to_ast(use2, ctx->input_path, ctx->symbols) : NULL;
+        if (pp2_err == 0 && !(getenv("CC_KEEP_REPARSE"))) unlink(pp2);
+        if (tmp2) {
+            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp2);
+            free(tmp2);
+        }
+        if (!root4) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+
+        /* 2) spawn(...) -> cc_nursery_spawn* (hard error if outside nursery). */
+        {
+            char* rewritten = NULL;
+            size_t rewritten_len = 0;
+            int r = cc__rewrite_spawn_stmts_with_nodes(root4, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+            if (r < 0) {
+                cc_tcc_bridge_free_ast(root4);
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            if (r > 0) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = rewritten_len;
+            }
+        }
+        cc_tcc_bridge_free_ast(root4);
+
+        /* Reparse after spawn rewrite so nursery/arena end braces are correct. */
+        char* tmp3 = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
+        char pp3[128];
+        int pp3_err = tmp3 ? cc_preprocess_file(tmp3, pp3, sizeof(pp3)) : EINVAL;
+        const char* use3 = (pp3_err == 0) ? pp3 : tmp3;
+        CCASTRoot* root5 = use3 ? cc_tcc_bridge_parse_to_ast(use3, ctx->input_path, ctx->symbols) : NULL;
+        if (pp3_err == 0 && !(getenv("CC_KEEP_REPARSE"))) unlink(pp3);
+        if (tmp3) {
+            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp3);
+            free(tmp3);
+        }
+        if (!root5) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+
+        /* 3) @nursery { ... } -> CCNursery create/wait/free */
+        {
+            char* rewritten = NULL;
+            size_t rewritten_len = 0;
+            int r = cc__rewrite_nursery_blocks_with_nodes(root5, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+            if (r < 0) {
+                cc_tcc_bridge_free_ast(root5);
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            if (r > 0) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = rewritten_len;
+            }
+        }
+
+        /* 4) @arena(...) { ... } -> CCArena prologue/epilogue */
+        {
+            char* rewritten = NULL;
+            size_t rewritten_len = 0;
+            int r = cc__rewrite_arena_blocks_with_nodes(root5, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+            if (r > 0) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = rewritten_len;
+            }
+        }
+        cc_tcc_bridge_free_ast(root5);
+    }
+
     /* Strip CC decl markers so output is valid C (run after async lowering so it can see `@async`). */
     if (src_ufcs) {
         char* stripped = NULL;
@@ -1541,6 +1699,27 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = stripped;
             src_ufcs_len = stripped_len;
+        }
+    }
+
+    /* Lower @defer (and hard-error on cancel) using a syntax-driven pass.
+       NOTE: stub-AST does not currently provide reliable scope targets for @defer, so we do a robust token/brace scan. */
+    if (src_ufcs) {
+        char* rewritten = NULL;
+        size_t rewritten_len = 0;
+        int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        if (r < 0) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (r > 0) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = rewritten_len;
         }
     }
 
@@ -1576,61 +1755,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "}\n");
     fprintf(out, "/* --- end spawn helpers --- */\n\n");
 
-    /* Pre-scan for spawn closures so we can emit valid top-level thunk defs. */
-    CCClosureDesc* closure_descs = NULL;
-    int closure_count = 0;
-    int* closure_line_map = NULL; /* 1-based line -> (index+1) */
-    int closure_line_cap = 0;
-    char* closure_protos = NULL;
-    size_t closure_protos_len = 0;
-    char* closure_defs = NULL;
-    size_t closure_defs_len = 0;
-    if (src_ufcs) {
-        int closure_next_id = 1;
-        cc__scan_spawn_closures(src_ufcs, src_ufcs_len, src_path,
-                                1, &closure_next_id,
-                                &closure_descs, &closure_count,
-                                &closure_line_map, &closure_line_cap,
-                                &closure_protos, &closure_protos_len,
-                                &closure_defs, &closure_defs_len);
-    }
-
-    /* Capture type check (best-effort):
-       We can only lower captures when we can infer a file-scope-safe type string for each captured name. */
-    if (closure_descs) {
-        for (int i = 0; i < closure_count; i++) {
-            for (int ci = 0; ci < closure_descs[i].cap_count; ci++) {
-                if (closure_descs[i].cap_types && closure_descs[i].cap_types[ci]) continue;
-                int col1 = closure_descs[i].start_col >= 0 ? (closure_descs[i].start_col + 1) : 1;
-                fprintf(stderr,
-                        "%s:%d:%d: error: CC: cannot infer type for captured name '%s' (capture-by-copy currently supports simple decls like 'int x = ...;' or 'T* p = ...;')\n",
-                        src_path,
-                        closure_descs[i].start_line,
-                        col1,
-                        closure_descs[i].cap_names && closure_descs[i].cap_names[ci] ? closure_descs[i].cap_names[ci] : "?");
-                fclose(out);
-                for (int k = 0; k < closure_count; k++) {
-                    for (int j = 0; j < closure_descs[k].cap_count; j++) free(closure_descs[k].cap_names[j]);
-                    free(closure_descs[k].cap_names);
-                    for (int j = 0; j < closure_descs[k].cap_count; j++) free(closure_descs[k].cap_types ? closure_descs[k].cap_types[j] : NULL);
-                    free(closure_descs[k].cap_types);
-                    free(closure_descs[k].param1_name);
-                    free(closure_descs[k].param0_name);
-                    free(closure_descs[k].param0_type);
-                    free(closure_descs[k].param1_type);
-                    free(closure_descs[k].body);
-                }
-                free(closure_descs);
-                free(closure_line_map);
-                free(closure_protos);
-                free(closure_defs);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(src_all);
-                return EINVAL;
-            }
-        }
-    }
-
     /* Captures are lowered via __cc_closure_make_N factories. */
     if (closure_protos && closure_protos_len > 0) {
         fputs("/* --- CC closure forward decls --- */\n", out);
@@ -1642,869 +1766,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "#line 1 \"%s\"\n", src_path);
 
     if (src_ufcs) {
-        FILE* in = fmemopen(src_ufcs, src_ufcs_len, "r");
-        if (!in) {
-            /* Fallback to old path */
-            in = fopen(ctx->input_path, "r");
-        }
-        /* Map of multiline UFCS call spans: start_line -> end_line (inclusive). */
-        int* ufcs_ml_end = NULL;
-        int ufcs_ml_cap = 0;
-        unsigned char* ufcs_single = NULL;
-        int ufcs_single_cap = 0;
-        /* Multiline spawn stmt spans: start_line -> end_line (inclusive). */
-        int* spawn_ml_end = NULL;
-        int spawn_ml_cap = 0;
-        /* Spawn arg count by stmt start line (from stub AST direct children). */
-        unsigned char* spawn_argc = NULL;
-        int spawn_argc_cap = 0;
-        if (root && root->nodes && root->node_count > 0) {
-            struct NodeView {
-                int kind;
-                int parent;
-                const char* file;
-                int line_start;
-                int line_end;
-                int col_start;
-                int col_end;
-                int aux1;
-                int aux2;
-                const char* aux_s1;
-                const char* aux_s2;
-            };
-            const struct NodeView* n = (const struct NodeView*)root->nodes;
-            int max_start = 0;
-            int max_spawn = 0;
-            for (int i = 0; i < root->node_count; i++) {
-                if (n[i].kind != 5) continue;          /* CALL */
-                int is_ufcs = (n[i].aux2 & 2) != 0;
-                if (!is_ufcs) continue;                /* only UFCS-marked calls */
-                if (!n[i].aux_s1) continue;
-                if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
-                if (n[i].line_end > n[i].line_start && n[i].line_start > max_start)
-                    max_start = n[i].line_start;
-                if (n[i].line_start > ufcs_single_cap)
-                    ufcs_single_cap = n[i].line_start;
-            }
-            for (int i = 0; i < root->node_count; i++) {
-                if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
-                if (n[i].kind == 3 && n[i].aux_s1 && strcmp(n[i].aux_s1, "spawn") == 0) {
-                    if (n[i].line_end > n[i].line_start && n[i].line_start > max_spawn)
-                        max_spawn = n[i].line_start;
-                }
-            }
-            if (max_start > 0) {
-                ufcs_ml_cap = max_start + 1;
-                ufcs_ml_end = (int*)calloc((size_t)ufcs_ml_cap, sizeof(int));
-                if (ufcs_ml_end) {
-                    for (int i = 0; i < root->node_count; i++) {
-                        if (n[i].kind != 5) continue;
-                        int is_ufcs = (n[i].aux2 & 2) != 0;
-                        if (!is_ufcs) continue;
-                        if (!n[i].aux_s1) continue;
-                        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
-                        if (n[i].line_end > n[i].line_start &&
-                            n[i].line_start > 0 &&
-                            n[i].line_start < ufcs_ml_cap) {
-                            int st = n[i].line_start;
-                            if (n[i].line_end > ufcs_ml_end[st])
-                                ufcs_ml_end[st] = n[i].line_end;
-                        }
-                    }
-                }
-            }
-            if (ufcs_single_cap > 0) {
-                ufcs_single = (unsigned char*)calloc((size_t)ufcs_single_cap + 1, 1);
-                if (ufcs_single) {
-                    for (int i = 0; i < root->node_count; i++) {
-                        if (n[i].kind != 5) continue;
-                        int is_ufcs = (n[i].aux2 & 2) != 0;
-                        if (!is_ufcs) continue;
-                        if (!n[i].aux_s1) continue;
-                        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
-                        if (n[i].line_start > 0 && n[i].line_start <= ufcs_single_cap)
-                            ufcs_single[n[i].line_start] = 1;
-                    }
-                }
-            }
+        fwrite(src_ufcs, 1, src_ufcs_len, out);
+        if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);
 
-            if (max_spawn > 0) {
-                spawn_ml_cap = max_spawn + 1;
-                spawn_ml_end = (int*)calloc((size_t)spawn_ml_cap, sizeof(int));
-                if (spawn_ml_end) {
-                    for (int i = 0; i < root->node_count; i++) {
-                        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
-                        if (n[i].kind != 3) continue;
-                        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, "spawn") != 0) continue;
-                        if (n[i].line_end > n[i].line_start &&
-                            n[i].line_start > 0 &&
-                            n[i].line_start < spawn_ml_cap) {
-                            if (n[i].line_end > spawn_ml_end[n[i].line_start])
-                                spawn_ml_end[n[i].line_start] = n[i].line_end;
-                        }
-                    }
-                }
-
-                spawn_argc_cap = spawn_ml_cap;
-                spawn_argc = (unsigned char*)calloc((size_t)spawn_argc_cap, 1);
-                if (spawn_argc) {
-                    for (int si = 0; si < root->node_count; si++) {
-                        if (!cc__node_file_matches_this_tu(root, ctx, n[si].file)) continue;
-                        if (n[si].kind != 3) continue;
-                        if (!n[si].aux_s1 || strcmp(n[si].aux_s1, "spawn") != 0) continue;
-                        int ls = n[si].line_start;
-                        if (ls <= 0 || ls >= spawn_argc_cap) continue;
-                        int argc = 0;
-                        for (int j = 0; j < root->node_count; j++) {
-                            if (n[j].parent != si) continue;
-                            if (!cc__node_file_matches_this_tu(root, ctx, n[j].file)) continue;
-                            argc++;
-                        }
-                        if (argc < 0) argc = 0;
-                        if (argc > 255) argc = 255;
-                        spawn_argc[ls] = (unsigned char)argc;
-                    }
-                }
-            }
-
-        }
-
-        int arena_stack[128];
-        int arena_top = -1;
-        int arena_counter = 0;
-        int nursery_depth_stack[128];
-        int nursery_id_stack[128];
-        int nursery_top = -1;
-        int nursery_counter = 0;
-
-        /* Basic scope tracking for @defer. This is a line-based best-effort implementation:
-           - @defer stmt; registers stmt to run before the closing brace of the current scope.
-           - @defer name: stmt; registers a named defer.
-           - cancel name; disables a named defer.
-           This does NOT support cross-line defers robustly yet, but unblocks correct-ish flow. */
-        typedef struct {
-            int depth;
-            int active;
-            int line_no;
-            char name[64];   /* empty = unnamed */
-            char stmt[512];  /* original stmt suffix */
-        } CCDeferItem;
-        CCDeferItem defers[512];
-        int defer_count = 0;
-
-        /* Track local decls (best-effort) so we can recognize CCClosure1 variables for call lowering. */
-        char** decl_names[256];
-        char** decl_types[256];
-        unsigned char* decl_flags[256];
-        int decl_counts[256];
-        for (int i = 0; i < 256; i++) {
-            decl_names[i] = NULL;
-            decl_types[i] = NULL;
-            decl_flags[i] = NULL;
-            decl_counts[i] = 0;
-        }
-
-        int brace_depth = 0;
-        /* nursery id stack is used for spawn lowering */
-        int src_line_no = 0;
-        const int cc_line_cap = 65536;
-        const int cc_rewritten_cap = 131072;
-        char* line = (char*)malloc((size_t)cc_line_cap);
-        char* rewritten = (char*)malloc((size_t)cc_rewritten_cap);
-        if (!line || !rewritten) {
-            free(line);
-            free(rewritten);
-            fclose(in);
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            return ENOMEM;
-        }
-        while (fgets(line, cc_line_cap, in)) {
-            src_line_no++;
-            char *p = line;
-            while (*p == ' ' || *p == '\t') p++;
-
-            /* Track decls before any rewriting so we can later lower `c(arg);` for CCClosure1 vars. */
-            cc__maybe_record_decl(decl_names, decl_types, decl_flags, decl_counts, brace_depth, line);
-
-            /* Multiline spawn lowering (buffer by stub span) */
-            if (spawn_ml_end && src_line_no > 0 && src_line_no < spawn_ml_cap && spawn_ml_end[src_line_no] > src_line_no) {
-                int is_closure_literal_spawn = (closure_line_map &&
-                                               src_line_no > 0 &&
-                                               src_line_no < closure_line_cap &&
-                                               closure_line_map[src_line_no] > 0);
-                if (!is_closure_literal_spawn) {
-                int start_line = src_line_no;
-                int end_line = spawn_ml_end[src_line_no];
-                int expected_argc = (spawn_argc && start_line > 0 && start_line < spawn_argc_cap) ? (int)spawn_argc[start_line] : 0;
-                size_t buf_cap = 1024, buf_len = 0;
-                char* buf = (char*)malloc(buf_cap);
-                if (!buf) { /* fallthrough */ }
-                else {
-                    buf[0] = '\0';
-                    size_t ll = strnlen(line, (size_t)cc_line_cap);
-                    if (buf_len + ll + 1 > buf_cap) { while (buf_len + ll + 1 > buf_cap) buf_cap *= 2; buf = (char*)realloc(buf, buf_cap); }
-                    if (!buf) { /* fallthrough */ }
-                    else {
-                        memcpy(buf + buf_len, line, ll); buf_len += ll; buf[buf_len] = '\0';
-                        while (src_line_no < end_line && fgets(line, cc_line_cap, in)) {
-                            src_line_no++;
-                            ll = strnlen(line, (size_t)cc_line_cap);
-                            if (buf_len + ll + 1 > buf_cap) { while (buf_len + ll + 1 > buf_cap) buf_cap *= 2; buf = (char*)realloc(buf, buf_cap); if (!buf) break; }
-                            if (!buf) break;
-                            memcpy(buf + buf_len, line, ll); buf_len += ll; buf[buf_len] = '\0';
-                        }
-                        if (buf) {
-                            /* Reuse the existing single-line spawn parser but on the buffered chunk. */
-                            char* pp = buf;
-                            while (*pp == ' ' || *pp == '\t') pp++;
-                            if (strncmp(pp, "spawn", 5) == 0 && (pp[5] == ' ' || pp[5] == '\t')) {
-                                int cur_nursery_id = (nursery_top >= 0) ? nursery_id_stack[nursery_top] : 0;
-                                const char* s0 = pp + 5;
-                                while (*s0 == ' ' || *s0 == '\t') s0++;
-                                if (*s0 == '(') {
-                                    s0++;
-                                    /* Find matching ')' at depth. */
-                                    const char* expr_start = s0;
-                                    const char* p2 = expr_start;
-                                    int par = 0, brk = 0, br = 0;
-                                    int ins = 0;
-                                    char qch = 0;
-                                    while (*p2) {
-                                        char ch = *p2;
-                                        if (ins) {
-                                            if (ch == '\\' && p2[1]) { p2 += 2; continue; }
-                                            if (ch == qch) ins = 0;
-                                            p2++;
-                                            continue;
-                                        }
-                                        if (ch == '"' || ch == '\'') { ins = 1; qch = ch; p2++; continue; }
-                                        if (ch == '(') par++;
-                                        else if (ch == ')') { if (par == 0 && brk == 0 && br == 0) break; par--; }
-                                        else if (ch == '[') brk++;
-                                        else if (ch == ']') { if (brk) brk--; }
-                                        else if (ch == '{') br++;
-                                        else if (ch == '}') { if (br) br--; }
-                                        p2++;
-                                    }
-                                    if (*p2 == ')') {
-                                        const char* expr_end = p2;
-                                        while (expr_end > expr_start && (expr_end[-1] == ' ' || expr_end[-1] == '\t' || expr_end[-1] == '\n' || expr_end[-1] == '\r')) expr_end--;
-                                        size_t expr_len = (size_t)(expr_end - expr_start);
-                                        /* top-level comma split */
-                                        int comma_pos[2] = { -1, -1 };
-                                        int comma_n = 0;
-                                        int dpar = 0, dbrk2 = 0, dbr2 = 0;
-                                        int ins2 = 0; char q2 = 0;
-                                        for (size_t ii = 0; ii < expr_len; ii++) {
-                                            char ch = expr_start[ii];
-                                            if (ins2) {
-                                                if (ch == '\\' && ii + 1 < expr_len) { ii++; continue; }
-                                                if (ch == q2) ins2 = 0;
-                                                continue;
-                                            }
-                                            if (ch == '"' || ch == '\'') { ins2 = 1; q2 = ch; continue; }
-                                            if (ch == '(') dpar++;
-                                            else if (ch == ')') { if (dpar) dpar--; }
-                                            else if (ch == '[') dbrk2++;
-                                            else if (ch == ']') { if (dbrk2) dbrk2--; }
-                                            else if (ch == '{') dbr2++;
-                                            else if (ch == '}') { if (dbr2) dbr2--; }
-                                            else if (ch == ',' && dpar == 0 && dbrk2 == 0 && dbr2 == 0) {
-                                                if (comma_n < 2) comma_pos[comma_n++] = (int)ii;
-                                            }
-                                        }
-                                        if (cur_nursery_id != 0) {
-                                            int argc = expected_argc ? expected_argc : (comma_n + 1);
-                                            if (argc < 1) argc = 1;
-                                            if (argc > 3) argc = 3;
-
-                                            if (argc == 1 && comma_n == 0) {
-                                                const char* c0 = expr_start;
-                                                size_t c0_len = expr_len;
-                                                while (c0_len > 0 && (c0[c0_len - 1] == ' ' || c0[c0_len - 1] == '\t')) c0_len--;
-                                                while (c0_len > 0 && (*c0 == ' ' || *c0 == '\t')) { c0++; c0_len--; }
-                                                fprintf(out, "#line %d \"%s\"\n", start_line, src_path);
-                                                fprintf(out, "{ CCClosure0 __c = %.*s; cc_nursery_spawn_closure0(__cc_nursery%d, __c); }\n",
-                                                        (int)c0_len, c0, cur_nursery_id);
-                                                free(buf);
-                                                fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                                                continue;
-                                            }
-                                            if (argc == 2 && comma_n >= 1) {
-                                                const char* c0 = expr_start;
-                                                const char* c1 = expr_start + comma_pos[0] + 1;
-                                                size_t c0_len = (size_t)comma_pos[0];
-                                                size_t c1_len = expr_len - (size_t)comma_pos[0] - 1;
-                                                while (c0_len > 0 && (c0[c0_len - 1] == ' ' || c0[c0_len - 1] == '\t')) c0_len--;
-                                                while (c1_len > 0 && (*c1 == ' ' || *c1 == '\t')) { c1++; c1_len--; }
-                                                while (c1_len > 0 && (c1[c1_len - 1] == ' ' || c1[c1_len - 1] == '\t')) c1_len--;
-                                                fprintf(out, "#line %d \"%s\"\n", start_line, src_path);
-                                                fprintf(out, "{ CCClosure1 __c = %.*s; cc_nursery_spawn_closure1(__cc_nursery%d, __c, (intptr_t)(%.*s)); }\n",
-                                                        (int)c0_len, c0, cur_nursery_id, (int)c1_len, c1);
-                                                free(buf);
-                                                fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                                                continue;
-                                            }
-                                            if (argc == 3 && comma_n >= 2) {
-                                                const char* c0 = expr_start;
-                                                const char* c1 = expr_start + comma_pos[0] + 1;
-                                                const char* c2 = expr_start + comma_pos[1] + 1;
-                                                size_t c0_len = (size_t)comma_pos[0];
-                                                size_t c1_len = (size_t)(comma_pos[1] - comma_pos[0] - 1);
-                                                size_t c2_len = expr_len - (size_t)comma_pos[1] - 1;
-                                                while (c0_len > 0 && (c0[c0_len - 1] == ' ' || c0[c0_len - 1] == '\t')) c0_len--;
-                                                while (c1_len > 0 && (*c1 == ' ' || *c1 == '\t')) { c1++; c1_len--; }
-                                                while (c1_len > 0 && (c1[c1_len - 1] == ' ' || c1[c1_len - 1] == '\t')) c1_len--;
-                                                while (c2_len > 0 && (*c2 == ' ' || *c2 == '\t')) { c2++; c2_len--; }
-                                                while (c2_len > 0 && (c2[c2_len - 1] == ' ' || c2[c2_len - 1] == '\t')) c2_len--;
-                                                fprintf(out, "#line %d \"%s\"\n", start_line, src_path);
-                                                fprintf(out, "{ CCClosure2 __c = %.*s; cc_nursery_spawn_closure2(__cc_nursery%d, __c, (intptr_t)(%.*s), (intptr_t)(%.*s)); }\n",
-                                                        (int)c0_len, c0, cur_nursery_id,
-                                                        (int)c1_len, c1,
-                                                        (int)c2_len, c2);
-                                                free(buf);
-                                                fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            /* Fallback: just emit buffered chunk */
-                            fprintf(out, "#line %d \"%s\"\n", start_line, src_path);
-                            fwrite(buf, 1, buf_len, out);
-                            free(buf);
-                            fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                            continue;
-                        }
-                    }
-                }
-                }
-            }
-
-            /* cancel <name>; */
-            if (strncmp(p, "cancel", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
-                char nm[64] = {0};
-                if (sscanf(p + 6, " %63[^; \t\r\n]", nm) == 1) {
-                    for (int i = defer_count - 1; i >= 0; i--) {
-                        if (defers[i].active && defers[i].name[0] && strcmp(defers[i].name, nm) == 0) {
-                            defers[i].active = 0;
-                            break;
-                        }
-                    }
-                }
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                fprintf(out, "/* TODO: cancel %s; */\n", nm[0] ? nm : "<unknown>");
-                continue;
-            }
-
-            /* Lower @arena syntax marker into a plain C block. The preprocessor already injected
-               the arena binding/free lines inside the block. */
-            if (strncmp(p, "@arena", 6) == 0) {
-                const char* name_tok = "arena";
-                const char* size_tok = "kilobytes(4)";
-#ifdef CC_TCC_EXT_AVAILABLE
-                const char* rec_name = NULL;
-                const char* rec_size = NULL;
-                /* Try matching arena node against either input_path or lowered_path. */
-                if (cc__arena_args_for_line(root, ctx->input_path, src_line_no, &rec_name, &rec_size) ||
-                    (root && root->lowered_path &&
-                     cc__arena_args_for_line(root, root->lowered_path, src_line_no, &rec_name, &rec_size))) {
-                    if (rec_name && rec_name[0]) name_tok = rec_name;
-                    if (rec_size && rec_size[0]) size_tok = rec_size;
-                }
-#endif
-
-                size_t indent_len = (size_t)(p - line);
-                char indent[256];
-                if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
-                memcpy(indent, line, indent_len);
-                indent[indent_len] = '\0';
-                int id = ++arena_counter;
-                if (arena_top + 1 < (int)(sizeof(arena_stack) / sizeof(arena_stack[0])))
-                    arena_stack[++arena_top] = id;
-
-                /* Map generated prologue to the @arena source line for better diagnostics. */
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                fprintf(out, "%s{\n", indent);
-                fprintf(out, "%s  CCArena __cc_arena%d = cc_heap_arena(%s);\n", indent, id, size_tok);
-                fprintf(out, "%s  CCArena* %s = &__cc_arena%d;\n", indent, name_tok, id);
-                brace_depth++; /* we emitted an opening brace */
-                fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                continue;
-            }
-
-            /* @defer [name:] stmt; */
-            if (strncmp(p, "@defer", 6) == 0 && (p[6] == ' ' || p[6] == '\t')) {
-                char* rest = p + 6;
-                while (*rest == ' ' || *rest == '\t') rest++;
-                /* Parse optional name: */
-                char nm[64] = {0};
-                const char* stmt = rest;
-                const char* colon = strchr(rest, ':');
-                if (colon) {
-                    /* treat as name: if name token is identifier-ish and ':' precedes a space */
-                    size_t nlen = (size_t)(colon - rest);
-                    if (nlen > 0 && nlen < sizeof(nm)) {
-                        int ok = 1;
-                        for (size_t i = 0; i < nlen; i++) {
-                            char c = rest[i];
-                            if (!(isalnum((unsigned char)c) || c == '_')) { ok = 0; break; }
-                        }
-                        if (ok) {
-                            memcpy(nm, rest, nlen);
-                            nm[nlen] = '\0';
-                            stmt = colon + 1;
-                            while (*stmt == ' ' || *stmt == '\t') stmt++;
-                        }
-                    }
-                }
-                if (defer_count < (int)(sizeof(defers) / sizeof(defers[0]))) {
-                    CCDeferItem* d = &defers[defer_count++];
-                    d->depth = brace_depth;
-                    d->active = 1;
-                    d->line_no = src_line_no;
-                    d->name[0] = '\0';
-                    if (nm[0]) strncpy(d->name, nm, sizeof(d->name) - 1);
-                    d->stmt[0] = '\0';
-                    strncpy(d->stmt, stmt, sizeof(d->stmt) - 1);
-                }
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                fprintf(out, "/* @defer recorded */\n");
-                continue;
-            }
-
-            /* Lower @nursery marker into a runtime nursery scope. */
-            if (strncmp(p, "@nursery", 8) == 0 && (p[8] == ' ' || p[8] == '\t' || p[8] == '\n' || p[8] == '\r' || p[8] == '{')) {
-                size_t indent_len = (size_t)(p - line);
-                char indent[256];
-                if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
-                memcpy(indent, line, indent_len);
-                indent[indent_len] = '\0';
-                int id = ++nursery_counter;
-                if (nursery_top + 1 < (int)(sizeof(nursery_id_stack) / sizeof(nursery_id_stack[0]))) {
-                    nursery_id_stack[++nursery_top] = id;
-                    /* Will be set after we account for the '{' we emit below. */
-                    nursery_depth_stack[nursery_top] = 0;
-                }
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                /* Declare nursery in the surrounding scope, then emit a plain C block for the nursery body.
-                   This keeps the nursery pointer in-scope even if epilogues are emitted later (best-effort). */
-                fprintf(out, "%sCCNursery* __cc_nursery%d = cc_nursery_create();\n", indent, id);
-                fprintf(out, "%sif (!__cc_nursery%d) abort();\n", indent, id);
-                fprintf(out, "%s{\n", indent);
-                brace_depth++; /* account for the '{' we emitted */
-                if (nursery_top >= 0) nursery_depth_stack[nursery_top] = brace_depth;
-                fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                continue;
-            }
-
-            /* Lower spawn(...) inside a nursery to cc_nursery_spawn. Supports:
-               - spawn (fn());
-               - spawn (fn(<int literal>));
-               Otherwise falls back to a plain call with a TODO. */
-            if (strncmp(p, "spawn", 5) == 0 && (p[5] == ' ' || p[5] == '\t')) {
-                int cur_nursery_id = (nursery_top >= 0) ? nursery_id_stack[nursery_top] : 0;
-                const char* s0 = p + 5;
-                while (*s0 == ' ' || *s0 == '\t') s0++;
-                if (*s0 == '(') {
-                    s0++;
-                    while (*s0 == ' ' || *s0 == '\t') s0++;
-
-                    /* Closure literal: spawn(() => { ... }); uses pre-scan + top-level thunks. */
-                    if (closure_line_map && src_line_no > 0 && src_line_no < closure_line_cap) {
-                        int idx1 = closure_line_map[src_line_no];
-                        if (idx1 > 0 && idx1 <= closure_count) {
-                            CCClosureDesc* cd = &closure_descs[idx1 - 1];
-                            if (cd->param_count != 0) {
-                                /* Not supported in spawn yet. Fall back to other spawn lowering paths. */
-                            } else {
-                            fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                            fprintf(out, "{\n");
-                            fprintf(out, "  CCClosure0 __c = __cc_closure_make_%d(", cd->id);
-                            if (cd->cap_count == 0) {
-                                fprintf(out, ");\n");
-                            } else {
-                                for (int ci = 0; ci < cd->cap_count; ci++) {
-                                    if (ci) fprintf(out, ", ");
-                                    int mo = (cd->cap_flags && (cd->cap_flags[ci] & 2) != 0);
-                                    if (mo) fprintf(out, "cc_move(");
-                                    fprintf(out, "%s", cd->cap_names[ci] ? cd->cap_names[ci] : "0");
-                                    if (mo) fprintf(out, ")");
-                                }
-                                fprintf(out, ");\n");
-                            }
-                            fprintf(out, "  cc_nursery_spawn_closure0(__cc_nursery%d, __c);\n", cur_nursery_id);
-                            fprintf(out, "}\n");
-                            /* Skip original closure text lines (multiline). */
-                            while (src_line_no < cd->end_line && fgets(line, cc_line_cap, in)) {
-                                src_line_no++;
-                            }
-                            /* Resync source mapping after eliding original closure text. */
-                            fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                            continue;
-                            }
-                        }
-                    }
-
-                    /* spawn(<closure_expr>); where the expression is a CCClosure0 value.
-                       Best-effort heuristic: accept identifiers and cc_closure0_make(...). */
-                    {
-                        const char* expr_start = s0;
-                        const char* p2 = expr_start;
-                        int par = 0;
-                        while (*p2) {
-                            if (*p2 == '(') par++;
-                            else if (*p2 == ')') {
-                                if (par == 0) break;
-                                par--;
-                            }
-                            p2++;
-                        }
-                        if (*p2 == ')') {
-                            const char* expr_end = p2;
-                            while (expr_end > expr_start && (expr_end[-1] == ' ' || expr_end[-1] == '\t')) expr_end--;
-                            size_t expr_len = (size_t)(expr_end - expr_start);
-                            /* Support spawn(c, arg) for CCClosure1 and spawn(c, a, b) for CCClosure2 (nursery only). */
-                            {
-                                /* Find top-level commas */
-                                int comma_pos[2] = { -1, -1 };
-                                int comma_n = 0;
-                                int dpar = 0, dbrk = 0, dbr = 0;
-                                int ins = 0;
-                                char qch = 0;
-                                for (size_t i = 0; i < expr_len; i++) {
-                                    char ch = expr_start[i];
-                                    if (ins) {
-                                        if (ch == '\\' && i + 1 < expr_len) { i++; continue; }
-                                        if (ch == qch) ins = 0;
-                                        continue;
-                                    }
-                                    if (ch == '"' || ch == '\'') { ins = 1; qch = ch; continue; }
-                                    if (ch == '(') dpar++;
-                                    else if (ch == ')') { if (dpar) dpar--; }
-                                    else if (ch == '[') dbrk++;
-                                    else if (ch == ']') { if (dbrk) dbrk--; }
-                                    else if (ch == '{') dbr++;
-                                    else if (ch == '}') { if (dbr) dbr--; }
-                                    else if (ch == ',' && dpar == 0 && dbrk == 0 && dbr == 0) {
-                                        if (comma_n < 2) comma_pos[comma_n++] = (int)i;
-                                    }
-                                }
-
-                                if (cur_nursery_id != 0 && (comma_n == 1 || comma_n == 2)) {
-                                    const char* c0 = expr_start;
-                                    const char* c1 = expr_start + comma_pos[0] + 1;
-                                    const char* c2 = (comma_n == 2) ? (expr_start + comma_pos[1] + 1) : NULL;
-
-                                    size_t c0_len = (size_t)comma_pos[0];
-                                    size_t c1_len = (comma_n == 2) ? (size_t)(comma_pos[1] - comma_pos[0] - 1) : (expr_len - (size_t)comma_pos[0] - 1);
-                                    size_t c2_len = (comma_n == 2) ? (expr_len - (size_t)comma_pos[1] - 1) : 0;
-
-                                    while (c0_len > 0 && (c0[c0_len - 1] == ' ' || c0[c0_len - 1] == '\t')) c0_len--;
-                                    while (c1_len > 0 && (*c1 == ' ' || *c1 == '\t')) { c1++; c1_len--; }
-                                    while (c1_len > 0 && (c1[c1_len - 1] == ' ' || c1[c1_len - 1] == '\t')) c1_len--;
-                                    if (c2) {
-                                        while (c2_len > 0 && (*c2 == ' ' || *c2 == '\t')) { c2++; c2_len--; }
-                                        while (c2_len > 0 && (c2[c2_len - 1] == ' ' || c2[c2_len - 1] == '\t')) c2_len--;
-                                    }
-
-                                    fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                                    if (comma_n == 1) {
-                                        fprintf(out, "{ CCClosure1 __c = %.*s; cc_nursery_spawn_closure1(__cc_nursery%d, __c, (intptr_t)(%.*s)); }\n",
-                                                (int)c0_len, c0, cur_nursery_id,
-                                                (int)c1_len, c1);
-                                    } else {
-                                        fprintf(out, "{ CCClosure2 __c = %.*s; cc_nursery_spawn_closure2(__cc_nursery%d, __c, (intptr_t)(%.*s), (intptr_t)(%.*s)); }\n",
-                                                (int)c0_len, c0, cur_nursery_id,
-                                                (int)c1_len, c1,
-                                                (int)c2_len, c2 ? c2 : "0");
-                                    }
-                                    continue;
-                                }
-                            }
-                            int looks_ident = 0;
-                            if (expr_len > 0 && (isalpha((unsigned char)expr_start[0]) || expr_start[0] == '_')) {
-                                looks_ident = 1;
-                                for (size_t i = 1; i < expr_len; i++) {
-                                    char c = expr_start[i];
-                                    if (!(isalnum((unsigned char)c) || c == '_')) { looks_ident = 0; break; }
-                                }
-                            }
-                            int looks_make = 0;
-                            if (expr_len >= 15) {
-                                for (size_t i = 0; i + 15 <= expr_len; i++) {
-                                    if (memcmp(expr_start + i, "cc_closure0_make", 15) == 0) { looks_make = 1; break; }
-                                }
-                            }
-                            if (looks_ident || looks_make) {
-                                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                                if (cur_nursery_id == 0) {
-                                    fprintf(out, "/* TODO: spawn outside nursery */ %s", line);
-                                } else {
-                                    fprintf(out, "{ CCClosure0 __c = %.*s; cc_nursery_spawn_closure0(__cc_nursery%d, __c); }\n",
-                                            (int)expr_len, expr_start, cur_nursery_id);
-                                }
-                                continue;
-                            }
-                        }
-                    }
-
-                    char fn[64] = {0};
-                    long arg = 0;
-                    int has_arg = 0;
-                    if (sscanf(s0, "%63[_A-Za-z0-9]%n", fn, &(int){0}) >= 1) {
-                        const char* lp = strchr(s0, '(');
-                        const char* rp = lp ? strchr(lp, ')') : NULL;
-                        if (lp && rp && lp < rp) {
-                            /* check for single integer literal inside */
-                            const char* inside = lp + 1;
-                            while (*inside == ' ' || *inside == '\t') inside++;
-                            if (*inside == '-' || isdigit((unsigned char)*inside)) {
-                                char* endp = NULL;
-                                arg = strtol(inside, &endp, 10);
-                                if (endp) {
-                                    while (*endp == ' ' || *endp == '\t') endp++;
-                                    if (*endp == ')' ) has_arg = 1;
-                                }
-                            }
-                            /* no-arg case */
-                            if (!has_arg) {
-                                const char* inside2 = lp + 1;
-                                while (*inside2 == ' ' || *inside2 == '\t') inside2++;
-                                if (*inside2 == ')' ) has_arg = 0;
-                            }
-                        }
-                    }
-
-                    fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                    if (cur_nursery_id == 0) {
-                        fprintf(out, "/* TODO: spawn outside nursery */ %s", line);
-                        continue;
-                    }
-                    if (fn[0] && !has_arg) {
-                        fprintf(out, "{ __cc_spawn_void_arg* __a = (__cc_spawn_void_arg*)malloc(sizeof(__cc_spawn_void_arg));\n");
-                        fprintf(out, "  if (!__a) abort();\n");
-                        fprintf(out, "  __a->fn = %s;\n", fn);
-                        fprintf(out, "  cc_nursery_spawn(__cc_nursery%d, __cc_spawn_thunk_void, __a);\n", cur_nursery_id);
-                        fprintf(out, "}\n");
-                        continue;
-                    }
-                    if (fn[0] && has_arg) {
-                        fprintf(out, "{ __cc_spawn_int_arg* __a = (__cc_spawn_int_arg*)malloc(sizeof(__cc_spawn_int_arg));\n");
-                        fprintf(out, "  if (!__a) abort();\n");
-                        fprintf(out, "  __a->fn = %s;\n", fn);
-                        fprintf(out, "  __a->arg = (int)%ld;\n", arg);
-                        fprintf(out, "  cc_nursery_spawn(__cc_nursery%d, __cc_spawn_thunk_int, __a);\n", cur_nursery_id);
-                        fprintf(out, "}\n");
-                        continue;
-                    }
-                    fprintf(out, "/* TODO: spawn lowering */ %s", line);
-                    continue;
-                }
-            }
-
-            /* Closure literal used as an expression:
-               rewrite `() => { ... }` / `() => expr` to a CCClosure0 value. */
-            if (closure_line_map && src_line_no > 0 && src_line_no < closure_line_cap) {
-                int idx1 = closure_line_map[src_line_no];
-                if (idx1 > 0 && idx1 <= closure_count) {
-                    CCClosureDesc* cd = &closure_descs[idx1 - 1];
-                    size_t line_len2 = strlen(line);
-                    if (cd->start_col < 0 || (size_t)cd->start_col > line_len2) {
-                        /* Unexpected; just pass through. */
-                    } else {
-                        fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                        fwrite(line, 1, (size_t)cd->start_col, out);
-                        if (cd->cap_count > 0) {
-                            fprintf(out, "__cc_closure_make_%d(", cd->id);
-                            for (int ci = 0; ci < cd->cap_count; ci++) {
-                                if (ci) fputs(", ", out);
-                                int mo = (cd->cap_flags && (cd->cap_flags[ci] & 2) != 0);
-                                if (mo) fputs("cc_move(", out);
-                                fputs(cd->cap_names[ci] ? cd->cap_names[ci] : "0", out);
-                                if (mo) fputs(")", out);
-                            }
-                            fputs(")", out);
-                        } else {
-                            fprintf(out, "__cc_closure_make_%d()", cd->id);
-                        }
-
-                        if (cd->end_line == src_line_no) {
-                            if (cd->end_col >= 0 && (size_t)cd->end_col < line_len2) {
-                                fputs(line + cd->end_col, out);
-                            } else {
-                                fputc('\n', out);
-                            }
-                            continue;
-                        }
-
-                        /* Multiline literal: skip until end_line, then emit suffix. */
-                        fputc('\n', out);
-                        while (src_line_no < cd->end_line && fgets(line, cc_line_cap, in)) {
-                            src_line_no++;
-                        }
-                        line_len2 = strlen(line);
-                        fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                        if (cd->end_col >= 0 && (size_t)cd->end_col < line_len2) {
-                            fputs(line + cd->end_col, out);
-                        } else {
-                            fputc('\n', out);
-                        }
-                        fprintf(out, "#line %d \"%s\"\n", src_line_no + 1, src_path);
-                        continue;
-                    }
-                }
-            }
-            if (arena_top >= 0 && p[0] == '}') {
-                int id = arena_stack[arena_top--];
-                size_t indent_len = (size_t)(p - line);
-                char indent[256];
-                if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
-                memcpy(indent, line, indent_len);
-                indent[indent_len] = '\0';
-                /* Map generated epilogue to the closing brace line for diagnostics. */
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                fprintf(out, "%s  cc_heap_arena_free(&__cc_arena%d);\n", indent, id);
-                fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-            }
-
-            /* Before emitting a close brace, emit any @defer statements at this depth. */
-            if (p[0] == '}') {
-                /* If this brace closes an active nursery scope, emit nursery epilogue inside the scope. */
-                if (nursery_top >= 0 && nursery_depth_stack[nursery_top] == brace_depth) {
-                    size_t indent_len = (size_t)(p - line);
-                    char indent[256];
-                    if (indent_len >= sizeof(indent)) indent_len = sizeof(indent) - 1;
-                    memcpy(indent, line, indent_len);
-                    indent[indent_len] = '\0';
-
-                    int id = nursery_id_stack[nursery_top--];
-                    fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                    fprintf(out, "%s  cc_nursery_wait(__cc_nursery%d);\n", indent, id);
-                    fprintf(out, "%s  cc_nursery_free(__cc_nursery%d);\n", indent, id);
-                    fprintf(out, "#line %d \"%s\"\n", src_line_no, src_path);
-                }
-
-                for (int i = defer_count - 1; i >= 0; i--) {
-                    if (defers[i].active && defers[i].depth == brace_depth) {
-                        fprintf(out, "#line %d \"%s\"\n", defers[i].line_no, src_path);
-                        fprintf(out, "%s", defers[i].stmt);
-                        /* Ensure newline */
-                        size_t sl = strnlen(defers[i].stmt, sizeof(defers[i].stmt));
-                        if (sl == 0 || defers[i].stmt[sl - 1] != '\n')
-                            fprintf(out, "\n");
-                        defers[i].active = 0;
-                    }
-                }
-                /* The source brace closes the current depth. */
-                if (brace_depth > 0) brace_depth--;
-            }
-
-            /* Update brace depth for opening braces on this line (best-effort). */
-            for (char* q = line; *q; q++) {
-                if (*q == '{') brace_depth++;
-            }
-
-            /* If this line starts a recorded multiline UFCS call, buffer until its end line and
-               rewrite the whole chunk (handles multi-line argument lists). */
-            if (ufcs_ml_end && src_line_no > 0 && src_line_no < ufcs_ml_cap && ufcs_ml_end[src_line_no] > src_line_no) {
-                int end_line = ufcs_ml_end[src_line_no];
-                size_t buf_cap = 1024;
-                size_t buf_len = 0;
-                char* buf = (char*)malloc(buf_cap);
-                if (!buf) {
-                    fputs(line, out);
-                    continue;
-                }
-                buf[0] = '\0';
-                size_t ll = strnlen(line, (size_t)cc_line_cap);
-                if (buf_len + ll + 1 > buf_cap) {
-                    while (buf_len + ll + 1 > buf_cap) buf_cap *= 2;
-                    buf = (char*)realloc(buf, buf_cap);
-                    if (!buf) continue;
-                }
-                memcpy(buf + buf_len, line, ll);
-                buf_len += ll;
-                buf[buf_len] = '\0';
-
-                while (src_line_no < end_line && fgets(line, cc_line_cap, in)) {
-                    src_line_no++;
-                    ll = strnlen(line, (size_t)cc_line_cap);
-                    if (buf_len + ll + 1 > buf_cap) {
-                        while (buf_len + ll + 1 > buf_cap) buf_cap *= 2;
-                        buf = (char*)realloc(buf, buf_cap);
-                        if (!buf) break;
-                    }
-                    memcpy(buf + buf_len, line, ll);
-                    buf_len += ll;
-                    buf[buf_len] = '\0';
-                }
-
-                size_t out_cap = buf_len * 2 + 128;
-                char* out_buf = (char*)malloc(out_cap);
-                if (out_buf && cc_ufcs_rewrite_line(buf, out_buf, out_cap) == 0) {
-                    fputs(out_buf, out);
-                } else {
-                    fputs(buf, out);
-                }
-                free(out_buf);
-                free(buf);
-                continue;
-            }
-
-            /* Single-line UFCS lowering: only on lines where TCC recorded a UFCS-marked call. */
-            if (ufcs_single && src_line_no > 0 && src_line_no <= ufcs_single_cap && ufcs_single[src_line_no]) {
-                if (cc_ufcs_rewrite_line(line, rewritten, (size_t)cc_rewritten_cap) != 0) {
-                    strncpy(rewritten, line, (size_t)cc_rewritten_cap - 1);
-                    rewritten[(size_t)cc_rewritten_cap - 1] = '\0';
-                }
-                fputs(rewritten, out);
-            } else {
-                fputs(line, out);
-            }
-        }
-        free(line);
-        free(rewritten);
-        free(ufcs_ml_end);
-        free(ufcs_single);
-        free(spawn_ml_end);
-        free(spawn_argc);
-        fclose(in);
-
-        /* decl table cleanup */
-        for (int d = 0; d < 256; d++) {
-            for (int i = 0; i < decl_counts[d]; i++) free(decl_names[d][i]);
-            free(decl_names[d]);
-            for (int i = 0; i < decl_counts[d]; i++) free(decl_types[d][i]);
-            free(decl_types[d]);
-            free(decl_flags[d]);
-        }
-
-        if (closure_descs) {
-            for (int i = 0; i < closure_count; i++) {
-                for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_names[j]);
-                free(closure_descs[i].cap_names);
-                for (int j = 0; j < closure_descs[i].cap_count; j++) free(closure_descs[i].cap_types ? closure_descs[i].cap_types[j] : NULL);
-                free(closure_descs[i].cap_types);
-                free(closure_descs[i].cap_flags);
-                    free(closure_descs[i].param1_name);
-                    free(closure_descs[i].param0_name);
-                    free(closure_descs[i].param0_type);
-                    free(closure_descs[i].param1_type);
-                free(closure_descs[i].body);
-            }
-            free(closure_descs);
-        }
-        free(closure_line_map);
         free(closure_protos);
         if (closure_defs && closure_defs_len > 0) {
             /* Emit closure definitions at end-of-file so global names are in scope. */
-            fputs("\n/* --- CC generated closures --- */\n", out);
+            fputs("\n#line 1 \"<cc_generated_closures>\"\n", out);
             fwrite(closure_defs, 1, closure_defs_len, out);
-            fputs("/* --- end generated closures --- */\n", out);
         }
         free(closure_defs);
         if (src_ufcs != src_all) free(src_ufcs);

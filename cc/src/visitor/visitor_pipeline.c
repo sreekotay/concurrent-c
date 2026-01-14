@@ -63,11 +63,22 @@ static char* cc__write_temp_c_file(const char* buf, size_t len, const char* orig
     int fd = mkstemp(tmpl);
 #endif
     if (fd < 0) return NULL;
-    /* Minimal prelude so patched TCC can type-check rewritten intermediate code during the reparse step. */
+    /* Prelude for reparse: must provide CC runtime types used by intermediate rewrites
+       (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers. */
     const char* prelude =
         "#define CC_PARSER_MODE 1\n"
+        "#include <stdlib.h>\n"
         "#include <stdint.h>\n"
-        "typedef intptr_t CCAbIntptr;\n";
+        "typedef intptr_t CCAbIntptr;\n"
+        "#include \"cc_closure.cch\"\n"
+        "#include \"cc_nursery.cch\"\n"
+        "#include \"cc_arena.cch\"\n"
+        "#include \"cc_slice.cch\"\n"
+        "#include \"std/task_intptr.cch\"\n"
+        "typedef struct { void (*fn)(void); } __cc_spawn_void_arg;\n"
+        "typedef struct { void (*fn)(int); int arg; } __cc_spawn_int_arg;\n"
+        "static void* __cc_spawn_thunk_void(void*);\n"
+        "static void* __cc_spawn_thunk_int(void*);\n";
     size_t pre_len = strlen(prelude);
     size_t off = 0;
     while (off < pre_len) {

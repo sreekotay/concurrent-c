@@ -17,7 +17,7 @@ typedef CCFutureStatus (*cc_task_intptr_poll_fn)(void* frame, intptr_t* out_val,
 
 /* Parse-only stubs: avoid type errors from using @async before lowering rewrites kick in.
    In particular, allow `cc_block_on_intptr(f())` where `f` is still seen as `void` by TCC. */
-#define cc_run_blocking_task_intptr(c) (0)
+#define cc_run_blocking_task_intptr(c) ((void)(c), (CCTaskIntptr)0)
 #define cc_task_intptr_make_poll(poll, frame, drop) (0)
 #define cc_block_on_intptr(t) (0)
 #define cc_block_on(T, task_expr) ((T)0)
