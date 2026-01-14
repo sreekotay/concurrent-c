@@ -502,11 +502,11 @@ static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, 
         (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->then_st, &out->then_n);
         i = rb + 1;
     } else {
-        size_t end0 = cc__scan_simple_stmt_end(src, i, se);
         out->then_st = (Stmt*)calloc(1, sizeof(Stmt));
         out->then_n = 1;
-        (void)cc__build_simple_stmt_from_text(src, i, end0, &out->then_st[0]);
-        i = (end0 < se && src[end0] == ';') ? (end0 + 1) : end0;
+        size_t end0 = se;
+        (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->then_st[0], &end0);
+        i = end0;
     }
 
     /* optional else */
@@ -527,11 +527,11 @@ static int cc__parse_if_chain_from_text(const char* src, size_t len, size_t ss, 
             (void)cc__parse_stmt_list_from_text_range(src, len, i + 1, rb, &out->else_st, &out->else_n);
             i = rb + 1;
         } else {
-        size_t end0 = cc__scan_simple_stmt_end(src, i, se);
             out->else_st = (Stmt*)calloc(1, sizeof(Stmt));
             out->else_n = 1;
-            (void)cc__build_simple_stmt_from_text(src, i, end0, &out->else_st[0]);
-            i = (end0 < se && src[end0] == ';') ? (end0 + 1) : end0;
+            size_t end0 = se;
+            (void)cc__parse_one_stmt_from_text(src, len, i, se, &out->else_st[0], &end0);
+            i = end0;
         }
     }
     if (out_end) *out_end = i;
@@ -635,6 +635,7 @@ static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, 
         int is_cc_block = 0;
         if (cc__match_kw_at(src, j, se, "nursery")) is_cc_block = 1;
         else if (cc__match_kw_at(src, j, se, "arena")) is_cc_block = 1;
+        else if (cc__match_kw_at(src, j, se, "defer")) is_cc_block = 1;
         if (is_cc_block) {
             /* Find the first '{' after the keyword and match it. */
             size_t k = j;
