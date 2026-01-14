@@ -1,0 +1,18 @@
+/* Test: @unsafe escape hatch allows mutation of reference capture */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+int main(void) {
+    int counter = 0;
+    
+    @nursery {
+        /* @unsafe bypasses mutation check - you own this race */
+        spawn(@unsafe [&counter]() => {
+            counter++;
+        });
+    }
+    
+    /* Note: this is racy! Only use @unsafe when you know what you're doing. */
+    printf("counter=%d\n", counter);
+    return (counter == 1) ? 0 : 1;
+}

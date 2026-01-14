@@ -584,6 +584,280 @@ static char** cc__dup_string_list(char** xs, int n) {
 }
 
 typedef struct {
+    char* name;
+    char** param_types;
+    int param_count;
+} CCFuncSig;
+
+static void cc__free_func_sigs(CCFuncSig* sigs, int n) {
+    if (!sigs) return;
+    for (int i = 0; i < n; i++) {
+        free(sigs[i].name);
+        for (int k = 0; k < sigs[i].param_count; k++) free(sigs[i].param_types ? sigs[i].param_types[k] : NULL);
+        free(sigs[i].param_types);
+    }
+    free(sigs);
+}
+
+static const CCFuncSig* cc__lookup_sig(const CCFuncSig* sigs, int n, const char* name) {
+    if (!sigs || n <= 0 || !name) return NULL;
+    for (int i = 0; i < n; i++) {
+        if (!sigs[i].name) continue;
+        if (strcmp(sigs[i].name, name) == 0) return &sigs[i];
+    }
+    return NULL;
+}
+
+static int cc__param_is_const_ptr(const char* ty) {
+    if (!ty) return 0;
+    /* Best-effort: require both "const" and "*" somewhere in the type string. */
+    if (!strstr(ty, "const")) return 0;
+    if (!strchr(ty, '*')) return 0;
+    return 1;
+}
+
+/* Check if a type string represents a safe wrapper that allows mutation in reference captures.
+   Safe wrappers: @atomic T, Atomic<T>, Mutex<T>, CCChan*, CCChanTx, CCChanRx */
+static int cc__is_safe_wrapper_type(const char* ty) {
+    if (!ty) return 0;
+    /* Skip leading whitespace */
+    while (*ty == ' ' || *ty == '\t') ty++;
+    /* @atomic prefix */
+    if (strncmp(ty, "@atomic", 7) == 0 && (ty[7] == ' ' || ty[7] == '\t' || ty[7] == '\0')) return 1;
+    /* Atomic<T> */
+    if (strncmp(ty, "Atomic<", 7) == 0) return 1;
+    /* Mutex<T> */
+    if (strncmp(ty, "Mutex<", 6) == 0) return 1;
+    /* CCChan* */
+    if (strncmp(ty, "CCChan", 6) == 0) return 1;
+    /* CCChanTx, CCChanRx */
+    if (strncmp(ty, "CCChanTx", 8) == 0 || strncmp(ty, "CCChanRx", 8) == 0) return 1;
+    return 0;
+}
+
+typedef enum {
+    CC_MUT_NONE = 0,
+    CC_MUT_WRITE = 1,
+    CC_MUT_ADDR_OF_ESCAPES = 2,
+    CC_MUT_ADDR_OF_NONCONST_CALL = 3,
+} CCMutationKind;
+
+static int cc__scan_skip_string_comment(const char* s, size_t n, size_t* io) {
+    size_t i = *io;
+    if (i >= n) return 0;
+    if (s[i] == '"') {
+        i++;
+        while (i < n) {
+            if (s[i] == '\\' && i + 1 < n) { i += 2; continue; }
+            if (s[i] == '"') { i++; break; }
+            i++;
+        }
+        *io = i;
+        return 1;
+    }
+    if (s[i] == '\'' && i + 1 < n) {
+        i++;
+        if (i < n && s[i] == '\\' && i + 1 < n) i += 2;
+        else i++;
+        if (i < n && s[i] == '\'') i++;
+        *io = i;
+        return 1;
+    }
+    if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+        i += 2;
+        while (i < n && s[i] != '\n') i++;
+        *io = i;
+        return 1;
+    }
+    if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+        i += 2;
+        while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+        if (i + 1 < n) i += 2;
+        *io = i;
+        return 1;
+    }
+    return 0;
+}
+
+/* Best-effort classification for `&var` usage:
+   - If inside a call arglist for a known function and the corresponding param is `const T*`, treat as read-only (OK).
+   - If inside a call arglist but param is `T*` (or unknown), treat as potential write.
+   - If not clearly inside a call, treat as address escape (potential write). */
+static int cc__addr_of_is_readonly_call(const char* body,
+                                       size_t amp_off,
+                                       const char* var_name,
+                                       const CCFuncSig* sigs,
+                                       int sig_n,
+                                       const char** out_callee,
+                                       const char** out_param_ty) {
+    if (out_callee) *out_callee = NULL;
+    if (out_param_ty) *out_param_ty = NULL;
+    if (!body || !var_name || !var_name[0]) return 0;
+
+    size_t n = strlen(body);
+    if (amp_off >= n) return 0;
+
+    /* Find the arglist '(' that contains this '&' by scanning backward and balancing parens. */
+    int par = 0;
+    size_t lp = (size_t)-1;
+    for (size_t i = amp_off; i > 0; i--) {
+        char c = body[i - 1];
+        if (c == ')') par++;
+        else if (c == '(') {
+            if (par == 0) { lp = i - 1; break; }
+            par--;
+        }
+    }
+    if (lp == (size_t)-1) return 0;
+
+    /* Find callee identifier immediately before '(' (skip ws). */
+    size_t j = lp;
+    while (j > 0 && (body[j - 1] == ' ' || body[j - 1] == '\t')) j--;
+    size_t end = j;
+    while (j > 0 && cc__is_ident_char2(body[j - 1])) j--;
+    if (j == end || !cc__is_ident_start_char(body[j])) return 0;
+    size_t name_len = end - j;
+    char callee[128];
+    if (name_len >= sizeof(callee)) return 0;
+    memcpy(callee, body + j, name_len);
+    callee[name_len] = 0;
+
+    const CCFuncSig* sig = cc__lookup_sig(sigs, sig_n, callee);
+    if (!sig) return 0;
+
+    /* Determine arg index by scanning from lp+1 to amp_off counting top-level commas. */
+    int argi = 0;
+    int p = 0, b = 0, sq = 0;
+    for (size_t i = lp + 1; i < amp_off && i < n; i++) {
+        size_t ii = i;
+        if (cc__scan_skip_string_comment(body, n, &ii)) { i = ii ? (ii - 1) : i; continue; }
+        char c = body[i];
+        if (c == '(') p++;
+        else if (c == ')' && p > 0) p--;
+        else if (c == '{') b++;
+        else if (c == '}' && b > 0) b--;
+        else if (c == '[') sq++;
+        else if (c == ']' && sq > 0) sq--;
+        else if (c == ',' && p == 0 && b == 0 && sq == 0) argi++;
+    }
+
+    if (argi < 0 || argi >= sig->param_count) {
+        if (out_callee) *out_callee = sig->name;
+        return 0;
+    }
+    const char* pty = sig->param_types ? sig->param_types[argi] : NULL;
+    if (out_callee) *out_callee = sig->name;
+    if (out_param_ty) *out_param_ty = pty;
+    return cc__param_is_const_ptr(pty);
+}
+
+/* Returns non-zero if mutation/potential mutation found. */
+static int cc__find_mutation_in_body(const char* body,
+                                     const char* var_name,
+                                     const CCFuncSig* sigs,
+                                     int sig_n,
+                                     CCMutationKind* out_kind,
+                                     size_t* out_offset,
+                                     const char** out_callee,
+                                     const char** out_param_ty) {
+    if (!body || !var_name || !var_name[0]) return 0;
+    size_t var_len = strlen(var_name);
+    size_t body_len = strlen(body);
+    if (out_kind) *out_kind = CC_MUT_NONE;
+    if (out_callee) *out_callee = NULL;
+    if (out_param_ty) *out_param_ty = NULL;
+    
+    for (size_t i = 0; i < body_len; i++) {
+        /* Skip strings/comments. */
+        size_t ii = i;
+        if (cc__scan_skip_string_comment(body, body_len, &ii)) { i = ii ? (ii - 1) : i; continue; }
+        
+        /* Check for ++var or --var */
+        if (i + 1 + var_len < body_len) {
+            if ((body[i] == '+' && body[i+1] == '+') || (body[i] == '-' && body[i+1] == '-')) {
+                size_t j = i + 2;
+                while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+                if (j + var_len <= body_len && strncmp(body + j, var_name, var_len) == 0) {
+                    char after = (j + var_len < body_len) ? body[j + var_len] : 0;
+                    if (!cc__is_ident_char2(after)) {
+                        if (out_offset) *out_offset = i;
+                        if (out_kind) *out_kind = CC_MUT_WRITE;
+                        return 1;
+                    }
+                }
+            }
+        }
+        
+        /* Check for identifier at position i */
+        if (!cc__is_ident_start_char(body[i])) continue;
+        if (i > 0 && cc__is_ident_char2(body[i-1])) continue;
+        if (i + var_len > body_len) continue;
+        if (strncmp(body + i, var_name, var_len) != 0) continue;
+        char after = (i + var_len < body_len) ? body[i + var_len] : 0;
+        if (cc__is_ident_char2(after)) continue;
+        
+        /* Found var_name at position i. Check for mutation. */
+        size_t j = i + var_len;
+        while (j < body_len && (body[j] == ' ' || body[j] == '\t')) j++;
+        
+        /* var++ or var-- */
+        if (j + 1 < body_len && ((body[j] == '+' && body[j+1] == '+') || (body[j] == '-' && body[j+1] == '-'))) {
+            if (out_offset) *out_offset = i;
+            if (out_kind) *out_kind = CC_MUT_WRITE;
+            return 1;
+        }
+        
+        /* var = ..., var += ..., var -= ..., etc. */
+        if (j < body_len && body[j] == '=') {
+            if (j + 1 >= body_len || body[j+1] != '=') { /* not == */
+                if (out_offset) *out_offset = i;
+                if (out_kind) *out_kind = CC_MUT_WRITE;
+                return 1;
+            }
+        }
+        if (j + 1 < body_len && body[j+1] == '=' && 
+            (body[j] == '+' || body[j] == '-' || body[j] == '*' || body[j] == '/' ||
+             body[j] == '%' || body[j] == '&' || body[j] == '|' || body[j] == '^' ||
+             body[j] == '<' || body[j] == '>')) {
+            /* Handle <<= and >>= */
+            if ((body[j] == '<' || body[j] == '>') && j + 2 < body_len && body[j+2] == '=') {
+                if (out_offset) *out_offset = i;
+                if (out_kind) *out_kind = CC_MUT_WRITE;
+                return 1;
+            }
+            if (out_offset) *out_offset = i;
+            if (out_kind) *out_kind = CC_MUT_WRITE;
+            return 1;
+        }
+        
+        /* Check for &var (address-of) */
+        if (i > 0) {
+            size_t k = i - 1;
+            while (k > 0 && (body[k] == ' ' || body[k] == '\t')) k--;
+            if (body[k] == '&') {
+                /* Check it's not && */
+                if (k == 0 || body[k-1] != '&') {
+                    const char* callee = NULL;
+                    const char* pty = NULL;
+                    if (cc__addr_of_is_readonly_call(body, k, var_name, sigs, sig_n, &callee, &pty)) {
+                        /* read-only: ok */
+                    } else {
+                        if (out_offset) *out_offset = k;
+                        if (out_kind) *out_kind = (callee ? CC_MUT_ADDR_OF_NONCONST_CALL : CC_MUT_ADDR_OF_ESCAPES);
+                        if (out_callee) *out_callee = callee;
+                        if (out_param_ty) *out_param_ty = pty;
+                        return 1;
+                    }
+                }
+            }
+        }
+        
+        i = j - 1; /* continue scanning after this identifier */
+    }
+    return 0;
+}
+
+typedef struct {
     int id;
     int start_line;
     int end_line;
@@ -1022,6 +1296,69 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
 
     const NodeView* n = (const NodeView*)root->nodes;
 
+    /* Build a best-effort function signature table from stub-AST FUNC/PARAM nodes.
+       Used to allow `&x` only when passed to a known `const T*` parameter (2B). */
+    CCFuncSig* sigs = NULL;
+    int sig_n = 0;
+    {
+        typedef struct { char** tys; int n; int cap; } Tmp;
+        Tmp* tmp = (Tmp*)calloc((size_t)root->node_count, sizeof(Tmp));
+        if (tmp) {
+            for (int i = 0; i < root->node_count; i++) {
+                if (n[i].kind != 16) continue; /* CC_AST_NODE_PARAM */
+                int p = n[i].parent;
+                if (p < 0 || p >= root->node_count) continue;
+                if (n[p].kind != 17) continue; /* CC_AST_NODE_FUNC */
+                if (!n[i].aux_s2) continue;
+                if (!cc__node_file_matches_this_tu(root, ctx, n[p].file)) continue;
+                if (tmp[p].n == tmp[p].cap) {
+                    int nc = tmp[p].cap ? tmp[p].cap * 2 : 8;
+                    char** nt = (char**)realloc(tmp[p].tys, (size_t)nc * sizeof(char*));
+                    if (!nt) continue;
+                    tmp[p].tys = nt;
+                    tmp[p].cap = nc;
+                }
+                tmp[p].tys[tmp[p].n++] = strdup(n[i].aux_s2);
+            }
+            for (int i = 0; i < root->node_count; i++) {
+                if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
+                if (!n[i].aux_s1) continue;
+                if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+                /* Insert/replace by name. */
+                int idx = -1;
+                for (int k = 0; k < sig_n; k++) {
+                    if (sigs && sigs[k].name && strcmp(sigs[k].name, n[i].aux_s1) == 0) { idx = k; break; }
+                }
+                if (idx < 0) {
+                    CCFuncSig* ns = (CCFuncSig*)realloc(sigs, (size_t)(sig_n + 1) * sizeof(CCFuncSig));
+                    if (!ns) break;
+                    sigs = ns;
+                    idx = sig_n++;
+                    memset(&sigs[idx], 0, sizeof(sigs[idx]));
+                } else {
+                    free(sigs[idx].name);
+                    for (int k = 0; k < sigs[idx].param_count; k++) free(sigs[idx].param_types ? sigs[idx].param_types[k] : NULL);
+                    free(sigs[idx].param_types);
+                    sigs[idx].name = NULL;
+                    sigs[idx].param_types = NULL;
+                    sigs[idx].param_count = 0;
+                }
+                sigs[idx].name = strdup(n[i].aux_s1);
+                sigs[idx].param_types = tmp[i].tys;
+                sigs[idx].param_count = tmp[i].n;
+                tmp[i].tys = NULL;
+                tmp[i].n = 0;
+                tmp[i].cap = 0;
+            }
+            /* cleanup tmp leftovers */
+            for (int i = 0; i < root->node_count; i++) {
+                for (int k = 0; k < tmp[i].n; k++) free(tmp[i].tys ? tmp[i].tys[k] : NULL);
+                free(tmp[i].tys);
+            }
+            free(tmp);
+        }
+    }
+
     /* Collect closure nodes in this TU. */
     int idxs_cap = 512;
     int* idxs = (int*)malloc((size_t)idxs_cap * sizeof(int));
@@ -1071,6 +1408,21 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         d->start_col = start_col1 - 1;
         d->end_col = (n[i].col_end > 0) ? (n[i].col_end - 1) : -1;
         d->start_off = start_off;
+        
+        /* Check for `@unsafe` prefix before the closure span (TCC consumes it separately).
+           If found, expand the start_off to include it so the rewrite removes it. */
+        if (start_off >= 7) {
+            size_t j = start_off - 1;
+            while (j > 0 && (in_src[j] == ' ' || in_src[j] == '\t')) j--;
+            if (j >= 6 && in_src[j] == 'e' && strncmp(in_src + j - 5, "unsafe", 6) == 0) {
+                size_t u = j - 5;
+                if (u > 0 && in_src[u-1] == '@') {
+                    d->is_unsafe = 1;
+                    d->start_off = u - 1; /* Include @unsafe in the span to rewrite */
+                }
+            }
+        }
+        
         /* Stub-AST end spans for closures are not reliable in nested/multiline contexts.
            Always infer end from the actual source text (find => then match body). */
         d->end_off = cc__infer_closure_end_off(in_src, in_len, d->start_off);
@@ -1182,6 +1534,74 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                             free(idxs);
                             return -1;
                         }
+                    }
+                }
+            }
+            /* Check for mutations to reference-captured variables (unless @unsafe). */
+            if (!d->is_unsafe && d->body_text && d->cap_count > 0) {
+                for (int ci = 0; ci < d->cap_count; ci++) {
+                    int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                    if (!is_ref) continue;
+                    const char* ty = d->cap_types ? d->cap_types[ci] : NULL;
+                    if (cc__is_safe_wrapper_type(ty)) continue;
+                    const char* nm = d->cap_names[ci];
+                    size_t mut_off = 0;
+                    CCMutationKind mk = CC_MUT_NONE;
+                    const char* callee = NULL;
+                    const char* pty = NULL;
+                    if (cc__find_mutation_in_body(d->body_text, nm, sigs, sig_n, &mk, &mut_off, &callee, &pty)) {
+                        int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
+                        if (mk == CC_MUT_ADDR_OF_NONCONST_CALL && callee) {
+                            fprintf(stderr,
+                                    "%s:%d:%d: error: passing '&%s' to '%s' may mutate shared state (data race)\n",
+                                    ctx->input_path ? ctx->input_path : "<input>",
+                                    d->start_line,
+                                    col1,
+                                    nm ? nm : "var",
+                                    callee);
+                            if (pty) {
+                                fprintf(stderr, "  = note: parameter type is '%s' (not const)\n", pty);
+                            } else {
+                                fprintf(stderr, "  = note: callee parameter is not known to be 'const T*'\n");
+                            }
+                            fprintf(stderr,
+                                    "  = help: make the parameter 'const %s*' for read-only, or use a safe wrapper / @unsafe\n",
+                                    ty ? ty : "T");
+                        } else if (mk == CC_MUT_ADDR_OF_ESCAPES) {
+                            fprintf(stderr,
+                                    "%s:%d:%d: error: taking address of shared reference '%s' may allow mutation (data race)\n",
+                                    ctx->input_path ? ctx->input_path : "<input>",
+                                    d->start_line,
+                                    col1,
+                                    nm ? nm : "?");
+                            fprintf(stderr,
+                                    "  = help: pass as 'const %s*' to a known read-only function, or use a safe wrapper / @unsafe\n",
+                                    ty ? ty : "T");
+                        } else {
+                            fprintf(stderr,
+                                    "%s:%d:%d: error: mutation of shared reference '%s' in closure\n",
+                                    ctx->input_path ? ctx->input_path : "<input>",
+                                    d->start_line,
+                                    col1,
+                                    nm ? nm : "?");
+                            fprintf(stderr,
+                                    "  = note: concurrent mutation causes data races\n"
+                                    "  = help: use @atomic %s, Mutex<%s>, or @unsafe [&%s]\n",
+                                    ty ? ty : "T", ty ? ty : "T", nm ? nm : "var");
+                        }
+                        /* cleanup and fail */
+                        for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
+                        free(descs);
+                        for (int dd = 0; dd < 256; dd++) {
+                            for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_names[dd][k2]);
+                            free(scope_names[dd]);
+                            for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_types[dd][k2]);
+                            free(scope_types[dd]);
+                            free(scope_flags[dd]);
+                        }
+                        free(idxs);
+                        cc__free_func_sigs(sigs, sig_n);
+                        return -1;
                     }
                 }
             }
@@ -1406,6 +1826,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
     free(descs);
     free(idxs);
+    cc__free_func_sigs(sigs, sig_n);
 
     if (!rewritten) {
         free(protos);

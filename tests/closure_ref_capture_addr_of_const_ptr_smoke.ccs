@@ -1,0 +1,20 @@
+/* Test (2B): passing &x to a known const T* parameter is allowed (read-only). */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+static void read_only_i32(const int* p) {
+    if (p) printf("%d\n", *p);
+}
+
+int main(void) {
+    int x = 7;
+
+    @nursery {
+        spawn([&x]() => {
+            /* Allowed: callee takes const int* */
+            read_only_i32(&x);
+        });
+    }
+
+    return 0;
+}

@@ -1451,7 +1451,7 @@ void   Thread.join();                    // wait for completion
 
 **Rule (reference capture):** Explicit reference capture `[&v]` creates a shared reference to the outer variable. Reference captures are subject to mutation checks:
 - Read-only access is allowed
-- Mutation is a compile error unless the type is `Mutex<T>`, `Atomic<T>`, or the capture is inside `@unsafe`
+- Mutation is a compile error unless the type is a safe wrapper (`@atomic T`, `Atomic<T>`, `Mutex<T>`, channel handles), or the capture is inside `@unsafe`
 
 ```c
 int x = 0;
@@ -4736,7 +4736,7 @@ x => expr                    // single parameter, expression body
 For thread/task closures, reference captures (`[&x]`) are checked for mutation:
 
 - **Read-only access:** Allowed. The closure may read the referenced variable.
-- **Mutation:** Compile error unless the type is `Mutex<T>`, `Atomic<T>`, or the capture is inside `@unsafe`.
+- **Mutation:** Compile error unless the type is a safe wrapper (`@atomic T`, `Atomic<T>`, `Mutex<T>`, channel handles), or the capture is inside `@unsafe`.
 
 ```c
 int counter = 0;

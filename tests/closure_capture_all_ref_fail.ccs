@@ -1,0 +1,15 @@
+/* Test: capture-all by reference [&] is banned */
+#include "cc_nursery.cch"
+
+int main(void) {
+    int x = 0;
+    
+    @nursery {
+        /* ERROR: capture-all [&] is not allowed */
+        spawn([&]() => {
+            x++;
+        });
+    }
+    
+    return 0;
+}

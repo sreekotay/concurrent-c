@@ -1,0 +1,17 @@
+/* Test: mixed value and reference capture [x, &y] */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+int main(void) {
+    int x = 10;
+    int y = 20;
+    
+    @nursery {
+        /* x by value (copied), y by reference (shared, read-only) */
+        spawn([x, &y]() => {
+            printf("value x=%d, ref y=%d\n", x, y);
+        });
+    }
+    
+    return (x == 10 && y == 20) ? 0 : 1;
+}

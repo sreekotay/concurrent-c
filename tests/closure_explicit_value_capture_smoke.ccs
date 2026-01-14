@@ -1,0 +1,20 @@
+/* Test: explicit value capture [x] */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+int main(void) {
+    int x = 42;
+    int result = 0;
+    
+    @nursery {
+        /* Explicit value capture: x is copied into closure */
+        spawn([x]() => {
+            printf("captured x=%d\n", x);
+            /* x is a copy, original is unaffected */
+        });
+    }
+    
+    /* Original x unchanged */
+    result = (x == 42) ? 0 : 1;
+    return result;
+}

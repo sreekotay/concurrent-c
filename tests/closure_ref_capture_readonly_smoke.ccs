@@ -1,0 +1,20 @@
+/* Test: reference capture [&x] with read-only access */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+int main(void) {
+    int x = 42;
+    int result = 0;
+    
+    @nursery {
+        /* Reference capture: closure shares x with outer scope.
+           Read-only access is allowed. */
+        spawn([&x]() => {
+            printf("ref captured x=%d\n", x);
+            /* Reading x is fine */
+        });
+    }
+    
+    result = (x == 42) ? 0 : 1;
+    return result;
+}

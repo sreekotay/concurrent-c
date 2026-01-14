@@ -256,7 +256,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */
         {
-            fprintf(stderr, "YYY: about to call cc__rewrite_closure_literals_with_nodes\n");
             char* rewritten = NULL;
             size_t rewritten_len = 0;
             char* protos = NULL;

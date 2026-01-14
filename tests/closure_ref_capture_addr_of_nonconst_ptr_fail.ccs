@@ -1,0 +1,19 @@
+/* Test (2B): passing &x to a known T* parameter is rejected (potential write race). */
+#include "cc_nursery.cch"
+
+static void maybe_write_i32(int* p) {
+    if (p) *p = 123;
+}
+
+int main(void) {
+    int x = 7;
+
+    @nursery {
+        spawn([&x]() => {
+            /* ERROR: callee takes int* (not const) */
+            maybe_write_i32(&x);
+        });
+    }
+
+    return 0;
+}

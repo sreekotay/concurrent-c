@@ -1,0 +1,15 @@
+/* Test: reference capture [&x] with mutation (should fail) */
+#include "cc_nursery.cch"
+
+int main(void) {
+    int counter = 0;
+    
+    @nursery {
+        /* ERROR: mutation of shared reference */
+        spawn([&counter]() => {
+            counter++;  /* This should produce a compile error */
+        });
+    }
+    
+    return 0;
+}
