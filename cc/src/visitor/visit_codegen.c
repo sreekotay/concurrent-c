@@ -35,6 +35,10 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                        char** out_src,
                                        size_t* out_len);
 
+/* Legacy closure scan/lowering helpers (best-effort).
+   Disabled: closure literals are lowered by `pass_closure_literal_ast`, and `spawn/@nursery` are lowered by
+   `pass_nursery_spawn_ast` using AST-span driven rewrites. */
+#if 0
 /* --- Closure scan/lowering helpers (best-effort, early) ---
    Goal: allow `spawn(() => { ... })` to lower to valid C by generating a
    top-level env+thunk and rewriting the spawn statement to use CCClosure0. */
@@ -1254,6 +1258,7 @@ static char* cc__lower_cc_in_block_text(const char* text,
 
     return lowered;
 }
+#endif /* 0 */
 
 /* Strip CC decl markers so output is valid C. This is used regardless of whether
    TCC extensions are available, because the output C is compiled by the host compiler. */
@@ -1302,57 +1307,6 @@ static int cc__same_source_file(const char* a, const char* b) {
 }
 
 /* UFCS span rewrite lives in pass_ufcs.c now (cc__rewrite_ufcs_spans_with_nodes). */
-
-#ifdef CC_TCC_EXT_AVAILABLE
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* node_file) {
-    if (!ctx || !ctx->input_path || !node_file) return 0;
-    if (cc__same_source_file(ctx->input_path, node_file)) return 1;
-    if (root && root->lowered_path && cc__same_source_file(root->lowered_path, node_file)) return 1;
-    return 0;
-}
-
-static int cc__arena_args_for_line(const CCASTRoot* root,
-                                   const char* src_path,
-                                   int line_no,
-                                   const char** out_name,
-                                   const char** out_size_expr) {
-    if (!root || !root->nodes || root->node_count <= 0 || !src_path || line_no <= 0)
-        return 0;
-    if (out_name) *out_name = NULL;
-    if (out_size_expr) *out_size_expr = NULL;
-
-    struct NodeView {
-        int kind;
-        int parent;
-        const char* file;
-        int line_start;
-        int line_end;
-        int col_start;
-        int col_end;
-        int aux1;
-        int aux2;
-        const char* aux_s1;
-        const char* aux_s2;
-    };
-    const struct NodeView* n = (const struct NodeView*)root->nodes;
-    for (int i = 0; i < root->node_count; i++) {
-        if (n[i].kind != 4) /* CC_AST_NODE_ARENA */
-            continue;
-        /* Prefer node file matching against input or lowered temp file. */
-        if (!cc__same_source_file(src_path, n[i].file))
-            continue;
-        if (n[i].line_start != line_no)
-            continue;
-
-        if (out_name) *out_name = n[i].aux_s1;
-        if (out_size_expr) *out_size_expr = n[i].aux_s2;
-        return 1;
-    }
-    return 0;
-}
-#endif
 
 
 int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) {
