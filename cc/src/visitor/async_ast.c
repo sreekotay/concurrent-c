@@ -1352,14 +1352,43 @@ typedef struct {
     int* cur_state;
     int* next_state;
     int* task_idx;
+    int task_cap;
     int ret_is_void;
     int* finished;
     int loop_depth;
     int break_state[64];
     int cont_state[64];
+    int indent; /* spaces for statement indentation inside switch/case */
 } Emit;
 
 static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n);
+
+static void cc__emit_indent(Emit* e) {
+    if (!e || !e->out) return;
+    int n = (e->indent < 0) ? 0 : e->indent;
+    for (int i = 0; i < n; i++) cc__sb_append_cstr(e->out, e->out_len, e->out_cap, " ");
+}
+
+static void cc__emit_line(Emit* e, const char* s) {
+    if (!e || !e->out || !s) return;
+    cc__emit_indent(e);
+    cc__sb_append_cstr(e->out, e->out_len, e->out_cap, s);
+    cc__sb_append_cstr(e->out, e->out_len, e->out_cap, "\n");
+}
+
+static void cc__emit_line_fmt(Emit* e, const char* fmt, ...) {
+    if (!e || !e->out || !fmt) return;
+    cc__emit_indent(e);
+    char tmp[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    int nn = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (nn <= 0) return;
+    tmp[sizeof(tmp) - 1] = 0;
+    cc__sb_append_cstr(e->out, e->out_len, e->out_cap, tmp);
+    cc__sb_append_cstr(e->out, e->out_len, e->out_cap, "\n");
+}
 
 static int cc__alloc_state(Emit* e) {
     if (!e || !e->next_state) return 0;
@@ -1370,18 +1399,28 @@ static int cc__alloc_state(Emit* e) {
 
 static int cc__emit_open_case(Emit* e, int st) {
     if (!e || !e->out) return 0;
-    cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "case %d:{\n", st);
+    /* inside poll() function body we emit:
+       - switch at indent 2
+       - case labels at indent 4
+       - statements inside case blocks at indent 6 */
+    e->indent = 4;
+    cc__emit_line_fmt(e, "case %d: {", st);
+    /* inside case: indent statements by 6 spaces */
+    e->indent = 6;
     if (e->cur_state) *e->cur_state = st;
     return 1;
 }
 
 static void cc__emit_close_case(Emit* e) {
-    cc__sb_append_cstr(e->out, e->out_len, e->out_cap, "}\n");
+    if (!e) return;
+    e->indent = 4;
+    cc__emit_line(e, "}");
 }
 
 static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to /* rewritten */) {
     if (!e || !task_expr || !e->task_idx || !e->cur_state || !e->next_state) return 0;
-    if (*e->task_idx >= 16) return 0;
+    if (e->task_cap <= 0) return 0;
+    if (*e->task_idx >= e->task_cap) return 0;
     int t = (*e->task_idx)++;
     int poll_state = cc__alloc_state(e);
     int cont_state = cc__alloc_state(e);
@@ -1389,23 +1428,32 @@ static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to 
     char* ex = cc__rewrite_idents(task_expr, e->map_names, e->map_repls, e->map_n);
     if (!ex) return 0;
 
-    cc__sb_append_fmt(e->out, e->out_len, e->out_cap,
-                      "__f->__t%d=(%s);__f->__st=%d;return CC_FUTURE_PENDING;\n",
-                      t, ex, poll_state);
+    /* Comment preserves original await text (pre-rewrite) for readability. */
+    {
+        const char* raw = cc__skip_ws(task_expr);
+        if (!raw) raw = "";
+        cc__emit_line_fmt(e, "/* await %s */", raw);
+    }
+    cc__emit_line_fmt(e, "__f->__t[%d] = (%s);", t, ex);
+    cc__emit_line_fmt(e, "__f->__st = %d;", poll_state);
+    cc__emit_line(e, "return CC_FUTURE_PENDING;");
     free(ex);
     cc__emit_close_case(e);
 
     cc__emit_open_case(e, poll_state);
-    cc__sb_append_fmt(e->out, e->out_len, e->out_cap,
-                      "intptr_t __v=0;int __err=0;CCFutureStatus __st=cc_task_intptr_poll(&__f->__t%d,&__v,&__err);"
-                      "if(__st==CC_FUTURE_PENDING)return CC_FUTURE_PENDING;cc_task_intptr_free(&__f->__t%d);",
-                      t, t);
+    cc__emit_line_fmt(e, "/* poll await %s */", cc__skip_ws(task_expr));
+    cc__emit_line(e, "intptr_t __v = 0;");
+    cc__emit_line(e, "int __err = 0;");
+    cc__emit_line_fmt(e, "CCFutureStatus __st = cc_task_intptr_poll(&__f->__t[%d], &__v, &__err);", t);
+    cc__emit_line(e, "if (__st == CC_FUTURE_PENDING) return CC_FUTURE_PENDING;");
+    cc__emit_line_fmt(e, "cc_task_intptr_free(&__f->__t[%d]);", t);
     if (assign_to && assign_to[0]) {
-        cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "%s=(intptr_t)__v;", assign_to);
+        cc__emit_line_fmt(e, "%s = (intptr_t)__v;", assign_to);
     } else {
-        cc__sb_append_cstr(e->out, e->out_len, e->out_cap, "(void)__v;");
+        cc__emit_line(e, "(void)__v;");
     }
-    cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", cont_state);
+    cc__emit_line_fmt(e, "__f->__st = %d;", cont_state);
+    cc__emit_line(e, "return CC_FUTURE_PENDING;");
     cc__emit_close_case(e);
     cc__emit_open_case(e, cont_state);
     return 1;
@@ -1546,7 +1594,9 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
     if (strncmp(p, "return", 6) == 0 && !cc__is_ident_char(p[6])) {
         const char* rp = cc__skip_ws(p + 6);
         if (e->ret_is_void && rp[0] == 0) {
-            cc__sb_append_cstr(e->out, e->out_len, e->out_cap, "__f->__r=0;__f->__st=999;return CC_FUTURE_PENDING;\n");
+            cc__emit_line(e, "__f->__r = 0;");
+            cc__emit_line(e, "__f->__st = 999;");
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
             cc__emit_close_case(e);
             *e->finished = 1;
             return 0;
@@ -1557,7 +1607,9 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         char* ex3 = cc__rewrite_idents(expr2, e->map_names, e->map_repls, e->map_n);
         free(expr2);
         if (!ex3) return 0;
-        cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__r=(intptr_t)(%s);__f->__st=999;return CC_FUTURE_PENDING;\n", ex3);
+        cc__emit_line_fmt(e, "__f->__r = (intptr_t)(%s);", ex3);
+        cc__emit_line(e, "__f->__st = 999;");
+        cc__emit_line(e, "return CC_FUTURE_PENDING;");
         free(ex3);
         cc__emit_close_case(e);
         *e->finished = 1;
@@ -1567,7 +1619,8 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
     if (strncmp(p, "break", 5) == 0 && !cc__is_ident_char(p[5])) {
         if (e->loop_depth <= 0) return 0;
         int bs = e->break_state[e->loop_depth - 1];
-        cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", bs);
+        cc__emit_line_fmt(e, "__f->__st = %d;", bs);
+        cc__emit_line(e, "return CC_FUTURE_PENDING;");
         cc__emit_close_case(e);
         *e->finished = 1;
         return 0;
@@ -1576,7 +1629,8 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
     if (strncmp(p, "continue", 8) == 0 && !cc__is_ident_char(p[8])) {
         if (e->loop_depth <= 0) return 0;
         int cs = e->cont_state[e->loop_depth - 1];
-        cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", cs);
+        cc__emit_line_fmt(e, "__f->__st = %d;", cs);
+        cc__emit_line(e, "return CC_FUTURE_PENDING;");
         cc__emit_close_case(e);
         *e->finished = 1;
         return 0;
@@ -1618,7 +1672,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                                 char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
                                 char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
                                 free(init2);
-                                if (lhs2 && rhs2) cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "%s=(%s);\n", lhs2, rhs2);
+                                if (lhs2 && rhs2) cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
                                 free(lhs2);
                                 free(rhs2);
                                 return 1;
@@ -1668,7 +1722,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
         char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
         free(init2);
-        if (lhs2 && rhs2) cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "%s=(intptr_t)(%s);\n", lhs2, rhs2);
+        if (lhs2 && rhs2) cc__emit_line_fmt(e, "%s = (intptr_t)(%s);", lhs2, rhs2);
         free(lhs2);
         free(rhs2);
         return 1;
@@ -1683,7 +1737,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         char* t3 = cc__rewrite_idents(t2, e->map_names, e->map_repls, e->map_n);
         free(t2);
         if (t3) {
-            cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "%s;\n", t3);
+            cc__emit_line_fmt(e, "%s;", t3);
             free(t3);
         }
     }
@@ -1717,9 +1771,12 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             int else_state = cc__alloc_state(e);
             int after_state = cc__alloc_state(e);
 
-            cc__sb_append_fmt(e->out, e->out_len, e->out_cap,
-                              "int __cc_if_c%d=(%s);__f->__st=__cc_if_c%d?%d:%d;return CC_FUTURE_PENDING;\n",
-                              then_state, cond3, then_state, then_state, (s->else_n ? else_state : after_state));
+            cc__emit_line_fmt(e, "int __cc_if_c%d = (%s);", then_state, cond3);
+            cc__emit_line_fmt(e, "__f->__st = __cc_if_c%d ? %d : %d;",
+                              then_state,
+                              then_state,
+                              (s->else_n ? else_state : after_state));
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
             free(cond3);
             cc__emit_close_case(e);
 
@@ -1730,7 +1787,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 sub.finished = &done;
                 (void)cc__emit_stmt_list(&sub, s->then_st, s->then_n);
                 if (!done) {
-                    cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", after_state);
+                    cc__emit_line_fmt(e, "__f->__st = %d;", after_state);
+                    cc__emit_line(e, "return CC_FUTURE_PENDING;");
                     cc__emit_close_case(e);
                 }
             }
@@ -1743,7 +1801,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                     sub.finished = &done;
                     (void)cc__emit_stmt_list(&sub, s->else_st, s->else_n);
                     if (!done) {
-                        cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", after_state);
+                        cc__emit_line_fmt(e, "__f->__st = %d;", after_state);
+                        cc__emit_line(e, "return CC_FUTURE_PENDING;");
                         cc__emit_close_case(e);
                     }
                 }
@@ -1758,7 +1817,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             int body_state = cc__alloc_state(e);
             int after_state = cc__alloc_state(e);
 
-            cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", cond_state);
+            cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
             cc__emit_close_case(e);
 
             /* loop context */
@@ -1776,9 +1836,9 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 char* cond3 = cc__rewrite_idents(cond2, e->map_names, e->map_repls, e->map_n);
                 free(cond2);
                 if (!cond3) return 0;
-                cc__sb_append_fmt(e->out, e->out_len, e->out_cap,
-                                  "int __cc_wh_c%d=(%s);__f->__st=__cc_wh_c%d?%d:%d;return CC_FUTURE_PENDING;\n",
-                                  cond_state, cond3, cond_state, body_state, after_state);
+                cc__emit_line_fmt(e, "int __cc_wh_c%d = (%s);", cond_state, cond3);
+                cc__emit_line_fmt(e, "__f->__st = __cc_wh_c%d ? %d : %d;", cond_state, body_state, after_state);
+                cc__emit_line(e, "return CC_FUTURE_PENDING;");
                 free(cond3);
                 cc__emit_close_case(e);
             }
@@ -1790,7 +1850,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 sub.finished = &done;
                 (void)cc__emit_stmt_list(&sub, s->then_st, s->then_n);
                 if (!done) {
-                    cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", cond_state);
+                    cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
+                    cc__emit_line(e, "return CC_FUTURE_PENDING;");
                     cc__emit_close_case(e);
                 }
             }
@@ -1807,7 +1868,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             int post_state = cc__alloc_state(e);
             int after_state = cc__alloc_state(e);
 
-            cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", init_state);
+            cc__emit_line_fmt(e, "__f->__st = %d;", init_state);
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
             cc__emit_close_case(e);
 
             /* loop context */
@@ -1822,7 +1884,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             if (s->for_init && cc__skip_ws(s->for_init)[0]) {
                 if (!cc__emit_semi_like(e, s->for_init)) return 0;
             }
-            cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", cond_state);
+            cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
             cc__emit_close_case(e);
 
             /* cond */
@@ -1834,9 +1897,9 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 char* cond3 = cc__rewrite_idents(cond2, e->map_names, e->map_repls, e->map_n);
                 free(cond2);
                 if (!cond3) return 0;
-                cc__sb_append_fmt(e->out, e->out_len, e->out_cap,
-                                  "int __cc_for_c%d=(%s);__f->__st=__cc_for_c%d?%d:%d;return CC_FUTURE_PENDING;\n",
-                                  cond_state, cond3, cond_state, body_state, after_state);
+                cc__emit_line_fmt(e, "int __cc_for_c%d = (%s);", cond_state, cond3);
+                cc__emit_line_fmt(e, "__f->__st = __cc_for_c%d ? %d : %d;", cond_state, body_state, after_state);
+                cc__emit_line(e, "return CC_FUTURE_PENDING;");
                 free(cond3);
                 cc__emit_close_case(e);
             }
@@ -1849,7 +1912,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
                 sub.finished = &done;
                 (void)cc__emit_stmt_list(&sub, s->then_st, s->then_n);
                 if (!done) {
-                    cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", post_state);
+                    cc__emit_line_fmt(e, "__f->__st = %d;", post_state);
+                    cc__emit_line(e, "return CC_FUTURE_PENDING;");
                     cc__emit_close_case(e);
                 }
             }
@@ -1859,7 +1923,8 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             if (s->for_post && cc__skip_ws(s->for_post)[0]) {
                 if (!cc__emit_semi_like(e, s->for_post)) return 0;
             }
-            cc__sb_append_fmt(e->out, e->out_len, e->out_cap, "__f->__st=%d;return CC_FUTURE_PENDING;\n", cond_state);
+            cc__emit_line_fmt(e, "__f->__st = %d;", cond_state);
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
             cc__emit_close_case(e);
 
             if (e->loop_depth > 0) e->loop_depth--;
@@ -1878,7 +1943,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                        size_t in_len,
                                        char** out_src,
                                        size_t* out_len) {
-    fprintf(stderr, "CC: async_ast: starting async lowering, root->node_count=%d\n", root ? root->node_count : 0);
+    if (getenv("CC_DEBUG_ASYNC_AST")) {
+        fprintf(stderr, "CC: async_ast: starting async lowering, root->node_count=%d\n", root ? root->node_count : 0);
+    }
     if (!root || !ctx || !in_src || !out_src || !out_len) return 0;
     *out_src = NULL;
     *out_len = 0;
@@ -2035,11 +2102,32 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
     cur[in_len] = 0;
     size_t cur_len = in_len;
 
-    static int g_async_id = 60000;
+        static int g_async_id = 60000;
 
     for (int fi = fn_n - 1; fi >= 0; fi--) {
         AF* fn = &fns[fi];
         int id = g_async_id++;
+
+        /* Stable-ish, readable symbol base for generated helpers. */
+        char fn_san[160];
+        {
+            size_t j = 0;
+            for (size_t i = 0; fn->name[i] && j + 1 < sizeof(fn_san); i++) {
+                char c = fn->name[i];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) fn_san[j++] = c;
+                else fn_san[j++] = '_';
+            }
+            if (j == 0) { fn_san[j++] = 'f'; }
+            fn_san[j] = 0;
+        }
+        char sym_base[220];
+        snprintf(sym_base, sizeof(sym_base), "__cc_async_%s_%d", fn_san, id);
+        char frame_ty[240];
+        char poll_fn[240];
+        char drop_fn[240];
+        snprintf(frame_ty, sizeof(frame_ty), "%s_frame", sym_base);
+        snprintf(poll_fn, sizeof(poll_fn), "%s_poll", sym_base);
+        snprintf(drop_fn, sizeof(drop_fn), "%s_drop", sym_base);
 
         /* Build structured stmt list from stub-AST statement nodes under the body BLOCK.
            Fall back to brace-bounded text parsing if STMT nodes are missing. */
@@ -2062,7 +2150,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 return -1;
             }
         }
-        cc__debug_dump_stmt_list(fn->name, st, st_n, 0);
+        if (getenv("CC_DEBUG_ASYNC_AST")) {
+            cc__debug_dump_stmt_list(fn->name, st, st_n, 0);
+        }
 
         /* Collect locals names (+ best-effort type) using DECL_ITEM nodes in function subtree. */
         char* locals[256];
@@ -2158,7 +2248,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
            that are not present in the stub-AST DECL_ITEM stream but must live in the frame across awaits. */
         cc__collect_decl_names_from_stmt_list(st, st_n, locals, &local_n, 256);
 
-        /* Count awaits in subtree; add __cc_awN temps */
+        /* Count awaits in subtree; add __cc_awN temps (also bounds task slots). */
         int aw_total = 0;
         for (int i = 0; i < root->node_count; i++) {
             if (n[i].kind != CC_AST_NODE_AWAIT) continue;
@@ -2277,22 +2367,35 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         char* repl = NULL;
         size_t repl_len = 0, repl_cap = 0;
 
-        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "typedef struct{int __st; intptr_t __r;");
+        /* Frame struct (formatted) */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "typedef struct %s {\n", frame_ty);
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  int __st;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  intptr_t __r;\n");
         for (int k = 0; k < local_n; k++) {
             if (local_tys[k] && strchr(local_tys[k], '*')) {
-                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " %s %s;", local_tys[k], locals[k]);
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s;\n", local_tys[k], locals[k]);
             } else {
-                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t %s;", locals[k]);
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", locals[k]);
             }
         }
-        for (int k = 0; k < aw_total; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t %s;", aw_names[k]);
-        for (int k = 0; k < param_n; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " intptr_t __p_%s;", param_names[k]);
-        for (int k = 0; k < 16; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, " CCTaskIntptr __t%d;", k);
-        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "}__cc_af%d_f;", id);
+        for (int k = 0; k < aw_total; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", aw_names[k]);
+        for (int k = 0; k < param_n; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t __p_%s;\n", param_names[k]);
+        int task_cap = aw_total;
+        if (task_cap < 1) task_cap = 1;
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  CCTaskIntptr __t[%d];\n", task_cap);
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "} %s;\n\n", frame_ty);
 
+        /* Poll function (formatted) */
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
-                          "static CCFutureStatus __cc_af%d_poll(void*__p,intptr_t*__o,int*__e){__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(!__f)return CC_FUTURE_ERR;switch(__f->__st){case 0:__f->__st=1;/*fall*/case 1:{\n",
-                          id, id, id);
+                          "static CCFutureStatus %s(void* __p, intptr_t* __o, int* __e) {\n",
+                          poll_fn);
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  (void)__e;\n");
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s* __f = (%s*)__p;\n", frame_ty, frame_ty);
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  if (!__f) return CC_FUTURE_ERR;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  switch (__f->__st) {\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    case 0:\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      __f->__st = 1;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      /* fallthrough */\n");
 
         int cur_state = 1;
         int next_state = 2;
@@ -2302,36 +2405,58 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             .out = &repl, .out_len = &repl_len, .out_cap = &repl_cap,
             .map_names = map_names, .map_repls = map_repls, .map_n = map_n,
             .cur_state = &cur_state, .next_state = &next_state, .task_idx = &task_idx,
+            .task_cap = task_cap,
             .ret_is_void = fn->ret_is_void,
             .finished = &finished,
             .loop_depth = 0,
+            .indent = 0,
         };
+        /* Open initial case 1 using the same helper as all other cases (keeps braces balanced). */
+        (void)cc__emit_open_case(&em, 1);
         (void)cc__emit_stmt_list(&em, st, st_n);
 
         if (!finished) {
-            cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "__f->__r=0;__f->__st=999;return CC_FUTURE_PENDING;\n");
+            cc__emit_line(&em, "__f->__r = 0;");
+            cc__emit_line(&em, "__f->__st = 999;");
+            cc__emit_line(&em, "return CC_FUTURE_PENDING;");
             cc__emit_close_case(&em);
         }
-        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "case 999:{if(__o)*__o=__f->__r;return CC_FUTURE_READY;}default:return CC_FUTURE_ERR;}return CC_FUTURE_ERR;}\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    case 999: {\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      if (__o) *__o = __f->__r;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      return CC_FUTURE_READY;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    }\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    default:\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "      return CC_FUTURE_ERR;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n\n");
 
-        cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
-                          "static void __cc_af%d_drop(void*__p){__cc_af%d_f*__f=(__cc_af%d_f*)__p;if(!__f)return;",
-                          id, id, id);
-        for (int k = 0; k < 16; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "cc_task_intptr_free(&__f->__t%d);", k);
-        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "free(__f);}\n");
+        /* Drop function (formatted) */
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "static void %s(void* __p) {\n", drop_fn);
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s* __f = (%s*)__p;\n", frame_ty, frame_ty);
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  if (!__f) return;\n");
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  for (int __i = 0; __i < %d; __i++) {\n", task_cap);
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    cc_task_intptr_free(&__f->__t[__i]);\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  free(__f);\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n\n");
 
         /* Emit function signature as `CCTaskIntptr name(<params>)` */
-        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "CCTaskIntptr %s(%s){", fn->name,
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "CCTaskIntptr %s(%s) {\n", fn->name,
                           (params_text && strlen(params_text) > 0) ? params_text : "void");
-        cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
-                          "__cc_af%d_f*__f=(__cc_af%d_f*)calloc(1,sizeof(__cc_af%d_f));if(!__f){CCTaskIntptr __t;memset(&__t,0,sizeof(__t));return __t;}__f->__st=0;",
-                          id, id, id);
+        cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s* __f = (%s*)calloc(1, sizeof(%s));\n", frame_ty, frame_ty, frame_ty);
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  if (!__f) {\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    CCTaskIntptr __t;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    memset(&__t, 0, sizeof(__t));\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "    return __t;\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  __f->__st = 0;\n");
         for (int k = 0; k < param_n; k++) {
-            cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "__f->__p_%s=(intptr_t)(%s);", param_names[k], param_names[k]);
+            cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = (intptr_t)(%s);\n", param_names[k], param_names[k]);
         }
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
-                          "return cc_task_intptr_make_poll_ex(__cc_af%d_poll,NULL,__f,__cc_af%d_drop);}\n",
-                          id, id);
+                          "  return cc_task_intptr_make_poll_ex(%s, NULL, __f, %s);\n",
+                          poll_fn, drop_fn);
+        cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "}\n");
 
         /* Replace original span */
         size_t rs = fn->start;
