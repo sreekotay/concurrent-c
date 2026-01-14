@@ -1,0 +1,22 @@
+#include "cc_runtime.cch"
+#include "cc_channel.cch"
+
+#include <errno.h>
+
+int main(void) {
+    CCChan* ch = cc_chan_create(1);
+    if (!ch) return 2;
+    (void)cc_chan_init_elem(ch, sizeof(int));
+
+    int v = 0;
+    int rc = 0;
+    // with_deadline argument is milliseconds (lowered to cc_deadline_after_ms).
+    with_deadline(10) {
+        rc = cc_chan_recv(ch, &v, sizeof(v));
+    }
+    if (rc != ETIMEDOUT) return 10;
+
+    cc_chan_free(ch);
+    return 0;
+}
+

@@ -14,6 +14,13 @@
 #include "cc_nursery.cch"
 #include "std/task_intptr.cch"
 
+/* Language-level cancellation helpers.
+   The runtime already provides cc_cancel(CCDeadline*) / cc_is_cancelled(const CCDeadline*).
+   At the language surface, `cc_cancel()` / `cc_is_cancelled()` refer to the current deadline scope
+   established by `with_deadline(...) { ... }` lowering. */
+#define cc_cancel() cc_cancel_current()
+#define cc_is_cancelled() cc_is_cancelled_current()
+
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;
 typedef struct CCTask CCTask;

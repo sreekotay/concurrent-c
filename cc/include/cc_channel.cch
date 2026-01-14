@@ -29,6 +29,7 @@ typedef int bool;
 #include "cc_slice.cch"
 #include "cc_nursery.cch"
 #include "cc_exec.cch"
+#include "cc_chan_handle.cch"
 
 typedef struct CCAsyncHandle CCAsyncHandle;
 #include "std/future.cch"
@@ -47,6 +48,15 @@ typedef enum {
 CCChan* cc_chan_create(size_t capacity);
 CCChan* cc_chan_create_mode(size_t capacity, CCChanMode mode);
 CCChan* cc_chan_create_mode_take(size_t capacity, CCChanMode mode, bool allow_send_take);
+
+// Create a channel and return a directional handle pair (tx/rx).
+// elem_size==0 means "leave uninitialized" (caller will call cc_chan_init_elem).
+int cc_chan_pair_create(size_t capacity,
+                        CCChanMode mode,
+                        bool allow_send_take,
+                        size_t elem_size,
+                        CCChanTx* out_tx,
+                        CCChanRx* out_rx);
 
 // Close the channel: unblocks waiters. Further sends fail with EPIPE.
 void cc_chan_close(CCChan* ch);

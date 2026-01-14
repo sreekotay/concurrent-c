@@ -39,12 +39,50 @@ static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const c
     cc__append_n(out, out_len, out_cap, s, strlen(s));
 }
 
+static void cc__ensure_line_start(char** out, size_t* out_len, size_t* out_cap) {
+    if (!out || !out_len || !out_cap) return;
+    if (*out_len == 0) return;
+    char last = (*out)[*out_len - 1];
+    if (last != '\n') cc__append_n(out, out_len, out_cap, "\n", 1);
+}
+
 static int cc__token_is(const char* s, size_t len, size_t i, const char* tok) {
     size_t tn = strlen(tok);
     if (i + tn > len) return 0;
     if (memcmp(s + i, tok, tn) != 0) return 0;
     if (i > 0 && cc__is_ident_char(s[i - 1])) return 0;
     if (i + tn < len && cc__is_ident_char(s[i + tn])) return 0;
+    return 1;
+}
+
+static int cc__is_if_controlled_return(const char* s, size_t len, size_t ret_i) {
+    (void)len;
+    if (!s || ret_i == 0) return 0;
+    /* Heuristic: detect `if (...) return ...;` without braces by looking backward for a ')'
+       immediately before the `return` token (ignoring whitespace), and checking for `if`
+       before the matching '('. */
+    size_t j = ret_i;
+    while (j > 0 && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) j--;
+    if (j == 0 || s[j - 1] != ')') return 0;
+
+    int par = 0;
+    size_t k = j - 1;
+    while (k > 0) {
+        char ch = s[k - 1];
+        if (ch == ')') par++;
+        else if (ch == '(') {
+            if (par == 0) break;
+            par--;
+        }
+        k--;
+    }
+    if (k == 0) return 0;
+
+    size_t t = k - 1;
+    while (t > 0 && (s[t - 1] == ' ' || s[t - 1] == '\t' || s[t - 1] == '\r' || s[t - 1] == '\n')) t--;
+    if (t < 2) return 0;
+    if (s[t - 2] != 'i' || s[t - 1] != 'f') return 0;
+    if (t > 2 && cc__is_ident_char(s[t - 3])) return 0; /* word boundary */
     return 1;
 }
 
@@ -182,17 +220,35 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 free(out);
                 return -1;
             }
-            const char* f = ctx->input_path ? ctx->input_path : "<input>";
+            int has_defers = 0;
+            for (int d = depth; d >= 0; d--) {
+                int dd = d;
+                if (dd < 0) dd = 0;
+                if (dd >= 256) dd = 255;
+                if (defer_counts[dd] > 0) { has_defers = 1; break; }
+            }
+
+            if (!has_defers) {
+                /* No active defers: keep return as-is. */
+                cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
+                /* Skip original text (keep line_no tracking correct via the main loop's '\n' handler). */
+                for (size_t k = i; k < stmt_end; k++) {
+                    if (in_src[k] == '\n') line_no++;
+                }
+                i = stmt_end - 1;
+                continue;
+            }
+
+            int is_if_ctl = cc__is_if_controlled_return(in_src, in_len, i);
+            if (is_if_ctl) {
+                cc__append_str(&out, &outl, &outc, "{\n");
+            }
+
             for (int d = depth; d >= 0; d--) {
                 int dd = d;
                 if (dd < 0) dd = 0;
                 if (dd >= 256) dd = 255;
                 for (int k = defer_counts[dd] - 1; k >= 0; k--) {
-                    char ln[256];
-                    int nn = snprintf(ln, sizeof(ln), "#line %d \"%s\"\n", defers[dd][k].line_no, f);
-                    if (nn > 0 && (size_t)nn < sizeof(ln)) {
-                        cc__append_n(&out, &outl, &outc, ln, (size_t)nn);
-                    }
                     cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
                     cc__append_n(&out, &outl, &outc, "\n", 1);
                 }
@@ -202,9 +258,11 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 defer_counts[dd] = 0;
                 defer_caps[dd] = 0;
             }
-
-            /* Emit the original return statement. */
+            cc__ensure_line_start(&out, &outl, &outc);
             cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
+            if (is_if_ctl) {
+                cc__append_str(&out, &outl, &outc, "\n}");
+            }
             changed = 1;
 
             /* Skip original text (keep line_no tracking correct via the main loop's '\n' handler). */
@@ -295,13 +353,7 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             if (d < 0) d = 0;
             if (d >= 256) d = 255;
             if (defer_counts[d] > 0) {
-                const char* f = ctx->input_path ? ctx->input_path : "<input>";
                 for (int k = defer_counts[d] - 1; k >= 0; k--) {
-                    char ln[256];
-                    int nn = snprintf(ln, sizeof(ln), "#line %d \"%s\"\n", defers[d][k].line_no, f);
-                    if (nn > 0 && (size_t)nn < sizeof(ln)) {
-                        cc__append_n(&out, &outl, &outc, ln, (size_t)nn);
-                    }
                     cc__append_str(&out, &outl, &outc, defers[d][k].stmt);
                     if (defers[d][k].stmt[0] != 0) {
                         size_t sl = strlen(defers[d][k].stmt);

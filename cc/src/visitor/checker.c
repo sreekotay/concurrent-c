@@ -200,6 +200,14 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
     return 0;
 }
 
+static int cc__ends_with(const char* s, const char* suf) {
+    if (!s || !suf) return 0;
+    size_t sl = strlen(s);
+    size_t su = strlen(suf);
+    if (su > sl) return 0;
+    return memcmp(s + (sl - su), suf, su) == 0;
+}
+
 /* Very small heuristic: detect the most common deadlock footgun:
      @nursery closing(ch) { spawn(() => { while (cc_chan_recv(ch, ...) == 0) { ... } }); }
    Under the spec, closing(...) happens after children exit, so "recv until close" inside the same nursery can wait forever. */
@@ -259,6 +267,20 @@ static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const cha
             memcpy(chname, buf + s0, sl);
             chname[sl] = '\0';
 
+            /* Heuristic upgrade for tx/rx naming: if the closing handle ends with `_tx`,
+               also scan for recv-until-close loops on the corresponding `_rx` name.
+               This keeps the heuristic useful even when closing(...) accepts only tx handles. */
+            char rxname[64];
+            rxname[0] = '\0';
+            if (cc__ends_with(chname, "_tx")) {
+                size_t bl = strlen(chname);
+                if (bl >= 3 && bl < sizeof(rxname)) {
+                    memcpy(rxname, chname, bl);
+                    rxname[bl - 3] = '\0';
+                    strncat(rxname, "_rx", sizeof(rxname) - strlen(rxname) - 1);
+                }
+            }
+
             /* Find '{' for nursery body. */
             while (j < n && buf[j] != '{') j++;
             if (j >= n) { col++; continue; }
@@ -283,6 +305,11 @@ static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const cha
                 snprintf(pat, sizeof(pat), "cc_chan_close(%s", chname);
                 const char* hit = strstr(buf + body_s, pat);
                 if (hit && (size_t)(hit - (buf + body_s)) < (body_e - body_s)) { col++; continue; }
+                if (rxname[0]) {
+                    snprintf(pat, sizeof(pat), "cc_chan_close(%s", rxname);
+                    hit = strstr(buf + body_s, pat);
+                    if (hit && (size_t)(hit - (buf + body_s)) < (body_e - body_s)) { col++; continue; }
+                }
             }
 
             /* Hard-error only on the direct footgun form (catches the common case). */
@@ -294,6 +321,7 @@ static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const cha
                     const char* nl = memchr(cur, '\n', (size_t)(end - cur));
                     size_t ll = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
                     if (cc__line_has_deadlock_recv_until_close(cur, ll, chname)) { hit = 1; break; }
+                    if (!hit && rxname[0] && cc__line_has_deadlock_recv_until_close(cur, ll, rxname)) { hit = 1; break; }
                     if (!nl) break;
                     cur = nl + 1;
                 }

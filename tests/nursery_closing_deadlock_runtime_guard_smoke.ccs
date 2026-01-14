@@ -10,15 +10,15 @@ int main(void) {
     setenv("CC_NURSERY_CLOSING_RUNTIME_GUARD", "1", 1);
 
     // Buffer producer's sends so the producer can finish even if the consumer stops early.
-    CCChan* ch = cc_chan_create(3);
-    if (!ch) return 2;
-    (void)cc_chan_init_elem(ch, sizeof(int));
+    CCChanTx ch_tx;
+    CCChanRx ch_rx;
+    if (cc_chan_pair_create(3, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
 
-    @nursery closing(ch) {
+    @nursery closing(ch_tx) {
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
                 int v = i;
-                (void)cc_chan_send(ch, &v, sizeof(v));
+                (void)cc_chan_send(ch_tx.raw, &v, sizeof(v));
             }
         });
 
@@ -26,7 +26,7 @@ int main(void) {
         spawn(() => {
             int v = 0;
             for (;;) {
-                int rc = cc_chan_recv(ch, &v, sizeof(v));
+                int rc = cc_chan_recv(ch_rx.raw, &v, sizeof(v));
                 if (rc == 0) continue;
                 g_err = rc; /* expect EDEADLK from the guard */
                 break;
@@ -35,7 +35,7 @@ int main(void) {
     }
 
     if (g_err != EDEADLK) return 10;
-    cc_chan_free(ch);
+    cc_chan_free(ch_tx.raw);
     return 0;
 }
 

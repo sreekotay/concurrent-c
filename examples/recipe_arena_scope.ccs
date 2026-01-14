@@ -3,28 +3,33 @@
  *
  * Demonstrates:
  *   - @arena block for automatic memory scope
- *   - Arena-backed String builder
- *   - UFCS (method-style calls): s.append()
- *   - No manual free() needed - arena cleans up on block exit
+ *   - Arena-backed String builder with UFCS
+ *   - Request-scoped allocation: O(1) reset per iteration
  *
- * Key insight: Arena scopes memory lifetime to code blocks.
+ * Key insight: Arena resets are instant (pointer bump reset).
+ * No per-allocation free, no fragmentation, no leaks.
  */
 #define CC_ENABLE_SHORT_NAMES
 #include <std/prelude.cch>
+#include <stdio.h>
 
 int main(void) {
-    @arena {
-        /* 'arena' is the implicit binding to the allocator. */
-        String s = string_new(arena);
-        
-        /* UFCS: method syntax on plain C types. */
-        s.append("Hello, ");
-        s.append("Concurrent-C!\n");
-        
-        /* Write to stdout. */
-        std_out.write(s);
+    /* Simulate processing 3 "requests" - arena resets each iteration. */
+    for (int i = 1; i <= 3; i++) {
+        @arena {
+            /* All allocations this iteration use this arena. */
+            String s = string_new(arena);
+            
+            /* UFCS: method syntax on plain C types. */
+            s.append("Processing request ");
+            cc_string_append_int(arena, &s, i);
+            s.append("\n");
+            
+            std_out.write(s);
+        }
+        /* Arena reset here - O(1), no matter how much was allocated. */
     }
-    /* Arena freed here - all allocations gone. No leaks. */
 
+    printf("done\n");
     return 0;
 }

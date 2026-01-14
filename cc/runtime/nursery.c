@@ -29,6 +29,10 @@ struct CCNursery {
 /* Defined in channel.c (same translation unit via runtime/concurrent_c.c). */
 void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner);
 
+int cc_nursery_add_closing_tx(CCNursery* n, CCChanTx tx) {
+    return cc_nursery_add_closing_chan(n, tx.raw);
+}
+
 typedef struct {
     CCNursery* n;
     void* (*fn)(void*);

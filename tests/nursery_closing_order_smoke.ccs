@@ -37,17 +37,17 @@ void consumer(CCChan* ch) {
 }
 
 int main(void) {
-    CCChan* ch = cc_chan_create(1);
-    if (!ch) return 2;
-    (void)cc_chan_init_elem(ch, sizeof(int));
+    CCChanTx ch_tx;
+    CCChanRx ch_rx;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
 
     g_err = 0;
     g_got = 0;
 
     // Spec: closing(ch) must close after all children exit (i.e., after joining).
-    @nursery closing(ch) {
-        spawn(() => { producer(ch); });
-        spawn(() => { consumer(ch); });
+    @nursery closing(ch_tx) {
+        spawn(() => { producer(ch_tx.raw); });
+        spawn(() => { consumer(ch_rx.raw); });
     }
 
     // If closing happened before join, producer/consumer likely saw EPIPE.
@@ -56,19 +56,19 @@ int main(void) {
 
     // After nursery exit, channel should now be closed.
     int tmp = 0;
-    int tr = cc_chan_try_recv(ch, &tmp, sizeof(tmp));
+    int tr = cc_chan_try_recv(ch_rx.raw, &tmp, sizeof(tmp));
     if (tr != EPIPE) {
         fprintf(stderr, "nursery_closing_order_smoke: expected channel closed after nursery; try_recv=%d (EPIPE=%d)\n", tr, EPIPE);
         return 12;
     }
     int v3 = 3;
-    int e = cc_chan_send(ch, &v3, sizeof(v3));
+    int e = cc_chan_send(ch_tx.raw, &v3, sizeof(v3));
     if (e != EPIPE) {
         fprintf(stderr, "nursery_closing_order_smoke: expected send EPIPE after nursery; send=%d (EPIPE=%d)\n", e, EPIPE);
         return 13;
     }
 
-    cc_chan_free(ch);
+    cc_chan_free(ch_tx.raw);
     return 0;
 }
 

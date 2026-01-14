@@ -1,14 +1,23 @@
-#define CC_ENABLE_SHORT_NAMES
-#include <std/prelude.cch>
+/*
+ * Hello, Concurrent-C!
+ *
+ * A minimal example showing the core concept: structured concurrency.
+ * Tasks run in parallel, nursery waits for all to complete.
+ */
+#include "cc_nursery.cch"
+#include <stdio.h>
 
-// UFCS-style hello: requires CC compiler UFCS lowering.
 int main(void) {
-    @arena {
-        String s = string_new(arena);
-        s.append("Hello, ");
-        s.append("Concurrent-C String via UFCS! - 2\n");
-        std_out.write(s);
+    printf("Starting...\n");
+    
+    @nursery {
+        spawn(() => printf("Hello from task A!\n"));
+        spawn(() => printf("Hello from task B!\n"));
+        spawn(() => printf("Hello from task C!\n"));
     }
+    /* All tasks complete before we reach here. */
+    
+    printf("Done.\n");
     return 0;
 }
 

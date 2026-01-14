@@ -1,8 +1,23 @@
-// Simple fixture to exercise ccc build stub flow.
-// The compiler currently copies input->output; the real check is via
-// `ccc build --dump-consts` to observe merged comptime consts.
+/*
+ * Build constants example.
+ *
+ * This example shows how to declare compile-time constants in build.cc.
+ * Use --dump-consts to see the merged const bindings:
+ *
+ *   ./cc/bin/ccc build --build-file examples/build_stub/build.cc --dump-consts
+ *
+ * The build.cc declares:
+ *   CC_CONST DEBUG 1
+ *   CC_CONST USE_TLS 1
+ *   CC_CONST NUM_WORKERS 4
+ *
+ * These can be overridden with CLI -D flags.
+ */
+#include <stdio.h>
 
-int main() {
+int main(void) {
+    printf("build_stub example\n");
+    printf("See build.cc for CC_CONST declarations\n");
     return 0;
 }
 

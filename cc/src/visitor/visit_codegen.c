@@ -19,6 +19,7 @@
 #include "visitor/pass_nursery_spawn_ast.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
+#include "visitor/pass_with_deadline_syntax.h"
 #include "visitor/visitor_fileutil.h"
 #include "visitor/text_span.h"
 #include "parser/tcc_bridge.h"
@@ -116,13 +117,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (max_dump > 4000) max_dump = 4000;
             for (int i = 0; i < max_dump; i++) {
                 fprintf(stderr,
-                        "  [%d] kind=%d parent=%d file=%s lines=%d..%d aux1=%d aux2=%d aux_s1=%s aux_s2=%s\n",
+                        "  [%d] kind=%d parent=%d file=%s lines=%d..%d cols=%d..%d aux1=%d aux2=%d aux_s1=%s aux_s2=%s\n",
                         i,
                         n[i].kind,
                         n[i].parent,
                         n[i].file ? n[i].file : "<null>",
                         n[i].line_start,
                         n[i].line_end,
+                        n[i].col_start,
+                        n[i].col_end,
                         n[i].aux1,
                         n[i].aux2,
                         n[i].aux_s1 ? n[i].aux_s1 : "<null>",
@@ -149,6 +152,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
 
+    /* Rewrite `with_deadline(expr) { ... }` (not valid C) into CCDeadline scope syntax
+       using @defer, so the rest of the pipeline sees valid parseable text. */
+    if (src_all && src_len) {
+        char* rewritten = NULL;
+        size_t rewritten_len = 0;
+        if (cc__rewrite_with_deadline_syntax(src_all, src_len, &rewritten, &rewritten_len) == 0 && rewritten) {
+            src_ufcs = rewritten;
+            src_ufcs_len = rewritten_len;
+        }
+    }
+
     /* Produced by the closure-literal AST pass (emitted into the output TU). */
     char* closure_protos = NULL;
     size_t closure_protos_len = 0;
@@ -156,10 +170,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     size_t closure_defs_len = 0;
 
 #ifdef CC_TCC_EXT_AVAILABLE
-    if (src_all && root && root->nodes && root->node_count > 0) {
+    if (src_ufcs && root && root->nodes && root->node_count > 0) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
-        if (cc__rewrite_ufcs_spans_with_nodes(root, ctx, src_all, src_len, &rewritten, &rewritten_len)) {
+        if (cc__rewrite_ufcs_spans_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
             src_ufcs = rewritten;
             src_ufcs_len = rewritten_len;
         }
@@ -242,6 +256,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */
         {
+            fprintf(stderr, "YYY: about to call cc__rewrite_closure_literals_with_nodes\n");
             char* rewritten = NULL;
             size_t rewritten_len = 0;
             char* protos = NULL;

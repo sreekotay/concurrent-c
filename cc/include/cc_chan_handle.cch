@@ -1,0 +1,19 @@
+/*
+ * Directional channel handle wrappers (spec-level tx/rx capabilities).
+ *
+ * These are lightweight wrappers around the underlying CCChan* so C type checking
+ * can enforce “send-only” vs “recv-only” at API boundaries.
+ *
+ * NOTE: This is an ABI layer only; the compiler does not yet lower `T[~ ... >/<]`
+ * surface types into these handles. For now, users/tests can opt in manually.
+ */
+#ifndef CC_CHAN_HANDLE_H
+#define CC_CHAN_HANDLE_H
+
+struct CCChan; /* forward */
+
+typedef struct { struct CCChan* raw; } CCChanTx;
+typedef struct { struct CCChan* raw; } CCChanRx;
+
+#endif // CC_CHAN_HANDLE_H
+

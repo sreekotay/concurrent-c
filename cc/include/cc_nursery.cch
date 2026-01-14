@@ -21,6 +21,7 @@ typedef int bool;
 #endif
 #include "cc_sched.cch"
 #include "cc_closure.cch"
+#include "cc_chan_handle.cch"
 
 typedef struct CCChan CCChan;
 
@@ -43,6 +44,8 @@ CCDeadline cc_nursery_as_deadline(const CCNursery* n);
 
 // Register a channel to be auto-closed when the nursery is waited/freed.
 int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch);
+// Preferred: register a send-only handle to be auto-closed (spec-level capability).
+int cc_nursery_add_closing_tx(CCNursery* n, CCChanTx tx);
 
 // Check cancellation flag.
 bool cc_nursery_is_cancelled(const CCNursery* n);

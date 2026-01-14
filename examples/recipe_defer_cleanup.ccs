@@ -2,7 +2,7 @@
  * Recipe: Guaranteed Cleanup (defer)
  *
  * Demonstrates:
- *   - @defer runs on scope exit (including early return)
+ *   - @defer runs on scope exit
  *   - Cleanup happens automatically, no explicit calls needed
  *
  * Key insight: defer guarantees cleanup without try/finally boilerplate.

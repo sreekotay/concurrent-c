@@ -7,6 +7,9 @@
  *   - Tasks exit gracefully when deadline expires
  *
  * Key insight: Cancellation is cooperative - tasks must check the flag.
+ *
+ * Note: Uses low-level nursery API because with_deadline() syntax
+ * is not yet implemented. The pattern is the same.
  */
 #include "cc_nursery.cch"
 #include <stdio.h>

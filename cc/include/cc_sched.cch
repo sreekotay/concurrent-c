@@ -61,4 +61,13 @@ void cc_cancel(CCDeadline* d);
 bool cc_is_cancelled(const CCDeadline* d);
 const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct timespec* out);
 
+// Thread-local "current deadline" scope (used by `with_deadline(...) {}` lowering).
+// These are runtime helpers; the language-level `cc_cancel()`/`cc_is_cancelled()` are provided
+// as macros in cc_runtime.cch to avoid colliding with the existing cc_cancel(CCDeadline*) API.
+CCDeadline* cc_current_deadline(void);
+CCDeadline* cc_deadline_push(CCDeadline* d);
+void cc_deadline_pop(CCDeadline* prev);
+void cc_cancel_current(void);
+bool cc_is_cancelled_current(void);
+
 #endif // CC_SCHED_H

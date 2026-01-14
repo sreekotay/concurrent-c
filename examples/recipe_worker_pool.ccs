@@ -11,22 +11,26 @@
  */
 #include "cc_nursery.cch"
 #include "cc_channel.cch"
+#include "cc_chan_handle.cch"
 #include <stdio.h>
 
 #define NUM_WORKERS 3
 #define NUM_JOBS 9
 
 int main(void) {
-    CCChan* jobs = cc_chan_create(4);
-    CCChan* done = cc_chan_create(NUM_JOBS);  /* results channel */
-    if (!jobs || !done) return 1;
+    CCChan* jobs_ch = cc_chan_create(4);
+    CCChanTx jobs = { jobs_ch };  /* tx handle for closing() */
+    /* done channel capacity must be >= NUM_JOBS to avoid deadlock:
+       if workers block on send(done), nursery can't exit to drain it. */
+    CCChan* done = cc_chan_create(NUM_JOBS);
+    if (!jobs_ch || !done) return 1;
 
     @nursery {
         /* Workers: pull jobs, send completion to done channel. */
         for (int w = 0; w < NUM_WORKERS; w++) {
             spawn(() => {
                 int job;
-                while (cc_chan_recv(jobs, &job, sizeof(job)) == 0) {
+                while (cc_chan_recv(jobs_ch, &job, sizeof(job)) == 0) {
                     printf("worker: processed job %d\n", job);
                     cc_chan_send(done, &job, sizeof(job));  /* report done */
                 }
@@ -37,7 +41,7 @@ int main(void) {
         @nursery closing(jobs) {
             spawn(() => {
                 for (int j = 1; j <= NUM_JOBS; j++) {
-                    cc_chan_send(jobs, &j, sizeof(j));
+                    cc_chan_send(jobs_ch, &j, sizeof(j));
                 }
                 printf("feeder: sent %d jobs\n", NUM_JOBS);
             });
@@ -53,7 +57,7 @@ int main(void) {
         jobs_done++;
     }
 
-    cc_chan_free(jobs);
+    cc_chan_free(jobs_ch);
     cc_chan_free(done);
     printf("done, jobs_done = %d\n", jobs_done);
     return (jobs_done == NUM_JOBS) ? 0 : 1;

@@ -120,8 +120,8 @@ static int cc__closure_start_off_best_effort(const char* src, size_t len,
         if (cand < line_hi) {
             size_t j = cand;
             while (j < line_hi && (src[j] == ' ' || src[j] == '\t')) j++;
-            /* Heuristic: closure literal starts at '(' (paren params) or an identifier (single-param form). */
-            if (j < line_hi && (src[j] == '(' || cc__is_ident_start_char(src[j]))) {
+            /* Heuristic: closure literal starts at '(' (paren params), '[' (capture list), '@' (@unsafe), or an identifier (single-param form). */
+            if (j < line_hi && (src[j] == '(' || src[j] == '[' || src[j] == '@' || cc__is_ident_start_char(src[j]))) {
             *out_off = cand;
             if (out_col_1based) *out_col_1based = col_start;
             return 1;
@@ -573,6 +573,16 @@ static void cc__collect_caps_from_block(char*** scope_names,
     }
 }
 
+static char** cc__dup_string_list(char** xs, int n) {
+    if (!xs || n <= 0) return NULL;
+    char** out = (char**)calloc((size_t)n, sizeof(char*));
+    if (!out) return NULL;
+    for (int i = 0; i < n; i++) {
+        out[i] = xs[i] ? strdup(xs[i]) : NULL;
+    }
+    return out;
+}
+
 typedef struct {
     int id;
     int start_line;
@@ -588,6 +598,10 @@ typedef struct {
     char* param1_name;
     char* param0_type;
     char* param1_type;
+    int is_unsafe;
+    char** explicit_cap_names;
+    unsigned char* explicit_cap_flags; /* bit 0: is_ref */
+    int explicit_cap_count;
     char** cap_names;
     char** cap_types;
     unsigned char* cap_flags;
@@ -696,6 +710,19 @@ static int cc__parse_closure_from_src(const char* src,
     }
     if (arrow == (size_t)-1) return 0;
 
+    /* Parse optional `@unsafe` prefix (expression-context marker). */
+    {
+        size_t u0 = 0;
+        while (u0 < arrow && (s[u0] == ' ' || s[u0] == '\t')) u0++;
+        if (u0 + 7 <= arrow && s[u0] == '@' && memcmp(s + u0 + 1, "unsafe", 6) == 0) {
+            size_t u1 = u0 + 7;
+            if (u1 == arrow || !cc__is_ident_char2(s[u1])) {
+                out->is_unsafe = 1;
+                /* Advance l0 trimming below will skip this prefix. */
+            }
+        }
+    }
+
     /* Parse params on the left. */
     int param_count = 0;
     char p0[128] = {0}, p1[128] = {0};
@@ -705,6 +732,98 @@ static int cc__parse_closure_from_src(const char* src,
     size_t l0 = 0, l1 = arrow;
     while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
     while (l1 > l0 && (s[l1 - 1] == ' ' || s[l1 - 1] == '\t')) l1--;
+
+    /* Skip `@unsafe` when parsing capture list/params. */
+    if (l0 + 7 <= l1 && s[l0] == '@' && memcmp(s + l0 + 1, "unsafe", 6) == 0) {
+        size_t u1 = l0 + 7;
+        if (u1 == l1 || !cc__is_ident_char2(s[u1])) {
+            out->is_unsafe = 1;
+            l0 = u1;
+            while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
+        }
+    }
+
+    /* Optional capture list: `[x, &y] ( ... ) => ...` */
+    if (l0 < l1 && s[l0] == '[') {
+        size_t j = l0 + 1;
+        while (j < l1 && (s[j] == ' ' || s[j] == '\t')) j++;
+        /* Disallow capture-all sugar: `[&]` and `[=]` */
+        if (j + 1 < l1 && s[j] == '&' && s[j + 1] == ']') return 0;
+        if (j < l1 && s[j] == '=' && (j + 1 == l1 || s[j + 1] == ']')) return 0;
+
+        /* Find matching ']' */
+        int sq = 1;
+        size_t k = l0 + 1;
+        for (; k < l1; k++) {
+            if (s[k] == '[') sq++;
+            else if (s[k] == ']') { sq--; if (sq == 0) break; }
+        }
+        if (k >= l1 || s[k] != ']') return 0;
+        size_t cap_l = l0 + 1;
+        size_t cap_r = k;
+
+        /* Parse entries: (&)? ident, comma-separated */
+        {
+            char** names = NULL;
+            unsigned char* flags = NULL;
+            int nn = 0;
+            size_t p = cap_l;
+            while (p < cap_r) {
+                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
+                if (p >= cap_r) break;
+                if (s[p] == ',') { p++; continue; }
+                if (s[p] == '=') {
+                    /* capture-all not allowed */
+                    for (int i = 0; i < nn; i++) free(names[i]);
+                    free(names); free(flags);
+                    return 0;
+                }
+                int is_ref = 0;
+                if (s[p] == '&') { is_ref = 1; p++; }
+                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
+                if (p >= cap_r || !cc__is_ident_start_char(s[p])) {
+                    /* capture-all like `[&]` or malformed */
+                    for (int i = 0; i < nn; i++) free(names[i]);
+                    free(names); free(flags);
+                    return 0;
+                }
+                size_t ns = p;
+                p++;
+                while (p < cap_r && cc__is_ident_char2(s[p])) p++;
+                size_t nl = p - ns;
+                char* nm = (char*)malloc(nl + 1);
+                if (!nm) { for (int i = 0; i < nn; i++) free(names[i]); free(names); free(flags); return 0; }
+                memcpy(nm, s + ns, nl);
+                nm[nl] = 0;
+                /* dedupe */
+                int dup = 0;
+                for (int q = 0; q < nn; q++) if (names[q] && strcmp(names[q], nm) == 0) { dup = 1; break; }
+                if (dup) { free(nm); continue; }
+                char** nnames = (char**)realloc(names, (size_t)(nn + 1) * sizeof(char*));
+                unsigned char* nflags = (unsigned char*)realloc(flags, (size_t)(nn + 1) * sizeof(unsigned char));
+                if (!nnames || !nflags) {
+                    free(nm);
+                    free(nnames); free(nflags);
+                    for (int i = 0; i < nn; i++) free(names[i]);
+                    free(names); free(flags);
+                    return 0;
+                }
+                names = nnames;
+                flags = nflags;
+                names[nn] = nm;
+                flags[nn] = (unsigned char)(is_ref ? 1 : 0);
+                nn++;
+            }
+            out->explicit_cap_names = names;
+            out->explicit_cap_flags = flags;
+            out->explicit_cap_count = nn;
+        }
+
+        l0 = k + 1;
+        while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
+        /* Capture list form requires paren params per spec. */
+        if (l0 >= l1 || s[l0] != '(') return 0;
+    }
 
     if (l0 < l1 && s[l0] == '(') {
         /* ( ... ) */
@@ -837,6 +956,9 @@ static void cc__free_closure_desc(CCClosureDesc* d) {
     free(d->param1_name);
     free(d->param0_type);
     free(d->param1_type);
+    for (int i = 0; i < d->explicit_cap_count; i++) free(d->explicit_cap_names ? d->explicit_cap_names[i] : NULL);
+    free(d->explicit_cap_names);
+    free(d->explicit_cap_flags);
     for (int i = 0; i < d->cap_count; i++) free(d->cap_names ? d->cap_names[i] : NULL);
     free(d->cap_names);
     for (int i = 0; i < d->cap_count; i++) free(d->cap_types ? d->cap_types[i] : NULL);
@@ -844,6 +966,17 @@ static void cc__free_closure_desc(CCClosureDesc* d) {
     free(d->cap_flags);
     free(d->body_text);
     memset(d, 0, sizeof(*d));
+}
+
+static int cc__cap_is_ref(const CCClosureDesc* d, const char* name) {
+    if (!d || !name || !d->explicit_cap_names || !d->explicit_cap_flags) return 0;
+    for (int i = 0; i < d->explicit_cap_count; i++) {
+        if (!d->explicit_cap_names[i]) continue;
+        if (strcmp(d->explicit_cap_names[i], name) == 0) {
+            return (d->explicit_cap_flags[i] & 1) != 0;
+        }
+    }
+    return 0;
 }
 
 static char* cc__make_call_expr(const CCClosureDesc* d) {
@@ -856,7 +989,9 @@ static char* cc__make_call_expr(const CCClosureDesc* d) {
     } else {
         for (int i = 0; i < d->cap_count; i++) {
             if (i) cc__append_str(&b, &bl, &bc, ", ");
-            int mo = (d->cap_flags && (d->cap_flags[i] & 2) != 0);
+            int is_ref = (d->cap_flags && (d->cap_flags[i] & 4) != 0);
+            int mo = (!is_ref && d->cap_flags && (d->cap_flags[i] & 2) != 0);
+            if (is_ref) cc__append_str(&b, &bl, &bc, "&");
             if (mo) cc__append_str(&b, &bl, &bc, "cc_move(");
             cc__append_str(&b, &bl, &bc, d->cap_names[i] ? d->cap_names[i] : "0");
             if (mo) cc__append_str(&b, &bl, &bc, ")");
@@ -979,9 +1114,27 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         /* Process any closures that start on or before the end of this line. */
         while (cur_closure < idx_n && descs[cur_closure].start_off < (off + line_len + 1)) {
             CCClosureDesc* d = &descs[cur_closure];
-            /* Collect captures from body (ignore param names). */
-            char** caps = NULL;
-            int cap_n = 0;
+            /* Start with explicit captures from `[ ... ]` (if any), then add implicit value captures
+               from free-var scan of the body (ignore param names). */
+            char** caps = cc__dup_string_list(d->explicit_cap_names, d->explicit_cap_count);
+            int cap_n = d->explicit_cap_count;
+            if (!caps && d->explicit_cap_count > 0) {
+                fprintf(stderr, "%s:%d:%d: error: CC: out of memory while building closure captures\n",
+                        ctx->input_path ? ctx->input_path : "<input>",
+                        d->start_line,
+                        (d->start_col >= 0 ? (d->start_col + 1) : 1));
+                for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
+                free(descs);
+                for (int dd = 0; dd < 256; dd++) {
+                    for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_names[dd][k2]);
+                    free(scope_names[dd]);
+                    for (int k2 = 0; k2 < scope_counts[dd]; k2++) free(scope_types[dd][k2]);
+                    free(scope_types[dd]);
+                    free(scope_flags[dd]);
+                }
+                free(idxs);
+                return -1;
+            }
             if (d->body_text) {
                 cc__collect_caps_from_block(scope_names, scope_counts, depth,
                                             d->body_text,
@@ -1006,11 +1159,12 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                             if (ty) fl = cc__lookup_decl_flags(scope_names[dd], scope_flags[dd], scope_counts[dd], caps[ci]);
                         }
                         if (ty) d->cap_types[ci] = strdup(ty);
+                        if (cc__cap_is_ref(d, caps[ci])) fl |= 4; /* bit 2: reference capture */
                         d->cap_flags[ci] = fl;
                         if (!ty) {
                             int col1 = d->start_col >= 0 ? (d->start_col + 1) : 1;
                             fprintf(stderr,
-                                    "%s:%d:%d: error: CC: cannot infer type for captured name '%s' (capture-by-copy currently supports simple decls like 'int x = ...;' or 'T* p = ...;')\n",
+                                    "%s:%d:%d: error: CC: cannot infer type for captured name '%s' (currently supports simple decls like 'int x = ...;' or 'T* p = ...;')\n",
                                     ctx->input_path ? ctx->input_path : "<input>",
                                     d->start_line,
                                     col1,
@@ -1083,9 +1237,14 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         } else {
             for (int ci = 0; ci < d->cap_count; ci++) {
                 if (ci) cc__append_str(&protos, &protos_len, &protos_cap, ", ");
-                cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s",
-                               d->cap_types && d->cap_types[ci] ? d->cap_types[ci] : "int",
-                               d->cap_names[ci] ? d->cap_names[ci] : "__cap");
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types && d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (is_ref) {
+                    cc__append_fmt(&protos, &protos_len, &protos_cap, "%s* %s", ty, nm);
+                } else {
+                    cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s", ty, nm);
+                }
             }
         }
         cc__append_str(&protos, &protos_len, &protos_cap, ");\n");
@@ -1103,9 +1262,14 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (d->cap_count > 0) {
             cc__append_fmt(&defs, &defs_len, &defs_cap, "typedef struct __cc_closure_env_%d {\n", d->id);
             for (int ci = 0; ci < d->cap_count; ci++) {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s;\n",
-                               d->cap_types[ci] ? d->cap_types[ci] : "int",
-                               d->cap_names[ci] ? d->cap_names[ci] : "__cap");
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (is_ref) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* %s;\n", ty, nm);
+                } else {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s;\n", ty, nm);
+                }
             }
             cc__append_str(&defs, &defs_len, &defs_cap, "} ");
             cc__append_fmt(&defs, &defs_len, &defs_cap, "__cc_closure_env_%d;\n", d->id);
@@ -1116,9 +1280,14 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s __cc_closure_make_%d(", cty, d->id);
             for (int ci = 0; ci < d->cap_count; ci++) {
                 if (ci) cc__append_str(&defs, &defs_len, &defs_cap, ", ");
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "%s %s",
-                               d->cap_types[ci] ? d->cap_types[ci] : "int",
-                               d->cap_names[ci] ? d->cap_names[ci] : "__cap");
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (is_ref) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "%s* %s", ty, nm);
+                } else {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "%s %s", ty, nm);
+                }
             }
             cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
@@ -1152,10 +1321,17 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (d->cap_count > 0) {
             cc__append_fmt(&defs, &defs_len, &defs_cap, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n", d->id, d->id);
             for (int ci = 0; ci < d->cap_count; ci++) {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = __env->%s;\n",
-                               d->cap_types[ci] ? d->cap_types[ci] : "int",
-                               d->cap_names[ci] ? d->cap_names[ci] : "__cap",
-                               d->cap_names[ci] ? d->cap_names[ci] : "__cap");
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (is_ref) {
+                    /* Reference capture: dereference the stored pointer.
+                       Use a local reference-like alias. */
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* __cc_ref_%s = __env->%s;\n", ty, nm, nm);
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "#define %s (*__cc_ref_%s)\n", nm, nm);
+                } else {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = __env->%s;\n", ty, nm, nm);
+                }
             }
         } else {
             cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__p;\n");
@@ -1191,6 +1367,13 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             cc__append_fmt(&defs, &defs_len, &defs_cap, "  (void)(%s);\n", lowered_body ? lowered_body : "0");
         }
         free(lowered_body);
+        /* Undefine reference capture macros to avoid polluting subsequent code. */
+        for (int ci = 0; ci < d->cap_count; ci++) {
+            int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+            if (is_ref && d->cap_names[ci]) {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "#undef %s\n", d->cap_names[ci]);
+            }
+        }
         cc__append_str(&defs, &defs_len, &defs_cap, "  return NULL;\n}\n\n");
 
         char* call = cc__make_call_expr(d);

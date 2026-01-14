@@ -7,6 +7,18 @@ Status: draft. Purpose: define the `ccc` driver behavior for C output, compilati
 - Remain C-friendly: emit clean C; allow Make/CMake to own compilation if desired.
 - Deterministic behavior; clear, inspectable outputs; easy overrides.
 
+## Design Philosophy
+
+**Declarative sugar over imperative comptime.**
+
+Like Zig's `build.zig`, CC's `build.cc` should ultimately be real CC code that runs at compile time. However, most builds are simple and don't need imperative logic. Therefore:
+
+1. **Declarative lines** (`CC_TARGET`, `CC_CONST`, etc.) handle the 80% case — simple, scannable, no logic required.
+2. **Comptime blocks** (`@comptime { ... }`) handle the 20% case — conditionals, loops, platform detection, dynamic target generation.
+3. **Declarative desugars to comptime** — they are not separate systems. `CC_TARGET main exe main.ccs` is syntactic sugar for equivalent comptime API calls.
+
+This matches C's own philosophy: simple things are simple (`int x = 5;`), complex things are possible (`__attribute__`, inline asm).
+
 ## Invocation Modes
 - `ccc [options] <input.ccs>` — default end-to-end: emit C, compile, link.
 - `ccc --emit-c-only ...` — stop after emitting C.
@@ -47,43 +59,90 @@ Build steps:
 - `--libdir/--includedir` overrides where runtime headers/libs are found if separated.
 
 ## Build.cc Integration
+
 ### Discovery
 - Prefer a `build.cc` **alongside the first input** (`<input_dir>/build.cc`), else fall back to `./build.cc` (CWD).
 - If **both** exist, `ccc build` errors (ambiguous).
 - `--build-file PATH` overrides discovery.
 - `--no-build` disables build.cc integration even if present.
 
-### Consts (current stub format)
-`build.cc` may declare compile-time integer consts:
+### End-State Vision: Comptime Build Scripts
+
+The end goal is `build.cc` as real CC code with comptime evaluation:
+
+```c
+// build.cc — CC code, evaluated at compile time
+@comptime {
+    CCTarget* exe = cc_exe("main");
+    exe.sources("main.ccs", "utils.ccs");
+    
+    if (cc_option_bool("debug")) {
+        exe.define("DEBUG", "1");
+        exe.cflags("-fsanitize=address");
+    }
+    
+    if (TARGET_OS == OS_WINDOWS) {
+        exe.libs("ws2_32");
+    } else {
+        exe.libs("pthread");
+    }
+    
+    cc_default(exe);
+}
+```
+
+This is imperative (matches C thinking), uses the same language (no DSL to learn), and handles complex builds naturally.
+
+### Declarative Syntax (Current & Permanent)
+
+For simple builds, declarative lines are more convenient. These desugar to equivalent comptime API calls:
+
+| Declarative | Equivalent Comptime |
+|-------------|---------------------|
+| `CC_TARGET main exe main.ccs` | `cc_exe("main").sources("main.ccs")` |
+| `CC_TARGET_LIBS main pthread` | `cc_target("main").libs("pthread")` |
+| `CC_CONST DEBUG 1` | `cc_const("DEBUG", 1)` |
+| `CC_DEFAULT main` | `cc_default(cc_target("main"))` |
+
+Both forms coexist in the same `build.cc`. Use declarative for simple cases, drop into `@comptime` when you need logic.
+
+### Consts
+
+Compile-time integer constants:
 - `CC_CONST <NAME> <EXPR>`
 
-Where `<EXPR>` is currently one token:
-- An integer literal parsed by `strtoll(..., base=0)` (so `123`, `0xff`, etc), or
-- One of the target const symbols:
-  - `TARGET_PTR_WIDTH`
-  - `TARGET_IS_LITTLE_ENDIAN` (0/1)
+Where `<EXPR>` is:
+- An integer literal (`123`, `0xff`, etc), or
+- A target const: `TARGET_PTR_WIDTH`, `TARGET_IS_LITTLE_ENDIAN`, `TARGET_OS`
 
-Const precedence:
-- Target consts are injected first.
-- `CC_CONST` lines are loaded next.
-- CLI `-DNAME[=VALUE]` are applied last and override prior values (with a warning if overriding a build.cc const).
+Precedence (later overrides earlier):
+1. Target consts (injected by compiler)
+2. `CC_CONST` lines
+3. CLI `-DNAME[=VALUE]`
 
-### Options (help-only today)
-`build.cc` may declare project options for help output:
+### Options
+
+Project options for `--help` output:
 - `CC_OPTION <NAME> <HELP...>`
 
-These are printed by `ccc build --help` when a `build.cc` is in scope (or when `--build-file` is provided).
+End-state: options become typed and queryable in comptime:
+```c
+@comptime {
+    int workers = cc_option_int("workers", 4);  // default 4
+    bool debug = cc_option_bool("debug");
+}
+```
 
-### Targets (target graph)
-`build.cc` may declare buildable targets:
+### Targets
+
+Declarative target declarations:
 - `CC_DEFAULT <TARGET_NAME>`
 - `CC_TARGET <TARGET_NAME> exe <SRC...>`
 - `CC_TARGET <TARGET_NAME> obj <SRC...>`
 
 Notes:
-- `<SRC...>` is a whitespace-separated list of source files.
-- Source paths are resolved **relative to the directory containing `build.cc`**.
-- Sources may be a mix of `.ccs` (CC, lowered first) and `.c` (compiled directly).
+- `<SRC...>` is whitespace-separated; paths relative to `build.cc` directory.
+- Sources may mix `.ccs` (lowered) and `.c` (compiled directly).
 
 Per-target properties (optional):
 - `CC_TARGET_INCLUDE <TARGET_NAME> <DIR...>`
@@ -129,16 +188,37 @@ Per-target properties (optional):
 - Support `--verbose` to print all invoked commands.
 
 ## Future Extensions (non-normative)
-- More build graph features (explicit outputs/inputs, richer option types).
-- Depfile integration beyond per-translation-unit (`-MMD` style) as needed.
 
-## Inspiration (non-normative): Zig `zig build`
-- Zig models builds as a **DAG of named steps** (build/install/run/test/custom), with project options registered and exposed via `zig build --help`.
-- We can mirror this shape in CC:
-  - `ccc build <step>` where `<step>` is `default`/`run`/`test` etc.
-  - Project-specific settings as `-D` options (Zig’s pattern: `-Dtarget=...`, `-Doptimize=...`).
+### Comptime Build API (priority)
+- Full comptime evaluation in `build.cc`
+- Typed option queries: `cc_option_int()`, `cc_option_bool()`, `cc_option_string()`
+- Target constants: `TARGET_OS`, `TARGET_ARCH`, `TARGET_PTR_WIDTH`
+- Conditional target generation in `@comptime` blocks
 
-See `docs/zig-build-inspiration.md`.
+### Build Graph Enhancements
+- Explicit outputs/inputs for custom steps
+- Parallel step execution
+- Richer depfile integration
+
+### Standard Options
+Following Zig's pattern, standardize common options:
+- `-Doptimize=Debug|ReleaseSafe|ReleaseFast|ReleaseSmall`
+- `-Dtarget=<triple>`
+
+## Inspiration: Zig `zig build`
+
+Zig models builds as a **DAG of named steps** with `build.zig` as imperative Zig code. CC mirrors this:
+
+| Zig | CC |
+|-----|-----|
+| `build.zig` (Zig code) | `build.cc` (CC code with comptime) |
+| `zig build <step>` | `ccc build <step>` |
+| `-Dname=value` | `-Dname=value` |
+| `b.addExecutable(...)` | `cc_exe(...)` in `@comptime` |
+
+Key difference: CC keeps declarative syntax (`CC_TARGET`) as sugar for simple cases, avoiding boilerplate for the common path.
+
+For more details, see `docs/zig-build-inspiration.md`.
 
 ## Recipes (copy/paste)
 

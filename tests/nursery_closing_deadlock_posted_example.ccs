@@ -6,15 +6,15 @@
 static volatile int received_sum = 0;
 
 int main(void) {
-    CCChan* ch = cc_chan_create(1);
-    if (!ch) return 2;
-    (void)cc_chan_init_elem(ch, sizeof(int));
+    CCChanTx ch_tx;
+    CCChanRx ch_rx;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
 
-    @nursery closing(ch) {
+    @nursery closing(ch_tx) {
         /* Producer: sends values 1, 2, 3 then exits. */
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
-                cc_chan_send(ch, &i, sizeof(i));
+                cc_chan_send(ch_tx.raw, &i, sizeof(i));
                 printf("sent %d\n", i);
             }
             /* Producer exits; channel stays open for consumer. */
@@ -23,14 +23,14 @@ int main(void) {
         /* Consumer: receives until channel closes. */
         spawn(() => {
             int v;
-            while (cc_chan_recv(ch, &v, sizeof(v)) == 0) {
+            while (cc_chan_recv(ch_rx.raw, &v, sizeof(v)) == 0) {
                 printf("got %d\n", v);
                 received_sum += v;
             }
         });
     }
 
-    cc_chan_free(ch);
+    cc_chan_free(ch_tx.raw);
     printf("sum = %d\n", (int)received_sum);
     return 0;
 }

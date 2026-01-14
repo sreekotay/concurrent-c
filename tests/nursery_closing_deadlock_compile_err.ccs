@@ -5,25 +5,25 @@
 // A consumer inside the same nursery that waits for "channel closed" can deadlock.
 static volatile int received_sum = 0;
 int main(void) {
-    CCChan* ch = cc_chan_create(1);
-    if (!ch) return 2;
-    (void)cc_chan_init_elem(ch, sizeof(int));
-    @nursery closing(ch) {
+    CCChanTx ch_tx;
+    CCChanRx ch_rx;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
+    @nursery closing(ch_tx) {
         // Producer: finite sends.
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
-                (void)cc_chan_send(ch, &i, sizeof(i));
+                (void)cc_chan_send(ch_tx.raw, &i, sizeof(i));
             }
         });
         // Consumer: recv-until-close INSIDE the same nursery => deadlock under spec semantics.
         spawn(() => {
             int v = 0;
-            while (cc_chan_recv(ch, &v, sizeof(v)) == 0) {
+            while (cc_chan_recv(ch_rx.raw, &v, sizeof(v)) == 0) {
                 received_sum += v;
             }
         });
     }
-    cc_chan_free(ch);
+    cc_chan_free(ch_tx.raw);
     return (received_sum == 6) ? 0 : 1;
 }
 

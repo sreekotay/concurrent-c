@@ -801,7 +801,7 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
             if (cn < 0) { free(pro); free(id_by_node); return -1; }
             for (int ci = 0; ci < cn; ci++) {
                 cc__append_fmt(&pro, &pro_len, &pro_cap,
-                               "%.*scc_nursery_add_closing_chan(__cc_nursery%d, %s);\n",
+                               "%.*scc_nursery_add_closing_tx(__cc_nursery%d, %s);\n",
                                (int)ind_len, indent, id, chans[ci]);
             }
         }

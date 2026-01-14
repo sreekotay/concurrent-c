@@ -40,18 +40,19 @@ void consumer(CCChan* ch1, CCChan* ch2) {
 }
 
 int main(void) {
-    CCChan* ch1 = cc_chan_create(1);
-    CCChan* ch2 = cc_chan_create(1);
-    if (!ch1 || !ch2) return 2;
-    (void)cc_chan_init_elem(ch1, sizeof(int));
-    (void)cc_chan_init_elem(ch2, sizeof(int));
+    CCChanTx ch1_tx;
+    CCChanTx ch2_tx;
+    CCChanRx ch1_rx;
+    CCChanRx ch2_rx;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch1_tx, &ch1_rx) != 0) return 2;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch2_tx, &ch2_rx) != 0) return 3;
 
     g_err = 0;
     g_sum = 0;
 
-    @nursery closing(ch1, ch2) {
-        spawn(() => { producer(ch1, ch2); });
-        spawn(() => { consumer(ch1, ch2); });
+    @nursery closing(ch1_tx, ch2_tx) {
+        spawn(() => { producer(ch1_tx.raw, ch2_tx.raw); });
+        spawn(() => { consumer(ch1_rx.raw, ch2_rx.raw); });
     }
 
     if (g_err != 0) return 10;
@@ -61,15 +62,15 @@ int main(void) {
 
     // After nursery exit, both channels should now be closed.
     int tmp = 0;
-    if (cc_chan_try_recv(ch1, &tmp, sizeof(tmp)) != EPIPE) return 12;
-    if (cc_chan_try_recv(ch2, &tmp, sizeof(tmp)) != EPIPE) return 13;
+    if (cc_chan_try_recv(ch1_rx.raw, &tmp, sizeof(tmp)) != EPIPE) return 12;
+    if (cc_chan_try_recv(ch2_rx.raw, &tmp, sizeof(tmp)) != EPIPE) return 13;
 
     int v = 1;
-    if (cc_chan_send(ch1, &v, sizeof(v)) != EPIPE) return 14;
-    if (cc_chan_send(ch2, &v, sizeof(v)) != EPIPE) return 15;
+    if (cc_chan_send(ch1_tx.raw, &v, sizeof(v)) != EPIPE) return 14;
+    if (cc_chan_send(ch2_tx.raw, &v, sizeof(v)) != EPIPE) return 15;
 
-    cc_chan_free(ch1);
-    cc_chan_free(ch2);
+    cc_chan_free(ch1_tx.raw);
+    cc_chan_free(ch2_tx.raw);
     return 0;
 }
 

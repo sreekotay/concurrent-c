@@ -1445,12 +1445,34 @@ void   Thread.join();                    // wait for completion
 **Rule (captures in thread closures):** Capturing a variable `v` into a thread closure is allowed iff:
 1. `v` is capturable (see §1.2), AND
 2. `v` is not assigned after the capture point, AND
-3. No address of `v` is taken in a way that escapes the closure's scope, AND
-4. The captured value is not mutated from within the closure unless it is `Mutex<T>`, `Atomic<T>`, or a pointer to `Mutex<T>`/`Atomic<T>`.
+3. No address of `v` is taken in a way that escapes the closure's scope
 
-This prevents "mutated through a pointer alias" loopholes while allowing explicit shared state.
+**Rule (value capture):** Thread closures capture by value by default. For copyable types, the captured value is a copy. For move-only types (e.g., `Map<K,V>`, unique slices), the capture is a move and the original becomes invalid. Value-captured variables are immutable within the closure.
 
-**Rule:** Thread closures capture by value. For copyable types, the captured value is a copy. For move-only types (e.g., `Map<K,V>`, unique slices), the capture is a move and the original becomes invalid. The captured value is immutable within the closure unless it is a `Mutex<T>` or `Atomic<T>` handle.
+**Rule (reference capture):** Explicit reference capture `[&v]` creates a shared reference to the outer variable. Reference captures are subject to mutation checks:
+- Read-only access is allowed
+- Mutation is a compile error unless the type is `Mutex<T>`, `Atomic<T>`, or the capture is inside `@unsafe`
+
+```c
+int x = 0;
+
+// Value capture (default): x is copied, immutable in closure
+spawn(() => { printf("%d", x); });     // ✅ OK
+spawn(() => { x++; });                 // ❌ ERROR: value capture is immutable
+
+// Reference capture: explicit sharing with mutation check
+spawn([&x]() => { printf("%d", x); }); // ✅ OK: read-only
+spawn([&x]() => { x++; });             // ❌ ERROR: mutation of shared ref
+
+// Safe wrappers: mutation allowed
+Atomic<int> counter = atomic_new(0);
+spawn([&counter]() => { counter++; }); // ✅ OK: Atomic is thread-safe
+
+// Escape hatch: @unsafe bypasses check
+spawn(@unsafe [&x]() => { x++; });     // ⚠️ OK: explicit unsafe
+```
+
+This prevents data races while allowing explicit shared state through safe wrappers.
 
 ---
 
@@ -4687,16 +4709,66 @@ char[:] s = "hello";  // static slice, always valid
 
 **Closures:**
 
-Closures use arrow syntax:
+Closures use arrow syntax with optional capture list:
 
 ```c
-() => { stmt; }              // no parameters
+() => { stmt; }              // no parameters, implicit value capture
 (x) => { stmt; }             // one parameter (type inferred)
 (int x, int y) => { stmt; }  // typed parameters
 x => expr                    // single parameter, expression body
+
+// Explicit capture list (optional)
+[x]() => { stmt; }           // explicit value capture (same as implicit)
+[&x]() => { stmt; }          // reference capture (explicit sharing)
+[x, &y]() => { stmt; }       // mixed: x by value, y by reference
 ```
 
-Closures capture by value. For copyable types, the captured value is a copy. For move-only types, the capture is a move and the original becomes invalid. For thread/task closures, captured values must be capturable (see §1.2).
+**Capture semantics:**
+
+- **Value capture (default):** Closures capture by value. For copyable types, the captured value is a copy. For move-only types, the capture is a move and the original becomes invalid.
+
+- **Reference capture (`[&x]`):** Explicitly captures a reference to the outer variable. The closure shares the variable with the outer scope. Reference captures are subject to mutation checks (see below).
+
+- **Capture-all banned:** The forms `[&]` and `[=]` (capture all by reference/value) are not allowed. Each captured variable must be listed explicitly.
+
+**Reference capture mutation check:**
+
+For thread/task closures, reference captures (`[&x]`) are checked for mutation:
+
+- **Read-only access:** Allowed. The closure may read the referenced variable.
+- **Mutation:** Compile error unless the type is `Mutex<T>`, `Atomic<T>`, or the capture is inside `@unsafe`.
+
+```c
+int counter = 0;
+
+// ✅ OK: read-only reference capture
+spawn([&counter]() => { printf("%d", counter); });
+
+// ❌ ERROR: mutation of shared reference
+spawn([&counter]() => { counter++; });
+// error: mutation of shared reference 'counter' in spawned task
+// help: use Atomic<int>, Mutex<int>, or @unsafe [&counter]
+
+// ✅ OK: safe wrapper
+Atomic<int> safe_counter = atomic_new(0);
+spawn([&safe_counter]() => { safe_counter++; });
+
+// ⚠️ OK: explicit unsafe (you own this race)
+spawn(@unsafe [&counter]() => { counter++; });
+```
+
+**Mutation patterns detected:**
+
+| Pattern | Classification |
+|---------|----------------|
+| `x = ...` | Write (error) |
+| `x++`, `++x`, `x--`, `--x` | Write (error) |
+| `x += ...`, `-=`, `\|=`, etc. | Write (error) |
+| `foo(&x)` where foo takes `T*` | Potential write (error) |
+| `foo(&x)` where foo takes `const T*` | Read (OK) |
+| `y = x`, `f(x)`, `x.field` | Read (OK) |
+
+For thread/task closures, captured values must also be capturable (see §1.2).
 
 **Type inference:**
 
@@ -5678,37 +5750,60 @@ Lowers to:
 
 **Lowering:** If `setup()` and `process()` would normally batch together, @latency_sensitive prevents it. Each has its own batch (or both are inlined if very fast).
 
-### C.3 Stack Capture Safety
+### C.3 Stack Capture Safety and Mutation Checking
 
-**Problem:** Closures capturing locals by reference can outlive the scope if escaped (sent to channel, spawned to thread).
+**Problem:** Closures capturing locals by reference can outlive the scope if escaped (sent to channel, spawned to thread). Additionally, shared mutable state across tasks causes data races.
 
-**Solution:** Compiler enforces that closures escaping a function do not capture locals by reference.
+**Solution:** Compiler enforces:
+1. Escaping closures do not capture stack-local references unsafely
+2. Reference captures in spawned closures are checked for mutation
 
-**Rule:**
-- Closure captured by value → safe (captures are copies or moves)
-- Closure captured by reference → allowed only if closure does not escape the scope
-- Escaping closure → must not have any reference captures
+**Rules:**
+- Value capture (default) → safe (captures are copies or moves)
+- Reference capture `[&x]` in non-escaping closure → allowed
+- Reference capture `[&x]` in escaping closure → allowed for read-only access, mutation is error
+- Reference capture `[&x]` with mutation → requires `Mutex<T>`, `Atomic<T>`, or `@unsafe`
 
-**Example:**
+**Example (escape safety):**
 
 ```c
 @async void bad() {
     int x = 42;
     nursery {
-        spawn (() => { use(x); });  // ERROR: x is local, escapes scope
-    }
-}
-
-@async void ok() {
-    int x = 42;
-    nursery {
-        spawn ((() => {
-            int y = x;              // capture by value (copy)
-            use(y);                 // OK
-        })());
+        spawn (() => { use(x); });  // ✅ OK: value capture (copy)
     }
 }
 ```
+
+**Example (mutation checking):**
+
+```c
+@async void bad_race() {
+    int counter = 0;
+    nursery {
+        spawn ([&counter]() => { counter++; });  // ❌ ERROR: mutation of shared ref
+        spawn ([&counter]() => { counter++; });
+    }
+}
+
+@async void ok_atomic() {
+    Atomic<int> counter = atomic_new(0);
+    nursery {
+        spawn ([&counter]() => { counter++; });  // ✅ OK: Atomic is thread-safe
+        spawn ([&counter]() => { counter++; });
+    }
+}
+
+@async void ok_readonly() {
+    int config = 42;
+    nursery {
+        spawn ([&config]() => { printf("%d", config); });  // ✅ OK: read-only
+        spawn ([&config]() => { printf("%d", config); });
+    }
+}
+```
+
+**Mutation detection:** The compiler analyzes the closure body for writes to reference-captured variables. Detected patterns include assignment, compound assignment, increment/decrement, and passing address to non-const pointer parameters.
 
 ### C.4 Slice Provenance Tracking (Debug Only)
 

@@ -25,6 +25,50 @@
 
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
 extern __thread CCNursery* cc__tls_current_nursery;
+/* Thread-local current deadline scope (set by with_deadline lowering). */
+__thread CCDeadline* cc__tls_current_deadline = NULL;
+
+CCDeadline* cc_current_deadline(void) {
+    return cc__tls_current_deadline;
+}
+
+CCDeadline* cc_deadline_push(CCDeadline* d) {
+    CCDeadline* prev = cc__tls_current_deadline;
+    cc__tls_current_deadline = d;
+    return prev;
+}
+
+void cc_deadline_pop(CCDeadline* prev) {
+    cc__tls_current_deadline = prev;
+}
+
+void cc_cancel_current(void) {
+    if (cc__tls_current_deadline) cc__tls_current_deadline->cancelled = 1;
+}
+
+bool cc_is_cancelled_current(void) {
+    return cc__tls_current_deadline && cc__tls_current_deadline->cancelled;
+}
+
+int cc_chan_pair_create(size_t capacity,
+                        CCChanMode mode,
+                        bool allow_send_take,
+                        size_t elem_size,
+                        CCChanTx* out_tx,
+                        CCChanRx* out_rx) {
+    if (!out_tx || !out_rx) return EINVAL;
+    out_tx->raw = NULL;
+    out_rx->raw = NULL;
+    CCChan* ch = cc_chan_create_mode_take(capacity, mode, allow_send_take);
+    if (!ch) return ENOMEM;
+    if (elem_size != 0) {
+        int e = cc_chan_init_elem(ch, elem_size);
+        if (e != 0) { cc_chan_free(ch); return e; }
+    }
+    out_tx->raw = ch;
+    out_rx->raw = ch;
+    return 0;
+}
 
 struct CCChan {
     size_t cap;
@@ -190,6 +234,10 @@ static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct 
 
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (!ch || !value || value_size == 0) return EINVAL;
+    /* Deadline scope: if caller installed a current deadline, use deadline-aware send. */
+    if (cc__tls_current_deadline) {
+        return cc_chan_deadline_send(ch, value, value_size, cc__tls_current_deadline);
+    }
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -205,6 +253,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
 
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (!ch || !out_value || value_size == 0) return EINVAL;
+    /* Deadline scope: if caller installed a current deadline, use deadline-aware recv. */
+    if (cc__tls_current_deadline) {
+        return cc_chan_deadline_recv(ch, out_value, value_size, cc__tls_current_deadline);
+    }
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -269,12 +321,14 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
 }
 
 int cc_chan_deadline_send(CCChan* ch, const void* value, size_t value_size, const CCDeadline* deadline) {
+    if (deadline && cc_is_cancelled(deadline)) return ECANCELED;
     struct timespec ts;
     const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
     return cc_chan_timed_send(ch, value, value_size, p);
 }
 
 int cc_chan_deadline_recv(CCChan* ch, void* out_value, size_t value_size, const CCDeadline* deadline) {
+    if (deadline && cc_is_cancelled(deadline)) return ECANCELED;
     struct timespec ts;
     const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
     return cc_chan_timed_recv(ch, out_value, value_size, p);

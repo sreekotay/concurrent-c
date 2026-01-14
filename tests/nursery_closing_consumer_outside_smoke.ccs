@@ -15,15 +15,15 @@ void producer(CCChan* ch) {
 
 int main(void) {
     // Capacity must be large enough to buffer producer's sends since the consumer runs after the nursery exits.
-    CCChan* ch = cc_chan_create(3);
-    if (!ch) return 2;
-    (void)cc_chan_init_elem(ch, sizeof(int));
+    CCChanTx ch_tx;
+    CCChanRx ch_rx;
+    if (cc_chan_pair_create(3, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
 
     g_err = 0;
 
     // Spawn producer(s) inside nursery; channel is closed on nursery exit.
-    @nursery closing(ch) {
-        spawn(() => { producer(ch); });
+    @nursery closing(ch_tx) {
+        spawn(() => { producer(ch_tx.raw); });
     }
 
     if (g_err != 0) return 10;
@@ -32,7 +32,7 @@ int main(void) {
     int sum = 0;
     for (;;) {
         int v = 0;
-        int e = cc_chan_recv(ch, &v, sizeof(v));
+        int e = cc_chan_recv(ch_rx.raw, &v, sizeof(v));
         if (e == 0) { sum += v; continue; }
         if (e == EPIPE) break;
         return 11;
@@ -40,7 +40,7 @@ int main(void) {
 
     if (sum != 6) return 12;
 
-    cc_chan_free(ch);
+    cc_chan_free(ch_tx.raw);
     return 0;
 }
 
