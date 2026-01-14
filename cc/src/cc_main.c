@@ -301,6 +301,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  %s [options] <input.ccs> [output]\n", prog);
     fprintf(stderr, "  %s build [options] <input.ccs> <output>\n", prog);
     fprintf(stderr, "  %s build run [options] <input.ccs> [-o out/<stem>] [-- <args...>]\n", prog);
+    fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
     fprintf(stderr, "Modes:\n");
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
     fprintf(stderr, "  --compile           Emit C and compile to object (output defaults to out/<stem>.o)\n");
@@ -325,6 +326,42 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
+}
+
+static int cc__rm_rf(const char* path) {
+    if (!path || !path[0]) return 0;
+    // Best-effort portable-ish removal via /bin/rm. This is a dev tool; keep it simple.
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", path);
+    int rc = system(cmd);
+    return rc == 0 ? 0 : -1;
+}
+
+static int cc__clean_artifacts(int all) {
+    // These are rooted under the selected out/bin dirs.
+    char p1[PATH_MAX], p2[PATH_MAX], p3[PATH_MAX], p4[PATH_MAX];
+    snprintf(p1, sizeof(p1), "%s/.cc-build", g_out_root);
+    snprintf(p2, sizeof(p2), "%s/.cc_test", g_out_root);
+    snprintf(p3, sizeof(p3), "%s/.cc_test", g_bin_root);
+    // Optional: wipe conventional build outputs too.
+    snprintf(p4, sizeof(p4), "%s/cc", g_out_root);
+
+    int bad = 0;
+    bad |= cc__rm_rf(p1);
+    bad |= cc__rm_rf(p2);
+    bad |= cc__rm_rf(p3);
+    if (all) {
+        bad |= cc__rm_rf(p4);
+        // Also remove top-level emitted files (common in dev).
+        {
+            char cmd[PATH_MAX * 2];
+            snprintf(cmd, sizeof(cmd),
+                     "rm -f \"%s\"/*.c \"%s\"/*.o \"%s\"/*.d \"%s\"/*.stderr \"%s\"/*.stdout \"%s\"/*.txt 2>/dev/null || true",
+                     g_out_root, g_out_root, g_out_root, g_out_root, g_out_root, g_out_root);
+            (void)system(cmd);
+        }
+    }
+    return bad ? -1 : 0;
 }
 
 static void usage_build(const char* prog) {
@@ -2701,6 +2738,32 @@ int main(int argc, char **argv) {
     cc_init_paths(argv[0]);
     if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
         usage(argv[0]);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "clean") == 0) {
+        int all = 0;
+        const char* out_dir = NULL;
+        const char* bin_dir = NULL;
+        for (int i = 2; i < argc; ++i) {
+            if (strcmp(argv[i], "--all") == 0) { all = 1; continue; }
+            if (strcmp(argv[i], "--out-dir") == 0) {
+                if (i + 1 >= argc) { fprintf(stderr, "cc: clean --out-dir requires a path\n"); usage(argv[0]); return 1; }
+                out_dir = argv[++i];
+                continue;
+            }
+            if (strcmp(argv[i], "--bin-dir") == 0) {
+                if (i + 1 >= argc) { fprintf(stderr, "cc: clean --bin-dir requires a path\n"); usage(argv[0]); return 1; }
+                bin_dir = argv[++i];
+                continue;
+            }
+            usage(argv[0]);
+            return 1;
+        }
+        cc_set_out_dir(out_dir, bin_dir);
+        if (cc__clean_artifacts(all) != 0) {
+            fprintf(stderr, "cc: clean failed (best-effort) for out_dir=%s bin_dir=%s\n", g_out_root, g_bin_root);
+            return 1;
+        }
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "build") == 0) {

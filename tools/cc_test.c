@@ -379,7 +379,7 @@ static int run_one_test(const char* stem,
 
 static void usage(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache]\n", prog);
+    fprintf(stderr, "  %s [--list] [--filter SUBSTR] [--verbose] [--jobs N] [--build-timeout SECONDS] [--run-timeout SECONDS] [--use-cache] [--clean]\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -388,12 +388,14 @@ int main(int argc, char** argv) {
     int list_only = 0;
     int jobs = 1;
     int use_cache = 0;
+    int clean = 0;
     int build_timeout_sec = 300;
     int run_timeout_sec = 5;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }
         if (strcmp(argv[i], "--use-cache") == 0) { use_cache = 1; continue; }
+        if (strcmp(argv[i], "--clean") == 0) { clean = 1; continue; }
         if (strcmp(argv[i], "--build-timeout") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "--build-timeout requires a value\n"); return 2; }
             build_timeout_sec = atoi(argv[++i]);
@@ -431,6 +433,10 @@ int main(int argc, char** argv) {
         if (env && strcmp(env, "1") == 0) use_cache = 1;
     }
     {
+        const char* env = getenv("CC_TEST_CLEAN");
+        if (env && strcmp(env, "1") == 0) clean = 1;
+    }
+    {
         const char* env = getenv("CC_TEST_BUILD_TIMEOUT");
         if (env && *env) {
             int t = atoi(env);
@@ -447,6 +453,10 @@ int main(int argc, char** argv) {
 
     (void)ensure_out_dir();
     (void)ensure_dir_p("bin");
+    if (clean && !list_only) {
+        // Best-effort: wipe per-test artifacts + incremental cache (matches what most devs want).
+        (void)run_cmd_redirect_timeout("./cc/bin/ccc clean --all", NULL, NULL, verbose, 0);
+    }
 
     DIR* d = opendir("tests");
     if (!d) {
