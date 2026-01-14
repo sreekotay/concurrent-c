@@ -32,6 +32,7 @@ enum {
     CC_AST_NODE_ASSIGN = 14,
     CC_AST_NODE_RETURN = 15,
     CC_AST_NODE_PARAM = 16,
+    CC_AST_NODE_FUNC = 17,
 };
 
 typedef struct {
@@ -98,8 +99,15 @@ static int cc__is_async_owner(const CCASTRoot* root,
         if (n[cur].kind == CC_AST_NODE_FUNC) {
             return (n[cur].aux1 & (1u << 0)) != 0;
         }
+        /* DECL_ITEM can be a function or a variable. Only function DECL_ITEMs have
+           async/noblock/latency_sensitive attrs (encoded in aux2). A local variable
+           DECL_ITEM has aux2=0, so we should NOT match it as a function boundary.
+           Continue traversing parent chain if aux2 == 0 (likely a variable decl). */
         if (n[cur].kind == CC_AST_NODE_DECL_ITEM) {
-            return (n[cur].aux2 & (1u << 0)) != 0;
+            if (n[cur].aux2 != 0) {
+                return (n[cur].aux2 & (1u << 0)) != 0;
+            }
+            /* aux2 == 0: not a function with attrs, keep searching parent chain */
         }
     }
     return 0;
@@ -617,6 +625,33 @@ static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, 
     if (!out || !src) return 0;
     size_t i = cc__skip_ws_and_comments_bounded(src, len, ss, se);
     if (i >= se) { memset(out, 0, sizeof(*out)); out->kind = ST_SEMI; out->text = strdup(""); if (out_end) *out_end = se; return 1; }
+    /* CC extension block-like statements with braces but no trailing ';'.
+       We treat these as a single semi-like statement so later lowering passes
+       (@nursery/@arena) can handle them, but we still need correct statement
+       boundary at the matching '}' so the next statement doesn't get glued. */
+    if (src[i] == '@') {
+        size_t j = i + 1;
+        j = cc__skip_ws_and_comments_bounded(src, len, j, se);
+        int is_cc_block = 0;
+        if (cc__match_kw_at(src, j, se, "nursery")) is_cc_block = 1;
+        else if (cc__match_kw_at(src, j, se, "arena")) is_cc_block = 1;
+        if (is_cc_block) {
+            /* Find the first '{' after the keyword and match it. */
+            size_t k = j;
+            while (k < se && src[k] != '{') k++;
+            if (k < se && src[k] == '{') {
+                size_t rb = 0;
+                if (!cc__find_matching_brace(src, len, k, &rb)) return 0;
+                memset(out, 0, sizeof(*out));
+                out->kind = ST_SEMI;
+                out->text = cc__dup_slice(src, i, rb + 1);
+                if (!out->text) out->text = strdup("");
+                cc__trim_trailing_semicolon(out->text);
+                if (out_end) *out_end = rb + 1;
+                return 1;
+            }
+        }
+    }
     if (src[i] == '{') {
         size_t rb = 0;
         if (!cc__find_matching_brace(src, len, i, &rb)) return 0;
@@ -1907,10 +1942,19 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         AF* fn = &fns[fi];
         int id = g_async_id++;
 
-        /* Build structured stmt list from body block. */
+        /* Build structured stmt list from the function body braces.
+           Stub-AST statement nodes are not reliable for function bodies (they can be missing,
+           too-wide, or even point at the function declaration line). Parsing from the
+           block-level `{ ... }` text keeps us scoped correctly. */
         Stmt* st = NULL;
         int st_n = 0;
-        if (fn->body_block_idx >= 0) {
+        if (fn->lbrace > 0 && fn->rbrace > fn->lbrace && fn->rbrace <= cur_len) {
+            if (!cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n)) {
+                fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body)\n", fn->name);
+                free(cur);
+                return -1;
+            }
+        } else if (fn->body_block_idx >= 0) {
             if (!cc__build_stmt_list_from_block(root, ctx, n, cur, cur_len, fn->body_block_idx, &st, &st_n)) {
                 fprintf(stderr, "CC: async_ast: failed to build statement list for @async function '%s' (body block idx=%d)\n",
                         fn->name, fn->body_block_idx);
@@ -1918,11 +1962,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 return -1;
             }
         } else {
-            if (!cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n)) {
-                fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body fallback)\n", fn->name);
-                free(cur);
-                return -1;
-            }
+            fprintf(stderr, "CC: async_ast: failed to locate body braces for @async function '%s'\n", fn->name);
+            free(cur);
+            return -1;
         }
         cc__debug_dump_stmt_list(fn->name, st, st_n, 0);
 

@@ -1,0 +1,23 @@
+#include "cc_runtime.cch"
+#include "cc_closure.cch"
+#include "std/task_intptr.cch"
+
+int g = 0;
+
+@async int noop(int v) { return v; }
+
+@async int run_with_nursery(void) {
+    g = 0;
+    @nursery {
+        spawn(() => { g = 7; });
+    }
+    int dummy = await noop(g);
+    (void)dummy;
+    return g;
+}
+
+int main(void) {
+    CCTaskIntptr t = run_with_nursery();
+    intptr_t r = cc_block_on_intptr(t);
+    return (r == 7 && g == 7) ? 0 : 1;
+}

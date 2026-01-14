@@ -24,6 +24,20 @@ enum {
     CC_FN_ATTR_LATENCY_SENSITIVE = 1u << 2,
 };
 
+typedef struct {
+    int kind;
+    int parent;
+    const char* file;
+    int line_start;
+    int line_end;
+    int col_start;
+    int col_end;
+    int aux1;
+    int aux2;
+    const char* aux_s1;
+    const char* aux_s2;
+} NodeView;
+
 /* ---- small shared helpers (duplicated from visitor.c) ---- */
 
 static const char* cc__basename(const char* path) {
