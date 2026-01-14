@@ -13,6 +13,236 @@
 static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* src, size_t n);
 static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const char* src);
 
+typedef struct NodeView {
+    int kind;
+    int parent;
+    const char* file;
+    int line_start;
+    int line_end;
+    int col_start;
+    int col_end;
+    int aux1;
+    int aux2;
+    const char* aux_s1;
+    const char* aux_s2;
+} NodeView;
+
+static size_t cc__skip_ws_comments(const char* s, size_t n, size_t i) {
+    while (i < n) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+            i += 2;
+            while (i < n && s[i] != '\n') i++;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+static size_t cc__scan_string_lit(const char* s, size_t n, size_t i, char quote) {
+    /* i points at opening quote */
+    if (i >= n || s[i] != quote) return i;
+    i++;
+    while (i < n) {
+        char c = s[i++];
+        if (c == '\\') { if (i < n) i++; continue; }
+        if (c == quote) break;
+    }
+    return i;
+}
+
+static size_t cc__scan_matching_delim(const char* s, size_t n, size_t i, char open, char close) {
+    if (i >= n || s[i] != open) return i;
+    int depth = 1;
+    i++;
+    while (i < n && depth > 0) {
+        i = cc__skip_ws_comments(s, n, i);
+        if (i >= n) break;
+        char c = s[i];
+        if (c == '"' || c == '\'') { i = cc__scan_string_lit(s, n, i, c); continue; }
+        if (c == open) { depth++; i++; continue; }
+        if (c == close) { depth--; i++; continue; }
+        /* Handle nested (), [], {} as well while scanning. */
+        if (c == '(') { i = cc__scan_matching_delim(s, n, i, '(', ')'); continue; }
+        if (c == '[') { i = cc__scan_matching_delim(s, n, i, '[', ']'); continue; }
+        if (c == '{') { i = cc__scan_matching_delim(s, n, i, '{', '}'); continue; }
+        i++;
+    }
+    return i;
+}
+
+static int cc__is_ident_start(char c) {
+    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+static int cc__is_ident_char(char c) {
+    return cc__is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static int cc__is_tok_boundary(char c) {
+    return !(c == '_' || isalnum((unsigned char)c));
+}
+
+static int cc__scan_line_for_await_tokens(const char* s,
+                                          size_t n,
+                                          size_t line_off,
+                                          size_t* out_offs,
+                                          int out_cap) {
+    if (!s || !out_offs || out_cap <= 0) return 0;
+    int k = 0;
+    size_t i = line_off;
+    while (i + 5 <= n) {
+        if (s[i] == '\n') break;
+        if (memcmp(s + i, "await", 5) == 0) {
+            char before = (i > line_off) ? s[i - 1] : ' ';
+            char after = (i + 5 < n) ? s[i + 5] : ' ';
+            if (cc__is_tok_boundary(before) && cc__is_tok_boundary(after)) {
+                if (k < out_cap) out_offs[k++] = i;
+            }
+        }
+        i++;
+    }
+    return k;
+}
+
+static size_t cc__await_kw_off_for_node(const void* nodes,
+                                        int node_count,
+                                        const char* in_src,
+                                        size_t in_len,
+                                        int idx) {
+    /* Assign `await` tokens on a line to await-nodes on that line by increasing col_start.
+       This is robust when stub-AST col_start points somewhere inside/near the operand. */
+    if (!nodes || node_count <= 0 || !in_src || in_len == 0 || idx < 0 || idx >= node_count) return (size_t)-1;
+    const NodeView* n = (const NodeView*)nodes;
+    if (n[idx].kind != 6) return (size_t)-1;
+    if (n[idx].line_start <= 0) return (size_t)-1;
+
+    /* Rank among await nodes on the same file+line by col_start (tie-break by node index). */
+    int rank = 0;
+    for (int j = 0; j < node_count; j++) {
+        if (j == idx) continue;
+        if (n[j].kind != 6) continue;
+        if (n[j].line_start != n[idx].line_start) continue;
+        if (n[j].file && n[idx].file && strcmp(n[j].file, n[idx].file) != 0) continue;
+        if (n[j].col_start < n[idx].col_start) rank++;
+        else if (n[j].col_start == n[idx].col_start && j < idx) rank++;
+    }
+
+    size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[idx].line_start);
+    size_t toks[32];
+    int tn = cc__scan_line_for_await_tokens(in_src, in_len, line_off, toks, (int)(sizeof(toks) / sizeof(toks[0])));
+    if (tn <= 0) return (size_t)-1;
+    if (rank < 0) rank = 0;
+    if (rank >= tn) rank = tn - 1;
+    return toks[rank];
+}
+
+/* Best-effort: find the end offset of the unary-expression operand of `await`.
+   This intentionally does NOT use the stub-AST `col_end` (often inaccurate in expressions). */
+static size_t cc__infer_await_expr_end(const char* s, size_t n, size_t await_kw_off) {
+    size_t i = await_kw_off;
+    if (i + 5 > n || memcmp(s + i, "await", 5) != 0) return await_kw_off;
+    i += 5;
+    i = cc__skip_ws_comments(s, n, i);
+    if (i >= n) return i;
+
+    /* Consume prefix operators/casts/parenthesized expressions in a simple way:
+       keep consuming leading unary-ish tokens, then a primary, then postfix chains. */
+    int progress_guard = 0;
+consume_unary_prefix:
+    if (i >= n || progress_guard++ > 2048) return i;
+    i = cc__skip_ws_comments(s, n, i);
+    if (i >= n) return i;
+
+    /* Prefix ++/-- */
+    if (i + 1 < n && ((s[i] == '+' && s[i + 1] == '+') || (s[i] == '-' && s[i + 1] == '-'))) {
+        i += 2;
+        goto consume_unary_prefix;
+    }
+    /* Simple one-char prefix ops */
+    if (s[i] == '+' || s[i] == '-' || s[i] == '!' || s[i] == '~' || s[i] == '&' || s[i] == '*') {
+        i += 1;
+        goto consume_unary_prefix;
+    }
+    /* Parenthesized group / cast. We just consume the whole (...) and allow chaining. */
+    if (s[i] == '(') {
+        i = cc__scan_matching_delim(s, n, i, '(', ')');
+        /* After a cast/group, there may be more unary/prefix (e.g., (T*)p). */
+        goto consume_unary_prefix;
+    }
+
+    /* Primary: identifier / number / string / char / brace-init (compound literal-ish). */
+    if (s[i] == '"' || s[i] == '\'') {
+        i = cc__scan_string_lit(s, n, i, s[i]);
+    } else if (s[i] == '{') {
+        i = cc__scan_matching_delim(s, n, i, '{', '}');
+    } else if (cc__is_ident_start(s[i])) {
+        i++;
+        while (i < n && cc__is_ident_char(s[i])) i++;
+    } else if ((s[i] >= '0' && s[i] <= '9') || (s[i] == '.' && i + 1 < n && (s[i + 1] >= '0' && s[i + 1] <= '9'))) {
+        i++;
+        while (i < n) {
+            char c = s[i];
+            if ((c >= '0' && c <= '9') || c == '.' || c == '_' || c == 'x' || c == 'X' ||
+                (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == 'p' || c == 'P' || c == 'e' || c == 'E' ||
+                c == '+' || c == '-' || c == 'u' || c == 'U' || c == 'l' || c == 'L') {
+                i++;
+                continue;
+            }
+            break;
+        }
+    } else {
+        /* Unknown token; give up with a tiny span to avoid corrupting output. */
+        return await_kw_off;
+    }
+
+    /* Postfix chain: calls, indexing, member access, post ++/-- */
+    for (int step = 0; step < 2048; step++) {
+        size_t j = cc__skip_ws_comments(s, n, i);
+        if (j >= n) { i = j; break; }
+        if (s[j] == '(') { i = cc__scan_matching_delim(s, n, j, '(', ')'); continue; }
+        if (s[j] == '[') { i = cc__scan_matching_delim(s, n, j, '[', ']'); continue; }
+        if (j + 1 < n && s[j] == '-' && s[j + 1] == '>') {
+            j += 2;
+            j = cc__skip_ws_comments(s, n, j);
+            if (j < n && cc__is_ident_start(s[j])) {
+                j++;
+                while (j < n && cc__is_ident_char(s[j])) j++;
+                i = j;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        if (s[j] == '.') {
+            j += 1;
+            j = cc__skip_ws_comments(s, n, j);
+            if (j < n && cc__is_ident_start(s[j])) {
+                j++;
+                while (j < n && cc__is_ident_char(s[j])) j++;
+                i = j;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+        if (j + 1 < n && ((s[j] == '+' && s[j + 1] == '+') || (s[j] == '-' && s[j + 1] == '-'))) {
+            i = j + 2;
+            continue;
+        }
+        break;
+    }
+
+    return i;
+}
+
 int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
                                       const CCVisitorCtx* ctx,
                                       const char* in_src,
@@ -24,19 +254,6 @@ int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
     *out_len = 0;
     if (!root->nodes || root->node_count <= 0) return 0;
 
-    typedef struct NodeView {
-        int kind;
-        int parent;
-        const char* file;
-        int line_start;
-        int line_end;
-        int col_start;
-        int col_end;
-        int aux1;
-        int aux2;
-        const char* aux_s1;
-        const char* aux_s2;
-    } NodeView;
     const NodeView* n = (const NodeView*)root->nodes;
 
     enum { CC_FN_ATTR_ASYNC = 1u << 0 };
@@ -78,25 +295,26 @@ int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
         size_t a_e = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);
         if (a_e <= a_s || a_e > in_len) continue;
 
-        /* Best-effort: many nodes record `col_start` at the operand; recover the `await` keyword
-           by scanning backward on the same line for the nearest `await` token. */
+        /* Recover a stable `await` keyword offset, even when the stub node points at the operand. */
         {
-            size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
-            size_t k = a_s;
-            size_t found = (size_t)-1;
-            while (k > line_off + 4) {
-                size_t s0 = k - 5;
-                if (memcmp(in_src + s0, "await", 5) == 0) {
-                    char before = (s0 > line_off) ? in_src[s0 - 1] : ' ';
-                    char after = (s0 + 5 < in_len) ? in_src[s0 + 5] : ' ';
-                    int before_ok = !(before == '_' || isalnum((unsigned char)before));
-                    int after_ok = !(after == '_' || isalnum((unsigned char)after));
-                    if (before_ok && after_ok) { found = s0; break; }
-                }
-                k--;
-            }
-            if (found != (size_t)-1) a_s = found;
+            size_t kw = cc__await_kw_off_for_node(root->nodes, root->node_count, in_src, in_len, i);
+            if (kw != (size_t)-1) a_s = kw;
             if (a_s + 5 > in_len || memcmp(in_src + a_s, "await", 5) != 0) continue;
+        }
+
+        /* Do NOT trust stub-AST col_end for await-exprs inside larger expressions.
+           Infer end by scanning a single unary-expression operand from the `await` keyword. */
+        {
+            size_t inferred = cc__infer_await_expr_end(in_src, in_len, a_s);
+            if (inferred > a_s + 5 && inferred <= in_len) a_e = inferred;
+        }
+
+        if (getenv("CC_DEBUG_AWAIT_REWRITE")) {
+            size_t sn = a_e > a_s ? (a_e - a_s) : 0;
+            if (sn > 96) sn = 96;
+            fprintf(stderr,
+                    "CC_DEBUG_AWAIT_REWRITE: pick await rep tmp_idx=%d node=%d start=%zu end=%zu text='%.96s'\n",
+                    rep_n, i, a_s, a_e, (a_s < in_len) ? (in_src + a_s) : "<oob>");
         }
 
         /* Require inside an @async function (otherwise leave it; checker will error). */

@@ -1,0 +1,46 @@
+/*
+ * Recipe: Channel Pipeline (Producer/Consumer)
+ *
+ * Demonstrates:
+ *   - Channel for message passing between tasks
+ *   - Producer explicitly closes channel when done sending
+ *   - Consumer receives until channel is closed
+ *   - Nursery waits for both tasks to complete
+ *
+ * Key insight: Producer owns the "write end", closes it when done.
+ */
+#include "cc_nursery.cch"
+#include "cc_channel.cch"
+#include <stdio.h>
+
+int received_sum = 0;
+
+int main(void) {
+    CCChan* ch = cc_chan_create(4);
+    if (!ch) return 1;
+
+    @nursery {
+        /* Producer: sends values 1, 2, 3, then closes channel. */
+        spawn(() => {
+            for (int i = 1; i <= 3; i++) {
+                cc_chan_send(ch, &i, sizeof(i));
+                printf("sent %d\n", i);
+            }
+            cc_chan_close(ch);  /* Signal "no more data" */
+        });
+
+        /* Consumer: receives until channel is closed and drained. */
+        spawn(() => {
+            int v;
+            while (cc_chan_recv(ch, &v, sizeof(v)) == 0) {
+                printf("got %d\n", v);
+                received_sum += v;
+            }
+        });
+    }
+    /* Nursery done → both tasks finished. */
+
+    cc_chan_free(ch);
+    printf("sum = %d\n", received_sum);
+    return (received_sum == 6) ? 0 : 1;  /* 1+2+3 = 6 */
+}

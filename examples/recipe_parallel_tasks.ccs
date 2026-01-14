@@ -1,0 +1,30 @@
+/*
+ * Recipe: Parallel Tasks (Fan-Out)
+ *
+ * Demonstrates:
+ *   - @nursery as a structured concurrency scope
+ *   - spawn() to run tasks in parallel
+ *   - Nursery waits for ALL tasks before exiting
+ *
+ * Run multiple times: output order may vary (proves concurrency).
+ * The "done" message always prints last (proves join semantics).
+ */
+#include "cc_nursery.cch"
+#include <stdio.h>
+
+/* Each task writes its own flag - no shared mutable state. */
+int a_done = 0;
+int b_done = 0;
+int c_done = 0;
+
+int main(void) {
+    @nursery {
+        spawn(() => { printf("A\n"); a_done = 1; });
+        spawn(() => { printf("B\n"); b_done = 1; });
+        spawn(() => { printf("C\n"); c_done = 1; });
+    }
+    /* Nursery guarantees: all three tasks finished before we get here. */
+
+    printf("done\n");
+    return (a_done && b_done && c_done) ? 0 : 1;
+}

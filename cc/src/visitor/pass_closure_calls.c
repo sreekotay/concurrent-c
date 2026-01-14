@@ -381,26 +381,8 @@ typedef struct {
     const char* aux_s2;
 } NodeView;
 
-static int cc__func_param_arity(const CCASTRoot* root,
-                                const CCVisitorCtx* ctx,
-                                const char* name) {
-    if (!root || !name) return -1;
-    const NodeView* n = (const NodeView*)root->nodes;
-    for (int i = 0; i < root->node_count; i++) {
-        if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
-        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, name) != 0) continue;
-        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
-        int pc = 0;
-        for (int j = 0; j < root->node_count; j++) {
-            if (n[j].parent != i) continue;
-            if (n[j].kind != 16) continue; /* PARAM */
-            pc++;
-        }
-        if (pc > 2) pc = 2;
-        return pc;
-    }
-    return -1;
-}
+/* NOTE: do not use FUNC/PARAM arity to decide closure calls.
+   A regular function call also has an arity; we only rewrite calls whose callee is typed as CCClosure1/2. */
 
 typedef struct {
     int line_start;
@@ -619,14 +601,12 @@ int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
         }
     }
 
-    /* Determine arity for each call based on FUNC/PARAM nodes (preferred) or declared type of the callee identifier. */
+    /* Determine whether each call is a closure call (CCClosure1/2) based on call type string (if present)
+       or declared type of the callee identifier. */
     int rewrite_n = 0;
     for (int i = 0; i < call_n; i++) {
-        int ar = cc__func_param_arity(root, ctx, calls[i].callee);
-        if (ar >= 1) {
-            calls[i].arity = ar;
-        } else if (n) {
-            /* Fallback: use recorded call type string if available. */
+        if (n) {
+            /* Prefer: recorded callee type string on the CALL node (when available). */
             for (int k = 0; k < root->node_count; k++) {
                 if (n[k].kind != 5) continue; /* CALL */
                 if (!n[k].aux_s1 || strcmp(n[k].aux_s1, calls[i].callee) != 0) continue;

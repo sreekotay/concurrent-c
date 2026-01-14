@@ -1,0 +1,30 @@
+/*
+ * Recipe: Scoped Memory (Arena)
+ *
+ * Demonstrates:
+ *   - @arena block for automatic memory scope
+ *   - Arena-backed String builder
+ *   - UFCS (method-style calls): s.append()
+ *   - No manual free() needed - arena cleans up on block exit
+ *
+ * Key insight: Arena scopes memory lifetime to code blocks.
+ */
+#define CC_ENABLE_SHORT_NAMES
+#include <std/prelude.cch>
+
+int main(void) {
+    @arena {
+        /* 'arena' is the implicit binding to the allocator. */
+        String s = string_new(arena);
+        
+        /* UFCS: method syntax on plain C types. */
+        s.append("Hello, ");
+        s.append("Concurrent-C!\n");
+        
+        /* Write to stdout. */
+        std_out.write(s);
+    }
+    /* Arena freed here - all allocations gone. No leaks. */
+
+    return 0;
+}

@@ -1,0 +1,40 @@
+/*
+ * Recipe: Guaranteed Cleanup (defer)
+ *
+ * Demonstrates:
+ *   - @defer runs on scope exit
+ *   - Cleanup happens automatically, no explicit calls needed
+ *
+ * Key insight: defer guarantees cleanup without try/finally boilerplate.
+ */
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+#include <stdio.h>
+
+int cleanup_ran = 0;
+
+@async int noop(int v) { return v; }
+
+@async int work_with_cleanup(void) {
+    cleanup_ran = 0;
+    
+    @defer cleanup: { 
+        cleanup_ran = 1;
+        printf("cleanup executed!\n");
+    };
+    
+    /* Do some async work. */
+    int x = await noop(42);
+    
+    printf("work done, returning %d\n", x);
+    return x;
+    /* defer runs here, on scope exit */
+}
+
+int main(void) {
+    CCTaskIntptr t = work_with_cleanup();
+    intptr_t result = cc_block_on_intptr(t);
+    
+    printf("result = %d, cleanup_ran = %d\n", (int)result, cleanup_ran);
+    return (result == 42 && cleanup_ran == 1) ? 0 : 1;
+}

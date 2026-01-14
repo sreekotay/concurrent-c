@@ -38,6 +38,17 @@ typedef struct {
     const char* aux_s2;
 } NodeView;
 
+static int cc__node_is_descendant_of_kind(const CCASTRoot* root,
+                                         const NodeView* n,
+                                         int idx,
+                                         int kind) {
+    if (!root || !n) return 0;
+    for (int cur = idx; cur >= 0 && cur < root->node_count; cur = n[cur].parent) {
+        if (n[cur].kind == kind) return 1;
+    }
+    return 0;
+}
+
 /* ---- small shared helpers (duplicated from visitor.c) ---- */
 
 static const char* cc__basename(const char* path) {
@@ -192,19 +203,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
     *out_len = 0;
     if (!root->nodes || root->node_count <= 0) return 0;
 
-    const struct NodeView {
-        int kind;
-        int parent;
-        const char* file;
-        int line_start;
-        int line_end;
-        int col_start;
-        int col_end;
-        int aux1;
-        int aux2;
-        const char* aux_s1;
-        const char* aux_s2;
-    }* n = (const struct NodeView*)root->nodes;
+    const NodeView* n = (const NodeView*)root->nodes;
 
     typedef enum {
         CC_AB_REWRITE_STMT_CALL = 0,
@@ -264,6 +263,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (is_ufcs) continue;
         if (!n[i].aux_s1) continue; /* callee name */
         if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+
+        /* Calls inside `await ...` are async call sites; never autoblock them. */
+        if (cc__node_is_descendant_of_kind(root, n, i, 6 /* CC_AST_NODE_AWAIT */)) continue;
 
         /* Find enclosing function decl-item and check @async attr. */
         int cur = n[i].parent;
