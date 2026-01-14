@@ -625,11 +625,24 @@ int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
         int ar = cc__func_param_arity(root, ctx, calls[i].callee);
         if (ar >= 1) {
             calls[i].arity = ar;
-        } else {
+        } else if (n) {
+            /* Fallback: use recorded call type string if available. */
+            for (int k = 0; k < root->node_count; k++) {
+                if (n[k].kind != 5) continue; /* CALL */
+                if (!n[k].aux_s1 || strcmp(n[k].aux_s1, calls[i].callee) != 0) continue;
+                if (!cc__node_file_matches_this_tu(root, ctx, n[k].file)) continue;
+                if (n[k].aux_s2) {
+                    if (strstr(n[k].aux_s2, "CCClosure2")) { calls[i].arity = 2; break; }
+                    if (strstr(n[k].aux_s2, "CCClosure1")) { calls[i].arity = 1; break; }
+                }
+            }
+        }
+        if (!calls[i].arity) {
             const char* ty = cc__lookup_decl_type(decl_names[0], decl_types[0], decl_counts[0], calls[i].callee);
-            if (!ty) continue;
-            if (strstr(ty, "CCClosure2")) calls[i].arity = 2;
-            else if (strstr(ty, "CCClosure1")) calls[i].arity = 1;
+            if (ty) {
+                if (strstr(ty, "CCClosure2")) calls[i].arity = 2;
+                else if (strstr(ty, "CCClosure1")) calls[i].arity = 1;
+            }
         }
         if (calls[i].arity) rewrite_n++;
     }

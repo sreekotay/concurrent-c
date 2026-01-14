@@ -77,6 +77,23 @@ static int cc__node_file_matches_this_tu(const CCASTRoot* root,
     return 0;
 }
 
+static int cc__lookup_func_attrs(const CCASTRoot* root,
+                                 const CCVisitorCtx* ctx,
+                                 const char* name,
+                                 unsigned int* out_attrs) {
+    if (out_attrs) *out_attrs = 0;
+    if (!root || !name) return 0;
+    const NodeView* n = (const NodeView*)root->nodes;
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
+        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, name) != 0) continue;
+        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+        if (out_attrs) *out_attrs = (unsigned int)n[i].aux1;
+        return 1;
+    }
+    return 0;
+}
+
 
 static int cc__append_str(char** buf, size_t* len, size_t* cap, const char* s) {
     if (!buf || !len || !cap || !s) return 0;
@@ -251,7 +268,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
         /* Only skip known-nonblocking callees; if we don't know attrs, assume blocking. */
         unsigned int callee_attrs = 0;
-        (void)cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs);
+        if (!cc__lookup_func_attrs(root, ctx, n[i].aux_s1, &callee_attrs)) {
+            (void)cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs);
+        }
         if (callee_attrs & CC_FN_ATTR_ASYNC) continue;
         if (callee_attrs & CC_FN_ATTR_NOBLOCK) continue;
 

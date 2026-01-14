@@ -89,6 +89,22 @@ static int cc__find_func_ret_is_void(const CCASTRoot* root,
     return 0;
 }
 
+static int cc__is_async_owner(const CCASTRoot* root,
+                              const CCVisitorCtx* ctx,
+                              const NodeView* n,
+                              int idx) {
+    for (int cur = idx; cur >= 0 && cur < root->node_count; cur = n[cur].parent) {
+        if (!cc__node_in_this_tu(root, ctx, n[cur].file)) continue;
+        if (n[cur].kind == CC_AST_NODE_FUNC) {
+            return (n[cur].aux1 & (1u << 0)) != 0;
+        }
+        if (n[cur].kind == CC_AST_NODE_DECL_ITEM) {
+            return (n[cur].aux2 & (1u << 0)) != 0;
+        }
+    }
+    return 0;
+}
+
 
 static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
     if (!nd || nd->line_start <= 0) return 0;
@@ -1743,6 +1759,17 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
     const NodeView* n = (const NodeView*)root->nodes;
 
+    /* Diagnose await outside @async early. */
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != CC_AST_NODE_AWAIT) continue;
+        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (cc__is_async_owner(root, ctx, n, n[i].parent)) continue;
+        const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+        fprintf(stderr, "CC: error: 'await' outside @async at %s:%d:%d\n",
+                f, n[i].line_start, n[i].col_start);
+        return -1;
+    }
+
     typedef struct {
         int decl_item_idx;
         int body_block_idx;
@@ -1758,10 +1785,31 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
     int fn_n = 0;
 
     for (int i = 0; i < root->node_count && fn_n < 256; i++) {
-        if (n[i].kind != CC_AST_NODE_DECL_ITEM) continue;
+        if (n[i].kind != CC_AST_NODE_DECL_ITEM && n[i].kind != 17) continue; /* DECL_ITEM or FUNC */
         if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
-        if (((unsigned int)n[i].aux2 & (1u << 0)) == 0) continue; /* async */
-        if (!n[i].aux_s1) continue;
+        const char* fn_name = n[i].aux_s1;
+        if (!fn_name) continue;
+
+        /* prefer FUNC node attrs; fallback to DECL_ITEM aux2 */
+        unsigned int fn_attrs = 0;
+        if (n[i].kind == 17) {
+            fn_attrs = (unsigned int)n[i].aux1;
+        } else {
+            fn_attrs = (unsigned int)n[i].aux2;
+        }
+        if ((fn_attrs & (1u << 0)) == 0) continue; /* async */
+
+        /* Find matching FUNC node for this function to prefer spans/attrs */
+        int func_idx = (n[i].kind == 17) ? i : -1;
+        if (func_idx < 0) {
+            for (int k = 0; k < root->node_count; k++) {
+                if (n[k].kind != 17) continue;
+                if (!n[k].aux_s1 || strcmp(n[k].aux_s1, fn_name) != 0) continue;
+                if (!cc__node_in_this_tu(root, ctx, n[k].file)) continue;
+                func_idx = k;
+                break;
+            }
+        }
 
         int body_block = -1;
 
@@ -1833,10 +1881,10 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         fn.end = e;
         fn.lbrace = lbrace;
         fn.rbrace = rbrace;
-        strncpy(fn.name, n[i].aux_s1, sizeof(fn.name) - 1);
-        fn.ret_is_void = cc__find_func_ret_is_void(root, ctx, n[i].aux_s1, n[i].file);
+        strncpy(fn.name, fn_name, sizeof(fn.name) - 1);
+        fn.ret_is_void = cc__find_func_ret_is_void(root, ctx, fn_name, n[i].file);
         if (!fn.ret_is_void && n[i].aux_s2 && strstr(n[i].aux_s2, "void") == n[i].aux_s2)
-            fn.ret_is_void = 1; /* fallback to DECL_ITEM string */
+            fn.ret_is_void = 1; /* fallback */
         fns[fn_n++] = fn;
     }
 
