@@ -1,0 +1,22 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+#include "std/prelude.cch"
+
+@async int noop(int v) { return v; }
+
+@async int f(void) {
+    char buf[256];
+    int out = 0;
+    @arena_init(buf, sizeof(buf)) {
+        int x = await noop(3);
+        out = x;
+        (void)arena;
+    }
+    return out;
+}
+
+int main(void) {
+    CCTaskIntptr t = f();
+    intptr_t r = cc_block_on_intptr(t);
+    return (r == 3) ? 0 : 1;
+}

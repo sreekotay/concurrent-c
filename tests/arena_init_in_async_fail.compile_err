@@ -1,0 +1,1 @@
+@arena_init(buf, size) block cannot contain 'await'

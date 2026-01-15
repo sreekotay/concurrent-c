@@ -10,7 +10,7 @@
 #endif
 
 /* Stub AST kinds from patched TCC (see third_party/tcc/tcc.h). */
-enum { CC_AST_NODE_ARENA = 4 };
+enum { CC_AST_NODE_ARENA = 4, CC_AST_NODE_AWAIT = 6 };
 
 typedef struct {
     int kind;
@@ -173,6 +173,7 @@ typedef struct {
     const char* name;
     const char* size_expr;
     int id;
+    int node_idx;      /* index into stub-AST nodes */
     size_t indent_off;
     size_t indent_len;
 } ArenaEdit;
@@ -241,12 +242,48 @@ int cc__rewrite_arena_blocks_with_nodes(const CCASTRoot* root,
             .name = (n[i].aux_s1 && n[i].aux_s1[0]) ? n[i].aux_s1 : "arena",
             .size_expr = (n[i].aux_s2 && n[i].aux_s2[0]) ? n[i].aux_s2 : "kilobytes(4)",
             .id = next_id++,
+            .node_idx = i,
             .indent_off = line_off,
             .indent_len = (ind > line_off) ? (ind - line_off) : 0,
         };
     }
 
     if (edit_n == 0) return 0;
+
+    /* Hard error: @arena_init(buf, size) uses a user-provided backing buffer. If the block contains
+       an `await`, the buffer may not remain valid across suspension (especially if stack-backed).
+       Reject to avoid miscompiles/UB. */
+    for (int ei = 0; ei < edit_n; ei++) {
+        const ArenaEdit* e = &edits[ei];
+        if (!(e->size_expr && strncmp(e->size_expr, "@buf:", 5) == 0)) continue;
+
+        for (int j = 0; j < root->node_count; j++) {
+            if (n[j].kind != CC_AST_NODE_AWAIT) continue;
+            if (!cc__node_file_matches_this_tu(root, ctx, n[j].file)) continue;
+            if (n[j].line_start <= 0) continue;
+
+            size_t aw_off = (n[j].col_start > 0)
+                                ? cc__offset_of_line_col_1based(in_src, in_len, n[j].line_start, n[j].col_start)
+                                : cc__offset_of_line_1based(in_src, in_len, n[j].line_start);
+            if (aw_off > in_len) aw_off = in_len;
+
+            if (aw_off > e->brace_off && aw_off < e->close_off) {
+                int col1 = n[e->node_idx].col_start > 0 ? n[e->node_idx].col_start : 1;
+                int aw_col = n[j].col_start > 0 ? n[j].col_start : 1;
+                fprintf(stderr,
+                        "%s:%d:%d: error: CC: @arena_init(buf, size) block cannot contain 'await' (backing buffer may not be valid across suspension)\n"
+                        "%s:%d:%d: note: 'await' occurs here\n"
+                        "help: use @arena(name, size) for a heap-backed arena, or allocate the backing buffer on the heap and ensure it outlives all awaits\n",
+                        ctx && ctx->input_path ? ctx->input_path : "<input>",
+                        n[e->node_idx].line_start > 0 ? n[e->node_idx].line_start : 1,
+                        col1,
+                        ctx && ctx->input_path ? ctx->input_path : "<input>",
+                        n[j].line_start,
+                        aw_col);
+                return -1;
+            }
+        }
+    }
 
     /* Apply edits from last to first to keep offsets valid. */
     for (int i = 0; i < edit_n - 1; i++) {

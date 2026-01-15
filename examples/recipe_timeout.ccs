@@ -2,14 +2,13 @@
  * Recipe: Timeout / Deadline
  *
  * Demonstrates:
- *   - with_deadline(ms) sets a deadline on a scope
- *   - Cooperative cancellation via cc_is_cancelled()
+ *   - @with_deadline(ms) sets a deadline on a scope
+ *   - cc_deadline_expired() checks if time limit passed
  *   - Tasks exit gracefully when deadline expires
  *
- * Key insight: Cancellation is cooperative - tasks must check the flag.
- *
- * Note: Using low-level nursery API because with_deadline inside closures
- * has a known pass-ordering limitation. Direct function + deadline works.
+ * Key insight: cc_is_cancelled() checks explicit cancellation,
+ * cc_deadline_expired() checks if deadline time passed.
+ * For time-based exits, use cc_deadline_expired().
  */
 #include "cc_runtime.cch"
 #include <stdio.h>
@@ -17,25 +16,15 @@
 int work_completed = 0;
 
 int main(void) {
-    CCNursery* n = cc_nursery_create();
-    if (!n) return 1;
-
-    /* Set deadline: 50ms from now. */
-    CCDeadline d = cc_deadline_after_ms(50);
-    cc_nursery_set_deadline(n, d.deadline);
-
-    /* Worker: does work until cancelled. */
-    cc_nursery_spawn_closure0(n, () => {
-        while (!cc_nursery_is_cancelled(n)) {
+    /* Worker does work until deadline expires. */
+    @with_deadline(50) {
+        CCDeadline* dl = cc_current_deadline();
+        while (!cc_deadline_expired(dl)) {
             work_completed++;
             cc_sleep_ms(10);  /* simulate work */
         }
-        printf("worker: cancelled after %d iterations\n", work_completed);
-    });
+    }
+    printf("deadline expired after %d iterations\n", work_completed);
 
-    cc_nursery_wait(n);
-    cc_nursery_free(n);
-
-    printf("done, work_completed = %d\n", work_completed);
     return (work_completed >= 1 && work_completed <= 10) ? 0 : 1;
 }
