@@ -38,4 +38,3 @@
  *   2. Add CC_TARGET_DEFINE CC_ENABLE_HTTP=1
  * The http.c file compiles as part of their build when http.cch is included.
  */
-

@@ -1,0 +1,22 @@
+#include "std/prelude.cch"
+#include <assert.h>
+#include <errno.h>
+
+int main(void) {
+    int[~1 >, Drop] tx;
+    int[~1 <, Drop] rx;
+    channel_pair(&tx, &rx);
+
+    int rc1 = chan_send(tx, 1);
+    int rc2 = chan_send(tx, 2);
+    assert(rc1 == 0);
+    assert(rc2 == EAGAIN);
+
+    int v = 0;
+    assert(chan_recv(rx, &v) == 0);
+    assert(v == 1);
+
+    chan_close(tx);
+    chan_free(rx);
+    return 0;
+}

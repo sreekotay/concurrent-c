@@ -1,0 +1,99 @@
+/*
+ * Stress Test: Long Pipeline
+ *
+ * Creates a chain of processing stages connected by channels.
+ * Each stage increments the value and passes it along.
+ * Tests channel chaining and pipeline throughput.
+ *
+ * Note: Uses a smaller pipeline due to channel array syntax limitations.
+ */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+#define NUM_ITEMS 1000
+
+/* Fixed number of stages (can't use arrays of channel handles yet) */
+int[~8 >] g_tx0, g_tx1, g_tx2, g_tx3, g_tx4;
+int[~8 <] g_rx0, g_rx1, g_rx2, g_rx3, g_rx4;
+
+int g_output_count = 0;
+int g_output_sum = 0;
+
+int main(void) {
+    printf("pipeline_long: 5 stages, %d items\n", NUM_ITEMS);
+
+    channel_pair(&g_tx0, &g_rx0);
+    channel_pair(&g_tx1, &g_rx1);
+    channel_pair(&g_tx2, &g_rx2);
+    channel_pair(&g_tx3, &g_rx3);
+    channel_pair(&g_tx4, &g_rx4);
+
+    @nursery {
+        /* Producer */
+        spawn(() => {
+            for (int i = 0; i < NUM_ITEMS; i++) {
+                chan_send(g_tx0, i);
+            }
+            chan_close(g_tx0);
+        });
+
+        /* Stage 1 */
+        spawn(() => {
+            int v;
+            while (chan_recv(g_rx0, &v) == 0) {
+                chan_send(g_tx1, v + 1);
+            }
+            chan_close(g_tx1);
+        });
+
+        /* Stage 2 */
+        spawn(() => {
+            int v;
+            while (chan_recv(g_rx1, &v) == 0) {
+                chan_send(g_tx2, v + 1);
+            }
+            chan_close(g_tx2);
+        });
+
+        /* Stage 3 */
+        spawn(() => {
+            int v;
+            while (chan_recv(g_rx2, &v) == 0) {
+                chan_send(g_tx3, v + 1);
+            }
+            chan_close(g_tx3);
+        });
+
+        /* Stage 4 */
+        spawn(() => {
+            int v;
+            while (chan_recv(g_rx3, &v) == 0) {
+                chan_send(g_tx4, v + 1);
+            }
+            chan_close(g_tx4);
+        });
+
+        /* Consumer */
+        spawn(() => {
+            int v;
+            while (chan_recv(g_rx4, &v) == 0) {
+                g_output_count++;
+                g_output_sum += v;
+            }
+        });
+    }
+
+    chan_free(g_tx0);
+    chan_free(g_tx1);
+    chan_free(g_tx2);
+    chan_free(g_tx3);
+    chan_free(g_tx4);
+
+    /* Each item goes through 4 increments (+4) */
+    /* Sum of (i + 4) for i=0..NUM_ITEMS-1 = sum(i) + 4*NUM_ITEMS */
+    int expected_sum = (NUM_ITEMS * (NUM_ITEMS - 1)) / 2 + 4 * NUM_ITEMS;
+
+    printf("pipeline_long: output %d items, sum %d (expected %d)\n",
+           g_output_count, g_output_sum, expected_sum);
+    return (g_output_count == NUM_ITEMS && g_output_sum == expected_sum) ? 0 : 1;
+}

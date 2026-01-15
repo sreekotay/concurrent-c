@@ -1,0 +1,82 @@
+/*
+ * Stress Test: Heavy Worker Pool
+ *
+ * Many workers processing many jobs with result aggregation.
+ * Tests worker pool pattern under heavy load.
+ */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+#define NUM_WORKERS 8
+#define NUM_JOBS 500
+#define JOB_QUEUE_CAP 32
+
+/* Job: compute sum of 1..n */
+typedef struct {
+    int id;
+    int n;
+} Job;
+
+typedef struct {
+    int id;
+    int result;
+} Result;
+
+/* Global channel handles */
+Job[~JOB_QUEUE_CAP >] g_jobs_tx;
+Job[~JOB_QUEUE_CAP <] g_jobs_rx;
+Result[~NUM_JOBS >] g_results_tx;
+Result[~NUM_JOBS <] g_results_rx;
+
+int main(void) {
+    printf("worker_pool_heavy: %d workers, %d jobs\n", NUM_WORKERS, NUM_JOBS);
+
+    channel_pair(&g_jobs_tx, &g_jobs_rx);
+    channel_pair(&g_results_tx, &g_results_rx);
+
+    @nursery {
+        /* Workers */
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            spawn(() => {
+                Job job;
+                while (chan_recv(g_jobs_rx, &job) == 0) {
+                    /* Compute sum 1..n */
+                    int sum = (job.n * (job.n + 1)) / 2;
+                    Result r = {.id = job.id, .result = sum};
+                    chan_send(g_results_tx, r);
+                }
+            });
+        }
+
+        /* Job feeder */
+        @nursery closing(g_jobs_tx) {
+            spawn(() => {
+                for (int i = 0; i < NUM_JOBS; i++) {
+                    Job j = {.id = i, .n = i + 1};
+                    chan_send(g_jobs_tx, j);
+                }
+            });
+        }
+    }
+
+    /* Collect results */
+    chan_close(g_results_tx);
+    int total_sum = 0;
+    int result_count = 0;
+    Result r;
+    while (chan_recv(g_results_rx, &r) == 0) {
+        total_sum += r.result;
+        result_count++;
+    }
+
+    chan_free(g_jobs_tx);
+    chan_free(g_results_tx);
+
+    /* Expected: sum of (n*(n+1)/2) for n=1..NUM_JOBS */
+    /* = sum of triangular numbers = NUM_JOBS*(NUM_JOBS+1)*(NUM_JOBS+2)/6 */
+    int expected = (NUM_JOBS * (NUM_JOBS + 1) * (NUM_JOBS + 2)) / 6;
+
+    printf("worker_pool_heavy: %d results, sum %d (expected %d)\n",
+           result_count, total_sum, expected);
+    return (result_count == NUM_JOBS && total_sum == expected) ? 0 : 1;
+}

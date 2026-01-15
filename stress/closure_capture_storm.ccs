@@ -1,0 +1,40 @@
+/*
+ * Stress Test: Closure Capture Storm
+ *
+ * Spawns many closures that capture different local variables.
+ * Tests closure environment allocation and capture semantics.
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define NUM_CLOSURES 100
+
+cc_atomic_int g_sum = 0;
+
+int main(void) {
+    printf("closure_capture_storm: %d closures with captures\n", NUM_CLOSURES);
+
+    @nursery {
+        for (int i = 0; i < NUM_CLOSURES; i++) {
+            /* Each closure captures different values */
+            int a = i;
+            int b = i * 2;
+            int c = i * 3;
+
+            spawn(() => {
+                /* Use captured values */
+                int local_sum = a + b + c;  /* = i + 2i + 3i = 6i */
+                cc_atomic_fetch_add(&g_sum, local_sum);
+            });
+        }
+    }
+
+    /* Expected: sum of 6*i for i=0..NUM_CLOSURES-1 */
+    /* = 6 * (0 + 1 + ... + NUM_CLOSURES-1) = 6 * NUM_CLOSURES*(NUM_CLOSURES-1)/2 */
+    int expected = 6 * NUM_CLOSURES * (NUM_CLOSURES - 1) / 2;
+    int final = cc_atomic_load(&g_sum);
+
+    printf("closure_capture_storm: sum %d (expected %d)\n", final, expected);
+    return (final == expected) ? 0 : 1;
+}

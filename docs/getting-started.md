@@ -40,7 +40,7 @@ int main(void) {
 Build and run:
 
 ```bash
-./cc/bin/ccc build run hello.ccs
+./cc/bin/ccc run hello.ccs
 ```
 
 Output (order may vary):
@@ -106,11 +106,11 @@ FILE* f = fopen("data.txt", "r");
 Fast bump allocation with automatic cleanup:
 
 ```c
-@arena(a) {
-    char* buf = arena_alloc(&a, 1024);
+@arena(a, kilobytes(4)) {
+    void* buf = cc_arena_alloc(a, 1024, 8);
     // ... use buf ...
 }
-// Memory freed automatically
+// Arena freed automatically
 ```
 
 ## Next Steps

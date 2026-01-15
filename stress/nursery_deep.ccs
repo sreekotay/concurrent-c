@@ -1,0 +1,44 @@
+/*
+ * Stress Test: Deep Nursery Nesting
+ *
+ * Creates deeply nested nurseries with tasks at each level.
+ * Tests nursery stack and structured concurrency semantics.
+ */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+#define MAX_DEPTH 20
+
+int g_completed[MAX_DEPTH] = {0};
+int g_current_depth = 0;
+
+void nested_spawn(int depth) {
+    if (depth >= MAX_DEPTH) return;
+
+    @nursery {
+        /* Capture depth in a local for the closure */
+        int my_depth = depth;
+
+        /* Task at this depth */
+        spawn(() => {
+            g_completed[my_depth] = 1;
+        });
+
+        /* Recurse deeper (not in closure, direct call) */
+        nested_spawn(depth + 1);
+    }
+}
+
+int main(void) {
+    printf("nursery_deep: nesting %d levels\n", MAX_DEPTH);
+
+    nested_spawn(0);
+
+    int completed = 0;
+    for (int i = 0; i < MAX_DEPTH; i++) {
+        if (g_completed[i]) completed++;
+    }
+
+    printf("nursery_deep: completed %d/%d levels\n", completed, MAX_DEPTH);
+    return (completed == MAX_DEPTH) ? 0 : 1;
+}

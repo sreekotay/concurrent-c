@@ -1,0 +1,61 @@
+/*
+ * Stress Test: Deadline Race
+ *
+ * Multiple tasks with different deadlines racing to complete.
+ * Tests deadline handling under concurrent pressure.
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define NUM_RACERS 20
+
+cc_atomic_int g_completed = 0;
+cc_atomic_int g_timed_out = 0;
+
+/* Work function to avoid closure-inside-with_deadline issue */
+void racer_work(int racer_id) {
+    /* Each racer gets deadline = (racer_id+1) * 10ms */
+    int deadline_ms = (racer_id + 1) * 10;
+    /* Some racers will timeout, some won't */
+    int work_ms = (racer_id % 3 == 0) ? deadline_ms + 50 : deadline_ms - 5;
+
+    CCDeadline dl = cc_deadline_after_ms((uint64_t)deadline_ms);
+    CCDeadline* prev = cc_deadline_push(&dl);
+
+    /* Simulate work that may exceed deadline */
+    int elapsed = 0;
+    while (elapsed < work_ms && !cc_deadline_expired(&dl)) {
+        cc_sleep_ms(5);
+        elapsed += 5;
+    }
+
+    if (cc_deadline_expired(&dl)) {
+        cc_atomic_fetch_add(&g_timed_out, 1);
+    } else {
+        cc_atomic_fetch_add(&g_completed, 1);
+    }
+
+    cc_deadline_pop(prev);
+}
+
+int main(void) {
+    printf("deadline_race: %d racers with varying deadlines\n", NUM_RACERS);
+
+    @nursery {
+        for (int i = 0; i < NUM_RACERS; i++) {
+            int racer_id = i;
+            spawn(() => {
+                racer_work(racer_id);
+            });
+        }
+    }
+
+    int completed = cc_atomic_load(&g_completed);
+    int timed_out = cc_atomic_load(&g_timed_out);
+    int total = completed + timed_out;
+
+    printf("deadline_race: %d completed, %d timed out, %d total\n",
+           completed, timed_out, total);
+    return (total == NUM_RACERS) ? 0 : 1;
+}

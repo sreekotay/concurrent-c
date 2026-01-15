@@ -45,13 +45,14 @@ All commands below assume you’re in the repo root and have built the compiler 
 #### Build + run a single file
 
 ```bash
-./cc/bin/ccc build run examples/hello.ccs
+./cc/bin/ccc run examples/hello.ccs           # shorthand
+./cc/bin/ccc build run examples/hello.ccs     # explicit
 ```
 
 Pass args to the produced binary:
 
 ```bash
-./cc/bin/ccc build run examples/hello.ccs -- --help
+./cc/bin/ccc run examples/hello.ccs -- --help
 ```
 
 #### Emit generated C only (let another build system compile it)

@@ -40,6 +40,36 @@ Build steps:
 - Binary output: `bin/<stem>` by default in `--link` mode (override with `-o`).
 - `--keep-c` preserves the generated C even when compiling/linking; otherwise it’s retained in `out/`.
 
+### Output Layout
+
+```
+out/
+  <stem>.c          # generated C
+  <stem>.o          # object file
+  <stem>.d          # dependency file (for incremental builds)
+  .cc-build/        # cache metadata (hidden)
+bin/
+  <stem>            # linked binary
+```
+
+The `<stem>` is the basename of the input file without extension: `examples/hello.ccs` → `hello`.
+
+### Name Collision Note
+
+Output paths use basename only, so files with the same name in different directories will collide:
+
+```bash
+./cc/bin/ccc a/test.ccs   # → out/test.c, bin/test
+./cc/bin/ccc b/test.ccs   # → overwrites out/test.c, bin/test
+```
+
+**Workarounds:**
+- Use `-o` to specify distinct output paths: `ccc a/test.ccs -o bin/a_test`
+- Use `build.cc` with explicit target names (recommended for multi-file projects)
+- Use `--out-dir` / `--bin-dir` to isolate outputs per project
+
+This flat naming is intentional for simplicity in single-file workflows. Multi-file projects should use `build.cc` for explicit control.
+
 ## Output directories
 - `--out-dir DIR` / `CC_OUT_DIR`: override where generated C and objects are written (default: `<repo>/out`).
 - `--bin-dir DIR` / `CC_BIN_DIR`: override where linked executables are written (default: `<repo>/bin`).
@@ -52,6 +82,59 @@ Build steps:
 - C compiler: use `$CC` if set, else first of `cc`, `gcc`, `clang` in PATH. Override with `--cc-bin PATH`.
 - Flags passthrough: honor `$CFLAGS`, `$CPPFLAGS`, `$LDFLAGS`, `$LDLIBS`. Additional flags via `--cc-flags "..."`, `--ld-flags "..."`.
 - Target/cross: accept `--target TRIPLE` and forward to the C compiler; accept `--sysroot PATH` and forward.
+
+### Supported Compilers
+
+| Compiler | Support | Notes |
+|----------|---------|-------|
+| **Clang** | ✅ Full | Recommended on macOS |
+| **GCC** | ✅ Full | Recommended on Linux |
+| **TCC** | ⚠️ Partial | See limitations below |
+| **MSVC** | 🚧 Planned | Not yet tested |
+
+### TCC Compatibility
+
+TCC (Tiny C Compiler) is used internally by `ccc` for fast preprocessing and parsing. It can also be used as the final C compiler via `CC=./third_party/tcc/tcc`, but with limitations:
+
+**What works:**
+- TCC as preprocessor (always used by ccc internally)
+- `cc_atomic.cch` portable atomics (detects TCC, uses fallbacks)
+- Compiler flag detection (ccc skips unsupported flags like `-MMD`, `-ffunction-sections`)
+
+**Platform limitations:**
+
+| Platform | TCC as Final Compiler |
+|----------|----------------------|
+| **Linux** | ✅ Works (TCC supports `__thread` TLS) |
+| **macOS** | ❌ Not supported (TCC lacks `__thread` TLS on macOS) |
+| **Windows** | 🚧 Untested |
+
+**Why macOS doesn't work:** The CC runtime uses `__thread` for thread-local storage (nursery tracking, deadline scopes). TCC on macOS doesn't implement the Mach-O TLS ABI (`_tlv_bootstrap`, TLV sections). This is a fundamental TCC limitation, not a ccc bug.
+
+**Alternatives considered:**
+- Patching TCC for macOS TLS: ~1 week effort, high complexity, not worth it
+- Using `pthread_getspecific` everywhere: ~10x slower TLS access, penalizes 99% of users
+- Single-threaded mode for TCC: Possible but defeats the purpose of concurrent code
+
+**Recommendation:** Use Clang or GCC on macOS. TCC-as-final-compiler is only for Linux or niche use cases.
+
+### Build Flavors
+
+Build flavor flags control optimization and debugging:
+
+```bash
+./cc/bin/ccc build foo.ccs -O          # Release: -O2 -DNDEBUG + dead-stripping
+./cc/bin/ccc build foo.ccs -g          # Debug: -O0 -g
+./cc/bin/ccc build foo.ccs --release   # Same as -O
+./cc/bin/ccc build foo.ccs --debug     # Same as -g
+```
+
+| Flag | Compiler Flags | Linker Flags |
+|------|---------------|--------------|
+| `-O` / `--release` | `-O2 -DNDEBUG -ffunction-sections -fdata-sections` | `-Wl,-dead_strip` (macOS) / `-Wl,--gc-sections` (Linux) |
+| `-g` / `--debug` | `-O0 -g` | (none) |
+
+**Note:** When both `-O` and `-g` are specified, debug wins (safe default).
 
 ## Runtime Linking
 - Default: link against the bundled runtime automatically.
@@ -176,6 +259,59 @@ Per-target properties (optional):
 - `ccc build graph` prints the target graph as `--format json` (default) or `--format dot`.
 - `--dump-consts` prints merged const bindings then compiles.
 - `--dry-run` resolves consts / prints commands, and skips compile/link.
+
+## Testing Infrastructure
+
+### Stress Tests
+
+Stress tests in `stress/` exercise concurrency patterns under load:
+
+| Test | What it stresses | Correctness check |
+|------|------------------|-------------------|
+| `spawn_storm` | 1000 concurrent task spawns | All tasks complete |
+| `channel_flood` | 10 producers × 1000 msgs | Message count matches |
+| `closure_capture_storm` | Many closures with captures | Sum formula verification |
+| `fanout_fanin` | Scatter-gather pattern | Sum of squares formula |
+| `nursery_deep` | 20 levels of nested nurseries | All levels complete |
+| `pipeline_long` | 4-stage channel pipeline | Sum formula verification |
+| `worker_pool_heavy` | 8 workers × 500 jobs | Sum formula verification |
+| `deadline_race` | Tasks with tight deadlines | Total = completed + timed_out |
+
+### Sanitizer Testing
+
+Run stress tests with ThreadSanitizer (race detection) and AddressSanitizer (memory errors):
+
+```bash
+./scripts/stress_sanitize.sh              # default compiler only
+./scripts/stress_sanitize.sh tsan         # ThreadSanitizer
+./scripts/stress_sanitize.sh asan         # AddressSanitizer
+./scripts/stress_sanitize.sh sanitizers   # Both TSan and ASan
+./scripts/stress_sanitize.sh compilers    # Test with clang, gcc, (tcc on Linux)
+./scripts/stress_sanitize.sh all          # Everything
+```
+
+**Note:** Sanitizers require Clang or GCC. TSan and ASan are mutually exclusive (run separately).
+
+### Portable Atomics
+
+For user code needing thread-safe counters or lock-free structures, include `cc_atomic.cch`:
+
+```c
+#include "cc_atomic.cch"
+
+cc_atomic_int counter = 0;
+
+void increment(void) {
+    cc_atomic_fetch_add(&counter, 1);
+}
+```
+
+The header auto-detects the compiler and uses:
+- C11 `<stdatomic.h>` on GCC/Clang
+- `__sync_*` builtins on older compilers
+- Non-atomic fallback on TCC (not thread-safe, best-effort only)
+
+See `<cc_atomic.cch>` documentation in the stdlib spec for full API.
 
 ## Error Reporting
 - On C compiler/linker failure: print the exact command, exit code, and keep generated C/object for inspection.

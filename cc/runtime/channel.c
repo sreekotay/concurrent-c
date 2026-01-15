@@ -667,3 +667,100 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
     return 0;
 }
 
+
+/* ---- Poll-based channel tasks (CCTaskIntptr) ----
+ * These return CCTaskIntptr with poll-based implementation for cooperative async.
+ * Result is errno (0=success). Caller must ensure value/out_value outlives the task.
+ */
+
+#include "std/task_intptr.cch"
+
+typedef struct {
+    CCChan* ch;
+    void* buf;           /* for send: source; for recv: dest */
+    size_t elem_size;
+    const CCDeadline* deadline;
+    int is_send;         /* 1=send, 0=recv */
+    int completed;
+    int result;          /* 0 success, errno on error */
+} CCChanTaskFrame;
+
+static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* out_err) {
+    CCChanTaskFrame* f = (CCChanTaskFrame*)frame;
+    if (f->completed) {
+        if (out_val) *out_val = (intptr_t)f->result;
+        if (out_err) *out_err = f->result;
+        return CC_FUTURE_READY;
+    }
+
+    /* Check deadline */
+    if (f->deadline && cc_deadline_expired(f->deadline)) {
+        f->completed = 1;
+        f->result = ETIMEDOUT;
+        if (out_val) *out_val = ETIMEDOUT;
+        if (out_err) *out_err = ETIMEDOUT;
+        return CC_FUTURE_READY;
+    }
+
+    int rc;
+    if (f->is_send) {
+        rc = cc_chan_try_send(f->ch, f->buf, f->elem_size);
+    } else {
+        rc = cc_chan_try_recv(f->ch, f->buf, f->elem_size);
+    }
+
+    if (rc == EAGAIN) {
+        /* Would block - return pending, let scheduler poll again */
+        return CC_FUTURE_PENDING;
+    }
+
+    /* Completed (success or error) */
+    f->completed = 1;
+    f->result = rc;
+    if (out_val) *out_val = (intptr_t)rc;
+    if (out_err) *out_err = rc;
+    return CC_FUTURE_READY;
+}
+
+static int cc__chan_task_wait(void* frame) {
+    /* Block until the channel can make progress (for block_on from sync context).
+       Simple fallback: sleep briefly and retry. */
+    (void)frame;
+    return cc_sleep_ms(1);
+}
+
+static void cc__chan_task_drop(void* frame) {
+    free(frame);
+}
+
+CCTaskIntptr cc_chan_send_task(CCChan* ch, const void* value, size_t value_size) {
+    CCTaskIntptr invalid = {0};
+    if (!ch || !value || value_size == 0) return invalid;
+
+    CCChanTaskFrame* f = (CCChanTaskFrame*)calloc(1, sizeof(CCChanTaskFrame));
+    if (!f) return invalid;
+
+    f->ch = ch;
+    f->buf = (void*)value;  /* Note: caller must ensure value outlives task */
+    f->elem_size = value_size;
+    f->deadline = cc_current_deadline();
+    f->is_send = 1;
+
+    return cc_task_intptr_make_poll_ex(cc__chan_task_poll, cc__chan_task_wait, f, cc__chan_task_drop);
+}
+
+CCTaskIntptr cc_chan_recv_task(CCChan* ch, void* out_value, size_t value_size) {
+    CCTaskIntptr invalid = {0};
+    if (!ch || !out_value || value_size == 0) return invalid;
+
+    CCChanTaskFrame* f = (CCChanTaskFrame*)calloc(1, sizeof(CCChanTaskFrame));
+    if (!f) return invalid;
+
+    f->ch = ch;
+    f->buf = out_value;
+    f->elem_size = value_size;
+    f->deadline = cc_current_deadline();
+    f->is_send = 0;
+
+    return cc_task_intptr_make_poll_ex(cc__chan_task_poll, cc__chan_task_wait, f, cc__chan_task_drop);
+}

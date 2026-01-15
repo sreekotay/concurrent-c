@@ -1,9 +1,23 @@
-/* Extracted from the working implementation in `cc/src/visitor/visitor.c`.
-   Goal: keep semantics identical while shrinking visitor.c over time.
-
-   This pass is intentionally self-contained (it duplicates a few small text helpers)
-   so it doesn't depend on `static` helpers inside visitor.c.
-*/
+/*
+ * Autoblock Pass: Automatically wraps blocking calls in @async functions.
+ *
+ * Inside @async functions, calls to non-async/non-noblock functions are wrapped
+ * with `cc_run_blocking_task_intptr(...)` so they produce CCTaskIntptr values
+ * that the async state machine can poll/await.
+ *
+ * Rewrite kinds:
+ *   - Statement-form calls:  `blocking_fn(...)` -> `await cc_run_blocking_task_intptr(...)`
+ *   - Return-value calls:    `return blocking_fn(...)` -> hoisted temp + await
+ *   - Assignment calls:      `x = blocking_fn(...)` -> hoisted temp + await
+ *   - Await operand calls:   `await chan_send(...)` -> wrapped to produce CCTaskIntptr
+ *
+ * Legacy/Transition Note (CC_AB_REWRITE_AWAIT_OPERAND_CALL):
+ *   Channel operations (chan_send, chan_recv, etc.) are currently blocking runtime
+ *   calls. When used with explicit `await`, they must be wrapped. The preferred
+ *   future path is to use task-returning variants (cc_chan_send_task, cc_chan_recv_task)
+ *   which return CCTaskIntptr directly, eliminating the need for this wrapping.
+ *   See: spec-progress/CCTASKINTPTR_CHANNEL_OPS_DESIGN.md
+ */
 
 #include "pass_autoblock.h"
 
@@ -15,6 +29,7 @@
 #include <string.h>
 
 #include "comptime/symbols.h"
+#include "util/path.h"
 #include "visitor/text_span.h"
 #include "visitor/visitor.h"
 
@@ -214,8 +229,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN = 5,
         CC_AB_REWRITE_RETURN_EXPR_CALL = 6,
         CC_AB_REWRITE_ASSIGN_EXPR_CALL = 7,
-        /* Special-case: inside `await ...`, rewrite the call expression to a blocking-task operand.
-           Used for chan_* operations (which are currently blocking runtime calls). */
+        /* LEGACY: For `await chan_*` - wraps the blocking call to produce CCTaskIntptr.
+           Future: Use cc_chan_send_task/cc_chan_recv_task which return CCTaskIntptr directly,
+           eliminating the need for this wrapping. See: CCTASKINTPTR_CHANNEL_OPS_DESIGN.md */
         CC_AB_REWRITE_AWAIT_OPERAND_CALL = 8,
     } CCAutoBlockRewriteKind;
 
@@ -237,6 +253,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         const char* callee;
         const char* lhs_name; /* for assign */
         CCAutoBlockRewriteKind kind;
+        int raw_call; /* reserved */
+        int is_chan_recv; /* 1 if chan_recv, 0 if chan_send */
         int argc;
         int ret_is_ptr;
         int ret_is_void;
@@ -267,16 +285,24 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (!n[i].aux_s1) continue; /* callee name */
         if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
 
-        /* Calls inside `await ...` are usually async call sites; never autoblock them.
-           Exception: channel ops are currently blocking (chan_*), so `await tx.send(...)` / `await rx.recv(...)`
-           must be rewritten into a blocking-task operand so async lowering sees a CCTaskIntptr. */
+        /* Calls inside `await ...` are async call sites; skip unless it's a channel op.
+           Channel ops return CCTaskIntptr via cc_chan_*_task, so they must be awaited.
+           Note: chan_send/chan_recv are macros that expand to cc_chan_send/cc_chan_recv. */
         int is_under_await = cc__node_is_descendant_of_kind(root, n, i, 6 /* CC_AST_NODE_AWAIT */);
         int is_chan_op = (strcmp(n[i].aux_s1, "chan_send") == 0 ||
                           strcmp(n[i].aux_s1, "chan_recv") == 0 ||
                           strcmp(n[i].aux_s1, "chan_send_take") == 0 ||
                           strcmp(n[i].aux_s1, "chan_send_take_ptr") == 0 ||
-                          strcmp(n[i].aux_s1, "chan_send_take_slice") == 0);
+                          strcmp(n[i].aux_s1, "chan_send_take_slice") == 0 ||
+                          /* Macro expansions: */
+                          strcmp(n[i].aux_s1, "cc_chan_send") == 0 ||
+                          strcmp(n[i].aux_s1, "cc_chan_recv") == 0 ||
+                          strcmp(n[i].aux_s1, "cc_chan_send_take") == 0 ||
+                          strcmp(n[i].aux_s1, "cc_chan_send_take_slice") == 0);
         if (is_under_await && !is_chan_op) continue;
+        /* In async context, chan ops MUST be awaited - they return CCTaskIntptr. */
+        int is_chan_recv = (strcmp(n[i].aux_s1, "chan_recv") == 0 ||
+                           strcmp(n[i].aux_s1, "cc_chan_recv") == 0);
 
         /* Find enclosing function decl-item and check @async attr. */
         int cur = n[i].parent;
@@ -292,6 +318,10 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             cur = n[cur].parent;
         }
         if (!owner || ((owner_attrs & CC_FN_ATTR_ASYNC) == 0)) continue;
+
+        /* NOTE: Channel ops in @async are wrapped automatically by autoblock,
+           making them cooperative without explicit await. This matches spec behavior.
+           Future: Consider requiring explicit await for clarity (requires better macro detection). */
 
         /* Only skip known-nonblocking callees; if we don't know attrs, assume blocking. */
         unsigned int callee_attrs = 0;
@@ -316,6 +346,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             while (s2 > 0 && (isalnum((unsigned char)in_src[s2 - 1]) || in_src[s2 - 1] == '_')) s2--;
             if (s2 < call_start) call_start = s2;
         }
+
+        /* is_ufcs already handled above */
 
         /* Next non-ws token after call. */
         size_t j = call_end;
@@ -608,6 +640,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             .callee = n[i].aux_s1,
             .lhs_name = lhs_name,
             .kind = kind,
+            .raw_call = 0,
+            .is_chan_recv = is_chan_recv,
             .argc = paramc,
             .ret_is_ptr = ret_is_ptr,
             .ret_is_void = ret_is_void,
@@ -1114,26 +1148,61 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
             if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
         } else if (reps[ri].kind == CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
-            /* For `await chan_*` forms, keep the user's `await` but rewrite the call operand
-               to `cc_run_blocking_task_intptr(__cc_ab_c_lN)` so async lowering sees a task. */
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
-            if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
-            else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
-            cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
-            cc__append_str(&repl, &repl_len, &repl_cap, "(");
+            /* For `await chan_*` forms, rewrite the call to cc_chan_*_task() which returns CCTaskIntptr.
+               The await keyword is preserved; async lowering handles the CCTaskIntptr await.
+               - chan_send(ch, val)    -> cc_chan_send_task(ch, &val, sizeof(val))
+               - chan_recv(ch, &out)   -> cc_chan_recv_task(ch, out, sizeof(*out))
+             */
+            /* Emit arg temporaries - they may be complex expressions. */
             for (int ai = 0; ai < argc; ai++) {
-                if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                size_t arg_s = arg_starts[ai];
+                size_t arg_e = arg_ends[ai];
+                /* Trim whitespace */
+                while (arg_s < arg_e && (call_txt[arg_s] == ' ' || call_txt[arg_s] == '\t')) arg_s++;
+                while (arg_e > arg_s && (call_txt[arg_e - 1] == ' ' || call_txt[arg_e - 1] == '\t')) arg_e--;
                 if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s%s __cc_ab_l%d_arg%d = ", I, reps[ri].param_types[ai], reps[ri].line_start, ai);
                 } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    /* Use __auto_type for C11 type inference */
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s__auto_type __cc_ab_l%d_arg%d = ", I, reps[ri].line_start, ai);
                 }
+                cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
+                cc__append_str(&repl, &repl_len, &repl_cap, ";\n");
             }
-            cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
 
-            /* Original statement with call replaced by cc_run_blocking_task_intptr(__cc_ab_c_lN). */
+            /* Emit the task-returning call in place of the original call. */
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt, call_s);
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "cc_run_blocking_task_intptr(__cc_ab_c_l%d)", reps[ri].line_start);
+            if (reps[ri].is_chan_recv) {
+                /* chan_recv(ch, &out) -> cc_chan_recv_task(ch, out, sizeof(*out)) */
+                cc__append_str(&repl, &repl_len, &repl_cap, "cc_chan_recv_task(");
+                if (argc >= 1) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg0", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                if (argc >= 2) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ", sizeof(*(");
+                if (argc >= 2) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ")))");
+            } else {
+                /* chan_send(ch, val) -> cc_chan_send_task(ch, &val, sizeof(val)) */
+                cc__append_str(&repl, &repl_len, &repl_cap, "cc_chan_send_task(");
+                if (argc >= 1) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg0", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ", &(");
+                if (argc >= 2) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, "), sizeof(");
+                if (argc >= 2) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, "))");
+            }
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
             if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
         } else if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {

@@ -4,33 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int cc__is_ident_start(char c) {
-    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-}
-static int cc__is_ident_char(char c) {
-    return cc__is_ident_start(c) || (c >= '0' && c <= '9');
-}
-
-static void cc__sb_append(char** buf, size_t* len, size_t* cap, const char* s, size_t n) {
-    if (!buf || !len || !cap || !s || n == 0) return;
-    size_t need = *len + n + 1;
-    if (need > *cap) {
-        size_t nc = (*cap ? *cap * 2 : 1024);
-        while (nc < need) nc *= 2;
-        char* nb = (char*)realloc(*buf, nc);
-        if (!nb) return;
-        *buf = nb;
-        *cap = nc;
-    }
-    memcpy(*buf + *len, s, n);
-    *len += n;
-    (*buf)[*len] = 0;
-}
-
-static void cc__sb_append_cstr(char** buf, size_t* len, size_t* cap, const char* s) {
-    if (!s) return;
-    cc__sb_append(buf, len, cap, s, strlen(s));
-}
+#include "util/text.h"
 
 int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, size_t* out_len) {
     if (!out_src || !out_len) return -1;
@@ -52,15 +26,15 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
 
         if (in_line_comment) {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             if (c == '\n') in_line_comment = 0;
             i++;
             continue;
         }
         if (in_block_comment) {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             if (c == '*' && c2 == '/') {
-                cc__sb_append(&out, &olen, &ocap, &c2, 1);
+                cc_sb_append(&out, &olen, &ocap, &c2, 1);
                 i += 2;
                 in_block_comment = 0;
                 continue;
@@ -69,9 +43,9 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             continue;
         }
         if (in_str) {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             if (c == '\\' && i + 1 < n) {
-                cc__sb_append(&out, &olen, &ocap, &c2, 1);
+                cc_sb_append(&out, &olen, &ocap, &c2, 1);
                 i += 2;
                 continue;
             }
@@ -80,9 +54,9 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             continue;
         }
         if (in_chr) {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             if (c == '\\' && i + 1 < n) {
-                cc__sb_append(&out, &olen, &ocap, &c2, 1);
+                cc_sb_append(&out, &olen, &ocap, &c2, 1);
                 i += 2;
                 continue;
             }
@@ -92,27 +66,27 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
         }
 
         if (c == '/' && c2 == '/') {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
-            cc__sb_append(&out, &olen, &ocap, &c2, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c2, 1);
             i += 2;
             in_line_comment = 1;
             continue;
         }
         if (c == '/' && c2 == '*') {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
-            cc__sb_append(&out, &olen, &ocap, &c2, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c2, 1);
             i += 2;
             in_block_comment = 1;
             continue;
         }
         if (c == '"') {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             i++;
             in_str = 1;
             continue;
         }
         if (c == '\'') {
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             i++;
             in_chr = 1;
             continue;
@@ -124,31 +98,31 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             while (peek < n && (src[peek] == ' ' || src[peek] == '\t')) peek++;
             if (peek + strlen("with_deadline") <= n &&
                 memcmp(src + peek, "with_deadline", strlen("with_deadline")) == 0 &&
-                (peek + strlen("with_deadline") >= n || !cc__is_ident_char(src[peek + strlen("with_deadline")]))) {
+                (peek + strlen("with_deadline") >= n || !cc_is_ident_char(src[peek + strlen("with_deadline")]))) {
                 /* Skip the '@' and continue to process 'with_deadline' */
                 i = peek;
                 continue;
             }
-            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            cc_sb_append(&out, &olen, &ocap, &c, 1);
             i++;
             continue;
         }
 
-        if (cc__is_ident_start(c)) {
+        if (cc_is_ident_start(c)) {
             size_t s0 = i;
             i++;
-            while (i < n && cc__is_ident_char(src[i])) i++;
+            while (i < n && cc_is_ident_char(src[i])) i++;
             size_t sl = i - s0;
             int is_wd = (sl == strlen("with_deadline") && memcmp(src + s0, "with_deadline", sl) == 0);
-            if (!is_wd || (s0 > 0 && cc__is_ident_char(src[s0 - 1]))) {
-                cc__sb_append(&out, &olen, &ocap, src + s0, sl);
+            if (!is_wd || (s0 > 0 && cc_is_ident_char(src[s0 - 1]))) {
+                cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 continue;
             }
 
             size_t j = i;
             while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\r' || src[j] == '\n')) j++;
             if (j >= n || src[j] != '(') {
-                cc__sb_append(&out, &olen, &ocap, src + s0, sl);
+                cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 i = j;
                 continue;
             }
@@ -175,7 +149,7 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
                 else if (ch == ')') { par--; if (par == 0) break; }
             }
             if (k >= n || par != 0) {
-                cc__sb_append(&out, &olen, &ocap, src + s0, sl);
+                cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 i = j;
                 continue;
             }
@@ -184,7 +158,7 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             size_t after_paren = expr_r + 1;
             while (after_paren < n && (src[after_paren] == ' ' || src[after_paren] == '\t' || src[after_paren] == '\r' || src[after_paren] == '\n')) after_paren++;
             if (after_paren >= n || src[after_paren] != '{') {
-                cc__sb_append(&out, &olen, &ocap, src + s0, sl);
+                cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 i = j;
                 continue;
             }
@@ -211,7 +185,7 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
                 else if (ch == '}') { br--; if (br == 0) { m++; break; } }
             }
             if (m > n || br != 0) {
-                cc__sb_append(&out, &olen, &ocap, src + s0, sl);
+                cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 i = j;
                 continue;
             }
@@ -227,15 +201,15 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
                      counter,
                      (int)(expr_r - expr_l), src + expr_l,
                      counter, counter, counter);
-            cc__sb_append_cstr(&out, &olen, &ocap, hdr);
-            cc__sb_append(&out, &olen, &ocap, src + body_s, body_e - body_s);
-            cc__sb_append_cstr(&out, &olen, &ocap, " }");
+            cc_sb_append_cstr(&out, &olen, &ocap, hdr);
+            cc_sb_append(&out, &olen, &ocap, src + body_s, body_e - body_s);
+            cc_sb_append_cstr(&out, &olen, &ocap, " }");
 
             i = body_e;
             continue;
         }
 
-        cc__sb_append(&out, &olen, &ocap, &c, 1);
+        cc_sb_append(&out, &olen, &ocap, &c, 1);
         i++;
     }
 
@@ -243,4 +217,3 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
     *out_len = out ? olen : n;
     return 0;
 }
-

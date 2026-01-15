@@ -1,0 +1,49 @@
+/* Test cc_chan_send_task and cc_chan_recv_task (poll-based channel tasks). */
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+#include <stdio.h>
+#include <assert.h>
+
+int main(void) {
+    /* Create a channel */
+    int[~4 >] tx;
+    int[~4 <] rx;
+    channel_pair(&tx, &rx);
+
+    /* Test 1: Send task - non-blocking (channel has capacity) */
+    int send_val = 42;
+    CCTaskIntptr send_t = cc_chan_send_task(tx.raw, &send_val, sizeof(send_val));
+    intptr_t send_rc = cc_block_on_intptr(send_t);
+    printf("send_rc = %ld\n", (long)send_rc);
+    assert(send_rc == 0);
+
+    /* Test 2: Recv task - should get the value we sent */
+    int recv_val = 0;
+    CCTaskIntptr recv_t = cc_chan_recv_task(rx.raw, &recv_val, sizeof(recv_val));
+    intptr_t recv_rc = cc_block_on_intptr(recv_t);
+    printf("recv_rc = %ld, recv_val = %d\n", (long)recv_rc, recv_val);
+    assert(recv_rc == 0);
+    assert(recv_val == 42);
+
+    /* Test 3: Send and recv multiple values */
+    for (int i = 0; i < 3; i++) {
+        int v = i * 10;
+        CCTaskIntptr t = cc_chan_send_task(tx.raw, &v, sizeof(v));
+        intptr_t rc = cc_block_on_intptr(t);
+        assert(rc == 0);
+    }
+    for (int i = 0; i < 3; i++) {
+        int v = -1;
+        CCTaskIntptr t = cc_chan_recv_task(rx.raw, &v, sizeof(v));
+        intptr_t rc = cc_block_on_intptr(t);
+        assert(rc == 0);
+        printf("recv[%d] = %d\n", i, v);
+        assert(v == i * 10);
+    }
+
+    chan_close(tx);
+    chan_free(rx);
+
+    printf("chan_task_smoke: PASS\n");
+    return 0;
+}

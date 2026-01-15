@@ -7,6 +7,7 @@ CURL_BUILD := $(CURL_DIR)/build
 .PHONY: all cc clean fmt lint example example-c smoke test tools
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
+.PHONY: examples-check stress-check
 
 all: cc
 
@@ -41,6 +42,55 @@ tools:
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
 test: cc tools
 	@./tools/cc_test
+
+# Verify all examples compile (CI smoke test for example rot).
+examples-check: cc
+	@echo "=== Checking examples compile ==="
+	@failed=0; \
+	for f in examples/*.ccs; do \
+		printf "  %-40s" "$$f"; \
+		if $(CC_DIR)/bin/ccc --emit-c-only "$$f" -o /dev/null 2>/dev/null; then \
+			echo "OK"; \
+		else \
+			echo "FAIL"; \
+			failed=$$((failed + 1)); \
+		fi; \
+	done; \
+	for d in examples/*/; do \
+		if [ -f "$$d/build.cc" ]; then \
+			printf "  %-40s" "$$d"; \
+			if $(CC_DIR)/bin/ccc build --build-file "$$d/build.cc" --dry-run 2>/dev/null; then \
+				echo "OK"; \
+			else \
+				echo "FAIL"; \
+				failed=$$((failed + 1)); \
+			fi; \
+		fi; \
+	done; \
+	if [ $$failed -gt 0 ]; then \
+		echo "$$failed example(s) failed"; \
+		exit 1; \
+	fi; \
+	echo "All examples OK"
+
+# Verify all stress tests compile and run.
+stress-check: cc
+	@echo "=== Running stress tests ==="
+	@failed=0; \
+	for f in stress/*.ccs; do \
+		printf "  %-40s" "$$f"; \
+		if $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; then \
+			echo "OK"; \
+		else \
+			echo "FAIL"; \
+			failed=$$((failed + 1)); \
+		fi; \
+	done; \
+	if [ $$failed -gt 0 ]; then \
+		echo "$$failed stress test(s) failed"; \
+		exit 1; \
+	fi; \
+	echo "All stress tests OK"
 
 # ---- Dependencies -----------------------------------------------------------
 #

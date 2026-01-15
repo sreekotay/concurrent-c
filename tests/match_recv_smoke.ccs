@@ -1,0 +1,22 @@
+#include "std/prelude.cch"
+#include <assert.h>
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    channel_pair(&tx, &rx);
+
+    chan_send(tx, 7);
+
+    int out = 0;
+    @match {
+        case rx.recv(&out): {
+            // recv already happened via match_select
+        }
+    }
+
+    assert(out == 7);
+    chan_close(tx);
+    chan_free(rx);
+    return 0;
+}

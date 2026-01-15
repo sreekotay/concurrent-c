@@ -1,8 +1,5 @@
 /* Extracted from the working implementation in `cc/src/visitor/visitor.c`.
    Goal: keep semantics identical while shrinking visitor.c over time.
-
-   This pass is intentionally self-contained (it duplicates a few small text helpers)
-   so it doesn't depend on `static` helpers inside visitor.c.
 */
 
 #include "pass_closure_calls.h"
@@ -14,10 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/text.h"
 #include "visitor/text_span.h"
 
-static int cc__is_ident_start_char(char c) { return (c == '_' || isalpha((unsigned char)c)); }
-static int cc__is_ident_char2(char c) { return (c == '_' || isalnum((unsigned char)c)); }
+/* Local aliases for the shared helpers */
+#define cc__is_ident_start_char cc_is_ident_start
+#define cc__is_ident_char2 cc_is_ident_char
 
 static int cc__is_keyword_tok(const char* s, size_t n) {
     static const char* kw[] = {

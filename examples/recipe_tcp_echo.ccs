@@ -14,6 +14,7 @@
  *   echo "Hello" | nc localhost 9000
  */
 #include "cc_runtime.cch"
+#include "std/prelude.cch"
 #include "std/net.cch"
 #include <stdio.h>
 
@@ -23,45 +24,40 @@
 /* Handle a single client connection.
  * Echoes back everything received until client closes. */
 void handle_client(CCSocket client) {
-    CCArena arena = {0};
-    char buf[4096];
-    if (cc_arena_init(&arena, buf, sizeof(buf)) != 0) {
-        cc_socket_close(&client);
-        return;
-    }
+    @arena(a, kilobytes(4)) {
+        CCNetError err = CC_NET_OK;
 
-    CCNetError err = CC_NET_OK;
+        /* Get peer address for logging */
+        CCSlice peer = cc_socket_peer_addr(&client, a, &err);
+        if (err == CC_NET_OK) {
+            printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
+        }
 
-    /* Get peer address for logging */
-    CCSlice peer = cc_socket_peer_addr(&client, &arena, &err);
-    if (err == CC_NET_OK) {
-        printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
-    }
-
-    /* Echo loop */
-    while (1) {
-        cc_arena_reset(&arena);
-        CCSlice data = cc_socket_read(&client, &arena, 1024, &err);
-        if (err != CC_NET_OK) {
-            if (err == CC_NET_CONNECTION_CLOSED) {
-                printf("client disconnected\n");
-            } else {
-                printf("read error: %d\n", err);
+        /* Echo loop */
+        while (1) {
+            cc_arena_reset(a);
+            CCSlice data = cc_socket_read(&client, a, 1024, &err);
+            if (err != CC_NET_OK) {
+                if (err == CC_NET_CONNECTION_CLOSED) {
+                    printf("client disconnected\n");
+                } else {
+                    printf("read error: %d\n", err);
+                }
+                break;
             }
-            break;
-        }
-        if (data.len == 0) {
-            printf("client disconnected (EOF)\n");
-            break;
-        }
+            if (data.len == 0) {
+                printf("client disconnected (EOF)\n");
+                break;
+            }
 
-        printf("received %zu bytes, echoing...\n", data.len);
-        size_t written = cc_socket_write(&client, data.ptr, data.len, &err);
-        if (err != CC_NET_OK) {
-            printf("write error: %d\n", err);
-            break;
+            printf("received %zu bytes, echoing...\n", data.len);
+            size_t written = cc_socket_write(&client, data.ptr, data.len, &err);
+            if (err != CC_NET_OK) {
+                printf("write error: %d\n", err);
+                break;
+            }
+            (void)written;
         }
-        (void)written;
     }
 
     cc_socket_close(&client);

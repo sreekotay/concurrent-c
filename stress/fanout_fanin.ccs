@@ -1,0 +1,76 @@
+/*
+ * Stress Test: Fan-out / Fan-in
+ *
+ * Single producer fans out to multiple workers,
+ * workers fan results back to single collector.
+ * Classic scatter-gather pattern under load.
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define NUM_WORKERS 16
+#define NUM_ITEMS 1000
+
+cc_atomic_int g_processed = 0;
+int g_collected = 0;  /* Only accessed from main thread after nursery */
+
+/* Shared channels */
+int[~32 >] g_work_tx;
+int[~32 <] g_work_rx;
+int[~NUM_ITEMS >] g_done_tx;
+int[~NUM_ITEMS <] g_done_rx;
+
+int main(void) {
+    printf("fanout_fanin: %d workers, %d items\n", NUM_WORKERS, NUM_ITEMS);
+
+    channel_pair(&g_work_tx, &g_work_rx);
+    channel_pair(&g_done_tx, &g_done_rx);
+
+    @nursery {
+        /* Workers: receive, process, send result */
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            spawn(() => {
+                int v;
+                while (chan_recv(g_work_rx, &v) == 0) {
+                    /* "Process" by squaring */
+                    int result = v * v;
+                    cc_atomic_fetch_add(&g_processed, 1);
+                    chan_send(g_done_tx, result);
+                }
+            });
+        }
+
+        /* Producer: fan out work items */
+        @nursery closing(g_work_tx) {
+            spawn(() => {
+                for (int i = 0; i < NUM_ITEMS; i++) {
+                    chan_send(g_work_tx, i);
+                }
+            });
+        }
+        /* Work channel now closed, workers will drain and exit */
+    }
+
+    /* Collect all results */
+    chan_close(g_done_tx);
+    long long sum = 0;
+    int v;
+    while (chan_recv(g_done_rx, &v) == 0) {
+        sum += v;
+        g_collected++;
+    }
+
+    chan_free(g_work_tx);
+    chan_free(g_done_tx);
+
+    /* Expected sum of squares: 0^2 + 1^2 + ... + (NUM_ITEMS-1)^2 */
+    /* = (n-1)*n*(2n-1)/6 where n=NUM_ITEMS */
+    long long n = NUM_ITEMS;
+    long long expected = (n - 1) * n * (2 * n - 1) / 6;
+
+    int processed = cc_atomic_load(&g_processed);
+    printf("fanout_fanin: processed %d, collected %d, sum %lld (expected %lld)\n",
+           processed, g_collected, sum, expected);
+    return (g_collected == NUM_ITEMS && sum == expected) ? 0 : 1;
+}

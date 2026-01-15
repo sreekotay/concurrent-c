@@ -6,8 +6,24 @@ Demonstrations of Concurrent-C features and patterns.
 
 ```bash
 # Build and run any example
-./cc/bin/ccc build run examples/hello.ccs
+./cc/bin/ccc run examples/hello.ccs
 ```
+
+## Learning Path (Recommended Order)
+
+New to Concurrent-C? Work through these in order:
+
+| # | File | Concept | What you'll learn |
+|---|------|---------|-------------------|
+| 1 | `hello.ccs` | First nursery | `@nursery`, `spawn()`, basic structured concurrency |
+| 2 | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, closure captures |
+| 3 | `recipe_channel_pipeline.ccs` | Communication | Channels, `closing()`, producer/consumer |
+| 4 | `recipe_timeout.ccs` | Cancellation | `@with_deadline`, cooperative exit |
+| 5 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
+| 6 | `recipe_arena_scope.ccs` | Memory | `@arena`, scoped allocation |
+| 7 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
+
+After these, explore the remaining recipes and build system examples.
 
 ## Overview
 

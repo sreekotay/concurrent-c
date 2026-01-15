@@ -6,8 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "visitor/text_span.h"
 #include "util/path.h"
+#include "util/text.h"
+#include "visitor/text_span.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
@@ -76,8 +77,9 @@ static int cc__node_file_matches_this_tu(const CCASTRoot* root,
 }
 
 
-static int cc__is_ident_start_char(char c) { return (c == '_' || isalpha((unsigned char)c)); }
-static int cc__is_ident_char2(char c) { return (c == '_' || isalnum((unsigned char)c)); }
+/* Local aliases for the shared helpers */
+#define cc__is_ident_start_char cc_is_ident_start
+#define cc__is_ident_char2 cc_is_ident_char
 
 static size_t cc__find_closure_start_from_arrow(const char* src, size_t span_start, size_t arrow_off) {
     if (!src) return span_start;

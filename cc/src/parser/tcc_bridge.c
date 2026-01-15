@@ -52,6 +52,29 @@ CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char*
     root->tcc_root = r;
     root->nodes = (const struct CCASTStubNode*)r->nodes;
     root->node_count = r->count;
+
+    /* Debug: dump stub nodes (best-effort) */
+    if (getenv("CC_DEBUG_STUB_NODES") && root->nodes && root->node_count > 0) {
+        const struct CCASTStubNode* nn = root->nodes;
+        int arenas = 0;
+        for (int i = 0; i < root->node_count; i++) {
+            if (nn[i].kind == 4) arenas++;
+        }
+        fprintf(stderr, "CC_DEBUG_STUB_NODES: %s: nodes=%d arenas=%d\n",
+                original_path ? original_path : "<input>", root->node_count, arenas);
+        for (int i = 0; i < root->node_count; i++) {
+            if (nn[i].kind == 4) {
+                fprintf(stderr,
+                        "  [arena] idx=%d parent=%d file=%s line=%d..%d col=%d..%d name=%s size=%s\n",
+                        i, nn[i].parent,
+                        nn[i].file ? nn[i].file : "<null>",
+                        nn[i].line_start, nn[i].line_end,
+                        nn[i].col_start, nn[i].col_end,
+                        nn[i].aux_s1 ? nn[i].aux_s1 : "<null>",
+                        nn[i].aux_s2 ? nn[i].aux_s2 : "<null>");
+            }
+        }
+    }
     return root;
 }
 

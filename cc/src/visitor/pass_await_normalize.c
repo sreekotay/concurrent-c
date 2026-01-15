@@ -8,10 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/text.h"
 #include "visitor/text_span.h"
 
-static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* src, size_t n);
-static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const char* src);
+/* Local aliases for the shared helpers */
+#define cc__append_n cc_sb_append
+#define cc__append_str cc_sb_append_cstr
 
 typedef struct NodeView {
     int kind;
@@ -511,23 +513,4 @@ int cc__rewrite_await_exprs_with_nodes(const CCASTRoot* root,
     *out_src = out;
     *out_len = outl;
     return 1;
-}
-
-
-static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* src, size_t n) {
-    if (!out || !out_len || !out_cap || !src) return;
-    if (*out_len + n + 1 >= *out_cap) {
-        *out_cap = *out_cap ? (*out_cap * 2) : 256;
-        if (*out_cap < *out_len + n + 1) *out_cap = *out_len + n + 256;
-        *out = (char*)realloc(*out, *out_cap);
-        if (!*out) return;
-    }
-    memcpy(*out + *out_len, src, n);
-    *out_len += n;
-    (*out)[*out_len] = '\0';
-}
-
-static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const char* src) {
-    if (!src) return;
-    cc__append_n(out, out_len, out_cap, src, strlen(src));
 }

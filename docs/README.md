@@ -3,13 +3,14 @@
 ## Getting Started
 
 - **[Getting Started](getting-started.md)** — Install, build, and run your first program
+- **[Cheatsheet](cheatsheet.md)** — Quick reference for common patterns
 - **[Debugging](debugging.md)** — VS Code / Cursor debugging setup
 
 ## Reference
 
 - **[Specification](../spec/concurrent-c-spec-complete.md)** — Full language specification
 - **[Standard Library](../spec/concurrent-c-stdlib-spec.md)** — Stdlib API reference
-- **[Examples](../examples/)** — Working code examples with explanations
+- **[Examples](../examples/)** — Working code examples with [learning path](../examples/README.md#learning-path-recommended-order)
 
 ## Building the Compiler
 
@@ -36,5 +37,5 @@ int main(void) {
 ```
 
 ```bash
-./cc/bin/ccc build run examples/hello.ccs
+./cc/bin/ccc run examples/hello.ccs
 ```

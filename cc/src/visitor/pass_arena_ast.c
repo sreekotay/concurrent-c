@@ -209,7 +209,9 @@ int cc__rewrite_arena_blocks_with_nodes(const CCASTRoot* root,
         size_t start = 0;
         if (n[i].col_start > 0) start = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_start, n[i].col_start);
         else {
-            if (!cc__find_substr_in_range(in_src, span_start, span_end, "@arena", 6, &start)) continue;
+            /* Support both @arena(...) and @arena_init(...). */
+            if (!cc__find_substr_in_range(in_src, span_start, span_end, "@arena_init", 10, &start) &&
+                !cc__find_substr_in_range(in_src, span_start, span_end, "@arena", 6, &start)) continue;
         }
 
         size_t end = 0;
@@ -228,6 +230,11 @@ int cc__rewrite_arena_blocks_with_nodes(const CCASTRoot* root,
 
         /* Find the matching '}' for this arena block. */
         size_t close = cc__find_matching_rbrace(in_src, in_len, brace, end);
+        /* Some stub-AST nodes (notably @arena_init) may have an imprecise line_end; fall back to
+           scanning the remainder of the file to find the matching brace. */
+        if (close == (size_t)-1) {
+            close = cc__find_matching_rbrace(in_src, in_len, brace, in_len);
+        }
         if (close == (size_t)-1 || close <= brace) continue;
 
         /* Indent = whitespace from line start to first non-ws. */

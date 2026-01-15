@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/text.h"
+
 typedef struct {
     int line_no;
     char* stmt; /* includes trailing ';' */
@@ -16,28 +18,11 @@ static void cc__free_defer_list(CCDeferStmt* xs, int n) {
     free(xs);
 }
 
-static int cc__is_ident_start(char c) { return (c == '_' || isalpha((unsigned char)c)); }
-static int cc__is_ident_char(char c) { return (c == '_' || isalnum((unsigned char)c)); }
-
-static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* s, size_t n) {
-    if (!out || !out_len || !out_cap || !s) return;
-    if (*out_len + n + 1 > *out_cap) {
-        size_t nc = *out_cap ? (*out_cap * 2) : 1024;
-        while (nc < *out_len + n + 1) nc *= 2;
-        char* nb = (char*)realloc(*out, nc);
-        if (!nb) return;
-        *out = nb;
-        *out_cap = nc;
-    }
-    memcpy(*out + *out_len, s, n);
-    *out_len += n;
-    (*out)[*out_len] = 0;
-}
-
-static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const char* s) {
-    if (!s) return;
-    cc__append_n(out, out_len, out_cap, s, strlen(s));
-}
+/* Local aliases for the shared helpers */
+#define cc__is_ident_start cc_is_ident_start
+#define cc__is_ident_char cc_is_ident_char
+#define cc__append_n cc_sb_append
+#define cc__append_str cc_sb_append_cstr
 
 static void cc__ensure_line_start(char** out, size_t* out_len, size_t* out_cap) {
     if (!out || !out_len || !out_cap) return;

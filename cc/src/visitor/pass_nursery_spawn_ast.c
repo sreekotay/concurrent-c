@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/text.h"
 #include "visitor/text_span.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -220,12 +221,9 @@ static void cc__append_fmt(char** out, size_t* out_len, size_t* out_cap, const c
     free(big);
 }
 
-static int cc__is_ident_start(char c) {
-    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-}
-static int cc__is_ident_char(char c) {
-    return cc__is_ident_start(c) || (c >= '0' && c <= '9');
-}
+/* Local aliases for the shared helpers */
+#define cc__is_ident_start cc_is_ident_start
+#define cc__is_ident_char cc_is_ident_char
 
 static size_t cc__skip_ws(const char* s, size_t i, size_t end) {
     while (i < end && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;

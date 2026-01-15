@@ -774,6 +774,7 @@ if (Request? r = active.get(id)) {
 <std/dns.cch>            // DNS resolution (dns_lookup)
 <std/server.cch>         // server_loop canonical shell
 <std/error.cch>          // Error enums (IoError, NetError, HttpError, etc.)
+<cc_atomic.cch>          // Portable atomic operations (runtime header, not std/)
 ```
 
 **Prelude Safety:** `<std/prelude.cch>` performs no implicit allocation or runtime initialization. It is a pure header include with zero hidden costs.
@@ -2062,6 +2063,181 @@ struct TlsSession {
     // iobuf is stack-allocated in async frame or part of struct
 };
 ```
+
+---
+
+### 6. Portable Atomics (`<cc_atomic.cch>`)
+
+#### 6.1 Overview
+
+`cc_atomic.cch` provides portable atomic operations across different compilers. This is a **runtime header** (not under `std/`) for users building concurrent data structures or needing explicit atomic memory operations.
+
+**Portability Matrix:**
+
+| Compiler | Backend | Thread-Safety |
+|----------|---------|---------------|
+| GCC/Clang (C11) | `<stdatomic.h>` | ✅ Full |
+| Older GCC/Clang | `__sync_*` builtins | ✅ Full |
+| TCC | Non-atomic fallback | ⚠️ Best-effort only |
+| Other | Non-atomic fallback | ⚠️ Best-effort only |
+
+**Design Note:** TCC does not support real atomics. When compiled with TCC as the final compiler, atomic operations fall back to non-atomic (volatile) operations. This is safe for single-threaded code but **not thread-safe** for concurrent access. For production concurrent code, use GCC or Clang.
+
+#### 6.2 Types
+
+```c
+#include "cc_atomic.cch"
+
+// Atomic integer types
+cc_atomic_int       // atomic int
+cc_atomic_uint      // atomic unsigned int
+cc_atomic_size      // atomic size_t
+cc_atomic_i64       // atomic int64_t
+cc_atomic_u64       // atomic uint64_t
+cc_atomic_intptr    // atomic intptr_t
+```
+
+All types are guaranteed to be at least as aligned as their non-atomic counterparts.
+
+#### 6.3 Operations
+
+```c
+// Atomic fetch-and-add: returns previous value, adds val
+T cc_atomic_fetch_add(T* ptr, T val);
+
+// Atomic fetch-and-subtract: returns previous value, subtracts val
+T cc_atomic_fetch_sub(T* ptr, T val);
+
+// Atomic load: returns current value
+T cc_atomic_load(T* ptr);
+
+// Atomic store: sets value
+void cc_atomic_store(T* ptr, T val);
+
+// Atomic compare-and-swap: if *ptr == *expected, set *ptr = desired, return true
+//                          else set *expected = *ptr, return false
+bool cc_atomic_cas(T* ptr, T* expected, T desired);
+```
+
+All operations use **sequential consistency** (`memory_order_seq_cst`) for simplicity and safety. Relaxed orderings are not exposed; if you need them, use the underlying compiler intrinsics directly.
+
+#### 6.4 Detection Macro
+
+```c
+// Defined to 1 if real atomics are available, 0 if using fallback
+#if CC_ATOMIC_HAVE_REAL_ATOMICS
+    // Using C11 atomics or __sync builtins — thread-safe
+#else
+    // Using non-atomic fallback — NOT thread-safe
+    #warning "Atomics unavailable; concurrent code may have data races"
+#endif
+```
+
+#### 6.5 Examples
+
+**Counter:**
+
+```c
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+cc_atomic_int g_counter = 0;
+
+void increment(void) {
+    cc_atomic_fetch_add(&g_counter, 1);
+}
+
+int get_count(void) {
+    return cc_atomic_load(&g_counter);
+}
+
+void reset_count(void) {
+    cc_atomic_store(&g_counter, 0);
+}
+```
+
+**Lock-free stack (simple example):**
+
+```c
+#include "cc_atomic.cch"
+
+struct Node {
+    int value;
+    struct Node* next;
+};
+
+cc_atomic_intptr g_stack_head = 0;  // NULL
+
+void push(struct Node* node) {
+    intptr_t old_head;
+    do {
+        old_head = cc_atomic_load(&g_stack_head);
+        node->next = (struct Node*)old_head;
+    } while (!cc_atomic_cas(&g_stack_head, &old_head, (intptr_t)node));
+}
+
+struct Node* pop(void) {
+    intptr_t old_head;
+    struct Node* node;
+    do {
+        old_head = cc_atomic_load(&g_stack_head);
+        node = (struct Node*)old_head;
+        if (!node) return NULL;
+    } while (!cc_atomic_cas(&g_stack_head, &old_head, (intptr_t)node->next));
+    return node;
+}
+```
+
+**Concurrent accumulator in spawned tasks:**
+
+```c
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+
+cc_atomic_int g_sum = 0;
+
+int main(void) {
+    @nursery {
+        for (int i = 0; i < 100; i++) {
+            int val = i;
+            spawn(() => {
+                cc_atomic_fetch_add(&g_sum, val);
+            });
+        }
+    }
+    
+    // Sum of 0..99 = 4950
+    printf("sum = %d (expected 4950)\n", cc_atomic_load(&g_sum));
+    return 0;
+}
+```
+
+#### 6.6 When to Use
+
+**Use `cc_atomic.cch` when:**
+- Building custom concurrent data structures (queues, stacks, counters)
+- Implementing lock-free algorithms
+- Coordinating between spawned tasks without channels
+- Porting existing C code that uses atomics
+
+**Prefer channels and nurseries when:**
+- Coordinating producer/consumer patterns → use `chan_send`/`chan_recv`
+- Aggregating results from tasks → use channels or return values
+- Synchronizing task completion → use `@nursery` structured concurrency
+
+**Avoid atomics when:**
+- A simple mutex would be clearer (atomics are hard to get right)
+- Channel-based coordination is sufficient
+- Compiling with TCC as final compiler (atomics degrade to non-atomic)
+
+#### 6.7 Relationship to Runtime
+
+The `cc_atomic.cch` header is used internally by:
+- `cc_arena.cch` — for thread-safe bump allocation
+- Channel implementation — for lock-free queue operations
+- Nursery implementation — for task counting
+
+Users can include it directly for their own needs. It has no dependencies beyond `<stdint.h>` and `<stddef.h>`.
 
 ---
 

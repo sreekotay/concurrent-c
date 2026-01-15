@@ -88,11 +88,11 @@ int main(void) {
     SenderArgs args2 = { .ch = ch2, .value = 99, .delay_ms = 20 };
     pthread_t t2;
     pthread_create(&t2, NULL, sender_thread, &args2);
-    int fut_err = cc_future_wait(&fut, NULL);
+    CCFutureStatus fut_st = cc_future_wait(&fut, NULL);
     pthread_join(t2, NULL);
     cc_future_free(&fut);
-    if (fut_err != 0 || ready_idx_fut != 0 || recv_val_fut != 99) {
-        fprintf(stderr, "future wait fut_err=%d ready_idx_fut=%zu recv_val_fut=%d\n", fut_err, ready_idx_fut, recv_val_fut);
+    if (fut_st != CC_FUTURE_READY || ready_idx_fut != 0 || recv_val_fut != 99) {
+        fprintf(stderr, "future wait fut_st=%d ready_idx_fut=%zu recv_val_fut=%d\n", (int)fut_st, ready_idx_fut, recv_val_fut);
         return 9;
     }
     cc_chan_free(ch2);

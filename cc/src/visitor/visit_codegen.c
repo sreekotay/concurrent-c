@@ -19,50 +19,25 @@
 #include "visitor/pass_nursery_spawn_ast.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
+#include "visitor/pass_match_syntax.h"
 #include "visitor/pass_with_deadline_syntax.h"
 #include "visitor/visitor_fileutil.h"
 #include "visitor/text_span.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
 #include "util/path.h"
+#include "util/text.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
 #endif
 
-static void cc__sb_append_local(char** buf, size_t* len, size_t* cap, const char* s, size_t n) {
-    if (!buf || !len || !cap || !s || n == 0) return;
-    size_t need = *len + n + 1;
-    if (need > *cap) {
-        size_t nc = (*cap ? *cap * 2 : 1024);
-        while (nc < need) nc *= 2;
-        char* nb = (char*)realloc(*buf, nc);
-        if (!nb) return;
-        *buf = nb;
-        *cap = nc;
-    }
-    memcpy(*buf + *len, s, n);
-    *len += n;
-    (*buf)[*len] = 0;
-}
-
-static void cc__sb_append_cstr_local(char** buf, size_t* len, size_t* cap, const char* s) {
-    if (!s) return;
-    cc__sb_append_local(buf, len, cap, s, strlen(s));
-}
-
-static int cc__is_ident_char_local2(char c) {
-    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
-}
-
-static int cc__is_ident_start_local2(char c) {
-    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-}
-
-static const char* cc__skip_ws_local2(const char* s) {
-    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
-    return s;
-}
+/* Local aliases for the shared helpers */
+#define cc__sb_append_local cc_sb_append
+#define cc__sb_append_cstr_local cc_sb_append_cstr
+#define cc__is_ident_char_local2 cc_is_ident_char
+#define cc__is_ident_start_local2 cc_is_ident_start
+#define cc__skip_ws_local2 cc_skip_ws
 
 static int cc__find_chan_decl_before(const char* src,
                                      size_t len,
@@ -131,6 +106,7 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                                       long long* out_cap_int,
                                       char* out_cap_expr, /* optional; caller-provided buffer for macro/expr capacity */
                                       size_t out_cap_expr_cap,
+                                      int* out_bp_mode, /* -1 unspecified, 0 block, 1 drop-new, 2 drop-old */
                                       int* out_mode, /* -1 unspecified, 0 async, 1 sync */
                                       char* out_topology, /* optional; caller-provided buffer */
                                       size_t out_topology_cap,
@@ -143,6 +119,7 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
     if (out_is_rx) *out_is_rx = 0;
     if (out_cap_int) *out_cap_int = -1;
     if (out_cap_expr && out_cap_expr_cap > 0) out_cap_expr[0] = 0;
+    if (out_bp_mode) *out_bp_mode = -1;
     if (out_mode) *out_mode = -1;
     if (out_topology && out_topology_cap) out_topology[0] = 0;
     if (out_has_topology) *out_has_topology = 0;
@@ -206,7 +183,7 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
             }
             continue;
         }
-        /* Alpha word: sync/async keywords OR identifier capacity (macro) */
+        /* Alpha word: sync/async keywords, backpressure tokens, OR identifier capacity (macro) */
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
             char word[128];
             size_t wn = 0;
@@ -217,10 +194,24 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                 t++;
             }
             word[wn] = 0;
-            if (strcmp(word, "sync") == 0) {
+            /* normalize to lowercase for matching */
+            char wlow[128];
+            size_t wl = wn < sizeof(wlow) - 1 ? wn : (sizeof(wlow) - 1);
+            for (size_t qi = 0; qi < wl; qi++) {
+                char ch = word[qi];
+                if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+                wlow[qi] = ch;
+            }
+            wlow[wl] = 0;
+
+            if (strcmp(wlow, "sync") == 0) {
                 if (out_mode) *out_mode = 1;
-            } else if (strcmp(word, "async") == 0) {
+            } else if (strcmp(wlow, "async") == 0) {
                 if (out_mode) *out_mode = 0;
+            } else if (strcmp(wlow, "drop") == 0 || strcmp(wlow, "dropnew") == 0 || strcmp(wlow, "drop_new") == 0) {
+                if (out_bp_mode) *out_bp_mode = 1;
+            } else if (strcmp(wlow, "dropold") == 0 || strcmp(wlow, "drop_old") == 0) {
+                if (out_bp_mode) *out_bp_mode = 2;
             } else {
                 /* Identifier: treat as capacity expression (macro) if we haven't seen one yet */
                 if (out_cap_int && *out_cap_int == -1 && 
@@ -368,6 +359,7 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 int tx_mode=-1, rx_mode=-1;
                 char tx_topo[8]; char rx_topo[8];
                 char tx_cap_expr[128]; char rx_cap_expr[128];
+                int tx_bp=-1, rx_bp=-1;
                 int tx_has_topo=0, rx_has_topo=0;
                 int tx_unknown=0, rx_unknown=0;
                 int dummy_allow=0;
@@ -375,11 +367,13 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 (void)cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr,
                                                   &tx_is_tx, &tx_is_rx, &tx_cap,
                                                   tx_cap_expr, sizeof(tx_cap_expr),
+                                                  &tx_bp,
                                                   &tx_mode, tx_topo, sizeof(tx_topo), &tx_has_topo, &tx_unknown,
                                                   &dummy_allow, &dummy_sz);
                 (void)cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr,
                                                   &rx_is_tx, &rx_is_rx, &rx_cap,
                                                   rx_cap_expr, sizeof(rx_cap_expr),
+                                                  &rx_bp,
                                                   &rx_mode, rx_topo, sizeof(rx_topo), &rx_has_topo, &rx_unknown,
                                                   &dummy_allow, &dummy_sz);
 
@@ -411,6 +405,16 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 if (tx_has_topo != rx_has_topo || (tx_has_topo && strcmp(tx_topo, rx_topo) != 0)) {
                     char rel[1024];
                     fprintf(stderr, "CC: error: channel_pair requires matching topology token on tx/rx (e.g. 1:1, 1:N, N:1, N:N) at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+                /* Backpressure: must match, default=block. */
+                if (tx_bp == -1) tx_bp = 0;
+                if (rx_bp == -1) rx_bp = 0;
+                if (tx_bp != rx_bp) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair requires matching backpressure token on tx/rx (e.g. Drop, DropOld) at %s:%d:%d\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col);
                     return NULL;
@@ -464,15 +468,20 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                     else if (strcmp(tx_topo, "N:N") == 0) topo_enum = "CC_CHAN_TOPO_N_N";
                 }
 
+                const char* bp_enum = "CC_CHAN_MODE_BLOCK";
+                if (tx_bp == 1) bp_enum = "CC_CHAN_MODE_DROP_NEW";
+                else if (tx_bp == 2) bp_enum = "CC_CHAN_MODE_DROP_OLD";
+
                 /* Emit up to call_start, then replace call statement. */
                 cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                 char repl[1024];
                 snprintf(repl, sizeof(repl),
-                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%s, CC_CHAN_MODE_BLOCK, %d, %s, %d, %s, &%s, &%s); "
+                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%s, %s, %d, %s, %d, %s, &%s, &%s); "
                          "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
                          (tx_mode == 1) ? "sync" : "async",
                          tx_has_topo ? tx_topo : "<default>",
                          cap_expr,
+                         bp_enum,
                          allow_take ? 1 : 0,
                          elem_sz_expr,
                          (tx_mode == 1) ? 1 : 0,  /* is_sync */
@@ -609,9 +618,7 @@ static char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx, const c
     return out;
 }
 
-static int cc__is_ident_char_local(char c) {
-    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
-}
+#define cc__is_ident_char_local cc_is_ident_char
 
 static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* out_qual, size_t out_cap) {
     if (!s || !out_qual || out_cap == 0) return ty_start;
@@ -1372,6 +1379,24 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Rewrite `@match { ... }` into valid C before any node-based rewrites. */
+    if (src_ufcs && src_ufcs_len) {
+        char* rewritten = NULL;
+        size_t rewritten_len = 0;
+        int r = cc__rewrite_match_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        if (r < 0) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return EINVAL;
+        }
+        if (r > 0 && rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = rewritten_len;
+        }
+    }
+
     /* Produced by the closure-literal AST pass (emitted into the output TU). */
     char* closure_protos = NULL;
     size_t closure_protos_len = 0;
@@ -1408,7 +1433,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     if (src_ufcs && root && root->nodes && root->node_count > 0 && ctx->symbols) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
-        if (cc__rewrite_autoblocking_calls_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
+        int r = cc__rewrite_autoblocking_calls_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
+        if (r < 0) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (r > 0) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
             src_ufcs_len = rewritten_len;
@@ -1462,9 +1496,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(src_all);
             return EINVAL;
         }
-
-        /* Autoblock was already run on the initial AST (before reparse), so UFCS-rewritten `chan_*`
-           calls should have been processed there. No need to re-run autoblock here. */
 
         /* Lower `channel_pair(&tx, &rx);` BEFORE channel type rewrite (it needs `[~]` patterns). */
         {

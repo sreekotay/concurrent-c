@@ -65,6 +65,16 @@ static int cc__ends_with(const char* s, const char* suf) {
     return memcmp(s + (n - m), suf, m) == 0;
 }
 
+// Detect if the compiler is TCC (doesn't support -MMD/-MF/-MT or section flags)
+static int cc__is_tcc(const char* cc_bin) {
+    if (!cc_bin) return 0;
+    // Check if path ends with "tcc" or contains "/tcc"
+    if (cc__ends_with(cc_bin, "tcc")) return 1;
+    if (cc__ends_with(cc_bin, "tcc.exe")) return 1;
+    if (strstr(cc_bin, "/tcc") || strstr(cc_bin, "\\tcc")) return 1;
+    return 0;
+}
+
 static void cc__append_flag(char* buf, size_t cap, const char* prefix, const char* val) {
     if (!buf || cap == 0 || !val || !val[0]) return;
     if (prefix && prefix[0]) {
@@ -335,6 +345,7 @@ static void cc_init_paths(const char* argv0) {
 static void usage(const char *prog) {
     fprintf(stderr, "Usage:\n");
     fprintf(stderr, "  %s [options] <input.ccs> [output]\n", prog);
+    fprintf(stderr, "  %s run <input.ccs> [-- <args...>]      (shorthand for build run)\n", prog);
     fprintf(stderr, "  %s build [options] <input.ccs> <output>\n", prog);
     fprintf(stderr, "  %s build run [options] <input.ccs> [-o out/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "  %s clean [--out-dir DIR] [--bin-dir DIR] [--all]\n", prog);
@@ -402,7 +413,7 @@ static int cc__clean_artifacts(int all) {
 
 static void usage_build(const char* prog) {
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s build [options] <input.ccs> [output]\n", prog);
+    fprintf(stderr, "  %s build [step] [options] <input.ccs> [output]\n", prog);
     fprintf(stderr, "  %s build run [options] <input.ccs> [-o bin/<stem>] [-- <args...>]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Steps:\n");
@@ -412,6 +423,10 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "  list        List targets declared in build.cc\n");
     fprintf(stderr, "  graph       Print the target graph (JSON or DOT)\n");
     fprintf(stderr, "  install     Build then install the produced binary (requires CC_INSTALL)\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Build flavors:\n");
+    fprintf(stderr, "  -g, --debug     Add -O0 -g (and disable release dead-stripping)\n");
+    fprintf(stderr, "  -O, --release   Add -O2 -DNDEBUG and enable dead-stripping (smaller binaries)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Options: same as main help (use `%s --help` for full list)\n", prog);
     fprintf(stderr, "\n");
@@ -684,6 +699,8 @@ typedef struct {
     const char* ld_flags;
     const char* target_flag;  // target triple (forwarded as: --target <triple>)
     const char* sysroot_flag; // sysroot path (forwarded as: --sysroot <path>)
+    int opt_release; // enable size/perf oriented defaults (dead-strip, -DNDEBUG)
+    int opt_debug;   // enable debug oriented defaults (-g, lower opt)
     int no_runtime;
     int keep_c;
     int verbose;
@@ -707,6 +724,13 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                                 const char* extra_include_dir,
                                 const char* target_part,
                                 const char* sysroot_part);
+
+static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
+                                 const char* target_part,
+                                 const char* sysroot_part,
+                                 char* out_runtime_path,
+                                 size_t out_runtime_cap,
+                                 int* out_reused);
 
 typedef struct {
     const char* c_out_path;
@@ -1504,8 +1528,6 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     }
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     const char* ccflags_env = getenv("CFLAGS");
-    const char* cppflags_env = getenv("CPPFLAGS");
-    char cmd[2048];
 
     // Compile to object (with incremental cache)
     char target_part[256];
@@ -1585,45 +1607,27 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     // Link to binary (with incremental cache)
     const char* ldflags_env = getenv("LDFLAGS");
     char link_cmd[2048];
-    // Optional runtime object
-    char runtime_obj[256];
+    // Optional runtime object (release builds may need a freshly-built runtime with section flags for dead-strip).
+    char runtime_obj[PATH_MAX];
+    runtime_obj[0] = '\0';
     int have_runtime = 0;
-    if (!opt->no_runtime) {
-        // Prefer prebuilt runtime object from the compiler build.
-        if (file_exists(g_cc_runtime_o)) {
-            strncpy(runtime_obj, g_cc_runtime_o, sizeof(runtime_obj));
-            runtime_obj[sizeof(runtime_obj) - 1] = '\0';
-            if (summary_out) {
-                summary_out->runtime_reused = 1;
-                summary_out->runtime_obj_path = g_cc_runtime_o;
-            }
-        } else {
-            snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_root);
-            snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
-                     cc_bin,
-                     ccflags_env ? ccflags_env : "",
-                     cppflags_env ? cppflags_env : "",
-                     target_part,
-                     sysroot_part,
-                     g_cc_include,
-                     g_cc_dir,
-                     g_repo_root,
-                     g_cc_runtime_c,
-                     runtime_obj);
-            if (opt->cc_flags && *opt->cc_flags) {
-                strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
-                strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
-            }
-            if (run_cmd(cmd, opt->verbose) != 0) {
-                return -1;
-            }
-            if (summary_out) {
-                summary_out->runtime_reused = 0;
-                summary_out->runtime_obj_path = "out/obj/runtime.o";
-            }
-        }
+    int runtime_reused = 0;
+    if (cc__ensure_runtime_obj(opt, target_part, sysroot_part, runtime_obj, sizeof(runtime_obj), &runtime_reused) != 0) return -1;
+    if (!opt->no_runtime && runtime_obj[0]) {
         have_runtime = 1;
+        if (summary_out) {
+            summary_out->runtime_reused = runtime_reused;
+            summary_out->runtime_obj_path = runtime_reused ? g_cc_runtime_o : runtime_obj;
+        }
     }
+
+    const char* link_extra = "";
+    int link_is_tcc = cc__is_tcc(cc_bin);
+#if defined(__APPLE__)
+    if (opt && opt->opt_release && !link_is_tcc) link_extra = "-Wl,-dead_strip";
+#elif defined(__linux__)
+    if (opt && opt->opt_release && !link_is_tcc) link_extra = "-Wl,--gc-sections";
+#endif
 
     char link_meta_path[PATH_MAX];
     cc__cache_key_paths(NULL, 0, link_meta_path, sizeof(link_meta_path), stem);
@@ -1645,6 +1649,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, ccflags_env);
         h = cc__fnv1a64_str(h, ldflags_env);
         h = cc__fnv1a64_str(h, final_ld_flags);
+        h = cc__fnv1a64_str(h, link_extra);
         h = cc__fnv1a64_str(h, target_part);
         h = cc__fnv1a64_str(h, sysroot_part);
         link_key = h;
@@ -1652,7 +1657,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (file_exists(opt->bin_out_path) && cc__read_u64_file(link_meta_path, &prev) == 0 && prev == link_key) {
             if (summary_out) { summary_out->reuse_link = 1; summary_out->did_link = 0; }
         } else {
-            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s -o %s",
+            snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s -o %s",
                      cc_bin,
                      ccflags_env ? ccflags_env : "",
                      opt->cc_flags ? opt->cc_flags : "",
@@ -1660,6 +1665,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                      sysroot_part,
                      ldflags_env ? ldflags_env : "",
                      final_ld_flags ? final_ld_flags : "",
+                      link_extra,
                      opt->obj_out_path,
                      have_runtime ? runtime_obj : "",
                      opt->bin_out_path);
@@ -1683,7 +1689,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (summary_out) { summary_out->reuse_link = 0; summary_out->did_link = 1; }
         }
     } else {
-        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s -o %s",
+        snprintf(link_cmd, sizeof(link_cmd), "%s %s %s %s %s %s %s %s %s %s -o %s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  opt->cc_flags ? opt->cc_flags : "",
@@ -1691,6 +1697,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  sysroot_part,
                  ldflags_env ? ldflags_env : "",
                  final_ld_flags ? final_ld_flags : "",
+                  link_extra,
                  opt->obj_out_path,
                  have_runtime ? runtime_obj : "",
                  opt->bin_out_path);
@@ -1770,18 +1777,33 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
+    int is_tcc = cc__is_tcc(cc_bin);
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s",
-             cc_bin,
-             ccflags_env ? ccflags_env : "",
-             cppflags_env ? cppflags_env : "",
-             target_part ? target_part : "",
-             sysroot_part ? sysroot_part : "",
-             dep_path ? dep_path : "/dev/null",
-             obj_path ? obj_path : "out.o",
-             g_cc_include,
-             g_cc_dir,
-             g_repo_root);
+
+    // TCC doesn't support -MMD/-MF/-MT dependency tracking flags
+    if (is_tcc) {
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s",
+                 cc_bin,
+                 ccflags_env ? ccflags_env : "",
+                 cppflags_env ? cppflags_env : "",
+                 target_part ? target_part : "",
+                 sysroot_part ? sysroot_part : "",
+                 g_cc_include,
+                 g_cc_dir,
+                 g_repo_root);
+    } else {
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s",
+                 cc_bin,
+                 ccflags_env ? ccflags_env : "",
+                 cppflags_env ? cppflags_env : "",
+                 target_part ? target_part : "",
+                 sysroot_part ? sysroot_part : "",
+                 dep_path ? dep_path : "/dev/null",
+                 obj_path ? obj_path : "out.o",
+                 g_cc_include,
+                 g_cc_dir,
+                 g_repo_root);
+    }
     if (extra_include_dir && *extra_include_dir) {
         // Add -I<dir> so generated C can include headers relative to the original source directory.
         char inc[PATH_MAX + 8];
@@ -1791,6 +1813,12 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     if (opt->cc_flags && *opt->cc_flags) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+    }
+    // For smaller release binaries, ensure the compiler emits per-function/data sections.
+    // This enables the linker to dead-strip unused runtime code.
+    // TCC doesn't support these flags.
+    if (opt && opt->opt_release && !is_tcc) {
+        strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
     }
     // Finally append the compilation inputs/outputs.
     if (c_path && *c_path) {
@@ -1816,7 +1844,14 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     if (out_reused) *out_reused = 0;
     if (opt->no_runtime) return 0;
 
-    if (file_exists(g_cc_runtime_o)) {
+    const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
+    int is_tcc = cc__is_tcc(cc_bin);
+
+    // NOTE: For release builds, don't reuse the prebuilt monolithic runtime object.
+    // It may not be compiled with -ffunction-sections/-fdata-sections, which prevents
+    // the linker from dead-stripping unused runtime code.
+    // NOTE: For TCC, don't reuse prebuilt - TCC can't link Mach-O/ELF from other compilers.
+    if (!opt->opt_release && !is_tcc && file_exists(g_cc_runtime_o)) {
         strncpy(out_runtime_path, g_cc_runtime_o, out_runtime_cap);
         out_runtime_path[out_runtime_cap - 1] = '\0';
         if (out_reused) *out_reused = 1;
@@ -1826,7 +1861,6 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     // Build a runtime object under out/obj/runtime.o
     char runtime_obj[PATH_MAX];
     snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_root);
-    const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
     char cmd[2048];
@@ -1845,6 +1879,10 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
     }
+    // TCC doesn't support -ffunction-sections/-fdata-sections
+    if (opt && opt->opt_release && !cc__is_tcc(cc_bin)) {
+        strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
+    }
     if (run_cmd(cmd, opt->verbose) != 0) return -1;
     strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
     out_runtime_path[out_runtime_cap - 1] = '\0';
@@ -1861,6 +1899,7 @@ static int cc__link_many(const CCBuildOptions* opt,
                          const char* bin_out_path) {
     const char* cc_bin = pick_cc_bin(opt->cc_bin_override);
     const char* ldflags_env = getenv("LDFLAGS");
+    int is_tcc = cc__is_tcc(cc_bin);
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "%s %s %s %s %s",
              cc_bin,
@@ -1868,6 +1907,14 @@ static int cc__link_many(const CCBuildOptions* opt,
              sysroot_part ? sysroot_part : "",
              ldflags_env ? ldflags_env : "",
              opt->ld_flags ? opt->ld_flags : "");
+    // TCC doesn't support -Wl,-dead_strip or -Wl,--gc-sections
+    if (opt && opt->opt_release && !is_tcc) {
+#if defined(__APPLE__)
+        strncat(cmd, " -Wl,-dead_strip", sizeof(cmd) - strlen(cmd) - 1);
+#elif defined(__linux__)
+        strncat(cmd, " -Wl,--gc-sections", sizeof(cmd) - strlen(cmd) - 1);
+#endif
+    }
     for (size_t i = 0; i < obj_count; ++i) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, obj_paths[i], sizeof(cmd) - strlen(cmd) - 1);
@@ -1948,6 +1995,8 @@ static int run_build_mode(int argc, char** argv) {
     const char* sysroot_flag = NULL;
     const char* out_dir = NULL;
     const char* bin_dir = NULL;
+    int opt_release = 0;
+    int opt_debug = 0;
     int help = 0;
     int dump_consts = 0;
     int dry_run = 0;
@@ -2012,6 +2061,8 @@ static int run_build_mode(int argc, char** argv) {
             help = 1;
             continue;
         }
+        if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-O") == 0) { opt_release = 1; continue; }
+        if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
@@ -2097,11 +2148,25 @@ static int run_build_mode(int argc, char** argv) {
         pos_args[pos_count++] = argv[i];
     }
 
+    // If both are provided, debug wins (safe default).
+    if (opt_release && opt_debug) opt_release = 0;
+
+    // Inject flavor defaults early (before we fold cc_flags + -D defines).
+    // - release: size-friendly dead-stripping (link) + NDEBUG (compile)
+    // - debug:   easy debugging
+    const char* flavor_cc = NULL;
+    if (opt_debug) flavor_cc = "-O0 -g";
+    else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
+
     // Build combined cc_flags that includes both --cc-flags and -D defines
     // This ensures defines like -DCC_ENABLE_HTTP=1 are passed to the C compiler
     static char combined_cc_flags[2048];
     combined_cc_flags[0] = '\0';
+    if (flavor_cc && flavor_cc[0]) {
+        strncat(combined_cc_flags, flavor_cc, sizeof(combined_cc_flags) - 1);
+    }
     if (cc_flags && cc_flags[0]) {
+        if (combined_cc_flags[0]) strncat(combined_cc_flags, " ", sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
         strncat(combined_cc_flags, cc_flags, sizeof(combined_cc_flags) - 1);
     }
     for (size_t i = 0; i < cli_count; ++i) {
@@ -2425,6 +2490,8 @@ static int run_build_mode(int argc, char** argv) {
                 .ld_flags = ld_flags,
                 .target_flag = target_flag ? target_flag : "",
                 .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+                .opt_release = opt_release,
+                .opt_debug = opt_debug,
                 .no_runtime = no_runtime,
                 .keep_c = keep_c,
                 .verbose = verbose,
@@ -2652,6 +2719,8 @@ static int run_build_mode(int argc, char** argv) {
             .ld_flags = ld_flags,
             .target_flag = target_flag ? target_flag : "",
             .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+            .opt_release = opt_release,
+            .opt_debug = opt_debug,
             .no_runtime = no_runtime,
             .keep_c = keep_c,
             .verbose = verbose,
@@ -2964,6 +3033,8 @@ static int run_build_mode(int argc, char** argv) {
         .ld_flags = ld_flags,
         .target_flag = target_flag ? target_flag : "",
         .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+        .opt_release = opt_release,
+        .opt_debug = opt_debug,
         .no_runtime = no_runtime,
         .keep_c = keep_c,
         .verbose = verbose,
@@ -3014,6 +3085,10 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 0;
     }
+    if (argc >= 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
+        printf("ccc 0.1.0-dev\n");
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "clean") == 0) {
         int all = 0;
         const char* out_dir = NULL;
@@ -3044,6 +3119,20 @@ int main(int argc, char **argv) {
         return run_build_mode(argc, argv) == 0 ? 0 : 1;
     }
 
+    /* `ccc run <file>` is shorthand for `ccc build run <file>` */
+    if (argc >= 2 && strcmp(argv[1], "run") == 0) {
+        /* Rewrite argv: insert "build" before "run" */
+        const char** new_argv = (const char**)malloc((argc + 2) * sizeof(char*));
+        if (!new_argv) { fprintf(stderr, "cc: out of memory\n"); return 1; }
+        new_argv[0] = argv[0];
+        new_argv[1] = "build";
+        for (int i = 1; i < argc; i++) new_argv[i + 1] = argv[i];
+        new_argv[argc + 1] = NULL;
+        int ret = run_build_mode(argc + 1, (char**)new_argv) == 0 ? 0 : 1;
+        free(new_argv);
+        return ret;
+    }
+
     // Default mode: cc [options] <inputs...> [-o out/bin/<stem>] [--obj-out ...]
     const int max_pos = 64;
     const char* pos_args[max_pos];
@@ -3059,6 +3148,8 @@ int main(int argc, char **argv) {
     const char* sysroot_flag = NULL;
     const char* out_dir = NULL;
     const char* bin_dir = NULL;
+    int opt_release = 0;
+    int opt_debug = 0;
     int no_build = 0;
     int no_runtime = 0;
     int dump_consts = 0;
@@ -3072,6 +3163,8 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
         if (strcmp(argv[i], "--compile") == 0) { mode = CC_MODE_COMPILE; continue; }
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
+        if (strcmp(argv[i], "--release") == 0 || strcmp(argv[i], "-O") == 0) { opt_release = 1; continue; }
+        if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
         if (strcmp(argv[i], "--build-file") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --build-file requires a path\n"); usage(argv[0]); return 1; }
             build_override = argv[++i];
@@ -3135,10 +3228,26 @@ int main(int argc, char **argv) {
         pos_args[pos_count++] = argv[i];
     }
 
+    // If both are provided, debug wins (safe default).
+    if (opt_release && opt_debug) opt_release = 0;
+
     if (pos_count == 0) {
         usage(argv[0]);
         return 1;
     }
+
+    // Flavor defaults (non-build mode): apply before any user-provided --cc-flags so users can override.
+    const char* flavor_cc = NULL;
+    if (opt_debug) flavor_cc = "-O0 -g";
+    else if (opt_release) flavor_cc = "-O2 -DNDEBUG";
+    static char combined_cc_flags_main[2048];
+    combined_cc_flags_main[0] = '\0';
+    if (flavor_cc && flavor_cc[0]) strncat(combined_cc_flags_main, flavor_cc, sizeof(combined_cc_flags_main) - 1);
+    if (cc_flags && cc_flags[0]) {
+        if (combined_cc_flags_main[0]) strncat(combined_cc_flags_main, " ", sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
+        strncat(combined_cc_flags_main, cc_flags, sizeof(combined_cc_flags_main) - strlen(combined_cc_flags_main) - 1);
+    }
+    cc_flags = combined_cc_flags_main[0] ? combined_cc_flags_main : cc_flags;
 
     cc_set_out_dir(out_dir, bin_dir);
     if (ensure_out_dir() != 0) {
@@ -3183,6 +3292,8 @@ int main(int argc, char **argv) {
             .ld_flags = ld_flags,
             .target_flag = target_flag ? target_flag : "",
             .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+            .opt_release = opt_release,
+            .opt_debug = opt_debug,
             .no_runtime = no_runtime,
             .keep_c = keep_c,
             .verbose = verbose,
@@ -3327,6 +3438,8 @@ int main(int argc, char **argv) {
         .ld_flags = ld_flags,
         .target_flag = target_flag ? target_flag : "",
         .sysroot_flag = sysroot_flag ? sysroot_flag : "",
+        .opt_release = opt_release,
+        .opt_debug = opt_debug,
         .no_runtime = no_runtime,
         .keep_c = keep_c,
         .verbose = verbose,

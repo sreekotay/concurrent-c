@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/text.h"
 #include "visitor/text_span.h"
 #include "visitor/visitor.h"
 
@@ -136,90 +137,24 @@ static size_t cc__node_end_off(const char* src, size_t len, const NodeView* nd) 
     return cc__offset_of_line_col_1based(src, len, nd->line_end, nd->col_end > 0 ? nd->col_end : 1);
 }
 
-static int cc__is_ident_start(char c) {
-    return (c == '_') || ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-}
+/* Local aliases for the shared helpers */
+#define cc__is_ident_start cc_is_ident_start
+#define cc__is_ident_char cc_is_ident_char
+#define cc__range_contains_token cc_range_contains_token
+#define cc__strndup_trim_ws cc_strndup_trim_ws
+#define cc__skip_ws cc_skip_ws
+#define cc__sb_append_cstr cc_sb_append_cstr
+#define cc__dup_slice cc_dup_slice
 
-static int cc__is_ident_char(char c) {
-    return cc__is_ident_start(c) || (c >= '0' && c <= '9');
-}
-
-static int cc__range_contains_token(const char* s, size_t n, const char* tok) {
-    if (!s || !tok) return 0;
-    size_t tn = strlen(tok);
-    if (tn == 0 || n < tn) return 0;
-    for (size_t i = 0; i + tn <= n; i++) {
-        if (memcmp(s + i, tok, tn) != 0) continue;
-        if (i > 0 && cc__is_ident_char(s[i - 1])) continue;
-        if (i + tn < n && cc__is_ident_char(s[i + tn])) continue;
-        return 1;
-    }
-    return 0;
-}
-
-static char* cc__strndup_trim_ws(const char* s, size_t n) {
-    if (!s) return NULL;
-    size_t i = 0;
-    while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
-    size_t j = n;
-    while (j > i && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\n' || s[j - 1] == '\r')) j--;
-    size_t m = (j > i) ? (j - i) : 0;
-    char* out = (char*)malloc(m + 1);
-    if (!out) return NULL;
-    if (m) memcpy(out, s + i, m);
-    out[m] = 0;
-    return out;
-}
-
-static const char* cc__skip_ws(const char* p) {
-    while (p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    return p;
-}
-
-static void cc__sb_append_vfmt(char** io_s, size_t* io_len, size_t* io_cap, const char* fmt, va_list ap) {
-    if (!io_s || !io_len || !io_cap || !fmt) return;
-    if (!*io_s) {
-        *io_cap = 256;
-        *io_s = (char*)malloc(*io_cap);
-        if (!*io_s) return;
-        (*io_s)[0] = 0;
-        *io_len = 0;
-    }
-    for (;;) {
-        size_t avail = (*io_cap > *io_len) ? (*io_cap - *io_len) : 0;
-        va_list ap2;
-        va_copy(ap2, ap);
-        int n = vsnprintf(*io_s + *io_len, avail, fmt, ap2);
-        va_end(ap2);
-        if (n < 0) return;
-        if ((size_t)n < avail) { *io_len += (size_t)n; return; }
-        *io_cap = (*io_cap ? *io_cap * 2 : 256) + (size_t)n + 16;
-        *io_s = (char*)realloc(*io_s, *io_cap);
-        if (!*io_s) return;
-    }
-}
-
+/* Local variadic wrapper using shared cc_sb_append_vfmt */
 static void cc__sb_append_fmt(char** io_s, size_t* io_len, size_t* io_cap, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    cc__sb_append_vfmt(io_s, io_len, io_cap, fmt, ap);
+    cc_sb_append_vfmt(io_s, io_len, io_cap, fmt, ap);
     va_end(ap);
 }
 
-static void cc__sb_append_cstr(char** io_s, size_t* io_len, size_t* io_cap, const char* s) {
-    if (!s) return;
-    cc__sb_append_fmt(io_s, io_len, io_cap, "%s", s);
-}
-
-static char* cc__dup_slice(const char* b, size_t s, size_t e) {
-    if (!b || e <= s) return strdup("");
-    size_t n = e - s;
-    char* out = (char*)malloc(n + 1);
-    if (!out) return NULL;
-    memcpy(out, b + s, n);
-    out[n] = 0;
-    return out;
-}
+/* Keep local implementations of cc__find_matching_paren/brace to avoid subtle behavioral changes. */
 
 static int cc__find_matching_paren(const char* b, size_t bl, size_t lpar, size_t* out_rpar) {
     if (!b || lpar >= bl || b[lpar] != '(') return 0;

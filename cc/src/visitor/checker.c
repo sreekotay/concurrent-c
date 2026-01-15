@@ -6,6 +6,7 @@
 #include <ctype.h>
 
 #include "util/path.h"
+#include "util/text.h"
 
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
 // populate flags on expressions and enforce send_take eligibility.
@@ -181,12 +182,9 @@ static void cc__emit_note(const CCCheckerCtx* ctx, const StubNodeView* n, const 
     fprintf(stderr, "%s:%d:%d: note: %s\n", path, line, col, msg);
 }
 
-static int cc__is_ident_start_ch(char c) {
-    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-}
-static int cc__is_ident_ch(char c) {
-    return cc__is_ident_start_ch(c) || (c >= '0' && c <= '9');
-}
+/* Local aliases for the shared helpers */
+#define cc__is_ident_start_ch cc_is_ident_start
+#define cc__is_ident_ch cc_is_ident_char
 
 static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, const char* chname) {
     if (!line || len == 0 || !chname || !chname[0]) return 0;
