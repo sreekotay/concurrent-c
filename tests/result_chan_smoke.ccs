@@ -1,0 +1,42 @@
+/*
+ * Result channel smoke test: channels carrying T!E types.
+ */
+#include "std/prelude.cch"
+#include <stdio.h>
+#include <assert.h>
+#include <errno.h>
+
+// Use built-in CCError for the error type
+CCResult_int_CCError[~4 >] results_tx;
+CCResult_int_CCError[~4 <] results_rx;
+
+int main(void) {
+    channel_pair(&results_tx, &results_rx);
+    
+    // Send a success
+    CCResult_int_CCError ok_result = cc_ok_CCResult_int_CCError(42);
+    results_tx.send(ok_result);
+    
+    // Send an error
+    CCError err = cc_error(CC_ERR_PARSE, "bad input");
+    CCResult_int_CCError err_result = cc_err_CCResult_int_CCError(err);
+    results_tx.send(err_result);
+    
+    results_tx.close();
+    
+    // Receive
+    CCResult_int_CCError r1 = {0};
+    int e1 = results_rx.recv(&r1);
+    assert(e1 == 0 && r1.ok && "first result should be ok");
+    assert(r1.u.value == 42);
+    
+    CCResult_int_CCError r2 = {0};
+    int e2 = results_rx.recv(&r2);
+    assert(e2 == 0 && !r2.ok && "second result should be error");
+    assert(r2.u.error.kind == CC_ERR_PARSE);
+    
+    results_tx.free();
+    
+    printf("result channel smoke: PASS\n");
+    return 0;
+}

@@ -1,0 +1,42 @@
+/*
+ * Test: Nested try expressions for error propagation
+ */
+#include "std/prelude.cch"
+
+int!CCError level3(int x) {
+    if (x < 0) {
+        return cc_err_CCResult_int_CCError(cc_error(CC_ERR_INVALID_ARG, "negative"));
+    }
+    return cc_ok_CCResult_int_CCError(x * 3);
+}
+
+int!CCError level2(int x) {
+    int v = try level3(x);
+    return cc_ok_CCResult_int_CCError(v + 2);
+}
+
+int!CCError level1(int x) {
+    int v = try level2(x);
+    return cc_ok_CCResult_int_CCError(v + 1);
+}
+
+int main(void) {
+    /* Success case: 5 -> 15 -> 17 -> 18 */
+    int!CCError r1 = level1(5);
+    if (!r1.ok || r1.u.value != 18) {
+        printf("FAIL: expected 18, got %s\n", r1.ok ? "wrong value" : "error");
+        return 1;
+    }
+    printf("SUCCESS: nested try (5) = %d\n", r1.u.value);
+    
+    /* Error propagates through all levels */
+    int!CCError r2 = level1(-1);
+    if (r2.ok) {
+        printf("FAIL: expected error\n");
+        return 1;
+    }
+    printf("SUCCESS: error propagated: %s\n", r2.u.error.message);
+    
+    printf("All nested try tests passed!\n");
+    return 0;
+}

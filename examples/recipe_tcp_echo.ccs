@@ -1,0 +1,95 @@
+/*
+ * Recipe: TCP Echo Server
+ *
+ * Demonstrates:
+ *   - TCP socket primitives (listen, accept, read, write)
+ *   - Connection handling with @nursery
+ *   - Graceful cleanup
+ *
+ * Run:
+ *   ./cc/bin/ccc build run examples/recipe_tcp_echo.ccs
+ *
+ * Test with:
+ *   echo "Hello" | nc localhost 9000
+ */
+#include "cc_runtime.cch"
+#include "std/net.cch"
+#include <stdio.h>
+
+#define PORT "127.0.0.1:9000"
+#define MAX_CONNECTIONS 4
+
+/* Handle a single client connection.
+ * Echoes back everything received until client closes. */
+void handle_client(CCSocket client) {
+    CCArena arena = {0};
+    char buf[4096];
+    if (cc_arena_init(&arena, buf, sizeof(buf)) != 0) {
+        cc_socket_close(&client);
+        return;
+    }
+
+    CCNetError err = CC_NET_OK;
+
+    /* Get peer address for logging */
+    CCSlice peer = cc_socket_peer_addr(&client, &arena, &err);
+    if (err == CC_NET_OK) {
+        printf("client connected: %.*s\n", (int)peer.len, (char*)peer.ptr);
+    }
+
+    /* Echo loop */
+    while (1) {
+        cc_arena_reset(&arena);
+        CCSlice data = cc_socket_read(&client, &arena, 1024, &err);
+        if (err != CC_NET_OK) {
+            if (err == CC_NET_CONNECTION_CLOSED) {
+                printf("client disconnected\n");
+            } else {
+                printf("read error: %d\n", err);
+            }
+            break;
+        }
+        if (data.len == 0) {
+            printf("client disconnected (EOF)\n");
+            break;
+        }
+
+        printf("received %zu bytes, echoing...\n", data.len);
+        size_t written = cc_socket_write(&client, data.ptr, data.len, &err);
+        if (err != CC_NET_OK) {
+            printf("write error: %d\n", err);
+            break;
+        }
+        (void)written;
+    }
+
+    cc_socket_close(&client);
+}
+
+int main(void) {
+    CCNetError err = CC_NET_OK;
+
+    /* Start listening */
+    CCListener ln = cc_tcp_listen(PORT, sizeof(PORT) - 1, &err);
+    if (err != CC_NET_OK) {
+        printf("listen error: %d\n", err);
+        return 1;
+    }
+    printf("listening on %s\n", PORT);
+
+    /* Accept loop - handle a few connections for demo */
+    for (int i = 0; i < MAX_CONNECTIONS; i++) {
+        CCSocket client = cc_listener_accept(&ln, &err);
+        if (err != CC_NET_OK) {
+            printf("accept error: %d\n", err);
+            break;
+        }
+
+        /* In a real server, spawn into nursery. For simplicity, handle inline. */
+        handle_client(client);
+    }
+
+    cc_listener_close(&ln);
+    printf("server done\n");
+    return 0;
+}

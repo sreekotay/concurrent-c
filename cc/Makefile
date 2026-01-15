@@ -4,9 +4,15 @@ TCC_EXT ?= 1
 TCC_INC ?= ../third_party/tcc
 TCC_LIB ?= ../third_party/tcc
 CC_ENABLE_ASYNC ?= 0
+CC_ENABLE_TLS ?= 0
+BEARSSL_DIR ?= ../third_party/bearssl
 CFLAGS_COMMON := -Wall -Wextra -Isrc -Iinclude
 ifeq ($(CC_ENABLE_ASYNC),1)
   CFLAGS_COMMON += -DCC_ENABLE_ASYNC
+endif
+ifeq ($(CC_ENABLE_TLS),1)
+  CFLAGS_COMMON += -DCC_ENABLE_TLS -I$(BEARSSL_DIR)/inc
+  LDLIBS += $(BEARSSL_DIR)/build/libbearssl.a
 endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g

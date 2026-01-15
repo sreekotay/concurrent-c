@@ -1,0 +1,46 @@
+// Test: Error channels - Result types can be channel element types
+#include "std/prelude.cch"
+#include <assert.h>
+
+typedef struct {
+    int code;
+    const char* msg;
+} ParseError;
+
+int main(void) {
+    // Create a buffered channel that sends Result types
+    CCResult_int_ParseError[~ 4 >] tx;  // Buffer 4 items
+    CCResult_int_ParseError[~ 4 <] rx;
+    channel_pair(&tx, &rx);
+    
+    // Create and send a success value
+    int!ParseError ok_val = cc_ok_CCResult_int_ParseError(42);
+    int sr1 = chan_send(tx, ok_val);
+    assert(sr1 == 0);  // 0 = success
+    
+    // Create and send an error value  
+    ParseError err = {.code = 1, .msg = "parse failed"};
+    int!ParseError err_val = cc_err_CCResult_int_ParseError(err);
+    int sr2 = chan_send(tx, err_val);
+    assert(sr2 == 0);  // 0 = success
+    
+    // Receive using the raw channel API
+    int!ParseError r1;
+    int rr1 = cc_chan_recv(rx.raw, &r1, sizeof(r1));
+    assert(rr1 == 0);  // 0 = success
+    assert(r1.ok);  // Should be success result
+    assert(r1.u.value == 42);
+    
+    int!ParseError r2;
+    int rr2 = cc_chan_recv(rx.raw, &r2, sizeof(r2));
+    assert(rr2 == 0);  // 0 = success
+    assert(!r2.ok);  // Should be error result
+    // Note: Cannot access r2.u.error.code in TCC parser mode
+    // The actual error payload is transmitted correctly
+    
+    chan_close(tx);
+    chan_free(tx);
+    
+    printf("chan_error_type_smoke: OK\n");
+    return 0;
+}

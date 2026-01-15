@@ -5,9 +5,10 @@
  * Async variants require runtime scheduler integration.
  */
 
-#include "std/net.cch"
+#include "../include/std/net.cch"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -225,7 +226,7 @@ CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetEr
     CCSlice result = {0};
     *out_err = CC_NET_OK;
 
-    char* buf = cc_arena_alloc(arena, max_bytes);
+    char* buf = cc_arena_alloc(arena, max_bytes, 1);
     if (!buf) {
         *out_err = CC_NET_OTHER;
         return result;
@@ -309,7 +310,7 @@ CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err)
     }
 
     size_t len = strlen(buf);
-    char* copy = cc_arena_alloc(arena, len);
+    char* copy = cc_arena_alloc(arena, len, 1);
     if (!copy) {
         *out_err = CC_NET_OTHER;
         return result;
@@ -349,7 +350,7 @@ CCSlice cc_socket_local_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err
     }
 
     size_t len = strlen(buf);
-    char* copy = cc_arena_alloc(arena, len);
+    char* copy = cc_arena_alloc(arena, len, 1);
     if (!copy) {
         *out_err = CC_NET_OTHER;
         return result;
@@ -414,7 +415,7 @@ CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena* arena, size_t max_bytes
     CCUdpPacket pkt = {0};
     *out_err = CC_NET_OK;
 
-    char* buf = cc_arena_alloc(arena, max_bytes);
+    char* buf = cc_arena_alloc(arena, max_bytes, 1);
     if (!buf) {
         *out_err = CC_NET_OTHER;
         return pkt;
@@ -446,7 +447,7 @@ CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena* arena, size_t max_bytes
     }
 
     size_t addr_len = strlen(addr_buf);
-    char* addr_copy = cc_arena_alloc(arena, addr_len);
+    char* addr_copy = cc_arena_alloc(arena, addr_len, 1);
     if (addr_copy) {
         memcpy(addr_copy, addr_buf, addr_len);
         pkt.from_addr.ptr = addr_copy;
@@ -506,7 +507,7 @@ CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len,
     }
 
     /* Allocate array */
-    CCIpAddr* addrs = cc_arena_alloc(arena, count * sizeof(CCIpAddr));
+    CCIpAddr* addrs = cc_arena_alloc(arena, count * sizeof(CCIpAddr), _Alignof(CCIpAddr));
     if (!addrs) {
         freeaddrinfo(res);
         *out_err = CC_NET_OTHER;
@@ -549,7 +550,7 @@ CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena) {
     }
 
     size_t len = strlen(buf);
-    char* copy = cc_arena_alloc(arena, len);
+    char* copy = cc_arena_alloc(arena, len, 1);
     if (!copy) return result;
     memcpy(copy, buf, len);
 

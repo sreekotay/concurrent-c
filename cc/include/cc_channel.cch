@@ -42,6 +42,14 @@ typedef enum {
     CC_CHAN_MODE_DROP_OLD     // drop oldest and enqueue new when full
 } CCChanMode;
 
+typedef enum {
+    CC_CHAN_TOPO_DEFAULT = 0, // N:N - any senders, any receivers
+    CC_CHAN_TOPO_1_1 = 1,     // 1:1 - single producer, single consumer
+    CC_CHAN_TOPO_1_N = 2,     // 1:N - broadcast: one sender, many receivers
+    CC_CHAN_TOPO_N_1 = 3,     // N:1 - many senders, one receiver
+    CC_CHAN_TOPO_N_N = 4      // N:N - explicit (same as default)
+} CCChanTopology;
+
 // Create a channel with the given capacity (>=1). Returns NULL on failure.
 // allow_send_take enables zero-copy pointer payloads via send_take API.
 // Note: send_take is pointer-only (elem_size must be sizeof(void*)); by-value payloads are not eligible.
@@ -57,6 +65,30 @@ int cc_chan_pair_create(size_t capacity,
                         size_t elem_size,
                         CCChanTx* out_tx,
                         CCChanRx* out_rx);
+
+// Extended pair creation with explicit sync/async flag.
+// is_sync: true = sync channel (blocks OS thread), false = async channel (cooperative).
+int cc_chan_pair_create_ex(size_t capacity,
+                           CCChanMode mode,
+                           bool allow_send_take,
+                           size_t elem_size,
+                           bool is_sync,
+                           CCChanTx* out_tx,
+                           CCChanRx* out_rx);
+
+// Full pair creation with all options including topology.
+// topology: one of CC_CHAN_TOPO_* values.
+int cc_chan_pair_create_full(size_t capacity,
+                             CCChanMode mode,
+                             bool allow_send_take,
+                             size_t elem_size,
+                             bool is_sync,
+                             int topology,
+                             CCChanTx* out_tx,
+                             CCChanRx* out_rx);
+
+// Create a sync channel directly (blocking mode).
+CCChan* cc_chan_create_sync(size_t capacity, CCChanMode mode, bool allow_send_take);
 
 // Close the channel: unblocks waiters. Further sends fail with EPIPE.
 void cc_chan_close(CCChan* ch);

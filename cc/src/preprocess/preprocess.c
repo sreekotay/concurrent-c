@@ -503,14 +503,50 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
     return out;
 }
 
+/* Collect result types (T, E) pairs and generate declarations. */
+typedef struct {
+    char ok_type[128];
+    char err_type[128];
+    char mangled_ok[128];
+    char mangled_err[128];
+} CCResultTypePair;
+
+static CCResultTypePair cc__result_types[64];
+static size_t cc__result_type_count = 0;
+
+static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
+                                const char* mangled_ok, const char* mangled_err) {
+    /* Check for duplicates */
+    for (size_t i = 0; i < cc__result_type_count; i++) {
+        if (strcmp(cc__result_types[i].mangled_ok, mangled_ok) == 0 &&
+            strcmp(cc__result_types[i].mangled_err, mangled_err) == 0) {
+            return; /* Already have this type */
+        }
+    }
+    if (cc__result_type_count >= sizeof(cc__result_types)/sizeof(cc__result_types[0])) return;
+    CCResultTypePair* p = &cc__result_types[cc__result_type_count++];
+    if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
+    if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
+    memcpy(p->ok_type, ok, ok_len);
+    p->ok_type[ok_len] = 0;
+    memcpy(p->err_type, err, err_len);
+    p->err_type[err_len] = 0;
+    snprintf(p->mangled_ok, sizeof(p->mangled_ok), "%s", mangled_ok);
+    snprintf(p->mangled_err, sizeof(p->mangled_err), "%s", mangled_err);
+}
+
 /* Rewrite result types:
    - `T!E` -> `CCResult_T_E`
    The '!' must immediately follow a type name (no space).
-   We detect: identifier!identifier patterns. */
+   We detect: identifier!identifier patterns.
+   Also collects unique (T, E) pairs for later emission of CC_DECL_RESULT_SPEC calls. */
 static char* cc__rewrite_result_types(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
+    
+    /* Reset result type collection */
+    cc__result_type_count = 0;
     
     size_t i = 0;
     size_t last_emit = 0;
@@ -564,6 +600,10 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                             cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
                             
                             if (mangled_ok[0] && mangled_err[0]) {
+                                /* Collect this type pair for later declaration emission */
+                                cc__add_result_type(src + ty_start, ty_len, src + err_start, err_len,
+                                                    mangled_ok, mangled_err);
+                                
                                 /* Emit everything up to ty_start */
                                 cc__sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
                                 /* Emit CCResult_T_E */
@@ -585,6 +625,17 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     }
     
     if (last_emit < n) cc__sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    
+    /* Result type declarations are NOT emitted by the preprocessor.
+       Instead, they are handled by the visitor/codegen pass which runs after TCC parsing.
+       TCC parses using CC_PARSER_MODE which provides placeholder types.
+       The visitor then emits proper CC_DECL_RESULT_SPEC macros in the generated C.
+       
+       This avoids forward declaration ordering issues where the error type may not
+       be defined yet at the point where we'd need to emit the CC_DECL_RESULT_SPEC. */
+    (void)cc__result_type_count; /* Result types collected but not emitted here */
+    
+    (void)input_path;
     return out;
 }
 
@@ -894,6 +945,108 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
     return out;
 }
 
+// Rewrite @link("lib") directives into marker comments that the linker phase can extract.
+// Input:  @link("curl")
+// Output: a comment containing __CC_LINK__ curl
+char* cc__rewrite_link_directives(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        /* Track comment/string state */
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = 0;
+            i++;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && c2 == '/') {
+                i += 2;
+                in_block_comment = 0;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) { i += 2; continue; }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) { i += 2; continue; }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+
+        /* Check for comment/string start */
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        /* Look for @link("...") */
+        if (c == '@' && i + 5 < n && strncmp(src + i, "@link(", 6) == 0) {
+            size_t start = i;
+            i += 6;  /* skip @link( */
+            
+            /* Skip whitespace */
+            while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
+            
+            /* Expect " */
+            if (i < n && src[i] == '"') {
+                i++;  /* skip opening " */
+                size_t lib_start = i;
+                
+                /* Find closing " */
+                while (i < n && src[i] != '"' && src[i] != '\n') i++;
+                
+                if (i < n && src[i] == '"') {
+                    size_t lib_end = i;
+                    i++;  /* skip closing " */
+                    
+                    /* Skip whitespace and closing ) */
+                    while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
+                    if (i < n && src[i] == ')') {
+                        i++;  /* skip ) */
+                        
+                        /* Success! Emit up to @link, then emit marker comment */
+                        cc__sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
+                        
+                        // Emit marker: __CC_LINK__ libname 
+                        cc__sb_append_cstr(&out, &out_len, &out_cap, "/* __CC_LINK__ ");
+                        cc__sb_append(&out, &out_len, &out_cap, src + lib_start, lib_end - lib_start);
+                        cc__sb_append_cstr(&out, &out_len, &out_cap, " */");
+                        
+                        last_emit = i;
+                        continue;
+                    }
+                }
+            }
+            /* If parsing failed, continue from after @ */
+            i = start + 1;
+        }
+
+        i++;
+    }
+
+    if (last_emit == 0) return NULL;  /* No rewrites */
+    if (last_emit < n) cc__sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_sz) {
     if (!input_path || !out_path || out_path_sz == 0) return -1;
     char tmp_path[] = "/tmp/cc_pp_XXXXXX.c";
@@ -958,12 +1111,18 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
 
     /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
     char* rewritten_unwrap = cc__rewrite_optional_unwrap(cur6, cur6_n);
-    const char* use = rewritten_unwrap ? rewritten_unwrap : cur6;
+    const char* cur7 = rewritten_unwrap ? rewritten_unwrap : cur6;
+    size_t cur7_n = rewritten_unwrap ? strlen(rewritten_unwrap) : cur6_n;
+
+    // Rewrite @link("lib") -> marker comments for linker
+    char* rewritten_link = cc__rewrite_link_directives(cur7, cur7_n);
+    const char* use = rewritten_link ? rewritten_link : cur7;
 
     char rel[1024];
     fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
     fputs(use, out);
 
+    free(rewritten_link);
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_res);

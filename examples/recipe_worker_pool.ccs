@@ -8,6 +8,8 @@
  *
  * Key insight: Workers live in outer nursery, jobs fed via inner nursery.
  * Use channels for coordination, not shared mutable state.
+ *
+ * Note: Uses globals for channel handles (closure capture limitation).
  */
 #include "cc_nursery.cch"
 #include "cc_runtime.cch"
@@ -16,33 +18,33 @@
 #define NUM_WORKERS 3
 #define NUM_JOBS 9
 
+/* Global handles (workaround for closure capture limitation) */
+int[~4 >] g_jobs_tx;
+int[~4 <] g_jobs_rx;
+int[~16 >] g_done_tx;  /* capacity >= NUM_JOBS to avoid deadlock */
+int[~16 <] g_done_rx;
+
 int main(void) {
-    int[~4 >] jobs_tx;
-    int[~4 <] jobs_rx;
-    /* done channel capacity must be >= NUM_JOBS to avoid deadlock:
-       if workers block on send(done), nursery can't exit to drain it. */
-    int[~NUM_JOBS >] done_tx;
-    int[~NUM_JOBS <] done_rx;
-    channel_pair(&jobs_tx, &jobs_rx);
-    channel_pair(&done_tx, &done_rx);
+    channel_pair(&g_jobs_tx, &g_jobs_rx);
+    channel_pair(&g_done_tx, &g_done_rx);
 
     @nursery {
         /* Workers: pull jobs, send completion to done channel. */
         for (int w = 0; w < NUM_WORKERS; w++) {
             spawn(() => {
                 int job;
-                while (chan_recv(jobs_rx, &job) == 0) {
+                while (chan_recv(g_jobs_rx, &job) == 0) {
                     printf("worker: processed job %d\n", job);
-                    (void)chan_send(done_tx, job);  /* report done */
+                    chan_send(g_done_tx, job);  /* report done */
                 }
             });
         }
 
         /* Feeder: sends all jobs, then inner nursery closes jobs channel. */
-        @nursery closing(jobs_tx) {
+        @nursery closing(g_jobs_tx) {
             spawn(() => {
                 for (int j = 1; j <= NUM_JOBS; j++) {
-                    (void)chan_send(jobs_tx, j);
+                    chan_send(g_jobs_tx, j);
                 }
                 printf("feeder: sent %d jobs\n", NUM_JOBS);
             });
@@ -51,15 +53,15 @@ int main(void) {
     }
 
     /* Count completed jobs by draining done channel. */
-    chan_close(done_tx);
+    chan_close(g_done_tx);
     int jobs_done = 0;
     int v;
-    while (chan_recv(done_rx, &v) == 0) {
+    while (chan_recv(g_done_rx, &v) == 0) {
         jobs_done++;
     }
 
-    chan_free(jobs_tx);
-    chan_free(done_tx);
+    chan_free(g_jobs_tx);
+    chan_free(g_done_tx);
     printf("done, jobs_done = %d\n", jobs_done);
     return (jobs_done == NUM_JOBS) ? 0 : 1;
 }

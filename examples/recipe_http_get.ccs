@@ -1,0 +1,70 @@
+/*
+ * Recipe: Async HTTP Requests
+ *
+ * Demonstrates:
+ *   - Parallel HTTP requests with @nursery
+ *   - cc_http_get for simple requests
+ *   - Arena-based response memory
+ *   - @link("curl") for automatic library linking
+ *
+ * Build:
+ *   ./cc/bin/ccc build run examples/recipe_http_get.ccs -DCC_ENABLE_HTTP=1
+ */
+@link("curl")
+
+#include "cc_runtime.cch"
+#include "std/http.cch"
+#include <stdio.h>
+#include <string.h>
+
+/* URLs to fetch in parallel */
+const char* g_urls[] = {
+    "https://httpbin.org/get",
+    "https://httpbin.org/headers",
+    "https://httpbin.org/ip",
+};
+#define NUM_URLS 3
+
+/* Results storage (global for closure capture) */
+int g_status[NUM_URLS] = {0};
+size_t g_body_len[NUM_URLS] = {0};
+
+int main(void) {
+    printf("Fetching %d URLs in parallel...\n\n", NUM_URLS);
+
+    @nursery {
+        for (int i = 0; i < NUM_URLS; i++) {
+            int idx = i;  /* capture copy */
+            spawn(() => {
+                /* Each task gets its own arena */
+                char buf[32 * 1024];
+                CCArena arena = {0};
+                cc_arena_init(&arena, buf, sizeof(buf));
+
+                CCHttpErrorInfo err = {0};
+                CCHttpResponse resp = cc_http_get(&arena, g_urls[idx], strlen(g_urls[idx]), &err);
+
+                if (err.code == CC_HTTP_OK) {
+                    g_status[idx] = resp.status;
+                    g_body_len[idx] = resp.body.len;
+                    printf("[%d] %s -> %d (%zu bytes)\n", 
+                           idx, g_urls[idx], resp.status, resp.body.len);
+                } else {
+                    g_status[idx] = -1;
+                    printf("[%d] %s -> ERROR %d\n", idx, g_urls[idx], err.code);
+                }
+            });
+        }
+    }
+
+    /* All requests complete - summarize */
+    printf("\n=== Summary ===\n");
+    int success = 0;
+    for (int i = 0; i < NUM_URLS; i++) {
+        if (g_status[i] == 200) success++;
+        printf("%s: %d (%zu bytes)\n", g_urls[i], g_status[i], g_body_len[i]);
+    }
+    printf("Success: %d/%d\n", success, NUM_URLS);
+
+    return (success == NUM_URLS) ? 0 : 1;
+}

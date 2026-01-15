@@ -129,6 +129,8 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                                       int* out_is_tx,
                                       int* out_is_rx,
                                       long long* out_cap_int,
+                                      char* out_cap_expr, /* optional; caller-provided buffer for macro/expr capacity */
+                                      size_t out_cap_expr_cap,
                                       int* out_mode, /* -1 unspecified, 0 async, 1 sync */
                                       char* out_topology, /* optional; caller-provided buffer */
                                       size_t out_topology_cap,
@@ -140,6 +142,7 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
     if (out_is_tx) *out_is_tx = 0;
     if (out_is_rx) *out_is_rx = 0;
     if (out_cap_int) *out_cap_int = -1;
+    if (out_cap_expr && out_cap_expr_cap > 0) out_cap_expr[0] = 0;
     if (out_mode) *out_mode = -1;
     if (out_topology && out_topology_cap) out_topology[0] = 0;
     if (out_has_topology) *out_has_topology = 0;
@@ -165,40 +168,8 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
         if (t >= rbr) break;
         char c = src[t];
         if (c == '>' || c == '<' || c == ',' ) { t++; continue; }
-        if (c >= '0' && c <= '9') {
-            long long cap = 0;
-            size_t start = t;
-            while (t < rbr && (src[t] >= '0' && src[t] <= '9')) { cap = cap * 10 + (src[t] - '0'); t++; }
-            /* Only first integer token is capacity; subsequent numeric tokens are currently rejected. */
-            if (out_cap_int && *out_cap_int == -1) {
-                *out_cap_int = cap;
-            } else {
-                if (out_unknown_token) *out_unknown_token = 1;
-            }
-            (void)start;
-                            continue;
-                        }
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
-            char word[32];
-            size_t wn = 0;
-            while (t < rbr && wn + 1 < sizeof(word)) {
-                char wc = src[t];
-                if (!((wc >= 'A' && wc <= 'Z') || (wc >= 'a' && wc <= 'z') || (wc >= '0' && wc <= '9') || wc == '_')) break;
-                word[wn++] = wc;
-                t++;
-            }
-            word[wn] = 0;
-            if (strcmp(word, "sync") == 0) {
-                if (out_mode) *out_mode = 1;
-            } else if (strcmp(word, "async") == 0) {
-                if (out_mode) *out_mode = 0;
-            } else {
-                if (out_unknown_token) *out_unknown_token = 1;
-            }
-            continue;
-        }
-        /* Topology token like 1:1 / N:N / 1:N / N:1 */
-        if (c == 'N' || c == 'n' || c == '1') {
+        /* Topology token like 1:1 / N:N / 1:N / N:1 - check BEFORE numeric to avoid consuming '1' from '1:1' as capacity */
+        if ((c == 'N' || c == 'n' || c == '1') && (t + 1 < rbr && src[t + 1] == ':')) {
             char topo[8];
             size_t tn = 0;
             size_t tt = t;
@@ -220,8 +191,52 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                 }
                 if (out_has_topology) *out_has_topology = 1;
                 t = tt;
-                continue;
+                            continue;
+                        }
+        }
+        /* Numeric: capacity */
+        if (c >= '0' && c <= '9') {
+            long long cap = 0;
+            while (t < rbr && (src[t] >= '0' && src[t] <= '9')) { cap = cap * 10 + (src[t] - '0'); t++; }
+            /* Only first integer token is capacity; subsequent numeric tokens are currently rejected. */
+            if (out_cap_int && *out_cap_int == -1) {
+                *out_cap_int = cap;
+            } else {
+                if (out_unknown_token) *out_unknown_token = 1;
             }
+            continue;
+        }
+        /* Alpha word: sync/async keywords OR identifier capacity (macro) */
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+            char word[128];
+            size_t wn = 0;
+            while (t < rbr && wn + 1 < sizeof(word)) {
+                char wc = src[t];
+                if (!((wc >= 'A' && wc <= 'Z') || (wc >= 'a' && wc <= 'z') || (wc >= '0' && wc <= '9') || wc == '_')) break;
+                word[wn++] = wc;
+                t++;
+            }
+            word[wn] = 0;
+            if (strcmp(word, "sync") == 0) {
+                if (out_mode) *out_mode = 1;
+            } else if (strcmp(word, "async") == 0) {
+                if (out_mode) *out_mode = 0;
+            } else {
+                /* Identifier: treat as capacity expression (macro) if we haven't seen one yet */
+                if (out_cap_int && *out_cap_int == -1 && 
+                    out_cap_expr && out_cap_expr_cap > 0 && out_cap_expr[0] == 0) {
+                    if (wn < out_cap_expr_cap) {
+                        memcpy(out_cap_expr, word, wn);
+                        out_cap_expr[wn] = 0;
+                        *out_cap_int = -2; /* sentinel: capacity is in out_cap_expr */
+                    } else {
+                        if (out_unknown_token) *out_unknown_token = 1;
+                    }
+                } else {
+                    if (out_unknown_token) *out_unknown_token = 1;
+                }
+            }
+            continue;
         }
         /* Anything else is unknown for now. */
         if (out_unknown_token) *out_unknown_token = 1;
@@ -231,6 +246,9 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
     (void)ctx;
     return 1;
 }
+
+/* Buffer for dynamic sizeof expr (used by cc__elem_type_implies_take). */
+static char cc__sizeof_expr_buf[256];
 
 static int cc__elem_type_implies_take(const char* elem_ty, const char** out_elem_size_expr) {
     if (!elem_ty || !*elem_ty) return 0;
@@ -244,7 +262,11 @@ static int cc__elem_type_implies_take(const char* elem_ty, const char** out_elem
         if (out_elem_size_expr) *out_elem_size_expr = "sizeof(void*)";
         return 1;
     }
-    if (out_elem_size_expr) *out_elem_size_expr = "0";
+    /* For other types (primitives, structs), generate sizeof(elem_ty). */
+    if (out_elem_size_expr) {
+        snprintf(cc__sizeof_expr_buf, sizeof(cc__sizeof_expr_buf), "sizeof(%s)", elem_ty);
+        *out_elem_size_expr = cc__sizeof_expr_buf;
+    }
     return 0;
 }
 
@@ -416,17 +438,28 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 const char* elem_sz_expr = "0";
                 int allow_take = cc__elem_type_implies_take(elem_ty, &elem_sz_expr);
 
+                /* Map topology string to enum value. */
+                const char* topo_enum = "CC_CHAN_TOPO_DEFAULT";
+                if (tx_has_topo) {
+                    if (strcmp(tx_topo, "1:1") == 0) topo_enum = "CC_CHAN_TOPO_1_1";
+                    else if (strcmp(tx_topo, "1:N") == 0) topo_enum = "CC_CHAN_TOPO_1_N";
+                    else if (strcmp(tx_topo, "N:1") == 0) topo_enum = "CC_CHAN_TOPO_N_1";
+                    else if (strcmp(tx_topo, "N:N") == 0) topo_enum = "CC_CHAN_TOPO_N_N";
+                }
+
                 /* Emit up to call_start, then replace call statement. */
                 cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                 char repl[1024];
                 snprintf(repl, sizeof(repl),
-                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create(%lld, CC_CHAN_MODE_BLOCK, %d, %s, &%s, &%s); "
+                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%lld, CC_CHAN_MODE_BLOCK, %d, %s, %d, %s, &%s, &%s); "
                          "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
                          (tx_mode == 1) ? "sync" : "async",
                          tx_has_topo ? tx_topo : "<default>",
                          cap_to_use,
                          allow_take ? 1 : 0,
                          elem_sz_expr,
+                         (tx_mode == 1) ? 1 : 0,  /* is_sync */
+                         topo_enum,
                          tx_name, rx_name);
                 cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
 
@@ -647,8 +680,8 @@ static char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* s
                     last_emit = k + 1;
                 }
                 while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
-                continue;
-            }
+                    continue;
+                }
         }
 
         i++; col++;
@@ -678,7 +711,7 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else if (c == '<' || c == '>' || c == ',') {
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-                    } else {
+                                } else {
             out[j++] = c;
         }
     }
@@ -754,12 +787,140 @@ static char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char
     return out;
 }
 
-/* Rewrite result types: T!E -> CCResult_T_E */
+/* Collection of result type pairs for CC_DECL_RESULT_SPEC emission */
+typedef struct {
+    char ok_type[128];
+    char err_type[128];
+    char mangled_ok[128];
+    char mangled_err[128];
+} CCCodegenResultTypePair;
+
+static CCCodegenResultTypePair cc__cg_result_types[64];
+static size_t cc__cg_result_type_count = 0;
+
+static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
+                                    const char* mangled_ok, const char* mangled_err) {
+    /* Skip built-in result types (already declared in cc_result.cch) */
+    if (strcmp(mangled_err, "CCError") == 0) return;
+    
+    /* Check for duplicates */
+    for (size_t i = 0; i < cc__cg_result_type_count; i++) {
+        if (strcmp(cc__cg_result_types[i].mangled_ok, mangled_ok) == 0 &&
+            strcmp(cc__cg_result_types[i].mangled_err, mangled_err) == 0) {
+            return; /* Already have this type */
+        }
+    }
+    if (cc__cg_result_type_count >= sizeof(cc__cg_result_types)/sizeof(cc__cg_result_types[0])) return;
+    CCCodegenResultTypePair* p = &cc__cg_result_types[cc__cg_result_type_count++];
+    if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
+    if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
+    memcpy(p->ok_type, ok, ok_len);
+    p->ok_type[ok_len] = '\0';
+    memcpy(p->err_type, err, err_len);
+    p->err_type[err_len] = '\0';
+    strncpy(p->mangled_ok, mangled_ok, sizeof(p->mangled_ok) - 1);
+    p->mangled_ok[sizeof(p->mangled_ok) - 1] = '\0';
+    strncpy(p->mangled_err, mangled_err, sizeof(p->mangled_err) - 1);
+    p->mangled_err[sizeof(p->mangled_err) - 1] = '\0';
+}
+
+static void cc__cg_emit_result_type_decls(FILE* out) {
+    for (size_t i = 0; i < cc__cg_result_type_count; i++) {
+        CCCodegenResultTypePair* p = &cc__cg_result_types[i];
+        /* Emit CC_DECL_RESULT_SPEC(CCResult_T_E, T, E) */
+        fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
+    }
+}
+
+/* Scan for already-lowered CCResult_T_E patterns and collect type pairs.
+   This handles the case where the preprocessor already rewrote T!E -> CCResult_T_E */
+static void cc__scan_for_existing_result_types(const char* src, size_t n) {
+    /* Reset collection */
+    cc__cg_result_type_count = 0;
+    
+    const char* prefix = "CCResult_";
+    size_t prefix_len = strlen(prefix);
+    
+    size_t i = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for CCResult_ prefix */
+        if (i + prefix_len < n && strncmp(src + i, prefix, prefix_len) == 0) {
+            /* Make sure this isn't part of a longer identifier (check char before) */
+            if (i > 0 && cc__is_ident_char_local(src[i-1])) {
+                i++;
+                continue;
+            }
+            
+            /* Parse: CCResult_OkType_ErrType */
+            size_t name_start = i;
+            size_t j = i + prefix_len;
+            
+            /* Find the ok type (everything until next '_') */
+            size_t ok_start = j;
+            while (j < n && src[j] != '_' && cc__is_ident_char_local(src[j])) j++;
+            if (j >= n || src[j] != '_') { i++; continue; }
+            size_t ok_end = j;
+            
+            j++; /* skip '_' */
+            
+            /* Find the error type (rest of identifier) */
+            size_t err_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t err_end = j;
+            
+            if (ok_end > ok_start && err_end > err_start) {
+                /* Extract type names */
+                char ok_type[128];
+                char err_type[128];
+                size_t ok_len = ok_end - ok_start;
+                size_t err_len = err_end - err_start;
+                
+                if (ok_len < sizeof(ok_type) && err_len < sizeof(err_type)) {
+                    memcpy(ok_type, src + ok_start, ok_len);
+                    ok_type[ok_len] = '\0';
+                    memcpy(err_type, src + err_start, err_len);
+                    err_type[err_len] = '\0';
+                    
+                    /* Skip built-in result types (those are already declared in cc_result.cch) */
+                    if (strcmp(err_type, "CCError") != 0) {
+                        cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
+                    }
+                }
+            }
+            
+            i = j;
+            continue;
+        }
+        
+        i++;
+    }
+}
+
+/* Rewrite result types: T!E -> CCResult_T_E, also collect pairs for declaration emission */
 static char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     (void)ctx;
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
+    
+    /* First, scan for any existing CCResult_T_E patterns (preprocessor may have already rewritten) */
+    cc__scan_for_existing_result_types(src, n);
 
     size_t i = 0;
     size_t last_emit = 0;
@@ -804,6 +965,11 @@ static char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* 
                             cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
                             
                             if (mangled_ok[0] && mangled_err[0]) {
+                                /* Collect this result type pair for declaration */
+                                cc__cg_add_result_type(src + ty_start, ty_len, 
+                                                       src + err_start, err_len,
+                                                       mangled_ok, mangled_err);
+                                
                                 cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCResult_");
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_ok);
@@ -832,7 +998,7 @@ static char* cc__rewrite_try_exprs_text(const CCVisitorCtx* ctx, const char* src
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    
+
     size_t i = 0;
     size_t last_emit = 0;
     int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
@@ -1283,6 +1449,33 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         /* Autoblock was already run on the initial AST (before reparse), so UFCS-rewritten `chan_*`
            calls should have been processed there. No need to re-run autoblock here. */
 
+        /* Lower `channel_pair(&tx, &rx);` BEFORE channel type rewrite (it needs `[~]` patterns). */
+        {
+            size_t rp_len = 0;
+            char* rp = cc__rewrite_channel_pair_calls_text(ctx, src_ufcs, src_ufcs_len, &rp_len);
+            if (!rp) {
+                cc_tcc_bridge_free_ast(root3);
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                return EINVAL;
+            }
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rp;
+            src_ufcs_len = rp_len;
+        }
+
+        /* Rewrite channel handle types BEFORE closure pass so captured CCChanTx/CCChanRx variables
+           are correctly recognized. This rewrites `int[~4 >]` -> `CCChanTx`, etc. */
+        {
+            char* rew = cc__rewrite_chan_handle_types_text(ctx, src_ufcs, src_ufcs_len);
+            if (rew) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rew;
+                src_ufcs_len = strlen(src_ufcs);
+            }
+        }
+
         /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */
         {
             char* rewritten = NULL;
@@ -1592,13 +1785,66 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 if (getenv("CC_DEBUG_OPTIONAL")) fprintf(stderr, "CC: DEBUG: new len=%zu\n", src_ufcs_len);
             }
         }
-        /* Rewrite T!E -> CCResult_T_E */
+        /* Rewrite T!E -> CCResult_T_E and collect result type pairs */
         {
             char* rew_res = cc__rewrite_result_types_text(ctx, src_ufcs, src_ufcs_len);
             if (rew_res) {
-                if (src_ufcs != src_all) free(src_ufcs);
+            if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rew_res;
                 src_ufcs_len = strlen(src_ufcs);
+            }
+            
+            /* Insert result type declarations into source at the right position.
+               We look for "int main(" or first function definition and insert before it. */
+            if (cc__cg_result_type_count > 0) {
+                const char* insert_pos = strstr(src_ufcs, "int main(");
+                if (!insert_pos) insert_pos = strstr(src_ufcs, "void main(");
+                if (!insert_pos) {
+                    /* Try to find any function definition: "type name(" at start of line */
+                    for (size_t k = 0; k < src_ufcs_len && !insert_pos; k++) {
+                        if ((k == 0 || src_ufcs[k-1] == '\n') && 
+                            (isalpha((unsigned char)src_ufcs[k]) || src_ufcs[k] == '_')) {
+                            /* Scan to see if this looks like a function def */
+                            size_t fn_start = k;
+                            while (k < src_ufcs_len && src_ufcs[k] != '(' && src_ufcs[k] != ';' && src_ufcs[k] != '\n') k++;
+                            if (k < src_ufcs_len && src_ufcs[k] == '(') {
+                                insert_pos = src_ufcs + fn_start;
+                            }
+                        }
+                    }
+                }
+                
+                if (insert_pos) {
+                    size_t insert_offset = (size_t)(insert_pos - src_ufcs);
+                    
+                    /* Build declaration string */
+                    char* decls = NULL;
+                    size_t decls_len = 0, decls_cap = 0;
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, 
+                        "/* --- CC result type declarations (auto-generated) --- */\n");
+                    for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
+                        CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
+                        char line[512];
+                        snprintf(line, sizeof(line), "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                                 p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
+                        cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                    }
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, 
+                        "/* --- end result type declarations --- */\n\n");
+                    
+                    /* Build new source: prefix + decls + suffix */
+                    char* new_src = NULL;
+                    size_t new_len = 0, new_cap = 0;
+                    cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, insert_offset);
+                    cc__sb_append_local(&new_src, &new_len, &new_cap, decls, decls_len);
+                    cc__sb_append_local(&new_src, &new_len, &new_cap, 
+                                        src_ufcs + insert_offset, src_ufcs_len - insert_offset);
+                    
+                    free(decls);
+                    if (src_ufcs != src_all) free(src_ufcs);
+                    src_ufcs = new_src;
+                    src_ufcs_len = new_len;
+                }
             }
         }
         /* Rewrite try expr -> cc_try(expr) */

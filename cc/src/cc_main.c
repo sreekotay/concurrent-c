@@ -913,19 +913,83 @@ static void cc__merge_target_compile_flags(const CCBuildTargetDecl* t, const cha
     if (t->cflags && t->cflags[0]) cc__append_spaced(cc_flags, cc_cap, t->cflags);
 }
 
+static int cc__is_lib_path(const char* lib) {
+    // Check if lib looks like a path (contains / or ends with .a/.so/.dylib)
+    if (!lib) return 0;
+    if (strchr(lib, '/') != NULL) return 1;
+    size_t len = strlen(lib);
+    if (len > 2 && strcmp(lib + len - 2, ".a") == 0) return 1;
+    if (len > 3 && strcmp(lib + len - 3, ".so") == 0) return 1;
+    if (len > 6 && strcmp(lib + len - 6, ".dylib") == 0) return 1;
+    return 0;
+}
+
 static void cc__merge_target_link_flags(const CCBuildTargetDecl* t, char* ld_flags, size_t ld_cap) {
     if (!t) return;
     if (t->ldflags && t->ldflags[0]) cc__append_spaced(ld_flags, ld_cap, t->ldflags);
     for (size_t i = 0; i < t->lib_count; ++i) {
         const char* lib = t->libs[i];
         if (!lib || !lib[0]) continue;
-        if (lib[0] == '-') cc__append_spaced(ld_flags, ld_cap, lib);
-        else {
+        if (lib[0] == '-') {
+            // Already has flag prefix (-lm, -L/path, etc.)
+            cc__append_spaced(ld_flags, ld_cap, lib);
+        } else if (cc__is_lib_path(lib)) {
+            // Path to library file - pass directly
+            cc__append_spaced(ld_flags, ld_cap, lib);
+        } else {
+            // Short library name - add -l prefix
             char tmp[256];
             snprintf(tmp, sizeof(tmp), "-l%s", lib);
             cc__append_spaced(ld_flags, ld_cap, tmp);
         }
     }
+}
+
+// Extract @link directives from generated .c file.
+// Looks for markers like: __CC_LINK__ libname
+// Adds discovered libs to ld_flags buffer.
+static void cc__extract_link_directives(const char* c_file_path, char* ld_flags, size_t ld_cap) {
+    if (!c_file_path || !ld_flags) return;
+    
+    FILE* f = fopen(c_file_path, "r");
+    if (!f) return;
+    
+    char line[1024];
+    const char* marker = "__CC_LINK__ ";
+    size_t marker_len = strlen(marker);
+    
+    while (fgets(line, sizeof(line), f)) {
+        char* pos = strstr(line, marker);
+        while (pos) {
+            pos += marker_len;
+            // Extract lib name until space or end of comment
+            char* end = pos;
+            while (*end && *end != ' ' && *end != '*' && *end != '\n') end++;
+            if (end > pos) {
+                size_t lib_len = (size_t)(end - pos);
+                char lib[256];
+                if (lib_len < sizeof(lib)) {
+                    memcpy(lib, pos, lib_len);
+                    lib[lib_len] = '\0';
+                    
+                    // Add to ld_flags (avoid duplicates)
+                    char flag[280];
+                    if (cc__is_lib_path(lib)) {
+                        snprintf(flag, sizeof(flag), "%s", lib);
+                    } else {
+                        snprintf(flag, sizeof(flag), "-l%s", lib);
+                    }
+                    // Simple duplicate check
+                    if (!strstr(ld_flags, flag)) {
+                        cc__append_spaced(ld_flags, ld_cap, flag);
+                    }
+                }
+            }
+            pos = strstr(end, marker);
+        }
+    }
+    
+    fclose(f);
 }
 
 typedef struct {
@@ -1357,6 +1421,16 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: internal error: missing binary output path\n");
         return -1;
     }
+    // Extract @link directives from generated C file
+    static char extracted_ld[1024];
+    extracted_ld[0] = '\0';
+    if (opt->ld_flags && opt->ld_flags[0]) {
+        strncpy(extracted_ld, opt->ld_flags, sizeof(extracted_ld) - 1);
+        extracted_ld[sizeof(extracted_ld) - 1] = '\0';
+    }
+    cc__extract_link_directives(opt->c_out_path, extracted_ld, sizeof(extracted_ld));
+    const char* final_ld_flags = extracted_ld[0] ? extracted_ld : opt->ld_flags;
+
     // Link to binary (with incremental cache)
     const char* ldflags_env = getenv("LDFLAGS");
     char link_cmd[2048];
@@ -1419,7 +1493,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_str(h, opt->cc_flags);
         h = cc__fnv1a64_str(h, ccflags_env);
         h = cc__fnv1a64_str(h, ldflags_env);
-        h = cc__fnv1a64_str(h, opt->ld_flags);
+        h = cc__fnv1a64_str(h, final_ld_flags);
         h = cc__fnv1a64_str(h, target_part);
         h = cc__fnv1a64_str(h, sysroot_part);
         link_key = h;
@@ -1434,7 +1508,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                      target_part,
                      sysroot_part,
                      ldflags_env ? ldflags_env : "",
-                     opt->ld_flags ? opt->ld_flags : "",
+                     final_ld_flags ? final_ld_flags : "",
                      opt->obj_out_path,
                      have_runtime ? runtime_obj : "",
                      opt->bin_out_path);
@@ -1465,7 +1539,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
                  target_part,
                  sysroot_part,
                  ldflags_env ? ldflags_env : "",
-                 opt->ld_flags ? opt->ld_flags : "",
+                 final_ld_flags ? final_ld_flags : "",
                  opt->obj_out_path,
                  have_runtime ? runtime_obj : "",
                  opt->bin_out_path);

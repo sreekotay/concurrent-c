@@ -169,6 +169,14 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
         src_ufcs_len = stripped_len;
     }
 
+    /* PASS 7: Rewrite @link("lib") to marker comments for linker extraction */
+    char* link_rewritten = cc__rewrite_link_directives(src_ufcs, src_ufcs_len);
+    if (link_rewritten) {
+        if (src_ufcs != src_all) free(src_ufcs);
+        src_ufcs = link_rewritten;
+        src_ufcs_len = strlen(link_rewritten);
+    }
+
     /* NOTE: slice move/provenance checking is now handled by the stub-AST checker pass
        (`cc/src/visitor/checker.c`) before visitor lowering. */
 

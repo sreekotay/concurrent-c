@@ -1,0 +1,52 @@
+/*
+ * Sync channel smoke test: verify sync channels block OS thread.
+ */
+#include "std/prelude.cch"
+#include <pthread.h>
+#include <stdio.h>
+#include <assert.h>
+#include <errno.h>
+
+// Sync channel pair - blocks OS thread, no await needed
+int[~2 sync >] tx;
+int[~2 sync <] rx;
+
+static void* sender_thread(void* arg) {
+    (void)arg;
+    // Send values
+    tx.send(10);
+    tx.send(20);
+    tx.close();
+    return NULL;
+}
+
+int main(void) {
+    channel_pair(&tx, &rx);
+    
+    pthread_t tid;
+    pthread_create(&tid, NULL, sender_thread, NULL);
+    
+    // Receive values (blocks OS thread, no await)
+    int v1 = 0, v2 = 0;
+    int err1 = rx.recv(&v1);
+    int err2 = rx.recv(&v2);
+    
+    pthread_join(tid, NULL);
+    
+    // Verify
+    assert(err1 == 0 && "first recv should succeed");
+    assert(err2 == 0 && "second recv should succeed");
+    assert(v1 == 10 && "first value should be 10");
+    assert(v2 == 20 && "second value should be 20");
+    
+    // Third recv should return EPIPE (closed + drained)
+    int v3 = 0;
+    int err3 = rx.recv(&v3);
+    assert(err3 == EPIPE && "recv on closed+drained should return EPIPE");
+    
+    // Free the channel exactly once (tx and rx share the same underlying channel)
+    tx.free();
+    
+    printf("sync channel smoke: PASS\n");
+    return 0;
+}

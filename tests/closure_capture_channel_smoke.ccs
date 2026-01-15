@@ -1,0 +1,34 @@
+// Test: Closure can capture channel handles
+#include "std/prelude.cch"
+#include <assert.h>
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    channel_pair(&tx, &rx);
+    
+    // Capture channel handle in closure
+    CCClosure0 producer = [tx]() => {
+        for (int i = 0; i < 3; i++) {
+            chan_send(tx, i * 10);
+        }
+        chan_close(tx);
+    };
+    
+    // Run the producer (invoke the closure)
+    cc_run_blocking_closure0(producer);
+    
+    // Receive values
+    int v;
+    int sum = 0;
+    while (cc_chan_recv(rx.raw, &v, sizeof(v)) == 0) {
+        sum += v;
+    }
+    
+    assert(sum == 0 + 10 + 20);  // 0 + 10 + 20 = 30
+    
+    chan_free(rx);
+    
+    printf("closure_capture_channel_smoke: OK\n");
+    return 0;
+}

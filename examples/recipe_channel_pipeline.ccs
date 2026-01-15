@@ -8,34 +8,39 @@
  *
  * Key insight: Nest producers inside closing() so channel closes
  * exactly when producers finish, while consumer keeps running.
+ *
+ * Note: Uses globals for channel handles because closure capture of
+ * typed channels is not yet implemented (see PENDING in compiler).
  */
 #include "cc_nursery.cch"
 #include "cc_runtime.cch"
 #include <stdio.h>
 
-int received_sum = 0;
+/* Global handles (workaround for closure capture limitation) */
+int[~4 >] g_tx;
+int[~4 <] g_rx;
+int g_sum = 0;
 
 int main(void) {
-    int[~4 >] ch_tx;
-    int[~4 <] ch_rx;
-    channel_pair(&ch_tx, &ch_rx);
+    channel_pair(&g_tx, &g_rx);
 
     @nursery {
         /* Consumer: lives in outer nursery, drains until close. */
         spawn(() => {
             int v;
-            while (chan_recv(ch_rx, &v) == 0) {
-                printf("got %d\n", v);
-                received_sum += v;
+            while (chan_recv(g_rx, &v) == 0) {
+                printf("recv: %d\n", v);
+                g_sum += v;
             }
+            printf("consumer: channel closed\n");
         });
 
         /* Producers: live in inner nursery with closing(ch). */
-        @nursery closing(ch_tx) {
+        @nursery closing(g_tx) {
             spawn(() => {
                 for (int i = 1; i <= 3; i++) {
-                    (void)chan_send(ch_tx, i);
-                    printf("sent %d\n", i);
+                    chan_send(g_tx, i);
+                    printf("send: %d\n", i);
                 }
             });
         }
@@ -44,7 +49,7 @@ int main(void) {
     }
     /* Outer nursery done → consumer finished → all clean. */
 
-    chan_free(ch_tx);
-    printf("sum = %d\n", received_sum);
-    return (received_sum == 6) ? 0 : 1;  /* 1+2+3 = 6 */
+    chan_free(g_tx);
+    printf("sum = %d (expected 6)\n", g_sum);  /* 1+2+3 = 6 */
+    return (g_sum == 6) ? 0 : 1;
 }

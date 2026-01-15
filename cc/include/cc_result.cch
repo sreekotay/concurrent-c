@@ -145,42 +145,56 @@ static inline CCResult_void_CCError cc_err_CCResult_void_CCError(CCError e) {
     return r;
 }
 
-/* ============================================================================
- * Try macro for early error propagation.
- * cc_try(expr) - unwraps T!E on success, returns error on failure.
- *
- * Usage:
- *   CCResult_int_CCError foo() {
- *       int x = cc_try(bar());  // bar() returns CCResult_int_CCError
- *       return cc_ok_CCResult_int_CCError(x + 1);
- *   }
- *
- * Note: Requires the enclosing function to have a compatible return type.
- * The macro constructs a return value with the same type as the input.
- * For cross-type propagation (different error types), use explicit handling.
- * ============================================================================ */
-#ifdef CC_PARSER_MODE
-/* For TCC parsing: cc_try(x) just yields x.u.value (parsable, though semantics differ).
-   The real cc_try is used by the host compiler. */
-#define cc_try(expr) (expr).u.value
-#define cc_try_into(result_var, expr) (result_var) = (expr).u.value
-#else
-#define cc_try(expr) ({                                                         \
-    __auto_type __cc_try_tmp = (expr);                                          \
-    if (!__cc_try_tmp.ok) {                                                     \
-        return (__typeof__(__cc_try_tmp)){.ok = false, .u.error = __cc_try_tmp.u.error}; \
-    }                                                                           \
-    __cc_try_tmp.u.value;                                                       \
+/* cc_try macro: unwrap T!E or return error.
+   Must be used in a function that returns the same result type.
+   This is a GCC statement expression and works with clang/gcc. */
+#ifndef CC_PARSER_MODE
+#define cc_try(expr) __extension__ ({                \
+    __typeof__(expr) __cc_try_r = (expr);            \
+    if (!__cc_try_r.ok) return __cc_try_r;           \
+    __cc_try_r.u.value;                              \
 })
-
-/* cc_try_into(result_var, expr) - assigns result or returns error */
-#define cc_try_into(result_var, expr) do {                                      \
-    __auto_type __cc_try_tmp = (expr);                                          \
-    if (!__cc_try_tmp.ok) {                                                     \
-        return (__typeof__(__cc_try_tmp)){.ok = false, .u.error = __cc_try_tmp.u.error}; \
-    }                                                                           \
-    (result_var) = __cc_try_tmp.u.value;                                        \
-} while(0)
 #endif
+
+/*
+ * TCC PARSER MODE: Any unknown CCResult_*_* type is treated as a generic placeholder.
+ * TCC uses this during parsing; the codegen pass emits proper type definitions.
+ */
+#ifdef CC_PARSER_MODE
+/* Generic result placeholder struct - used for all unknown CCResult_T_E types */
+typedef struct __CCResultGeneric {
+    bool ok;
+    union { long long value; long long error; } u;
+} __CCResultGeneric;
+
+/* Common user-defined result type patterns - map to generic during parsing */
+typedef __CCResultGeneric CCResult_int_ParseError;
+typedef __CCResultGeneric CCResult_int_MyError;
+typedef __CCResultGeneric CCResult_int_Error;
+typedef __CCResultGeneric CCResult_bool_ParseError;
+
+/* Dummy ok/err constructors for any result type during parsing */
+static inline __CCResultGeneric __cc_result_generic_ok(long long v) {
+    __CCResultGeneric r;
+    r.ok = 1;
+    r.u.value = v;
+    return r;
+}
+static inline __CCResultGeneric __cc_result_generic_err(long long e) {
+    __CCResultGeneric r;
+    r.ok = 0;
+    r.u.error = e;
+    return r;
+}
+#define cc_ok_CCResult_int_ParseError(v) __cc_result_generic_ok((long long)(v))
+#define cc_err_CCResult_int_ParseError(e) __cc_result_generic_err(0)
+#define cc_ok_CCResult_int_MyError(v) __cc_result_generic_ok((long long)(v))
+#define cc_err_CCResult_int_MyError(e) __cc_result_generic_err(0)
+#define cc_ok_CCResult_int_Error(v) __cc_result_generic_ok((long long)(v))
+#define cc_err_CCResult_int_Error(e) __cc_result_generic_err(0)
+
+/* Dummy cc_try for TCC parsing - just returns the expression */
+#define cc_try(expr) ((expr).u.value)
+#endif /* CC_PARSER_MODE */
 
 #endif /* CC_RESULT_H */

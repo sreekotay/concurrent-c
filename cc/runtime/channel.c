@@ -50,16 +50,41 @@ bool cc_is_cancelled_current(void) {
     return cc__tls_current_deadline && cc__tls_current_deadline->cancelled;
 }
 
+/* Forward declarations */
+static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take, bool is_sync, CCChanTopology topology);
+
 int cc_chan_pair_create(size_t capacity,
                         CCChanMode mode,
                         bool allow_send_take,
                         size_t elem_size,
                         CCChanTx* out_tx,
                         CCChanRx* out_rx) {
+    return cc_chan_pair_create_ex(capacity, mode, allow_send_take, elem_size, false, out_tx, out_rx);
+}
+
+int cc_chan_pair_create_ex(size_t capacity,
+                           CCChanMode mode,
+                           bool allow_send_take,
+                           size_t elem_size,
+                           bool is_sync,
+                           CCChanTx* out_tx,
+                           CCChanRx* out_rx) {
+    return cc_chan_pair_create_full(capacity, mode, allow_send_take, elem_size, is_sync, CC_CHAN_TOPO_DEFAULT, out_tx, out_rx);
+}
+
+int cc_chan_pair_create_full(size_t capacity,
+                             CCChanMode mode,
+                             bool allow_send_take,
+                             size_t elem_size,
+                             bool is_sync,
+                             int topology,
+                             CCChanTx* out_tx,
+                             CCChanRx* out_rx) {
     if (!out_tx || !out_rx) return EINVAL;
     out_tx->raw = NULL;
     out_rx->raw = NULL;
-    CCChan* ch = cc_chan_create_mode_take(capacity, mode, allow_send_take);
+    CCChanTopology topo = (CCChanTopology)topology;
+    CCChan* ch = cc_chan_create_internal(capacity, mode, allow_send_take, is_sync, topo);
     if (!ch) return ENOMEM;
     if (elem_size != 0) {
         int e = cc_chan_init_elem(ch, elem_size);
@@ -80,6 +105,8 @@ struct CCChan {
     int closed;
     CCChanMode mode;
     int allow_take;
+    int is_sync;     // 1 = sync (blocks OS thread), 0 = async (cooperative)
+    CCChanTopology topology;
     /* Rendezvous (unbuffered) support: cap==0 */
     int rv_has_value;
     int rv_recv_waiters;
@@ -100,7 +127,7 @@ void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner) {
     pthread_mutex_unlock(&ch->mu);
 }
 
-static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take) {
+static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take, bool is_sync, CCChanTopology topology) {
     size_t cap = capacity; /* capacity==0 => unbuffered rendezvous */
     CCChan* ch = (CCChan*)malloc(sizeof(CCChan));
     if (!ch) return NULL;
@@ -110,6 +137,8 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
     ch->buf = NULL;    // lazily allocated when we know elem_size
     ch->mode = mode;
     ch->allow_take = allow_take ? 1 : 0;
+    ch->is_sync = is_sync ? 1 : 0;
+    ch->topology = topology;
     pthread_mutex_init(&ch->mu, NULL);
     pthread_cond_init(&ch->not_empty, NULL);
     pthread_cond_init(&ch->not_full, NULL);
@@ -117,15 +146,19 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
 }
 
 CCChan* cc_chan_create(size_t capacity) {
-    return cc_chan_create_internal(capacity, CC_CHAN_MODE_BLOCK, true);
+    return cc_chan_create_internal(capacity, CC_CHAN_MODE_BLOCK, true, false, CC_CHAN_TOPO_DEFAULT);
 }
 
 CCChan* cc_chan_create_mode(size_t capacity, CCChanMode mode) {
-    return cc_chan_create_internal(capacity, mode, true);
+    return cc_chan_create_internal(capacity, mode, true, false, CC_CHAN_TOPO_DEFAULT);
 }
 
 CCChan* cc_chan_create_mode_take(size_t capacity, CCChanMode mode, bool allow_send_take) {
-    return cc_chan_create_internal(capacity, mode, allow_send_take);
+    return cc_chan_create_internal(capacity, mode, allow_send_take, false, CC_CHAN_TOPO_DEFAULT);
+}
+
+CCChan* cc_chan_create_sync(size_t capacity, CCChanMode mode, bool allow_send_take) {
+    return cc_chan_create_internal(capacity, mode, allow_send_take, true, CC_CHAN_TOPO_DEFAULT);
 }
 
 void cc_chan_close(CCChan* ch) {

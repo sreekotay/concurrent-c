@@ -10,8 +10,8 @@
  * - MIT license
  */
 
-#include "std/tls.cch"
-#include "std/net.cch"
+#include "../include/std/tls.cch"
+#include "../include/std/net.cch"
 
 /* BearSSL includes */
 #ifdef CC_HAS_BEARSSL

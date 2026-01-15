@@ -9,5 +9,9 @@
 // temp file when done.
 int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_sz);
 
+// Rewrite @link("lib") directives to marker comments for linker extraction.
+// Returns newly allocated string, or NULL if no rewrites needed.
+char* cc__rewrite_link_directives(const char* src, size_t n);
+
 #endif // CC_PREPROCESS_H
 

@@ -1,10 +1,12 @@
 CC_DIR := cc
 BUILD ?= debug
 BEARSSL_DIR := third_party/bearssl
+CURL_DIR := third_party/curl
+CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean fmt lint example example-c smoke test tools
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
-.PHONY: deps bearssl bearssl-clean deps-update
+.PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 
 all: cc
 
@@ -41,11 +43,16 @@ test: cc tools
 	@./tools/cc_test
 
 # ---- Dependencies -----------------------------------------------------------
+#
+# Dependencies are opt-in. Only build/link what you need:
+#   make bearssl   - TLS support (for <std/tls.cch>)
+#   make curl      - HTTP client (for <std/http.cch>)
+#
+# In your build.cc, add the libraries you need:
+#   CC_TARGET_LIBS myapp third_party/bearssl/build/libbearssl.a
+#   CC_TARGET_LIBS myapp third_party/curl/build/lib/libcurl.a
 
-# Build all third-party dependencies
-deps: bearssl
-
-# Build BearSSL static library
+# Build BearSSL static library (for TLS)
 bearssl:
 	@echo "Building BearSSL..."
 	@$(MAKE) -C $(BEARSSL_DIR) -j4
@@ -54,11 +61,66 @@ bearssl:
 bearssl-clean:
 	@$(MAKE) -C $(BEARSSL_DIR) clean
 
+# Check for system libcurl (preferred - already has TLS)
+curl-check:
+	@if command -v curl-config >/dev/null 2>&1; then \
+		echo "System libcurl found: $$(curl-config --version)"; \
+		echo "  Include: $$(curl-config --cflags)"; \
+		echo "  Libs: $$(curl-config --libs)"; \
+		echo "Use system curl in build.cc:"; \
+		echo "  CC_TARGET_CFLAGS myapp \$$(curl-config --cflags)"; \
+		echo "  CC_TARGET_LDFLAGS myapp \$$(curl-config --libs)"; \
+	else \
+		echo "System libcurl not found. Install via:"; \
+		echo "  macOS: brew install curl"; \
+		echo "  Ubuntu: apt install libcurl4-openssl-dev"; \
+	fi
+
+# Build vendored libcurl (requires cmake)
+# Minimal build: HTTP/HTTPS only, uses BearSSL for TLS
+curl-build: bearssl
+	@command -v cmake >/dev/null 2>&1 || { echo "cmake required. Install via: brew install cmake"; exit 1; }
+	@echo "Building libcurl (minimal, with BearSSL)..."
+	@mkdir -p $(CURL_BUILD)
+	@cd $(CURL_BUILD) && cmake .. \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_SHARED_LIBS=OFF \
+		-DBUILD_CURL_EXE=OFF \
+		-DCURL_USE_BEARSSL=ON \
+		-DBEARSSL_INCLUDE_DIR=$(PWD)/$(BEARSSL_DIR)/inc \
+		-DBEARSSL_LIBRARY=$(PWD)/$(BEARSSL_DIR)/build/libbearssl.a \
+		-DCURL_DISABLE_LDAP=ON \
+		-DCURL_DISABLE_LDAPS=ON \
+		-DCURL_DISABLE_TELNET=ON \
+		-DCURL_DISABLE_DICT=ON \
+		-DCURL_DISABLE_FILE=ON \
+		-DCURL_DISABLE_TFTP=ON \
+		-DCURL_DISABLE_RTSP=ON \
+		-DCURL_DISABLE_POP3=ON \
+		-DCURL_DISABLE_IMAP=ON \
+		-DCURL_DISABLE_SMTP=ON \
+		-DCURL_DISABLE_GOPHER=ON \
+		-DCURL_DISABLE_MQTT=ON \
+		-DCURL_DISABLE_SMB=ON \
+		-DCURL_DISABLE_FTP=ON \
+		-DHTTP_ONLY=ON \
+		-DCURL_CA_BUNDLE=none \
+		-DCURL_CA_PATH=none \
+		>/dev/null
+	@$(MAKE) -C $(CURL_BUILD) -j4
+	@echo "libcurl built: $(CURL_BUILD)/lib/libcurl.a"
+
+curl-clean:
+	@rm -rf $(CURL_BUILD)
+
+# Build all optional dependencies (only BearSSL by default, curl uses system)
+deps: bearssl
+
 # Update all dependencies to latest versions
 deps-update:
 	@echo "Updating submodules to latest..."
 	@git submodule update --remote --merge
-	@echo "Submodules updated. Rebuild with: make deps"
+	@echo "Submodules updated. Rebuild needed deps with: make bearssl / make curl"
 
 # ---- TCC upgrade convenience ------------------------------------------------
 

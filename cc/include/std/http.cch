@@ -2,20 +2,31 @@
  * Concurrent-C HTTP Client
  * <std/http.cch>
  *
- * Convenience layer over TCP+TLS for HTTP requests.
+ * HTTP client built on libcurl.
  * All responses are arena-allocated.
+ *
+ * Requires: @link("curl") in user code, or -lcurl in linker flags.
  */
 #ifndef CC_STD_HTTP_H
 #define CC_STD_HTTP_H
 
 #include "../cc_arena.cch"
 #include "../cc_slice.cch"
-#include "net.cch"
-#include "tls.cch"
+#include "net.cch"  /* For CCNetError in CCHttpErrorInfo */
 
 #include <stdint.h>
 #include <stddef.h>
+
+#if __has_include(<stdbool.h>)
 #include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
 
 /* ============================================================================
  * Error Types
@@ -68,22 +79,22 @@ typedef struct CCHttpRequest {
 
 typedef struct CCHttpClientConfig {
     uint32_t timeout_ms;        /* Request timeout (default: 30000) */
-    CCTlsClientConfig tls;      /* TLS config */
     CCSlice user_agent;         /* User-Agent header (optional) */
     bool follow_redirects;      /* Default: true */
     uint8_t max_redirects;      /* Default: 10 */
     size_t max_response_size;   /* Default: 64MB */
+    bool verify_ssl;            /* Verify SSL certs (default: true) */
 } CCHttpClientConfig;
 
 /* Default config */
 static inline CCHttpClientConfig cc_http_client_config_default(void) {
     return (CCHttpClientConfig){
         .timeout_ms = 30000,
-        .tls = cc_tls_client_config_default(),
         .user_agent = {0},
         .follow_redirects = true,
         .max_redirects = 10,
         .max_response_size = 64 * 1024 * 1024,
+        .verify_ssl = true,
     };
 }
 
@@ -177,5 +188,17 @@ typedef CCParsedUrl ParsedUrl;
 #define HttpClient_post(c, a, u, ul, b, bl, e) cc_http_client_post(c, a, u, ul, b, bl, e)
 #define HttpClient_request(c, a, r, e) cc_http_client_request(c, a, r, e)
 #endif /* CC_ENABLE_SHORT_NAMES */
+
+/* ============================================================================
+ * Implementation (header-only when CC_ENABLE_HTTP defined)
+ * ============================================================================
+ * 
+ * HTTP support requires libcurl, which is an external dependency.
+ * The implementation compiles with user code (not in base runtime).
+ */
+#if defined(CC_ENABLE_HTTP) && !defined(CC_HTTP_IMPL_INCLUDED)
+#define CC_HTTP_IMPL_INCLUDED 1
+#include "../../runtime/http.c"
+#endif
 
 #endif /* CC_STD_HTTP_H */

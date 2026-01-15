@@ -1,0 +1,22 @@
+/*
+ * Test: try used outside a function returning T!E (should fail)
+ * The try macro requires the enclosing function to return a compatible Result type.
+ */
+#include "std/prelude.cch"
+
+int!CCError maybe_fail(int x) {
+    if (x < 0) {
+        return cc_err_CCResult_int_CCError(cc_error(CC_ERR_INVALID_ARG, "negative"));
+    }
+    return cc_ok_CCResult_int_CCError(x);
+}
+
+/* This function returns int, not int!CCError, so try should fail */
+int broken(int x) {
+    int v = try maybe_fail(x);  /* ERROR: can't return CCResult from int function */
+    return v;
+}
+
+int main(void) {
+    return broken(5);
+}

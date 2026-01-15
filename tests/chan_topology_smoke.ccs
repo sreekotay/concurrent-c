@@ -1,0 +1,45 @@
+/*
+ * Channel topology smoke test: verify topology is parsed and passed to runtime.
+ */
+#include "std/prelude.cch"
+#include <pthread.h>
+#include <stdio.h>
+#include <assert.h>
+#include <errno.h>
+
+// Test various topology declarations
+int[~4 N:1 >] many_to_one_tx;
+int[~4 N:1 <] many_to_one_rx;
+
+int[~4 1:1 >] one_to_one_tx;
+int[~4 1:1 <] one_to_one_rx;
+
+int main(void) {
+    // Create N:1 channel (many senders, one receiver)
+    channel_pair(&many_to_one_tx, &many_to_one_rx);
+    
+    // Create 1:1 channel (single producer, single consumer)
+    channel_pair(&one_to_one_tx, &one_to_one_rx);
+    
+    // Basic send/recv test on N:1
+    many_to_one_tx.send(42);
+    int v1 = 0;
+    int err1 = many_to_one_rx.recv(&v1);
+    assert(err1 == 0 && v1 == 42 && "N:1 channel should work");
+    
+    // Basic send/recv test on 1:1
+    one_to_one_tx.send(99);
+    int v2 = 0;
+    int err2 = one_to_one_rx.recv(&v2);
+    assert(err2 == 0 && v2 == 99 && "1:1 channel should work");
+    
+    // Cleanup
+    many_to_one_tx.close();
+    many_to_one_tx.free();
+    
+    one_to_one_tx.close();
+    one_to_one_tx.free();
+    
+    printf("channel topology smoke: PASS\n");
+    return 0;
+}

@@ -46,4 +46,3 @@ int cc_compile_with_config(const char *input_path, const char *output_path, cons
 int cc_compile(const char *input_path, const char *output_path) {
     return cc_compile_with_config(input_path, output_path, NULL);
 }
-
