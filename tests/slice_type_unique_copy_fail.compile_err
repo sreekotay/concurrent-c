@@ -1,0 +1,3 @@
+# slice type `T[:!]` should be move-only (copy is forbidden)
+CC: cannot copy move-only slice
+

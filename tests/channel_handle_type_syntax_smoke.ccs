@@ -1,0 +1,10 @@
+#include "cc_runtime.cch"
+
+int main(void) {
+    int[~ 3 >] tx;
+    int[~ 3 <] rx;
+    (void)tx;
+    (void)rx;
+    return 0;
+}
+

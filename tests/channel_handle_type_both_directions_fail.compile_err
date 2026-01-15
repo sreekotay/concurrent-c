@@ -1,0 +1,3 @@
+# channel handle types cannot be both send and recv
+CC: error: channel handle type cannot be both send
+

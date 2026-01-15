@@ -80,6 +80,9 @@ struct CCChan {
     int closed;
     CCChanMode mode;
     int allow_take;
+    /* Rendezvous (unbuffered) support: cap==0 */
+    int rv_has_value;
+    int rv_recv_waiters;
     /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
     CCNursery* autoclose_owner;
     int warned_autoclose_block;
@@ -98,7 +101,7 @@ void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner) {
 }
 
 static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take) {
-    size_t cap = capacity ? capacity : 64;
+    size_t cap = capacity; /* capacity==0 => unbuffered rendezvous */
     CCChan* ch = (CCChan*)malloc(sizeof(CCChan));
     if (!ch) return NULL;
     memset(ch, 0, sizeof(*ch));
@@ -147,7 +150,8 @@ void cc_chan_free(CCChan* ch) {
 static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
     if (ch->elem_size == 0) {
         ch->elem_size = elem_size;
-        ch->buf = malloc(ch->cap * elem_size);
+        size_t slots = (ch->cap == 0) ? 1 : ch->cap;
+        ch->buf = malloc(slots * elem_size);
         if (!ch->buf) return ENOMEM;
         return 0;
     }
@@ -163,6 +167,18 @@ int cc_chan_init_elem(CCChan* ch, size_t elem_size) {
 
 static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     int err = 0;
+    /* Unbuffered rendezvous: sender must wait for a receiver and for slot to be free. */
+    if (ch->cap == 0) {
+        while (!ch->closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
+            if (deadline) {
+                err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
+                if (err == ETIMEDOUT) return ETIMEDOUT;
+            } else {
+                pthread_cond_wait(&ch->not_full, &ch->mu);
+            }
+        }
+        return ch->closed ? EPIPE : 0;
+    }
     while (!ch->closed && ch->count == ch->cap && err == 0) {
         if (deadline) {
             err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
@@ -176,6 +192,21 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
 
 static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     int err = 0;
+    /* Unbuffered rendezvous: receiver waits for a sender to place a value. */
+    if (ch->cap == 0) {
+        ch->rv_recv_waiters++;
+        pthread_cond_broadcast(&ch->not_full); /* wake senders waiting for a receiver */
+        while (!ch->closed && !ch->rv_has_value && err == 0) {
+            if (deadline) {
+                err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
+                if (err == ETIMEDOUT) { ch->rv_recv_waiters--; return ETIMEDOUT; }
+            } else {
+                pthread_cond_wait(&ch->not_empty, &ch->mu);
+            }
+        }
+        if (ch->closed && !ch->rv_has_value) { ch->rv_recv_waiters--; return EPIPE; }
+        return 0;
+    }
     /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
     if (!deadline && !ch->closed && ch->count == 0 &&
@@ -205,6 +236,12 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
 }
 
 static void cc_chan_enqueue(CCChan* ch, const void* value) {
+    if (ch->cap == 0) {
+        memcpy(ch->buf, value, ch->elem_size);
+        ch->rv_has_value = 1;
+        pthread_cond_signal(&ch->not_empty);
+        return;
+    }
     void *slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
     memcpy(slot, value, ch->elem_size);
     ch->tail = (ch->tail + 1) % ch->cap;
@@ -213,6 +250,13 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
 }
 
 static void cc_chan_dequeue(CCChan* ch, void* out_value) {
+    if (ch->cap == 0) {
+        memcpy(out_value, ch->buf, ch->elem_size);
+        ch->rv_has_value = 0;
+        if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+        pthread_cond_broadcast(&ch->not_full);
+        return;
+    }
     void *slot = (uint8_t*)ch->buf + ch->head * ch->elem_size;
     memcpy(out_value, slot, ch->elem_size);
     ch->head = (ch->head + 1) % ch->cap;
@@ -243,6 +287,17 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+    if (ch->cap == 0) {
+        err = cc_chan_handle_full_send(ch, value, NULL);
+        if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+        cc_chan_enqueue(ch, value);
+        /* Rendezvous: wait until receiver consumes. */
+        while (!ch->closed && ch->rv_has_value) {
+            pthread_cond_wait(&ch->not_full, &ch->mu);
+        }
+        pthread_mutex_unlock(&ch->mu);
+        return ch->closed ? EPIPE : 0;
+    }
     if (ch->count == ch->cap) {
         err = cc_chan_handle_full_send(ch, value, NULL);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -264,6 +319,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     err = cc_chan_wait_empty(ch, NULL);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     cc_chan_dequeue(ch, out_value);
+    if (ch->cap == 0) pthread_cond_broadcast(&ch->not_full);
     pthread_mutex_unlock(&ch->mu);
     return 0;
 }

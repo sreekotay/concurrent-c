@@ -1,0 +1,51 @@
+#include "cc_runtime.cch"
+
+#include <pthread.h>
+#include <time.h>
+
+typedef struct {
+    CCChanTx tx;
+    volatile int done;
+} Ctx;
+
+static void* sender(void* p) {
+    Ctx* c = (Ctx*)p;
+    int v = 7;
+    int rc = chan_send(c->tx, v);
+    if (rc != 0) return (void*)1;
+    c->done = 1;
+    return NULL;
+}
+
+static void sleep_ms(int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+int main(void) {
+    int[~ >] tx;
+    int[~ <] rx;
+    channel_pair(&tx, &rx); /* unbuffered */
+
+    Ctx c = {0};
+    c.tx = tx;
+    c.done = 0;
+
+    pthread_t th;
+    pthread_create(&th, NULL, sender, &c);
+
+    /* Sender should block until we recv. */
+    sleep_ms(50);
+    if (c.done != 0) return 2;
+
+    int out = 0;
+    if (chan_recv(rx, &out) != 0) return 3;
+    pthread_join(th, NULL);
+
+    chan_close(tx);
+    chan_free(tx);
+    return (out == 7 && c.done == 1) ? 0 : 4;
+}
+

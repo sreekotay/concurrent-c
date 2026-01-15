@@ -1,0 +1,3 @@
+# channel handle types require explicit direction
+CC: error: channel handle type requires direction
+

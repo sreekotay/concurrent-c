@@ -1,0 +1,11 @@
+#include "cc_runtime.cch"
+
+int main(void) {
+    int* p = (int*)malloc(sizeof(int) * 2);
+    p[0] = 1; p[1] = 2;
+    char[:!] s = cc_slice_from_parts(p, 2, cc_slice_make_id(1, true, true, false), 2);
+    char[:!] t = s; /* ERROR: copy of move-only slice */
+    (void)t;
+    return 0;
+}
+

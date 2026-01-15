@@ -51,6 +51,11 @@ typedef struct {
     size_t alen;
 } CCSlice;
 
+/* Surface type sugar:
+   - `T[:]`  lowers to `CCSlice`
+   - `T[:!]` lowers to `CCSliceUnique` (still ABI-identical to CCSlice) */
+typedef CCSlice CCSliceUnique;
+
 static inline CCSlice cc_slice_empty(void) {
     CCSlice s = {0};
     return s;

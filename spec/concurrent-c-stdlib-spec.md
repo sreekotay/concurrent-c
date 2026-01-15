@@ -49,17 +49,26 @@ split(&s, ",");
 
 ### Type Notation Precedence
 
-Type modifiers bind with this precedence (highest to lowest):
+Type modifiers bind with this precedence (tightest first):
 
-1. **Optional** (`T?`)
-2. **Result** (`T!E`)
+1. `?` (optional)
+2. `!E` (result)
+3. `[:]` (slice)
 
-Thus: `T?!E` means `Result<Option<T>, E>` (error takes precedence over missing value).
+See **§2.3 Type Precedence** in the main language spec for complete rules.
 
 **Examples:**
-- `char[:]?!IoError` — read may fail (IoError) or reach EOF (None) or succeed (some slice)
-- `int!BoundsError` — set may fail with BoundsError, or succeed
-- `Vec<T>?` — optional vector (rare in stdlib, more in application code)
+
+| Syntax | Parses as | Meaning |
+|--------|-----------|---------|
+| `char[:]?` | `(char[:])?` | optional slice (e.g., `find()` return) |
+| `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read_all()` return) |
+| `char[:]?!IoError` | `((char[:])?)!IoError` | result whose ok-value is optional (e.g., streaming `read()`) |
+| `T!E?` | `((T)!E)?` | optional result (e.g., `recv()` on error channel) |
+
+**Key distinction:**
+- `T?!E` — "operation may fail; if it succeeds, value may be absent" (streaming read: error, EOF, or data)
+- `T!E?` — "value may be absent; if present, it's a result" (channel recv: closed, or ok/err)
 
 ---
 
@@ -364,21 +373,18 @@ File! file_open(Arena* a, char[:] path, char[:] mode);  // "r", "w", "a"
 @async File! file_open_async(Arena* a, char[:] path, char[:] mode);
 
 // UFCS Methods
-struct FileReadResult {
-    char[:] data;       // allocated in arena
-    size_t bytes_read;  // 0 allowed (only with EOF semantics below)
-};
 
 // Streaming read: Ok(None) means EOF (normal termination), Err means actual failure.
-FileReadResult?!IoError File.read(Arena* a, size_t n);
-
-// Read entire file into arena. Always succeeds (returns empty slice for empty files).
-// EOF is not an error; never returns Ok(None) or error with Eof.
-char[:]!IoError File.read_all(Arena* a);
+// Reads up to n bytes; returns slice of actual bytes read.
+char[:]?!IoError File.read(Arena* a, size_t n);
 
 // Read one line into arena (line ending handling: accepts \n and \r\n).
 // Ok(None) means EOF with no more data.
 char[:]?!IoError File.read_line(Arena* a);
+
+// Read entire file into arena. Returns empty slice for empty files.
+// This is NOT a streaming API — use read() or read_line() for streaming.
+char[:]!IoError File.read_all(Arena* a);
 
 // Write all bytes from data.
 size_t !IoError File.write(char[:] data);
@@ -393,24 +399,22 @@ void   !IoError File.sync();
 // Call sync() before close() to observe flush failures.
 void            File.close();
 
-// Async variants
-@async FileReadResult?!IoError File.read_async(Arena* a, size_t n);
-@async char[:]         !IoError File.read_all_async(Arena* a);
-@async char[:]?        !IoError File.read_line_async(Arena* a);
-@async size_t          !IoError File.write_async(char[:] data);
+// Async variants (same signatures, just async)
+@async char[:]?!IoError File.read_async(Arena* a, size_t n);
+@async char[:]?!IoError File.read_line_async(Arena* a);
+@async char[:]!IoError  File.read_all_async(Arena* a);
+@async size_t!IoError   File.write_async(char[:] data);
 ```
 
-**EOF Semantics:** `read()` and `read_line()` return `Ok(None)` at EOF. EOF is not an error. `read_all()` returns `Ok(empty)` for empty files and never signals EOF as an error.
+**EOF Semantics (Unified):**
 
-**EOF Behavior Comparison:**
+| Method | Return Type | EOF Behavior |
+|--------|-------------|--------------|
+| `read()` | `char[:]?!IoError` | `Ok(None)` = EOF |
+| `read_line()` | `char[:]?!IoError` | `Ok(None)` = EOF |
+| `read_all()` | `char[:]!IoError` | N/A (reads entire file; empty slice for empty file) |
 
-| Method | EOF Behavior | Use Case |
-|--------|--------------|----------|
-| `read_line()` | Returns `Ok(None)` | Line-by-line streaming |
-| `read()` | Returns `Ok(None)` with `bytes_read=0` | Chunked streaming |
-| `read_all()` | Returns `Ok(empty_slice)` never EOF | Whole-file reads |
-
-This prevents accidental infinite loops or double-reads.
+**Rule:** All streaming reads (`read()`, `read_line()`) return `Ok(None)` at EOF. Non-streaming reads (`read_all()`) return the full content (empty slice if file is empty).
 
 **Examples:**
 
@@ -1043,24 +1047,13 @@ typedef struct {
 - **Closure responsibility:** For server shell context, see **ServerAction ownership rules** below. After calling `close()` or `shutdown(Both)`, the handler must not call any other methods on the same Duplex
 - Duplex values are not thread-safe; they must not be shared across threads (use `send_take()` requires a `Duplex!SendDuplex` marker type, future phase)
 
-// Streaming request body (for chunked/multipart uploads)
-struct BodyReader {
-    @async char[:]?!IoError read_chunk(Arena* a);  // Ok(None) == EOF
-};
-
-// Streaming response body (for chunked/SSE/streaming)
-struct BodyWriter {
-    @async void!IoError write_chunk(char[:] bytes);
-    @async void!IoError end();  // Signal EOF; flushes any trailers
-};
-
 // Request from client
 struct Request {
     int fd;                      // Socket file descriptor (do not close; server manages)
     char[:] method;              // HTTP method ("GET", "POST", etc.)
     char[:] path;                // URL path ("/api/users", etc.)
     char[:] headers;             // Raw HTTP headers
-    BodyReader body;             // Request body stream
+    Duplex body;                 // Request body stream (use read() for chunked uploads)
 };
 
 // Response to send back
@@ -1068,7 +1061,7 @@ struct Response {
     u16 status;                  // HTTP status (200, 404, 500, etc.)
     char[:] headers;             // Response headers
     char[:] body;                // Response body (small/unary fast path)
-    BodyWriter? stream;          // Or streaming response body
+    Duplex? stream;              // Streaming response (use write() + shutdown(Write) to end)
 };
 
 // Handler returns either unary response or takes over connection
@@ -1325,33 +1318,28 @@ struct ServerConfig {
 ```c
 @async ServerAction!IoError sse_handler(Request* req, Arena* req_arena) {
     if (req.path == "/events") {
-        Response resp = {
-            .status = 200,
-            .headers = "Content-Type: text/event-stream\r\nConnection: keep-alive\r\n",
-        };
-        
-        // Create streaming body writer
-        BodyWriter stream = BodyWriter.new();
-        resp.stream = &stream;
-        
-        // Spawn background task to write events
-        @nursery {
-            spawn (sse_event_loop(stream, req_arena));
-        }
-        
-        return ServerAction.Reply(resp);
+        // For SSE, use Takeover to control the connection directly
+        return ServerAction.Takeover(sse_connection);
     } else {
         return ServerAction.Reply({.status = 404});
     }
 }
 
-@async void sse_event_loop(BodyWriter* stream, Arena* arena) {
+@async void!IoError sse_connection(Duplex* conn, Arena* conn_arena) {
+    // Send SSE headers
+    try await conn.write("HTTP/1.1 200 OK\r\n");
+    try await conn.write("Content-Type: text/event-stream\r\n");
+    try await conn.write("Connection: keep-alive\r\n\r\n");
+    
+    // Stream events
     for (size_t i = 0; i < 100; i++) {
-        char[:] event = format_event(i, arena);
-        try await stream.write_chunk(event);
+        char[:] event = format_event(i, conn_arena);
+        try await conn.write(event);
         await sleep(milliseconds(1000));
     }
-    try await stream.end();
+    
+    // Signal end by closing write side
+    try await conn.shutdown(Write);
 }
 ```
 
@@ -1451,7 +1439,7 @@ struct ServerConfig {
 Users can:
 - Return `Reply` for unary request/response patterns (HTTP, gRPC, JSON-RPC)
 - Return `Takeover` for long-lived protocols (WebSocket, SSE, raw TCP, HTTP/2, custom protocols)
-- Use `BodyReader`/`BodyWriter` for streaming request/response bodies
+- Use `Duplex` for streaming request/response bodies (read for uploads, write for SSE/streaming)
 - Implement custom protocol parsing in handlers
 - Use `Duplex` interface for any bidirectional, closeable stream
 - Configure TLS at the server level (decryption transparent to handlers)

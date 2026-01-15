@@ -5011,182 +5011,27 @@ Intentionally omitted in v1.0:
 
 ## 11. Collections
 
-This section defines built-in generic collection types: `Vec<T>` (dynamic array) and `Map<K,V>` (hash table). Both are arena-backed for predictable allocation and lifetime.
+Standard collection types are defined in the **Standard Library Specification** (`concurrent-c-stdlib-spec.md`):
 
----
+- **`Vec<T>`** — arena-backed dynamic array (`<std/vec.cch>`)
+- **`Map<K,V>`** — arena-backed hash table (`<std/map.cch>`)
 
-### 11.1 Vec<T> (Dynamic Array)
+Both types are generic, use UFCS methods, and require an `Arena*` at construction. See the stdlib spec for full API reference, rules, and examples.
 
-`Vec<T>` is a generic, arena-backed dynamic array with UFCS methods.
-
-**Type definition:**
-
-```c
-typedef struct Vec<T> Vec<T>;
-```
-
-**Factories:**
+**Quick reference:**
 
 ```c
-Vec<T> vec_new<T>(Arena* a);                          // Create empty vec
-Vec<T> vec_with_capacity<T>(Arena* a, size_t capacity);  // Pre-allocate
-```
+// Vec<T>
+Vec<T> v = vec_new<T>(&arena);
+v.push(value);
+T? x = v.get(index);
+T[:] slice = v.as_slice();
 
-**UFCS Methods:**
-
-```c
-// Mutating
-void    Vec<T>.push(T value);                   // Add element, grows as needed
-T?      Vec<T>.pop();                           // Remove and return last (None if empty)
-void!BoundsError Vec<T>.set(size_t i, T value);       // Set with bounds check
-
-// Querying
-T?      Vec<T>.get(size_t index);               // Bounds-safe get (None if out of bounds)
-T*      Vec<T>.get_mut(size_t index);           // Mutable reference (NULL if out of bounds)
-size_t  Vec<T>.len();                           // Number of elements
-size_t  Vec<T>.cap();                           // Allocated capacity
-T[:]    Vec<T>.as_slice();                      // View as slice
-
-// Bulk operations
-void    Vec<T>.clear();                         // Remove all elements
-```
-
-**Iterator:**
-
-```c
-struct VecIter<T> {
-    Vec<T>* vec;
-    size_t index;
-};
-
-VecIter<T> Vec<T>.iter();                       // Create iterator
-T?         VecIter<T>.next();                   // Get next element (None when exhausted)
-```
-
-**Rules:**
-
-- `Vec<T>` is **move-only** when `T` is move-only. Copying a vec with non-copyable elements is a compile-time error.
-- `Vec<T>` allocates from the arena provided at construction; elements do not shift between arenas.
-- `push()` may cause reallocation; all existing elements remain valid.
-- `clear()` resets length to 0 but does not deallocate capacity.
-- Iteration over a modified vec (during iteration, elements added/removed) is undefined behavior.
-
-**Examples:**
-
-```c
-Arena arena = arena(megabytes(1));
-
-// Work queue (spawn and await async tasks)
-Vec<Task<void>> tasks = vec_new<Task<void>>(&arena);
-tasks.push(async_compute(data1));
-tasks.push(async_compute(data2));
-tasks.push(async_compute(data3));
-
-VecIter<Task<void>> it = tasks.iter();
-while (Task<void>? task = it.next()) {
-    await *task;
-}
-
-// String accumulation
-Vec<char> buffer = vec_new<char>(&arena);
-for (size_t i = 0; i < input.len; i++) {
-    buffer.push(input.ptr[i]);
-}
-char[:] result = buffer.as_slice();
-
-// Bounds-safe access
-Vec<int> data = vec_new<int>(&arena);
-data.push(42);
-int? val = data.get(0);       // Some(42)
-int? oob = data.get(100);     // None (out of bounds)
-
-// Error handling with set
-if (Error? e = data.set(0, 99)) {
-    handle_bounds_error(e);
-}
-```
-
----
-
-### 11.2 Map<K, V> (Hash Table)
-
-`Map<K, V>` is a generic, arena-backed hash table with UFCS methods.
-
-**Type definition:**
-
-```c
-typedef struct Map<K, V> Map<K, V>;
-```
-
-**Factory:**
-
-```c
-Map<K, V> map_new<K, V>(Arena* a);              // Create empty map
-```
-
-**UFCS Methods:**
-
-```c
-// Mutating
-void    Map<K, V>.insert(K key, V value);       // Insert or update
-bool    Map<K, V>.remove(K key);                // Remove (true if existed)
-void    Map<K, V>.clear();                      // Remove all entries
-
-// Querying
-V?      Map<K, V>.get(K key);                   // Lookup (None if missing)
-V*      Map<K, V>.get_mut(K key);               // Mutable reference (NULL if missing)
-size_t  Map<K, V>.len();                        // Number of entries
-size_t  Map<K, V>.cap();                        // Capacity
-```
-
-**Rules:**
-
-- `Map<K,V>` is **move-only**. Copying a map is a compile-time error. Share via `Mutex<Map<K,V>>`.
-- Slice keys and values are deep-copied into the map's arena. Originals can be freed after insertion.
-- `K` and `V` must have `hash(K) -> u64` and `eq(K, K) -> bool` free functions (defaults exist for primitives and slices).
-- The map is **not thread-safe** but is **sendable**. Concurrent access requires external synchronization.
-- Mutating a map during iteration is undefined behavior (Phase 2 will add safe iterators).
-
-**Hash/Eq Protocol:**
-
-Maps use free functions for equality and hashing. Defaults exist for all primitives, slices, and basic structs.
-
-```c
-// Custom key type
-struct Point { int x; int y; }
-
-u64  hash(Point p) {
-    return ((u64)p.x * 31) ^ ((u64)p.y * 37);
-}
-
-bool eq(Point a, Point b) {
-    return a.x == b.x && a.y == b.y;
-}
-```
-
-**Examples:**
-
-```c
-Arena arena = arena(megabytes(1));
-
-// String → int cache
-Map<char[:], int> cache = map_new<char[:], int>(&arena);
-cache.insert("hits", 100);
-cache.insert("misses", 5);
-
-int? val = cache.get("hits");    // Some(100)
-int? miss = cache.get("nothere"); // None
-
-// Request ID → state table
-struct RequestState { int code; char[:] body; };
-Map<int, RequestState> active = map_new<int, RequestState>(&arena);
-
-active.insert(req.id, state);
-RequestState? found = active.get(42);
-if (found) {
-    process_response(*found);
-}
-active.remove(42);
+// Map<K,V>
+Map<K, V> m = map_new<K, V>(&arena);
+m.insert(key, value);
+V? x = m.get(key);
+m.remove(key);
 ```
 
 ---

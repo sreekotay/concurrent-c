@@ -1,0 +1,10 @@
+#include "cc_runtime.cch"
+
+int main(void) {
+    char[:] s = cc_slice_empty();
+    (void)s;
+    char[:!] u = cc_slice_from_parts(NULL, 0, cc_slice_make_id(1, true, true, false), 0);
+    (void)u;
+    return 0;
+}
+

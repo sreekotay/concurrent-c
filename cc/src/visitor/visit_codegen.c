@@ -30,6 +30,529 @@
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
 #endif
 
+static void cc__sb_append_local(char** buf, size_t* len, size_t* cap, const char* s, size_t n) {
+    if (!buf || !len || !cap || !s || n == 0) return;
+    size_t need = *len + n + 1;
+    if (need > *cap) {
+        size_t nc = (*cap ? *cap * 2 : 1024);
+        while (nc < need) nc *= 2;
+        char* nb = (char*)realloc(*buf, nc);
+        if (!nb) return;
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = 0;
+}
+
+static void cc__sb_append_cstr_local(char** buf, size_t* len, size_t* cap, const char* s) {
+    if (!s) return;
+    cc__sb_append_local(buf, len, cap, s, strlen(s));
+}
+
+static int cc__is_ident_char_local2(char c) {
+    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
+}
+
+static int cc__is_ident_start_local2(char c) {
+    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+
+static const char* cc__skip_ws_local2(const char* s) {
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    return s;
+}
+
+static int cc__find_chan_decl_before(const char* src,
+                                     size_t len,
+                                     size_t search_before_off,
+                                     const char* name,
+                                     size_t* out_lbrack,
+                                     size_t* out_rbrack,
+                                     size_t* out_ty_start) {
+    if (!src || !name || !*name || !out_lbrack || !out_rbrack || !out_ty_start) return 0;
+    size_t nm_len = strlen(name);
+    if (search_before_off > len) search_before_off = len;
+
+    /* Search backwards for the identifier. Best-effort: this is a text scan over the original source. */
+    for (size_t pos = search_before_off; pos-- > 0; ) {
+        if (pos + nm_len > len) continue;
+        if (memcmp(src + pos, name, nm_len) != 0) continue;
+        char pre = (pos == 0) ? 0 : src[pos - 1];
+        char post = (pos + nm_len < len) ? src[pos + nm_len] : 0;
+        if (pre && cc__is_ident_char_local2(pre)) continue;
+        if (post && cc__is_ident_char_local2(post)) continue;
+
+        /* Find preceding '[~' ... ']' before the name (same statement chunk). */
+        size_t scan = pos;
+        size_t lbr = (size_t)-1;
+        size_t rbr = (size_t)-1;
+        for (size_t j = scan; j-- > 0; ) {
+            char c = src[j];
+            if (c == ';' || c == '{' || c == '}' || c == '\n') break;
+            if (c == ']') { rbr = j; continue; }
+            if (c == '[') {
+                /* check for "~" soon after '[' */
+                size_t k = j + 1;
+                while (k < len && (src[k] == ' ' || src[k] == '\t')) k++;
+                if (k < len && src[k] == '~' && rbr != (size_t)-1 && rbr > j) {
+                    lbr = j;
+                    break;
+                }
+            }
+        }
+        if (lbr == (size_t)-1 || rbr == (size_t)-1) continue;
+
+        /* Type start: walk back to delimiter. */
+        size_t ts = lbr;
+        while (ts > 0) {
+            char c = src[ts - 1];
+            if (c == ';' || c == '{' || c == '}' || c == ',' || c == '(' || c == ')' || c == '\n') break;
+            ts--;
+        }
+        while (ts < lbr && (src[ts] == ' ' || src[ts] == '\t')) ts++;
+
+        *out_lbrack = lbr;
+        *out_rbrack = rbr;
+        *out_ty_start = ts;
+        return 1;
+    }
+    return 0;
+}
+
+static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
+                                      const char* src,
+                                      size_t len,
+                                      size_t lbr,
+                                      size_t rbr,
+                                      int* out_is_tx,
+                                      int* out_is_rx,
+                                      long long* out_cap_int,
+                                      int* out_allow_take,
+                                      const char** out_elem_size_expr) {
+    if (!src || lbr >= len || rbr >= len || rbr <= lbr) return 0;
+    if (out_is_tx) *out_is_tx = 0;
+    if (out_is_rx) *out_is_rx = 0;
+    if (out_cap_int) *out_cap_int = -1;
+    if (out_allow_take) *out_allow_take = 0;
+    if (out_elem_size_expr) *out_elem_size_expr = "0";
+
+    /* Direction */
+    int saw_gt = 0, saw_lt = 0;
+    for (size_t i = lbr; i <= rbr && i < len; i++) {
+        if (src[i] == '>') saw_gt = 1;
+        if (src[i] == '<') saw_lt = 1;
+    }
+    if (out_is_tx) *out_is_tx = saw_gt;
+    if (out_is_rx) *out_is_rx = saw_lt;
+
+    /* Capacity: parse first integer after '~' (digits only for now). */
+    size_t t = lbr;
+    while (t < rbr && src[t] != '~') t++;
+    if (t < rbr && src[t] == '~') t++;
+    while (t < rbr && (src[t] == ' ' || src[t] == '\t')) t++;
+    if (t < rbr && (src[t] >= '0' && src[t] <= '9')) {
+        long long cap = 0;
+        while (t < rbr && (src[t] >= '0' && src[t] <= '9')) { cap = cap * 10 + (src[t] - '0'); t++; }
+        if (out_cap_int) *out_cap_int = cap;
+    } else {
+        if (out_cap_int) *out_cap_int = -1;
+    }
+
+    (void)ctx;
+    return 1;
+}
+
+static int cc__elem_type_implies_take(const char* elem_ty, const char** out_elem_size_expr) {
+    if (!elem_ty || !*elem_ty) return 0;
+    /* Slice element: enable take and set elem size to CCSlice */
+    if (strstr(elem_ty, "[:") || strstr(elem_ty, "CCSlice")) {
+        if (out_elem_size_expr) *out_elem_size_expr = "sizeof(CCSlice)";
+        return 1;
+    }
+    /* Pointer element: enable take and set elem size to void* */
+    if (strchr(elem_ty, '*')) {
+        if (out_elem_size_expr) *out_elem_size_expr = "sizeof(void*)";
+        return 1;
+    }
+    if (out_elem_size_expr) *out_elem_size_expr = "0";
+    return 0;
+}
+
+static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const char* src, size_t len, size_t* out_len) {
+    if (!src || !out_len) return NULL;
+    *out_len = 0;
+    char* out = NULL;
+    size_t o_len = 0, o_cap = 0;
+
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+
+    int line = 1, col = 1;
+
+    while (i < len) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < len) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < len) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+
+        /* Look for channel_pair token */
+        if (c == 'c' && i + 12 < len && memcmp(src + i, "channel_pair", 12) == 0) {
+            char pre = (i == 0) ? 0 : src[i - 1];
+            char post = (i + 12 < len) ? src[i + 12] : 0;
+            if ((i == 0 || !cc__is_ident_char_local2(pre)) && (i + 12 == len || !cc__is_ident_char_local2(post))) {
+                size_t call_start = i;
+                const char* p = src + i + 12;
+                p = cc__skip_ws_local2(p);
+                if (*p != '(') { i++; col++; continue; }
+                p++; /* consume '(' */
+                p = cc__skip_ws_local2(p);
+                if (*p != '&') {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair expects `&tx, &rx` at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+                p++;
+                p = cc__skip_ws_local2(p);
+                if (!cc__is_ident_start_local2(*p)) return NULL;
+                const char* tx_s = p;
+                p++;
+                while (cc__is_ident_char_local2(*p)) p++;
+                size_t tx_n = (size_t)(p - tx_s);
+                p = cc__skip_ws_local2(p);
+                if (*p != ',') return NULL;
+                p++;
+                p = cc__skip_ws_local2(p);
+                if (*p != '&') return NULL;
+                p++;
+                p = cc__skip_ws_local2(p);
+                if (!cc__is_ident_start_local2(*p)) return NULL;
+                const char* rx_s = p;
+                p++;
+                while (cc__is_ident_char_local2(*p)) p++;
+                size_t rx_n = (size_t)(p - rx_s);
+                p = cc__skip_ws_local2(p);
+                if (*p != ')') return NULL;
+                p++;
+                const char* after = cc__skip_ws_local2(p);
+                if (*after != ';') {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair must be used as a statement (end with ';') at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+
+                char tx_name[128], rx_name[128];
+                if (tx_n >= sizeof(tx_name) || rx_n >= sizeof(rx_name)) return NULL;
+                memcpy(tx_name, tx_s, tx_n); tx_name[tx_n] = 0;
+                memcpy(rx_name, rx_s, rx_n); rx_name[rx_n] = 0;
+
+                size_t tx_lbr=0, tx_rbr=0, tx_ts=0;
+                size_t rx_lbr=0, rx_rbr=0, rx_ts=0;
+                if (!cc__find_chan_decl_before(src, len, call_start, tx_name, &tx_lbr, &tx_rbr, &tx_ts) ||
+                    !cc__find_chan_decl_before(src, len, call_start, rx_name, &rx_lbr, &rx_rbr, &rx_ts)) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair could not find matching channel handle declarations for '%s'/'%s' at %s:%d:%d\n",
+                            tx_name, rx_name,
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+
+                int tx_is_tx=0, tx_is_rx=0, rx_is_tx=0, rx_is_rx=0;
+                long long tx_cap=-1, rx_cap=-1;
+                int dummy_allow=0;
+                const char* dummy_sz="0";
+                (void)cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr, &tx_is_tx, &tx_is_rx, &tx_cap, &dummy_allow, &dummy_sz);
+                (void)cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr, &rx_is_tx, &rx_is_rx, &rx_cap, &dummy_allow, &dummy_sz);
+
+                if (!tx_is_tx || tx_is_rx || !rx_is_rx || rx_is_tx) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair requires a send handle (>) then a recv handle (<) at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+                long long cap_to_use = -1;
+                if (tx_cap == -1 && rx_cap == -1) {
+                    /* Unbuffered rendezvous channel (capacity omitted). */
+                    cap_to_use = 0;
+                } else if (tx_cap >= 1 && rx_cap >= 1 && tx_cap == rx_cap) {
+                    cap_to_use = tx_cap;
+                } else {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair requires matching capacity on tx/rx (or omit both for unbuffered) at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+
+                /* Element type: slice substring before tx_lbr */
+                size_t elem_len = tx_lbr > tx_ts ? (tx_lbr - tx_ts) : 0;
+                char elem_ty[256];
+                if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
+                memcpy(elem_ty, src + tx_ts, elem_len);
+                elem_ty[elem_len] = 0;
+                /* Trim trailing whitespace */
+                while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) elem_ty[--elem_len] = 0;
+
+                const char* elem_sz_expr = "0";
+                int allow_take = cc__elem_type_implies_take(elem_ty, &elem_sz_expr);
+
+                /* Emit up to call_start, then replace call statement. */
+                cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
+                char repl[1024];
+                snprintf(repl, sizeof(repl),
+                         "do { int __cc_err = cc_chan_pair_create(%lld, CC_CHAN_MODE_BLOCK, %d, %s, &%s, &%s); "
+                         "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
+                         cap_to_use,
+                         allow_take ? 1 : 0,
+                         elem_sz_expr,
+                         tx_name, rx_name);
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
+
+                /* Advance i to after the ';' */
+                size_t consumed = (size_t)(after - (src + i));
+                i += consumed + 1;
+                last_emit = i;
+                col += (int)consumed + 1;
+                continue;
+            }
+        }
+
+        i++; col++;
+    }
+
+    if (last_emit < len) {
+        cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, len - last_emit);
+    }
+    *out_len = o_len;
+    return out;
+}
+
+/* Text-based: rewrite channel handle types `T[~ ... >]` / `T[~ ... <]` into `CCChanTx` / `CCChanRx`.
+   This is a surface-syntax lowering step: it must run before the generated C is compiled. */
+static char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+
+    int line = 1;
+    int col = 1;
+
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = 0;
+            i++; col++;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; }
+            i++; col++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; }
+            if (c == '"') in_str = 0;
+            i++; col++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; }
+            if (c == '\'') in_chr = 0;
+            i++; col++;
+            continue;
+        }
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+
+        if (c == '[') {
+            size_t j = i + 1;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j < n && src[j] == '~') {
+                size_t k = j + 1;
+                while (k < n && src[k] != ']' && src[k] != '\n') k++;
+                if (k >= n || src[k] != ']') {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: unterminated channel handle type (missing ']') at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    free(out);
+                    return NULL;
+                }
+                int saw_gt = 0, saw_lt = 0;
+                for (size_t t = j; t < k; t++) { if (src[t] == '>') saw_gt = 1; if (src[t] == '<') saw_lt = 1; }
+                if (saw_gt && saw_lt) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel handle type cannot be both send ('>') and recv ('<') at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    free(out);
+                    return NULL;
+                }
+                if (!saw_gt && !saw_lt) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel handle type requires direction: use `T[~ ... >]` or `T[~ ... <]` at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    free(out);
+                    return NULL;
+                }
+                /* back to stmt delimiter */
+                size_t ty_start = i;
+                while (ty_start > 0) {
+                    char p = src[ty_start - 1];
+                    if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+                    ty_start--;
+                }
+                while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
+
+                if (ty_start >= last_emit) {
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
+                    last_emit = k + 1;
+                }
+                /* advance scan to k+1 */
+                while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
+                continue;
+            }
+        }
+
+        i++; col++;
+    }
+
+    if (last_emit < n) {
+        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    }
+    return out;
+}
+
+static int cc__is_ident_char_local(char c) {
+    return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
+}
+
+static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* out_qual, size_t out_cap) {
+    if (!s || !out_qual || out_cap == 0) return ty_start;
+    out_qual[0] = 0;
+    size_t p = ty_start;
+    while (s[p] == ' ' || s[p] == '\t') p++;
+    for (;;) {
+        int matched = 0;
+        if (strncmp(s + p, "const", 5) == 0 && !cc__is_ident_char_local(s[p + 5])) {
+            strncat(out_qual, "const ", out_cap - strlen(out_qual) - 1);
+            p += 5;
+            while (s[p] == ' ' || s[p] == '\t') p++;
+            matched = 1;
+        } else if (strncmp(s + p, "volatile", 8) == 0 && !cc__is_ident_char_local(s[p + 8])) {
+            strncat(out_qual, "volatile ", out_cap - strlen(out_qual) - 1);
+            p += 8;
+            while (s[p] == ' ' || s[p] == '\t') p++;
+            matched = 1;
+        }
+        if (!matched) break;
+    }
+    return p;
+}
+
+static char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    int line = 1, col = 1;
+
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+
+        if (c == '[') {
+            size_t j = i + 1;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j < n && src[j] == ':') {
+                size_t k = j + 1;
+                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                int is_unique = 0;
+                if (k < n && src[k] == '!') { is_unique = 1; k++; }
+                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                if (k >= n || src[k] != ']') {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: unterminated slice type (missing ']') at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    free(out);
+                    return NULL;
+                }
+                /* Find start of type token sequence and preserve leading cv qualifiers */
+                size_t ty_start = i;
+                while (ty_start > 0) {
+                    char p = src[ty_start - 1];
+                    if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+                    ty_start--;
+                }
+                while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
+
+                if (ty_start >= last_emit) {
+                    char quals[64];
+                    size_t after_qual = cc__strip_leading_cv_qual(src, ty_start, quals, sizeof(quals));
+                    (void)after_qual;
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, quals);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, is_unique ? "CCSliceUnique" : "CCSlice");
+                    last_emit = k + 1;
+                }
+                while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
+                continue;
+            }
+        }
+
+        i++; col++;
+    }
+
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* AST-driven async lowering (implemented in `cc/src/visitor/async_ast.c`). */
 int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                        const CCVisitorCtx* ctx,
@@ -519,6 +1042,39 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     if (src_ufcs) {
+        /* Lower `channel_pair(&tx, &rx);` into `cc_chan_pair_create(...)` */
+        {
+            size_t rp_len = 0;
+            char* rp = cc__rewrite_channel_pair_calls_text(ctx, src_ufcs, src_ufcs_len, &rp_len);
+            if (!rp) {
+                fclose(out);
+                return EINVAL;
+            }
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rp;
+            src_ufcs_len = rp_len;
+        }
+        /* Final safety: ensure invalid surface syntax like `T[~ ... >]` does not reach the C compiler. */
+        {
+            char* rew_slice = cc__rewrite_slice_types_text(ctx, src_ufcs, src_ufcs_len);
+            if (!rew_slice) {
+                fclose(out);
+                return EINVAL;
+            }
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rew_slice;
+            src_ufcs_len = strlen(src_ufcs);
+        }
+        {
+            char* rew = cc__rewrite_chan_handle_types_text(ctx, src_ufcs, src_ufcs_len);
+            if (!rew) {
+                fclose(out);
+                return EINVAL;
+            }
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rew;
+            src_ufcs_len = strlen(src_ufcs);
+        }
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);
 

@@ -1,0 +1,8 @@
+#include "cc_runtime.cch"
+
+int main(void) {
+    int[~ 3] ch;
+    (void)ch;
+    return 0;
+}
+
