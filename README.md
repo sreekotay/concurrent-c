@@ -2,6 +2,8 @@
 
 This repo is an early prototype of **Concurrent‑C (CC)** built by extending **Tiny C Compiler (TCC)** with small, upstream-friendly hooks (guarded behind `CONFIG_CC_EXT`).
 
+**License:** Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
+
 At this stage CC is a “C-with-extensions” toolchain:
 - A `ccc` compiler (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then optionally compiles/links using the host C compiler.
 - A small runtime/stdlib (header-first, prefixed APIs) under `cc/include` and `cc/runtime`.
