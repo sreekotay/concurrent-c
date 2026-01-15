@@ -275,9 +275,48 @@ int cc__rewrite_arena_blocks_with_nodes(const CCASTRoot* root,
         if (e.indent_off + indent_len > cur_len) { indent = ""; indent_len = 0; }
 
         char pro[512];
-        /* Heap-allocate the arena object so it can be safely referenced across @async suspension
-           (the pointer can be hoisted into the async frame). */
-        int pn = snprintf(pro, sizeof(pro),
+        char epi[256];
+        int pn = 0;
+        int en = 0;
+
+        /* Check for @buf: prefix indicating 3-arg form: @arena(name, buf, size) */
+        if (e.size_expr && strncmp(e.size_expr, "@buf:", 5) == 0) {
+            /* Parse "buf_expr;size_expr" after the "@buf:" prefix */
+            const char* rest = e.size_expr + 5;
+            const char* semi = strchr(rest, ';');
+            if (!semi) continue;
+
+            char buf_expr[256];
+            char size_expr[256];
+            size_t buf_len = (size_t)(semi - rest);
+            if (buf_len >= sizeof(buf_expr)) buf_len = sizeof(buf_expr) - 1;
+            memcpy(buf_expr, rest, buf_len);
+            buf_expr[buf_len] = 0;
+
+            size_t size_len = strlen(semi + 1);
+            if (size_len >= sizeof(size_expr)) size_len = sizeof(size_expr) - 1;
+            memcpy(size_expr, semi + 1, size_len);
+            size_expr[size_len] = 0;
+
+            /* Stack-allocate the arena object, initialize with user's buffer */
+            pn = snprintf(pro, sizeof(pro),
+                          "%.*s{\n"
+                          "%.*s  CCArena __cc_arena%d_obj;\n"
+                          "%.*s  if (cc_arena_init(&__cc_arena%d_obj, %s, %s) != 0) abort();\n"
+                          "%.*s  CCArena* %s = &__cc_arena%d_obj;\n",
+                          (int)indent_len, indent,
+                          (int)indent_len, indent, e.id,
+                          (int)indent_len, indent, e.id, buf_expr, size_expr,
+                          (int)indent_len, indent, e.name, e.id);
+
+            /* No cleanup needed - arena uses user's buffer, not heap */
+            en = snprintf(epi, sizeof(epi),
+                          "%.*s  /* arena %s uses user buffer - no cleanup */\n",
+                          (int)indent_len, indent, e.name);
+        } else {
+            /* Heap-allocate the arena object so it can be safely referenced across @async suspension
+               (the pointer can be hoisted into the async frame). */
+            pn = snprintf(pro, sizeof(pro),
                           "%.*s{\n"
                           "%.*s  CCArena* __cc_arena%d = (CCArena*)malloc(sizeof(CCArena));\n"
                           "%.*s  if (!__cc_arena%d) abort();\n"
@@ -288,14 +327,14 @@ int cc__rewrite_arena_blocks_with_nodes(const CCASTRoot* root,
                           (int)indent_len, indent, e.id,
                           (int)indent_len, indent, e.id, e.size_expr,
                           (int)indent_len, indent, e.name, e.id);
-        if (pn <= 0 || (size_t)pn >= sizeof(pro)) continue;
 
-        char epi[256];
-        int en = snprintf(epi, sizeof(epi),
+            en = snprintf(epi, sizeof(epi),
                           "%.*s  cc_heap_arena_free(__cc_arena%d);\n"
                           "%.*s  free(__cc_arena%d);\n",
                           (int)indent_len, indent, e.id,
                           (int)indent_len, indent, e.id);
+        }
+        if (pn <= 0 || (size_t)pn >= sizeof(pro)) continue;
         if (en <= 0 || (size_t)en >= sizeof(epi)) continue;
 
         /* Replace [start_off, brace_off+1) with prologue. */

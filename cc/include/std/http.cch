@@ -5,7 +5,7 @@
  * HTTP client built on libcurl.
  * All responses are arena-allocated.
  *
- * Requires: @link("curl") in user code, or -lcurl in linker flags.
+ * @link("curl") - auto-links libcurl when this header is used
  */
 #ifndef CC_STD_HTTP_H
 #define CC_STD_HTTP_H

@@ -1,0 +1,26 @@
+// Test: @arena_init with user-provided buffer
+#include "std/prelude.cch"
+#include <assert.h>
+
+int main(void) {
+    // User-provided stack buffer
+    char buffer[1024];
+    
+    @arena_init(buffer, sizeof(buffer)) {
+        // Allocate from the arena (default name is "arena")
+        int* x = (int*)cc_arena_alloc(arena, sizeof(int), sizeof(int));
+        assert(x != NULL);
+        *x = 42;
+        assert(*x == 42);
+        
+        // Verify the pointer is within our buffer
+        assert((char*)x >= buffer);
+        assert((char*)x < buffer + sizeof(buffer));
+        
+        printf("arena_user_buffer_smoke: allocated at offset %ld\n", 
+               (long)((char*)x - buffer));
+    }
+    
+    printf("arena_user_buffer_smoke: OK\n");
+    return 0;
+}

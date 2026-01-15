@@ -125,6 +125,28 @@ static char* cc__rewrite_with_deadline_syntax(const char* src, size_t n) {
             continue;
         }
 
+        /* Allow `@with_deadline(...) { ... }` as an alias for `with_deadline(...) { ... }`.
+           This must happen in preprocessing because `@...` is not valid C and would be rejected
+           by the patched TCC parser before later visitor rewrites run. */
+        if (c == '@') {
+            size_t j = i + 1;
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\r' || src[j] == '\n')) j++;
+            const char* kw = "with_deadline";
+            size_t kw_len = strlen(kw);
+            if (j + kw_len <= n && memcmp(src + j, kw, kw_len) == 0) {
+                char after = (j + kw_len < n) ? src[j + kw_len] : 0;
+                if (!after || !cc__is_ident_char(after)) {
+                    /* Drop the '@' and continue scanning at the keyword. */
+                    i = j;
+                    continue;
+                }
+            }
+            /* Not our alias; keep the '@' verbatim. */
+            cc__sb_append(&out, &out_len, &out_cap, &c, 1);
+            i++;
+            continue;
+        }
+
         if (cc__is_ident_start(c)) {
             size_t s0 = i;
             i++;

@@ -24,7 +24,13 @@ typedef _Atomic size_t cc_atomic_size;
 #else
 typedef uint64_t cc_atomic_u64;
 typedef size_t cc_atomic_size;
-#if defined(__TINYC__)
+#if defined(CC_PARSER_MODE)
+// Simplified stubs for TCC stub-AST parsing (no actual execution)
+#define CC_ATOMIC_FETCH_ADD(ptr, val) ((*(ptr)) += (val))
+#define CC_ATOMIC_LOAD(ptr) (*(ptr))
+#define CC_ATOMIC_STORE(ptr, val) ((*(ptr)) = (val))
+#define CC_ATOMIC_CAS(ptr, expected_ptr, desired) (*(ptr) == *(expected_ptr) ? (*(ptr) = (desired), 1) : 0)
+#elif defined(__TINYC__)
 // tcc lacks __sync builtins; fallback to non-atomic ops (best-effort thread safety)
 #define CC_ATOMIC_FETCH_ADD(ptr, val) ((*(ptr)) += (val))
 #define CC_ATOMIC_LOAD(ptr) (*(ptr))

@@ -2,14 +2,14 @@
  * Recipe: Timeout / Deadline
  *
  * Demonstrates:
- *   - Setting a deadline on a nursery
- *   - Cooperative cancellation via cc_nursery_is_cancelled()
+ *   - with_deadline(ms) sets a deadline on a scope
+ *   - Cooperative cancellation via cc_is_cancelled()
  *   - Tasks exit gracefully when deadline expires
  *
  * Key insight: Cancellation is cooperative - tasks must check the flag.
  *
- * Note: Uses low-level nursery API because with_deadline() syntax
- * is not yet implemented. The pattern is the same.
+ * Note: Using low-level nursery API because with_deadline inside closures
+ * has a known pass-ordering limitation. Direct function + deadline works.
  */
 #include "cc_runtime.cch"
 #include <stdio.h>

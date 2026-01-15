@@ -191,8 +191,8 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                 }
                 if (out_has_topology) *out_has_topology = 1;
                 t = tt;
-                            continue;
-                        }
+            continue;
+        }
         }
         /* Numeric: capacity */
         if (c >= '0' && c <= '9') {
@@ -232,12 +232,12 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                     } else {
                         if (out_unknown_token) *out_unknown_token = 1;
                     }
-                } else {
+    } else {
                     if (out_unknown_token) *out_unknown_token = 1;
                 }
-            }
-            continue;
-        }
+                            }
+                            continue;
+                        }
         /* Anything else is unknown for now. */
         if (out_unknown_token) *out_unknown_token = 1;
         t++;
@@ -343,8 +343,8 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                     fprintf(stderr, "CC: error: channel_pair must be used as a statement (end with ';') at %s:%d:%d\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col);
-                    return NULL;
-                }
+    return NULL;
+}
 
                 char tx_name[128], rx_name[128];
                 if (tx_n >= sizeof(tx_name) || rx_n >= sizeof(rx_name)) return NULL;
@@ -367,16 +367,19 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 long long tx_cap=-1, rx_cap=-1;
                 int tx_mode=-1, rx_mode=-1;
                 char tx_topo[8]; char rx_topo[8];
+                char tx_cap_expr[128]; char rx_cap_expr[128];
                 int tx_has_topo=0, rx_has_topo=0;
                 int tx_unknown=0, rx_unknown=0;
                 int dummy_allow=0;
                 const char* dummy_sz="0";
                 (void)cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr,
                                                   &tx_is_tx, &tx_is_rx, &tx_cap,
+                                                  tx_cap_expr, sizeof(tx_cap_expr),
                                                   &tx_mode, tx_topo, sizeof(tx_topo), &tx_has_topo, &tx_unknown,
                                                   &dummy_allow, &dummy_sz);
                 (void)cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr,
                                                   &rx_is_tx, &rx_is_rx, &rx_cap,
+                                                  rx_cap_expr, sizeof(rx_cap_expr),
                                                   &rx_mode, rx_topo, sizeof(rx_topo), &rx_has_topo, &rx_unknown,
                                                   &dummy_allow, &dummy_sz);
 
@@ -412,12 +415,26 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                             line, col);
                     return NULL;
                 }
-                long long cap_to_use = -1;
+                /* Capacity: can be integer literal, macro identifier, or omitted (unbuffered). */
+                char cap_expr[256];
+                cap_expr[0] = 0;
                 if (tx_cap == -1 && rx_cap == -1) {
                     /* Unbuffered rendezvous channel (capacity omitted). */
-                    cap_to_use = 0;
+                    snprintf(cap_expr, sizeof(cap_expr), "0");
+                } else if (tx_cap == -2 && rx_cap == -2) {
+                    /* Both have expression-based capacity (macro) - must match */
+                    if (strcmp(tx_cap_expr, rx_cap_expr) != 0) {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: channel_pair requires matching capacity expression on tx/rx (got '%s' vs '%s') at %s:%d:%d\n",
+                                tx_cap_expr, rx_cap_expr,
+                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col);
+                        return NULL;
+                    }
+                    snprintf(cap_expr, sizeof(cap_expr), "%s", tx_cap_expr);
                 } else if (tx_cap >= 1 && rx_cap >= 1 && tx_cap == rx_cap) {
-                    cap_to_use = tx_cap;
+                    /* Integer literals that match */
+                    snprintf(cap_expr, sizeof(cap_expr), "%lld", tx_cap);
                 } else {
                     char rel[1024];
                     fprintf(stderr, "CC: error: channel_pair requires matching capacity on tx/rx (or omit both for unbuffered) at %s:%d:%d\n",
@@ -451,11 +468,11 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                 char repl[1024];
                 snprintf(repl, sizeof(repl),
-                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%lld, CC_CHAN_MODE_BLOCK, %d, %s, %d, %s, &%s, &%s); "
+                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%s, CC_CHAN_MODE_BLOCK, %d, %s, %d, %s, &%s, &%s); "
                          "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
                          (tx_mode == 1) ? "sync" : "async",
                          tx_has_topo ? tx_topo : "<default>",
-                         cap_to_use,
+                         cap_expr,
                          allow_take ? 1 : 0,
                          elem_sz_expr,
                          (tx_mode == 1) ? 1 : 0,  /* is_sync */

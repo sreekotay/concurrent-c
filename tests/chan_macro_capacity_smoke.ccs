@@ -1,0 +1,31 @@
+// Test: Channel capacity can be a macro/constant
+#include "std/prelude.cch"
+#include <assert.h>
+
+#define NUM_ITEMS 4
+
+int main(void) {
+    int[~NUM_ITEMS >] tx;
+    int[~NUM_ITEMS <] rx;
+    channel_pair(&tx, &rx);
+    
+    // Send NUM_ITEMS values
+    for (int i = 0; i < NUM_ITEMS; i++) {
+        chan_send(tx, i * 10);
+    }
+    chan_close(tx);
+    
+    // Receive all values
+    int sum = 0;
+    int v;
+    while (cc_chan_recv(rx.raw, &v, sizeof(v)) == 0) {
+        sum += v;
+    }
+    
+    assert(sum == 0 + 10 + 20 + 30);  // 0+10+20+30 = 60
+    
+    chan_free(rx);
+    
+    printf("chan_macro_capacity_smoke: OK\n");
+    return 0;
+}

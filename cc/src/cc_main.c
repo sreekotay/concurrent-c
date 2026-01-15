@@ -11,6 +11,7 @@
 
 #include "build/build.h"
 #include "driver.h"
+#include "preprocess/preprocess.h"
 
 // Forward decls for helpers used by multiple modes.
 static int file_exists(const char* path);
@@ -945,51 +946,188 @@ static void cc__merge_target_link_flags(const CCBuildTargetDecl* t, char* ld_fla
     }
 }
 
-// Extract @link directives from generated .c file.
-// Looks for markers like: __CC_LINK__ libname
-// Adds discovered libs to ld_flags buffer.
-static void cc__extract_link_directives(const char* c_file_path, char* ld_flags, size_t ld_cap) {
-    if (!c_file_path || !ld_flags) return;
+// Helper to add a library to ld_flags, avoiding duplicates
+static void cc__add_lib_to_flags(const char* lib, char* ld_flags, size_t ld_cap) {
+    if (!lib || !lib[0] || !ld_flags) return;
     
-    FILE* f = fopen(c_file_path, "r");
-    if (!f) return;
+    char flag[280];
+    if (cc__is_lib_path(lib)) {
+        snprintf(flag, sizeof(flag), "%s", lib);
+    } else {
+        snprintf(flag, sizeof(flag), "-l%s", lib);
+    }
+    // Simple duplicate check
+    if (!strstr(ld_flags, flag)) {
+        cc__append_spaced(ld_flags, ld_cap, flag);
+    }
+}
+
+// Scan text buffer for @link directives and add to ld_flags
+static void cc__scan_for_link_directives(const char* content, size_t len, char* ld_flags, size_t ld_cap) {
+    if (!content || len == 0 || !ld_flags) return;
     
-    char line[1024];
     const char* marker = "__CC_LINK__ ";
     size_t marker_len = strlen(marker);
+    const char* link_pat = "@link(\"";
+    size_t link_pat_len = strlen(link_pat);
     
-    while (fgets(line, sizeof(line), f)) {
-        char* pos = strstr(line, marker);
-        while (pos) {
+    const char* p = content;
+    const char* end = content + len;
+    
+    while (p < end) {
+        // Look for __CC_LINK__ marker
+        const char* pos = strstr(p, marker);
+        if (pos && pos < end) {
             pos += marker_len;
-            // Extract lib name until space or end of comment
-            char* end = pos;
-            while (*end && *end != ' ' && *end != '*' && *end != '\n') end++;
-            if (end > pos) {
-                size_t lib_len = (size_t)(end - pos);
+            const char* lib_end = pos;
+            while (lib_end < end && *lib_end && *lib_end != ' ' && *lib_end != '*' && *lib_end != '\n') lib_end++;
+            if (lib_end > pos) {
+                size_t lib_len = (size_t)(lib_end - pos);
                 char lib[256];
                 if (lib_len < sizeof(lib)) {
                     memcpy(lib, pos, lib_len);
                     lib[lib_len] = '\0';
-                    
-                    // Add to ld_flags (avoid duplicates)
-                    char flag[280];
-                    if (cc__is_lib_path(lib)) {
-                        snprintf(flag, sizeof(flag), "%s", lib);
-                    } else {
-                        snprintf(flag, sizeof(flag), "-l%s", lib);
-                    }
-                    // Simple duplicate check
-                    if (!strstr(ld_flags, flag)) {
-                        cc__append_spaced(ld_flags, ld_cap, flag);
-                    }
+                    cc__add_lib_to_flags(lib, ld_flags, ld_cap);
                 }
             }
-            pos = strstr(end, marker);
+            p = lib_end;
+            continue;
         }
+        
+        // Look for @link("lib") pattern
+        pos = strstr(p, link_pat);
+        if (pos && pos < end) {
+            pos += link_pat_len;
+            const char* quote_end = strchr(pos, '"');
+            if (quote_end && quote_end < end && quote_end > pos) {
+                size_t lib_len = (size_t)(quote_end - pos);
+                char lib[256];
+                if (lib_len < sizeof(lib)) {
+                    memcpy(lib, pos, lib_len);
+                    lib[lib_len] = '\0';
+                    cc__add_lib_to_flags(lib, ld_flags, ld_cap);
+                }
+            }
+            p = quote_end ? quote_end + 1 : end;
+            continue;
+        }
+        
+        // No more patterns found
+        break;
+    }
+}
+
+// Extract @link directives from generated .c file.
+// Runs the C preprocessor to expand includes, then scans for:
+//   1. Markers: __CC_LINK__ libname
+//   2. Comment directives: @link("libname") (anywhere, including in comments)
+// Adds discovered libs to ld_flags buffer.
+static void cc__extract_link_directives(const char* c_file_path, const char* include_flags, 
+                                        char* ld_flags, size_t ld_cap) {
+    if (!c_file_path || !ld_flags) return;
+    
+    // First scan the .c file directly (for markers we've already rewritten)
+    FILE* f = fopen(c_file_path, "r");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (len > 0) {
+            char* content = (char*)malloc((size_t)len + 1);
+            if (content) {
+                size_t nread = fread(content, 1, (size_t)len, f);
+                content[nread] = '\0';
+                cc__scan_for_link_directives(content, nread, ld_flags, ld_cap);
+                free(content);
+            }
+        }
+        fclose(f);
     }
     
+    // Run preprocessor to expand includes and scan that too
+    char cmd[2048];
+    const char* inc = include_flags ? include_flags : "";
+    snprintf(cmd, sizeof(cmd), "cc -E %s \"%s\" 2>/dev/null", inc, c_file_path);
+    
+    FILE* pp = popen(cmd, "r");
+    if (!pp) return;
+    
+    // Read preprocessed output
+    size_t cap = 64 * 1024;
+    size_t len = 0;
+    char* buf = (char*)malloc(cap);
+    if (buf) {
+        char chunk[4096];
+        size_t n;
+        while ((n = fread(chunk, 1, sizeof(chunk), pp)) > 0) {
+            if (len + n >= cap) {
+                cap *= 2;
+                char* newbuf = (char*)realloc(buf, cap);
+                if (!newbuf) break;
+                buf = newbuf;
+            }
+            memcpy(buf + len, chunk, n);
+            len += n;
+        }
+        buf[len] = '\0';
+        cc__scan_for_link_directives(buf, len, ld_flags, ld_cap);
+        free(buf);
+    }
+    
+    pclose(pp);
+}
+
+// Post-process generated .c file to rewrite @link("lib") to markers.
+// This handles @link directives that come from included headers.
+static int cc__postprocess_link_directives(const char* c_file_path) {
+    if (!c_file_path) return -1;
+    
+    // Read the file
+    FILE* f = fopen(c_file_path, "rb");
+    if (!f) return -1;
+    
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    if (len <= 0) {
+        fclose(f);
+        return 0;  // Empty file, nothing to do
+    }
+    
+    char* content = (char*)malloc((size_t)len + 1);
+    if (!content) {
+        fclose(f);
+        return -1;
+    }
+    
+    size_t nread = fread(content, 1, (size_t)len, f);
     fclose(f);
+    content[nread] = '\0';
+    
+    // Rewrite @link directives
+    char* rewritten = cc__rewrite_link_directives(content, nread);
+    if (!rewritten) {
+        // No changes needed
+        free(content);
+        return 0;
+    }
+    
+    // Write back
+    f = fopen(c_file_path, "wb");
+    if (!f) {
+        free(content);
+        free(rewritten);
+        return -1;
+    }
+    
+    size_t rewritten_len = strlen(rewritten);
+    fwrite(rewritten, 1, rewritten_len, f);
+    fclose(f);
+    
+    free(content);
+    free(rewritten);
+    return 0;
 }
 
 typedef struct {
@@ -1350,6 +1488,12 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (err != 0) return err;
         if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
     }
+
+    // Post-process generated .c to rewrite @link directives from headers
+    if (!is_raw_c && opt->c_out_path) {
+        cc__postprocess_link_directives(opt->c_out_path);
+    }
+
     if (opt->mode == CC_MODE_EMIT_C) {
         return 0;
     }
@@ -1421,14 +1565,21 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         fprintf(stderr, "cc: internal error: missing binary output path\n");
         return -1;
     }
-    // Extract @link directives from generated C file
+    // Extract @link directives from generated C file (runs preprocessor to expand includes)
     static char extracted_ld[1024];
     extracted_ld[0] = '\0';
     if (opt->ld_flags && opt->ld_flags[0]) {
         strncpy(extracted_ld, opt->ld_flags, sizeof(extracted_ld) - 1);
         extracted_ld[sizeof(extracted_ld) - 1] = '\0';
     }
-    cc__extract_link_directives(opt->c_out_path, extracted_ld, sizeof(extracted_ld));
+    char link_inc_flags[512];
+    snprintf(link_inc_flags, sizeof(link_inc_flags), "-I%s -I%s -I%s",
+             g_cc_include, g_cc_dir, g_repo_root);
+    if (src_dir[0]) {
+        strncat(link_inc_flags, " -I", sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
+        strncat(link_inc_flags, src_dir, sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
+    }
+    cc__extract_link_directives(opt->c_out_path, link_inc_flags, extracted_ld, sizeof(extracted_ld));
     const char* final_ld_flags = extracted_ld[0] ? extracted_ld : opt->ld_flags;
 
     // Link to binary (with incremental cache)
@@ -1945,6 +2096,24 @@ static int run_build_mode(int argc, char** argv) {
         }
         pos_args[pos_count++] = argv[i];
     }
+
+    // Build combined cc_flags that includes both --cc-flags and -D defines
+    // This ensures defines like -DCC_ENABLE_HTTP=1 are passed to the C compiler
+    static char combined_cc_flags[2048];
+    combined_cc_flags[0] = '\0';
+    if (cc_flags && cc_flags[0]) {
+        strncat(combined_cc_flags, cc_flags, sizeof(combined_cc_flags) - 1);
+    }
+    for (size_t i = 0; i < cli_count; ++i) {
+        char def[256];
+        if (cli_values[i] == 1) {
+            snprintf(def, sizeof(def), " -D%s", cli_names[i]);
+        } else {
+            snprintf(def, sizeof(def), " -D%s=%lld", cli_names[i], cli_values[i]);
+        }
+        strncat(combined_cc_flags, def, sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
+    }
+    cc_flags = combined_cc_flags[0] ? combined_cc_flags : cc_flags;
 
     // Apply output directory override before creating/deriving any outputs.
     cc_set_out_dir(out_dir, bin_dir);

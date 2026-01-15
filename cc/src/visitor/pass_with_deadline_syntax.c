@@ -118,6 +118,22 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             continue;
         }
 
+        /* Handle @with_deadline(ms) as alias for with_deadline(ms) */
+        if (c == '@') {
+            size_t peek = i + 1;
+            while (peek < n && (src[peek] == ' ' || src[peek] == '\t')) peek++;
+            if (peek + strlen("with_deadline") <= n &&
+                memcmp(src + peek, "with_deadline", strlen("with_deadline")) == 0 &&
+                (peek + strlen("with_deadline") >= n || !cc__is_ident_char(src[peek + strlen("with_deadline")]))) {
+                /* Skip the '@' and continue to process 'with_deadline' */
+                i = peek;
+                continue;
+            }
+            cc__sb_append(&out, &olen, &ocap, &c, 1);
+            i++;
+            continue;
+        }
+
         if (cc__is_ident_start(c)) {
             size_t s0 = i;
             i++;

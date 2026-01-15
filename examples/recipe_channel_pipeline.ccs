@@ -5,30 +5,28 @@
  *   - Nested nurseries for structured channel lifetime
  *   - closing(ch) on inner nursery closes channel when producers done
  *   - Consumer in outer nursery drains until close, then exits
+ *   - Channel handles captured in closures
  *
  * Key insight: Nest producers inside closing() so channel closes
  * exactly when producers finish, while consumer keeps running.
- *
- * Note: Uses globals for channel handles because closure capture of
- * typed channels is not yet implemented (see PENDING in compiler).
  */
 #include "cc_nursery.cch"
 #include "cc_runtime.cch"
 #include <stdio.h>
 
-/* Global handles (workaround for closure capture limitation) */
-int[~4 >] g_tx;
-int[~4 <] g_rx;
+/* Global sum (closures capture by value, so local int wouldn't work) */
 int g_sum = 0;
 
 int main(void) {
-    channel_pair(&g_tx, &g_rx);
+    int[~4 >] tx;
+    int[~4 <] rx;
+    channel_pair(&tx, &rx);
 
     @nursery {
         /* Consumer: lives in outer nursery, drains until close. */
         spawn(() => {
             int v;
-            while (chan_recv(g_rx, &v) == 0) {
+            while (chan_recv(rx, &v) == 0) {
                 printf("recv: %d\n", v);
                 g_sum += v;
             }
@@ -36,20 +34,20 @@ int main(void) {
         });
 
         /* Producers: live in inner nursery with closing(ch). */
-        @nursery closing(g_tx) {
+        @nursery closing(tx) {
             spawn(() => {
                 for (int i = 1; i <= 3; i++) {
-                    chan_send(g_tx, i);
+                    chan_send(tx, i);
                     printf("send: %d\n", i);
                 }
             });
         }
-        /* Inner nursery done → producers finished → ch closed. */
+        /* Inner nursery done -> producers finished -> ch closed. */
         /* Consumer sees close, drains remaining, exits. */
     }
-    /* Outer nursery done → consumer finished → all clean. */
+    /* Outer nursery done -> consumer finished -> all clean. */
 
-    chan_free(g_tx);
+    chan_free(tx);
     printf("sum = %d (expected 6)\n", g_sum);  /* 1+2+3 = 6 */
     return (g_sum == 6) ? 0 : 1;
 }
