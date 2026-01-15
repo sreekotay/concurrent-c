@@ -11,6 +11,7 @@
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
 #include "util/io.h"
+#include "util/path.h"
 #include "visitor/async_ast.h"
 #include "visitor/checker.h"
 #include "visitor/pass_autoblock.h"
@@ -28,9 +29,6 @@
 static const char* cc__basename(const char* path);
 static const char* cc__path_suffix2(const char* path);
 static int cc__same_source_file(const char* a, const char* b);
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* file);
 
 /* Helper: reparse rewritten source to get updated stub AST */
 static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t rewritten_len,
@@ -204,10 +202,13 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     fprintf(out, "}\n");
     fprintf(out, "/* --- end spawn helpers --- */\n\n");
 
-    /* TODO: Extract the remaining closure/UFCS emission logic from visitor.c */
+    /* Note: most CC lowering is now handled via dedicated passes; this prelude exists only to keep reparses parseable. */
 
-    /* Preserve diagnostics mapping to the original input where possible. */
-    fprintf(out, "#line 1 \"%s\"\n", src_path);
+    /* Preserve diagnostics mapping to the original input (repo-relative for readability). */
+    {
+        char rel[1024];
+        fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(src_path, rel, sizeof(rel)));
+    }
 
     /* Write the final lowered source */
     if (src_ufcs) {
@@ -264,11 +265,4 @@ static int cc__same_source_file(const char* a, const char* b) {
 }
 
 
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* file) {
-    if (!file || !ctx->input_path) return 0;
-    if (cc__same_source_file(ctx->input_path, file)) return 1;
-    if (root->lowered_path && cc__same_source_file(root->lowered_path, file)) return 1;
-    return 0;
-}
+/* (cleanup) cc__node_file_matches_this_tu was used by earlier versions of the pipeline; removed as unused. */

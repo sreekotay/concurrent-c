@@ -24,6 +24,7 @@
 #include "visitor/text_span.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
+#include "util/path.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
@@ -511,8 +512,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         fputs("/* --- end closure forward decls --- */\n\n", out);
     }
 
-    /* Preserve diagnostics mapping to the original input where possible. */
-    fprintf(out, "#line 1 \"%s\"\n", src_path);
+    /* Preserve diagnostics mapping to the original input (repo-relative for readability). */
+    {
+        char rel[1024];
+        fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(src_path, rel, sizeof(rel)));
+    }
 
     if (src_ufcs) {
         fwrite(src_ufcs, 1, src_ufcs_len, out);
@@ -521,7 +525,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         free(closure_protos);
         if (closure_defs && closure_defs_len > 0) {
             /* Emit closure definitions at end-of-file so global names are in scope. */
-            fputs("\n#line 1 \"<cc_generated_closures>\"\n", out);
+            fputs("\n#line 1 \"<cc-generated:closures>\"\n", out);
             fwrite(closure_defs, 1, closure_defs_len, out);
         }
         free(closure_defs);

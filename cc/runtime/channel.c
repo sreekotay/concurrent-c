@@ -221,6 +221,7 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
 }
 
 static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct timespec* deadline) {
+    (void)value;
     if (ch->mode == CC_CHAN_MODE_BLOCK) {
         return cc_chan_wait_full(ch, deadline);
     } else if (ch->mode == CC_CHAN_MODE_DROP_NEW) {

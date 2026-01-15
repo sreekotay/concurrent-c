@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+#include "util/path.h"
+
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
 // populate flags on expressions and enforce send_take eligibility.
 
@@ -32,6 +34,24 @@ typedef struct {
     int vars_len;
     int vars_cap;
 } CCScope;
+
+static int cc__same_source_file(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    if (strcmp(a, b) == 0) return 1;
+    /* Prefer repo-relative normalization when possible. */
+    {
+        char ra[1024], rb[1024];
+        const char* pa = cc_path_rel_to_repo(a, ra, sizeof(ra));
+        const char* pb = cc_path_rel_to_repo(b, rb, sizeof(rb));
+        if (pa && pb && strcmp(pa, pb) == 0) return 1;
+    }
+    /* Fallback: basename match (best-effort). */
+    const char* a_base = a;
+    const char* b_base = b;
+    for (const char* p = a; *p; p++) if (*p == '/' || *p == '\\') a_base = p + 1;
+    for (const char* p = b; *p; p++) if (*p == '/' || *p == '\\') b_base = p + 1;
+    return (a_base && b_base && strcmp(a_base, b_base) == 0);
+}
 
 static CCSliceVar* cc__scope_find(CCScope* sc, const char* name) {
     if (!sc || !name) return NULL;
@@ -854,7 +874,7 @@ static int cc__walk(int idx,
 
     /* Only enforce semantic checks within the user's input file. We still recurse so
        that we can reach user-file nodes that are parented under include contexts. */
-    if (ctx && ctx->input_path && n->file && strcmp(n->file, ctx->input_path) != 0) {
+    if (ctx && ctx->input_path && n->file && !cc__same_source_file(n->file, ctx->input_path)) {
         const ChildList* cl = &kids[idx];
         for (int i = 0; i < cl->len; i++) {
             if (cc__walk(cl->child[i], nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;

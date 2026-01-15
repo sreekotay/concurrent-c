@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "visitor/text_span.h"
+#include "util/path.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
@@ -158,7 +159,7 @@ static size_t cc__infer_closure_end_off(const char* src, size_t len, size_t star
     if (i >= len) return len;
     /* Scan body: if we see a '{' at top level, treat it as a block body and match braces.
        Otherwise treat as expression body and stop at a delimiter at top level. */
-    int par = 0, brk = 0, br = 0;
+    int par = 0, brk = 0;
     int in_str = 0;
     char qch = 0;
     for (; i < len; i++) {
@@ -1449,7 +1450,6 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
 
     const char* cur = in_src;
     size_t off = 0;
-    int line_no = 1;
     while (off < in_len && *cur) {
         const char* line_start = cur;
         const char* nl = memchr(cur, '\n', in_len - off);
@@ -1628,7 +1628,6 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (!nl) break;
         cur = nl + 1;
         off = (size_t)(cur - in_src);
-        line_no++;
     }
 
     /* Emit protos/defs and build rewrite edits for all closure literals. */
@@ -1777,7 +1776,13 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
 
         char* lowered_body = cc__lower_nested_closures_in_body(k, descs, idx_n);
         if (!lowered_body) lowered_body = strdup(d->body_text);
-        cc__append_fmt(&defs, &defs_len, &defs_cap, "#line %d \"%s\"\n", d->start_line, ctx->input_path ? ctx->input_path : "<input>");
+        /* Map diagnostics within the closure body back to the original source location. */
+        {
+            char rel[1024];
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "#line %d \"%s\"\n",
+                           d->start_line,
+                           cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)));
+        }
         if (lowered_body && lowered_body[0] == '{') {
             char* lowered2 = cc__lower_nursery_spawn_in_body_text(d->id, lowered_body);
             if (!lowered2) lowered2 = strdup(lowered_body);

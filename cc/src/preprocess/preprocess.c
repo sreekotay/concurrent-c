@@ -6,6 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "util/path.h"
+
 static int cc__is_ident_start(char c) {
     return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
 }
@@ -281,7 +283,8 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     char* rewritten = cc__rewrite_with_deadline_syntax(buf, got);
     const char* use = rewritten ? rewritten : buf;
 
-    fprintf(out, "#line 1 \"%s\"\n", input_path);
+    char rel[1024];
+    fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
     fputs(use, out);
 
     free(rewritten);

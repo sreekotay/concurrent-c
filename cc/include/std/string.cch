@@ -91,7 +91,7 @@ static inline bool cc_slice_get(CCSlice s, size_t idx, char *out) {
     return true;
 }
 
-// Use cc_slice_sub from cc_slice.h
+// Use cc_slice_sub from cc_slice.cch
 
 static inline CCSlice cc_slice_clone(CCArena *arena, CCSlice s) {
     if (!arena || s.len == 0) return s.len == 0 ? cc_slice_empty() : s;

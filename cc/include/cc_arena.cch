@@ -92,7 +92,6 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
             return NULL;
         }
         size_t desired = new_offset;
-        size_t snapshot = expected;
         if (CC_ATOMIC_CAS(&arena->offset, &expected, desired)) {
             // CAS succeeded; expected now holds previous value.
             break;

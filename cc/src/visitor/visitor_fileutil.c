@@ -6,6 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "util/path.h"
+
 int cc__read_entire_file(const char* path, char** out_buf, size_t* out_len) {
     if (!path || !out_buf || !out_len) return 0;
     *out_buf = NULL;
@@ -65,8 +67,10 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
         if (n <= 0) { close(fd); unlink(tmpl); return NULL; }
         off += (size_t)n;
     }
+    char rel[1024];
+    const char* lp = cc_path_rel_to_repo(original_path, rel, sizeof(rel));
     char line_buf[1024];
-    int ln = snprintf(line_buf, sizeof(line_buf), "#line 1 \"%s\"\n", original_path);
+    int ln = snprintf(line_buf, sizeof(line_buf), "#line 1 \"%s\"\n", lp);
     if (ln <= 0 || (size_t)ln >= sizeof(line_buf)) { close(fd); unlink(tmpl); return NULL; }
     off = 0;
     while (off < (size_t)ln) {

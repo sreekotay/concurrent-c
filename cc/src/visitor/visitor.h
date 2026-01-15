@@ -5,7 +5,7 @@
 #include "comptime/symbols.h"
 
 // Placeholder structures for type/context state used during visiting.
-typedef struct {
+typedef struct CCVisitorCtx {
     CCSymbolTable* symbols;
     const char* input_path; // used for #line source mapping
     // TODO: add type tables, provenance tracking, arena/async context, codegen state.
