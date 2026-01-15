@@ -10,6 +10,10 @@ static int is_ident_char(char c) {
     return isalnum((unsigned char)c) || c == '_';
 }
 
+// Thread-local context: set to 1 when rewriting UFCS inside `await`.
+// Channel ops should emit task-returning variants when set.
+static _Thread_local int g_ufcs_await_context = 0;
+
 // Map a receiver+method to a desugared function call prefix.
 // Returns number of bytes written to out (not including args), or -1 on failure.
 static const char* skip_ws(const char* s) {
@@ -57,12 +61,33 @@ static int emit_desugared_call(char* out,
 
     /* Channel ergonomic sugar:
        Prefer the surface chan_* helpers and do NOT auto-take address-of for handles.
-       Also avoids collisions with libc symbols like close/free. */
+       Also avoids collisions with libc symbols like close/free.
+       In await context, emit task-returning variants (cc_chan_*_task). */
     if (strcmp(method, "send") == 0) {
+        if (g_ufcs_await_context) {
+            /* Emit cc_chan_send_task(recv.raw, &val, sizeof(val)) */
+            if (!has_args || !args_rewritten) {
+                return snprintf(out, cap, "cc_chan_send_task((%s%s).raw, NULL, 0)",
+                               recv_is_ptr ? "*" : "", recv);
+            }
+            return snprintf(out, cap,
+                           "cc_chan_send_task((%s%s).raw, &(__extension__({__auto_type __cc_v=%s; __cc_v;})), sizeof(__extension__({__auto_type __cc_v=%s; __cc_v;})))",
+                           recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
+        }
         if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_send(%s%s)", recv_is_ptr ? "*":"", recv);
         return snprintf(out, cap, "chan_send(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
     }
     if (strcmp(method, "recv") == 0) {
+        if (g_ufcs_await_context) {
+            /* Emit cc_chan_recv_task(recv.raw, ptr, sizeof(*ptr)) */
+            if (!has_args || !args_rewritten) {
+                return snprintf(out, cap, "cc_chan_recv_task((%s%s).raw, NULL, 0)",
+                               recv_is_ptr ? "*" : "", recv);
+            }
+            return snprintf(out, cap,
+                           "cc_chan_recv_task((%s%s).raw, %s, sizeof(*(%s)))",
+                           recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
+        }
         if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_recv(%s%s)", recv_is_ptr ? "*":"", recv);
         return snprintf(out, cap, "chan_recv(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
     }
@@ -279,3 +304,10 @@ int cc_ufcs_rewrite(CCASTRoot* root) {
     return 0;
 }
 
+// Rewrite UFCS with await context: channel ops emit task-returning variants.
+int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is_await) {
+    g_ufcs_await_context = is_await;
+    int rc = cc_ufcs_rewrite_line(in, out, out_cap);
+    g_ufcs_await_context = 0;
+    return rc;
+}

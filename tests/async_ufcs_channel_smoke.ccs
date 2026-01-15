@@ -1,0 +1,43 @@
+/* Test that UFCS channel ops with await in @async functions work correctly.
+   This uses the ergonomic form: `await tx.send(val)` instead of the explicit
+   cc_chan_send_task() call. */
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+#include <stdio.h>
+#include <assert.h>
+
+@async int sender(CCChanTx tx) {
+    int val = 42;
+    /* Ergonomic form: tx.send(val) under await emits cc_chan_send_task() */
+    intptr_t rc = await tx.send(val);
+    printf("sender: sent %d, rc=%ld\n", val, (long)rc);
+    return (int)rc;
+}
+
+@async int receiver(CCChanRx rx) {
+    int val = 0;
+    /* Ergonomic form: rx.recv(&val) under await emits cc_chan_recv_task() */
+    intptr_t rc = await rx.recv(&val);
+    printf("receiver: received %d, rc=%ld\n", val, (long)rc);
+    return val;
+}
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    channel_pair(&tx, &rx);
+
+    int send_rc = cc_block_on(int, sender(tx));
+    printf("send_rc = %d\n", send_rc);
+    assert(send_rc == 0);
+
+    int recv_val = cc_block_on(int, receiver(rx));
+    printf("recv_val = %d\n", recv_val);
+    assert(recv_val == 42);
+
+    chan_close(tx);
+    chan_free(rx);
+
+    printf("async_ufcs_channel_smoke: PASS\n");
+    return 0;
+}

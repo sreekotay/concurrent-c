@@ -1369,6 +1369,120 @@ char* cc__rewrite_link_directives(const char* src, size_t n) {
     return out;
 }
 
+/* Check that channel ops inside @async functions are awaited.
+   Returns 0 if OK, -1 if errors were emitted.
+   This runs BEFORE rewrites so we can see the original source forms. */
+static int cc__check_async_chan_await(const char* src, size_t n, const char* input_path) {
+    if (!src || n == 0) return 0;
+
+    int errors = 0;
+    int line = 1, col = 1;
+    int in_async_fn = 0;      /* 1 if inside @async function body */
+    int async_brace_depth = 0; /* Brace depth when we entered the async function */
+
+    /* Comment/string tracking */
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int brace_depth = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        /* Track position */
+        if (c == '\n') { line++; col = 1; } else { col++; }
+
+        /* Skip comments and strings */
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; col++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; col++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; col++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+
+        /* Track braces */
+        if (c == '{') brace_depth++;
+        else if (c == '}') {
+            brace_depth--;
+            if (in_async_fn && brace_depth < async_brace_depth) {
+                in_async_fn = 0; /* Exited async function */
+            }
+        }
+
+        /* Detect @async function start */
+        if (c == '@') {
+            size_t j = i + 1;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j + 5 <= n && memcmp(src + j, "async", 5) == 0 && (j + 5 >= n || !cc_is_ident_char(src[j + 5]))) {
+                /* Found @async - find the function body */
+                j += 5;
+                /* Skip to opening brace */
+                int found_brace = 0;
+                while (j < n) {
+                    if (src[j] == '{') { found_brace = 1; break; }
+                    if (src[j] == ';') break; /* Declaration, not definition */
+                    j++;
+                }
+                if (found_brace) {
+                    in_async_fn = 1;
+                    async_brace_depth = brace_depth + 1; /* We'll hit the '{' soon */
+                }
+            }
+            continue;
+        }
+
+        /* Inside @async function, check for channel ops.
+           Note: We only check chan_send/chan_recv here, not UFCS form (.send/.recv).
+           UFCS form is handled by the UFCS pass which correctly emits task variants in await context. */
+        if (in_async_fn) {
+            /* Check for chan_send, chan_recv (macro forms) */
+            int is_chan_op = 0;
+            const char* op_name = NULL;
+            size_t op_len = 0;
+
+            if (i + 9 <= n && memcmp(src + i, "chan_send", 9) == 0 && (i + 9 >= n || !cc_is_ident_char(src[i + 9]))) {
+                /* Make sure it's not preceded by identifier char (to avoid matching cc_chan_send) */
+                if (i > 0 && cc_is_ident_char(src[i - 1])) { /* skip */ }
+                else { is_chan_op = 1; op_name = "chan_send"; op_len = 9; }
+            } else if (i + 9 <= n && memcmp(src + i, "chan_recv", 9) == 0 && (i + 9 >= n || !cc_is_ident_char(src[i + 9]))) {
+                if (i > 0 && cc_is_ident_char(src[i - 1])) { /* skip */ }
+                else { is_chan_op = 1; op_name = "chan_recv"; op_len = 9; }
+            }
+
+            if (is_chan_op) {
+                /* Check if preceded by "await" (skipping whitespace/comments backwards) */
+                int has_await = 0;
+                size_t k = i;
+                while (k > 0) {
+                    k--;
+                    char ck = src[k];
+                    if (ck == ' ' || ck == '\t' || ck == '\n' || ck == '\r') continue;
+                    /* Check for "await" ending at position k */
+                    if (k >= 4 && memcmp(src + k - 4, "await", 5) == 0) {
+                        /* Ensure "await" is not part of a larger identifier */
+                        if (k >= 5 && cc_is_ident_char(src[k - 5])) break;
+                        has_await = 1;
+                    }
+                    break;
+                }
+
+                if (!has_await) {
+                    char rel[1024];
+                    cc_path_rel_to_repo(input_path, rel, sizeof(rel));
+                    fprintf(stderr, "%s:%d:%d: error: channel operation '%s' must be awaited in @async function\n",
+                            rel, line, col, op_name);
+                    fprintf(stderr, "%s:%d:%d: note: add 'await' before this call\n", rel, line, col);
+                    errors++;
+                }
+                i += op_len - 1; /* Skip past the op name */
+            }
+        }
+    }
+
+    return errors > 0 ? -1 : 0;
+}
+
 int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_sz) {
     if (!input_path || !out_path || out_path_sz == 0) return -1;
     char tmp_path[] = "/tmp/cc_pp_XXXXXX.c";
@@ -1404,6 +1518,25 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     }
     size_t got = fread(buf, 1, (size_t)in_n, in);
     buf[got] = 0;
+
+    /* Check for unawaited channel ops in @async functions (before rewrites).
+       Skip this check for temp/reparse files (they have already been checked). */
+    const char* basename = strrchr(input_path, '/');
+    basename = basename ? basename + 1 : input_path;
+    int is_temp_file = (strncmp(basename, "cc_reparse_", 11) == 0 ||
+                        strncmp(basename, "cc_pp_", 6) == 0 ||
+                        strncmp(input_path, "/tmp/", 5) == 0);
+    if (!is_temp_file) {
+        int chan_err = cc__check_async_chan_await(buf, got, input_path);
+        if (chan_err != 0) {
+            fclose(in);
+            fclose(out);
+            free(buf);
+            unlink(tmp_path);
+            return -1;
+        }
+    }
+
     char* rewritten_deadline = cc__rewrite_with_deadline_syntax(buf, got);
     const char* cur = rewritten_deadline ? rewritten_deadline : buf;
     size_t cur_n = rewritten_deadline ? strlen(rewritten_deadline) : got;

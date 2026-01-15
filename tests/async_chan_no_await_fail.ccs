@@ -1,0 +1,17 @@
+/* Test that channel ops without await in @async functions produce error. */
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+@async int f(CCChanTx tx) {
+    chan_send(tx, 42);  /* ERROR: must be awaited */
+    return 0;
+}
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    channel_pair(&tx, &rx);
+    int r = cc_block_on(int, f(tx));
+    chan_free(rx);
+    return r;
+}

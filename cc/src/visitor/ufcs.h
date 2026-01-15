@@ -15,5 +15,9 @@ int cc_ufcs_rewrite(CCASTRoot* root);
 // present. Safe for nested method calls.
 int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap);
 
+// Rewrite UFCS with await context flag. When is_await=1, channel ops (send/recv)
+// emit task-returning variants (cc_chan_*_task) for use in @async functions.
+int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is_await);
+
 #endif // CC_VISITOR_UFCS_H
 

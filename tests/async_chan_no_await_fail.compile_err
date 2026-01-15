@@ -1,0 +1,1 @@
+error: channel operation 'chan_send' must be awaited in @async function
