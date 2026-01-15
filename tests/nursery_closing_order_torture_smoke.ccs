@@ -7,33 +7,33 @@
 static volatile int g_err = 0;
 static volatile int g_sum = 0;
 
-void producer(CCChan* ch1, CCChan* ch2) {
+void producer(CCChanTx ch1_tx, CCChanTx ch2_tx) {
     int e = 0;
     // Send a sequence across both channels. If closing happens before join, we'll hit EPIPE.
     for (int i = 1; i <= 20; i++) {
         int v1 = i;
-        e = cc_chan_send(ch1, &v1, sizeof(v1));
+        e = chan_send(ch1_tx, v1);
         if (e != 0) { g_err = e; return; }
 
         // Keep the producer alive long enough that a buggy "close-first" will trip.
         usleep(2 * 1000);
 
         int v2 = i * 10;
-        e = cc_chan_send(ch2, &v2, sizeof(v2));
+        e = chan_send(ch2_tx, v2);
         if (e != 0) { g_err = e; return; }
     }
 }
 
-void consumer(CCChan* ch1, CCChan* ch2) {
+void consumer(CCChanRx ch1_rx, CCChanRx ch2_rx) {
     int e = 0;
     for (int i = 1; i <= 20; i++) {
         int v = 0;
-        e = cc_chan_recv(ch1, &v, sizeof(v));
+        e = chan_recv(ch1_rx, &v);
         if (e != 0) { g_err = e; return; }
         g_sum += v;
 
         v = 0;
-        e = cc_chan_recv(ch2, &v, sizeof(v));
+        e = chan_recv(ch2_rx, &v);
         if (e != 0) { g_err = e; return; }
         g_sum += v;
     }
@@ -51,8 +51,8 @@ int main(void) {
     g_sum = 0;
 
     @nursery closing(ch1_tx, ch2_tx) {
-        spawn(() => { producer(ch1_tx.raw, ch2_tx.raw); });
-        spawn(() => { consumer(ch1_rx.raw, ch2_rx.raw); });
+        spawn(() => { producer(ch1_tx, ch2_tx); });
+        spawn(() => { consumer(ch1_rx, ch2_rx); });
     }
 
     if (g_err != 0) return 10;
@@ -62,15 +62,15 @@ int main(void) {
 
     // After nursery exit, both channels should now be closed.
     int tmp = 0;
-    if (cc_chan_try_recv(ch1_rx.raw, &tmp, sizeof(tmp)) != EPIPE) return 12;
-    if (cc_chan_try_recv(ch2_rx.raw, &tmp, sizeof(tmp)) != EPIPE) return 13;
+    if (chan_try_recv(ch1_rx, &tmp) != EPIPE) return 12;
+    if (chan_try_recv(ch2_rx, &tmp) != EPIPE) return 13;
 
     int v = 1;
-    if (cc_chan_send(ch1_tx.raw, &v, sizeof(v)) != EPIPE) return 14;
-    if (cc_chan_send(ch2_tx.raw, &v, sizeof(v)) != EPIPE) return 15;
+    if (chan_send(ch1_tx, v) != EPIPE) return 14;
+    if (chan_send(ch2_tx, v) != EPIPE) return 15;
 
-    cc_chan_free(ch1_tx.raw);
-    cc_chan_free(ch2_tx.raw);
+    chan_free(ch1_tx);
+    chan_free(ch2_tx);
     return 0;
 }
 

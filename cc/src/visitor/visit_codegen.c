@@ -129,12 +129,21 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                                       int* out_is_tx,
                                       int* out_is_rx,
                                       long long* out_cap_int,
+                                      int* out_mode, /* -1 unspecified, 0 async, 1 sync */
+                                      char* out_topology, /* optional; caller-provided buffer */
+                                      size_t out_topology_cap,
+                                      int* out_has_topology,
+                                      int* out_unknown_token,
                                       int* out_allow_take,
                                       const char** out_elem_size_expr) {
     if (!src || lbr >= len || rbr >= len || rbr <= lbr) return 0;
     if (out_is_tx) *out_is_tx = 0;
     if (out_is_rx) *out_is_rx = 0;
     if (out_cap_int) *out_cap_int = -1;
+    if (out_mode) *out_mode = -1;
+    if (out_topology && out_topology_cap) out_topology[0] = 0;
+    if (out_has_topology) *out_has_topology = 0;
+    if (out_unknown_token) *out_unknown_token = 0;
     if (out_allow_take) *out_allow_take = 0;
     if (out_elem_size_expr) *out_elem_size_expr = "0";
 
@@ -147,17 +156,76 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
     if (out_is_tx) *out_is_tx = saw_gt;
     if (out_is_rx) *out_is_rx = saw_lt;
 
-    /* Capacity: parse first integer after '~' (digits only for now). */
+    /* Tokens inside [~ ... ]: capacity? + mode? + topology? + direction */
     size_t t = lbr;
     while (t < rbr && src[t] != '~') t++;
     if (t < rbr && src[t] == '~') t++;
-    while (t < rbr && (src[t] == ' ' || src[t] == '\t')) t++;
-    if (t < rbr && (src[t] >= '0' && src[t] <= '9')) {
-        long long cap = 0;
-        while (t < rbr && (src[t] >= '0' && src[t] <= '9')) { cap = cap * 10 + (src[t] - '0'); t++; }
-        if (out_cap_int) *out_cap_int = cap;
-    } else {
-        if (out_cap_int) *out_cap_int = -1;
+    while (t < rbr) {
+        while (t < rbr && (src[t] == ' ' || src[t] == '\t')) t++;
+        if (t >= rbr) break;
+        char c = src[t];
+        if (c == '>' || c == '<' || c == ',' ) { t++; continue; }
+        if (c >= '0' && c <= '9') {
+            long long cap = 0;
+            size_t start = t;
+            while (t < rbr && (src[t] >= '0' && src[t] <= '9')) { cap = cap * 10 + (src[t] - '0'); t++; }
+            /* Only first integer token is capacity; subsequent numeric tokens are currently rejected. */
+            if (out_cap_int && *out_cap_int == -1) {
+                *out_cap_int = cap;
+            } else {
+                if (out_unknown_token) *out_unknown_token = 1;
+            }
+            (void)start;
+            continue;
+        }
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+            char word[32];
+            size_t wn = 0;
+            while (t < rbr && wn + 1 < sizeof(word)) {
+                char wc = src[t];
+                if (!((wc >= 'A' && wc <= 'Z') || (wc >= 'a' && wc <= 'z') || (wc >= '0' && wc <= '9') || wc == '_')) break;
+                word[wn++] = wc;
+                t++;
+            }
+            word[wn] = 0;
+            if (strcmp(word, "sync") == 0) {
+                if (out_mode) *out_mode = 1;
+            } else if (strcmp(word, "async") == 0) {
+                if (out_mode) *out_mode = 0;
+            } else {
+                if (out_unknown_token) *out_unknown_token = 1;
+            }
+            continue;
+        }
+        /* Topology token like 1:1 / N:N / 1:N / N:1 */
+        if (c == 'N' || c == 'n' || c == '1') {
+            char topo[8];
+            size_t tn = 0;
+            size_t tt = t;
+            while (tt < rbr && tn + 1 < sizeof(topo)) {
+                char tc = src[tt];
+                if (tc == ' ' || tc == '\t' || tc == '>' || tc == '<' || tc == ',') break;
+                topo[tn++] = tc;
+                tt++;
+            }
+            topo[tn] = 0;
+            /* validate: X:Y where X,Y in {1,N,n} */
+            if (tn == 3 && topo[1] == ':' &&
+                ((topo[0] == '1') || (topo[0] == 'N') || (topo[0] == 'n')) &&
+                ((topo[2] == '1') || (topo[2] == 'N') || (topo[2] == 'n'))) {
+                if (out_topology && out_topology_cap) {
+                    snprintf(out_topology, out_topology_cap, "%c:%c",
+                             (topo[0] == 'n') ? 'N' : topo[0],
+                             (topo[2] == 'n') ? 'N' : topo[2]);
+                }
+                if (out_has_topology) *out_has_topology = 1;
+                t = tt;
+                continue;
+            }
+        }
+        /* Anything else is unknown for now. */
+        if (out_unknown_token) *out_unknown_token = 1;
+        t++;
     }
 
     (void)ctx;
@@ -275,14 +343,49 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
 
                 int tx_is_tx=0, tx_is_rx=0, rx_is_tx=0, rx_is_rx=0;
                 long long tx_cap=-1, rx_cap=-1;
+                int tx_mode=-1, rx_mode=-1;
+                char tx_topo[8]; char rx_topo[8];
+                int tx_has_topo=0, rx_has_topo=0;
+                int tx_unknown=0, rx_unknown=0;
                 int dummy_allow=0;
                 const char* dummy_sz="0";
-                (void)cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr, &tx_is_tx, &tx_is_rx, &tx_cap, &dummy_allow, &dummy_sz);
-                (void)cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr, &rx_is_tx, &rx_is_rx, &rx_cap, &dummy_allow, &dummy_sz);
+                (void)cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr,
+                                                  &tx_is_tx, &tx_is_rx, &tx_cap,
+                                                  &tx_mode, tx_topo, sizeof(tx_topo), &tx_has_topo, &tx_unknown,
+                                                  &dummy_allow, &dummy_sz);
+                (void)cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr,
+                                                  &rx_is_tx, &rx_is_rx, &rx_cap,
+                                                  &rx_mode, rx_topo, sizeof(rx_topo), &rx_has_topo, &rx_unknown,
+                                                  &dummy_allow, &dummy_sz);
 
                 if (!tx_is_tx || tx_is_rx || !rx_is_rx || rx_is_tx) {
                     char rel[1024];
                     fprintf(stderr, "CC: error: channel_pair requires a send handle (>) then a recv handle (<) at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+
+                /* Mode + topology: enforce tx/rx agreement if specified. */
+                if (tx_unknown || rx_unknown) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair could not parse channel handle spec tokens (expected: optional capacity, optional 'sync'/'async', optional topology '1:1'/'1:N'/'N:1'/'N:N') at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+                if (tx_mode == -1) tx_mode = 0; /* default: async */
+                if (rx_mode == -1) rx_mode = 0;
+                if (tx_mode != rx_mode) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair requires matching mode on tx/rx (sync vs async) at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    return NULL;
+                }
+                if (tx_has_topo != rx_has_topo || (tx_has_topo && strcmp(tx_topo, rx_topo) != 0)) {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: channel_pair requires matching topology token on tx/rx (e.g. 1:1, 1:N, N:1, N:N) at %s:%d:%d\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col);
                     return NULL;
@@ -317,8 +420,10 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                 char repl[1024];
                 snprintf(repl, sizeof(repl),
-                         "do { int __cc_err = cc_chan_pair_create(%lld, CC_CHAN_MODE_BLOCK, %d, %s, &%s, &%s); "
+                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create(%lld, CC_CHAN_MODE_BLOCK, %d, %s, &%s, &%s); "
                          "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
+                         (tx_mode == 1) ? "sync" : "async",
+                         tx_has_topo ? tx_topo : "<default>",
                          cap_to_use,
                          allow_take ? 1 : 0,
                          elem_sz_expr,
@@ -777,6 +882,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(src_all);
             return EINVAL;
         }
+
+        /* Autoblock was already run on the initial AST (before reparse), so UFCS-rewritten `chan_*`
+           calls should have been processed there. No need to re-run autoblock here. */
 
         /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */
         {

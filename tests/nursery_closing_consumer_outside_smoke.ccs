@@ -5,10 +5,9 @@
 
 static volatile int g_err = 0;
 
-void producer(CCChan* ch) {
+void producer(CCChanTx tx) {
     for (int i = 1; i <= 3; i++) {
-        int v = i;
-        int e = cc_chan_send(ch, &v, sizeof(v));
+        int e = chan_send(tx, i);
         if (e != 0) { g_err = e; return; }
     }
 }
@@ -23,7 +22,7 @@ int main(void) {
 
     // Spawn producer(s) inside nursery; channel is closed on nursery exit.
     @nursery closing(ch_tx) {
-        spawn(() => { producer(ch_tx.raw); });
+        spawn(() => { producer(ch_tx); });
     }
 
     if (g_err != 0) return 10;
@@ -32,7 +31,7 @@ int main(void) {
     int sum = 0;
     for (;;) {
         int v = 0;
-        int e = cc_chan_recv(ch_rx.raw, &v, sizeof(v));
+        int e = chan_recv(ch_rx, &v);
         if (e == 0) { sum += v; continue; }
         if (e == EPIPE) break;
         return 11;
@@ -40,7 +39,7 @@ int main(void) {
 
     if (sum != 6) return 12;
 
-    cc_chan_free(ch_tx.raw);
+    chan_free(ch_tx);
     return 0;
 }
 

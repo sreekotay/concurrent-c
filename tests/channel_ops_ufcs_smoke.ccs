@@ -1,0 +1,17 @@
+#include "cc_runtime.cch"
+
+int main(void) {
+    int[~3 >] tx;
+    int[~3 <] rx;
+    channel_pair(&tx, &rx);
+
+    int v = 0;
+    if (tx.send(42) != 0) return 1;
+    if (rx.recv(&v) != 0) return 2;
+    if (v != 42) return 3;
+
+    tx.close();
+    tx.free();
+    return 0;
+}
+

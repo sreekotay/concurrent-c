@@ -55,6 +55,36 @@ static int emit_desugared_call(char* out,
                                bool has_args) {
     if (!out || cap == 0 || !recv || !method) return -1;
 
+    /* Channel ergonomic sugar:
+       Prefer the surface chan_* helpers and do NOT auto-take address-of for handles.
+       Also avoids collisions with libc symbols like close/free. */
+    if (strcmp(method, "send") == 0) {
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_send(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "chan_send(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+    }
+    if (strcmp(method, "recv") == 0) {
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_recv(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "chan_recv(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+    }
+    if (strcmp(method, "send_take") == 0) {
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_send_take(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "chan_send_take(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+    }
+    if (strcmp(method, "try_send") == 0) {
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_try_send(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "chan_try_send(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+    }
+    if (strcmp(method, "try_recv") == 0) {
+        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_try_recv(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "chan_try_recv(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+    }
+    if (strcmp(method, "close") == 0) {
+        return snprintf(out, cap, "chan_close(%s%s)", recv_is_ptr ? "*":"", recv);
+    }
+    if (strcmp(method, "free") == 0) {
+        return snprintf(out, cap, "chan_free(%s%s)", recv_is_ptr ? "*":"", recv);
+    }
+
     // Special cases for stdlib convenience.
     if (strcmp(method, "as_slice") == 0) {
         return recv_is_ptr ? snprintf(out, cap, "string_as_slice(%s)", recv)

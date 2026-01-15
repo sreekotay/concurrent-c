@@ -193,7 +193,8 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
 
     /* Cheap filters. */
     if (!memmem(line, len, "while", 5)) return 0;
-    if (!memmem(line, len, "cc_chan_recv", 12)) return 0;  /* 12 chars in "cc_chan_recv" */
+    /* Accept either the raw runtime API or the ergonomic macro form. */
+    if (!memmem(line, len, "cc_chan_recv", 12) && !memmem(line, len, "chan_recv", 8)) return 0;
     if (!memmem(line, len, chname, strlen(chname))) return 0;
 
     /* Normalize by removing whitespace so we can match many formatting variants. */
@@ -210,13 +211,21 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
     /* Catch:
        - while(cc_chan_recv(ch,...)==0)
        - while((cc_chan_recv(ch,...)==0))
-       - while(!cc_chan_recv(ch,...)) */
+       - while(!cc_chan_recv(ch,...))
+       - while(chan_recv(ch,...)==0)
+       - while(!chan_recv(ch,...)) */
     char pat1[256];
     snprintf(pat1, sizeof(pat1), "while(cc_chan_recv(%s", chname);
     char pat2[256];
     snprintf(pat2, sizeof(pat2), "while(!cc_chan_recv(%s", chname);
+    char pat3[256];
+    snprintf(pat3, sizeof(pat3), "while(chan_recv(%s", chname);
+    char pat4[256];
+    snprintf(pat4, sizeof(pat4), "while(!chan_recv(%s", chname);
     if (strstr(tmp, pat1) && strstr(tmp, "==0")) return 1;
     if (strstr(tmp, pat2)) return 1;
+    if (strstr(tmp, pat3) && strstr(tmp, "==0")) return 1;
+    if (strstr(tmp, pat4)) return 1;
     return 0;
 }
 
@@ -1214,6 +1223,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             return -1;
         }
     }
+
+    /* Channel ops in @async don't require explicit await - the autoblock pass wraps them automatically.
+       This makes blocking channel ops cooperative without user effort. */
 
     /* Auto-blocking diagnostics (env-gated): identify direct calls to non-@async, non-@noblock
        functions inside @async functions. This is the classification backbone for spec auto-wrapping. */

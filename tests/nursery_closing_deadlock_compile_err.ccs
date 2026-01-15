@@ -12,18 +12,18 @@ int main(void) {
         // Producer: finite sends.
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
-                (void)cc_chan_send(ch_tx.raw, &i, sizeof(i));
+                (void)chan_send(ch_tx, i);
             }
         });
         // Consumer: recv-until-close INSIDE the same nursery => deadlock under spec semantics.
         spawn(() => {
             int v = 0;
-            while (cc_chan_recv(ch_rx.raw, &v, sizeof(v)) == 0) {
+            while (chan_recv(ch_rx, &v) == 0) {
                 received_sum += v;
             }
         });
     }
-    cc_chan_free(ch_tx.raw);
+    chan_free(ch_tx);
     return (received_sum == 6) ? 0 : 1;
 }
 

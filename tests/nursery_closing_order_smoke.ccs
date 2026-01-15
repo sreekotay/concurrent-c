@@ -8,30 +8,30 @@
 static volatile int g_err = 0;
 static volatile int g_got = 0;
 
-void producer(CCChan* ch) {
+void producer(CCChanTx tx) {
     int v1 = 1;
     int v2 = 2;
     int e = 0;
 
-    e = cc_chan_send(ch, &v1, sizeof(v1));
+    e = chan_send(tx, v1);
     if (e != 0) { g_err = e; return; }
 
     // Ensure nursery end is reached while producer is still running.
     usleep(50 * 1000);
 
-    e = cc_chan_send(ch, &v2, sizeof(v2));
+    e = chan_send(tx, v2);
     if (e != 0) { g_err = e; return; }
 }
 
-void consumer(CCChan* ch) {
+void consumer(CCChanRx rx) {
     int v = 0;
     int e = 0;
 
-    e = cc_chan_recv(ch, &v, sizeof(v));
+    e = chan_recv(rx, &v);
     if (e != 0) { g_err = e; return; }
     g_got += v;
 
-    e = cc_chan_recv(ch, &v, sizeof(v));
+    e = chan_recv(rx, &v);
     if (e != 0) { g_err = e; return; }
     g_got += v;
 }
@@ -46,8 +46,8 @@ int main(void) {
 
     // Spec: closing(ch) must close after all children exit (i.e., after joining).
     @nursery closing(ch_tx) {
-        spawn(() => { producer(ch_tx.raw); });
-        spawn(() => { consumer(ch_rx.raw); });
+        spawn(() => { producer(ch_tx); });
+        spawn(() => { consumer(ch_rx); });
     }
 
     // If closing happened before join, producer/consumer likely saw EPIPE.
@@ -56,19 +56,19 @@ int main(void) {
 
     // After nursery exit, channel should now be closed.
     int tmp = 0;
-    int tr = cc_chan_try_recv(ch_rx.raw, &tmp, sizeof(tmp));
+    int tr = chan_try_recv(ch_rx, &tmp);
     if (tr != EPIPE) {
         fprintf(stderr, "nursery_closing_order_smoke: expected channel closed after nursery; try_recv=%d (EPIPE=%d)\n", tr, EPIPE);
         return 12;
     }
     int v3 = 3;
-    int e = cc_chan_send(ch_tx.raw, &v3, sizeof(v3));
+    int e = chan_send(ch_tx, v3);
     if (e != EPIPE) {
         fprintf(stderr, "nursery_closing_order_smoke: expected send EPIPE after nursery; send=%d (EPIPE=%d)\n", e, EPIPE);
         return 13;
     }
 
-    cc_chan_free(ch_tx.raw);
+    chan_free(ch_tx);
     return 0;
 }
 

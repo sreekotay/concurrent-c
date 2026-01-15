@@ -17,8 +17,7 @@ int main(void) {
     @nursery closing(ch_tx) {
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
-                int v = i;
-                (void)cc_chan_send(ch_tx.raw, &v, sizeof(v));
+                (void)chan_send(ch_tx, i);
             }
         });
 
@@ -26,7 +25,7 @@ int main(void) {
         spawn(() => {
             int v = 0;
             for (;;) {
-                int rc = cc_chan_recv(ch_rx.raw, &v, sizeof(v));
+                int rc = chan_recv(ch_rx, &v);
                 if (rc == 0) continue;
                 g_err = rc; /* expect EDEADLK from the guard */
                 break;
@@ -35,7 +34,7 @@ int main(void) {
     }
 
     if (g_err != EDEADLK) return 10;
-    cc_chan_free(ch_tx.raw);
+    chan_free(ch_tx);
     return 0;
 }
 

@@ -2212,7 +2212,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             for (int k = 0; k < local_n; k++) if (locals[k] && strcmp(locals[k], n[i].aux_s1) == 0) dup = 1;
             if (dup) continue;
             locals[local_n++] = strdup(n[i].aux_s1);
-            if (is_ptr) {
+            /* Extract type for both pointers and scalars so we preserve correct sizes. */
+            {
                 /* Prefer the type text from the actual (rewritten) source so we don't emit
                    non-C spellings like `struct <anonymous>*` in the final output. */
                 if (n[i].line_start > 0 && n[i].aux_s1) {
@@ -2233,7 +2234,27 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                             break;
                         }
                         if (hit) {
-                            local_tys[local_n - 1] = cc__strndup_trim_ws(ls, (size_t)(hit - ls));
+                            char* ty_text = cc__strndup_trim_ws(ls, (size_t)(hit - ls));
+                            /* Reject if the extracted "type" starts with a control-flow keyword
+                               (e.g. `for (int i` → "for (int" is not a valid type). */
+                            if (ty_text) {
+                                const char* t = ty_text;
+                                while (*t == ' ' || *t == '\t') t++;
+                                if (strncmp(t, "for", 3) == 0 && !cc__is_ident_char(t[3])) {
+                                    free(ty_text);
+                                    ty_text = NULL;
+                                } else if (strncmp(t, "while", 5) == 0 && !cc__is_ident_char(t[5])) {
+                                    free(ty_text);
+                                    ty_text = NULL;
+                                } else if (strncmp(t, "if", 2) == 0 && !cc__is_ident_char(t[2])) {
+                                    free(ty_text);
+                                    ty_text = NULL;
+                                } else if (strncmp(t, "switch", 6) == 0 && !cc__is_ident_char(t[6])) {
+                                    free(ty_text);
+                                    ty_text = NULL;
+                                }
+                            }
+                            local_tys[local_n - 1] = ty_text;
                         }
                     }
                 }
@@ -2282,16 +2303,20 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             }
         }
 
-        /* Extract param names very conservatively: last ident in each comma-separated chunk. */
+        /* Extract param names AND types: last ident in each comma-separated chunk is the name,
+           everything before it is the type. */
         char* param_names[64];
+        char* param_tys[64];
         int param_n = 0;
         memset(param_names, 0, sizeof(param_names));
+        memset(param_tys, 0, sizeof(param_tys));
         if (params_text) {
             int par = 0, brk = 0, br = 0;
             int ins = 0; char q = 0;
             int in_lc = 0, in_bc = 0;
             const char* last_ident = NULL;
             size_t last_ident_len = 0;
+            size_t chunk_start = 0;
             size_t pl = strlen(params_text);
             for (size_t i = 0; i <= pl; i++) {
                 char ch = params_text[i];
@@ -2327,12 +2352,25 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                         if (nm) {
                             memcpy(nm, last_ident, last_ident_len);
                             nm[last_ident_len] = 0;
-                            if (strcmp(nm, "void") != 0) param_names[param_n++] = nm;
-                            else free(nm);
+                            if (strcmp(nm, "void") != 0) {
+                                param_names[param_n] = nm;
+                                /* Extract type: from chunk_start to last_ident, trimmed. */
+                                size_t ty_end = (size_t)(last_ident - params_text);
+                                while (ty_end > chunk_start && (params_text[ty_end - 1] == ' ' || params_text[ty_end - 1] == '\t')) ty_end--;
+                                size_t ty_start = chunk_start;
+                                while (ty_start < ty_end && (params_text[ty_start] == ' ' || params_text[ty_start] == '\t')) ty_start++;
+                                if (ty_end > ty_start) {
+                                    param_tys[param_n] = cc__strndup_trim_ws(&params_text[ty_start], ty_end - ty_start);
+                                }
+                                param_n++;
+                            } else {
+                                free(nm);
+                            }
                         }
                     }
                     last_ident = NULL;
                     last_ident_len = 0;
+                    chunk_start = i + 1;
                 }
             }
         }
@@ -2372,14 +2410,34 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  int __st;\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  intptr_t __r;\n");
         for (int k = 0; k < local_n; k++) {
-            if (local_tys[k] && strchr(local_tys[k], '*')) {
+            /* Use actual type if known, otherwise fall back to intptr_t for primitives. */
+            if (local_tys[k] && local_tys[k][0]) {
                 cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s;\n", local_tys[k], locals[k]);
             } else {
                 cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", locals[k]);
             }
         }
         for (int k = 0; k < aw_total; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", aw_names[k]);
-        for (int k = 0; k < param_n; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t __p_%s;\n", param_names[k]);
+        for (int k = 0; k < param_n; k++) {
+            /* Use actual type for struct-like params (starts with CC or contains "struct"),
+               otherwise use intptr_t for scalars/pointers. */
+            int is_struct = 0;
+            if (param_tys[k]) {
+                if (strncmp(param_tys[k], "CC", 2) == 0) is_struct = 1;
+                else if (strstr(param_tys[k], "struct")) is_struct = 1;
+                else if (!strchr(param_tys[k], '*')) {
+                    /* No pointer, might be a typedef'd struct - check for uppercase start. */
+                    const char* t = param_tys[k];
+                    while (*t == ' ' || *t == '\t') t++;
+                    if (*t >= 'A' && *t <= 'Z' && strncmp(t, "int", 3) != 0 && strncmp(t, "Int", 3) != 0) is_struct = 1;
+                }
+            }
+            if (is_struct && param_tys[k]) {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s __p_%s;\n", param_tys[k], param_names[k]);
+            } else {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t __p_%s;\n", param_names[k]);
+            }
+        }
         int task_cap = aw_total;
         if (task_cap < 1) task_cap = 1;
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  CCTaskIntptr __t[%d];\n", task_cap);
@@ -2451,7 +2509,22 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  __f->__st = 0;\n");
         for (int k = 0; k < param_n; k++) {
-            cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = (intptr_t)(%s);\n", param_names[k], param_names[k]);
+            /* Use direct assignment for struct-like params, (intptr_t) cast otherwise. */
+            int is_struct = 0;
+            if (param_tys[k]) {
+                if (strncmp(param_tys[k], "CC", 2) == 0) is_struct = 1;
+                else if (strstr(param_tys[k], "struct")) is_struct = 1;
+                else if (!strchr(param_tys[k], '*')) {
+                    const char* t = param_tys[k];
+                    while (*t == ' ' || *t == '\t') t++;
+                    if (*t >= 'A' && *t <= 'Z' && strncmp(t, "int", 3) != 0 && strncmp(t, "Int", 3) != 0) is_struct = 1;
+                }
+            }
+            if (is_struct) {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = %s;\n", param_names[k], param_names[k]);
+            } else {
+                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = (intptr_t)(%s);\n", param_names[k], param_names[k]);
+            }
         }
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
                           "  return cc_task_intptr_make_poll_ex(%s, NULL, __f, %s);\n",
@@ -2487,7 +2560,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
         for (int k = 0; k < local_n; k++) { free(locals[k]); free(local_tys[k]); }
         for (int k = 0; k < aw_total; k++) free(aw_names[k]);
-        for (int k = 0; k < param_n; k++) free(param_names[k]);
+        for (int k = 0; k < param_n; k++) { free(param_names[k]); free(param_tys[k]); }
         for (int k = 0; k < map_n; k++) free((void*)map_repls[k]);
         free(params_text);
         free(repl);

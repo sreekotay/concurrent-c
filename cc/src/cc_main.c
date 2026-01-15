@@ -148,6 +148,41 @@ static uint64_t cc__fnv1a64_i64(uint64_t h, long long v) {
     return cc__fnv1a64_update(h, &v, sizeof(v));
 }
 
+static uint64_t cc__hash_build_dir_u64(const char* build_dir) {
+    // Use realpath when possible to make this stable regardless of CWD / symlinks.
+    char rp[PATH_MAX];
+    rp[0] = '\0';
+    if (build_dir && build_dir[0]) {
+        if (realpath(build_dir, rp) == NULL) {
+            strncpy(rp, build_dir, sizeof(rp));
+            rp[sizeof(rp) - 1] = '\0';
+        }
+    }
+    uint64_t h = 1469598103934665603ULL;
+    h = cc__fnv1a64_str(h, rp);
+    return h;
+}
+
+static uint64_t cc__hash_src_path_u64(const char* build_dir, const char* src_abs) {
+    // Prefer a build-relative identity when src is under build_dir (nice + stable),
+    // else fall back to the absolute path.
+    if (!src_abs) src_abs = "";
+    if (!build_dir) build_dir = "";
+    size_t bd_len = strlen(build_dir);
+    const char* p = src_abs;
+    if (bd_len && strncmp(src_abs, build_dir, bd_len) == 0 && src_abs[bd_len] == '/') {
+        p = src_abs + bd_len + 1; // rel
+    }
+    uint64_t h = 1469598103934665603ULL;
+    h = cc__fnv1a64_str(h, p);
+    return h;
+}
+
+static void cc__format_u64_hex(char* out, size_t cap, uint64_t v) {
+    if (!out || cap == 0) return;
+    snprintf(out, cap, "%016llx", (unsigned long long)v);
+}
+
 static int cc__read_u64_file(const char* path, uint64_t* out) {
     if (!out) return -1;
     *out = 0;
@@ -908,21 +943,6 @@ static int cc__find_target_idx(const CCBuildTargetDecl* targets, size_t target_c
     return -1;
 }
 
-static int cc__derive_target_c_path(const char* target, const char* stem, char* out, size_t cap) {
-    if (!target || !stem || !out || cap == 0) return -1;
-    return snprintf(out, cap, "%s/c/%s/%s.c", g_out_root, target, stem) > 0 ? 0 : -1;
-}
-
-static int cc__derive_target_o_path(const char* target, const char* stem, char* out, size_t cap) {
-    if (!target || !stem || !out || cap == 0) return -1;
-    return snprintf(out, cap, "%s/obj/%s/%s.o", g_out_root, target, stem) > 0 ? 0 : -1;
-}
-
-static int cc__derive_target_d_path(const char* target, const char* stem, char* out, size_t cap) {
-    if (!target || !stem || !out || cap == 0) return -1;
-    return snprintf(out, cap, "%s/obj/%s/%s.d", g_out_root, target, stem) > 0 ? 0 : -1;
-}
-
 static void cc__make_cross_parts(const CCBuildTargetDecl* t,
                                  const char* cli_target,
                                  const char* cli_sysroot,
@@ -982,13 +1002,18 @@ static int cc__build_target_objs_rec(int idx,
     // Ensure target subdirs exist.
     char c_dir[PATH_MAX];
     char o_dir[PATH_MAX];
-    snprintf(c_dir, sizeof(c_dir), "%s/c/%s", g_out_root, t->name);
-    snprintf(o_dir, sizeof(o_dir), "%s/obj/%s", g_out_root, t->name);
+    // Include a per-build-dir prefix so multiple unrelated projects can safely share the same --out-dir.
+    // Layout:
+    //   <out>/c/<build_id>/<target>/<unit>.c
+    //   <out>/obj/<build_id>/<target>/<unit>.o/.d
+    uint64_t build_id_u64 = cc__hash_build_dir_u64(build_dir);
+    char build_id_hex[32];
+    cc__format_u64_hex(build_id_hex, sizeof(build_id_hex), build_id_u64);
+    snprintf(c_dir, sizeof(c_dir), "%s/c/%s/%s", g_out_root, build_id_hex, t->name);
+    snprintf(o_dir, sizeof(o_dir), "%s/obj/%s/%s", g_out_root, build_id_hex, t->name);
     if (cc__mkdir_p(c_dir) != 0 || cc__mkdir_p(o_dir) != 0) return -1;
 
     // Emit + compile each source.
-    char used[64][128];
-    size_t used_count = 0;
     caches[idx].obj_count = 0;
 
     for (size_t si = 0; si < t->src_count; ++si) {
@@ -996,17 +1021,22 @@ static int cc__build_target_objs_rec(int idx,
         char src_abs[PATH_MAX];
         cc__join_path(build_dir, t->srcs[si], src_abs, sizeof(src_abs));
 
+        // Collision-proof, stable unit name:
+        //   <basename_without_ext>__<hash(rel_or_abs_path)>
         char stem0[128];
-        char stem[128];
         cc__stem_from_path(src_abs, stem0, sizeof(stem0));
-        if (cc__unique_stem(stem0, used, &used_count, 64, stem, sizeof(stem)) != 0) return -1;
+        uint64_t src_id_u64 = cc__hash_src_path_u64(build_dir, src_abs);
+        char src_id_hex[32];
+        cc__format_u64_hex(src_id_hex, sizeof(src_id_hex), src_id_u64);
+        char unit[256];
+        snprintf(unit, sizeof(unit), "%s__%s", stem0, src_id_hex);
 
         char c_out[PATH_MAX];
         char o_out[PATH_MAX];
         char d_out[PATH_MAX];
-        if (cc__derive_target_c_path(t->name, stem, c_out, sizeof(c_out)) != 0) return -1;
-        if (cc__derive_target_o_path(t->name, stem, o_out, sizeof(o_out)) != 0) return -1;
-        if (cc__derive_target_d_path(t->name, stem, d_out, sizeof(d_out)) != 0) return -1;
+        if (snprintf(c_out, sizeof(c_out), "%s/%s.c", c_dir, unit) <= 0) return -1;
+        if (snprintf(o_out, sizeof(o_out), "%s/%s.o", o_dir, unit) <= 0) return -1;
+        if (snprintf(d_out, sizeof(d_out), "%s/%s.d", o_dir, unit) <= 0) return -1;
 
         char src_dir[PATH_MAX];
         cc__dir_of_path(src_abs, src_dir, sizeof(src_dir));
@@ -1016,7 +1046,8 @@ static int cc__build_target_objs_rec(int idx,
 
         // Use a cache stem that is unique per target.
         char cache_stem[256];
-        snprintf(cache_stem, sizeof(cache_stem), "%s__%s", t->name, stem);
+        // Also include build_id so caches are safe when sharing --out-dir across multiple projects.
+        snprintf(cache_stem, sizeof(cache_stem), "%s__%s__%s", build_id_hex, t->name, unit);
         char meta_path[PATH_MAX];
         char obj_meta_path[PATH_MAX];
         snprintf(meta_path, sizeof(meta_path), "%s/%s.meta", g_cache_root, cache_stem);

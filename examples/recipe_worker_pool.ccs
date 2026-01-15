@@ -10,38 +10,39 @@
  * Use channels for coordination, not shared mutable state.
  */
 #include "cc_nursery.cch"
-#include "cc_channel.cch"
-#include "cc_chan_handle.cch"
+#include "cc_runtime.cch"
 #include <stdio.h>
 
 #define NUM_WORKERS 3
 #define NUM_JOBS 9
 
 int main(void) {
-    CCChan* jobs_ch = cc_chan_create(4);
-    CCChanTx jobs = { jobs_ch };  /* tx handle for closing() */
+    int[~4 >] jobs_tx;
+    int[~4 <] jobs_rx;
     /* done channel capacity must be >= NUM_JOBS to avoid deadlock:
        if workers block on send(done), nursery can't exit to drain it. */
-    CCChan* done = cc_chan_create(NUM_JOBS);
-    if (!jobs_ch || !done) return 1;
+    int[~NUM_JOBS >] done_tx;
+    int[~NUM_JOBS <] done_rx;
+    channel_pair(&jobs_tx, &jobs_rx);
+    channel_pair(&done_tx, &done_rx);
 
     @nursery {
         /* Workers: pull jobs, send completion to done channel. */
         for (int w = 0; w < NUM_WORKERS; w++) {
             spawn(() => {
                 int job;
-                while (cc_chan_recv(jobs_ch, &job, sizeof(job)) == 0) {
+                while (chan_recv(jobs_rx, &job) == 0) {
                     printf("worker: processed job %d\n", job);
-                    cc_chan_send(done, &job, sizeof(job));  /* report done */
+                    (void)chan_send(done_tx, job);  /* report done */
                 }
             });
         }
 
         /* Feeder: sends all jobs, then inner nursery closes jobs channel. */
-        @nursery closing(jobs) {
+        @nursery closing(jobs_tx) {
             spawn(() => {
                 for (int j = 1; j <= NUM_JOBS; j++) {
-                    cc_chan_send(jobs_ch, &j, sizeof(j));
+                    (void)chan_send(jobs_tx, j);
                 }
                 printf("feeder: sent %d jobs\n", NUM_JOBS);
             });
@@ -50,15 +51,15 @@ int main(void) {
     }
 
     /* Count completed jobs by draining done channel. */
-    cc_chan_close(done);
+    chan_close(done_tx);
     int jobs_done = 0;
     int v;
-    while (cc_chan_recv(done, &v, sizeof(v)) == 0) {
+    while (chan_recv(done_rx, &v) == 0) {
         jobs_done++;
     }
 
-    cc_chan_free(jobs_ch);
-    cc_chan_free(done);
+    chan_free(jobs_tx);
+    chan_free(done_tx);
     printf("done, jobs_done = %d\n", jobs_done);
     return (jobs_done == NUM_JOBS) ? 0 : 1;
 }

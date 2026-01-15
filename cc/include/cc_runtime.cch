@@ -16,6 +16,19 @@
 
 /* Surface channel helpers (ergonomic layer over CCChanTx/CCChanRx).
    These are macros so they can infer sizes from expressions / pointers. */
+#ifdef CC_PARSER_MODE
+/* In parser-only mode (TCC stub-AST generation), we only need the code to parse.
+   Avoid macros like `&(literal)` that can trip "lvalue expected" errors under TCC. */
+#define chan_send(tx, value) (0)
+#define chan_recv(rx, out_ptr) (0)
+#define chan_close(tx) ((void)0)
+#define chan_free(h) ((void)0)
+#define chan_try_recv(rx, out_ptr) (0)
+#define chan_try_send(tx, value) (0)
+#define chan_send_take_ptr(tx, ptr) (0)
+#define chan_send_take_slice(tx, slice_ptr) (0)
+#define chan_send_take(tx, x) (0)
+#else
 #if (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
 /* Send by value (copies `value` into a temporary to take its address). Returns 0 or errno-style code. */
 #define chan_send(tx, value) ({ __typeof__(value) __cc_tmp = (value); cc_chan_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp)); })
@@ -25,18 +38,30 @@
 #define chan_close(tx) (cc_chan_close((tx).raw))
 /* Free the underlying channel (call exactly once for a (tx,rx) pair). */
 #define chan_free(h) (cc_chan_free((h).raw))
+/* Try-recv/try-send helpers */
+#define chan_try_recv(rx, out_ptr) (cc_chan_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
+#define chan_try_send(tx, value) ({ __typeof__(value) __cc_tmp = (value); cc_chan_try_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp)); })
 /* send_take primitives */
 #define chan_send_take_ptr(tx, ptr) (cc_chan_send_take((tx).raw, (void*)(ptr)))
 #define chan_send_take_slice(tx, slice_ptr) (cc_chan_send_take_slice((tx).raw, (const CCSlice*)(slice_ptr)))
+#define chan_send_take(tx, x) ({ \
+  __typeof__(x) __cc_v = (x); \
+  int __cc_is_slice = (__builtin_types_compatible_p(__typeof__(__cc_v), CCSlice) || __builtin_types_compatible_p(__typeof__(__cc_v), CCSliceUnique)); \
+  __cc_is_slice ? cc_chan_send_take_slice((tx).raw, (const CCSlice*)&__cc_v) : cc_chan_send_take((tx).raw, (void*)(__cc_v)); \
+})
 #else
 /* Fallbacks (less ergonomic): still avoid `.raw` at call sites for common cases. */
 #define chan_send(tx, value) (cc_chan_send((tx).raw, &(value), sizeof(value)))
 #define chan_recv(rx, out_ptr) (cc_chan_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
 #define chan_close(tx) (cc_chan_close((tx).raw))
 #define chan_free(h) (cc_chan_free((h).raw))
+#define chan_try_recv(rx, out_ptr) (cc_chan_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
+#define chan_try_send(tx, value) (cc_chan_try_send((tx).raw, &(value), sizeof(value)))
 #define chan_send_take_ptr(tx, ptr) (cc_chan_send_take((tx).raw, (void*)(ptr)))
 #define chan_send_take_slice(tx, slice_ptr) (cc_chan_send_take_slice((tx).raw, (const CCSlice*)(slice_ptr)))
+#define chan_send_take(tx, x) chan_send_take_ptr(tx, x)
 #endif
+#endif /* CC_PARSER_MODE */
 
 /* Surface constructor marker. This is lowered by the CC frontend; the runtime does not implement it.
    Declared here to avoid implicit-declaration warnings if the lowering misses a call site. */

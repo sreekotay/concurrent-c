@@ -4725,11 +4725,13 @@ x => expr                    // single parameter, expression body
 
 **Capture semantics:**
 
-- **Value capture (default):** Closures capture by value. For copyable types, the captured value is a copy. For move-only types, the capture is a move and the original becomes invalid.
+- **Value capture (default):** Closures capture by value. For copyable types, the captured value is a copy. For move-only types, the capture is a move and the original becomes invalid. **Value-captured variables are immutable within the closure.**
 
 - **Reference capture (`[&x]`):** Explicitly captures a reference to the outer variable. The closure shares the variable with the outer scope. Reference captures are subject to mutation checks (see below).
 
 - **Capture-all banned:** The forms `[&]` and `[=]` (capture all by reference/value) are not allowed. Each captured variable must be listed explicitly.
+
+**Rule (modification requires `[&x]`):** To modify a captured variable, you must use reference capture `[&x]`. Attempting to modify a value-captured variable is a compile error.
 
 **Reference capture mutation check:**
 
@@ -4740,6 +4742,14 @@ For thread/task closures, reference captures (`[&x]`) are checked for mutation:
 
 ```c
 int counter = 0;
+
+// ✅ OK: read value-captured variable
+spawn(() => { printf("%d", counter); });
+
+// ❌ ERROR: cannot modify value-captured variable
+spawn(() => { counter++; });
+// error: cannot modify value-captured variable 'counter'
+// help: use [&counter] for reference capture
 
 // ✅ OK: read-only reference capture
 spawn([&counter]() => { printf("%d", counter); });

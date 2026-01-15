@@ -1,0 +1,26 @@
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+
+/* Channel ops are blocking - autoblock pass wraps them automatically. No explicit await needed. */
+@async int f(CCChanTx tx, CCChanRx rx) {
+    int out = 0;
+    int rc = 0;
+
+    rc = tx.send(7);  /* Autoblock wraps this blocking call */
+    if (rc != 0) return 100 + rc;
+
+    rc = rx.recv(&out);  /* Autoblock wraps this blocking call */
+    if (rc != 0) return 200 + rc;
+
+    return out;
+}
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    channel_pair(&tx, &rx);
+
+    int r = cc_block_on(int, f(tx, rx));
+    tx.free();
+    return (r == 7) ? 0 : 1;
+}

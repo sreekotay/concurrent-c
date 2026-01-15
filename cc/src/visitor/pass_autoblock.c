@@ -214,6 +214,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN = 5,
         CC_AB_REWRITE_RETURN_EXPR_CALL = 6,
         CC_AB_REWRITE_ASSIGN_EXPR_CALL = 7,
+        /* Special-case: inside `await ...`, rewrite the call expression to a blocking-task operand.
+           Used for chan_* operations (which are currently blocking runtime calls). */
+        CC_AB_REWRITE_AWAIT_OPERAND_CALL = 8,
     } CCAutoBlockRewriteKind;
 
     typedef struct {
@@ -264,8 +267,16 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (!n[i].aux_s1) continue; /* callee name */
         if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
 
-        /* Calls inside `await ...` are async call sites; never autoblock them. */
-        if (cc__node_is_descendant_of_kind(root, n, i, 6 /* CC_AST_NODE_AWAIT */)) continue;
+        /* Calls inside `await ...` are usually async call sites; never autoblock them.
+           Exception: channel ops are currently blocking (chan_*), so `await tx.send(...)` / `await rx.recv(...)`
+           must be rewritten into a blocking-task operand so async lowering sees a CCTaskIntptr. */
+        int is_under_await = cc__node_is_descendant_of_kind(root, n, i, 6 /* CC_AST_NODE_AWAIT */);
+        int is_chan_op = (strcmp(n[i].aux_s1, "chan_send") == 0 ||
+                          strcmp(n[i].aux_s1, "chan_recv") == 0 ||
+                          strcmp(n[i].aux_s1, "chan_send_take") == 0 ||
+                          strcmp(n[i].aux_s1, "chan_send_take_ptr") == 0 ||
+                          strcmp(n[i].aux_s1, "chan_send_take_slice") == 0);
+        if (is_under_await && !is_chan_op) continue;
 
         /* Find enclosing function decl-item and check @async attr. */
         int cur = n[i].parent;
@@ -422,13 +433,20 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CCAutoBlockRewriteKind kind = CC_AB_REWRITE_STMT_CALL;
         const char* lhs_name = NULL;
         size_t stmt_start = lb;
+        if (is_under_await && is_chan_op) {
+            /* We rewrite the operand expression (call span) in-place, keeping the existing `await`. */
+            kind = CC_AB_REWRITE_AWAIT_OPERAND_CALL;
+        }
 
-        /* Check for nearest RETURN or ASSIGN ancestor. */
+        /* Check for nearest RETURN or ASSIGN ancestor.
+           NOTE: For CC_AB_REWRITE_AWAIT_OPERAND_CALL, we intentionally skip this and only replace the call span. */
         int assign_idx = -1;
         int ret_idx = -1;
-        for (int cur2 = n[i].parent; cur2 >= 0 && cur2 < root->node_count; cur2 = n[cur2].parent) {
-            if (n[cur2].kind == 15) { ret_idx = cur2; break; } /* RETURN */
-            if (n[cur2].kind == 14) { assign_idx = cur2; break; } /* ASSIGN */
+        if (kind != CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
+            for (int cur2 = n[i].parent; cur2 >= 0 && cur2 < root->node_count; cur2 = n[cur2].parent) {
+                if (n[cur2].kind == 15) { ret_idx = cur2; break; } /* RETURN */
+                if (n[cur2].kind == 14) { assign_idx = cur2; break; } /* ASSIGN */
+            }
         }
 
         if (ret_idx >= 0 && n[ret_idx].line_start == n[i].line_start && is_stmt_form) {
@@ -536,7 +554,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     }
                 }
             }
-        } else {
+        } else if (kind != CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
             /* plain statement call: require call begins statement token */
             if (is_stmt_form) {
                 int ok = 1;
@@ -566,7 +584,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             kind != CC_AB_REWRITE_RETURN_CALL &&
             kind != CC_AB_REWRITE_ASSIGN_CALL &&
             kind != CC_AB_REWRITE_RETURN_EXPR_CALL &&
-            kind != CC_AB_REWRITE_ASSIGN_EXPR_CALL) {
+            kind != CC_AB_REWRITE_ASSIGN_EXPR_CALL &&
+            kind != CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
             for (int pi = 0; pi < paramc; pi++) free(param_types[pi]);
             continue;
         }
@@ -1092,6 +1111,29 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             /* Original statement with call replaced by tmp. */
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt, call_s);
             cc__append_str(&repl, &repl_len, &repl_cap, tmp_name);
+            cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
+            if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
+        } else if (reps[ri].kind == CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
+            /* For `await chan_*` forms, keep the user's `await` but rewrite the call operand
+               to `cc_run_blocking_task_intptr(__cc_ab_c_lN)` so async lowering sees a task. */
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
+            if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+            else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+            cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+            cc__append_str(&repl, &repl_len, &repl_cap, "(");
+            for (int ai = 0; ai < argc; ai++) {
+                if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
+                } else {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                }
+            }
+            cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
+
+            /* Original statement with call replaced by cc_run_blocking_task_intptr(__cc_ab_c_lN). */
+            cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt, call_s);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "cc_run_blocking_task_intptr(__cc_ab_c_l%d)", reps[ri].line_start);
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
             if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
         } else if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {
