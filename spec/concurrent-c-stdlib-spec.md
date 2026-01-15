@@ -768,8 +768,12 @@ if (Request? r = active.get(id)) {
 <std/fs.cch>             // Path utilities
 <std/vec.cch>            // Vec<T> dynamic array with UFCS methods
 <std/map.cch>            // Map<K, V> hash map with UFCS methods
+<std/net.cch>            // TCP/UDP sockets, Listener
+<std/tls.cch>            // TLS client/server (wraps BearSSL/mbedTLS)
+<std/http.cch>           // HTTP client (http_get, http_post, HttpClient)
+<std/dns.cch>            // DNS resolution (dns_lookup)
 <std/server.cch>         // server_loop canonical shell
-<std/error.cch>          // Error enums (IoError, ParseError, etc.)
+<std/error.cch>          // Error enums (IoError, NetError, HttpError, etc.)
 ```
 
 **Prelude Safety:** `<std/prelude.cch>` performs no implicit allocation or runtime initialization. It is a pure header include with zero hidden costs.
@@ -1568,6 +1572,499 @@ void process_csv(char* filename) {
 
 ---
 
+### 5. Networking (`<std/net.cch>`)
+
+Concurrent-C networking provides safe, async-first primitives for TCP/UDP, TLS, HTTP clients, and DNS. All operations integrate with the arena model and return `T!E` results.
+
+#### 5.1 Design Principles
+
+1. **Arena-first buffers:** All read operations allocate into caller-provided arenas. No hidden mallocs.
+2. **Duplex unification:** TCP sockets and TLS connections expose the same `Duplex` interface as server connections.
+3. **Explicit lifetimes:** Socket handles are resources that must be closed. Use `@defer` or `@nursery closing()`.
+4. **Async by default:** All I/O is async. Sync wrappers exist but prefer async in concurrent code.
+
+#### 5.2 TCP Sockets
+
+```c
+// TCP client connection
+@async Socket!NetError tcp_connect(char[:] addr);  // "host:port" or "ip:port"
+
+// TCP server listener
+Listener!NetError tcp_listen(char[:] addr);        // "0.0.0.0:8080", "[::]:8080"
+
+// Accept connection (async)
+@async Socket!NetError Listener.accept();
+
+// Listener lifecycle
+void Listener.close();
+
+// Socket is a Duplex — unified read/write interface
+// Socket implements Duplex, so all Duplex methods work:
+@async char[:]?!IoError Socket.read(Arena* a, size_t max_bytes);
+@async size_t!IoError   Socket.write(char[:] data);
+@async void!IoError     Socket.shutdown(ShutdownMode mode);
+void                    Socket.close();
+
+// Socket-specific methods
+char[:]!NetError Socket.peer_addr();   // Remote address as string
+char[:]!NetError Socket.local_addr();  // Local address as string
+```
+
+**Memory Provenance:**
+- `read()` allocates the returned slice in the provided arena
+- The slice is valid until the arena is reset/freed
+- `write()` does NOT take ownership; data is copied to kernel buffers
+- Socket handles contain no arena references; they're just fd wrappers
+
+**Error Type:**
+```c
+enum NetError {
+    ConnectionRefused,
+    ConnectionReset,
+    ConnectionClosed,    // Normal remote close (not an error condition)
+    TimedOut,
+    HostUnreachable,
+    NetworkUnreachable,
+    AddressInUse,
+    AddressNotAvailable,
+    InvalidAddress,      // Parse failure for "host:port"
+    DnsFailure,
+    TlsHandshakeFailed,
+    TlsCertificateError,
+    Other(i32 os_code),
+};
+```
+
+**Examples:**
+
+```c
+// TCP client
+@async void!NetError fetch_data() {
+    Arena arena = arena(megabytes(1));
+    
+    Socket conn = try await tcp_connect("example.com:80");
+    @defer conn.close();
+    
+    try await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n");
+    
+    // Read response into arena
+    while (char[:]?!IoError chunk = try await conn.read(&arena, 4096)) {
+        if (!chunk) break;  // EOF
+        process(*chunk);
+    }
+}
+
+// TCP server (low-level; prefer server_loop for HTTP)
+@async void!NetError echo_server() {
+    Listener ln = try tcp_listen("0.0.0.0:9000");
+    @defer ln.close();
+    
+    @nursery {
+        while (true) {
+            Socket conn = try await ln.accept();
+            spawn(() => handle_echo(conn));
+        }
+    }
+}
+
+@async void handle_echo(Socket conn) {
+    Arena arena = arena(kilobytes(64));
+    @defer conn.close();
+    
+    while (char[:]?!IoError data = try await conn.read(&arena, 1024)) {
+        if (!data) break;
+        try await conn.write(*data);
+        arena_reset(&arena);  // Reuse buffer space
+    }
+}
+```
+
+#### 5.3 UDP Sockets
+
+```c
+// UDP socket (connectionless)
+UdpSocket!NetError udp_bind(char[:] addr);  // Bind to local address
+
+// Send to specific address
+@async size_t!NetError UdpSocket.send_to(char[:] data, char[:] addr);
+
+// Receive with sender address
+struct UdpPacket {
+    char[:] data;       // Packet data (allocated in arena)
+    char[:] from_addr;  // Sender address (allocated in arena)
+};
+@async UdpPacket?!NetError UdpSocket.recv_from(Arena* a, size_t max_bytes);
+
+void UdpSocket.close();
+```
+
+**Memory Provenance:**
+- `recv_from()` allocates both `data` and `from_addr` in the provided arena
+- Both slices share arena lifetime
+- `send_to()` copies data to kernel; no ownership transfer
+
+#### 5.4 TLS (`<std/tls.cch>`)
+
+TLS wraps a Socket or Duplex to provide encrypted communication. The wrapped connection exposes the same Duplex interface — handlers don't need to know if they're speaking TLS.
+
+```c
+// TLS client configuration
+struct TlsClientConfig {
+    char[:]? ca_cert;           // Optional: custom CA cert path (None = system roots)
+    bool verify_hostname;       // Default: true
+    char[:]? sni_hostname;      // Optional: override SNI (None = use connect addr)
+};
+
+// TLS server configuration (same as ServerConfig.tls)
+struct TlsServerConfig {
+    char[:] cert_path;          // Server certificate
+    char[:] key_path;           // Private key
+    char[:]? client_ca;         // Optional: require client certs
+};
+
+// Wrap existing socket in TLS (client)
+@async Duplex!NetError tls_connect(Socket sock, TlsClientConfig cfg);
+
+// Convenience: TCP + TLS in one call
+@async Duplex!NetError tls_connect_addr(char[:] addr, TlsClientConfig cfg);
+
+// Wrap existing socket in TLS (server-side handshake)
+@async Duplex!NetError tls_accept(Socket sock, TlsServerConfig cfg);
+
+// TLS connection info (available after handshake)
+struct TlsInfo {
+    char[:] protocol_version;   // "TLSv1.3", "TLSv1.2"
+    char[:] cipher_suite;       // "TLS_AES_256_GCM_SHA384"
+    char[:]? peer_cert_subject; // Client cert subject (if client auth)
+    char[:]? sni_hostname;      // SNI from client hello
+};
+TlsInfo? Duplex.tls_info();     // None if not a TLS connection
+```
+
+**Memory Provenance:**
+- `TlsInfo` strings are allocated in an internal arena owned by the TLS session
+- They remain valid for the lifetime of the Duplex
+- When Duplex is closed, TlsInfo strings become invalid
+- For long-term storage, copy with `.clone(your_arena)`
+
+**Implementation Backend:**
+
+CC's TLS implementation wraps **BearSSL** (primary) or **mbedTLS** (fallback):
+
+| Library | License | Allocation Model | Notes |
+|---------|---------|------------------|-------|
+| **BearSSL** | MIT | Caller-provided buffers | Ideal for arena model; no malloc |
+| **mbedTLS** | Apache 2.0 | Custom allocator hook | More features; hook to arena |
+
+**Interop: BearSSL Buffer Model**
+
+BearSSL requires caller-provided I/O buffers. This maps directly to CC arenas:
+
+```c
+// Internal: how CC wraps BearSSL (illustrative)
+struct TlsSession {
+    br_ssl_client_context cc;
+    br_x509_minimal_context xc;
+    unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];  // ~33KB, stack or arena
+    Socket underlying;
+    Arena* info_arena;  // For TlsInfo strings
+};
+
+// BearSSL's read callback — we implement to read from Socket
+static int tls_sock_read(void* ctx, unsigned char* buf, size_t len) {
+    TlsSession* s = ctx;
+    // Blocking read into BearSSL's buffer (not user arena)
+    return cc_blocking_recv(s->underlying.fd, buf, len);
+}
+```
+
+**Key insight:** BearSSL's zero-allocation design means:
+- No hidden mallocs during handshake or I/O
+- I/O buffers can be stack-allocated or arena-backed
+- Perfect fit for CC's "allocations are explicit" philosophy
+
+**Example:**
+
+```c
+@async void!NetError secure_fetch() {
+    Arena arena = arena(megabytes(1));
+    
+    // Connect with TLS (uses system CA roots by default)
+    Duplex conn = try await tls_connect_addr("api.example.com:443", {
+        .verify_hostname = true,
+    });
+    @defer conn.close();
+    
+    // Duplex interface is identical to plain Socket
+    try await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n");
+    
+    while (char[:]?!IoError chunk = try await conn.read(&arena, 4096)) {
+        if (!chunk) break;
+        process(*chunk);
+    }
+    
+    // Optional: inspect TLS session
+    if (TlsInfo? info = conn.tls_info()) {
+        printf("Protocol: %.*s\n", (int)info.protocol_version.len, info.protocol_version.ptr);
+    }
+}
+```
+
+#### 5.5 HTTP Client (`<std/http.cch>`)
+
+Convenience layer over TCP+TLS for common HTTP operations.
+
+```c
+// Simple GET/POST (one-shot, blocks until complete)
+@async HttpResponse!HttpError http_get(Arena* a, char[:] url);
+@async HttpResponse!HttpError http_post(Arena* a, char[:] url, char[:] body);
+
+// Response structure
+struct HttpResponse {
+    u16 status;             // 200, 404, etc.
+    char[:] status_text;    // "OK", "Not Found"
+    char[:] headers;        // Raw headers
+    char[:] body;           // Response body
+};
+
+// Configurable client
+struct HttpClient {
+    Duration timeout;           // Request timeout (default: 30s)
+    TlsClientConfig? tls;       // TLS config (None = use defaults)
+    char[:]? user_agent;        // User-Agent header
+    bool follow_redirects;      // Follow 3xx (default: true, max 10)
+};
+
+HttpClient http_client_new();
+
+// Builder methods
+HttpClient* HttpClient.timeout(Duration d);
+HttpClient* HttpClient.user_agent(char[:] ua);
+HttpClient* HttpClient.no_redirects();
+
+// Requests
+@async HttpResponse!HttpError HttpClient.get(Arena* a, char[:] url);
+@async HttpResponse!HttpError HttpClient.post(Arena* a, char[:] url, char[:] body);
+@async HttpResponse!HttpError HttpClient.request(Arena* a, HttpRequest req);
+
+// Full request control
+struct HttpRequest {
+    char[:] method;         // "GET", "POST", "PUT", etc.
+    char[:] url;
+    char[:] headers;        // Additional headers
+    char[:] body;
+};
+```
+
+**Memory Provenance:**
+- All response data (status_text, headers, body) allocated in provided arena
+- Response is valid until arena is reset/freed
+- Request data (url, headers, body) is read but not owned — caller maintains lifetime
+
+**Error Type:**
+```c
+enum HttpError {
+    Net(NetError),          // Connection errors
+    InvalidUrl,             // URL parse failure
+    TooManyRedirects,
+    InvalidResponse,        // Malformed HTTP response
+    Timeout,
+};
+```
+
+**Examples:**
+
+```c
+// Simple GET
+@async void!HttpError fetch_json() {
+    Arena arena = arena(megabytes(1));
+    
+    HttpResponse resp = try await http_get(&arena, "https://api.example.com/users");
+    if (resp.status == 200) {
+        // resp.body is valid until arena reset
+        User[] users = parse_json_users(resp.body, &arena);
+        process_users(users);
+    }
+}
+
+// Configured client
+@async void!HttpError fetch_with_config() {
+    Arena arena = arena(megabytes(1));
+    
+    HttpClient client = http_client_new()
+        .timeout(seconds(10))
+        .user_agent("MyApp/1.0")
+        .no_redirects();
+    
+    HttpResponse resp = try await client.get(&arena, "https://api.example.com/data");
+    process(resp);
+}
+
+// Custom request
+@async void!HttpError post_data() {
+    Arena arena = arena(megabytes(1));
+    
+    HttpRequest req = {
+        .method = "POST",
+        .url = "https://api.example.com/submit",
+        .headers = "Content-Type: application/json\r\nAuthorization: Bearer token\r\n",
+        .body = "{\"name\": \"test\"}",
+    };
+    
+    HttpClient client = http_client_new();
+    HttpResponse resp = try await client.request(&arena, req);
+}
+```
+
+#### 5.6 DNS (`<std/dns.cch>`)
+
+Async DNS resolution. Integrates with system resolver by default.
+
+```c
+// Resolve hostname to addresses
+@async IpAddr[]!NetError dns_lookup(Arena* a, char[:] hostname);
+
+// IP address (v4 or v6)
+struct IpAddr {
+    enum { V4, V6 } family;
+    union {
+        u8 v4[4];
+        u8 v6[16];
+    };
+};
+
+// Format IP as string
+char[:] IpAddr.to_string(Arena* a);
+
+// Parse string to IP (no DNS, just parsing)
+IpAddr!NetError ip_parse(char[:] s);
+```
+
+**Memory Provenance:**
+- `dns_lookup()` returns slice of IpAddr allocated in arena
+- `to_string()` allocates the formatted string in arena
+- Both valid until arena reset
+
+**Example:**
+
+```c
+@async void!NetError connect_by_name() {
+    Arena arena = arena(kilobytes(4));
+    
+    IpAddr[] addrs = try await dns_lookup(&arena, "example.com");
+    if (addrs.len == 0) {
+        return cc_err(NetError::DnsFailure);
+    }
+    
+    // Try each address until one works
+    for (size_t i = 0; i < addrs.len; i++) {
+        char[:] addr_str = addrs[i].to_string(&arena);
+        char[:] full_addr = string_new(&arena)
+            .append(addr_str)
+            .append(":443")
+            .as_slice();
+        
+        if (try Socket sock = await tcp_connect(full_addr)) {
+            return handle_connection(sock);
+        }
+    }
+    
+    return cc_err(NetError::HostUnreachable);
+}
+```
+
+#### 5.7 Interop Lessons
+
+Wrapping C networking libraries teaches key interop patterns:
+
+**Pattern 1: Buffer Ownership**
+
+```c
+// BAD: C library allocates, CC must free
+char* result = some_c_lib_alloc();  // Who frees this?
+// ...
+free(result);  // Easy to forget
+
+// GOOD: CC provides buffer, C library fills it
+char buffer[1024];
+int len = some_c_lib_read(buffer, sizeof(buffer));
+// No ownership question — buffer is stack/arena
+
+// GOOD: Hook allocator to arena
+void* my_alloc(size_t n) { return arena_alloc(&my_arena, n); }
+some_c_lib_set_allocator(my_alloc, NULL);
+```
+
+**Pattern 2: Callback Lifetimes**
+
+```c
+// C callback signature
+typedef int (*read_fn)(void* ctx, unsigned char* buf, size_t len);
+
+// CC closure can't be passed directly (different ABI)
+// Solution: pass function pointer + void* context
+
+struct CallbackContext {
+    Socket* sock;
+    CCDeadline* deadline;  // For cancellation checks
+};
+
+static int socket_read_callback(void* ctx, unsigned char* buf, size_t len) {
+    CallbackContext* c = ctx;
+    // Check cancellation
+    if (cc_is_cancelled(c->deadline)) return -1;
+    return cc_blocking_recv(c->sock->fd, buf, len);
+}
+```
+
+**Pattern 3: Arena Checkpoint for Streaming**
+
+```c
+// Long-lived connection processing many messages
+@async void!IoError process_stream(Duplex* conn, Arena* arena) {
+    ArenaCheckpoint cp = arena_checkpoint(arena);
+    size_t count = 0;
+    
+    while (char[:]?!IoError msg = try await conn.read(arena, 4096)) {
+        if (!msg) break;
+        process(*msg);
+        count++;
+        
+        // Restore arena periodically to prevent unbounded growth
+        if (count % 100 == 0) {
+            arena_restore(cp);
+            cp = arena_checkpoint(arena);
+        }
+    }
+}
+```
+
+**Pattern 4: Foreign Struct Wrapping**
+
+```c
+// C library struct with internal pointers
+typedef struct {
+    void* internal;
+    // ...
+} SomeLibHandle;
+
+// CC wrapper adds provenance tracking
+struct Socket {
+    int fd;
+    // No arena pointer — Socket doesn't own buffers
+    // Buffers are provided per-operation
+};
+
+struct TlsSession {
+    br_ssl_client_context ctx;   // BearSSL context (value, not pointer)
+    Socket underlying;           // Owned socket
+    Arena* info_arena;           // Owns TlsInfo strings
+    // iobuf is stack-allocated in async frame or part of struct
+};
+```
+
+---
+
 ## Future Phases
 
 **Phase 2 (v1.1):**
@@ -1576,6 +2073,8 @@ void process_csv(char* filename) {
 - Printf-style formatting if proven essential.
 - Concurrency helpers: Fan-in/fan-out patterns, broadcast helpers.
 - Map/Vec iteration methods (UFCS).
+- WebSocket client (`ws_connect()`).
+- HTTP/2 client support.
 
 **Phase 3 (v1.2):**
 - Advanced I/O: Async file ops, streams, buffering.
@@ -1583,6 +2082,7 @@ void process_csv(char* filename) {
 - Time: Duration, Timestamp.
 - Process/env: Environment variables, subprocess.
 - Compression/hashing: zlib, xxhash wrappers (maybe).
+- QUIC/HTTP3 (stretch goal).
 
 ---
 

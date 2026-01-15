@@ -1,0 +1,56 @@
+/*
+ * Recipe: Fan-Out with Capture
+ *
+ * Demonstrates:
+ *   - Spawning N tasks with different captured data
+ *   - Value capture pattern: copy loop var before spawning
+ *   - Aggregating results (using result array, one slot per task)
+ *
+ * Key insight: Copy loop variable to a local before the closure.
+ * Each iteration's local is captured by value, giving each task
+ * its own copy that won't change when the loop advances.
+ */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+#define NUM_TASKS 5
+
+/* Results array - each task writes to its own slot (no races). */
+int results[NUM_TASKS] = {0};
+
+/* Simulate work: compute square of input. */
+int compute(int x) {
+    return x * x;
+}
+
+int main(void) {
+    printf("=== Fan-Out: spawn %d tasks ===\n", NUM_TASKS);
+
+    @nursery {
+        for (int i = 0; i < NUM_TASKS; i++) {
+            /*
+             * Copy loop variable to a local before capture.
+             * Each iteration gets a fresh 'task_id' that the closure captures.
+             * This ensures each task sees its own value, not the final i.
+             */
+            int task_id = i;
+            spawn(() => {
+                int result = compute(task_id);
+                printf("task %d: compute(%d) = %d\n", task_id, task_id, result);
+                results[task_id] = result;  /* safe: each task owns its slot */
+            });
+        }
+    }
+    /* All tasks complete here. */
+
+    printf("\n=== Results ===\n");
+    int sum = 0;
+    for (int i = 0; i < NUM_TASKS; i++) {
+        printf("results[%d] = %d\n", i, results[i]);
+        sum += results[i];
+    }
+    printf("sum = %d\n", sum);
+
+    /* Verify: 0^2 + 1^2 + 2^2 + 3^2 + 4^2 = 0 + 1 + 4 + 9 + 16 = 30 */
+    return (sum == 30) ? 0 : 1;
+}

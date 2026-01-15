@@ -8,6 +8,7 @@
 #include "cc_slice.cch"
 #include "cc_arena.cch"
 #include "cc_io.cch"
+#include "cc_optional.cch"
 #include "cc_result.cch"
 #include "cc_channel.cch"
 #include "cc_sched.cch"

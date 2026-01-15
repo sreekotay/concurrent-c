@@ -402,6 +402,192 @@ static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* ou
     return p;
 }
 
+/* Mangle a type name for use in CCOptional_T or CCResult_T_E.
+   - Strips leading/trailing whitespace
+   - Replaces spaces with underscores
+   - Replaces '*' with 'ptr'
+   - Replaces '[' and ']' with '_' */
+static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
+    if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
+    
+    /* Skip leading whitespace */
+    while (len > 0 && (*src == ' ' || *src == '\t')) { src++; len--; }
+    /* Skip trailing whitespace */
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
+    
+    size_t j = 0;
+    for (size_t i = 0; i < len && j < out_sz - 1; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\t') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '*') {
+            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
+        } else if (c == '[' || c == ']') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '<' || c == '>' || c == ',') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else {
+            out[j++] = c;
+        }
+    }
+    /* Remove trailing underscore */
+    while (j > 0 && out[j - 1] == '_') j--;
+    out[j] = 0;
+}
+
+/* Rewrite optional types:
+   - `T?` -> `CCOptional_T`
+   The '?' must immediately follow a type name (no space).
+   We detect: identifier? or )? or ]? or >? patterns. */
+static char* cc__rewrite_optional_types(const char* src, size_t n, const char* input_path) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    int line = 1;
+    int col = 1;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+        
+        /* Detect T? pattern: identifier followed by '?' (not '?:' ternary) */
+        if (c == '?' && c2 != ':' && c2 != '?') {
+            /* Check what precedes the '?' */
+            if (i > 0) {
+                char prev = src[i - 1];
+                /* Valid type-ending chars: identifier char, ')', ']', '>' */
+                if (cc__is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
+                    /* Scan back to find the type start */
+                    size_t ty_start = cc__scan_back_to_delim(src, i);
+                    if (ty_start < i) {
+                        /* Extract the type name */
+                        size_t ty_len = i - ty_start;
+                        char mangled[256];
+                        cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
+                        
+                        if (mangled[0]) {
+                            /* Emit everything up to ty_start */
+                            cc__sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                            /* Emit CCOptional_T */
+                            cc__sb_append_cstr(&out, &out_len, &out_cap, "CCOptional_");
+                            cc__sb_append_cstr(&out, &out_len, &out_cap, mangled);
+                            last_emit = i + 1; /* skip past '?' */
+                        }
+                    }
+                }
+            }
+        }
+        
+        i++; col++;
+    }
+    
+    if (last_emit < n) cc__sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite result types:
+   - `T!E` -> `CCResult_T_E`
+   The '!' must immediately follow a type name (no space).
+   We detect: identifier!identifier patterns. */
+static char* cc__rewrite_result_types(const char* src, size_t n, const char* input_path) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    int line = 1;
+    int col = 1;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+        
+        /* Detect T!E pattern: type followed by '!' followed by error type */
+        if (c == '!' && c2 != '=') {  /* != is not result type */
+            /* Check what precedes the '!' */
+            if (i > 0) {
+                char prev = src[i - 1];
+                /* Valid type-ending chars: identifier char, ')', ']', '>' */
+                if (cc__is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
+                    /* Check what follows the '!' - must be an identifier (error type) */
+                    size_t j = i + 1;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && cc__is_ident_start(src[j])) {
+                        /* Found error type start */
+                        size_t err_start = j;
+                        while (j < n && cc__is_ident_char(src[j])) j++;
+                        size_t err_end = j;
+                        
+                        /* Scan back to find the ok type start */
+                        size_t ty_start = cc__scan_back_to_delim(src, i);
+                        if (ty_start < i) {
+                            size_t ty_len = i - ty_start;
+                            size_t err_len = err_end - err_start;
+                            
+                            char mangled_ok[256];
+                            char mangled_err[256];
+                            cc__mangle_type_name(src + ty_start, ty_len, mangled_ok, sizeof(mangled_ok));
+                            cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
+                            
+                            if (mangled_ok[0] && mangled_err[0]) {
+                                /* Emit everything up to ty_start */
+                                cc__sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                                /* Emit CCResult_T_E */
+                                cc__sb_append_cstr(&out, &out_len, &out_cap, "CCResult_");
+                                cc__sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
+                                cc__sb_append_cstr(&out, &out_len, &out_cap, "_");
+                                cc__sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
+                                last_emit = err_end;
+                                i = err_end;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        i++; col++;
+    }
+    
+    if (last_emit < n) cc__sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Rewrite slice types:
    - `T[:]`  -> `CCSlice`
    - `T[:!]` -> `CCSliceUnique`
@@ -480,6 +666,234 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
     return out;
 }
 
+/* Rewrite try expressions: try expr -> cc_try(expr) */
+static char* cc__rewrite_try_exprs(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Detect 'try' keyword followed by expression (not try { block } form) */
+        if (c == 't' && i + 2 < n && src[i+1] == 'r' && src[i+2] == 'y') {
+            /* Check word boundary before */
+            int word_start = (i == 0) || !cc__is_ident_char(src[i-1]);
+            /* Check word boundary after */
+            int word_end = (i + 3 >= n) || !cc__is_ident_char(src[i+3]);
+            
+            if (word_start && word_end) {
+                size_t after_try = i + 3;
+                /* Skip whitespace */
+                while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t' || src[after_try] == '\n')) after_try++;
+                
+                /* Check it's not try { block } form */
+                if (after_try < n && src[after_try] == '{') {
+                    /* try { ... } block form - skip, not handled here */
+                } else if (after_try < n && (cc__is_ident_start(src[after_try]) || src[after_try] == '(')) {
+                    /* 'try expr' form - find end of expression */
+                    size_t expr_start = after_try;
+                    size_t expr_end = expr_start;
+                    
+                    /* Scan expression with balanced parens/braces */
+                    int paren = 0, brace = 0, bracket = 0;
+                    int in_s = 0, in_c = 0;
+                    while (expr_end < n) {
+                        char ec = src[expr_end];
+                        
+                        if (in_s) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '"') in_s = 0; expr_end++; continue; }
+                        if (in_c) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '\'') in_c = 0; expr_end++; continue; }
+                        if (ec == '"') { in_s = 1; expr_end++; continue; }
+                        if (ec == '\'') { in_c = 1; expr_end++; continue; }
+                        
+                        if (ec == '(' ) { paren++; expr_end++; continue; }
+                        if (ec == ')' ) { if (paren > 0) { paren--; expr_end++; continue; } else break; }
+                        if (ec == '{' ) { brace++; expr_end++; continue; }
+                        if (ec == '}' ) { if (brace > 0) { brace--; expr_end++; continue; } else break; }
+                        if (ec == '[' ) { bracket++; expr_end++; continue; }
+                        if (ec == ']' ) { if (bracket > 0) { bracket--; expr_end++; continue; } else break; }
+                        
+                        /* End expression at ';', ',', or unbalanced ')' */
+                        if (paren == 0 && brace == 0 && bracket == 0) {
+                            if (ec == ';' || ec == ',') break;
+                        }
+                        
+                        expr_end++;
+                    }
+                    
+                    /* Only rewrite if we found a valid expression */
+                    if (expr_end > expr_start) {
+                        /* Emit: everything up to 'try', then 'cc_try(', then expr, then ')' */
+                        cc__sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                        cc__sb_append_cstr(&out, &out_len, &out_cap, "cc_try(");
+                        cc__sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
+                        cc__sb_append_cstr(&out, &out_len, &out_cap, ")");
+                        last_emit = expr_end;
+                        i = expr_end;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit < n) cc__sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite *opt -> cc_unwrap_opt(opt) for variables declared with CCOptional_* type.
+   Two-pass approach:
+   1. Scan for CCOptional_<T> <varname> declarations
+   2. Rewrite *varname to cc_unwrap_opt(varname)
+*/
+static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    
+    /* Pass 1: Collect optional variable names */
+    #define MAX_OPT_VARS 256
+    char* opt_vars[MAX_OPT_VARS];
+    int opt_var_count = 0;
+    
+    size_t i = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n && opt_var_count < MAX_OPT_VARS) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for CCOptional_ type declarations */
+        if (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0) {
+            /* Skip to end of type name */
+            size_t type_start = i;
+            i += 11;
+            while (i < n && cc__is_ident_char(src[i])) i++;
+            /* Skip whitespace */
+            while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n')) i++;
+            /* Check for variable name (not function) */
+            if (i < n && cc__is_ident_start(src[i])) {
+                size_t var_start = i;
+                while (i < n && cc__is_ident_char(src[i])) i++;
+                size_t var_len = i - var_start;
+                /* Skip whitespace */
+                while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
+                /* If followed by '=' or ';', it's a variable declaration */
+                if (i < n && (src[i] == '=' || src[i] == ';' || src[i] == ',')) {
+                    char* varname = (char*)malloc(var_len + 1);
+                    if (varname) {
+                        memcpy(varname, src + var_start, var_len);
+                        varname[var_len] = 0;
+                        opt_vars[opt_var_count++] = varname;
+                    }
+                }
+            }
+            continue;
+        }
+        
+        i++;
+    }
+    
+    /* If no optional vars found, nothing to rewrite */
+    if (opt_var_count == 0) return NULL;
+    
+    /* Pass 2: Rewrite *varname to cc_unwrap_opt(varname) */
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    i = 0;
+    size_t last_emit = 0;
+    in_line_comment = 0; in_block_comment = 0; in_str = 0; in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for * followed by an optional variable name */
+        if (c == '*') {
+            size_t star_pos = i;
+            i++;
+            /* Skip whitespace */
+            while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
+            /* Check for identifier */
+            if (i < n && cc__is_ident_start(src[i])) {
+                size_t var_start = i;
+                while (i < n && cc__is_ident_char(src[i])) i++;
+                size_t var_len = i - var_start;
+                
+                /* Check if this identifier is in our opt_vars list */
+                int is_opt = 0;
+                for (int j = 0; j < opt_var_count; j++) {
+                    if (strlen(opt_vars[j]) == var_len && strncmp(opt_vars[j], src + var_start, var_len) == 0) {
+                        is_opt = 1;
+                        break;
+                    }
+                }
+                
+                if (is_opt) {
+                    /* Rewrite *varname to cc_unwrap_opt(varname) */
+                    cc__sb_append(&out, &out_len, &out_cap, src + last_emit, star_pos - last_emit);
+                    cc__sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap_opt(");
+                    cc__sb_append(&out, &out_len, &out_cap, src + var_start, var_len);
+                    cc__sb_append_cstr(&out, &out_len, &out_cap, ")");
+                    last_emit = i;
+                }
+            }
+            continue;
+        }
+        
+        i++;
+    }
+    
+    /* Free opt_vars */
+    for (int j = 0; j < opt_var_count; j++) {
+        free(opt_vars[j]);
+    }
+    
+    if (last_emit == 0) {
+        /* No rewrites done */
+        return NULL;
+    }
+    
+    if (last_emit < n) cc__sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_sz) {
     if (!input_path || !out_path || out_path_sz == 0) return -1;
     char tmp_path[] = "/tmp/cc_pp_XXXXXX.c";
@@ -524,12 +938,36 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     size_t cur2_n = rewritten_slice ? strlen(rewritten_slice) : cur_n;
 
     char* rewritten_chan = cc__rewrite_chan_handle_types(cur2, cur2_n, input_path);
-    const char* use = rewritten_chan ? rewritten_chan : cur2;
+    const char* cur3 = rewritten_chan ? rewritten_chan : cur2;
+    size_t cur3_n = rewritten_chan ? strlen(rewritten_chan) : cur2_n;
+
+    /* Rewrite T? -> CCOptional_T */
+    char* rewritten_opt = cc__rewrite_optional_types(cur3, cur3_n, input_path);
+    const char* cur4 = rewritten_opt ? rewritten_opt : cur3;
+    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3_n;
+
+    /* Rewrite T!E -> CCResult_T_E */
+    char* rewritten_res = cc__rewrite_result_types(cur4, cur4_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4_n;
+
+    /* Rewrite try expr -> cc_try(expr) */
+    char* rewritten_try = cc__rewrite_try_exprs(cur5, cur5_n);
+    const char* cur6 = rewritten_try ? rewritten_try : cur5;
+    size_t cur6_n = rewritten_try ? strlen(rewritten_try) : cur5_n;
+
+    /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
+    char* rewritten_unwrap = cc__rewrite_optional_unwrap(cur6, cur6_n);
+    const char* use = rewritten_unwrap ? rewritten_unwrap : cur6;
 
     char rel[1024];
     fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
     fputs(use, out);
 
+    free(rewritten_unwrap);
+    free(rewritten_try);
+    free(rewritten_res);
+    free(rewritten_opt);
     free(rewritten_chan);
     free(rewritten_slice);
     free(rewritten_deadline);

@@ -1,8 +1,10 @@
 CC_DIR := cc
 BUILD ?= debug
+BEARSSL_DIR := third_party/bearssl
 
 .PHONY: all cc clean fmt lint example example-c smoke test tools
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
+.PHONY: deps bearssl bearssl-clean deps-update
 
 all: cc
 
@@ -37,6 +39,26 @@ tools:
 # Prefer using ccc itself for tests (the runner drives ./cc/bin/ccc).
 test: cc tools
 	@./tools/cc_test
+
+# ---- Dependencies -----------------------------------------------------------
+
+# Build all third-party dependencies
+deps: bearssl
+
+# Build BearSSL static library
+bearssl:
+	@echo "Building BearSSL..."
+	@$(MAKE) -C $(BEARSSL_DIR) -j4
+	@echo "BearSSL built: $(BEARSSL_DIR)/build/libbearssl.a"
+
+bearssl-clean:
+	@$(MAKE) -C $(BEARSSL_DIR) clean
+
+# Update all dependencies to latest versions
+deps-update:
+	@echo "Updating submodules to latest..."
+	@git submodule update --remote --merge
+	@echo "Submodules updated. Rebuild with: make deps"
 
 # ---- TCC upgrade convenience ------------------------------------------------
 

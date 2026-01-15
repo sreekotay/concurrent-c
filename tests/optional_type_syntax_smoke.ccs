@@ -1,0 +1,31 @@
+// Test: Optional type syntax T? lowers to CCOptional_T
+#include <stdio.h>
+#include "cc_runtime.cch"
+
+// CCOptional_int is pre-declared in cc_optional.cch
+
+int main(void) {
+    // Declare an optional int using T? syntax
+    int? x;
+    
+    // Initialize to none
+    x = cc_none_CCOptional_int();
+    if (x.has) {
+        printf("FAIL: x should be none\n");
+        return 1;
+    }
+    
+    // Initialize to some value
+    x = cc_some_CCOptional_int(42);
+    if (!x.has) {
+        printf("FAIL: x should have value\n");
+        return 1;
+    }
+    if (x.u.value != 42) {
+        printf("FAIL: x.u.value should be 42, got %d\n", x.u.value);
+        return 1;
+    }
+    
+    printf("OK: optional type syntax works\n");
+    return 0;
+}

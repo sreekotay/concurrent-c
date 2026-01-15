@@ -1,0 +1,197 @@
+/*
+ * Concurrent-C Networking Primitives
+ * <std/net.cch>
+ *
+ * TCP/UDP sockets with async-first design.
+ * All read operations allocate into caller-provided arenas.
+ */
+#ifndef CC_STD_NET_H
+#define CC_STD_NET_H
+
+#include "../cc_arena.cch"
+#include "../cc_slice.cch"
+#include "../cc_result.cch"
+#include "io.cch"
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* ============================================================================
+ * Error Types
+ * ============================================================================ */
+
+typedef enum CCNetError {
+    CC_NET_OK = 0,
+    CC_NET_CONNECTION_REFUSED,
+    CC_NET_CONNECTION_RESET,
+    CC_NET_CONNECTION_CLOSED,   /* Normal remote close */
+    CC_NET_TIMED_OUT,
+    CC_NET_HOST_UNREACHABLE,
+    CC_NET_NETWORK_UNREACHABLE,
+    CC_NET_ADDRESS_IN_USE,
+    CC_NET_ADDRESS_NOT_AVAILABLE,
+    CC_NET_INVALID_ADDRESS,
+    CC_NET_DNS_FAILURE,
+    CC_NET_TLS_HANDSHAKE_FAILED,
+    CC_NET_TLS_CERTIFICATE_ERROR,
+    CC_NET_OTHER,               /* os_code in extended info */
+} CCNetError;
+
+/* ============================================================================
+ * Socket Types
+ * ============================================================================ */
+
+/* Opaque socket handle */
+typedef struct CCSocket {
+    int fd;
+    uint8_t flags;  /* Internal: closed, etc. */
+} CCSocket;
+
+/* TCP listener */
+typedef struct CCListener {
+    int fd;
+    uint8_t flags;
+} CCListener;
+
+/* UDP socket */
+typedef struct CCUdpSocket {
+    int fd;
+    uint8_t flags;
+} CCUdpSocket;
+
+/* UDP packet with sender info */
+typedef struct CCUdpPacket {
+    CCSlice data;
+    CCSlice from_addr;
+} CCUdpPacket;
+
+/* IP address (v4 or v6) */
+typedef struct CCIpAddr {
+    uint8_t family;  /* 4 or 6 */
+    union {
+        uint8_t v4[4];
+        uint8_t v6[16];
+    } addr;
+} CCIpAddr;
+
+/* ============================================================================
+ * TCP Client
+ * ============================================================================ */
+
+/* Connect to addr ("host:port" or "ip:port") */
+CCSocket cc_tcp_connect(const char* addr, size_t addr_len, CCNetError* out_err);
+
+/* Async variant (requires runtime integration) */
+/* @async CCSocket cc_tcp_connect_async(const char* addr, size_t addr_len, CCNetError* out_err); */
+
+/* ============================================================================
+ * TCP Server
+ * ============================================================================ */
+
+/* Listen on addr ("0.0.0.0:8080", "[::]:8080") */
+CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err);
+
+/* Accept connection (blocking) */
+CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err);
+
+/* Async accept */
+/* @async CCSocket cc_listener_accept_async(CCListener* ln, CCNetError* out_err); */
+
+/* Close listener */
+void cc_listener_close(CCListener* ln);
+
+/* ============================================================================
+ * Socket I/O (implements Duplex-like interface)
+ * ============================================================================ */
+
+/* Read up to max_bytes into arena. Returns slice of actual bytes read.
+ * Returns empty slice with CC_NET_CONNECTION_CLOSED on EOF. */
+CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err);
+
+/* Async read */
+/* @async CCSlice cc_socket_read_async(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
+
+/* Write data. Returns bytes written. */
+size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError* out_err);
+
+/* Async write */
+/* @async size_t cc_socket_write_async(CCSocket* sock, const char* data, size_t len, CCNetError* out_err); */
+
+/* Shutdown modes */
+typedef enum CCShutdownMode {
+    CC_SHUTDOWN_READ = 1,
+    CC_SHUTDOWN_WRITE = 2,
+    CC_SHUTDOWN_BOTH = 3,
+} CCShutdownMode;
+
+/* Half-close or full close */
+void cc_socket_shutdown(CCSocket* sock, CCShutdownMode mode, CCNetError* out_err);
+
+/* Close socket */
+void cc_socket_close(CCSocket* sock);
+
+/* Address info */
+CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);
+CCSlice cc_socket_local_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);
+
+/* ============================================================================
+ * UDP
+ * ============================================================================ */
+
+/* Bind to local address */
+CCUdpSocket cc_udp_bind(const char* addr, size_t addr_len, CCNetError* out_err);
+
+/* Send to specific address */
+size_t cc_udp_send_to(CCUdpSocket* sock, const char* data, size_t len,
+                      const char* addr, size_t addr_len, CCNetError* out_err);
+
+/* Receive with sender address */
+CCUdpPacket cc_udp_recv_from(CCUdpSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err);
+
+/* Close UDP socket */
+void cc_udp_close(CCUdpSocket* sock);
+
+/* ============================================================================
+ * DNS
+ * ============================================================================ */
+
+/* Resolve hostname to IP addresses. Returns slice of CCIpAddr. */
+CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err);
+
+/* Async DNS lookup */
+/* @async CCSlice cc_dns_lookup_async(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err); */
+
+/* Format IP address as string */
+CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena);
+
+/* Parse string to IP address */
+CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
+
+/* ============================================================================
+ * Short Name Aliases (when CC_ENABLE_SHORT_NAMES defined)
+ * ============================================================================ */
+
+#ifdef CC_ENABLE_SHORT_NAMES
+typedef CCNetError NetError;
+typedef CCSocket Socket;
+typedef CCListener Listener;
+typedef CCUdpSocket UdpSocket;
+typedef CCUdpPacket UdpPacket;
+typedef CCIpAddr IpAddr;
+typedef CCShutdownMode ShutdownMode;
+
+#define tcp_connect(addr, len, err) cc_tcp_connect(addr, len, err)
+#define tcp_listen(addr, len, err) cc_tcp_listen(addr, len, err)
+#define dns_lookup(arena, host, len, err) cc_dns_lookup(arena, host, len, err)
+
+/* UFCS-style method macros */
+#define Socket_read(s, a, n, e) cc_socket_read(s, a, n, e)
+#define Socket_write(s, d, l, e) cc_socket_write(s, d, l, e)
+#define Socket_close(s) cc_socket_close(s)
+#define Socket_shutdown(s, m, e) cc_socket_shutdown(s, m, e)
+
+#define Listener_accept(ln, e) cc_listener_accept(ln, e)
+#define Listener_close(ln) cc_listener_close(ln)
+#endif /* CC_ENABLE_SHORT_NAMES */
+
+#endif /* CC_STD_NET_H */

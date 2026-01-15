@@ -1,12 +1,17 @@
 /*
  * Generic Result helpers for generated C.
  *
- * Pattern:
- *   CC_DECL_RESULT(CCResultIntErr, int, CCIoError)
- *   CCResultIntErr r = cc_ok_CCResultIntErr(123);
- *   if (r.is_err) { ... r.err ... } else { ... r.ok ... }
+ * Two layouts are supported:
+ * 
+ * 1. Legacy layout (CC_DECL_RESULT): used by existing runtime code
+ *    - struct { bool is_err; union { OkType ok; ErrType err; }; }
+ *    - Access: r.is_err, r.ok, r.err
  *
- * The union layout is stable and POD-only to keep ABI simple.
+ * 2. Spec-aligned layout (CC_DECL_RESULT_SPEC): matches spec ABI
+ *    - struct { bool ok; union { T value; E error; } u; }
+ *    - Access: r.ok, r.u.value, r.u.error
+ *
+ * The compiler-lowered T!E syntax uses the spec layout.
  */
 #ifndef CC_RESULT_H
 #define CC_RESULT_H
@@ -25,7 +30,41 @@ typedef int bool;
 #endif
 #endif
 
-// Define a Result-like struct and constructors.
+/* Common error type - a simple tagged enum with message */
+typedef enum {
+    CC_ERR_NONE = 0,
+    CC_ERR_IO,
+    CC_ERR_PARSE,
+    CC_ERR_TIMEOUT,
+    CC_ERR_CANCELLED,
+    CC_ERR_INVALID_ARG,
+    CC_ERR_OUT_OF_MEMORY,
+    CC_ERR_NOT_FOUND,
+    CC_ERR_PERMISSION,
+    CC_ERR_ALREADY_EXISTS,
+    CC_ERR_WOULD_BLOCK,
+    CC_ERR_CLOSED,
+    CC_ERR_OVERFLOW,
+    CC_ERR_UNDERFLOW,
+    CC_ERR_USER = 1000  /* User-defined errors start here */
+} CCErrorKind;
+
+typedef struct CCError {
+    CCErrorKind kind;
+    const char* message;  /* May be NULL */
+} CCError;
+
+/* Helper to construct errors */
+static inline CCError cc_error(CCErrorKind kind, const char* msg) {
+    CCError e = { kind, msg };
+    return e;
+}
+
+/*
+ * LEGACY LAYOUT: CC_DECL_RESULT
+ * Used by existing runtime code (std/io.cch, etc.)
+ * Access pattern: r.is_err, r.ok, r.err
+ */
 #define CC_DECL_RESULT(name, OkType, ErrType)                                       \
     typedef struct {                                                                \
         bool is_err;                                                                \
@@ -47,6 +86,101 @@ typedef int bool;
         return r;                                                                   \
     }
 
-#endif // CC_RESULT_H
+/*
+ * SPEC-ALIGNED LAYOUT: CC_DECL_RESULT_SPEC
+ * Used by compiler-lowered T!E syntax
+ * Access pattern: r.ok, r.u.value, r.u.error
+ * Matches spec: struct { bool ok; union { T value; E error; } u; }
+ */
+#define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                                  \
+    typedef struct name {                                                           \
+        bool ok;                                                                    \
+        union { OkType value; ErrType error; } u;                                   \
+    } name;                                                                         \
+    static inline name cc_ok_##name(OkType v) {                                     \
+        name r;                                                                     \
+        r.ok = true;                                                                \
+        r.u.value = v;                                                              \
+        return r;                                                                   \
+    }                                                                               \
+    static inline name cc_err_##name(ErrType e) {                                   \
+        name r;                                                                     \
+        r.ok = false;                                                               \
+        r.u.error = e;                                                              \
+        return r;                                                                   \
+    }
 
+/* Generic cc_ok / cc_err macros for spec-aligned results */
+#define cc_ok_into(result_var, val) do {          \
+    (result_var).ok = true;                       \
+    (result_var).u.value = (val);                 \
+} while(0)
 
+#define cc_err_into(result_var, err) do {         \
+    (result_var).ok = false;                      \
+    (result_var).u.error = (err);                 \
+} while(0)
+
+/* Common spec-aligned result types - pre-declared for convenience */
+CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
+CC_DECL_RESULT_SPEC(CCResult_bool_CCError, bool, CCError)
+CC_DECL_RESULT_SPEC(CCResult_size_t_CCError, size_t, CCError)
+CC_DECL_RESULT_SPEC(CCResult_voidptr_CCError, void*, CCError)
+CC_DECL_RESULT_SPEC(CCResult_charptr_CCError, char*, CCError)
+
+/* Void result (for functions that return only success/error) */
+typedef struct CCResult_void_CCError {
+    bool ok;
+    union { char _dummy; CCError error; } u;
+} CCResult_void_CCError;
+static inline CCResult_void_CCError cc_ok_CCResult_void_CCError(void) {
+    CCResult_void_CCError r;
+    r.ok = true;
+    return r;
+}
+static inline CCResult_void_CCError cc_err_CCResult_void_CCError(CCError e) {
+    CCResult_void_CCError r;
+    r.ok = false;
+    r.u.error = e;
+    return r;
+}
+
+/* ============================================================================
+ * Try macro for early error propagation.
+ * cc_try(expr) - unwraps T!E on success, returns error on failure.
+ *
+ * Usage:
+ *   CCResult_int_CCError foo() {
+ *       int x = cc_try(bar());  // bar() returns CCResult_int_CCError
+ *       return cc_ok_CCResult_int_CCError(x + 1);
+ *   }
+ *
+ * Note: Requires the enclosing function to have a compatible return type.
+ * The macro constructs a return value with the same type as the input.
+ * For cross-type propagation (different error types), use explicit handling.
+ * ============================================================================ */
+#ifdef CC_PARSER_MODE
+/* For TCC parsing: cc_try(x) just yields x.u.value (parsable, though semantics differ).
+   The real cc_try is used by the host compiler. */
+#define cc_try(expr) (expr).u.value
+#define cc_try_into(result_var, expr) (result_var) = (expr).u.value
+#else
+#define cc_try(expr) ({                                                         \
+    __auto_type __cc_try_tmp = (expr);                                          \
+    if (!__cc_try_tmp.ok) {                                                     \
+        return (__typeof__(__cc_try_tmp)){.ok = false, .u.error = __cc_try_tmp.u.error}; \
+    }                                                                           \
+    __cc_try_tmp.u.value;                                                       \
+})
+
+/* cc_try_into(result_var, expr) - assigns result or returns error */
+#define cc_try_into(result_var, expr) do {                                      \
+    __auto_type __cc_try_tmp = (expr);                                          \
+    if (!__cc_try_tmp.ok) {                                                     \
+        return (__typeof__(__cc_try_tmp)){.ok = false, .u.error = __cc_try_tmp.u.error}; \
+    }                                                                           \
+    (result_var) = __cc_try_tmp.u.value;                                        \
+} while(0)
+#endif
+
+#endif /* CC_RESULT_H */

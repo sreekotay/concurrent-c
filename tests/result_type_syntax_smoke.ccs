@@ -1,0 +1,35 @@
+// Test: Result type syntax T!E lowers to CCResult_T_E
+#include <stdio.h>
+#include "cc_runtime.cch"
+
+// CCResult_int_CCError is pre-declared in cc_result.cch via CC_DECL_RESULT_SPEC
+
+int main(void) {
+    // Declare a result using T!E syntax
+    int!CCError r;
+    
+    // Initialize to ok
+    r = cc_ok_CCResult_int_CCError(42);
+    if (!r.ok) {
+        printf("FAIL: r should be ok\n");
+        return 1;
+    }
+    if (r.u.value != 42) {
+        printf("FAIL: r.u.value should be 42, got %d\n", r.u.value);
+        return 1;
+    }
+    
+    // Initialize to error
+    r = cc_err_CCResult_int_CCError(cc_error(CC_ERR_NOT_FOUND, "not found"));
+    if (r.ok) {
+        printf("FAIL: r should be error\n");
+        return 1;
+    }
+    if (r.u.error.kind != CC_ERR_NOT_FOUND) {
+        printf("FAIL: r.u.error.kind should be CC_ERR_NOT_FOUND\n");
+        return 1;
+    }
+    
+    printf("OK: result type syntax works\n");
+    return 0;
+}

@@ -18,12 +18,13 @@ Minimal concurrent hello world — shows nursery and spawn.
 
 | File | Pattern | Key Concept |
 |------|---------|-------------|
-| `recipe_parallel_tasks.ccs` | Fan-out | Nursery as join point |
+| `recipe_fanout_capture.ccs` | Fan-out | N tasks with captured data |
+| `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested nursery + `closing()` |
+| `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 | `recipe_arena_scope.ccs` | Scoped memory | Arena reset per iteration |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
-| `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 
 Run any recipe:
 ```bash

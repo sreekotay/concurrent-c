@@ -1,0 +1,32 @@
+/*
+ * Test: *opt unwrap for optionals
+ */
+#include "std/prelude.cch"
+
+int main(void) {
+    /* Test successful unwrap */
+    int? x = cc_some_CCOptional_int(42);
+    int val = *x;  /* Should unwrap to 42 */
+    
+    if (val != 42) {
+        printf("FAIL: expected 42, got %d\n", val);
+        return 1;
+    }
+    printf("SUCCESS: *x = %d\n", val);
+    
+    /* Test with explicit check before unwrap */
+    int? y = cc_some_CCOptional_int(100);
+    if (y.has) {
+        int yval = *y;
+        printf("SUCCESS: y has value = %d\n", yval);
+    }
+    
+    /* Test none case - just checking it exists */
+    int? z = cc_none_CCOptional_int();
+    if (!z.has) {
+        printf("SUCCESS: z is none (would panic if unwrapped)\n");
+    }
+    
+    printf("All optional unwrap tests passed!\n");
+    return 0;
+}

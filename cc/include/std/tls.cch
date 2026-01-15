@@ -1,0 +1,174 @@
+/*
+ * Concurrent-C TLS Support
+ * <std/tls.cch>
+ *
+ * TLS client/server wrapping using BearSSL.
+ * Provides Duplex-compatible encrypted connections.
+ */
+#ifndef CC_STD_TLS_H
+#define CC_STD_TLS_H
+
+#include "../cc_arena.cch"
+#include "../cc_slice.cch"
+#include "net.cch"
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+/* ============================================================================
+ * TLS Configuration
+ * ============================================================================ */
+
+/* TLS client configuration */
+typedef struct CCTlsClientConfig {
+    const char* ca_cert_path;       /* NULL = use system roots */
+    size_t ca_cert_path_len;
+    bool verify_hostname;           /* Default: true */
+    const char* sni_hostname;       /* NULL = use connect address */
+    size_t sni_hostname_len;
+} CCTlsClientConfig;
+
+/* TLS server configuration */
+typedef struct CCTlsServerConfig {
+    const char* cert_path;
+    size_t cert_path_len;
+    const char* key_path;
+    size_t key_path_len;
+    const char* client_ca_path;     /* NULL = no client cert required */
+    size_t client_ca_path_len;
+} CCTlsServerConfig;
+
+/* Default client config (system roots, verify hostname) */
+static inline CCTlsClientConfig cc_tls_client_config_default(void) {
+    return (CCTlsClientConfig){
+        .ca_cert_path = NULL,
+        .ca_cert_path_len = 0,
+        .verify_hostname = true,
+        .sni_hostname = NULL,
+        .sni_hostname_len = 0,
+    };
+}
+
+/* ============================================================================
+ * TLS Connection (Duplex-compatible)
+ * ============================================================================ */
+
+/* Opaque TLS session handle.
+ * Internally contains BearSSL context + I/O buffers.
+ * Implements same read/write interface as Socket. */
+typedef struct CCTlsConn {
+    void* ctx;          /* BearSSL context (br_ssl_client_context or br_ssl_server_context) */
+    void* iobuf;        /* I/O buffer (~33KB for bidirectional) */
+    size_t iobuf_len;
+    CCSocket underlying;
+    CCArena* info_arena; /* Owns TlsInfo strings */
+    uint8_t flags;       /* Client/server, closed, etc. */
+} CCTlsConn;
+
+/* TLS connection info (available after handshake) */
+typedef struct CCTlsInfo {
+    CCSlice protocol_version;   /* "TLSv1.3", "TLSv1.2" */
+    CCSlice cipher_suite;       /* "TLS_AES_256_GCM_SHA384" */
+    CCSlice peer_cert_subject;  /* Client cert subject (empty if none) */
+    CCSlice sni_hostname;       /* SNI from client hello */
+} CCTlsInfo;
+
+/* ============================================================================
+ * TLS Client
+ * ============================================================================ */
+
+/* Wrap existing socket in TLS (client-side handshake).
+ * iobuf must be at least CC_TLS_IOBUF_SIZE bytes and remain valid for connection lifetime.
+ * info_arena is used for TlsInfo strings. */
+#define CC_TLS_IOBUF_SIZE (16384 + 16384 + 325)  /* BR_SSL_BUFSIZE_BIDI */
+
+CCTlsConn cc_tls_connect(CCSocket sock, CCTlsClientConfig cfg,
+                          void* iobuf, size_t iobuf_len,
+                          CCArena* info_arena, CCNetError* out_err);
+
+/* Convenience: TCP connect + TLS handshake in one call.
+ * Allocates iobuf from arena. */
+CCTlsConn cc_tls_connect_addr(const char* addr, size_t addr_len,
+                               CCTlsClientConfig cfg,
+                               CCArena* conn_arena, CCNetError* out_err);
+
+/* Async variants */
+/* @async CCTlsConn cc_tls_connect_async(...); */
+/* @async CCTlsConn cc_tls_connect_addr_async(...); */
+
+/* ============================================================================
+ * TLS Server
+ * ============================================================================ */
+
+/* Wrap accepted socket in TLS (server-side handshake) */
+CCTlsConn cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg,
+                         void* iobuf, size_t iobuf_len,
+                         CCArena* info_arena, CCNetError* out_err);
+
+/* Async variant */
+/* @async CCTlsConn cc_tls_accept_async(...); */
+
+/* ============================================================================
+ * TLS I/O (Duplex-compatible interface)
+ * ============================================================================ */
+
+/* Read decrypted data into arena */
+CCSlice cc_tls_read(CCTlsConn* conn, CCArena* arena, size_t max_bytes, CCNetError* out_err);
+
+/* Async read */
+/* @async CCSlice cc_tls_read_async(CCTlsConn* conn, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
+
+/* Write data (encrypted automatically) */
+size_t cc_tls_write(CCTlsConn* conn, const char* data, size_t len, CCNetError* out_err);
+
+/* Async write */
+/* @async size_t cc_tls_write_async(CCTlsConn* conn, const char* data, size_t len, CCNetError* out_err); */
+
+/* Shutdown TLS (sends close_notify) */
+void cc_tls_shutdown(CCTlsConn* conn, CCShutdownMode mode, CCNetError* out_err);
+
+/* Close TLS connection and underlying socket */
+void cc_tls_close(CCTlsConn* conn);
+
+/* Get TLS session info (NULL if handshake not complete) */
+const CCTlsInfo* cc_tls_info(const CCTlsConn* conn);
+
+/* ============================================================================
+ * Certificate Loading (helpers)
+ * ============================================================================ */
+
+/* Load certificate chain from PEM file.
+ * Returns opaque handle for use in config. */
+typedef struct CCTlsCertChain CCTlsCertChain;
+CCTlsCertChain* cc_tls_load_cert_chain(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
+
+/* Load private key from PEM file */
+typedef struct CCTlsPrivateKey CCTlsPrivateKey;
+CCTlsPrivateKey* cc_tls_load_private_key(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
+
+/* Load trust anchors (CA certs) from PEM file */
+typedef struct CCTlsTrustAnchors CCTlsTrustAnchors;
+CCTlsTrustAnchors* cc_tls_load_trust_anchors(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
+
+/* ============================================================================
+ * Short Name Aliases
+ * ============================================================================ */
+
+#ifdef CC_ENABLE_SHORT_NAMES
+typedef CCTlsClientConfig TlsClientConfig;
+typedef CCTlsServerConfig TlsServerConfig;
+typedef CCTlsConn TlsConn;
+typedef CCTlsInfo TlsInfo;
+
+#define tls_connect(sock, cfg, buf, len, arena, err) cc_tls_connect(sock, cfg, buf, len, arena, err)
+#define tls_connect_addr(addr, len, cfg, arena, err) cc_tls_connect_addr(addr, len, cfg, arena, err)
+#define tls_accept(sock, cfg, buf, len, arena, err) cc_tls_accept(sock, cfg, buf, len, arena, err)
+
+#define TlsConn_read(c, a, n, e) cc_tls_read(c, a, n, e)
+#define TlsConn_write(c, d, l, e) cc_tls_write(c, d, l, e)
+#define TlsConn_close(c) cc_tls_close(c)
+#define TlsConn_info(c) cc_tls_info(c)
+#endif /* CC_ENABLE_SHORT_NAMES */
+
+#endif /* CC_STD_TLS_H */

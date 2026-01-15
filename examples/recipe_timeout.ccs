@@ -11,7 +11,7 @@
  * Note: Uses low-level nursery API because with_deadline() syntax
  * is not yet implemented. The pattern is the same.
  */
-#include "cc_nursery.cch"
+#include "cc_runtime.cch"
 #include <stdio.h>
 
 int work_completed = 0;

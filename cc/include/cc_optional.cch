@@ -1,0 +1,98 @@
+/*
+ * Generic Optional helpers for generated C.
+ *
+ * Pattern:
+ *   CC_DECL_OPTIONAL(CCOptional_int, int)
+ *   CCOptional_int x = cc_some_CCOptional_int(42);
+ *   CCOptional_int y = cc_none_CCOptional_int();
+ *   if (x.has) { use(x.u.value); }
+ *
+ * The union layout is stable and POD-only to keep ABI simple.
+ * Matches the spec: struct { bool has; union { T value; } u; }
+ */
+#ifndef CC_OPTIONAL_H
+#define CC_OPTIONAL_H
+
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+
+/* Define an Optional-like struct and constructors.
+ * Usage: CC_DECL_OPTIONAL(CCOptional_int, int)
+ */
+#define CC_DECL_OPTIONAL(name, ValueType)                                       \
+    typedef struct name {                                                       \
+        bool has;                                                               \
+        union { ValueType value; } u;                                           \
+    } name;                                                                     \
+    static inline name cc_some_##name(ValueType value) {                        \
+        name o;                                                                 \
+        o.has = true;                                                           \
+        o.u.value = value;                                                      \
+        return o;                                                               \
+    }                                                                           \
+    static inline name cc_none_##name(void) {                                   \
+        name o;                                                                 \
+        o.has = false;                                                          \
+        return o;                                                               \
+    }
+
+/* Convenience: check presence with if (x) syntax via macro.
+ * Note: This only works if x is an optional struct with .has field.
+ * For real "if (x)" support, we rewrite in the visitor. */
+
+/* Common optional types - pre-declared for convenience */
+CC_DECL_OPTIONAL(CCOptional_int, int)
+CC_DECL_OPTIONAL(CCOptional_bool, bool)
+CC_DECL_OPTIONAL(CCOptional_size_t, size_t)
+CC_DECL_OPTIONAL(CCOptional_intptr_t, intptr_t)
+CC_DECL_OPTIONAL(CCOptional_char, char)
+CC_DECL_OPTIONAL(CCOptional_float, float)
+CC_DECL_OPTIONAL(CCOptional_double, double)
+
+/* Pointer optionals */
+CC_DECL_OPTIONAL(CCOptional_voidptr, void*)
+CC_DECL_OPTIONAL(CCOptional_charptr, char*)
+CC_DECL_OPTIONAL(CCOptional_intptr, int*)
+
+/* ============================================================================
+ * Unwrap helper for optional types.
+ * cc_unwrap_opt(opt) - returns value or aborts if none.
+ * Used by compiler-lowered `*opt` syntax on T? types.
+ * ============================================================================ */
+#include <stdio.h>
+#include <stdlib.h>
+
+#ifdef CC_PARSER_MODE
+/* For TCC parsing: cc_unwrap_opt(x) just yields x.u.value (parsable). */
+#define cc_unwrap_opt(opt) (opt).u.value
+#define cc_opt_value(opt) (opt).u.value
+#else
+#define cc_unwrap_opt(opt) ({                                                   \
+    __auto_type __cc_opt_tmp = (opt);                                           \
+    if (!__cc_opt_tmp.has) {                                                    \
+        fprintf(stderr, "CC: unwrap failed: optional is none at %s:%d\n",       \
+                __FILE__, __LINE__);                                            \
+        abort();                                                                \
+    }                                                                           \
+    __cc_opt_tmp.u.value;                                                       \
+})
+
+/* Checked access: cc_opt_value(opt) - same as cc_unwrap_opt but clearer name */
+#define cc_opt_value(opt) cc_unwrap_opt(opt)
+#endif
+
+/* Unchecked access (use with care after .has check) */
+#define cc_opt_value_unchecked(opt) ((opt).u.value)
+
+#endif /* CC_OPTIONAL_H */

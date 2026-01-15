@@ -1,0 +1,58 @@
+/*
+ * Concurrent-C DNS Resolution
+ * <std/dns.cch>
+ *
+ * Async DNS resolution. Uses system resolver by default.
+ */
+#ifndef CC_STD_DNS_H
+#define CC_STD_DNS_H
+
+#include "../cc_arena.cch"
+#include "../cc_slice.cch"
+#include "net.cch"
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* ============================================================================
+ * DNS Resolution
+ * ============================================================================ */
+
+/* Resolve hostname to IP addresses.
+ * Returns slice of CCIpAddr allocated in arena.
+ * Empty slice (len=0) means no addresses found. */
+CCSlice cc_dns_lookup(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err);
+
+/* Async DNS lookup */
+/* @async CCSlice cc_dns_lookup_async(CCArena* arena, const char* hostname, size_t hostname_len, CCNetError* out_err); */
+
+/* Resolve with specific address family preference */
+typedef enum CCDnsFamily {
+    CC_DNS_ANY = 0,     /* Return all addresses */
+    CC_DNS_IPV4 = 4,    /* Prefer/filter IPv4 */
+    CC_DNS_IPV6 = 6,    /* Prefer/filter IPv6 */
+} CCDnsFamily;
+
+CCSlice cc_dns_lookup_family(CCArena* arena, const char* hostname, size_t hostname_len,
+                              CCDnsFamily family, CCNetError* out_err);
+
+/* ============================================================================
+ * Reverse DNS
+ * ============================================================================ */
+
+/* Reverse lookup: IP address to hostname */
+CCSlice cc_dns_reverse(CCArena* arena, const CCIpAddr* addr, CCNetError* out_err);
+
+/* ============================================================================
+ * Short Name Aliases
+ * ============================================================================ */
+
+#ifdef CC_ENABLE_SHORT_NAMES
+typedef CCDnsFamily DnsFamily;
+
+#define dns_lookup(arena, host, len, err) cc_dns_lookup(arena, host, len, err)
+#define dns_lookup_family(arena, host, len, fam, err) cc_dns_lookup_family(arena, host, len, fam, err)
+#define dns_reverse(arena, addr, err) cc_dns_reverse(arena, addr, err)
+#endif /* CC_ENABLE_SHORT_NAMES */
+
+#endif /* CC_STD_DNS_H */
