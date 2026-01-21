@@ -1,0 +1,34 @@
+/* Test: cc_block_race returns first task to complete.
+   Expected: Fast task wins, slow task is cancelled. */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+@async int fast_task(void) {
+    cc_sleep_ms(10);
+    return 42;
+}
+
+@async int slow_task(void) {
+    cc_sleep_ms(1000);
+    return 99;
+}
+
+int main(void) {
+    CCTaskIntptr tasks[] = {
+        slow_task(),
+        fast_task()  /* This should win */
+    };
+
+    int winner = -1;
+    intptr_t result = 0;
+    int err = cc_block_race(2, tasks, &winner, &result);
+
+    printf("err=%d, winner=%d, result=%d\n", err, winner, (int)result);
+
+    if (err != 0) return 1;
+    if (winner != 1) return 2;  /* fast_task is at index 1 */
+    if (result != 42) return 3;
+
+    printf("Result: PASS\n");
+    return 0;
+}

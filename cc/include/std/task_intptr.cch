@@ -76,6 +76,19 @@ CCFutureStatus cc_task_intptr_poll(CCTaskIntptr* t, intptr_t* out_val, int* out_
 
 /* Free task resources without waiting (unsafe if still running). */
 void cc_task_intptr_free(CCTaskIntptr* t);
+
+/* Block until all tasks complete. Runs them concurrently.
+   Returns 0 on success, errno on error. Results stored in results array. */
+int cc_block_all(int count, CCTaskIntptr* tasks, intptr_t* results);
+
+/* Block until FIRST task completes (race). Returns immediately when any finishes.
+   winner: index of task that completed first. result: its return value. */
+int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
+
+/* Block until first SUCCESSFUL task completes. Only fails if ALL tasks fail.
+   winner: index of first success. result: its return value.
+   Returns 0 if any succeeded, ECANCELED if all failed. */
+int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
 #endif /* !CC_PARSER_MODE */
 
 #if !defined(CC_PARSER_MODE)

@@ -1,0 +1,40 @@
+/* Test: cc_block_on with non-@nonblocking function should warn.
+   Expected: Compile with warning about potential deadlock. */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+/* This function has a loop with channel ops - NOT @nonblocking */
+@async int producer(CCChanTx tx, int count) {
+    for (int i = 0; i < count; i++) {
+        await tx.send(i);
+    }
+    return 0;
+}
+
+/* This function has NO loop with channel ops - implicitly @nonblocking */
+@async int single_send(CCChanTx tx, int val) {
+    await tx.send(val);
+    return 0;
+}
+
+int main(void) {
+    int[~10 >] tx;
+    int[~10 <] rx;
+    channel_pair(&tx, &rx);
+    
+    /* This should warn - producer has loop with channel ops */
+    int rc1 = cc_block_on(int, producer(tx, 5));
+    
+    /* This should NOT warn - single_send is @nonblocking */
+    int rc2 = cc_block_on(int, single_send(tx, 42));
+    
+    /* Drain */
+    int val;
+    while (chan_try_recv(rx, &val) == 0) { }
+    
+    chan_close(tx);
+    chan_free(rx);
+    
+    printf("rc1=%d, rc2=%d\n", rc1, rc2);
+    return 0;
+}

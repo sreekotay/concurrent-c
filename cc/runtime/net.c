@@ -54,7 +54,6 @@ static int parse_addr(const char* addr, size_t addr_len,
     /* Find last colon for port */
     char* port_sep = NULL;
     char* host_start = buf;
-    char* host_end = NULL;
 
     if (buf[0] == '[') {
         /* IPv6 literal: [::1]:port */
@@ -64,7 +63,6 @@ static int parse_addr(const char* addr, size_t addr_len,
             *out_err = CC_NET_INVALID_ADDRESS;
             return -1;
         }
-        host_end = bracket;
         *bracket = '\0';
         if (bracket[1] == ':') {
             port_sep = bracket + 2;
@@ -78,11 +76,8 @@ static int parse_addr(const char* addr, size_t addr_len,
         /* IPv4 or hostname: find last colon */
         port_sep = strrchr(buf, ':');
         if (port_sep) {
-            host_end = port_sep;
             *port_sep = '\0';
             port_sep++;
-        } else {
-            host_end = buf + strlen(buf);
         }
     }
 

@@ -3675,7 +3675,201 @@ void sync_boundary() {
 
 ---
 
-### 7.7.1 Blocking Thread Pool
+### 7.7.1 Deadlock Prevention: `@nonblocking` and `cc_concurrent`
+
+**Problem:** `block_on` creates a single-task execution context. If that task performs a channel operation that blocks waiting for a peer (send on full buffer, recv on empty buffer), the program deadlocks because no other task can run to unblock it.
+
+```c
+// DEADLOCK: buffer=4, sends=5, no concurrent consumer
+int[~4 >] tx;
+block_on(producer(tx, 5));  // Hangs forever on 5th send
+```
+
+**Solution:** Concurrent-C distinguishes between async functions that can safely run alone (`@nonblocking`) and those that require concurrent peers.
+
+#### `@nonblocking` Attribute
+
+An `@async` function is `@nonblocking` if it contains no channel operations inside loops that could wait indefinitely for a peer.
+
+**Inference rules (automatic):**
+
+1. No `await ch.send()` or `await ch.recv()` inside `for`, `while`, or `do-while` loops
+2. All called `@async` functions are also `@nonblocking`
+3. Any loop with channel operations makes the function **not** `@nonblocking`
+
+```c
+// Inferred @nonblocking - no loops with channel ops
+@async int send_one(CCChanTx tx, int v) {
+    await tx.send(v);  // OK: not in a loop
+    return 0;
+}
+
+// Inferred @nonblocking - loop without channel ops
+@async int compute_sum(int n) {
+    int sum = 0;
+    for (int i = 0; i < n; i++) sum += i;  // OK: no channel ops
+    return sum;
+}
+
+// NOT @nonblocking - loop with channel send
+@async int producer(CCChanTx tx, int count) {
+    for (int i = 0; i < count; i++) {
+        await tx.send(i);  // In loop → not @nonblocking
+    }
+    return 0;
+}
+
+// NOT @nonblocking - calls non-@nonblocking function
+@async int wrapper(CCChanTx tx) {
+    return producer(tx, 10);  // Calls non-@nonblocking → not @nonblocking
+}
+```
+
+**Explicit annotation:**
+
+Functions can be explicitly marked `@nonblocking` to override inference (for expert use):
+
+```c
+// Explicit: "I know this won't deadlock because buffer is always large enough"
+@async @nonblocking int bounded_producer(CCChanTx tx) {
+    for (int i = 0; i < 3; i++) {  // Only 3 sends, buffer assumed >= 3
+        await tx.send(i);
+    }
+    return 0;
+}
+```
+
+**Warning:** Explicit `@nonblocking` on a function with unbounded channel loops is programmer error. The compiler does not verify correctness of explicit annotations.
+
+#### `block_on` Restrictions
+
+**Rule:** `block_on(task)` emits a compile-time warning if `task` is not `@nonblocking`:
+
+```c
+int[~4 >] tx;
+block_on(send_one(tx, 42));    // ✓ OK: send_one is @nonblocking
+block_on(producer(tx, 5));     // ⚠ WARNING: producer is not @nonblocking
+                               //   hint: use cc_concurrent for peer-dependent tasks
+```
+
+**Phase-in:**
+- Phase 1 (current): Warning
+- Phase 2 (future): Error (requires explicit opt-out or `cc_concurrent`)
+
+#### Task Combinators
+
+Concurrent-C provides JavaScript-style task combinators for running multiple async tasks from sync code.
+
+##### `cc_block_all` - Wait for All
+
+Runs all tasks concurrently, waits for all to complete:
+
+```c
+CCTaskIntptr tasks[] = {
+    fetch_user(id),
+    fetch_posts(id),
+    fetch_friends(id)
+};
+
+intptr_t results[3];
+int err = cc_block_all(3, tasks, results);
+
+if (err == 0) {
+    User* user = (User*)results[0];
+    Posts* posts = (Posts*)results[1];
+    Friends* friends = (Friends*)results[2];
+}
+```
+
+**Semantics:** Like JavaScript's `Promise.all()` - fails fast if any task errors.
+
+##### `cc_block_race` - First to Complete
+
+Returns as soon as the first task completes (success or failure):
+
+```c
+CCTaskIntptr tasks[] = {
+    fetch_from_primary(),
+    fetch_from_backup()
+};
+
+int winner;
+intptr_t result;
+cc_block_race(2, tasks, &winner, &result);
+
+printf("Task %d finished first with result %ld\n", winner, (long)result);
+```
+
+**Semantics:** Like JavaScript's `Promise.race()`. Use cases:
+- Timeout patterns (race task against timer)
+- Redundant requests (first response wins)
+- Speculative execution
+
+##### `cc_block_any` - First Success
+
+Returns first successful task; only fails if ALL tasks fail:
+
+```c
+CCTaskIntptr tasks[] = {
+    try_cdn_1(),
+    try_cdn_2(),
+    try_cdn_3()
+};
+
+int winner;
+intptr_t result;
+int err = cc_block_any(3, tasks, &winner, &result);
+
+if (err == 0) {
+    printf("CDN %d responded with %ld\n", winner, (long)result);
+} else {
+    printf("All CDNs failed\n");
+}
+```
+
+**Semantics:** Like JavaScript's `Promise.any()`. Use cases:
+- Fallback chains
+- Best-effort from multiple sources
+- Load balancing with retry
+
+##### API Reference
+
+```c
+// Wait for ALL tasks. Returns 0 on success.
+// Results stored in results array (must have count elements).
+int cc_block_all(int count, CCTaskIntptr* tasks, intptr_t* results);
+
+// Wait for FIRST task to complete. Returns 0 on success.
+// winner: index of completing task. result: its return value.
+int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
+
+// Wait for first SUCCESS. Returns 0 if any succeeded, ECANCELED if all failed.
+// winner: index of first success. result: its return value.
+int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
+```
+
+##### Comparison with JavaScript
+
+| Concurrent-C | JavaScript | Behavior |
+|--------------|------------|----------|
+| `cc_block_all` | `Promise.all` | Wait for all, fail fast |
+| `cc_block_race` | `Promise.race` | First to complete wins |
+| `cc_block_any` | `Promise.any` | First success wins |
+| (not yet) | `Promise.allSettled` | Wait for all, collect all results |
+
+##### Entry Points Comparison
+
+| Entry Point | Use Case | Concurrent Tasks | Deadlock Risk |
+|-------------|----------|------------------|---------------|
+| `cc_block_on` | Single async task | 1 | Yes if not @nonblocking |
+| `cc_block_all` | Fan-out/fan-in | N | No |
+| `cc_block_race` | First wins | N | No |
+| `cc_block_any` | First success | N | No |
+| `@nursery` | Inside @async functions | N | No |
+
+---
+
+### 7.7.2 Blocking Thread Pool
 
 Certain operations may stall indefinitely (I/O, locks, OS calls). These run on a bounded thread pool to avoid blocking the async scheduler.
 

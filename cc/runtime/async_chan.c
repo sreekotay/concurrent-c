@@ -166,35 +166,6 @@ static int buffer_dequeue(CCAsyncChan* ch, void* out) {
     return 0;
 }
 
-static void fulfill_from_buffer(CCAsyncChan* ch) {
-    // while recv pending and buffer has data
-    while (ch->recv_len > 0 && ch->count > 0) {
-        PendingOp recv_op = ch->recvs[0];
-        memmove(ch->recvs, ch->recvs + 1, (ch->recv_len - 1) * sizeof(PendingOp));
-        ch->recv_len--;
-        buffer_dequeue(ch, recv_op.buf);
-        complete_op(recv_op.op, 0);
-    }
-    // while send pending and buffer space
-    while (ch->send_len > 0) {
-        if (ch->count == ch->cap && ch->mode == CC_CHAN_MODE_BLOCK) break;
-        if (ch->count == ch->cap && ch->mode == CC_CHAN_MODE_DROP_NEW) {
-            complete_op(ch->sends[0].op, EAGAIN);
-            free(ch->sends[0].buf);
-            memmove(ch->sends, ch->sends + 1, (ch->send_len - 1) * sizeof(PendingOp));
-            ch->send_len--;
-            continue;
-        }
-        PendingOp send_op = ch->sends[0];
-        int err = buffer_enqueue(ch, send_op.buf);
-        complete_op(send_op.op, err);
-        free(send_op.buf);
-        memmove(ch->sends, ch->sends + 1, (ch->send_len - 1) * sizeof(PendingOp));
-        ch->send_len--;
-        if (err != 0 && ch->mode == CC_CHAN_MODE_BLOCK) break;
-    }
-}
-
 int cc_async_chan_send(CCAsyncChan* ch, const void* value, size_t value_size, CCAsyncChanOp* op) {
     if (!ch || !value || !op || value_size == 0) return EINVAL;
     pthread_mutex_lock(&ch->mu);

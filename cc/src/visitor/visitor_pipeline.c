@@ -26,10 +26,6 @@
 #include "visitor/walk.h"
 
 
-static const char* cc__basename(const char* path);
-static const char* cc__path_suffix2(const char* path);
-static int cc__same_source_file(const char* a, const char* b);
-
 /* Helper: reparse rewritten source to get updated stub AST */
 static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t rewritten_len,
                                            const char* input_path, CCSymbolTable* symbols,
@@ -230,47 +226,5 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
 
     return 0;
 }
-
-/* Helper implementations (extracted from visitor.c) */
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* last = path;
-    for (const char* p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') last = p + 1;
-    }
-    return last;
-}
-
-static const char* cc__path_suffix2(const char* path) {
-    if (!path) return NULL;
-    const char* end = path + strlen(path);
-    int seps = 0;
-    for (const char* p = end; p > path; ) {
-        p--;
-        if (*p == '/' || *p == '\\') {
-            seps++;
-            if (seps == 2) return p + 1;
-        }
-    }
-    return cc__basename(path);
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    if (strcmp(a, b) == 0) return 1;
-
-    const char* a_base = cc__basename(a);
-    const char* b_base = cc__basename(b);
-    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
-
-    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
-    const char* a_suf = cc__path_suffix2(a);
-    const char* b_suf = cc__path_suffix2(b);
-    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
-
-    /* Fallback: basename-only match. */
-    return 1;
-}
-
 
 /* (cleanup) cc__node_file_matches_this_tu was used by earlier versions of the pipeline; removed as unused. */

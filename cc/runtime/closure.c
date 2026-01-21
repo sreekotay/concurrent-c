@@ -138,3 +138,4 @@ void* cc_closure2_call(CCClosure2 c, intptr_t arg0, intptr_t arg1) {
     if (c.drop) c.drop(c.env);
     return r;
 }
+

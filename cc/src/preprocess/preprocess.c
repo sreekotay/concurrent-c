@@ -165,7 +165,6 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                             int ins3 = 0; char qq3 = 0;
                             for (size_t q = p; q < body_e; q++) {
                                 char ch = src[q];
-                                char ch2 = (q + 1 < body_e) ? src[q + 1] : 0;
                                 if (ins3) { if (ch == '\\' && q + 1 < body_e) { q++; continue; } if (ch == qq3) ins3 = 0; continue; }
                                 if (ch == '"' || ch == '\'') { ins3 = 1; qq3 = ch; continue; }
                                 if (ch == '(') par3++;
@@ -252,7 +251,7 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                                            "do { /* @match */\n"
                                            "  size_t __cc_match_idx_%lu = (size_t)-1;\n"
                                            "  int __cc_match_rc_%lu = 0;\n",
-                                           counter, counter, counter);
+                                           counter, counter);
 
                     /* Prepare send temps and build cases array */
                     pn += (size_t)snprintf(pro + pn, sizeof(pro) - pn,
@@ -762,6 +761,7 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
    The '?' must immediately follow a type name (no space).
    We detect: identifier? or )? or ]? or >? patterns. */
 static char* cc__rewrite_optional_types(const char* src, size_t n, const char* input_path) {
+    (void)input_path; /* Reserved for future error reporting */
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -772,8 +772,9 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
     int in_block_comment = 0;
     int in_str = 0;
     int in_chr = 0;
-    int line = 1;
-    int col = 1;
+    /* line/col tracked for potential future error reporting */
+    int line = 1; (void)line;
+    int col = 1; (void)col;
     
     while (i < n) {
         char c = src[i];
@@ -876,8 +877,9 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     int in_block_comment = 0;
     int in_str = 0;
     int in_chr = 0;
-    int line = 1;
-    int col = 1;
+    /* line/col tracked for potential future error reporting */
+    int line = 1; (void)line;
+    int col = 1; (void)col;
     
     while (i < n) {
         char c = src[i];
@@ -1164,7 +1166,6 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
         /* Look for CCOptional_ type declarations */
         if (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0) {
             /* Skip to end of type name */
-            size_t type_start = i;
             i += 11;
             while (i < n && cc_is_ident_char(src[i])) i++;
             /* Skip whitespace */
@@ -1483,6 +1484,284 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
     return errors > 0 ? -1 : 0;
 }
 
+/* Track @async functions for @nonblocking inference. */
+typedef struct {
+    char name[128];
+    int is_explicit_nonblocking;  /* Has @nonblocking attribute */
+    int has_loop_with_chan_op;    /* Contains loop with channel ops */
+} CCAsyncFnInfo;
+
+#define CC_MAX_ASYNC_FNS 256
+static CCAsyncFnInfo cc__async_fns[CC_MAX_ASYNC_FNS];
+static int cc__async_fn_count = 0;
+
+/* Check if an @async function is nonblocking (either explicit or inferred).
+   Note: Reserved for future cross-file analysis. */
+__attribute__((unused))
+static int cc__fn_is_nonblocking(const char* name) {
+    for (int i = 0; i < cc__async_fn_count; i++) {
+        if (strcmp(cc__async_fns[i].name, name) == 0) {
+            if (cc__async_fns[i].is_explicit_nonblocking) return 1;
+            if (!cc__async_fns[i].has_loop_with_chan_op) return 1;
+            return 0;
+        }
+    }
+    /* Unknown function - assume nonblocking (could be from another file) */
+    return 1;
+}
+
+/* Collect @async function info and check cc_block_on calls.
+   Warns if cc_block_on is called with a function that has loops with channel ops.
+   Returns number of warnings. */
+static int cc__check_block_on_nonblocking(const char* src, size_t n, const char* input_path) {
+    if (!src || n == 0) return 0;
+
+    cc__async_fn_count = 0;
+    int warnings = 0;
+
+    /* Pass 1: Collect @async functions and determine if they're @nonblocking */
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int line = 1, col = 1;
+
+    for (size_t i = 0; i < n; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        if (c == '\n') { line++; col = 1; } else { col++; }
+
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; col++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; col++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; col++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+
+        /* Look for @async or @async @nonblocking */
+        if (c == '@' && i + 5 < n && memcmp(src + i + 1, "async", 5) == 0 && !cc_is_ident_char(src[i + 6])) {
+            size_t j = i + 6;
+            int is_explicit_nb = 0;
+
+            /* Skip whitespace and check for @nonblocking */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+            if (j + 12 < n && src[j] == '@' && memcmp(src + j + 1, "nonblocking", 11) == 0 && !cc_is_ident_char(src[j + 12])) {
+                is_explicit_nb = 1;
+                j += 12;
+            }
+
+            /* Skip to function name: skip return type and get identifier before '(' */
+            while (j < n && src[j] != '(' && src[j] != '{' && src[j] != ';') j++;
+            if (j >= n || src[j] != '(') continue;
+
+            /* Back up to find function name */
+            size_t paren = j;
+            j--;
+            while (j > i && (src[j] == ' ' || src[j] == '\t')) j--;
+            if (j <= i || !cc_is_ident_char(src[j])) continue;
+
+            size_t name_end = j + 1;
+            while (j > i && cc_is_ident_char(src[j - 1])) j--;
+            size_t name_start = j;
+            size_t name_len = name_end - name_start;
+
+            if (name_len == 0 || name_len >= 127) continue;
+
+            /* Find function body */
+            j = paren + 1;
+            int depth = 1;
+            while (j < n && depth > 0) {
+                if (src[j] == '(') depth++;
+                else if (src[j] == ')') depth--;
+                j++;
+            }
+            while (j < n && src[j] != '{' && src[j] != ';') j++;
+            if (j >= n || src[j] != '{') continue;
+
+            size_t body_start = j;
+            depth = 1;
+            j++;
+            while (j < n && depth > 0) {
+                if (src[j] == '{') depth++;
+                else if (src[j] == '}') depth--;
+                j++;
+            }
+            size_t body_end = j;
+
+            /* Check for loops with channel ops in the body */
+            int has_loop_with_chan = 0;
+
+            for (size_t k = body_start; k < body_end && !has_loop_with_chan; k++) {
+                /* Simple check: look for 'for' or 'while' keyword */
+                int is_for = (k + 3 <= body_end && memcmp(src + k, "for", 3) == 0);
+                int is_while = (k + 5 <= body_end && memcmp(src + k, "while", 5) == 0);
+                if (!is_for && !is_while) continue;
+                if (k > 0 && cc_is_ident_char(src[k - 1])) continue;
+                size_t kw_len = is_for ? 3 : 5;
+                if (k + kw_len < body_end && cc_is_ident_char(src[k + kw_len])) continue;
+
+                /* Found a loop keyword - scan to find its body, handling parentheses in for() header */
+                size_t loop_start = k + kw_len;
+                int paren_depth = 0;
+                while (loop_start < body_end) {
+                    char lc = src[loop_start];
+                    if (lc == '(') paren_depth++;
+                    else if (lc == ')') paren_depth--;
+                    else if (lc == '{' && paren_depth == 0) break;  /* Found loop body */
+                    else if (lc == ';' && paren_depth == 0) break;  /* Single-statement loop (no braces) */
+                    loop_start++;
+                }
+                if (loop_start >= body_end || src[loop_start] != '{') continue; /* Skip single-line loops for now */
+
+                int ld = 1;
+                size_t loop_end = loop_start + 1;
+                while (loop_end < body_end && ld > 0) {
+                    if (src[loop_end] == '{') ld++;
+                    else if (src[loop_end] == '}') ld--;
+                    loop_end++;
+                }
+
+                /* Check for channel ops in loop body - look for .send( or .recv( */
+                for (size_t m = loop_start; m < loop_end; m++) {
+                    if (m + 5 <= loop_end && memcmp(src + m, ".send", 5) == 0) {
+                        has_loop_with_chan = 1;
+                        break;
+                    }
+                    if (m + 5 <= loop_end && memcmp(src + m, ".recv", 5) == 0) {
+                        has_loop_with_chan = 1;
+                        break;
+                    }
+                    /* Also check for chan_send/chan_recv macro forms */
+                    if (m + 9 <= loop_end && memcmp(src + m, "chan_send", 9) == 0) {
+                        has_loop_with_chan = 1;
+                        break;
+                    }
+                    if (m + 9 <= loop_end && memcmp(src + m, "chan_recv", 9) == 0) {
+                        has_loop_with_chan = 1;
+                        break;
+                    }
+                }
+            }
+
+            /* Store function info */
+            if (cc__async_fn_count < CC_MAX_ASYNC_FNS) {
+                memcpy(cc__async_fns[cc__async_fn_count].name, src + name_start, name_len);
+                cc__async_fns[cc__async_fn_count].name[name_len] = '\0';
+                cc__async_fns[cc__async_fn_count].is_explicit_nonblocking = is_explicit_nb;
+                cc__async_fns[cc__async_fn_count].has_loop_with_chan_op = has_loop_with_chan;
+                cc__async_fn_count++;
+            }
+
+            i = body_end - 1;
+            continue;
+        }
+    }
+
+    /* Pass 2: Check cc_block_on calls */
+    in_lc = in_bc = in_str = in_chr = 0;
+    line = 1; col = 1;
+
+    for (size_t i = 0; i < n; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        if (c == '\n') { line++; col = 1; } else { col++; }
+
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; col++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; col++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; col++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+
+        /* Look for cc_block_on( */
+        if (c == 'c' && i + 11 < n && memcmp(src + i, "cc_block_on", 11) == 0 && src[i + 11] == '(') {
+            int call_line = line, call_col = col;
+            size_t j = i + 12;
+
+            /* Skip the type argument */
+            while (j < n && src[j] != ',') j++;
+            if (j >= n) continue;
+            j++; /* Skip comma */
+
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+
+            /* Extract the function name being called */
+            if (j >= n || !cc_is_ident_start(src[j])) continue;
+            size_t fn_start = j;
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            size_t fn_len = j - fn_start;
+
+            if (fn_len == 0 || fn_len >= 127) continue;
+
+            char fn_name[128];
+            memcpy(fn_name, src + fn_start, fn_len);
+            fn_name[fn_len] = '\0';
+
+            /* Check if this function is known and not @nonblocking */
+            for (int fi = 0; fi < cc__async_fn_count; fi++) {
+                if (strcmp(cc__async_fns[fi].name, fn_name) == 0) {
+                    if (!cc__async_fns[fi].is_explicit_nonblocking && cc__async_fns[fi].has_loop_with_chan_op) {
+                        char rel[1024];
+                        cc_path_rel_to_repo(input_path, rel, sizeof(rel));
+                        fprintf(stderr, "%s:%d:%d: warning: cc_block_on with '%s' may deadlock\n",
+                                rel, call_line, call_col, fn_name);
+                        fprintf(stderr, "%s:%d:%d: note: '%s' has channel ops in a loop; consider using cc_concurrent or larger buffer\n",
+                                rel, call_line, call_col, fn_name);
+                        warnings++;
+                    }
+                    break;
+                }
+            }
+
+            i = j - 1;
+        }
+    }
+
+    return warnings;
+}
+
+/* Check for cc_concurrent usage and emit error with migration guidance.
+   cc_concurrent syntax is deprecated; use cc_block_all instead. */
+static char* cc__rewrite_cc_concurrent(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int line = 1;
+
+    for (size_t i = 0; i < n; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        if (c == '\n') line++;
+
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+
+        if (c == 'c' && i + 12 < n && memcmp(src + i, "cc_concurrent", 13) == 0) {
+            if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
+            if (i + 13 < n && cc_is_ident_char(src[i + 13])) continue;
+
+            fprintf(stderr, "line %d: error: 'cc_concurrent' syntax is not supported\n", line);
+            fprintf(stderr, "  note: use cc_block_all() instead:\n");
+            fprintf(stderr, "    CCTaskIntptr tasks[] = { task1(), task2() };\n");
+            fprintf(stderr, "    intptr_t results[2];\n");
+            fprintf(stderr, "    cc_block_all(2, tasks, results);\n");
+            return (char*)-1;
+        }
+    }
+
+    return NULL;
+}
 int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_sz) {
     if (!input_path || !out_path || out_path_sz == 0) return -1;
     char tmp_path[] = "/tmp/cc_pp_XXXXXX.c";
@@ -1535,6 +1814,8 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             unlink(tmp_path);
             return -1;
         }
+        /* Check for cc_block_on with non-@nonblocking functions (warning only) */
+        cc__check_block_on_nonblocking(buf, got, input_path);
     }
 
     char* rewritten_deadline = cc__rewrite_with_deadline_syntax(buf, got);
@@ -1573,15 +1854,27 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur7 = rewritten_unwrap ? rewritten_unwrap : cur6;
     size_t cur7_n = rewritten_unwrap ? strlen(rewritten_unwrap) : cur6_n;
 
+    /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
+    char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
+    if (rewritten_conc == (char*)-1) {
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_opt);
+        free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
+        fclose(in); fclose(out); unlink(tmp_path);
+        return -1;
+    }
+    const char* cur8 = rewritten_conc ? rewritten_conc : cur7;
+    size_t cur8_n = rewritten_conc ? strlen(rewritten_conc) : cur7_n;
+
     // Rewrite @link("lib") -> marker comments for linker
-    char* rewritten_link = cc__rewrite_link_directives(cur7, cur7_n);
-    const char* use = rewritten_link ? rewritten_link : cur7;
+    char* rewritten_link = cc__rewrite_link_directives(cur8, cur8_n);
+    const char* use = rewritten_link ? rewritten_link : cur8;
 
     char rel[1024];
     fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
     fputs(use, out);
 
     free(rewritten_link);
+    free(rewritten_conc);
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_res);

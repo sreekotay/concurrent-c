@@ -152,7 +152,7 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             int ins3 = 0; char qq3 = 0;
                             for (size_t q = p; q < body_e; q++) {
                                 char ch = src[q];
-                                char ch2 = (q + 1 < body_e) ? src[q + 1] : 0;
+                                (void)(q + 1 < body_e ? src[q + 1] : 0); /* reserved for comment detection */
                                 if (ins3) { if (ch == '\\' && q + 1 < body_e) { q++; continue; } if (ch == qq3) ins3 = 0; continue; }
                                 if (ch == '"' || ch == '\'') { ins3 = 1; qq3 = ch; continue; }
                                 if (ch == '(') par3++;

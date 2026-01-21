@@ -92,26 +92,6 @@ static size_t cc__offset_of_line_col_1based(const char* s, size_t len, int line_
     return off;
 }
 
-static void cc__append_n(char** out, size_t* out_len, size_t* out_cap, const char* s, size_t n) {
-    if (!out || !out_len || !out_cap || !s) return;
-    if (*out_len + n + 1 > *out_cap) {
-        size_t nc = *out_cap ? *out_cap * 2 : 1024;
-        while (nc < *out_len + n + 1) nc *= 2;
-        char* nb = (char*)realloc(*out, nc);
-        if (!nb) return;
-        *out = nb;
-        *out_cap = nc;
-    }
-    memcpy(*out + *out_len, s, n);
-    *out_len += n;
-    (*out)[*out_len] = 0;
-}
-
-static void cc__append_str(char** out, size_t* out_len, size_t* out_cap, const char* s) {
-    if (!s) return;
-    cc__append_n(out, out_len, out_cap, s, strlen(s));
-}
-
 static int cc__find_substr_in_range(const char* s,
                                    size_t start,
                                    size_t end,

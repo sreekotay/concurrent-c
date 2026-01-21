@@ -71,7 +71,7 @@ static int emit_desugared_call(char* out,
                                recv_is_ptr ? "*" : "", recv);
             }
             return snprintf(out, cap,
-                           "cc_chan_send_task((%s%s).raw, &(__extension__({__auto_type __cc_v=%s; __cc_v;})), sizeof(__extension__({__auto_type __cc_v=%s; __cc_v;})))",
+                           "cc_chan_send_task((%s%s).raw, &(%s), sizeof(%s))",
                            recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
         }
         if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_send(%s%s)", recv_is_ptr ? "*":"", recv);

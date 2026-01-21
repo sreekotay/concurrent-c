@@ -848,15 +848,6 @@ static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* er
     p->mangled_err[sizeof(p->mangled_err) - 1] = '\0';
 }
 
-static void cc__cg_emit_result_type_decls(FILE* out) {
-    for (size_t i = 0; i < cc__cg_result_type_count; i++) {
-        CCCodegenResultTypePair* p = &cc__cg_result_types[i];
-        /* Emit CC_DECL_RESULT_SPEC(CCResult_T_E, T, E) */
-        fprintf(out, "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
-                p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
-    }
-}
-
 /* Scan for already-lowered CCResult_T_E patterns and collect type pairs.
    This handles the case where the preprocessor already rewrote T!E -> CCResult_T_E */
 static void cc__scan_for_existing_result_types(const char* src, size_t n) {
@@ -892,7 +883,6 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             }
             
             /* Parse: CCResult_OkType_ErrType */
-            size_t name_start = i;
             size_t j = i + prefix_len;
             
             /* Find the ok type (everything until next '_') */
@@ -1065,7 +1055,6 @@ static char* cc__rewrite_try_exprs_text(const CCVisitorCtx* ctx, const char* src
                     int in_s = 0, in_c = 0;
                     while (expr_end < n) {
                         char ec = src[expr_end];
-                        char ec2 = (expr_end + 1 < n) ? src[expr_end + 1] : 0;
                         
                         if (in_s) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '"') in_s = 0; expr_end++; continue; }
                         if (in_c) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '\'') in_c = 0; expr_end++; continue; }
@@ -1258,48 +1247,6 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 /* Strip CC decl markers so output is valid C. This is used regardless of whether
    TCC extensions are available, because the output C is compiled by the host compiler. */
 /* cc__read_entire_file / cc__write_temp_c_file are implemented in visitor_fileutil.c */
-
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* last = path;
-    for (const char* p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') last = p + 1;
-    }
-    return last;
-}
-
-/* Return pointer to a stable suffix (last 2 path components) inside `path`.
-   If `path` has fewer than 2 components, returns basename. */
-static const char* cc__path_suffix2(const char* path) {
-    if (!path) return NULL;
-    const char* end = path + strlen(path);
-    int seps = 0;
-    for (const char* p = end; p > path; ) {
-        p--;
-        if (*p == '/' || *p == '\\') {
-            seps++;
-            if (seps == 2) return p + 1;
-        }
-    }
-    return cc__basename(path);
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    if (strcmp(a, b) == 0) return 1;
-
-    const char* a_base = cc__basename(a);
-    const char* b_base = cc__basename(b);
-    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
-
-    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
-    const char* a_suf = cc__path_suffix2(a);
-    const char* b_suf = cc__path_suffix2(b);
-    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
-
-    /* Fallback: basename-only match. */
-    return 1;
-}
 
 /* UFCS span rewrite lives in pass_ufcs.c now (cc__rewrite_ufcs_spans_with_nodes). */
 

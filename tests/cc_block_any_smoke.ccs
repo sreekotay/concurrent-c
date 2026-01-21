@@ -1,0 +1,40 @@
+/* Test: cc_block_any returns first successful task.
+   Expected: First success wins. */
+#include "cc_runtime.cch"
+#include <stdio.h>
+
+@async int task_a(void) {
+    cc_sleep_ms(50);
+    return 10;
+}
+
+@async int task_b(void) {
+    cc_sleep_ms(10);
+    return 20;
+}
+
+@async int task_c(void) {
+    cc_sleep_ms(100);
+    return 30;
+}
+
+int main(void) {
+    CCTaskIntptr tasks[] = {
+        task_a(),
+        task_b(),  /* This should win (fastest) */
+        task_c()
+    };
+
+    int winner = -1;
+    intptr_t result = 0;
+    int err = cc_block_any(3, tasks, &winner, &result);
+
+    printf("err=%d, winner=%d, result=%d\n", err, winner, (int)result);
+
+    if (err != 0) return 1;
+    if (winner != 1) return 2;  /* task_b is at index 1 */
+    if (result != 20) return 3;
+
+    printf("Result: PASS\n");
+    return 0;
+}

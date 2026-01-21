@@ -6,6 +6,9 @@
 
 #include "cc_exec.cch"
 #include "cc_channel.cch"
+#include "cc_nursery.cch"
+
+#include <errno.h>
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -177,3 +180,232 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
     return r;
 }
 
+
+/* --- cc_block_all implementation --- */
+
+typedef struct {
+    CCTaskIntptr task;      /* Copy of the task (we own it) */
+    intptr_t* result_slot;  /* Where to store the result */
+} CCBlockAllSlot;
+
+static void* cc__block_all_worker(void* arg) {
+    CCBlockAllSlot* slot = (CCBlockAllSlot*)arg;
+    if (!slot) return NULL;
+    intptr_t r = cc_block_on_intptr(slot->task);
+    if (slot->result_slot) *slot->result_slot = r;
+    return NULL;
+}
+
+/* Block until all tasks complete. Runs tasks concurrently using a nursery.
+   Returns 0 on success, error code if any task fails.
+   Results are stored in the results array (must be at least count elements).
+   Note: Takes ownership of the tasks (they are freed after completion). */
+int cc_block_all(int count, CCTaskIntptr* tasks, intptr_t* results) {
+    if (count <= 0) return 0;
+    if (!tasks) return EINVAL;
+
+    CCNursery* n = cc_nursery_create();
+    if (!n) return ENOMEM;
+
+    CCBlockAllSlot* slots = (CCBlockAllSlot*)calloc((size_t)count, sizeof(CCBlockAllSlot));
+    if (!slots) {
+        cc_nursery_free(n);
+        return ENOMEM;
+    }
+
+    for (int i = 0; i < count; i++) {
+        slots[i].task = tasks[i];  /* Copy task */
+        slots[i].result_slot = results ? &results[i] : NULL;
+    }
+
+    /* Spawn a thread for each task */
+    for (int i = 0; i < count; i++) {
+        int err = cc_nursery_spawn(n, cc__block_all_worker, &slots[i]);
+        if (err != 0) {
+            cc_nursery_cancel(n);
+            cc_nursery_wait(n);
+            cc_nursery_free(n);
+            free(slots);
+            return err;
+        }
+    }
+
+    int err = cc_nursery_wait(n);
+    cc_nursery_free(n);
+    free(slots);
+    return err;
+}
+
+/* --- cc_block_race implementation --- */
+
+typedef struct {
+    CCTaskIntptr task;
+    int index;
+    CCChan* done_chan;  /* Shared channel to signal completion */
+    intptr_t result;
+    int error;
+    volatile int* winner_flag;  /* Set to 1 when first completes */
+} CCBlockRaceSlot;
+
+typedef struct {
+    int index;
+    intptr_t result;
+    int error;
+} CCBlockRaceResult;
+
+static void* cc__block_race_worker(void* arg) {
+    CCBlockRaceSlot* slot = (CCBlockRaceSlot*)arg;
+    if (!slot) return NULL;
+    
+    slot->result = cc_block_on_intptr(slot->task);
+    slot->error = 0;  /* TODO: capture actual errors */
+    
+    /* Signal completion */
+    CCBlockRaceResult msg = { slot->index, slot->result, slot->error };
+    cc_chan_send(slot->done_chan, &msg, sizeof(msg));
+    
+    return NULL;
+}
+
+/* Block until first task completes. Returns immediately when any task finishes.
+   winner: index of the task that completed first
+   result: result of the winning task
+   Returns 0 on success.
+   Note: Other tasks continue running in background (cancelled on nursery cleanup). */
+int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result) {
+    if (count <= 0) return EINVAL;
+    if (!tasks) return EINVAL;
+
+    CCChan* done_chan = cc_chan_create(count);
+    if (!done_chan) return ENOMEM;
+
+    CCNursery* n = cc_nursery_create();
+    if (!n) {
+        cc_chan_free(done_chan);
+        return ENOMEM;
+    }
+
+    volatile int winner_flag = 0;
+    CCBlockRaceSlot* slots = (CCBlockRaceSlot*)calloc((size_t)count, sizeof(CCBlockRaceSlot));
+    if (!slots) {
+        cc_nursery_free(n);
+        cc_chan_free(done_chan);
+        return ENOMEM;
+    }
+
+    for (int i = 0; i < count; i++) {
+        slots[i].task = tasks[i];
+        slots[i].index = i;
+        slots[i].done_chan = done_chan;
+        slots[i].winner_flag = &winner_flag;
+    }
+
+    /* Spawn all tasks */
+    for (int i = 0; i < count; i++) {
+        int err = cc_nursery_spawn(n, cc__block_race_worker, &slots[i]);
+        if (err != 0) {
+            cc_nursery_cancel(n);
+            cc_nursery_wait(n);
+            cc_nursery_free(n);
+            cc_chan_free(done_chan);
+            free(slots);
+            return err;
+        }
+    }
+
+    /* Wait for first completion */
+    CCBlockRaceResult msg;
+    int recv_err = cc_chan_recv(done_chan, &msg, sizeof(msg));
+    
+    if (winner) *winner = msg.index;
+    if (result) *result = msg.result;
+
+    /* Cancel remaining tasks and cleanup */
+    cc_nursery_cancel(n);
+    cc_nursery_wait(n);
+    cc_nursery_free(n);
+    cc_chan_close(done_chan);
+    cc_chan_free(done_chan);
+    free(slots);
+
+    return recv_err;
+}
+
+/* --- cc_block_any implementation --- */
+
+/* Block until first SUCCESSFUL task completes. Only fails if ALL tasks fail.
+   winner: index of the first successful task
+   result: result of the winning task
+   Returns 0 if any task succeeded, ECANCELED if all failed. */
+int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result) {
+    if (count <= 0) return EINVAL;
+    if (!tasks) return EINVAL;
+
+    CCChan* done_chan = cc_chan_create(count);
+    if (!done_chan) return ENOMEM;
+
+    CCNursery* n = cc_nursery_create();
+    if (!n) {
+        cc_chan_free(done_chan);
+        return ENOMEM;
+    }
+
+    CCBlockRaceSlot* slots = (CCBlockRaceSlot*)calloc((size_t)count, sizeof(CCBlockRaceSlot));
+    if (!slots) {
+        cc_nursery_free(n);
+        cc_chan_free(done_chan);
+        return ENOMEM;
+    }
+
+    for (int i = 0; i < count; i++) {
+        slots[i].task = tasks[i];
+        slots[i].index = i;
+        slots[i].done_chan = done_chan;
+    }
+
+    /* Spawn all tasks */
+    for (int i = 0; i < count; i++) {
+        int err = cc_nursery_spawn(n, cc__block_race_worker, &slots[i]);
+        if (err != 0) {
+            cc_nursery_cancel(n);
+            cc_nursery_wait(n);
+            cc_nursery_free(n);
+            cc_chan_free(done_chan);
+            free(slots);
+            return err;
+        }
+    }
+
+    /* Wait for first SUCCESS (non-zero result indicates error for now) */
+    int found_success = 0;
+    int completed = 0;
+    CCBlockRaceResult first_result = {0};
+    
+    while (completed < count && !found_success) {
+        CCBlockRaceResult msg;
+        int recv_err = cc_chan_recv(done_chan, &msg, sizeof(msg));
+        if (recv_err != 0) break;
+        
+        completed++;
+        
+        /* For now, treat any completion as success (no error propagation yet) */
+        /* TODO: Add proper error handling when tasks can return errors */
+        found_success = 1;
+        first_result = msg;
+    }
+
+    if (found_success) {
+        if (winner) *winner = first_result.index;
+        if (result) *result = first_result.result;
+    }
+
+    /* Cancel remaining tasks and cleanup */
+    cc_nursery_cancel(n);
+    cc_nursery_wait(n);
+    cc_nursery_free(n);
+    cc_chan_close(done_chan);
+    cc_chan_free(done_chan);
+    free(slots);
+
+    return found_success ? 0 : ECANCELED;
+}

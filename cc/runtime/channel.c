@@ -667,7 +667,6 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
     return 0;
 }
 
-
 /* ---- Poll-based channel tasks (CCTaskIntptr) ----
  * These return CCTaskIntptr with poll-based implementation for cooperative async.
  * Result is errno (0=success). Caller must ensure value/out_value outlives the task.

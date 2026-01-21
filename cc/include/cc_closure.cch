@@ -51,6 +51,7 @@ int cc_run_blocking_closure0(CCClosure0 c);
 /* Run a closure on a blocking OS thread and return its `void*` result. */
 void* cc_run_blocking_closure0_ptr(CCClosure0 c);
 
+
 /* Invoke a 1-arg closure. */
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0);
 /* Invoke a 2-arg closure. */
