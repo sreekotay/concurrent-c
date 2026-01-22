@@ -20,12 +20,14 @@ int[~32 >] g_work_tx;
 int[~32 <] g_work_rx;
 int[~NUM_ITEMS >] g_done_tx;
 int[~NUM_ITEMS <] g_done_rx;
+CCChan* g_work_ch;
+CCChan* g_done_ch;
 
 int main(void) {
     printf("fanout_fanin: %d workers, %d items\n", NUM_WORKERS, NUM_ITEMS);
 
-    channel_pair(&g_work_tx, &g_work_rx);
-    channel_pair(&g_done_tx, &g_done_rx);
+    g_work_ch = channel_pair(&g_work_tx, &g_work_rx);
+    g_done_ch = channel_pair(&g_done_tx, &g_done_rx);
 
     @nursery {
         /* Workers: receive, process, send result */
@@ -61,8 +63,8 @@ int main(void) {
         g_collected++;
     }
 
-    chan_free(g_work_tx);
-    chan_free(g_done_tx);
+    cc_chan_free(g_work_ch);
+    cc_chan_free(g_done_ch);
 
     /* Expected sum of squares: 0^2 + 1^2 + ... + (NUM_ITEMS-1)^2 */
     /* = (n-1)*n*(2n-1)/6 where n=NUM_ITEMS */

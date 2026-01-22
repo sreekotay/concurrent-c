@@ -46,7 +46,7 @@ int main(void) {
     {
         int[~10 >] tx;  /* Buffer of 10 fits 5 values */
         int[~10 <] rx;
-        channel_pair(&tx, &rx);
+        CCChan* ch = channel_pair(&tx, &rx);
         
         int rc = cc_block_on(int, producer(tx, 5));
         printf("producer returned: %d\n", rc);
@@ -60,7 +60,7 @@ int main(void) {
         printf("sum = %d (expected 15)\n", sum);
         
         chan_close(tx);
-        chan_free(rx);
+        cc_chan_free(ch);
     }
     
     /*
@@ -70,7 +70,7 @@ int main(void) {
     {
         int[~1 >] tx;
         int[~1 <] rx;
-        channel_pair(&tx, &rx);
+        CCChan* ch = channel_pair(&tx, &rx);
         
         /* Send one value */
         int val = 42;
@@ -83,7 +83,7 @@ int main(void) {
         printf("received: %d\n", received);
         
         chan_close(tx);
-        chan_free(rx);
+        cc_chan_free(ch);
     }
     
     printf("\nResult: PASS\n");

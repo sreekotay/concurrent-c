@@ -27,12 +27,14 @@ Job[~JOB_QUEUE_CAP >] g_jobs_tx;
 Job[~JOB_QUEUE_CAP <] g_jobs_rx;
 Result[~NUM_JOBS >] g_results_tx;
 Result[~NUM_JOBS <] g_results_rx;
+CCChan* g_jobs_ch;
+CCChan* g_results_ch;
 
 int main(void) {
     printf("worker_pool_heavy: %d workers, %d jobs\n", NUM_WORKERS, NUM_JOBS);
 
-    channel_pair(&g_jobs_tx, &g_jobs_rx);
-    channel_pair(&g_results_tx, &g_results_rx);
+    g_jobs_ch = channel_pair(&g_jobs_tx, &g_jobs_rx);
+    g_results_ch = channel_pair(&g_results_tx, &g_results_rx);
 
     @nursery {
         /* Workers */
@@ -69,8 +71,8 @@ int main(void) {
         result_count++;
     }
 
-    chan_free(g_jobs_tx);
-    chan_free(g_results_tx);
+    cc_chan_free(g_jobs_ch);
+    cc_chan_free(g_results_ch);
 
     /* Expected: sum of (n*(n+1)/2) for n=1..NUM_JOBS */
     /* = sum of triangular numbers = NUM_JOBS*(NUM_JOBS+1)*(NUM_JOBS+2)/6 */

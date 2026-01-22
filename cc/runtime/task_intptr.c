@@ -7,6 +7,7 @@
 #include "cc_exec.cch"
 #include "cc_channel.cch"
 #include "cc_nursery.cch"
+#include "cc_deadlock_detect.cch"
 
 #include <errno.h>
 
@@ -154,9 +155,31 @@ void cc_task_intptr_free(CCTaskIntptr* t) {
     memset(t, 0, sizeof(*t));
 }
 
+/* Cancel a task and wake up anyone blocked on it.
+   This closes the done channel, causing cc_block_on_intptr to return immediately. */
+void cc_task_intptr_cancel(CCTaskIntptr* t) {
+    if (!t) return;
+    if (t->kind == CC_TASK_INTPTR_KIND_FUTURE) {
+        CCTaskIntptrHeap* h = (CCTaskIntptrHeap*)t->future.heap;
+        if (h) {
+            h->cancelled = 1;
+            /* Close the done channel to wake up blocked waiters */
+            if (h->done) {
+                cc_chan_close(h->done);
+            }
+        }
+        /* Also mark the future handle as cancelled */
+        t->future.fut.handle.cancelled = 1;
+    } else if (t->kind == CC_TASK_INTPTR_KIND_POLL) {
+        /* For poll-based tasks, we can't easily cancel - just mark frame for cleanup */
+        /* The poll function should check cancellation state */
+    }
+}
+
 intptr_t cc_block_on_intptr(CCTaskIntptr t) {
     intptr_t r = 0;
     int err = 0;
+    cc_deadlock_enter_blocking(CC_BLOCK_ON_TASK);
     for (;;) {
         CCFutureStatus st = cc_task_intptr_poll(&t, &r, &err);
         if (st == CC_FUTURE_PENDING) {
@@ -167,14 +190,18 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
                 if (err == 0 && t.future.fut.result) r = *(const intptr_t*)t.future.fut.result;
                 break;
             } else if (t.kind == CC_TASK_INTPTR_KIND_POLL && t.poll.wait) {
+                /* Task has a wait function - use it to block efficiently */
                 (void)t.poll.wait(t.poll.frame);
-            } else {
-                (void)cc_sleep_ms(1);
             }
+            /* For POLL tasks without wait: tight-loop poll (no sleep).
+               We're the sole driver, so spinning is correct.
+               This makes @async functions without await points fast. */
             continue;
         }
         break;
     }
+    cc_deadlock_exit_blocking();
+    cc_deadlock_progress();  /* Task completed */
     cc_task_intptr_free(&t);
     (void)err;
     return r;
@@ -320,7 +347,14 @@ int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result)
     if (winner) *winner = msg.index;
     if (result) *result = msg.result;
 
-    /* Cancel remaining tasks and cleanup */
+    /* Cancel remaining tasks - this wakes up workers blocked in cc_block_on_intptr */
+    for (int i = 0; i < count; i++) {
+        if (i != msg.index) {
+            cc_task_intptr_cancel(&slots[i].task);
+        }
+    }
+    
+    /* Now wait for all workers to finish (they should exit quickly after cancel) */
     cc_nursery_cancel(n);
     cc_nursery_wait(n);
     cc_nursery_free(n);
@@ -399,7 +433,14 @@ int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result) 
         if (result) *result = first_result.result;
     }
 
-    /* Cancel remaining tasks and cleanup */
+    /* Cancel remaining tasks - this wakes up workers blocked in cc_block_on_intptr */
+    for (int i = 0; i < count; i++) {
+        if (!found_success || i != first_result.index) {
+            cc_task_intptr_cancel(&slots[i].task);
+        }
+    }
+    
+    /* Now wait for all workers to finish */
     cc_nursery_cancel(n);
     cc_nursery_wait(n);
     cc_nursery_free(n);

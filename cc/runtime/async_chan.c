@@ -30,6 +30,7 @@ struct CCAsyncChan {
     size_t recv_len, recv_cap;
 
     pthread_mutex_t mu;
+    pthread_cond_t cv;
 };
 
 static int ensure_elem(CCAsyncChan* ch, size_t elem_size) {
@@ -69,6 +70,7 @@ CCAsyncChan* cc_async_chan_create(size_t capacity, CCChanMode mode, bool allow_s
     ch->mode = mode;
     ch->allow_take = allow_send_take ? 1 : 0;
     pthread_mutex_init(&ch->mu, NULL);
+    pthread_cond_init(&ch->cv, NULL);
     return ch;
 }
 
@@ -79,6 +81,7 @@ void cc_async_chan_close(CCAsyncChan* ch) {
     for (size_t i = 0; i < ch->send_len; ++i) complete_op(ch->sends[i].op, EPIPE);
     for (size_t i = 0; i < ch->recv_len; ++i) complete_op(ch->recvs[i].op, EPIPE);
     ch->send_len = ch->recv_len = 0;
+    pthread_cond_broadcast(&ch->cv);
     pthread_mutex_unlock(&ch->mu);
 }
 
@@ -89,6 +92,7 @@ void cc_async_chan_free(CCAsyncChan* ch) {
     free(ch->recvs);
     free(ch->buf);
     pthread_mutex_destroy(&ch->mu);
+    pthread_cond_destroy(&ch->cv);
     free(ch);
 }
 
@@ -138,6 +142,27 @@ static int match_pending(CCAsyncChan* ch) {
     return 0;
 }
 
+static void cc_async_chan_signal(CCAsyncChan* ch) {
+    if (!ch) return;
+    pthread_cond_broadcast(&ch->cv);
+}
+
+static int cc_async_chan_wait_locked(CCAsyncChan* ch, const CCDeadline* d) {
+    if (!ch) return EINVAL;
+    if (!d || d->deadline.tv_sec == 0) {
+        pthread_cond_wait(&ch->cv, &ch->mu);
+        return 0;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    if (now.tv_sec > d->deadline.tv_sec ||
+        (now.tv_sec == d->deadline.tv_sec && now.tv_nsec >= d->deadline.tv_nsec)) {
+        return ETIMEDOUT;
+    }
+    int rc = pthread_cond_timedwait(&ch->cv, &ch->mu, &d->deadline);
+    return rc == ETIMEDOUT ? ETIMEDOUT : 0;
+}
+
 static int buffer_enqueue(CCAsyncChan* ch, const void* value) {
     int err = ensure_buf(ch);
     if (err != 0) return err;
@@ -176,6 +201,7 @@ int cc_async_chan_send(CCAsyncChan* ch, const void* value, size_t value_size, CC
     op->status = CC_CHAN_ASYNC_PENDING;
     if (match_pending(ch)) {
         complete_op(op, 0);
+        cc_async_chan_signal(ch);
         pthread_mutex_unlock(&ch->mu);
         return 0;
     }
@@ -187,6 +213,7 @@ int cc_async_chan_send(CCAsyncChan* ch, const void* value, size_t value_size, CC
         memcpy(recv_op.buf, value, ch->elem_size);
         complete_op(recv_op.op, 0);
         complete_op(op, 0);
+        cc_async_chan_signal(ch);
         pthread_mutex_unlock(&ch->mu);
         return 0;
     }
@@ -197,6 +224,7 @@ int cc_async_chan_send(CCAsyncChan* ch, const void* value, size_t value_size, CC
     } else if (err == EAGAIN && ch->mode == CC_CHAN_MODE_BLOCK) {
         err = push_send(ch, value, op);
     }
+    cc_async_chan_signal(ch);
     pthread_mutex_unlock(&ch->mu);
     return err;
 }
@@ -226,6 +254,7 @@ int cc_async_chan_recv(CCAsyncChan* ch, void* out_value, size_t value_size, CCAs
     // If buffer has data
     if (buffer_dequeue(ch, out_value) == 0) {
         complete_op(op, 0);
+        cc_async_chan_signal(ch);
         pthread_mutex_unlock(&ch->mu);
         return 0;
     }
@@ -238,29 +267,24 @@ int cc_async_chan_recv(CCAsyncChan* ch, void* out_value, size_t value_size, CCAs
         complete_op(send_op.op, 0);
         free(send_op.buf);
         complete_op(op, 0);
+        cc_async_chan_signal(ch);
         pthread_mutex_unlock(&ch->mu);
         return 0;
     }
     // Otherwise queue recv
     err = push_recv(ch, out_value, op);
+    cc_async_chan_signal(ch);
     pthread_mutex_unlock(&ch->mu);
     return err;
-}
-
-static int wait_until(const CCDeadline* d) {
-    if (!d || d->deadline.tv_sec == 0) return 0;
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    if (now.tv_sec > d->deadline.tv_sec || (now.tv_sec == d->deadline.tv_sec && now.tv_nsec >= d->deadline.tv_nsec)) return ETIMEDOUT;
-    struct timespec sleep_ts = {0, 1000000};
-    nanosleep(&sleep_ts, NULL);
-    return 0;
 }
 
 int cc_async_chan_send_deadline(CCAsyncChan* ch, const void* value, size_t value_size, CCAsyncChanOp* op, const CCDeadline* d) {
     int err = cc_async_chan_send(ch, value, value_size, op);
     while (err == EAGAIN) {
-        if (wait_until(d) == ETIMEDOUT) return ETIMEDOUT;
+        pthread_mutex_lock(&ch->mu);
+        int w = cc_async_chan_wait_locked(ch, d);
+        pthread_mutex_unlock(&ch->mu);
+        if (w == ETIMEDOUT) return ETIMEDOUT;
         err = cc_async_chan_send(ch, value, value_size, op);
     }
     return err;
@@ -269,7 +293,10 @@ int cc_async_chan_send_deadline(CCAsyncChan* ch, const void* value, size_t value
 int cc_async_chan_recv_deadline(CCAsyncChan* ch, void* out_value, size_t value_size, CCAsyncChanOp* op, const CCDeadline* d) {
     int err = cc_async_chan_recv(ch, out_value, value_size, op);
     while (err == EAGAIN) {
-        if (wait_until(d) == ETIMEDOUT) return ETIMEDOUT;
+        pthread_mutex_lock(&ch->mu);
+        int w = cc_async_chan_wait_locked(ch, d);
+        pthread_mutex_unlock(&ch->mu);
+        if (w == ETIMEDOUT) return ETIMEDOUT;
         err = cc_async_chan_recv(ch, out_value, value_size, op);
     }
     return err;

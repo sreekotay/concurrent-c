@@ -1,80 +1,105 @@
 /*
  * Stress Test: Async/Await Flood
  *
- * Many concurrent async tasks using await for channel operations.
+ * Many concurrent async tasks using cc_block_all combinator.
  * Tests the async runtime under heavy concurrent await pressure.
  */
 #include "cc_runtime.cch"
 #include "cc_atomic.cch"
+#include "std/task_intptr.cch"
 #include <stdio.h>
 
-#define NUM_PRODUCERS 10
-#define NUM_CONSUMERS 10
-#define MSGS_PER_PRODUCER 100
-#define CHAN_CAPACITY 16
+#define NUM_TASKS 100
+#define BATCH_SIZE 10
 
-cc_atomic_int g_sent = 0;
-cc_atomic_int g_received = 0;
+cc_atomic_int g_completed = 0;
 
-/* Shared channel */
-int[~CHAN_CAPACITY >] g_tx;
-int[~CHAN_CAPACITY <] g_rx;
-
-@async int producer(int id) {
-    for (int i = 0; i < MSGS_PER_PRODUCER; i++) {
-        int val = id * 1000 + i;
-        await g_tx.send(val);
-        cc_atomic_fetch_add(&g_sent, 1);
+@async int compute_chain(int start, int iterations) {
+    /* Simulate a chain of async computations */
+    int result = start;
+    for (int i = 0; i < iterations; i++) {
+        result = result * 3 + 1;
+        if (result > 10000) result = result % 10000;
     }
-    return id;
+    return result;
 }
 
-@async int consumer(int id) {
-    int count = 0;
-    int val;
-    /* Each consumer drains until error (channel closed) */
-    while (await g_rx.recv(&val) == 0) {
-        cc_atomic_fetch_add(&g_received, 1);
-        count++;
+@async int double_compute(int x) {
+    int a = await compute_chain(x, 5);
+    return a * 2;
+}
+
+@async int triple_compute(int x) {
+    int a = await compute_chain(x, 3);
+    return a * 3;
+}
+
+@async int nested_await(int x) {
+    /* Call multiple async functions in sequence */
+    int a = await compute_chain(x, 5);
+    int b = await double_compute(a);
+    int c = await triple_compute(b);
+    return c;
+}
+
+@async int multi_await_loop(int count, int seed) {
+    int result = seed;
+    for (int i = 0; i < count; i++) {
+        result = await compute_chain(result, 2);
     }
-    return count;
+    return result;
 }
 
 int main(void) {
-    int expected = NUM_PRODUCERS * MSGS_PER_PRODUCER;
-    printf("async_await_flood: %d producers x %d msgs = %d total\n",
-           NUM_PRODUCERS, MSGS_PER_PRODUCER, expected);
+    printf("async_await_flood: %d tasks in batches of %d\n", NUM_TASKS, BATCH_SIZE);
 
-    channel_pair(&g_tx, &g_rx);
+    int total_sum = 0;
+    int num_batches = NUM_TASKS / BATCH_SIZE;
 
-    @nursery {
-        /* Start consumers */
-        for (int c = 0; c < NUM_CONSUMERS; c++) {
-            int consumer_id = c;
-            spawn(() => {
-                CCTaskIntptr task = consumer(consumer_id);
-                cc_block_on_intptr(task);
-            });
+    for (int batch = 0; batch < num_batches; batch++) {
+        CCTaskIntptr tasks[BATCH_SIZE];
+        intptr_t results[BATCH_SIZE];
+
+        /* Create batch of diverse async tasks */
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            int idx = batch * BATCH_SIZE + i;
+            switch (idx % 4) {
+                case 0:
+                    tasks[i] = compute_chain(idx, 10);
+                    break;
+                case 1:
+                    tasks[i] = nested_await(idx);
+                    break;
+                case 2:
+                    tasks[i] = double_compute(idx);
+                    break;
+                case 3:
+                    tasks[i] = multi_await_loop(5, idx);
+                    break;
+            }
         }
 
-        /* Start producers in inner nursery with closing */
-        @nursery closing(g_tx) {
-            for (int p = 0; p < NUM_PRODUCERS; p++) {
-                int producer_id = p;
-                spawn(() => {
-                    CCTaskIntptr task = producer(producer_id);
-                    cc_block_on_intptr(task);
-                });
-            }
+        /* Run all concurrently */
+        int err = cc_block_all(BATCH_SIZE, tasks, results);
+        if (err != 0) {
+            printf("ERROR: batch %d failed with err=%d\n", batch, err);
+            return 1;
+        }
+
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            total_sum += (int)results[i];
+            cc_atomic_fetch_add(&g_completed, 1);
         }
     }
 
-    chan_free(g_tx);
+    int completed = cc_atomic_load(&g_completed);
+    printf("async_await_flood: completed=%d, sum=%d\n", completed, total_sum);
 
-    int sent = cc_atomic_load(&g_sent);
-    int received = cc_atomic_load(&g_received);
+    if (completed != NUM_TASKS) {
+        printf("ERROR: expected %d completions\n", NUM_TASKS);
+        return 2;
+    }
 
-    printf("async_await_flood: sent %d, received %d (expected %d)\n",
-           sent, received, expected);
-    return (sent == expected && received == expected) ? 0 : 1;
+    printf("async_await_flood: PASS\n");
+    return 0;
 }

@@ -10,6 +10,7 @@
 // Sync channel pair - blocks OS thread, no await needed
 int[~2 sync >] tx;
 int[~2 sync <] rx;
+CCChan* g_ch;
 
 static void* sender_thread(void* arg) {
     (void)arg;
@@ -21,7 +22,7 @@ static void* sender_thread(void* arg) {
 }
 
 int main(void) {
-    channel_pair(&tx, &rx);
+    g_ch = channel_pair(&tx, &rx);
     
     pthread_t tid;
     pthread_create(&tid, NULL, sender_thread, NULL);
@@ -45,7 +46,7 @@ int main(void) {
     assert(err3 == EPIPE && "recv on closed+drained should return EPIPE");
     
     // Free the channel exactly once (tx and rx share the same underlying channel)
-    tx.free();
+    cc_chan_free(g_ch);
     
     printf("sync channel smoke: PASS\n");
     return 0;

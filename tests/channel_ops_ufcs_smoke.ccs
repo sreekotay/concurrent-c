@@ -3,7 +3,7 @@
 int main(void) {
     int[~3 >] tx;
     int[~3 <] rx;
-    channel_pair(&tx, &rx);
+    CCChan* ch = channel_pair(&tx, &rx);
 
     int v = 0;
     if (tx.send(42) != 0) return 1;
@@ -11,7 +11,7 @@ int main(void) {
     if (v != 42) return 3;
 
     tx.close();
-    tx.free();
+    cc_chan_free(ch);
     return 0;
 }
 

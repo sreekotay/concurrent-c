@@ -20,7 +20,7 @@ int g_sum = 0;
 int main(void) {
     int[~4 >] tx;
     int[~4 <] rx;
-    channel_pair(&tx, &rx);
+    CCChan* ch = channel_pair(&tx, &rx);
 
     @nursery {
         /* Consumer: lives in outer nursery, drains until close. */
@@ -47,7 +47,7 @@ int main(void) {
     }
     /* Outer nursery done -> consumer finished -> all clean. */
 
-    chan_free(tx);
+    cc_chan_free(ch);
     printf("sum = %d (expected 6)\n", g_sum);  /* 1+2+3 = 6 */
     return (g_sum == 6) ? 0 : 1;
 }

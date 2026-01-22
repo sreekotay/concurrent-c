@@ -87,6 +87,17 @@ int cc_chan_pair_create_full(size_t capacity,
                              CCChanTx* out_tx,
                              CCChanRx* out_rx);
 
+// Same as cc_chan_pair_create_full but returns CCChan* for assignment.
+// Returns NULL on error. Used by channel_pair() language construct.
+CCChan* cc_chan_pair_create_returning(size_t capacity,
+                                      CCChanMode mode,
+                                      bool allow_send_take,
+                                      size_t elem_size,
+                                      bool is_sync,
+                                      int topology,
+                                      CCChanTx* out_tx,
+                                      CCChanRx* out_rx);
+
 // Create a sync channel directly (blocking mode).
 CCChan* cc_chan_create_sync(size_t capacity, CCChanMode mode, bool allow_send_take);
 

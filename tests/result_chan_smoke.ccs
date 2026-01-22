@@ -9,9 +9,10 @@
 // Use built-in CCError for the error type
 CCResult_int_CCError[~4 >] results_tx;
 CCResult_int_CCError[~4 <] results_rx;
+CCChan* g_ch;
 
 int main(void) {
-    channel_pair(&results_tx, &results_rx);
+    g_ch = channel_pair(&results_tx, &results_rx);
     
     // Send a success
     CCResult_int_CCError ok_result = cc_ok_CCResult_int_CCError(42);
@@ -35,7 +36,7 @@ int main(void) {
     assert(e2 == 0 && !r2.ok && "second result should be error");
     assert(r2.u.error.kind == CC_ERR_PARSE);
     
-    results_tx.free();
+    cc_chan_free(g_ch);
     
     printf("result channel smoke: PASS\n");
     return 0;

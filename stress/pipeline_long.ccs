@@ -15,6 +15,11 @@
 /* Fixed number of stages (can't use arrays of channel handles yet) */
 int[~8 >] g_tx0, g_tx1, g_tx2, g_tx3, g_tx4;
 int[~8 <] g_rx0, g_rx1, g_rx2, g_rx3, g_rx4;
+CCChan* g_ch0;
+CCChan* g_ch1;
+CCChan* g_ch2;
+CCChan* g_ch3;
+CCChan* g_ch4;
 
 int g_output_count = 0;
 int g_output_sum = 0;
@@ -22,11 +27,11 @@ int g_output_sum = 0;
 int main(void) {
     printf("pipeline_long: 5 stages, %d items\n", NUM_ITEMS);
 
-    channel_pair(&g_tx0, &g_rx0);
-    channel_pair(&g_tx1, &g_rx1);
-    channel_pair(&g_tx2, &g_rx2);
-    channel_pair(&g_tx3, &g_rx3);
-    channel_pair(&g_tx4, &g_rx4);
+    g_ch0 = channel_pair(&g_tx0, &g_rx0);
+    g_ch1 = channel_pair(&g_tx1, &g_rx1);
+    g_ch2 = channel_pair(&g_tx2, &g_rx2);
+    g_ch3 = channel_pair(&g_tx3, &g_rx3);
+    g_ch4 = channel_pair(&g_tx4, &g_rx4);
 
     @nursery {
         /* Producer */
@@ -83,11 +88,11 @@ int main(void) {
         });
     }
 
-    chan_free(g_tx0);
-    chan_free(g_tx1);
-    chan_free(g_tx2);
-    chan_free(g_tx3);
-    chan_free(g_tx4);
+    cc_chan_free(g_ch0);
+    cc_chan_free(g_ch1);
+    cc_chan_free(g_ch2);
+    cc_chan_free(g_ch3);
+    cc_chan_free(g_ch4);
 
     /* Each item goes through 4 increments (+4) */
     /* Sum of (i + 4) for i=0..NUM_ITEMS-1 = sum(i) + 4*NUM_ITEMS */

@@ -11,6 +11,21 @@ At this stage CC is a “C-with-extensions” toolchain:
 
 ---
 
+### Type Family: Arrays, Slices, Channels
+
+Concurrent-C uses `[...]` syntax for all container types:
+
+| Type | Meaning |
+|------|---------|
+| `T[n]` | Fixed array of `n` elements |
+| `T[:]` | Slice — variable-length view |
+| `T[~n >]` | Channel send handle, buffer size `n` |
+| `T[~n <]` | Channel receive handle, buffer size `n` |
+
+The `~` means "channel" (a queue, not inline storage). The `>/<` indicate direction.
+
+---
+
 ### Build
 
 #### Build the compiler
@@ -106,6 +121,44 @@ Set comptime integer consts:
 ```bash
 CC_OUT_DIR=out2 CC_BIN_DIR=bin2 ./cc/bin/ccc build run examples/hello.ccs --summary
 ```
+
+---
+
+### Deadlock Detection
+
+Concurrent-C detects deadlocks at **compile time** (for guaranteed patterns) and **runtime** (for real deadlocks).
+
+#### Compile-time: 100% guaranteed deadlocks → ERROR
+
+```c
+@nursery closing(ch) {
+    spawn([rx]() => {
+        while (chan_recv(rx, &v) == 0) { ... }  // ❌ ERROR: deadlock
+    });
+}
+// Consumer waits for close, but close happens AFTER children exit
+```
+
+Fix: Move consumer **outside** the nursery.
+
+#### Runtime: Real deadlock detection
+
+Enable runtime deadlock detection for fuzzy patterns:
+
+```bash
+CC_DEADLOCK_DETECT=1 ./my_program
+```
+
+When all threads are blocked with no progress for 10+ seconds:
+- Prints detailed diagnostics (which threads are blocked, why)
+- Exits with code 124 (like `timeout`)
+
+Configure:
+- `CC_DEADLOCK_TIMEOUT=5` — detect after 5 seconds (default: 10)
+- `CC_DEADLOCK_ABORT=0` — warn but don't exit
+
+Escape hatch for compile-time check:
+- `CC_ALLOW_NURSERY_CLOSING_DRAIN=1`
 
 ---
 

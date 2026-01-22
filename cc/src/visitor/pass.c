@@ -1,6 +1,7 @@
 #include "pass.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "parser/parse.h"
@@ -30,6 +31,9 @@ int cc_run_main_pass(const char* input_path, CCSymbolTable* symbols, const char*
         if (err != 0) {
             cc_free_ast(root);
             return EINVAL;
+        }
+        if (c.warnings > 0) {
+            fprintf(stderr, "cc: %d warning(s)\n", c.warnings);
         }
     }
     err = cc_visit_ast(root, symbols, input_path, output_path);

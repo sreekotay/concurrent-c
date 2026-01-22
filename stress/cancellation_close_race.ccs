@@ -1,0 +1,134 @@
+/*
+ * Stress Test: Cancellation and Channel Close Races
+ *
+ * Tests:
+ * - cc_task_intptr_cancel() under load (via cc_block_race)
+ * - Channel close() while send/recv in flight
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define NUM_ROUNDS 10
+#define TASKS_PER_ROUND 8
+
+cc_atomic_int g_cancelled = 0;
+cc_atomic_int g_completed = 0;
+cc_atomic_int g_close_errors = 0;
+
+/* Slow task that can be cancelled */
+@async int slow_work(int id) {
+    int sum = 0;
+    for (int i = 0; i < 10000; i++) {
+        sum += (id + i) % 17;
+    }
+    return sum;
+}
+
+/* Test 1: cc_block_race cancellation under load */
+int test_race_cancellation(void) {
+    printf("  race_cancellation: %d rounds x %d tasks\n", NUM_ROUNDS, TASKS_PER_ROUND);
+    
+    for (int round = 0; round < NUM_ROUNDS; round++) {
+        CCTaskIntptr tasks[TASKS_PER_ROUND];
+        
+        for (int i = 0; i < TASKS_PER_ROUND; i++) {
+            tasks[i] = slow_work(round * TASKS_PER_ROUND + i);
+        }
+        
+        int winner;
+        intptr_t result;
+        int err = cc_block_race(TASKS_PER_ROUND, tasks, &winner, &result);
+        
+        if (err != 0) {
+            printf("  race_cancellation: round %d failed err=%d\n", round, err);
+            return 1;
+        }
+        
+        cc_atomic_fetch_add(&g_completed, 1);
+        cc_atomic_fetch_add(&g_cancelled, TASKS_PER_ROUND - 1);
+    }
+    
+    printf("  race_cancellation: completed=%d, cancelled=%d\n",
+           cc_atomic_load(&g_completed), cc_atomic_load(&g_cancelled));
+    return 0;
+}
+
+/* Test 2: Channel close while recv is waiting */
+int test_close_while_recv(void) {
+    printf("  close_while_recv: testing close() interrupts blocking recv\n");
+    
+    cc_atomic_store(&g_close_errors, 0);
+    
+    for (int round = 0; round < 10; round++) {
+        int[~4 >] tx;
+        int[~4 <] rx;
+        CCChan* ch = channel_pair(&tx, &rx);
+        
+        /* Note: We need TWO spawns - one to recv, one to close.
+           The closing(tx) clause runs AFTER children, which would deadlock.
+           Instead, have a sibling spawn close the channel. */
+        @nursery {
+            spawn([rx]() => {
+                int val;
+                int err = chan_recv(rx, &val);
+                if (err != 0) {
+                    cc_atomic_fetch_add(&g_close_errors, 1);
+                }
+            });
+            
+            spawn([tx]() => {
+                /* Small delay to ensure recv is waiting */
+                for (int i = 0; i < 1000; i++) { }
+                chan_close(tx);
+            });
+        }
+        
+        cc_chan_free(ch);
+    }
+    
+    int close_errors = cc_atomic_load(&g_close_errors);
+    printf("  close_while_recv: recv-after-close errors=%d (expected ~10)\n", close_errors);
+    return (close_errors >= 5) ? 0 : 1;
+}
+
+/* Test 3: Concurrent close - multiple threads closing same channel */
+int test_concurrent_close(void) {
+    printf("  concurrent_close: multiple threads racing to close\n");
+    
+    for (int round = 0; round < NUM_ROUNDS; round++) {
+        int[~4 >] tx;
+        int[~4 <] rx;
+        CCChan* ch = channel_pair(&tx, &rx);
+        
+        @nursery {
+            spawn([tx]() => { chan_close(tx); });
+            spawn([tx]() => { chan_close(tx); });
+            spawn([tx]() => { chan_close(tx); });
+            spawn([tx]() => { chan_close(tx); });
+        }
+        
+        cc_chan_free(ch);
+    }
+    
+    printf("  concurrent_close: %d rounds completed\n", NUM_ROUNDS);
+    return 0;
+}
+
+int main(void) {
+    printf("cancellation_close_race: starting\n");
+    
+    int err = 0;
+    
+    err = test_race_cancellation();
+    if (err != 0) return err;
+    
+    err = test_close_while_recv();
+    if (err != 0) return err;
+    
+    err = test_concurrent_close();
+    if (err != 0) return err;
+    
+    printf("cancellation_close_race: PASS\n");
+    return 0;
+}

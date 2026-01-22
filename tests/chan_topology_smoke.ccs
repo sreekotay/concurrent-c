@@ -14,12 +14,15 @@ int[~4 N:1 <] many_to_one_rx;
 int[~4 1:1 >] one_to_one_tx;
 int[~4 1:1 <] one_to_one_rx;
 
+CCChan* g_n1_ch;
+CCChan* g_11_ch;
+
 int main(void) {
     // Create N:1 channel (many senders, one receiver)
-    channel_pair(&many_to_one_tx, &many_to_one_rx);
+    g_n1_ch = channel_pair(&many_to_one_tx, &many_to_one_rx);
     
     // Create 1:1 channel (single producer, single consumer)
-    channel_pair(&one_to_one_tx, &one_to_one_rx);
+    g_11_ch = channel_pair(&one_to_one_tx, &one_to_one_rx);
     
     // Basic send/recv test on N:1
     many_to_one_tx.send(42);
@@ -35,10 +38,10 @@ int main(void) {
     
     // Cleanup
     many_to_one_tx.close();
-    many_to_one_tx.free();
+    cc_chan_free(g_n1_ch);
     
     one_to_one_tx.close();
-    one_to_one_tx.free();
+    cc_chan_free(g_11_ch);
     
     printf("channel topology smoke: PASS\n");
     return 0;

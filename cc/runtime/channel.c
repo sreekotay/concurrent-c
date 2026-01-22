@@ -13,6 +13,7 @@
 #include "cc_nursery.cch"
 #include "cc_exec.cch"
 #include "cc_slice.cch"
+#include "cc_deadlock_detect.cch"
 #include "std/async_io.cch"
 #include "std/future.cch"
 
@@ -95,6 +96,36 @@ int cc_chan_pair_create_full(size_t capacity,
     return 0;
 }
 
+/* Returns CCChan* for assignment; returns NULL on error */
+CCChan* cc_chan_pair_create_returning(size_t capacity,
+                                      CCChanMode mode,
+                                      bool allow_send_take,
+                                      size_t elem_size,
+                                      bool is_sync,
+                                      int topology,
+                                      CCChanTx* out_tx,
+                                      CCChanRx* out_rx) {
+    if (!out_tx || !out_rx) return NULL;
+    out_tx->raw = NULL;
+    out_rx->raw = NULL;
+    CCChanTopology topo = (CCChanTopology)topology;
+    CCChan* ch = cc_chan_create_internal(capacity, mode, allow_send_take, is_sync, topo);
+    if (!ch) return NULL;
+    if (elem_size != 0) {
+        int e = cc_chan_init_elem(ch, elem_size);
+        if (e != 0) { cc_chan_free(ch); return NULL; }
+    }
+    out_tx->raw = ch;
+    out_rx->raw = ch;
+    return ch;
+}
+
+/* Global broadcast condvar for multi-channel select (@match).
+   Simple approach: any channel activity signals this global condvar.
+   Waiters in @match wait on this. Spurious wakeups are handled by retrying. */
+static pthread_mutex_t g_chan_broadcast_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_chan_broadcast_cv = PTHREAD_COND_INITIALIZER;
+
 struct CCChan {
     size_t cap;
     size_t count;
@@ -125,6 +156,14 @@ void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner) {
     if (!ch->autoclose_owner) ch->autoclose_owner = owner;
     ch->warned_autoclose_block = 0;
     pthread_mutex_unlock(&ch->mu);
+}
+
+/* Signal the global broadcast condvar for multi-channel select.
+   Called when any channel state changes. Simple and deadlock-free. */
+static void cc__chan_broadcast_activity(void) {
+    pthread_mutex_lock(&g_chan_broadcast_mu);
+    pthread_cond_broadcast(&g_chan_broadcast_cv);
+    pthread_mutex_unlock(&g_chan_broadcast_mu);
 }
 
 static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take, bool is_sync, CCChanTopology topology) {
@@ -168,6 +207,7 @@ void cc_chan_close(CCChan* ch) {
     pthread_cond_broadcast(&ch->not_empty);
     pthread_cond_broadcast(&ch->not_full);
     pthread_mutex_unlock(&ch->mu);
+    cc__chan_broadcast_activity();
 }
 
 void cc_chan_free(CCChan* ch) {
@@ -202,24 +242,28 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     int err = 0;
     /* Unbuffered rendezvous: sender must wait for a receiver and for slot to be free. */
     if (ch->cap == 0) {
+        cc_deadlock_enter_blocking(CC_BLOCK_CHAN_SEND);
         while (!ch->closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
-                if (err == ETIMEDOUT) return ETIMEDOUT;
+                if (err == ETIMEDOUT) { cc_deadlock_exit_blocking(); return ETIMEDOUT; }
             } else {
                 pthread_cond_wait(&ch->not_full, &ch->mu);
             }
         }
+        cc_deadlock_exit_blocking();
         return ch->closed ? EPIPE : 0;
     }
+    cc_deadlock_enter_blocking(CC_BLOCK_CHAN_SEND);
     while (!ch->closed && ch->count == ch->cap && err == 0) {
         if (deadline) {
             err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
-            if (err == ETIMEDOUT) return ETIMEDOUT;
+            if (err == ETIMEDOUT) { cc_deadlock_exit_blocking(); return ETIMEDOUT; }
         } else {
             pthread_cond_wait(&ch->not_full, &ch->mu);
         }
     }
+    cc_deadlock_exit_blocking();
     return ch->closed ? EPIPE : 0;
 }
 
@@ -229,14 +273,16 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     if (ch->cap == 0) {
         ch->rv_recv_waiters++;
         pthread_cond_broadcast(&ch->not_full); /* wake senders waiting for a receiver */
+        cc_deadlock_enter_blocking(CC_BLOCK_CHAN_RECV);
         while (!ch->closed && !ch->rv_has_value && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
-                if (err == ETIMEDOUT) { ch->rv_recv_waiters--; return ETIMEDOUT; }
+                if (err == ETIMEDOUT) { cc_deadlock_exit_blocking(); ch->rv_recv_waiters--; return ETIMEDOUT; }
             } else {
                 pthread_cond_wait(&ch->not_empty, &ch->mu);
             }
         }
+        cc_deadlock_exit_blocking();
         if (ch->closed && !ch->rv_has_value) { ch->rv_recv_waiters--; return EPIPE; }
         return 0;
     }
@@ -256,14 +302,16 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             return EDEADLK;
         }
     }
+    cc_deadlock_enter_blocking(CC_BLOCK_CHAN_RECV);
     while (!ch->closed && ch->count == 0 && err == 0) {
         if (deadline) {
             err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
-            if (err == ETIMEDOUT) return ETIMEDOUT;
+            if (err == ETIMEDOUT) { cc_deadlock_exit_blocking(); return ETIMEDOUT; }
         } else {
             pthread_cond_wait(&ch->not_empty, &ch->mu);
         }
     }
+    cc_deadlock_exit_blocking();
     if (ch->closed && ch->count == 0) return EPIPE;
     return 0;
 }
@@ -273,6 +321,7 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
         memcpy(ch->buf, value, ch->elem_size);
         ch->rv_has_value = 1;
         pthread_cond_signal(&ch->not_empty);
+        cc__chan_broadcast_activity();
         return;
     }
     void *slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
@@ -280,6 +329,7 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->count++;
     pthread_cond_signal(&ch->not_empty);
+    cc__chan_broadcast_activity();
 }
 
 static void cc_chan_dequeue(CCChan* ch, void* out_value) {
@@ -288,6 +338,7 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
         ch->rv_has_value = 0;
         if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
         pthread_cond_broadcast(&ch->not_full);
+        cc__chan_broadcast_activity();
         return;
     }
     void *slot = (uint8_t*)ch->buf + ch->head * ch->elem_size;
@@ -295,6 +346,7 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
     ch->head = (ch->head + 1) % ch->cap;
     ch->count--;
     pthread_cond_signal(&ch->not_full);
+    cc__chan_broadcast_activity();
 }
 
 static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct timespec* deadline) {
@@ -325,10 +377,13 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
         cc_chan_enqueue(ch, value);
         /* Rendezvous: wait until receiver consumes. */
+        cc_deadlock_enter_blocking(CC_BLOCK_CHAN_SEND);
         while (!ch->closed && ch->rv_has_value) {
             pthread_cond_wait(&ch->not_full, &ch->mu);
         }
+        cc_deadlock_exit_blocking();
         pthread_mutex_unlock(&ch->mu);
+        cc_deadlock_progress();  /* Successful send */
         return ch->closed ? EPIPE : 0;
     }
     if (ch->count == ch->cap) {
@@ -337,6 +392,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     }
     cc_chan_enqueue(ch, value);
     pthread_mutex_unlock(&ch->mu);
+    cc_deadlock_progress();  /* Successful send */
     return 0;
 }
 
@@ -354,6 +410,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     cc_chan_dequeue(ch, out_value);
     if (ch->cap == 0) pthread_cond_broadcast(&ch->not_full);
     pthread_mutex_unlock(&ch->mu);
+    cc_deadlock_progress();  /* Successful recv */
     return 0;
 }
 
@@ -580,16 +637,29 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
     if (!cases || n == 0 || !ready_index) return EINVAL;
     struct timespec ts;
     const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
+    
+    /* Multi-channel select: Use global broadcast condvar.
+       Any channel activity (send/recv/close) wakes all waiters.
+       Simple, deadlock-free, at cost of some spurious wakeups. */
     while (1) {
         int rc = cc_chan_match_try(cases, n, ready_index);
         if (rc == 0 || rc == EPIPE) return rc;
         if (rc != EAGAIN) return rc;
         if (p) {
             struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
-            if (now.tv_sec > p->tv_sec || (now.tv_sec == p->tv_sec && now.tv_nsec >= p->tv_nsec)) return ETIMEDOUT;
+            if (now.tv_sec > p->tv_sec || (now.tv_sec == p->tv_sec && now.tv_nsec >= p->tv_nsec)) {
+                return ETIMEDOUT;
+            }
         }
-        struct timespec sleep_ts = {0, 1000000};
-        nanosleep(&sleep_ts, NULL);
+        
+        /* Wait for any channel activity */
+        pthread_mutex_lock(&g_chan_broadcast_mu);
+        if (p) {
+            pthread_cond_timedwait(&g_chan_broadcast_cv, &g_chan_broadcast_mu, p);
+        } else {
+            pthread_cond_wait(&g_chan_broadcast_cv, &g_chan_broadcast_mu);
+        }
+        pthread_mutex_unlock(&g_chan_broadcast_mu);
     }
 }
 
@@ -723,9 +793,22 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
 
 static int cc__chan_task_wait(void* frame) {
     /* Block until the channel can make progress (for block_on from sync context).
-       Simple fallback: sleep briefly and retry. */
-    (void)frame;
-    return cc_sleep_ms(1);
+       Uses the channel's condition variables for efficient waiting. */
+    CCChanTaskFrame* f = (CCChanTaskFrame*)frame;
+    if (!f || !f->ch) return EINVAL;
+    CCChan* ch = f->ch;
+    pthread_mutex_lock(&ch->mu);
+    if (f->is_send) {
+        while (!ch->closed && ch->count == ch->cap) {
+            pthread_cond_wait(&ch->not_full, &ch->mu);
+        }
+    } else {
+        while (!ch->closed && ch->count == 0) {
+            pthread_cond_wait(&ch->not_empty, &ch->mu);
+        }
+    }
+    pthread_mutex_unlock(&ch->mu);
+    return 0;
 }
 
 static void cc__chan_task_drop(void* frame) {

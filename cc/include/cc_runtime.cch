@@ -37,7 +37,9 @@
 #define chan_recv(rx, out_ptr) (cc_chan_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
 /* Close the underlying channel (valid on tx). */
 #define chan_close(tx) (cc_chan_close((tx).raw))
-/* Free the underlying channel (call exactly once for a (tx,rx) pair). */
+/* Free the underlying channel (call exactly once for a (tx,rx) pair).
+   For handles: chan_free(tx) or tx.free()
+   For CCChan*: cc_chan_free(ch) */
 #define chan_free(h) (cc_chan_free((h).raw))
 /* Try-recv/try-send helpers */
 #define chan_try_recv(rx, out_ptr) (cc_chan_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
@@ -55,6 +57,7 @@
 #define chan_send(tx, value) (cc_chan_send((tx).raw, &(value), sizeof(value)))
 #define chan_recv(rx, out_ptr) (cc_chan_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
 #define chan_close(tx) (cc_chan_close((tx).raw))
+/* Free the underlying channel - for handles use chan_free(tx), for CCChan* use cc_chan_free(ch) */
 #define chan_free(h) (cc_chan_free((h).raw))
 #define chan_try_recv(rx, out_ptr) (cc_chan_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))))
 #define chan_try_send(tx, value) (cc_chan_try_send((tx).raw, &(value), sizeof(value)))
@@ -65,8 +68,14 @@
 #endif /* CC_PARSER_MODE */
 
 /* Surface constructor marker. This is lowered by the CC frontend; the runtime does not implement it.
-   Declared here to avoid implicit-declaration warnings if the lowering misses a call site. */
-int channel_pair(CCChanTx* tx, CCChanRx* rx);
+   Declared here to avoid implicit-declaration warnings if the lowering misses a call site.
+   
+   Usage:
+     Statement form (legacy): channel_pair(&tx, &rx);
+     Expression form (preferred): CCChan* ch = channel_pair(&tx, &rx);
+   
+   The expression form returns the underlying channel for explicit cleanup with chan_free(ch). */
+CCChan* channel_pair(CCChanTx* tx, CCChanRx* rx);
 
 /* Language-level cancellation helpers.
    The runtime already provides cc_cancel(CCDeadline*) / cc_is_cancelled(const CCDeadline*).

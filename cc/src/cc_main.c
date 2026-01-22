@@ -372,8 +372,11 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --out-dir DIR       Output dir for generated C + objects (default: <repo>/out)\n");
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
+    fprintf(stderr, "  --strict-deadlock   Treat deadlock heuristics as errors (also: CC_STRICT_DEADLOCK=1)\n");
+    fprintf(stderr, "  --no-strict-deadlock  Disable strict deadlock mode for this run\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
 }
+
 
 static int cc__rm_rf(const char* path) {
     if (!path || !path[0]) return 0;
@@ -712,10 +715,24 @@ typedef struct {
     const char* out_dir;
     const char* bin_dir;
     int no_cache;
+    int strict_deadlock;
+    int strict_deadlock_set;
     char** cli_names;
     long long* cli_values;
     size_t cli_count;
 } CCBuildOptions;
+
+static void cc__apply_deadlock_env(const CCBuildOptions* opt) {
+    if (!opt) return;
+    if (opt->strict_deadlock_set) {
+        setenv("CC_STRICT_DEADLOCK", opt->strict_deadlock ? "1" : "0", 1);
+    }
+}
+
+static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, CCCompileConfig* cfg) {
+    cc__apply_deadlock_env(opt);
+    return cc_compile_with_config(in_path, out_path, cfg);
+}
 
 static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                                 const char* c_path,
@@ -1312,12 +1329,12 @@ static int cc__build_target_objs_rec(int idx,
                 if (file_exists(c_out) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
                     // reuse
                 } else {
-                    int err = cc_compile_with_config(src_abs, c_out, cfg);
+                    int err = cc__compile_with_env(base_cli_opt, src_abs, c_out, cfg);
                     if (err != 0) return err;
                     (void)cc__write_u64_file(meta_path, emit_key);
                 }
             } else {
-                int err = cc_compile_with_config(src_abs, c_out, cfg);
+                int err = cc__compile_with_env(base_cli_opt, src_abs, c_out, cfg);
                 if (err != 0) return err;
             }
         }
@@ -1502,13 +1519,13 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
             if (summary_out) { summary_out->reuse_emit_c = 1; summary_out->did_emit_c = 0; }
             // skip emit
         } else {
-            int err = cc_compile_with_config(opt->in_path, opt->c_out_path, &cfg);
+            int err = cc__compile_with_env(opt, opt->in_path, opt->c_out_path, &cfg);
             if (err != 0) return err;
             (void)cc__write_u64_file(meta_path, emit_key);
             if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
         }
     } else if (!is_raw_c) {
-        int err = cc_compile_with_config(opt->in_path, opt->c_out_path, &cfg);
+        int err = cc__compile_with_env(opt, opt->in_path, opt->c_out_path, &cfg);
         if (err != 0) return err;
         if (summary_out) { summary_out->reuse_emit_c = 0; summary_out->did_emit_c = 1; }
     }
@@ -2007,6 +2024,8 @@ static int run_build_mode(int argc, char** argv) {
     int summary = 0;
     CCMode mode = CC_MODE_LINK;
     int no_cache = 0;
+    int strict_deadlock = 0;
+    int strict_deadlock_set = 0;
 
     enum {
         CC_BUILD_STEP_DEFAULT = 0,
@@ -2065,6 +2084,8 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--debug") == 0 || strcmp(argv[i], "-g") == 0) { opt_debug = 1; continue; }
         if (strcmp(argv[i], "--summary") == 0) { summary = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
+        if (strcmp(argv[i], "--strict-deadlock") == 0) { strict_deadlock = 1; strict_deadlock_set = 1; continue; }
+        if (strcmp(argv[i], "--no-strict-deadlock") == 0) { strict_deadlock = 0; strict_deadlock_set = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); goto parse_fail; }
             out_dir = argv[++i];
@@ -2179,6 +2200,14 @@ static int run_build_mode(int argc, char** argv) {
         strncat(combined_cc_flags, def, sizeof(combined_cc_flags) - strlen(combined_cc_flags) - 1);
     }
     cc_flags = combined_cc_flags[0] ? combined_cc_flags : cc_flags;
+
+    /* Apply deadlock strictness env (if requested). */
+    if (strict_deadlock_set) {
+        CCBuildOptions tmp = {0};
+        tmp.strict_deadlock = strict_deadlock;
+        tmp.strict_deadlock_set = 1;
+        cc__apply_deadlock_env(&tmp);
+    }
 
     // Apply output directory override before creating/deriving any outputs.
     cc_set_out_dir(out_dir, bin_dir);
@@ -2503,6 +2532,8 @@ static int run_build_mode(int argc, char** argv) {
                 .out_dir = g_out_root,
                 .bin_dir = g_bin_root,
                 .no_cache = no_cache,
+                .strict_deadlock = strict_deadlock,
+                .strict_deadlock_set = strict_deadlock_set,
                 .cli_names = cli_names,
                 .cli_values = cli_values,
                 .cli_count = cli_count,
@@ -2732,6 +2763,8 @@ static int run_build_mode(int argc, char** argv) {
             .out_dir = g_out_root,
             .bin_dir = g_bin_root,
             .no_cache = no_cache,
+            .strict_deadlock = strict_deadlock,
+            .strict_deadlock_set = strict_deadlock_set,
             .cli_names = cli_names,
             .cli_values = cli_values,
             .cli_count = cli_count,
@@ -2835,14 +2868,14 @@ static int run_build_mode(int argc, char** argv) {
                 if (file_exists(c_bufs[i]) && cc__read_u64_file(meta_path, &prev) == 0 && prev == emit_key) {
                     emit_reused++;
                 } else {
-                    int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                    int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                     if (err != 0) goto parse_fail;
                     (void)cc__write_u64_file(meta_path, emit_key);
                     emit_built++;
                 }
             } else {
                 if (!is_raw_c) {
-                    int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                    int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                     if (err != 0) goto parse_fail;
                     emit_built++;
                 }
@@ -3046,6 +3079,8 @@ static int run_build_mode(int argc, char** argv) {
         .out_dir = g_out_root,
         .bin_dir = g_bin_root,
         .no_cache = no_cache,
+        .strict_deadlock = strict_deadlock,
+        .strict_deadlock_set = strict_deadlock_set,
         .cli_names = cli_names,
         .cli_values = cli_values,
         .cli_count = cli_count,
@@ -3157,6 +3192,8 @@ int main(int argc, char **argv) {
     int keep_c = 1;
     int verbose = 0;
     int no_cache = 0;
+    int strict_deadlock = 0;
+    int strict_deadlock_set = 0;
     CCMode mode = CC_MODE_LINK;
 
     for (int i = 1; i < argc; ++i) {
@@ -3177,6 +3214,8 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--no-cache") == 0) { no_cache = 1; continue; }
+        if (strcmp(argv[i], "--strict-deadlock") == 0) { strict_deadlock = 1; strict_deadlock_set = 1; continue; }
+        if (strcmp(argv[i], "--no-strict-deadlock") == 0) { strict_deadlock = 0; strict_deadlock_set = 1; continue; }
         if (strcmp(argv[i], "--out-dir") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --out-dir requires a path\n"); usage(argv[0]); return 1; }
             out_dir = argv[++i];
@@ -3226,6 +3265,14 @@ int main(int argc, char **argv) {
         // Positional input.
         if (pos_count >= max_pos) { fprintf(stderr, "cc: too many input files (max %d)\n", max_pos); return 1; }
         pos_args[pos_count++] = argv[i];
+    }
+
+    /* Apply deadlock strictness env (if requested). */
+    if (strict_deadlock_set) {
+        CCBuildOptions tmp = {0};
+        tmp.strict_deadlock = strict_deadlock;
+        tmp.strict_deadlock_set = 1;
+        cc__apply_deadlock_env(&tmp);
     }
 
     // If both are provided, debug wins (safe default).
@@ -3345,13 +3392,13 @@ int main(int argc, char **argv) {
                 if (is_raw_c) {
                     if (cc__copy_file(inputs[i], c_bufs[i]) != 0) return 1;
                 } else {
-                    int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                    int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                     if (err != 0) return 1;
                 }
                 continue;
             }
             if (!is_raw_c) {
-                int err = cc_compile_with_config(inputs[i], c_bufs[i], &cfg);
+                int err = cc__compile_with_env(NULL, inputs[i], c_bufs[i], &cfg);
                 if (err != 0) return 1;
             }
             if (mode != CC_MODE_EMIT_C) {
@@ -3451,6 +3498,8 @@ int main(int argc, char **argv) {
         .out_dir = g_out_root,
         .bin_dir = g_bin_root,
         .no_cache = no_cache,
+        .strict_deadlock = strict_deadlock,
+        .strict_deadlock_set = strict_deadlock_set,
         .cli_names = NULL,
         .cli_values = NULL,
         .cli_count = 0,

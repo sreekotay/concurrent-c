@@ -11,7 +11,7 @@ int main(void) {
     // Create a buffered channel that sends Result types
     CCResult_int_ParseError[~ 4 >] tx;  // Buffer 4 items
     CCResult_int_ParseError[~ 4 <] rx;
-    channel_pair(&tx, &rx);
+    CCChan* ch = channel_pair(&tx, &rx);
     
     // Create and send a success value
     int!ParseError ok_val = cc_ok_CCResult_int_ParseError(42);
@@ -39,7 +39,7 @@ int main(void) {
     // The actual error payload is transmitted correctly
     
     chan_close(tx);
-    chan_free(tx);
+    cc_chan_free(ch);
     
     printf("chan_error_type_smoke: OK\n");
     return 0;

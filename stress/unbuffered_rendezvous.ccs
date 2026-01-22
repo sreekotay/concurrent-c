@@ -1,0 +1,87 @@
+/*
+ * Stress Test: Unbuffered Rendezvous
+ *
+ * Tests unbuffered (rendezvous) channels under heavy concurrent load.
+ * Each send must synchronize with a receive.
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define NUM_PAIRS 50
+#define MSGS_PER_PAIR 100
+
+cc_atomic_int g_total_sent = 0;
+cc_atomic_int g_total_received = 0;
+cc_atomic_int g_checksum_sent = 0;
+cc_atomic_int g_checksum_received = 0;
+
+/* Global unbuffered channel for many-to-many test */
+int[~ >] g_tx;  /* Unbuffered */
+int[~ <] g_rx;
+CCChan* g_ch;
+
+int main(void) {
+    printf("unbuffered_rendezvous: %d pairs x %d msgs\n", NUM_PAIRS, MSGS_PER_PAIR);
+
+    g_ch = channel_pair(&g_tx, &g_rx);
+
+    @nursery {
+        /* Receivers - must be ready before senders can proceed */
+        for (int r = 0; r < NUM_PAIRS; r++) {
+            int receiver_id = r;
+            spawn(() => {
+                int val;
+                for (int i = 0; i < MSGS_PER_PAIR; i++) {
+                    if (chan_recv(g_rx, &val) == 0) {
+                        cc_atomic_fetch_add(&g_total_received, 1);
+                        cc_atomic_fetch_add(&g_checksum_received, val);
+                    }
+                }
+            });
+        }
+
+        /* Senders - each send blocks until a receiver is ready */
+        for (int s = 0; s < NUM_PAIRS; s++) {
+            int sender_id = s;
+            spawn(() => {
+                for (int i = 0; i < MSGS_PER_PAIR; i++) {
+                    int val = sender_id * 1000 + i;
+                    chan_send(g_tx, val);
+                    cc_atomic_fetch_add(&g_total_sent, 1);
+                    cc_atomic_fetch_add(&g_checksum_sent, val);
+                }
+            });
+        }
+    }
+
+    chan_close(g_tx);
+    cc_chan_free(g_ch);
+
+    int sent = cc_atomic_load(&g_total_sent);
+    int received = cc_atomic_load(&g_total_received);
+    int chk_sent = cc_atomic_load(&g_checksum_sent);
+    int chk_recv = cc_atomic_load(&g_checksum_received);
+    int expected = NUM_PAIRS * MSGS_PER_PAIR;
+
+    printf("unbuffered_rendezvous: sent=%d, received=%d (expected=%d)\n",
+           sent, received, expected);
+    printf("unbuffered_rendezvous: checksum sent=%d, received=%d\n",
+           chk_sent, chk_recv);
+
+    if (sent != expected) {
+        printf("ERROR: sent count mismatch\n");
+        return 1;
+    }
+    if (received != expected) {
+        printf("ERROR: received count mismatch\n");
+        return 2;
+    }
+    if (chk_sent != chk_recv) {
+        printf("ERROR: checksum mismatch (data corruption)\n");
+        return 3;
+    }
+
+    printf("unbuffered_rendezvous: PASS\n");
+    return 0;
+}

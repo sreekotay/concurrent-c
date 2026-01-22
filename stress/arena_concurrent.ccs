@@ -1,0 +1,151 @@
+/*
+ * Stress Test: Arena Concurrent Allocations
+ *
+ * Tests arena allocations from multiple concurrent tasks.
+ * The arena API is thread-safe using atomic CAS.
+ */
+#include "cc_runtime.cch"
+#include "cc_arena.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+#include <string.h>
+
+#define NUM_WORKERS 16
+#define ALLOCS_PER_WORKER 100
+#define ARENA_SIZE (1024 * 1024)  /* 1MB */
+
+cc_atomic_int g_successful_allocs = 0;
+cc_atomic_int g_failed_allocs = 0;
+cc_atomic_int g_bytes_written = 0;
+
+/* Global arena and backing storage */
+CCArena g_arena;
+uint8_t g_arena_buffer[ARENA_SIZE];
+
+/* Worker that performs many allocations */
+void arena_worker(int worker_id) {
+    for (int i = 0; i < ALLOCS_PER_WORKER; i++) {
+        /* Vary allocation sizes */
+        size_t size = 16 + (worker_id * 7 + i * 13) % 256;
+
+        void* ptr = cc_arena_alloc(&g_arena, size, 8);
+        if (ptr != NULL) {
+            /* Write a pattern to verify memory is usable */
+            memset(ptr, (uint8_t)(worker_id ^ i), size);
+            cc_atomic_fetch_add(&g_successful_allocs, 1);
+            cc_atomic_fetch_add(&g_bytes_written, (int)size);
+        } else {
+            cc_atomic_fetch_add(&g_failed_allocs, 1);
+        }
+    }
+}
+
+/* Test concurrent allocations */
+int test_concurrent_alloc(void) {
+    printf("  concurrent_alloc: %d workers x %d allocs\n", NUM_WORKERS, ALLOCS_PER_WORKER);
+
+    /* Initialize arena */
+    int err = cc_arena_init(&g_arena, g_arena_buffer, ARENA_SIZE);
+    if (err != 0) {
+        printf("ERROR: arena init failed\n");
+        return 1;
+    }
+
+    /* Reset counters */
+    cc_atomic_store(&g_successful_allocs, 0);
+    cc_atomic_store(&g_failed_allocs, 0);
+    cc_atomic_store(&g_bytes_written, 0);
+
+    @nursery {
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            int worker_id = w;
+            spawn(() => {
+                arena_worker(worker_id);
+            });
+        }
+    }
+
+    int success = cc_atomic_load(&g_successful_allocs);
+    int failed = cc_atomic_load(&g_failed_allocs);
+    int bytes = cc_atomic_load(&g_bytes_written);
+    int expected_allocs = NUM_WORKERS * ALLOCS_PER_WORKER;
+
+    printf("  concurrent_alloc: success=%d, failed=%d, bytes=%d\n",
+           success, failed, bytes);
+
+    /* Most allocations should succeed (may fail near capacity) */
+    if (success + failed != expected_allocs) {
+        printf("ERROR: alloc count mismatch\n");
+        return 2;
+    }
+
+    return 0;
+}
+
+/* Test arena reset under concurrent access */
+int test_reset_during_use(void) {
+    printf("  reset_during_use: testing arena reset safety\n");
+
+    cc_arena_reset(&g_arena);
+
+    /* Reset counters */
+    cc_atomic_store(&g_successful_allocs, 0);
+    cc_atomic_store(&g_failed_allocs, 0);
+
+    @nursery {
+        /* Some workers allocate */
+        for (int w = 0; w < NUM_WORKERS / 2; w++) {
+            int worker_id = w;
+            spawn(() => {
+                for (int i = 0; i < 50; i++) {
+                    void* ptr = cc_arena_alloc(&g_arena, 64, 8);
+                    if (ptr) {
+                        cc_atomic_fetch_add(&g_successful_allocs, 1);
+                    }
+                }
+            });
+        }
+
+        /* One worker periodically resets (simulates request boundary) */
+        spawn(() => {
+            for (int i = 0; i < 5; i++) {
+                cc_sleep_ms(1);
+                cc_arena_reset(&g_arena);
+            }
+        });
+
+        /* More workers allocate */
+        for (int w = NUM_WORKERS / 2; w < NUM_WORKERS; w++) {
+            int worker_id = w;
+            spawn(() => {
+                for (int i = 0; i < 50; i++) {
+                    void* ptr = cc_arena_alloc(&g_arena, 64, 8);
+                    if (ptr) {
+                        cc_atomic_fetch_add(&g_successful_allocs, 1);
+                    }
+                }
+            });
+        }
+    }
+
+    int success = cc_atomic_load(&g_successful_allocs);
+    printf("  reset_during_use: %d successful allocs (some lost to resets, expected)\n", success);
+
+    /* Just verify no crashes - some allocs will be "lost" due to reset */
+    return 0;
+}
+
+int main(void) {
+    printf("arena_concurrent: starting\n");
+
+    int err = 0;
+
+    err = test_concurrent_alloc();
+    if (err != 0) return err;
+
+    err = test_reset_during_use();
+    if (err != 0) return err;
+
+    printf("arena_concurrent: PASS\n");
+    return 0;
+}

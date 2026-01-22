@@ -1901,13 +1901,30 @@ Channels are created by producing a `(tx, rx)` pair:
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-channel_pair(&tx, &rx);  // the only way to create a channel
+CCChan* ch = channel_pair(&tx, &rx);  // returns the underlying channel
 ```
 
 Notes:
-- `channel_pair` initializes both handles to the same underlying channel.
-- `close(&tx)` closes the underlying channel.
-- `free(&tx)` and `free(&rx)` free their respective handles; freeing requires no other threads are using the channel (same as today).
+- `channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
+- `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
+- `chan_close(tx)` (or `closing(tx)` in a nursery) closes the underlying channel.
+- `chan_free(ch)` frees the channel. Always free the channel, not the handles.
+
+**Ownership idiom:**
+```c
+int[~10 >] tx;
+int[~10 <] rx;
+CCChan* ch = channel_pair(&tx, &rx);
+
+@nursery {
+    spawn(consumer(rx));
+    @nursery closing(tx) {
+        spawn(producer(tx));
+    }
+}
+
+chan_free(ch);  // free what you created
+```
 
 **Error channels:**
 
@@ -1916,11 +1933,11 @@ Channels can carry results using `T!E` as the element type:
 ```c
 int!ParseError[~100 >] results_tx;        // async sender of Result<int, ParseError>
 int!ParseError[~100 <] results_rx;        // async receiver of Result<int, ParseError>
-channel_pair(&results_tx, &results_rx);
+CCChan* results_ch = channel_pair(&results_tx, &results_rx);
 
 int!ParseError[~100 sync >] sync_results_tx;   // sync sender
 int!ParseError[~100 sync <] sync_results_rx;   // sync receiver
-channel_pair(&sync_results_tx, &sync_results_rx);
+CCChan* sync_results_ch = channel_pair(&sync_results_tx, &sync_results_rx);
 ```
 
 **Rule (recv return type):** `recv()` always returns `(ElemType)?`. For a channel with element type `T!E`, `recv()` returns `(T!E)?` which is spelled `T!E?`. The outer `?` indicates channel state (null = closed+drained); the inner `!E` is application-level success/failure.
@@ -2806,14 +2823,18 @@ In brief:
 ```c
 int[~ >] tx;
 int[~ <] rx;
-channel_pair(&tx, &rx);
+CCChan* ch = channel_pair(&tx, &rx);
+// ... use tx, rx ...
+chan_free(ch);
 ```
 
 **Sync channels:**
 ```c
 int[~ sync >] tx;
 int[~ sync <] rx;
-channel_pair(&tx, &rx);
+CCChan* ch = channel_pair(&tx, &rx);
+// ... use tx, rx ...
+chan_free(ch);
 ```
 
 **Rule:** Channel mode is fixed in the handle type. An `int[~ ...]` handle is always async; an `int[~ sync ...]` handle is always sync. Operations must match the handle type.
@@ -2829,7 +2850,7 @@ Async channels **suspend cooperatively** and require `await`. They are used in `
 ```c
 int[~ >] tx;
 int[~ <] rx;
-channel_pair(&tx, &rx);
+CCChan* ch = channel_pair(&tx, &rx);
 
 // Must use await
 int? x = await recv(&rx);                 // suspends, returns optional
@@ -2840,6 +2861,8 @@ bool ok = await send_cancellable(&tx, 42);
 // Cannot use await
 int x = recv(&rx);                        // ❌ ERROR: missing await
 send(&tx, 42);                            // ❌ ERROR: missing await
+
+chan_free(ch);                            // free the channel when done
 ```
 
 **Rule:** All operations on async channels require `await`. Omitting `await` is a compile error (regardless of context).
@@ -3015,7 +3038,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 ```c
 int[~ >] work_tx;
 int[~ <] work_rx;
-channel_pair(&work_tx, &work_rx);
+CCChan* work_ch = channel_pair(&work_tx, &work_rx);
 
 @async void producer() {
     for (int i = 0; i < 100; i++) {
@@ -3035,6 +3058,8 @@ channel_pair(&work_tx, &work_rx);
     spawn (producer());
     spawn (consumer());
 }
+
+chan_free(work_ch);
 ```
 
 **Pattern 2: Thread Pool (Sync)**
@@ -3042,11 +3067,11 @@ channel_pair(&work_tx, &work_rx);
 ```c
 int[~ sync >] requests_tx;
 int[~ sync <] requests_rx;
-channel_pair(&requests_tx, &requests_rx);
+CCChan* req_ch = channel_pair(&requests_tx, &requests_rx);
 
 int[~ sync >] responses_tx;
 int[~ sync <] responses_rx;
-channel_pair(&responses_tx, &responses_rx);
+CCChan* resp_ch = channel_pair(&responses_tx, &responses_rx);
 
 void worker_thread() {
     while (true) {
@@ -3066,6 +3091,9 @@ void main() {
     int resp = recv(&responses_rx);
     
     t.join();
+    
+    chan_free(req_ch);
+    chan_free(resp_ch);
 }
 ```
 
@@ -3755,6 +3783,62 @@ block_on(producer(tx, 5));     // ⚠ WARNING: producer is not @nonblocking
 **Phase-in:**
 - Phase 1 (current): Warning
 - Phase 2 (future): Error (requires explicit opt-out or `cc_concurrent`)
+
+#### Runtime Deadlock Detection
+
+For deadlocks that escape compile-time analysis (e.g., complex patterns, dynamic channel creation), Concurrent-C provides optional runtime deadlock detection.
+
+**Enabling:**
+
+```bash
+CC_DEADLOCK_DETECT=1 ./my_program
+```
+
+**How it works:**
+
+1. **Track blocked threads:** Each thread entering a blocking operation (channel send/recv waiting, `cc_block_on`) increments a global blocked counter
+2. **Track progress:** Each successful channel operation or task completion increments a progress counter
+3. **Watchdog thread:** Periodically checks if:
+   - All threads are blocked AND
+   - No progress has been made for 3+ seconds
+4. **Diagnostic output:** When deadlock detected, prints:
+   - Number of blocked threads
+   - What each thread is blocked on (channel send, recv, cc_block_on)
+   - Common causes and suggested fixes
+
+**Example output:**
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║              ⚠️  POTENTIAL DEADLOCK DETECTED ⚠️               ║
+╠══════════════════════════════════════════════════════════════╣
+║ 2 thread(s) blocked for 3.0+ seconds with no progress.     ║
+╚══════════════════════════════════════════════════════════════╝
+  Thread 0: blocked on cc_block_on (waiting for async task)
+  Thread 1: blocked on chan_recv (channel empty, waiting for sender)
+
+Common causes:
+  • cc_block_on() inside spawn() or @nursery
+  • Producer/consumer mismatch (sends without receivers)
+  • Missing channel close (receiver waiting forever)
+
+Suggested fixes:
+  • Use cc_block_all() to run multiple async tasks concurrently
+  • Use sync channel ops in spawn() instead of async
+  • Ensure channels are closed when producers finish
+```
+
+**Key features:**
+
+- **No false positives on temporary saturation:** Only triggers if blocked with zero progress for multiple seconds
+- **Minimal overhead when disabled:** All tracking is no-op when `CC_DEADLOCK_DETECT` is not set
+- **Non-intrusive:** Warns but doesn't abort (deadlocked programs can still be killed normally)
+
+**Limitations:**
+
+- Cannot detect all deadlocks (e.g., distributed deadlocks across processes)
+- Watchdog thread adds minimal overhead (~1 thread, polling every 500ms)
+- Progress counter may overflow on very long-running programs (wraparound is benign)
 
 #### Task Combinators
 

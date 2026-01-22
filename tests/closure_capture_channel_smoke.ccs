@@ -5,7 +5,7 @@
 int main(void) {
     int[~4 >] tx;
     int[~4 <] rx;
-    channel_pair(&tx, &rx);
+    CCChan* ch = channel_pair(&tx, &rx);
     
     // Capture channel handle in closure
     CCClosure0 producer = [tx]() => {
@@ -27,7 +27,7 @@ int main(void) {
     
     assert(sum == 0 + 10 + 20);  // 0 + 10 + 20 = 30
     
-    chan_free(rx);
+    cc_chan_free(ch);
     
     printf("closure_capture_channel_smoke: OK\n");
     return 0;

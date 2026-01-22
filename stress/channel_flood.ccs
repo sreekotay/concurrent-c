@@ -16,7 +16,7 @@ int g_received = 0;
 int main(void) {
     int[~CHAN_CAPACITY >] tx;
     int[~CHAN_CAPACITY <] rx;
-    channel_pair(&tx, &rx);
+    CCChan* ch = channel_pair(&tx, &rx);
 
     printf("channel_flood: %d producers x %d msgs = %d total\n",
            NUM_PRODUCERS, MSGS_PER_PRODUCER, NUM_PRODUCERS * MSGS_PER_PRODUCER);
@@ -42,7 +42,7 @@ int main(void) {
         }
     }
 
-    chan_free(tx);
+    cc_chan_free(ch);
 
     int expected = NUM_PRODUCERS * MSGS_PER_PRODUCER;
     printf("channel_flood: received %d/%d\n", g_received, expected);

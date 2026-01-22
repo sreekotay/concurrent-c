@@ -174,12 +174,25 @@ static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const c
     fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
 }
 
+static void cc__emit_warn(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
+    int line = n ? n->line_start : 0;
+    int col = n ? n->col_start : 0;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: warning: %s\n", path, line, col, msg);
+}
+
 static void cc__emit_note(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
     const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
     int line = n ? n->line_start : 0;
     int col = n ? n->col_start : 0;
     if (col <= 0) col = 1;
     fprintf(stderr, "%s:%d:%d: note: %s\n", path, line, col, msg);
+}
+
+static int cc__deadlock_warn_as_error(void) {
+    const char* s = getenv("CC_STRICT_DEADLOCK");
+    return s && s[0] == '1';
 }
 
 /* Local aliases for the shared helpers */
@@ -227,6 +240,111 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
     return 0;
 }
 
+static int cc__body_has_loop_keyword(const char* buf, size_t len) {
+    if (!buf || len == 0) return 0;
+    for (size_t i = 0; i + 2 < len; i++) {
+        if (buf[i] == 'w' && i + 4 <= len && memcmp(buf + i, "while", 5) == 0) {
+            if ((i == 0 || !cc__is_ident_ch(buf[i - 1])) &&
+                (i + 5 >= len || !cc__is_ident_ch(buf[i + 5]))) return 1;
+        }
+        if (buf[i] == 'f' && i + 2 <= len && memcmp(buf + i, "for", 3) == 0) {
+            if ((i == 0 || !cc__is_ident_ch(buf[i - 1])) &&
+                (i + 3 >= len || !cc__is_ident_ch(buf[i + 3]))) return 1;
+        }
+        if (buf[i] == 'd' && i + 1 <= len && memcmp(buf + i, "do", 2) == 0) {
+            if ((i == 0 || !cc__is_ident_ch(buf[i - 1])) &&
+                (i + 2 >= len || !cc__is_ident_ch(buf[i + 2]))) return 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__body_has_await_recv(const char* buf, size_t len, const char* chname, const char* rxname) {
+    if (!buf || len == 0) return 0;
+    if (!memmem(buf, len, "await", 5)) return 0;
+    if (!memmem(buf, len, "recv", 4)) return 0;
+    if (!memmem(buf, len, chname, strlen(chname)) &&
+        !(rxname && rxname[0] && memmem(buf, len, rxname, strlen(rxname)))) return 0;
+    return 1;
+}
+
+static void cc__emit_deadlock_diag(const CCCheckerCtx* ctx, const StubNodeView* sn,
+                                   const char* warn_msg, const char* note_msg) {
+    if (cc__deadlock_warn_as_error()) {
+        cc__emit_err(ctx, sn, warn_msg);
+        if (note_msg) cc__emit_note(ctx, sn, note_msg);
+        if (ctx) ((CCCheckerCtx*)ctx)->errors++;
+    } else {
+        cc__emit_warn(ctx, sn, warn_msg);
+        if (note_msg) cc__emit_note(ctx, sn, note_msg);
+        if (ctx) ((CCCheckerCtx*)ctx)->warnings++;
+    }
+}
+
+static size_t cc__find_block_end_naive(const char* buf, size_t n, size_t start_brace) {
+    if (!buf || start_brace >= n || buf[start_brace] != '{') return 0;
+    int depth = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    for (size_t i = start_brace; i < n; i++) {
+        char c = buf[i];
+        if (c == '\n') { in_line_comment = 0; }
+        if (in_line_comment) continue;
+        if (in_block_comment) {
+            if (c == '*' && i + 1 < n && buf[i + 1] == '/') { in_block_comment = 0; i++; }
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) { i++; continue; }
+            if (c == '"') in_str = 0;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) { i++; continue; }
+            if (c == '\'') in_chr = 0;
+            continue;
+        }
+        if (c == '/' && i + 1 < n) {
+            if (buf[i + 1] == '/') { in_line_comment = 1; i++; continue; }
+            if (buf[i + 1] == '*') { in_block_comment = 1; i++; continue; }
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+
+        if (c == '{') depth++;
+        else if (c == '}') {
+            depth--;
+            if (depth == 0) return i + 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__find_next_spawn_body(const char* buf, size_t n, size_t start,
+                                    size_t* out_body_s, size_t* out_body_e) {
+    if (!buf || !out_body_s || !out_body_e) return 0;
+    for (size_t i = start; i + 4 < n; i++) {
+        if (buf[i] == 's' && memcmp(buf + i, "spawn", 5) == 0) {
+            if ((i > 0 && cc__is_ident_ch(buf[i - 1])) ||
+                (i + 5 < n && cc__is_ident_ch(buf[i + 5]))) {
+                continue;
+            }
+            /* Find the first '{' after spawn(...) */
+            size_t j = i + 5;
+            while (j < n && buf[j] != '{') j++;
+            if (j >= n || buf[j] != '{') continue;
+            size_t end = cc__find_block_end_naive(buf, n, j);
+            if (end == 0) continue;
+            *out_body_s = j;
+            *out_body_e = end;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int cc__ends_with(const char* s, const char* suf) {
     if (!s || !suf) return 0;
     size_t sl = strlen(s);
@@ -234,6 +352,26 @@ static int cc__ends_with(const char* s, const char* suf) {
     if (su > sl) return 0;
     return memcmp(s + (sl - su), suf, su) == 0;
 }
+
+/* NOTE: We removed overly-broad heuristics for cc_block_on inside spawn/nursery.
+ * These had too many false positives - cc_block_on is often fine if the task
+ * doesn't wait on peers. We rely on runtime deadlock detection for fuzzy cases.
+ * 
+ * The ONLY compile-time error we keep is the 100% guaranteed deadlock:
+ * @nursery closing(ch) + recv-until-close inside the same nursery.
+ */
+
+/* Placeholder to keep line numbers stable */
+static void cc__check_spawn_block_on_text(CCCheckerCtx* ctx, const char* buf, size_t n) {
+    (void)ctx; (void)buf; (void)n;
+    /* Removed: too many false positives. Runtime detection handles real deadlocks. */
+}
+
+static void cc__check_nursery_block_on_text(CCCheckerCtx* ctx, const char* buf, size_t n) {
+    (void)ctx; (void)buf; (void)n;
+    /* Removed: too many false positives. Runtime detection handles real deadlocks. */
+}
+
 
 /* Very small heuristic: detect the most common deadlock footgun:
      @nursery closing(ch) { spawn(() => { while (cc_chan_recv(ch, ...) == 0) { ... } }); }
@@ -365,6 +503,23 @@ static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const cha
                     cc__emit_note(ctx, &sn, "Set CC_ALLOW_NURSERY_CLOSING_DRAIN=1 to bypass this heuristic check.");
                     ctx->errors++;
                     return;
+                }
+            }
+
+            /* Heuristic warning for await/recv loops inside the same closing nursery. */
+            {
+                int has_loop = cc__body_has_loop_keyword(buf + body_s, body_e - body_s);
+                int has_await_recv = cc__body_has_await_recv(buf + body_s, body_e - body_s, chname, rxname);
+                if (has_loop && has_await_recv) {
+                    StubNodeView sn;
+                    memset(&sn, 0, sizeof(sn));
+                    sn.file = ctx->input_path;
+                    sn.line_start = nur_line;
+                    sn.col_start = nur_col;
+                    cc__emit_deadlock_diag(ctx, &sn,
+                                           "CC: warning: `@nursery closing(ch)` + await/recv in a loop may deadlock (closing happens after children exit). "
+                                           "Prefer draining outside the nursery, or close explicitly / send a sentinel.",
+                                           "Set CC_ALLOW_NURSERY_CLOSING_DRAIN=1 to bypass this heuristic check.");
                 }
             }
         }
@@ -1099,6 +1254,20 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
 
                     /* Heuristic deadlock check for `@nursery closing(...)` misuse. */
                     cc__check_nursery_closing_deadlock_text(ctx, buf, got);
+                    if (ctx->errors) {
+                        free(buf);
+                        fclose(f);
+                        return -1;
+                    }
+                    /* Heuristic warning for spawn()+cc_block_on() footgun. */
+                    cc__check_spawn_block_on_text(ctx, buf, got);
+                    if (ctx->errors) {
+                        free(buf);
+                        fclose(f);
+                        return -1;
+                    }
+                    /* Heuristic warning for cc_block_on inside nursery bodies. */
+                    cc__check_nursery_block_on_text(ctx, buf, got);
                     if (ctx->errors) {
                         free(buf);
                         fclose(f);

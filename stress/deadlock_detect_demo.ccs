@@ -1,0 +1,65 @@
+/*
+ * Test: Deadlock Detection
+ *
+ * This test intentionally creates a deadlock pattern that should be detected
+ * by the runtime deadlock watchdog when CC_DEADLOCK_DETECT=1.
+ *
+ * The pattern: cc_block_on inside spawn with channel ops that wait on each other.
+ * 
+ * Expected behavior:
+ * - Without CC_DEADLOCK_DETECT=1: hangs forever
+ * - With CC_DEADLOCK_DETECT=1: prints deadlock warning after ~3 seconds
+ */
+#include "cc_runtime.cch"
+#include "std/task_intptr.cch"
+#include <stdio.h>
+
+@async int producer(CCChanTx tx) {
+    printf("Producer: about to send...\n");
+    int val = 42;
+    intptr_t rc = await tx.send(val);
+    printf("Producer: sent! rc=%ld\n", (long)rc);
+    return 1;
+}
+
+@async int consumer(CCChanRx rx) {
+    printf("Consumer: about to recv...\n");
+    int v = 0;
+    intptr_t rc = await rx.recv(&v);
+    printf("Consumer: received %d, rc=%ld\n", v, (long)rc);
+    return v;
+}
+
+int main(void) {
+    printf("Deadlock Detection Test\n");
+    printf("========================\n");
+    printf("This test creates an intentional deadlock.\n");
+    printf("Set CC_DEADLOCK_DETECT=1 to enable detection.\n\n");
+    
+    int[~ >] tx;  /* Unbuffered channel - requires rendezvous */
+    int[~ <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+    
+    /* THIS IS THE BAD PATTERN */
+    /* cc_block_on inside spawn blocks the spawn's thread,
+       so neither the producer nor consumer can make progress */
+    
+    @nursery {
+        /* Consumer spawn - blocks on cc_block_on waiting for recv */
+        spawn(() => {
+            int v = cc_block_on(int, consumer(rx));  /* Blocks this thread! */
+            (void)v;
+        });
+        
+        /* Producer spawn - blocks on cc_block_on waiting for send */
+        spawn(() => {
+            int r = cc_block_on(int, producer(tx));  /* Blocks this thread! */
+            (void)r;
+        });
+    }
+    
+    /* Never reached - deadlock above */
+    printf("Completed!\n");
+    cc_chan_free(ch);
+    return 0;
+}

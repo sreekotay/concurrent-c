@@ -27,7 +27,7 @@ static void sleep_ms(int ms) {
 int main(void) {
     int[~ >] tx;
     int[~ <] rx;
-    channel_pair(&tx, &rx); /* unbuffered */
+    CCChan* ch = channel_pair(&tx, &rx); /* unbuffered */
 
     Ctx c = {0};
     c.tx = tx;
@@ -45,7 +45,7 @@ int main(void) {
     pthread_join(th, NULL);
 
     chan_close(tx);
-    chan_free(tx);
+    cc_chan_free(ch);
     return (out == 7 && c.done == 1) ? 0 : 4;
 }
 

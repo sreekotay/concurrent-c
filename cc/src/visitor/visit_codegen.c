@@ -329,9 +329,33 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 if (*p != ')') return NULL;
                 p++;
                 const char* after = cc__skip_ws_local2(p);
-                if (*after != ';') {
+                
+                /* Detect if this is an expression (assigned to CCChan*) or a statement.
+                 * Look backwards from call_start to find '=' indicating assignment. */
+                int is_expression = 0;
+                size_t assign_start = call_start;
+                {
+                    /* Scan backwards skipping whitespace to find '=' */
+                    size_t scan = call_start;
+                    while (scan > 0 && (src[scan-1] == ' ' || src[scan-1] == '\t')) scan--;
+                    if (scan > 0 && src[scan-1] == '=') {
+                        is_expression = 1;
+                        /* Find start of assignment (skip backwards past the variable decl) */
+                        scan--;
+                        while (scan > 0 && (src[scan-1] == ' ' || src[scan-1] == '\t')) scan--;
+                        /* Now scan backwards to find start of statement (after ;, {, or start of src) */
+                        while (scan > 0) {
+                            char pc = src[scan-1];
+                            if (pc == ';' || pc == '{' || pc == '}' || pc == '\n') break;
+                            scan--;
+                        }
+                        assign_start = scan;
+                    }
+                }
+                
+                if (!is_expression && *after != ';') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair must be used as a statement (end with ';') at %s:%d:%d\n",
+                    fprintf(stderr, "CC: error: channel_pair must be used as a statement (end with ';') or as an expression assigned to CCChan* at %s:%d:%d\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col);
     return NULL;
@@ -472,22 +496,44 @@ static char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx, const 
                 if (tx_bp == 1) bp_enum = "CC_CHAN_MODE_DROP_NEW";
                 else if (tx_bp == 2) bp_enum = "CC_CHAN_MODE_DROP_OLD";
 
-                /* Emit up to call_start, then replace call statement. */
-                cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
+                /* Emit up to start point, then replace call. */
                 char repl[1024];
-                snprintf(repl, sizeof(repl),
-                         "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%s, %s, %d, %s, %d, %s, &%s, &%s); "
-                         "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
-                         (tx_mode == 1) ? "sync" : "async",
-                         tx_has_topo ? tx_topo : "<default>",
-                         cap_expr,
-                         bp_enum,
-                         allow_take ? 1 : 0,
-                         elem_sz_expr,
-                         (tx_mode == 1) ? 1 : 0,  /* is_sync */
-                         topo_enum,
-                         tx_name, rx_name);
-                cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
+                if (is_expression) {
+                    /* Expression form: CCChan* ch = channel_pair(&tx, &rx);
+                     * Emit up to assign_start, preserve the "CCChan* ch = ", emit returning call */
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
+                    /* Copy the "CCChan* ch = " part */
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
+                    snprintf(repl, sizeof(repl),
+                             "/* channel_pair: mode=%s topo=%s */ cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, &%s, &%s);",
+                             (tx_mode == 1) ? "sync" : "async",
+                             tx_has_topo ? tx_topo : "<default>",
+                             cap_expr,
+                             bp_enum,
+                             allow_take ? 1 : 0,
+                             elem_sz_expr,
+                             (tx_mode == 1) ? 1 : 0,  /* is_sync */
+                             topo_enum,
+                             tx_name, rx_name);
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
+                } else {
+                    /* Statement form: channel_pair(&tx, &rx);
+                     * Use do-while wrapper with error handling */
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
+                    snprintf(repl, sizeof(repl),
+                             "/* channel_pair: mode=%s topo=%s */ do { int __cc_err = cc_chan_pair_create_full(%s, %s, %d, %s, %d, %s, &%s, &%s); "
+                             "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
+                             (tx_mode == 1) ? "sync" : "async",
+                             tx_has_topo ? tx_topo : "<default>",
+                             cap_expr,
+                             bp_enum,
+                             allow_take ? 1 : 0,
+                             elem_sz_expr,
+                             (tx_mode == 1) ? 1 : 0,  /* is_sync */
+                             topo_enum,
+                             tx_name, rx_name);
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
+                }
 
                 /* Advance i to after the ';' */
                 size_t consumed = (size_t)(after - (src + i));

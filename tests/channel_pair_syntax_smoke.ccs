@@ -3,14 +3,14 @@
 int main(void) {
     int[~3 >] tx;
     int[~3 <] rx;
-    channel_pair(&tx, &rx);
+    CCChan* ch = channel_pair(&tx, &rx);
 
     int v = 42;
     int out = 0;
     if (chan_send(tx, v) != 0) return 1;
     if (chan_recv(rx, &out) != 0) return 2;
     chan_close(tx);
-    chan_free(tx);
+    cc_chan_free(ch);
     return (out == 42) ? 0 : 3;
 }
 

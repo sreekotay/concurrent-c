@@ -1,0 +1,153 @@
+/*
+ * Stress Test: Mixed spawn() and @async Patterns
+ *
+ * SAFE patterns tested:
+ * - spawn() with sync channel ops, consumer OUTSIDE nursery
+ * - cc_block_all/race for compute tasks
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+#include <errno.h>
+
+#define PRODUCERS 4
+#define ITEMS_PER_PRODUCER 20
+
+cc_atomic_int g_sent = 0;
+cc_atomic_int g_received = 0;
+
+/* Simple compute task */
+@async int compute_task(int id) {
+    int sum = 0;
+    for (int i = 0; i < 1000; i++) {
+        sum += (id + i) % 17;
+    }
+    return sum;
+}
+
+/*
+ * Test 1: Producer/consumer with consumer OUTSIDE nursery
+ * This is the correct pattern for "loop until close"
+ */
+int test_consumer_outside(void) {
+    printf("  consumer_outside: %d producers x %d items\n", PRODUCERS, ITEMS_PER_PRODUCER);
+    
+    cc_atomic_store(&g_sent, 0);
+    cc_atomic_store(&g_received, 0);
+    
+    /* Buffer large enough for all items (producers don't block) */
+    int[~100 >] tx;
+    int[~100 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+    
+    /* Producers inside nursery - channel closed when they all finish */
+    @nursery closing(tx) {
+        spawn([tx]() => {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
+                if (chan_send(tx, 0 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+            }
+        });
+        spawn([tx]() => {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
+                if (chan_send(tx, 1 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+            }
+        });
+        spawn([tx]() => {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
+                if (chan_send(tx, 2 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+            }
+        });
+        spawn([tx]() => {
+            for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
+                if (chan_send(tx, 3 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+            }
+        });
+    }
+    
+    /* Consumer OUTSIDE nursery - drains until EPIPE */
+    int val;
+    while (chan_recv(rx, &val) == 0) {
+        cc_atomic_fetch_add(&g_received, 1);
+    }
+    
+    cc_chan_free(ch);
+    
+    int sent = cc_atomic_load(&g_sent);
+    int recv = cc_atomic_load(&g_received);
+    printf("  consumer_outside: sent=%d, received=%d\n", sent, recv);
+    
+    return (sent == recv && sent == PRODUCERS * ITEMS_PER_PRODUCER) ? 0 : 1;
+}
+
+/*
+ * Test 2: cc_block_all for compute tasks
+ */
+int test_block_all_compute(void) {
+    printf("  block_all_compute: 10 rounds x 8 tasks\n");
+    
+    int total_sum = 0;
+    
+    for (int round = 0; round < 10; round++) {
+        CCTaskIntptr tasks[8];
+        for (int i = 0; i < 8; i++) {
+            tasks[i] = compute_task(round * 8 + i);
+        }
+        
+        intptr_t results[8];
+        int err = cc_block_all(8, tasks, results);
+        if (err != 0) {
+            printf("  block_all_compute: round %d failed err=%d\n", round, err);
+            return 1;
+        }
+        
+        for (int i = 0; i < 8; i++) {
+            total_sum += (int)results[i];
+        }
+    }
+    
+    printf("  block_all_compute: total_sum=%d\n", total_sum);
+    return 0;
+}
+
+/*
+ * Test 3: cc_block_race with compute tasks
+ */
+int test_block_race_compute(void) {
+    printf("  block_race_compute: 10 races x 4 tasks\n");
+    
+    for (int round = 0; round < 10; round++) {
+        CCTaskIntptr tasks[4];
+        for (int i = 0; i < 4; i++) {
+            tasks[i] = compute_task(round * 4 + i);
+        }
+        
+        int winner;
+        intptr_t result;
+        int err = cc_block_race(4, tasks, &winner, &result);
+        if (err != 0) {
+            printf("  block_race_compute: round %d failed err=%d\n", round, err);
+            return 1;
+        }
+    }
+    
+    printf("  block_race_compute: PASS\n");
+    return 0;
+}
+
+int main(void) {
+    printf("spawn_async_mixed: starting\n");
+    
+    int err = 0;
+    
+    err = test_consumer_outside();
+    if (err != 0) { printf("FAIL: consumer_outside\n"); return err; }
+    
+    err = test_block_all_compute();
+    if (err != 0) { printf("FAIL: block_all_compute\n"); return err; }
+    
+    err = test_block_race_compute();
+    if (err != 0) { printf("FAIL: block_race_compute\n"); return err; }
+    
+    printf("spawn_async_mixed: PASS\n");
+    return 0;
+}

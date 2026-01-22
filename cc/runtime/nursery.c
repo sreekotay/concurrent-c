@@ -4,6 +4,7 @@
 
 #include "cc_nursery.cch"
 #include "cc_channel.cch"
+#include "cc_deadlock_detect.cch"
 
 #include <errno.h>
 #include <pthread.h>
@@ -53,6 +54,9 @@ static void* cc__nursery_task_trampoline(void* p) {
 }
 
 CCNursery* cc_nursery_create(void) {
+    /* Initialize deadlock detection on first nursery (lazy init, checks env var) */
+    cc_deadlock_detect_init();
+    
     CCNursery* n = (CCNursery*)malloc(sizeof(CCNursery));
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));

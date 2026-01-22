@@ -13,6 +13,7 @@ typedef struct {
     CCSymbolTable* symbols;
     const char* input_path;
     int errors;
+    int warnings;
 } CCCheckerCtx;
 
 // Run the checker; returns 0 on success, non-zero on error. No-op until CC AST is populated.
