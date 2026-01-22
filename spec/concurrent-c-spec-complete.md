@@ -1279,6 +1279,7 @@ size_t gigabytes(size_t n);            // n * 1024 * 1024 * 1024
 - Restoring a checkpoint releases all allocations performed after the checkpoint.
 - Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
 - Arena checkpoints do not alter arena ownership or lifetime rules.
+ - Restoring a checkpoint does not bump arena provenance; uses-after-restore are programmer errors.
 
 ```c
 Arena a = arena(megabytes(1));

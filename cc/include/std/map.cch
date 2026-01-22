@@ -1,17 +1,25 @@
 /*
- * Arena-backed dynamic hash map (khash-style) for Concurrent-C stdlib.
- * - Allocates bucket/flag arrays from a caller-provided CCArena.
- * - Resizes by allocating new tables in the arena and rehashing; old tables
- *   are reclaimed when the arena resets. Growth fails if arena is exhausted.
- *
- * Optional heap-backed variant is provided via CC_MAP_DECL_HEAP for tools/tests.
- * Inspired by klib khash (MIT, Attractive Chaos).
+ * Arena-backed hash map for Concurrent-C stdlib.
+ * 
+ * Built on khashl (MIT, Attractive Chaos) with these benefits:
+ * - 1-bit per bucket flags (32x smaller than naive)
+ * - No tombstones (backshift deletion)
+ * - Fibonacci hashing (better distribution)
+ * - Linear probing (cache-friendly)
+ * 
+ * Usage:
+ *   CC_MAP_DECL_ARENA(int, int, IntMap, hash_i32, eq_i32)
+ *   IntMap *m = IntMap_init(&arena);
+ *   IntMap_put(m, 42, 100, NULL);
+ *   int val; if (IntMap_get(m, 42, &val)) { ... }
  */
 #ifndef CC_STD_MAP_H
 #define CC_STD_MAP_H
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+
 #ifndef __has_include
 #define __has_include(x) 0
 #endif
@@ -25,237 +33,140 @@ typedef int bool;
 #define __bool_true_false_are_defined 1
 #endif
 #endif
-#include <string.h>
 
-#include "../cc_runtime.cch"
-#include "hash.cch"
+#include "../cc_arena.cch"
 
-#define CC__MAP_EMPTY 0
-#define CC__MAP_FULL 1
-#define CC__MAP_TOMB 2
+/*
+ * Arena-backed allocator hooks for khashl.
+ * - Kmalloc/Kcalloc: allocate from arena
+ * - Krealloc: allocate new + copy (old stays in arena until reset)
+ * - Kfree: no-op (arena bulk-frees on reset)
+ */
+#define Kmalloc(km, type, cnt) \
+    ((type*)cc_arena_alloc((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)))
 
-#define CC__MAP_ROUNDUP(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, ++(x))
+#define Kcalloc(km, type, cnt) \
+    ((type*)({ \
+        void *__p = cc_arena_alloc((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)); \
+        if (__p) memset(__p, 0, (cnt) * sizeof(type)); \
+        __p; \
+    }))
 
-// Generic iteration helper for maps with fields flags/keys/vals/n_buckets
-#define CC_MAP_FOREACH(map_ptr, key_lvalue, val_lvalue)                                   \
-    for (size_t __i = 0; (map_ptr) && __i < (map_ptr)->n_buckets; ++__i)                 \
-        if ((map_ptr)->flags[__i] == CC__MAP_FULL &&                                    \
-            ((key_lvalue = (map_ptr)->keys[__i]), (val_lvalue = (map_ptr)->vals[__i]), 1))
+#define Krealloc(km, type, ptr, cnt) \
+    ((type*)({ \
+        size_t __sz = (cnt) * sizeof(type); \
+        type *__new = (type*)cc_arena_alloc((CCArena*)(km), __sz, _Alignof(type)); \
+        if (__new && (ptr)) memcpy(__new, (ptr), __sz); \
+        __new; \
+    }))
 
-// Arena-backed hash map
-// HASH_FN: uint64_t HASH_FN(const K* k)
-// EQ_FN  : bool EQ_FN(const K* a, const K* b)
-#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                                  \
-    typedef struct {                                                                  \
-        size_t n_buckets;                                                             \
-        size_t size;                                                                  \
-        size_t n_occupied;                                                            \
-        uint8_t *flags;                                                               \
-        K *keys;                                                                      \
-        V *vals;                                                                      \
-        CCArena *arena;                                                               \
-    } Name;                                                                           \
-                                                                                      \
-    static inline size_t Name##_mask(const Name *h) { return h->n_buckets - 1; }      \
-    static inline bool Name##_exist(const Name *h, size_t i) { return h->flags[i] == CC__MAP_FULL; } \
-                                                                                      \
-    static inline Name Name##_init(CCArena *arena, size_t initial_buckets) {           \
-        Name h = {0,0,0,NULL,NULL,NULL,arena};                                        \
-        if (!arena) return h;                                                         \
-        size_t nb = initial_buckets < 4 ? 4 : initial_buckets;                        \
-        CC__MAP_ROUNDUP(nb);                                                          \
-        h.flags = (uint8_t *)cc_arena_alloc(arena, nb * sizeof(uint8_t), _Alignof(uint8_t)); \
-        h.keys  = (K *)cc_arena_alloc(arena, nb * sizeof(K), _Alignof(K));            \
-        h.vals  = (V *)cc_arena_alloc(arena, nb * sizeof(V), _Alignof(V));            \
-        if (!h.flags || !h.keys || !h.vals) { h.flags = NULL; h.keys = NULL; h.vals = NULL; h.n_buckets = 0; return h; } \
-        memset(h.flags, CC__MAP_EMPTY, nb * sizeof(uint8_t));                         \
-        h.n_buckets = nb;                                                             \
-        h.size = 0;                                                                   \
-        h.n_occupied = 0;                                                             \
-        return h;                                                                     \
-    }                                                                                 \
-                                                                                      \
-    static inline int Name##_rehash(Name *h, size_t new_n_buckets) {                  \
-        if (!h || !h->arena) return -1;                                               \
-        size_t nb = new_n_buckets < 4 ? 4 : new_n_buckets;                            \
-        CC__MAP_ROUNDUP(nb);                                                          \
-        uint8_t *new_flags = (uint8_t *)cc_arena_alloc(h->arena, nb * sizeof(uint8_t), _Alignof(uint8_t)); \
-        K *new_keys = (K *)cc_arena_alloc(h->arena, nb * sizeof(K), _Alignof(K));     \
-        V *new_vals = (V *)cc_arena_alloc(h->arena, nb * sizeof(V), _Alignof(V));     \
-        if (!new_flags || !new_keys || !new_vals) return -1;                          \
-        memset(new_flags, CC__MAP_EMPTY, nb * sizeof(uint8_t));                       \
-        size_t new_mask = nb - 1;                                                     \
-        for (size_t i = 0; i < h->n_buckets; ++i) {                                   \
-            if (Name##_exist(h, i)) {                                                 \
-                K key = h->keys[i];                                                   \
-                V val = h->vals[i];                                                   \
-                uint64_t k = HASH_FN(&key);                                           \
-                size_t step = 0;                                                      \
-                size_t pos = k & new_mask;                                            \
-                while (new_flags[pos] == CC__MAP_FULL) {                              \
-                    pos = (pos + (++step)) & new_mask;                                \
-                }                                                                     \
-                new_flags[pos] = CC__MAP_FULL;                                        \
-                new_keys[pos] = key;                                                  \
-                new_vals[pos] = val;                                                  \
-            }                                                                         \
-        }                                                                             \
-        h->flags = new_flags;                                                         \
-        h->keys = new_keys;                                                           \
-        h->vals = new_vals;                                                           \
-        h->n_buckets = nb;                                                            \
-        h->n_occupied = h->size;                                                      \
-        return 0;                                                                     \
-    }                                                                                 \
-                                                                                      \
-    static inline int Name##_reserve(Name *h, size_t new_buckets) {                   \
-        if (!h) return -1;                                                            \
-        if (new_buckets <= h->n_buckets) return 0;                                   \
-        return Name##_rehash(h, new_buckets);                                        \
-    }                                                                                 \
-                                                                                      \
-    static inline int Name##_put(Name *h, const K *key, const V *val, int *ret) {     \
-        if (!h || !key || !val || !h->arena) { if (ret) *ret = -1; return -1; }       \
-        if (h->n_buckets == 0) {                                                      \
-            *h = Name##_init(h->arena, 4);                                            \
-            if (h->n_buckets == 0) { if (ret) *ret = -1; return -1; }                 \
-        }                                                                             \
-        if (h->n_occupied >= (size_t)(h->n_buckets * 0.7)) {                          \
-            if (Name##_rehash(h, h->n_buckets << 1) != 0) { if (ret) *ret = -1; return -1; } \
-        }                                                                             \
-        size_t mask = Name##_mask(h);                                                 \
-        uint64_t k = HASH_FN(key);                                                    \
-        size_t step = 0;                                                              \
-        size_t site = (size_t)-1;                                                     \
-        size_t i = k & mask;                                                          \
-        while (1) {                                                                   \
-            uint8_t f = h->flags[i];                                                  \
-            if (f == CC__MAP_EMPTY) {                                                 \
-                size_t dest = (site != (size_t)-1) ? site : i;                        \
-                h->flags[dest] = CC__MAP_FULL;                                        \
-                h->keys[dest] = *key;                                                 \
-                h->vals[dest] = *val;                                                 \
-                h->size++;                                                            \
-                h->n_occupied++;                                                      \
-                if (ret) *ret = 1;                                                    \
-                return (int)dest;                                                     \
-            } else if (f == CC__MAP_TOMB) {                                           \
-                if (site == (size_t)-1) site = i;                                     \
-            } else { /* FULL */                                                       \
-                if (EQ_FN(&h->keys[i], key)) {                                        \
-                    h->vals[i] = *val;                                                \
-                    if (ret) *ret = 0;                                                \
-                    return (int)i;                                                    \
-                }                                                                     \
-            }                                                                         \
-            i = (i + (++step)) & mask;                                                \
-        }                                                                             \
-    }                                                                                 \
-                                                                                      \
-    static inline bool Name##_get(const Name *h, const K *key, V *out) {              \
-        if (!h || h->n_buckets == 0 || !key) return false;                            \
-        size_t mask = Name##_mask(h);                                                 \
-        uint64_t k = HASH_FN(key);                                                    \
-        size_t step = 0;                                                              \
-        size_t i = k & mask;                                                          \
-        while (1) {                                                                   \
-            uint8_t f = h->flags[i];                                                  \
-            if (f == CC__MAP_EMPTY) return false;                                     \
-            if (f == CC__MAP_FULL && EQ_FN(&h->keys[i], key)) {                       \
-                if (out) *out = h->vals[i];                                           \
-                return true;                                                          \
-            }                                                                         \
-            i = (i + (++step)) & mask;                                                \
-        }                                                                             \
-    }                                                                                 \
-                                                                                      \
-    static inline bool Name##_del(Name *h, const K *key) {                            \
-        if (!h || h->n_buckets == 0 || !key) return false;                            \
-        size_t mask = Name##_mask(h);                                                 \
-        uint64_t k = HASH_FN(key);                                                    \
-        size_t step = 0;                                                              \
-        size_t i = k & mask;                                                          \
-        while (1) {                                                                   \
-            uint8_t f = h->flags[i];                                                  \
-            if (f == CC__MAP_EMPTY) return false;                                     \
-            if (f == CC__MAP_FULL && EQ_FN(&h->keys[i], key)) {                       \
-                h->flags[i] = CC__MAP_TOMB;                                           \
-                if (h->size > 0) h->size--;                                          \
-                return true;                                                          \
-            }                                                                         \
-            i = (i + (++step)) & mask;                                                \
-        }                                                                             \
+#define Kfree(km, ptr) ((void)0)  /* no-op: arena manages memory */
+
+/* Now include khashl with our allocator hooks */
+#include "../../../third_party/khashl/khashl.h"
+
+/*
+ * Hash function helpers
+ */
+static inline khint_t cc_kh_hash_i32(int x) { return kh_hash_uint32((khint_t)x); }
+static inline int cc_kh_eq_i32(int a, int b) { return a == b; }
+
+static inline khint_t cc_kh_hash_u64(uint64_t x) { return kh_hash_uint64(x); }
+static inline int cc_kh_eq_u64(uint64_t a, uint64_t b) { return a == b; }
+
+/* Slice hashing (FNV-1a) */
+static inline khint_t cc_kh_hash_slice(CCSlice s) {
+    khint_t h = 2166136261U;
+    const unsigned char *p = (const unsigned char*)s.ptr;
+    for (size_t i = 0; i < s.len; ++i)
+        h ^= p[i], h *= 16777619;
+    return h;
+}
+static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
+    return a.len == b.len && (a.ptr == b.ptr || (a.ptr && b.ptr && memcmp(a.ptr, b.ptr, a.len) == 0));
+}
+
+/*
+ * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
+ * 
+ * Declares an arena-backed hash map with:
+ * - Name_init(arena) -> Name*
+ * - Name_destroy(h)
+ * - Name_put(h, key, val, absent*) -> bucket index
+ * - Name_get(h, key, out_val*) -> bool
+ * - Name_del(h, key) -> bool
+ * - Name_len(h) -> size
+ * - Name_clear(h)
+ * 
+ * HASH_FN: khint_t fn(K key)
+ * EQ_FN:   int fn(K a, K b)  (returns non-zero if equal)
+ */
+#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                          \
+    KHASHL_MAP_INIT(KH_LOCAL, Name##__kh, Name##__kh, K, V, HASH_FN, EQ_FN)    \
+                                                                               \
+    typedef Name##__kh Name;                                                   \
+                                                                               \
+    static inline Name* Name##_init(CCArena *arena) {                          \
+        return Name##__kh_init2((void*)arena);                                 \
+    }                                                                          \
+                                                                               \
+    static inline void Name##_destroy(Name *h) {                               \
+        Name##__kh_destroy(h);                                                 \
+    }                                                                          \
+                                                                               \
+    static inline int Name##_put(Name *h, K key, V val, int *ret) {            \
+        if (!h) { if (ret) *ret = -1; return -1; }                             \
+        int absent = 0;                                                        \
+        khint_t k = Name##__kh_put(h, key, &absent);                           \
+        if (absent < 0) { if (ret) *ret = -1; return -1; }                     \
+        kh_val(h, k) = val;                                                    \
+        if (ret) *ret = absent;                                                \
+        return (int)k;                                                         \
+    }                                                                          \
+                                                                               \
+    static inline bool Name##_get(const Name *h, K key, V *out) {              \
+        if (!h) return false;                                                  \
+        khint_t k = Name##__kh_get(h, key);                                    \
+        if (k == kh_end(h)) return false;                                      \
+        if (out) *out = kh_val(h, k);                                          \
+        return true;                                                           \
+    }                                                                          \
+                                                                               \
+    static inline V* Name##_get_ptr(Name *h, K key) {                          \
+        if (!h) return NULL;                                                   \
+        khint_t k = Name##__kh_get(h, key);                                    \
+        if (k == kh_end(h)) return NULL;                                       \
+        return &kh_val(h, k);                                                  \
+    }                                                                          \
+                                                                               \
+    static inline bool Name##_del(Name *h, K key) {                            \
+        if (!h) return false;                                                  \
+        khint_t k = Name##__kh_get(h, key);                                    \
+        if (k == kh_end(h)) return false;                                      \
+        Name##__kh_del(h, k);                                                  \
+        return true;                                                           \
+    }                                                                          \
+                                                                               \
+    static inline size_t Name##_len(const Name *h) {                           \
+        return h ? kh_size(h) : 0;                                             \
+    }                                                                          \
+                                                                               \
+    static inline void Name##_clear(Name *h) {                                 \
+        if (h) Name##__kh_clear(h);                                            \
     }
 
-// Heap-backed map (tool/test-only)
-#define CC_MAP_DECL_HEAP(K, V, Name, HASH_FN, EQ_FN)                                  \
-    typedef struct {                                                                  \
-        size_t n_buckets;                                                             \
-        size_t size;                                                                  \
-        size_t n_occupied;                                                            \
-        uint8_t *flags;                                                               \
-        K *keys;                                                                      \
-        V *vals;                                                                      \
-    } Name;                                                                           \
-    static inline size_t Name##_mask(const Name *h) { return h->n_buckets - 1; }      \
-    static inline bool Name##_exist(const Name *h, size_t i) { return h->flags[i] == CC__MAP_FULL; } \
-    static inline Name Name##_init(void) { Name h = {0,0,0,NULL,NULL,NULL}; return h; }\
-    static inline void Name##_destroy(Name *h) { if (!h) return; free(h->flags); free(h->keys); free(h->vals); h->flags=h->keys=h->vals=NULL; h->n_buckets=h->size=h->n_occupied=0; } \
-    static inline int Name##_rehash(Name *h, size_t new_n_buckets) {                  \
-        if (!h) return -1;                                                            \
-        size_t nb = new_n_buckets < 4 ? 4 : new_n_buckets;                            \
-        CC__MAP_ROUNDUP(nb);                                                          \
-        uint8_t *new_flags = (uint8_t *)malloc(nb * sizeof(uint8_t));                 \
-        K *new_keys = (K *)malloc(nb * sizeof(K));                                    \
-        V *new_vals = (V *)malloc(nb * sizeof(V));                                    \
-        if (!new_flags || !new_keys || !new_vals) { free(new_flags); free(new_keys); free(new_vals); return -1; } \
-        memset(new_flags, CC__MAP_EMPTY, nb * sizeof(uint8_t));                       \
-        size_t new_mask = nb - 1;                                                     \
-        for (size_t i = 0; i < h->n_buckets; ++i) {                                   \
-            if (Name##_exist(h, i)) {                                                 \
-                K key = h->keys[i]; V val = h->vals[i];                               \
-                uint64_t k = HASH_FN(&key); size_t step = 0; size_t pos = k & new_mask; \
-                while (new_flags[pos] == CC__MAP_FULL) pos = (pos + (++step)) & new_mask; \
-                new_flags[pos] = CC__MAP_FULL; new_keys[pos] = key; new_vals[pos] = val; \
-            }                                                                         \
-        }                                                                             \
-        free(h->flags); free(h->keys); free(h->vals);                                 \
-        h->flags = new_flags; h->keys = new_keys; h->vals = new_vals;                 \
-        h->n_buckets = nb; h->n_occupied = h->size;                                   \
-        return 0;                                                                     \
-    }                                                                                 \
-    static inline int Name##_put(Name *h, const K *key, const V *val, int *ret) {     \
-        if (!h || !key || !val) { if (ret) *ret = -1; return -1; }                    \
-        if (h->n_buckets == 0 || h->n_occupied >= (size_t)(h->n_buckets * 0.7)) {     \
-            size_t new_n = h->n_buckets ? h->n_buckets << 1 : 4;                      \
-            if (Name##_rehash(h, new_n) != 0) { if (ret) *ret = -1; return -1; }      \
-        }                                                                             \
-        size_t mask = Name##_mask(h); uint64_t k = HASH_FN(key); size_t step = 0; size_t site = (size_t)-1; size_t i = k & mask; \
-        while (1) {                                                                   \
-            uint8_t f = h->flags[i];                                                  \
-            if (f == CC__MAP_EMPTY) {                                                 \
-                size_t dest = (site != (size_t)-1) ? site : i;                        \
-                h->flags[dest] = CC__MAP_FULL; h->keys[dest] = *key; h->vals[dest] = *val; h->size++; h->n_occupied++; if (ret) *ret = 1; return (int)dest; \
-            } else if (f == CC__MAP_TOMB) { if (site == (size_t)-1) site = i; }       \
-            else { if (EQ_FN(&h->keys[i], key)) { h->vals[i] = *val; if (ret) *ret = 0; return (int)i; } } \
-            i = (i + (++step)) & mask;                                                \
-        }                                                                             \
-    }                                                                                 \
-    static inline bool Name##_get(const Name *h, const K *key, V *out) {              \
-        if (!h || h->n_buckets == 0 || !key) return false;                            \
-        size_t mask = Name##_mask(h); uint64_t k = HASH_FN(key); size_t step = 0; size_t i = k & mask; \
-        while (1) { uint8_t f = h->flags[i]; if (f == CC__MAP_EMPTY) return false; if (f == CC__MAP_FULL && EQ_FN(&h->keys[i], key)) { if (out) *out = h->vals[i]; return true; } i = (i + (++step)) & mask; } \
-    }                                                                                 \
-    static inline bool Name##_del(Name *h, const K *key) {                            \
-        if (!h || h->n_buckets == 0 || !key) return false;                            \
-        size_t mask = Name##_mask(h); uint64_t k = HASH_FN(key); size_t step = 0; size_t i = k & mask; \
-        while (1) { uint8_t f = h->flags[i]; if (f == CC__MAP_EMPTY) return false; if (f == CC__MAP_FULL && EQ_FN(&h->keys[i], key)) { h->flags[i] = CC__MAP_TOMB; if (h->size > 0) h->size--; return true; } i = (i + (++step)) & mask; } \
-    }
+/* Iteration helper: iterates over all (key, val) pairs */
+#define CC_MAP_FOREACH(h, k_var, v_var)                                        \
+    for (khint_t __i = 0; (h) && __i != kh_end(h); ++__i)                      \
+        if (kh_exist((h), __i) &&                                              \
+            ((k_var) = kh_key((h), __i), (v_var) = kh_val((h), __i), 1))
 
-// Convenience macros for common key types
-#define CC_MAP_DECL_SLICE(V, Name) CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_hash_slice, cc_eq_slice)
-#define CC_MAP_DECL_U64(V, Name)   CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_hash_u64, cc_hash_u64_eq)
+/* Convenience: common key types */
+#define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
+#define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
+#define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
 
-static inline bool cc_hash_u64_eq(const uint64_t* a, const uint64_t* b) { return *a == *b; }
+/* Legacy alias for compatibility */
+#define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
 
-#endif // CC_STD_MAP_H
+#endif /* CC_STD_MAP_H */

@@ -1,0 +1,33 @@
+// Test: arena checkpoints restore allocation position without invalidating prior allocations
+#include "std/prelude.cch"
+#include <assert.h>
+
+int main(void) {
+    char buffer[1024];
+
+    @arena_init(buffer, sizeof(buffer)) {
+        int* a1 = arena_alloc(int, arena, 1);
+        assert(a1 != NULL);
+        *a1 = 11;
+
+        ArenaCheckpoint cp = arena_checkpoint(arena);
+
+        int* a2 = arena_alloc(int, arena, 4);
+        assert(a2 != NULL);
+        a2[0] = 22;
+
+        // Restore: allocations after checkpoint should be reclaimed
+        arena_restore(cp);
+
+        int* a3 = arena_alloc(int, arena, 4);
+        assert(a3 != NULL);
+        // Should reuse the same slot as a2
+        assert(a3 == a2);
+
+        // Allocation before checkpoint should remain valid
+        assert(*a1 == 11);
+    }
+
+    printf("arena_checkpoint_smoke: OK\n");
+    return 0;
+}

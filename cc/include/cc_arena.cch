@@ -26,6 +26,11 @@ typedef struct {
     uint32_t _reserved;
 } CCArena;
 
+typedef struct {
+    CCArena* arena;
+    size_t offset;
+} ArenaCheckpoint;
+
 // Global provenance counter (defined in runtime).
 extern cc_atomic_u64 cc_arena_prov_counter;
 
@@ -84,6 +89,24 @@ static inline void cc_arena_reset(CCArena *arena) {
     CC_ATOMIC_STORE(&arena->offset, 0);
     // Bump provenance so new allocations get a fresh id (helps detect stale use).
     arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+}
+
+// Capture current arena allocation state.
+static inline ArenaCheckpoint arena_checkpoint(CCArena* arena) {
+    ArenaCheckpoint cp;
+    cp.arena = arena;
+    cp.offset = arena ? CC_ATOMIC_LOAD(&arena->offset) : 0;
+    return cp;
+}
+
+// Restore arena to a previously captured checkpoint.
+// Note: This does NOT bump provenance; allocations before the checkpoint remain valid.
+static inline void arena_restore(ArenaCheckpoint checkpoint) {
+    CCArena* arena = checkpoint.arena;
+    if (!arena) return;
+    size_t off = checkpoint.offset;
+    if (off > arena->capacity) off = arena->capacity;
+    CC_ATOMIC_STORE(&arena->offset, off);
 }
 
 // Convenience: compute how many bytes remain.
