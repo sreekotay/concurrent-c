@@ -1,7 +1,7 @@
 /*
  * Test: Nested try expressions for error propagation
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 int!CCError level3(int x) {
     if (x < 0) {

@@ -7,8 +7,8 @@
  *
  * Key insight: defer guarantees cleanup without try/finally boilerplate.
  */
-#include "cc_runtime.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
 #include <stdio.h>
 
 int cleanup_ran = 0;

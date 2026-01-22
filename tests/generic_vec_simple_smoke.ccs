@@ -1,0 +1,41 @@
+/* Minimal test for Vec<int> generic syntax - NO UFCS VERSION */
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/* Manually declare Vec_int since generic lowering may not emit it */
+CC_VEC_DECL_ARENA(int, Vec_int)
+
+int main(void) {
+    CCArena arena = cc_heap_arena(kilobytes(4));
+    if (!arena.base) return 1;
+
+    /* Initialize Vec_int directly (no generic syntax for now) */
+    Vec_int v = Vec_int_init(&arena, CC_VEC_INITIAL_CAP);
+    
+    /* Use explicit function calls (no UFCS) */
+    Vec_int_push(&v, 10);
+    Vec_int_push(&v, 20);
+    Vec_int_push(&v, 30);
+    
+    if (Vec_int_len(&v) != 3) {
+        fprintf(stderr, "FAIL: expected len=3\n");
+        return 2;
+    }
+    
+    /* Test optional-returning get with explicit call */
+    CCOptional_int val = Vec_int_get(&v, 0);
+    if (!val.has) {
+        fprintf(stderr, "FAIL: get returned None\n");
+        return 3;
+    }
+    if (val.u.value != 10) {
+        fprintf(stderr, "FAIL: expected 10\n");
+        return 4;
+    }
+
+    printf("generic_vec_simple_smoke ok\n");
+    
+    cc_heap_arena_free(&arena);
+    return 0;
+}

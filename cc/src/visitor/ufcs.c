@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "preprocess/type_registry.h"
+
 // Simple identifier check (ASCII-only for now).
 static int is_ident_char(char c) {
     return isalnum((unsigned char)c) || c == '_';
@@ -232,6 +234,27 @@ static int emit_desugared_call(char* out,
         }
         return snprintf(out, cap, "cc_std_err_write(");
     }
+
+    /* Container UFCS: check type registry for Vec_T/Map_K_V types */
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (reg && is_ident_only(recv)) {
+        const char* type_name = cc_type_registry_lookup_var(reg, recv);
+        if (type_name) {
+            /* Check if it's a container type (starts with Vec_ or Map_) */
+            int is_vec = (strncmp(type_name, "Vec_", 4) == 0);
+            int is_map = (strncmp(type_name, "Map_", 4) == 0);
+            if (is_vec || is_map) {
+                /* Container method: emit TypeName_method(&recv, args) */
+                if (has_args) {
+                    return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s, ", type_name, method, recv)
+                                       : snprintf(out, cap, "%s_%s(&%s, ", type_name, method, recv);
+                }
+                return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s)", type_name, method, recv)
+                                   : snprintf(out, cap, "%s_%s(&%s)", type_name, method, recv);
+            }
+        }
+    }
+
     // Generic UFCS: method(&recv,
     if (has_args) {
         return recv_is_ptr ? snprintf(out, cap, "%s(%s, ", method, recv)

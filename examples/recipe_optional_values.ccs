@@ -10,7 +10,7 @@
  * Key insight: Optionals are for "maybe present" values.
  * Use T!E for errors, T? for legitimate absence.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 /* Find an element in an array, return its index or none. */
 int? find_index(int* arr, int len, int target) {

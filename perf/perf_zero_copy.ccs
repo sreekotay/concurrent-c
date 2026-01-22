@@ -2,7 +2,7 @@
  * Payload size channel benchmark.
  * Compares channel throughput with different payload sizes.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>

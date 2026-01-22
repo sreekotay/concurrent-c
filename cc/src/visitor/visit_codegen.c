@@ -1537,15 +1537,30 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_all = NULL;
     size_t src_len = 0;
     if (ctx->input_path) {
-#ifdef CC_TCC_EXT_AVAILABLE
         cc__read_entire_file(ctx->input_path, &src_all, &src_len);
-#else
-        cc__read_entire_file(ctx->input_path, &src_all, &src_len);
-#endif
     }
 
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
+
+    fprintf(stderr, "CC_DEBUG: visit_codegen after file read: src_all=%p, src_len=%zu\n", 
+            (void*)src_all, src_len);
+
+    /* Rewrite generic container syntax: Vec<T> -> Vec_T, vec_new<T>() -> Vec_T_init() */
+    if (src_ufcs && src_ufcs_len) {
+        if (getenv("CC_DEBUG_GENERIC")) {
+            fprintf(stderr, "CC: calling cc_rewrite_generic_containers, len=%zu\n", src_ufcs_len);
+        }
+        char* rewritten = cc_rewrite_generic_containers(src_ufcs, src_ufcs_len, ctx->input_path);
+        if (getenv("CC_DEBUG_GENERIC")) {
+            fprintf(stderr, "CC: cc_rewrite_generic_containers returned %s\n", rewritten ? "non-NULL" : "NULL");
+        }
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
 
     /* Rewrite `with_deadline(expr) { ... }` (not valid C) into CCDeadline scope syntax
        using @defer, so the rest of the pipeline sees valid parseable text. */
@@ -1927,11 +1942,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "/* CC visitor: passthrough of lowered C (preprocess + TCC parse) */\n");
     fprintf(out, "#include <stdlib.h>\n");
     fprintf(out, "#include <stdint.h>\n");
-    fprintf(out, "#include \"cc_nursery.cch\"\n");
-    fprintf(out, "#include \"cc_closure.cch\"\n");
-    fprintf(out, "#include \"cc_slice.cch\"\n");
-    fprintf(out, "#include \"cc_runtime.cch\"\n");
-    fprintf(out, "#include \"std/task_intptr.cch\"\n");
+    fprintf(out, "#include <ccc/cc_nursery.cch>\n");
+    fprintf(out, "#include <ccc/cc_closure.cch>\n");
+    fprintf(out, "#include <ccc/cc_slice.cch>\n");
+    fprintf(out, "#include <ccc/cc_runtime.cch>\n");
+    fprintf(out, "#include <ccc/std/task_intptr.cch>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */

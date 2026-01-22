@@ -25,10 +25,10 @@ typedef int bool;
 #include <limits.h>
 #include <stdlib.h>
 
-#include "../cc_runtime.cch"
-#include "../cc_io.cch"
-#include "../cc_result.cch"
-#include "../cc_exec.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_io.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_exec.cch>
 #include "async_io.cch"
 #include "string.cch"
 

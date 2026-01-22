@@ -21,7 +21,7 @@ typedef int bool;
 #include <stdint.h>
 #include <time.h>
 
-#include "cc_closure.cch"
+#include <ccc/cc_closure.cch>
 
 typedef struct CCTask CCTask;
 

@@ -9,9 +9,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "cc_sched.cch"
-#include "cc_channel.cch"
-#include "std/async_io.cch"
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/std/async_io.cch>
 
 typedef struct CCAsyncChan CCAsyncChan;
 

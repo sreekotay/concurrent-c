@@ -4,9 +4,9 @@
  * Tests arena allocations from multiple concurrent tasks.
  * The arena API is thread-safe using atomic CAS.
  */
-#include "cc_runtime.cch"
-#include "cc_arena.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 #include <string.h>
 

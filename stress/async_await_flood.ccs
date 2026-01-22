@@ -4,9 +4,9 @@
  * Many concurrent async tasks using cc_block_all combinator.
  * Tests the async runtime under heavy concurrent await pressure.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task_intptr.cch>
 #include <stdio.h>
 
 #define NUM_TASKS 100

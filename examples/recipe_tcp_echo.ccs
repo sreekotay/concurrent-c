@@ -13,9 +13,9 @@
  * Test with:
  *   echo "Hello" | nc localhost 9000
  */
-#include "cc_runtime.cch"
-#include "std/prelude.cch"
-#include "std/net.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
 #include <stdio.h>
 
 #define PORT "127.0.0.1:9000"

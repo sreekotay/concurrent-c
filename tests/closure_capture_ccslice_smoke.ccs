@@ -1,5 +1,5 @@
 // Smoke: closures should be able to capture CCSlice by copy (best-effort; move semantics enforced later).
-#include "cc_slice.cch"
+#include <ccc/cc_slice.cch>
 
 int g = 0;
 

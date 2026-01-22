@@ -1,6 +1,6 @@
 // Test: Result type syntax T!E lowers to CCResult_T_E
 #include <stdio.h>
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 // CCResult_int_CCError is pre-declared in cc_result.cch via CC_DECL_RESULT_SPEC
 

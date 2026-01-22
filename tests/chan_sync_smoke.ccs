@@ -1,7 +1,7 @@
 /*
  * Sync channel smoke test: verify sync channels block OS thread.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <pthread.h>
 #include <stdio.h>
 #include <assert.h>

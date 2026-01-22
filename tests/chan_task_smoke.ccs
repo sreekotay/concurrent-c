@@ -1,6 +1,6 @@
 /* Test cc_chan_send_task and cc_chan_recv_task (poll-based channel tasks). */
-#include "cc_runtime.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
 #include <stdio.h>
 #include <assert.h>
 

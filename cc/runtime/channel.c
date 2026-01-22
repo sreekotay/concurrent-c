@@ -8,14 +8,14 @@
  * Match helpers for polling/selecting across channels.
  */
 
-#include "cc_channel.cch"
-#include "cc_sched.cch"
-#include "cc_nursery.cch"
-#include "cc_exec.cch"
-#include "cc_slice.cch"
-#include "cc_deadlock_detect.cch"
-#include "std/async_io.cch"
-#include "std/future.cch"
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_exec.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_deadlock_detect.cch>
+#include <ccc/std/async_io.cch>
+#include <ccc/std/future.cch>
 
 #include <errno.h>
 #include <pthread.h>
@@ -765,7 +765,7 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
  * Result is errno (0=success). Caller must ensure value/out_value outlives the task.
  */
 
-#include "std/task_intptr.cch"
+#include <ccc/std/task_intptr.cch>
 
 typedef struct {
     CCChan* ch;

@@ -1,5 +1,5 @@
 // Smoke: spawn should accept a CCClosure0 value (not just a literal).
-#include "cc_closure.cch"
+#include <ccc/cc_closure.cch>
 
 int g = 0;
 

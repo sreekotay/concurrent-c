@@ -4,7 +4,7 @@
  * Many workers processing many jobs with result aggregation.
  * Tests worker pool pattern under heavy load.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_WORKERS 8

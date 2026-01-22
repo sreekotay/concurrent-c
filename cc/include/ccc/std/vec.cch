@@ -8,13 +8,19 @@
  * - Fails gracefully when arena exhausted
  *
  * Optional heap-backed variant provided via CC_VEC_DECL_HEAP for tools/tests.
+ *
+ * Spec-compliant API:
+ * - Name_get(v, i) returns T? (optional, None if out of bounds)
+ * - Name_get_ptr(v, i) returns T* (mutable access, NULL if out of bounds)
+ * - Name_pop(v) returns T? (optional, None if empty)
  */
 #ifndef CC_STD_VEC_H
 #define CC_STD_VEC_H
 
 #include <stddef.h>
 #include <string.h>
-#include "../cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_optional.cch>
 
 /* Default initial capacity - skip tiny allocations */
 #ifndef CC_VEC_INITIAL_CAP
@@ -22,20 +28,24 @@
 #endif
 
 /*
- * CC_VEC_DECL_ARENA(T, Name)
+ * CC_VEC_DECL_ARENA_FULL(T, Name, OptT)
  * 
- * Arena-backed vector with:
+ * Full arena-backed vector with optional-returning methods.
+ * OptT is the optional type for T (e.g., CCOptional_int for int).
+ * 
+ * API:
  * - Name_init(arena, initial_cap) -> Name
  * - Name_push(v, value) -> 0 on success, -1 on failure
- * - Name_pop(v, out) -> 0 on success, -1 if empty
- * - Name_get(v, i) -> T* or NULL if out of bounds
+ * - Name_pop(v) -> OptT (None if empty)
+ * - Name_get(v, i) -> OptT (None if out of bounds)
+ * - Name_get_ptr(v, i) -> T* (mutable access, NULL if out of bounds)
  * - Name_at_grow(v, i) -> T* (auto-extends if needed)
  * - Name_push_ptr(v) -> T* (push slot, returns pointer)
  * - Name_len(v), Name_cap(v)
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
  */
-#define CC_VEC_DECL_ARENA(T, Name)                                                \
+#define CC_VEC_DECL_ARENA_FULL(T, Name, OptT)                                     \
     typedef struct {                                                              \
         size_t len;                                                               \
         size_t cap;                                                               \
@@ -86,15 +96,27 @@
         return &v->data[v->len++];                                                \
     }                                                                             \
                                                                                   \
-    static inline int Name##_pop(Name *v, T *out) {                               \
-        if (!v || v->len == 0) return -1;                                         \
+    /* Pop: returns optional (None if empty) */                                   \
+    static inline OptT Name##_pop(Name *v) {                                      \
+        OptT result = {0};                                                        \
+        if (!v || v->len == 0) return result;                                     \
         v->len--;                                                                 \
-        if (out) *out = v->data[v->len];                                          \
-        return 0;                                                                 \
+        result.has = 1;                                                           \
+        result.u.value = v->data[v->len];                                         \
+        return result;                                                            \
     }                                                                             \
                                                                                   \
-    /* Bounds-safe get: returns pointer or NULL */                                \
-    static inline T* Name##_get(Name *v, size_t i) {                              \
+    /* Bounds-safe get: returns optional (None if out of bounds) */               \
+    static inline OptT Name##_get(Name *v, size_t i) {                            \
+        OptT result = {0};                                                        \
+        if (!v || i >= v->len) return result;                                     \
+        result.has = 1;                                                           \
+        result.u.value = v->data[i];                                              \
+        return result;                                                            \
+    }                                                                             \
+                                                                                  \
+    /* Mutable pointer access: returns pointer or NULL */                         \
+    static inline T* Name##_get_ptr(Name *v, size_t i) {                          \
         if (!v || i >= v->len) return NULL;                                       \
         return &v->data[i];                                                       \
     }                                                                             \
@@ -121,16 +143,24 @@
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
 
+/*
+ * CC_VEC_DECL_ARENA(T, Name)
+ * 
+ * Convenience macro for simple types where OptT = CCOptional_##T.
+ * For complex types (pointers, structs), use CC_VEC_DECL_ARENA_FULL.
+ */
+#define CC_VEC_DECL_ARENA(T, Name) CC_VEC_DECL_ARENA_FULL(T, Name, CCOptional_##T)
+
 /* Iteration helper */
 #define CC_VEC_FOREACH(vptr, idx_var, item_var)                                   \
     for (size_t idx_var = 0; (vptr) && idx_var < (vptr)->len && (((item_var) = (vptr)->data[idx_var]), 1); ++idx_var)
 
 /*
- * CC_VEC_DECL_HEAP(T, Name)
+ * CC_VEC_DECL_HEAP_FULL(T, Name, OptT)
  * 
- * Heap-backed vector (tool/test-only; not arena-scoped)
+ * Heap-backed vector (tool/test-only; not arena-scoped) with optional returns.
  */
-#define CC_VEC_DECL_HEAP(T, Name)                                                 \
+#define CC_VEC_DECL_HEAP_FULL(T, Name, OptT)                                      \
     typedef struct { size_t len, cap; T *data; } Name;                            \
     static inline Name Name##_init(void) { Name v = {0,0,NULL}; return v; }       \
     static inline void Name##_free(Name *v) {                                     \
@@ -163,11 +193,22 @@
         }                                                                         \
         return &v->data[v->len++];                                                \
     }                                                                             \
-    static inline int Name##_pop(Name *v, T *out) {                               \
-        if (!v || v->len == 0) return -1;                                         \
-        v->len--; if (out) *out = v->data[v->len]; return 0;                      \
+    static inline OptT Name##_pop(Name *v) {                                      \
+        OptT result = {0};                                                        \
+        if (!v || v->len == 0) return result;                                     \
+        v->len--;                                                                 \
+        result.has = 1;                                                           \
+        result.u.value = v->data[v->len];                                         \
+        return result;                                                            \
     }                                                                             \
-    static inline T* Name##_get(Name *v, size_t i) {                              \
+    static inline OptT Name##_get(Name *v, size_t i) {                            \
+        OptT result = {0};                                                        \
+        if (!v || i >= v->len) return result;                                     \
+        result.has = 1;                                                           \
+        result.u.value = v->data[i];                                              \
+        return result;                                                            \
+    }                                                                             \
+    static inline T* Name##_get_ptr(Name *v, size_t i) {                          \
         if (!v || i >= v->len) return NULL;                                       \
         return &v->data[i];                                                       \
     }                                                                             \
@@ -187,6 +228,8 @@
     static inline T *Name##_begin(Name *v) { return v ? v->data : NULL; }         \
     static inline T *Name##_end(Name *v) { return v ? v->data + v->len : NULL; }  \
     static inline T *Name##_data(Name *v) { return v ? v->data : NULL; }
+
+#define CC_VEC_DECL_HEAP(T, Name) CC_VEC_DECL_HEAP_FULL(T, Name, CCOptional_##T)
 
 /* Legacy alias for compatibility */
 #define Vec(T, Name) CC_VEC_DECL_ARENA(T, Name)

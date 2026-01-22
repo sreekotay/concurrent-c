@@ -5,8 +5,8 @@
  * - spawn() with sync channel ops, consumer OUTSIDE nursery
  * - cc_block_all/race for compute tasks
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 #include <errno.h>
 

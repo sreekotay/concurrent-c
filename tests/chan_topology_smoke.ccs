@@ -1,7 +1,7 @@
 /*
  * Channel topology smoke test: verify topology is parsed and passed to runtime.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <pthread.h>
 #include <stdio.h>
 #include <assert.h>

@@ -1,6 +1,6 @@
 /* Test: cc_block_on with non-@nonblocking function should warn.
    Expected: Compile with warning about potential deadlock. */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 /* This function has a loop with channel ops - NOT @nonblocking */

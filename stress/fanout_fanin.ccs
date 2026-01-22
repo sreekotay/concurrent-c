@@ -5,8 +5,8 @@
  * workers fan results back to single collector.
  * Classic scatter-gather pattern under load.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define NUM_WORKERS 16

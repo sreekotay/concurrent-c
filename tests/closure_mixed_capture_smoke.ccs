@@ -1,5 +1,5 @@
 /* Test: mixed value and reference capture [x, &y] */
-#include "cc_nursery.cch"
+#include <ccc/cc_nursery.cch>
 #include <stdio.h>
 
 int main(void) {

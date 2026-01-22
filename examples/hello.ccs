@@ -4,7 +4,7 @@
  * A minimal example showing the core concept: structured concurrency.
  * Tasks run in parallel, nursery waits for all to complete.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 int main(void) {

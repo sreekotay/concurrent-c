@@ -9,7 +9,7 @@
  *
  * See spec §9.5 for full capture rules.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 int main(void) {

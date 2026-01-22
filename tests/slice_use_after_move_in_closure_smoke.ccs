@@ -1,5 +1,5 @@
 // Compile-fail: closure uses a moved CCSlice.
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 int g = 0;
 

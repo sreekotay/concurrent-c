@@ -1,5 +1,5 @@
 // Compile-fail: using a move-only slice after it was moved into a closure capture.
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 int main(void) {
     int* p = (int*)malloc(sizeof(int) * 2);

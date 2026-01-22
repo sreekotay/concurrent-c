@@ -5,8 +5,8 @@
  * - cc_task_intptr_cancel() under load (via cc_block_race)
  * - Channel close() while send/recv in flight
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define NUM_ROUNDS 10

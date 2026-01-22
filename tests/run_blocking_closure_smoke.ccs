@@ -1,5 +1,5 @@
 // Smoke: run_blocking on a closure should execute closure body and wait for it.
-#include "cc_closure.cch"
+#include <ccc/cc_closure.cch>
 
 int g = 0;
 

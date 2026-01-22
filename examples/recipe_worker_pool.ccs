@@ -11,8 +11,8 @@
  * Key insight: Workers live in outer nursery, jobs fed via inner nursery.
  * Use channels for coordination, not shared mutable state.
  */
-#include "cc_nursery.cch"
-#include "cc_runtime.cch"
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_WORKERS 3

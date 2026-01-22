@@ -1,7 +1,7 @@
-#include "cc_runtime.cch"
-#include "cc_closure.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
 #include <pthread.h>
-#include "std/task_intptr.cch"
+#include <ccc/std/task_intptr.cch>
 
 static pthread_t g_tid;
 static int g_ok = 1;

@@ -1,5 +1,5 @@
 // Test: Error channels - Result types can be channel element types
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <assert.h>
 
 typedef struct {

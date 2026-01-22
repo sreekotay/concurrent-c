@@ -1,6 +1,6 @@
-#include "cc_closure.cch"
-#include "cc_slice.cch"
-#include "cc_nursery.cch"
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_nursery.cch>
 
 int g = 0;
 

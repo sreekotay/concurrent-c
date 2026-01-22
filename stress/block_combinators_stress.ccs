@@ -4,8 +4,8 @@
  * Stress tests for cc_block_all, cc_block_race, and cc_block_any.
  * Tests combinator overhead and correctness under load.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define BATCH_SIZE 10

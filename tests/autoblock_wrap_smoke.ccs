@@ -1,6 +1,6 @@
-#include "cc_runtime.cch"
-#include "cc_closure.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task_intptr.cch>
 
 static void blocking_set(int* p) {
     if (p) *p = 42;

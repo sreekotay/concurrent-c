@@ -11,7 +11,7 @@
  * ensure the buffer is large enough to hold all values, OR use
  * concurrent producer/consumer via @nursery.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 /* Async producer: sends values on a channel */

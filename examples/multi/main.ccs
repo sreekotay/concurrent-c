@@ -1,5 +1,5 @@
 #define CC_ENABLE_SHORT_NAMES
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 
 int add_ints(int a, int b);
 

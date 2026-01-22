@@ -2,7 +2,7 @@
  * Test: Combined use of T? and T!E
  * Shows the distinction: T? for "maybe", T!E for errors
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 /* Returns an optional - absence is normal, not an error */
 int? find_positive(int x) {

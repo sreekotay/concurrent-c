@@ -10,7 +10,7 @@
  * Each iteration's local is captured by value, giving each task
  * its own copy that won't change when the loop advances.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_TASKS 5

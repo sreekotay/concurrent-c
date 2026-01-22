@@ -25,14 +25,14 @@ typedef int bool;
 #endif
 #include <time.h>
 
-#include "cc_sched.cch"
-#include "cc_slice.cch"
-#include "cc_nursery.cch"
-#include "cc_exec.cch"
-#include "cc_chan_handle.cch"
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_exec.cch>
+#include <ccc/cc_chan_handle.cch>
 
 typedef struct CCAsyncHandle CCAsyncHandle;
-#include "std/future.cch"
+#include <ccc/std/future.cch>
 
 typedef struct CCChan CCChan;
 
@@ -164,7 +164,7 @@ int cc_chan_recv_async(CCExec* ex, CCChan* ch, void* out_value, size_t value_siz
 // Poll-based channel tasks returning CCTaskIntptr (cooperative async).
 // Result is errno (0=success). Caller must ensure value/out_value outlives the task.
 #if !defined(CC_PARSER_MODE)
-#include "std/task_intptr.cch"
+#include <ccc/std/task_intptr.cch>
 CCTaskIntptr cc_chan_send_task(CCChan* ch, const void* value, size_t value_size);
 CCTaskIntptr cc_chan_recv_task(CCChan* ch, void* out_value, size_t value_size);
 #endif

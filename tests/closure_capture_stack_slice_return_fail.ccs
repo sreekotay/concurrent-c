@@ -1,6 +1,6 @@
 // Compile-fail: stack-backed slice cannot be captured by a closure that escapes (returned).
-#include "cc_closure.cch"
-#include "cc_slice.cch"
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_slice.cch>
 
 CCClosure0 make_bad(void) {
     int buf[2] = {1, 2};

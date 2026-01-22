@@ -1,7 +1,7 @@
 /*
  * Test: *opt unwrap for optionals
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 int main(void) {
     /* Test successful unwrap */

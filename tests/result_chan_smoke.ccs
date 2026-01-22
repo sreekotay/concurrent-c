@@ -1,7 +1,7 @@
 /*
  * Result channel smoke test: channels carrying T!E types.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <assert.h>
 #include <errno.h>

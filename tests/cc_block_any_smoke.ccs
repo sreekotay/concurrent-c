@@ -1,6 +1,6 @@
 /* Test: cc_block_any returns first successful task.
    Expected: First success wins. */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 @async int task_a(void) {

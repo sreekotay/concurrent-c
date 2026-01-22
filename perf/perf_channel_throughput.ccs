@@ -2,7 +2,7 @@
  * Channel throughput benchmark.
  * Measures: operations per second for buffered and unbuffered channels.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <time.h>
 

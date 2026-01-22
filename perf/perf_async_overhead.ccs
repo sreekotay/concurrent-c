@@ -2,7 +2,7 @@
  * Async task overhead benchmark.
  * Measures: task creation, state machine transitions, cc_block_on overhead.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <time.h>
 

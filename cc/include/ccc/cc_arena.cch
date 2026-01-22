@@ -9,8 +9,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "cc_slice.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_atomic.cch>
 
 /* Internal macros using cc_atomic interface */
 #define CC_ATOMIC_FETCH_ADD(ptr, val) cc_atomic_fetch_add((ptr), (val))

@@ -4,7 +4,7 @@
  * Many producers flooding messages to a single consumer.
  * Tests channel backpressure and throughput under contention.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_PRODUCERS 10

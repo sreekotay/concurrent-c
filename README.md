@@ -6,8 +6,14 @@ This repo is an early prototype of **Concurrent‑C (CC)** built by extending **
 
 At this stage CC is a “C-with-extensions” toolchain:
 - A `ccc` compiler (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then optionally compiles/links using the host C compiler.
-- A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include` and `cc/runtime`.
+- A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include/ccc` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
+
+**Headers use the `<ccc/...>` namespace** to avoid collisions with your project:
+```c
+#include <ccc/cc_runtime.cch>      // core runtime
+#include <ccc/std/prelude.cch>     // standard library (channels, arena, etc.)
+```
 
 ---
 
@@ -42,6 +48,31 @@ Notes:
  - Compiler outputs:
    - `out/cc/bin/ccc` (real binary)
    - `cc/bin/ccc` (thin wrapper that execs the real binary)
+
+#### Install the compiler
+
+```bash
+make install                     # install to /usr/local
+make install PREFIX=/opt/ccc     # install to custom prefix
+make install DESTDIR=/tmp/pkg    # staged install (for packaging)
+```
+
+Installed layout:
+```
+$PREFIX/
+├── bin/ccc                      # compiler binary
+├── include/ccc/                 # headers
+│   ├── cc_runtime.cch
+│   ├── std/prelude.cch
+│   └── vendor/khashl.h
+└── lib/ccc/runtime/             # runtime source
+    └── concurrent_c.c
+```
+
+The compiler auto-detects its include/runtime paths from the binary location. You can also override with `CC_HOME`:
+```bash
+CC_HOME=/opt/ccc ccc run myfile.ccs
+```
 
 ---
 

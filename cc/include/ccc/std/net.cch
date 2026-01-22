@@ -8,9 +8,9 @@
 #ifndef CC_STD_NET_H
 #define CC_STD_NET_H
 
-#include "../cc_arena.cch"
-#include "../cc_slice.cch"
-#include "../cc_result.cch"
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_result.cch>
 #include "io.cch"
 
 #include <stdint.h>

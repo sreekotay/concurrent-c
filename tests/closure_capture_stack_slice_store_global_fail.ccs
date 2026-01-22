@@ -1,5 +1,5 @@
-#include "cc_closure.cch"
-#include "cc_slice.cch"
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_slice.cch>
 
 CCClosure0 g;
 

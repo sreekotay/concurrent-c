@@ -1,5 +1,5 @@
 // Test: @arena_init with user-provided buffer
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <assert.h>
 
 int main(void) {

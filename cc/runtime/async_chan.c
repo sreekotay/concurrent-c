@@ -1,4 +1,4 @@
-#include "cc_async_chan.cch"
+#include <ccc/cc_async_chan.cch>
 
 #include <pthread.h>
 #include <stdlib.h>

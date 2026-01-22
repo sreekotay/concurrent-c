@@ -4,8 +4,8 @@
  * Spawns many closures that capture different local variables.
  * Tests closure environment allocation and capture semantics.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define NUM_CLOSURES 100

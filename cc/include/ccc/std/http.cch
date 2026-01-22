@@ -10,8 +10,8 @@
 #ifndef CC_STD_HTTP_H
 #define CC_STD_HTTP_H
 
-#include "../cc_arena.cch"
-#include "../cc_slice.cch"
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
 #include "net.cch"  /* For CCNetError in CCHttpErrorInfo */
 
 #include <stdint.h>

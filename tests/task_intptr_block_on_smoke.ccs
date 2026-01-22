@@ -1,5 +1,5 @@
-#include "cc_closure.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task_intptr.cch>
 
 int main(void) {
     CCTaskIntptr t = cc_run_blocking_task_intptr(() => { return (void*)(intptr_t)123; });

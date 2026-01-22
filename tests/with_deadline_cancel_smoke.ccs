@@ -1,5 +1,5 @@
-#include "cc_runtime.cch"
-#include "cc_channel.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
 
 #include <errno.h>
 

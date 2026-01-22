@@ -1,5 +1,5 @@
 // Test: Channel capacity can be a macro/constant
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <assert.h>
 
 #define NUM_ITEMS 4

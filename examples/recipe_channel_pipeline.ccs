@@ -10,8 +10,8 @@
  * Key insight: Nest producers inside closing() so channel closes
  * exactly when producers finish, while consumer keeps running.
  */
-#include "cc_nursery.cch"
-#include "cc_runtime.cch"
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 /* Global sum (closures capture by value, so local int wouldn't work) */

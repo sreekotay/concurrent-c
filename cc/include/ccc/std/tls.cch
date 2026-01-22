@@ -8,8 +8,8 @@
 #ifndef CC_STD_TLS_H
 #define CC_STD_TLS_H
 
-#include "../cc_arena.cch"
-#include "../cc_slice.cch"
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
 #include "net.cch"
 
 #include <stdint.h>

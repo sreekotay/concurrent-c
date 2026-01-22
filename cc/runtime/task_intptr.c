@@ -2,12 +2,12 @@
  * Executor-backed Task<intptr_t> (bridge for async bring-up).
  */
 
-#include "std/task_intptr.cch"
+#include <ccc/std/task_intptr.cch>
 
-#include "cc_exec.cch"
-#include "cc_channel.cch"
-#include "cc_nursery.cch"
-#include "cc_deadlock_detect.cch"
+#include <ccc/cc_exec.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_deadlock_detect.cch>
 
 #include <errno.h>
 

@@ -1,6 +1,6 @@
 // Test: Optional type syntax T? lowers to CCOptional_T
 #include <stdio.h>
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 // CCOptional_int is pre-declared in cc_optional.cch
 

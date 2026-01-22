@@ -1,5 +1,5 @@
 // Smoke: closure literal used as an expression should be recorded as CC_AST_NODE_CLOSURE.
-#include "cc_closure.cch"
+#include <ccc/cc_closure.cch>
 int g = 0;
 int main(void) {
     size_t z = sizeof(() => { g = 1; });

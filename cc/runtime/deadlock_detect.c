@@ -14,8 +14,8 @@
  *   CC_DEADLOCK_TIMEOUT=N Set timeout in seconds (default: 10)
  */
 
-#include "cc_deadlock_detect.cch"
-#include "cc_sched.cch"
+#include <ccc/cc_deadlock_detect.cch>
+#include <ccc/cc_sched.cch>
 
 #include <pthread.h>
 #include <stdatomic.h>

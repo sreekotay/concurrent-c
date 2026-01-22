@@ -1,6 +1,6 @@
 /* Test: cc_block_race returns first task to complete.
    Expected: Fast task wins, slow task is cancelled. */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 @async int fast_task(void) {

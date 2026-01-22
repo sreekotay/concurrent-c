@@ -12,10 +12,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include "../cc_arena.cch"
-#include "../cc_slice.cch"
-#include "../cc_channel.cch"
-#include "../cc_exec.cch"
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_exec.cch>
 #include "string.cch"
 #include "io.cch"
 #include "vec.cch"

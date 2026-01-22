@@ -1,7 +1,7 @@
-#include "cc_runtime.cch"
-#include "cc_closure.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
 #include <stdint.h>
-#include "std/task_intptr.cch"
+#include <ccc/std/task_intptr.cch>
 
 static int add1(int x) { return x + 1; }
 

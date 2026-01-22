@@ -6,8 +6,8 @@
 #ifndef CC_ASYNC_RUNTIME_H
 #define CC_ASYNC_RUNTIME_H
 
-#include "cc_exec.cch"
-#include "cc_async_backend.cch"
+#include <ccc/cc_exec.cch>
+#include <ccc/cc_async_backend.cch>
 
 // Initialize the async runtime and shared executor. Returns 0 on success.
 int cc_async_runtime_init(size_t workers, size_t queue_cap);

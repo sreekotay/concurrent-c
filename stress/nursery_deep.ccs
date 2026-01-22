@@ -4,7 +4,7 @@
  * Creates deeply nested nurseries with tasks at each level.
  * Tests nursery stack and structured concurrency semantics.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define MAX_DEPTH 20

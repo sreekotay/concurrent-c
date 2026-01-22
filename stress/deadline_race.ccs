@@ -4,8 +4,8 @@
  * Multiple tasks with different deadlines racing to complete.
  * Tests deadline handling under concurrent pressure.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define NUM_RACERS 20

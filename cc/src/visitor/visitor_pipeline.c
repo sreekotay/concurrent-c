@@ -10,6 +10,7 @@
 #include "parser/parse.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/type_registry.h"
 #include "util/io.h"
 #include "util/path.h"
 #include "visitor/async_ast.h"
@@ -180,11 +181,11 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     fprintf(out, "/* CC visitor: passthrough of lowered C (preprocess + TCC parse) */\n");
     fprintf(out, "#include <stdlib.h>\n");
     fprintf(out, "#include <stdint.h>\n");
-    fprintf(out, "#include \"cc_nursery.cch\"\n");
-    fprintf(out, "#include \"cc_closure.cch\"\n");
-    fprintf(out, "#include \"cc_slice.cch\"\n");
-    fprintf(out, "#include \"cc_runtime.cch\"\n");
-    fprintf(out, "#include \"std/task_intptr.cch\"\n");
+    fprintf(out, "#include <ccc/cc_nursery.cch>\n");
+    fprintf(out, "#include <ccc/cc_closure.cch>\n");
+    fprintf(out, "#include <ccc/cc_slice.cch>\n");
+    fprintf(out, "#include <ccc/cc_runtime.cch>\n");
+    fprintf(out, "#include <ccc/std/task_intptr.cch>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
@@ -207,6 +208,60 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     fprintf(out, "/* --- end spawn helpers --- */\n\n");
 
     /* Note: most CC lowering is now handled via dedicated passes; this prelude exists only to keep reparses parseable. */
+
+    /* Emit container type declarations from type registry */
+    {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg) {
+            size_t n_opt = cc_type_registry_optional_count(reg);
+            size_t n_vec = cc_type_registry_vec_count(reg);
+            size_t n_map = cc_type_registry_map_count(reg);
+            
+            if (n_opt > 0 || n_vec > 0 || n_map > 0) {
+                fprintf(out, "/* --- CC generic container declarations --- */\n");
+                fprintf(out, "#include <ccc/std/vec.cch>\n");
+                fprintf(out, "#include <ccc/std/map.cch>\n");
+                
+                /* Emit optional type declarations */
+                for (size_t i = 0; i < n_opt; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_optional(reg, i);
+                    if (inst && inst->type1 && inst->mangled_name) {
+                        fprintf(out, "CC_DECL_OPTIONAL(%s, %s)\n", inst->mangled_name, inst->type1);
+                    }
+                }
+                
+                /* Emit Vec declarations */
+                for (size_t i = 0; i < n_vec; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
+                    if (inst && inst->type1 && inst->mangled_name) {
+                        /* Also declare the optional type for the element */
+                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                    }
+                }
+                
+                /* Emit Map declarations (using default hash functions for known types) */
+                for (size_t i = 0; i < n_map; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
+                    if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
+                        /* Determine hash/eq functions based on key type */
+                        const char* hash_fn = "cc_kh_hash_i32";
+                        const char* eq_fn = "cc_kh_eq_i32";
+                        if (strcmp(inst->type1, "int") == 0) {
+                            hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                        } else if (strstr(inst->type1, "64") != NULL) {
+                            hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                        } else if (strstr(inst->type1, "slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
+                            hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
+                        }
+                        fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
+                                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                    }
+                }
+                
+                fprintf(out, "/* --- end container declarations --- */\n\n");
+            }
+        }
+    }
 
     /* Preserve diagnostics mapping to the original input (repo-relative for readability). */
     {

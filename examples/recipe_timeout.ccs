@@ -11,7 +11,7 @@
  * cc_deadline_expired() checks if deadline time passed.
  * For time-based exits, use cc_deadline_expired().
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 int work_completed = 0;

@@ -1,5 +1,5 @@
-#include "cc_runtime.cch"
-#include "cc_channel.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
 // This is a common foot-gun:
 // `closing(ch)` closes the channel only after all nursery children exit.
 // A consumer inside the same nursery that waits for "channel closed" can deadlock.

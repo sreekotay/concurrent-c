@@ -1,5 +1,5 @@
 // Compile-fail: use-after-move for CCSlice.
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 int main(void) {
     int buf[2] = {1, 2};

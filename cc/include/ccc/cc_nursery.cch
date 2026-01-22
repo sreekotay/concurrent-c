@@ -19,9 +19,9 @@ typedef int bool;
 #define __bool_true_false_are_defined 1
 #endif
 #endif
-#include "cc_sched.cch"
-#include "cc_closure.cch"
-#include "cc_chan_handle.cch"
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_chan_handle.cch>
 
 typedef struct CCChan CCChan;
 

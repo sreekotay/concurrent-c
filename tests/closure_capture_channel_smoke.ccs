@@ -1,5 +1,5 @@
 // Test: Closure can capture channel handles
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <assert.h>
 
 int main(void) {

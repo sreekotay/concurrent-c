@@ -4,9 +4,9 @@
  * Tests unbuffered (rendezvous) channels under heavy concurrent load.
  * Each send must synchronize with a receive.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task_intptr.cch>
 #include <stdio.h>
 
 #define NUM_PAIRS 50

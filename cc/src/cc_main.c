@@ -258,6 +258,18 @@ static void cc_set_out_dir(const char* out_dir_opt, const char* bin_dir_opt) {
     snprintf(g_cache_root, sizeof(g_cache_root), "%s/.cc-build", g_out_root);
 }
 
+// Check if a path layout is valid (runtime source exists).
+static int cc__check_layout(const char* include_path, const char* runtime_path) {
+    char marker[PATH_MAX];
+    snprintf(marker, sizeof(marker), "%s/concurrent_c.c", runtime_path);
+    if (file_exists(marker)) {
+        // Also verify include dir has ccc/cc_runtime.cch.
+        snprintf(marker, sizeof(marker), "%s/ccc/cc_runtime.cch", include_path);
+        return file_exists(marker);
+    }
+    return 0;
+}
+
 static void cc_init_paths(const char* argv0) {
     if (g_paths_inited) return;
     g_paths_inited = 1;
@@ -276,61 +288,110 @@ static void cc_init_paths(const char* argv0) {
     strncpy(g_ccc_path, exe_abs[0] ? exe_abs : (argv0 ? argv0 : ""), sizeof(g_ccc_path));
     g_ccc_path[sizeof(g_ccc_path) - 1] = '\0';
 
-    // Derive repo root from the executable location.
-    // Supported layouts:
-    //  - <repo>/cc/bin/ccc
-    //  - <repo>/out/cc/bin/ccc
-    char tmp[PATH_MAX];
-    strncpy(tmp, exe_abs[0] ? exe_abs : "", sizeof(tmp));
-    tmp[sizeof(tmp) - 1] = '\0';
+    // ------------------------------------------------------------------
+    // Path resolution priority:
+    //   1. CC_HOME env var (explicit override for custom installations)
+    //   2. Installed layout: <prefix>/bin/ccc with <prefix>/lib/ccc and <prefix>/include/ccc
+    //   3. Dev layout: <repo>/cc/bin/ccc or <repo>/out/cc/bin/ccc (fallback for development)
+    // ------------------------------------------------------------------
 
-    const char* suf1 = "/cc/bin/ccc";
-    const char* suf2 = "/out/cc/bin/ccc";
-    // Back-compat for older wrapper names.
-    const char* suf1_old = "/cc/bin/cc";
-    const char* suf2_old = "/out/cc/bin/cc";
-    char* cut = NULL;
-    if (tmp[0]) {
-        char* p2 = strstr(tmp, suf2);
-        if (p2) cut = p2;
-        else {
-            char* p1 = strstr(tmp, suf1);
-            if (p1) cut = p1;
+    int layout_found = 0;
+    char tmp[PATH_MAX];
+
+    // Priority 1: CC_HOME environment variable.
+    const char* cc_home = getenv("CC_HOME");
+    if (cc_home && cc_home[0]) {
+        char inc_check[PATH_MAX], rt[PATH_MAX];
+        snprintf(inc_check, sizeof(inc_check), "%s/include", cc_home);
+        snprintf(rt, sizeof(rt), "%s/lib/ccc/runtime", cc_home);
+        if (cc__check_layout(inc_check, rt)) {
+            strncpy(g_repo_root, cc_home, sizeof(g_repo_root));
+            g_repo_root[sizeof(g_repo_root) - 1] = '\0';
+            // g_cc_include points to parent of ccc/ so -I enables <ccc/...> includes
+            snprintf(g_cc_include, sizeof(g_cc_include), "%s/include", cc_home);
+            snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/concurrent_c.c", rt);
+            // No prebuilt runtime .o in installed layout; will compile from source.
+            g_cc_runtime_o[0] = '\0';
+            snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/lib/ccc", cc_home);
+            layout_found = 1;
+        }
+    }
+
+    // Priority 2: Installed layout (<prefix>/bin/ccc -> <prefix>/lib/ccc, <prefix>/include/ccc).
+    if (!layout_found && exe_abs[0]) {
+        strncpy(tmp, exe_abs, sizeof(tmp));
+        tmp[sizeof(tmp) - 1] = '\0';
+        cc__dirname_inplace(tmp); // <prefix>/bin
+        cc__dirname_inplace(tmp); // <prefix>
+
+        char inc_check[PATH_MAX], rt[PATH_MAX];
+        snprintf(inc_check, sizeof(inc_check), "%s/include", tmp);
+        snprintf(rt, sizeof(rt), "%s/lib/ccc/runtime", tmp);
+        if (cc__check_layout(inc_check, rt)) {
+            strncpy(g_repo_root, tmp, sizeof(g_repo_root));
+            g_repo_root[sizeof(g_repo_root) - 1] = '\0';
+            // g_cc_include points to parent of ccc/ so -I enables <ccc/...> includes
+            snprintf(g_cc_include, sizeof(g_cc_include), "%s/include", tmp);
+            snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/concurrent_c.c", rt);
+            g_cc_runtime_o[0] = '\0';
+            snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/lib/ccc", tmp);
+            layout_found = 1;
+        }
+    }
+
+    // Priority 3: Dev layout (<repo>/cc/bin/ccc or <repo>/out/cc/bin/ccc).
+    if (!layout_found) {
+        strncpy(tmp, exe_abs[0] ? exe_abs : "", sizeof(tmp));
+        tmp[sizeof(tmp) - 1] = '\0';
+
+        const char* suf1 = "/cc/bin/ccc";
+        const char* suf2 = "/out/cc/bin/ccc";
+        // Back-compat for older wrapper names.
+        const char* suf1_old = "/cc/bin/cc";
+        const char* suf2_old = "/out/cc/bin/cc";
+        char* cut = NULL;
+        if (tmp[0]) {
+            char* p2 = strstr(tmp, suf2);
+            if (p2) cut = p2;
             else {
-                char* p2o = strstr(tmp, suf2_old);
-                if (p2o) cut = p2o;
+                char* p1 = strstr(tmp, suf1);
+                if (p1) cut = p1;
                 else {
-                    char* p1o = strstr(tmp, suf1_old);
-                    if (p1o) cut = p1o;
+                    char* p2o = strstr(tmp, suf2_old);
+                    if (p2o) cut = p2o;
+                    else {
+                        char* p1o = strstr(tmp, suf1_old);
+                        if (p1o) cut = p1o;
+                    }
                 }
             }
         }
-    }
-    if (cut) {
-        *cut = '\0';
-    } else {
-        // Fallback: old heuristic (dirname thrice).
-        cc__dirname_inplace(tmp); // .../bin
-        cc__dirname_inplace(tmp); // .../cc
-        cc__dirname_inplace(tmp); // repo root
-    }
-
-    if (!tmp[0]) {
-        // Final fallback: assume current working directory is the repo root.
-        if (getcwd(tmp, sizeof(tmp)) == NULL) {
-            strncpy(tmp, ".", sizeof(tmp));
-            tmp[sizeof(tmp) - 1] = '\0';
+        if (cut) {
+            *cut = '\0';
+        } else {
+            // Fallback: old heuristic (dirname thrice).
+            cc__dirname_inplace(tmp); // .../bin
+            cc__dirname_inplace(tmp); // .../cc
+            cc__dirname_inplace(tmp); // repo root
         }
+
+        if (!tmp[0]) {
+            // Final fallback: assume current working directory is the repo root.
+            if (getcwd(tmp, sizeof(tmp)) == NULL) {
+                strncpy(tmp, ".", sizeof(tmp));
+                tmp[sizeof(tmp) - 1] = '\0';
+            }
+        }
+
+        strncpy(g_repo_root, tmp, sizeof(g_repo_root));
+        g_repo_root[sizeof(g_repo_root) - 1] = '\0';
+
+        snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/cc", g_repo_root);
+        snprintf(g_cc_include, sizeof(g_cc_include), "%s/cc/include", g_repo_root);
+        // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
+        snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
+        snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
     }
-
-    strncpy(g_repo_root, tmp, sizeof(g_repo_root));
-    g_repo_root[sizeof(g_repo_root) - 1] = '\0';
-
-    snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/cc", g_repo_root);
-    snprintf(g_cc_include, sizeof(g_cc_include), "%s/cc/include", g_repo_root);
-    // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
-    snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
-    snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
 
     // Fingerprint the *real* compiler binary for cache keys. `./cc/bin/ccc` is a small wrapper script
     // that often doesn't change when the compiler is rebuilt, while `./out/cc/bin/ccc` does.

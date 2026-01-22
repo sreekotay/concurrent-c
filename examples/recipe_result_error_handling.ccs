@@ -9,7 +9,7 @@
  * Key insight: Result types make error handling explicit and composable.
  * Use `try` for early propagation, manual checks for recovery.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 /* Simulated I/O operation that can fail. */
 int!CCError read_config_value(const char* key) {

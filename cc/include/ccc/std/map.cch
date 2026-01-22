@@ -7,11 +7,17 @@
  * - Fibonacci hashing (better distribution)
  * - Linear probing (cache-friendly)
  * 
+ * Spec-compliant API:
+ * - Name_get(h, key) returns V? (optional, None if not found)
+ * - Name_get_ptr(h, key) returns V* (mutable access, NULL if not found)
+ * - Name_insert(h, key, val) inserts or updates
+ * - Name_remove(h, key) returns bool (true if existed)
+ * 
  * Usage:
- *   CC_MAP_DECL_ARENA(int, int, IntMap, hash_i32, eq_i32)
+ *   CC_MAP_DECL_ARENA_FULL(int, int, IntMap, CCOptional_int, hash_i32, eq_i32)
  *   IntMap *m = IntMap_init(&arena);
- *   IntMap_put(m, 42, 100, NULL);
- *   int val; if (IntMap_get(m, 42, &val)) { ... }
+ *   IntMap_insert(m, 42, 100);
+ *   int? val = IntMap_get(m, 42);  // returns optional
  */
 #ifndef CC_STD_MAP_H
 #define CC_STD_MAP_H
@@ -34,7 +40,8 @@ typedef int bool;
 #endif
 #endif
 
-#include "../cc_arena.cch"
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_optional.cch>
 
 /*
  * Arena-backed allocator hooks for khashl.
@@ -63,7 +70,7 @@ typedef int bool;
 #define Kfree(km, ptr) ((void)0)  /* no-op: arena manages memory */
 
 /* Now include khashl with our allocator hooks */
-#include "../../../third_party/khashl/khashl.h"
+#include <ccc/vendor/khashl.h>
 
 /*
  * Hash function helpers
@@ -87,21 +94,25 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
 }
 
 /*
- * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
+ * CC_MAP_DECL_ARENA_FULL(K, V, Name, OptV, HASH_FN, EQ_FN)
  * 
- * Declares an arena-backed hash map with:
+ * Declares an arena-backed hash map with optional-returning get.
+ * OptV is the optional type for V (e.g., CCOptional_int for int).
+ * 
+ * API:
  * - Name_init(arena) -> Name*
  * - Name_destroy(h)
- * - Name_put(h, key, val, absent*) -> bucket index
- * - Name_get(h, key, out_val*) -> bool
- * - Name_del(h, key) -> bool
+ * - Name_insert(h, key, val) -> 0 on success, -1 on failure
+ * - Name_get(h, key) -> OptV (None if not found)
+ * - Name_get_ptr(h, key) -> V* (mutable access, NULL if not found)
+ * - Name_remove(h, key) -> bool (true if existed)
  * - Name_len(h) -> size
  * - Name_clear(h)
  * 
  * HASH_FN: khint_t fn(K key)
  * EQ_FN:   int fn(K a, K b)  (returns non-zero if equal)
  */
-#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)                          \
+#define CC_MAP_DECL_ARENA_FULL(K, V, Name, OptV, HASH_FN, EQ_FN)               \
     KHASHL_MAP_INIT(KH_LOCAL, Name##__kh, Name##__kh, K, V, HASH_FN, EQ_FN)    \
                                                                                \
     typedef Name##__kh Name;                                                   \
@@ -114,6 +125,17 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         Name##__kh_destroy(h);                                                 \
     }                                                                          \
                                                                                \
+    /* Insert or update: returns 0 on success, -1 on failure */                \
+    static inline int Name##_insert(Name *h, K key, V val) {                   \
+        if (!h) return -1;                                                     \
+        int absent = 0;                                                        \
+        khint_t k = Name##__kh_put(h, key, &absent);                           \
+        if (absent < 0) return -1;                                             \
+        kh_val(h, k) = val;                                                    \
+        return 0;                                                              \
+    }                                                                          \
+                                                                               \
+    /* Legacy put with absent flag */                                          \
     static inline int Name##_put(Name *h, K key, V val, int *ret) {            \
         if (!h) { if (ret) *ret = -1; return -1; }                             \
         int absent = 0;                                                        \
@@ -124,14 +146,18 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         return (int)k;                                                         \
     }                                                                          \
                                                                                \
-    static inline bool Name##_get(const Name *h, K key, V *out) {              \
-        if (!h) return false;                                                  \
+    /* Get: returns optional (None if not found) */                            \
+    static inline OptV Name##_get(const Name *h, K key) {                      \
+        OptV result = {0};                                                     \
+        if (!h) return result;                                                 \
         khint_t k = Name##__kh_get(h, key);                                    \
-        if (k == kh_end(h)) return false;                                      \
-        if (out) *out = kh_val(h, k);                                          \
-        return true;                                                           \
+        if (k == kh_end(h)) return result;                                     \
+        result.has = 1;                                                        \
+        result.u.value = kh_val(h, k);                                         \
+        return result;                                                         \
     }                                                                          \
                                                                                \
+    /* Mutable pointer access: returns pointer or NULL */                      \
     static inline V* Name##_get_ptr(Name *h, K key) {                          \
         if (!h) return NULL;                                                   \
         khint_t k = Name##__kh_get(h, key);                                    \
@@ -139,12 +165,18 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         return &kh_val(h, k);                                                  \
     }                                                                          \
                                                                                \
-    static inline bool Name##_del(Name *h, K key) {                            \
+    /* Remove: returns true if key existed */                                  \
+    static inline bool Name##_remove(Name *h, K key) {                         \
         if (!h) return false;                                                  \
         khint_t k = Name##__kh_get(h, key);                                    \
         if (k == kh_end(h)) return false;                                      \
         Name##__kh_del(h, k);                                                  \
         return true;                                                           \
+    }                                                                          \
+                                                                               \
+    /* Legacy del alias */                                                     \
+    static inline bool Name##_del(Name *h, K key) {                            \
+        return Name##_remove(h, key);                                          \
     }                                                                          \
                                                                                \
     static inline size_t Name##_len(const Name *h) {                           \
@@ -155,16 +187,30 @@ static inline int cc_kh_eq_slice(CCSlice a, CCSlice b) {
         if (h) Name##__kh_clear(h);                                            \
     }
 
+/*
+ * CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)
+ * 
+ * Convenience macro for simple value types where OptV = CCOptional_##V.
+ * For complex value types (pointers, structs), use CC_MAP_DECL_ARENA_FULL.
+ */
+#define CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN) \
+    CC_MAP_DECL_ARENA_FULL(K, V, Name, CCOptional_##V, HASH_FN, EQ_FN)
+
 /* Iteration helper: iterates over all (key, val) pairs */
 #define CC_MAP_FOREACH(h, k_var, v_var)                                        \
     for (khint_t __i = 0; (h) && __i != kh_end(h); ++__i)                      \
         if (kh_exist((h), __i) &&                                              \
             ((k_var) = kh_key((h), __i), (v_var) = kh_val((h), __i), 1))
 
-/* Convenience: common key types */
+/* Convenience: common key types (simple value types only) */
 #define CC_MAP_DECL_INT(V, Name)    CC_MAP_DECL_ARENA(int, V, Name, cc_kh_hash_i32, cc_kh_eq_i32)
 #define CC_MAP_DECL_U64(V, Name)    CC_MAP_DECL_ARENA(uint64_t, V, Name, cc_kh_hash_u64, cc_kh_eq_u64)
 #define CC_MAP_DECL_SLICE(V, Name)  CC_MAP_DECL_ARENA(CCSlice, V, Name, cc_kh_hash_slice, cc_kh_eq_slice)
+
+/* Full versions with explicit optional type */
+#define CC_MAP_DECL_INT_FULL(V, Name, OptV)    CC_MAP_DECL_ARENA_FULL(int, V, Name, OptV, cc_kh_hash_i32, cc_kh_eq_i32)
+#define CC_MAP_DECL_U64_FULL(V, Name, OptV)    CC_MAP_DECL_ARENA_FULL(uint64_t, V, Name, OptV, cc_kh_hash_u64, cc_kh_eq_u64)
+#define CC_MAP_DECL_SLICE_FULL(V, Name, OptV)  CC_MAP_DECL_ARENA_FULL(CCSlice, V, Name, OptV, cc_kh_hash_slice, cc_kh_eq_slice)
 
 /* Legacy alias for compatibility */
 #define Map(K, V, Name, HASH_FN, EQ_FN) CC_MAP_DECL_ARENA(K, V, Name, HASH_FN, EQ_FN)

@@ -1,4 +1,4 @@
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 int main(void) {
     int x = 0;

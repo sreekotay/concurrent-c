@@ -13,5 +13,12 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
 // Returns newly allocated string, or NULL if no rewrites needed.
 char* cc__rewrite_link_directives(const char* src, size_t n);
 
+// Rewrite generic container syntax:
+//   Vec<T> -> Vec_T, Map<K,V> -> Map_K_V
+//   vec_new<T>(&arena) -> Vec_T_init(&arena, CC_VEC_INITIAL_CAP)
+//   map_new<K,V>(&arena) -> Map_K_V_init(&arena)
+// Returns newly allocated string with rewrites, or NULL if no changes.
+char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);
+
 #endif // CC_PREPROCESS_H
 

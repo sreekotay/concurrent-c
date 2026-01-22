@@ -7,7 +7,7 @@
  *
  * Note: Uses a smaller pipeline due to channel array syntax limitations.
  */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_ITEMS 1000

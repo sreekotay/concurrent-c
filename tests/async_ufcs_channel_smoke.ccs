@@ -1,8 +1,8 @@
 /* Test that UFCS channel ops with await in @async functions work correctly.
    This uses the ergonomic form: `await tx.send(val)` instead of the explicit
    cc_chan_send_task() call. */
-#include "cc_runtime.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
 #include <stdio.h>
 #include <assert.h>
 

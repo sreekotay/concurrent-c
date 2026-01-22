@@ -1,5 +1,5 @@
 /* Test: reference capture [&x] with mutation (should fail) */
-#include "cc_nursery.cch"
+#include <ccc/cc_nursery.cch>
 
 int main(void) {
     int counter = 0;

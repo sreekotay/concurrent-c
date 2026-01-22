@@ -4,7 +4,7 @@
  * 
  * This test validates our signal-based implementation doesn't regress.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <time.h>
 

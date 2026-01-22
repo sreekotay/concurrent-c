@@ -1,5 +1,5 @@
 #define CC_ENABLE_SHORT_NAMES
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 
 // UFCS smoke: validate compiler-side overload selection for std_out.write:
 // - std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer(...))

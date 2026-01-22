@@ -1,5 +1,5 @@
-#include "cc_runtime.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
 
 /* Channel ops are blocking - autoblock pass wraps them automatically. No explicit await needed. */
 @async int f(CCChanTx tx, CCChanRx rx) {

@@ -10,7 +10,7 @@
  * No per-allocation free, no fragmentation, no leaks.
  */
 #define CC_ENABLE_SHORT_NAMES
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 
 int main(void) {

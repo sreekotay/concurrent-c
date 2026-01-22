@@ -2,9 +2,9 @@
  * Closure helpers (early).
  */
 
-#include "cc_closure.cch"
-#include "cc_sched.cch"
-#include "cc_nursery.cch"
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_sched.cch>
+#include <ccc/cc_nursery.cch>
 
 #include <errno.h>
 #include <stdint.h>

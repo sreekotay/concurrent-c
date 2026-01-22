@@ -5,6 +5,7 @@ CURL_DIR := third_party/curl
 CURL_BUILD := $(CURL_DIR)/build
 
 .PHONY: all cc clean fmt lint example example-c smoke test tools
+.PHONY: install uninstall
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
 .PHONY: examples-check stress-check perf-check full-check
@@ -16,6 +17,43 @@ cc:
 
 clean:
 	$(MAKE) -C $(CC_DIR) clean
+
+# ---- Installation -----------------------------------------------------------
+#
+# Install the compiler and runtime to a prefix (default: /usr/local).
+# Use DESTDIR for staged installs (e.g., packaging).
+#
+#   make install                     # install to /usr/local
+#   make install PREFIX=/opt/ccc     # install to /opt/ccc
+#   make install DESTDIR=/tmp/pkg    # staged install for packaging
+#
+# The installed layout:
+#   $PREFIX/bin/ccc                   - compiler binary
+#   $PREFIX/include/ccc/*.cch         - standard library headers
+#   $PREFIX/include/ccc/std/*.cch     - std module headers
+#   $PREFIX/lib/ccc/runtime/*.c       - runtime source (compiled per-project)
+
+PREFIX ?= /usr/local
+
+install: cc
+	@echo "Installing Concurrent-C to $(DESTDIR)$(PREFIX)..."
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime
+	install -d $(DESTDIR)$(PREFIX)/include/ccc/std
+	install -d $(DESTDIR)$(PREFIX)/include/ccc/vendor
+	install -m 755 out/cc/bin/ccc $(DESTDIR)$(PREFIX)/bin/
+	install -m 644 cc/include/ccc/*.cch $(DESTDIR)$(PREFIX)/include/ccc/
+	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
+	install -m 644 cc/include/ccc/vendor/*.h $(DESTDIR)$(PREFIX)/include/ccc/vendor/
+	install -m 644 cc/runtime/*.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
+	@echo "Installed. Add $(DESTDIR)$(PREFIX)/bin to PATH if needed."
+
+uninstall:
+	@echo "Uninstalling Concurrent-C from $(DESTDIR)$(PREFIX)..."
+	rm -f $(DESTDIR)$(PREFIX)/bin/ccc
+	rm -rf $(DESTDIR)$(PREFIX)/lib/ccc
+	rm -rf $(DESTDIR)$(PREFIX)/include/ccc
+	@echo "Uninstalled."
 
 fmt:
 	@./scripts/format.sh

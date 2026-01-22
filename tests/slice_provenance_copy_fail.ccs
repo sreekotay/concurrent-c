@@ -1,5 +1,5 @@
 // Compile-fail: provenance-driven move-only slice cannot be copied.
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 int main(void) {
     int* p = (int*)malloc(sizeof(int) * 2);

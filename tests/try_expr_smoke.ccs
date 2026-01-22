@@ -1,7 +1,7 @@
 /*
  * Test: try expression for early error propagation
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 /* Helper that may fail */
 int!CCError maybe_parse(int x) {

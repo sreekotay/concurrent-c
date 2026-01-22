@@ -4,8 +4,8 @@
  * Spawns many concurrent tasks that each do minimal work.
  * Tests nursery spawn overhead and task scheduling.
  */
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define NUM_TASKS 1000

@@ -1,5 +1,5 @@
 // Smoke: returning a move-only slice works when explicitly moved.
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 CCSlice make_ok(void) {
     int* p0 = (int*)malloc(sizeof(int) * 2);

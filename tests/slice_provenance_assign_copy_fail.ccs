@@ -1,5 +1,5 @@
 // Compile-fail: assignment copy of move-only slice must use cc_move.
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 int main(void) {
     int* p0 = (int*)malloc(sizeof(int) * 2);

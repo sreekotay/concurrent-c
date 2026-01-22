@@ -1,5 +1,5 @@
 /* Test (2B): passing &x to a known const T* parameter is allowed (read-only). */
-#include "cc_nursery.cch"
+#include <ccc/cc_nursery.cch>
 #include <stdio.h>
 
 static void read_only_i32(const int* p) {

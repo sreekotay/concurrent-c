@@ -5,7 +5,7 @@
  * Async variants require runtime scheduler integration.
  */
 
-#include "../include/std/net.cch"
+#include <ccc/std/net.cch>
 
 #include <errno.h>
 #include <stdio.h>

@@ -1,6 +1,6 @@
 /* Test: cc_block_all runs tasks concurrently.
    Expected: Both tasks complete, results are correct. */
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 @async int add(int a, int b) {

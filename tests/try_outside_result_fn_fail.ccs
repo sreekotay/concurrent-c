@@ -2,7 +2,7 @@
  * Test: try used outside a function returning T!E (should fail)
  * The try macro requires the enclosing function to return a compatible Result type.
  */
-#include "std/prelude.cch"
+#include <ccc/std/prelude.cch>
 
 int!CCError maybe_fail(int x) {
     if (x < 0) {

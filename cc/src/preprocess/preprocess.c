@@ -6,8 +6,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
+
+CC_DEFINE_SB_APPEND_FMT
 
 /* Rewrite `@match { case <hdr>: <body> ... }` into valid C using cc_chan_match_select.
    This is intentionally text-based: the construct is not valid C, so TCC must see rewritten code.
@@ -820,6 +823,262 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
         }
         
         i++; col++;
+    }
+    
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* ============================================================================
+ * Generic container syntax lowering: Vec<T> -> Vec_T, Map<K,V> -> Map_K_V
+ * Also: vec_new<T>(...) -> Vec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
+ * ============================================================================ */
+
+/* Mangle a type parameter for container names (int -> int, char[:] -> charslice, etc.) */
+static void cc__mangle_container_type_param(const char* src, size_t len, char* out, size_t out_sz) {
+    if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
+    /* Trim whitespace */
+    size_t i = 0;
+    while (i < len && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r')) i++;
+    size_t e = len;
+    while (e > i && (src[e - 1] == ' ' || src[e - 1] == '\t' || src[e - 1] == '\n' || src[e - 1] == '\r')) e--;
+    size_t j = 0;
+    for (size_t k = i; k < e && j < out_sz - 1; k++) {
+        char c = src[k];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+        if (c == '*') { 
+            if (j + 3 < out_sz) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
+        } else if (c == '[') {
+            if (j + 5 < out_sz && k + 2 < e && src[k + 1] == ':' && src[k + 2] == ']') {
+                out[j++] = 's'; out[j++] = 'l'; out[j++] = 'i'; out[j++] = 'c'; out[j++] = 'e';
+                k += 2;
+            } else {
+                out[j++] = '_';
+            }
+        } else if (c == ']' || c == ',' || c == '<' || c == '>') {
+            out[j++] = '_';
+        } else {
+            out[j++] = c;
+        }
+    }
+    while (j > 0 && out[j - 1] == '_') j--;
+    out[j] = 0;
+}
+
+/* Find matching '>' for '<' at position langle. Returns 1 on success. */
+static int cc__find_matching_angle(const char* b, size_t bl, size_t langle, size_t* out_rangle) {
+    if (!b || langle >= bl || b[langle] != '<') return 0;
+    int ang = 1, par = 0, brk = 0, br = 0;
+    int ins = 0; char q = 0;
+    int in_lc = 0, in_bc = 0;
+    for (size_t p = langle + 1; p < bl; p++) {
+        char ch = b[p];
+        char ch2 = (p + 1 < bl) ? b[p + 1] : 0;
+        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; p++; } continue; }
+        if (ins) { if (ch == '\\' && p + 1 < bl) { p++; continue; } if (ch == q) ins = 0; continue; }
+        if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
+        if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
+        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        if (ch == '(') par++;
+        else if (ch == ')') { if (par) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk) brk--; }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+        else if (ch == '<' && par == 0 && brk == 0 && br == 0) ang++;
+        else if (ch == '>' && par == 0 && brk == 0 && br == 0) {
+            ang--;
+            if (ang == 0) { if (out_rangle) *out_rangle = p; return 1; }
+        }
+    }
+    return 0;
+}
+
+/* Rewrite generic container syntax:
+   - Vec<T> -> Vec_T
+   - Map<K, V> -> Map_K_V  
+   - vec_new<T>(...) -> Vec_T_init(...)
+   - map_new<K, V>(...) -> Map_K_V_init(...)
+   Also tracks variable declarations for UFCS resolution. */
+char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
+    (void)input_path;
+    if (!src || n == 0) return NULL;
+    
+    if (getenv("CC_DEBUG_GENERIC")) {
+        fprintf(stderr, "CC: cc_rewrite_generic_containers called, n=%zu\n", n);
+    }
+    
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for Vec< or Map< or vec_new< or map_new< */
+        int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
+        size_t kw_start = i;
+        size_t kw_len = 0;
+        
+        if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
+            /* Check word boundary before */
+            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
+                is_vec_type = 1;
+                kw_len = 3;
+            }
+        } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
+            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
+                is_map_type = 1;
+                kw_len = 3;
+            }
+        } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
+            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
+                is_vec_new = 1;
+                kw_len = 7;
+            }
+        } else if (i + 8 <= n && memcmp(src + i, "map_new<", 8) == 0) {
+            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
+                is_map_new = 1;
+                kw_len = 7;
+            }
+        }
+        
+        if (is_vec_type || is_map_type || is_vec_new || is_map_new) {
+            size_t angle_start = kw_start + kw_len;
+            size_t angle_end = 0;
+            
+            if (!cc__find_matching_angle(src, n, angle_start, &angle_end)) {
+                i++;
+                continue;
+            }
+            
+            /* Extract type parameters */
+            const char* params = src + angle_start + 1;
+            size_t params_len = angle_end - angle_start - 1;
+            
+            char mangled[256] = {0};
+            char elem_type[128] = {0};
+            char key_type[128] = {0};
+            char val_type[128] = {0};
+            
+            if (is_vec_type || is_vec_new) {
+                /* Single type parameter */
+                cc__mangle_container_type_param(params, params_len, elem_type, sizeof(elem_type));
+                snprintf(mangled, sizeof(mangled), "Vec_%s", elem_type);
+                
+                if (reg) {
+                    cc_type_registry_add_vec(reg, elem_type, mangled);
+                }
+            } else {
+                /* Two type parameters: K, V */
+                const char* comma = NULL;
+                int depth = 0;
+                for (size_t k = 0; k < params_len; k++) {
+                    char pc = params[k];
+                    if (pc == '<') depth++;
+                    else if (pc == '>') depth--;
+                    else if (pc == ',' && depth == 0) {
+                        comma = params + k;
+                        break;
+                    }
+                }
+                
+                if (!comma) {
+                    i++;
+                    continue;
+                }
+                
+                size_t k_len = (size_t)(comma - params);
+                size_t v_start = (size_t)(comma - params) + 1;
+                size_t v_len = params_len - v_start;
+                
+                cc__mangle_container_type_param(params, k_len, key_type, sizeof(key_type));
+                cc__mangle_container_type_param(params + v_start, v_len, val_type, sizeof(val_type));
+                snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
+                
+                if (reg) {
+                    cc_type_registry_add_map(reg, key_type, val_type, mangled);
+                }
+            }
+            
+            /* Emit everything up to this point */
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, kw_start - last_emit);
+            
+            if (is_vec_type || is_map_type) {
+                /* Emit mangled type name */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
+                last_emit = angle_end + 1;
+                
+                /* Try to extract variable name for type registry */
+                if (reg) {
+                    size_t j = cc_skip_ws_and_comments(src, n, angle_end + 1);
+                    if (j < n && (cc_is_ident_start(src[j]) || src[j] == '*')) {
+                        /* Skip any * for pointer types */
+                        while (j < n && src[j] == '*') j++;
+                        j = cc_skip_ws_and_comments(src, n, j);
+                        if (j < n && cc_is_ident_start(src[j])) {
+                            size_t var_start = j;
+                            while (j < n && cc_is_ident_char(src[j])) j++;
+                            char var_name[128];
+                            size_t vn_len = j - var_start;
+                            if (vn_len < sizeof(var_name)) {
+                                memcpy(var_name, src + var_start, vn_len);
+                                var_name[vn_len] = 0;
+                                cc_type_registry_add_var(reg, var_name, mangled);
+                            }
+                        }
+                    }
+                }
+            } else {
+                /* vec_new<T>(...) or map_new<K,V>(...) -> TypeName_init(..., default_cap) */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "_init");
+                
+                /* Find the opening paren and add default capacity after the arena arg */
+                size_t j = cc_skip_ws_and_comments(src, n, angle_end + 1);
+                if (j < n && src[j] == '(') {
+                    /* Find the closing paren */
+                    size_t paren_end = 0;
+                    if (cc_find_matching_paren(src, n, j, &paren_end)) {
+                        /* Emit opening paren */
+                        cc_sb_append(&out, &out_len, &out_cap, src + angle_end + 1, j - angle_end);
+                        /* Emit the arena argument */
+                        cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
+                        /* Add default capacity for vec, nothing extra for map */
+                        if (is_vec_new) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", CC_VEC_INITIAL_CAP)");
+                        } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                        }
+                        last_emit = paren_end + 1;
+                        i = paren_end + 1;
+                        continue;
+                    }
+                }
+                last_emit = angle_end + 1;
+            }
+            
+            i = angle_end + 1;
+            continue;
+        }
+        
+        i++;
     }
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -1982,6 +2241,15 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     int fd = mkstemps(tmp_path, 2); /* keep .c suffix */
     if (fd < 0) return -1;
 
+    /* Create type registry for this file (or reuse existing global) */
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    int reg_owned = 0;
+    if (!reg) {
+        reg = cc_type_registry_new();
+        cc_type_registry_set_global(reg);
+        reg_owned = 1;
+    }
+
     FILE *in = fopen(input_path, "r");
     FILE *out = fdopen(fd, "w");
     if (!in || !out) {
@@ -2048,10 +2316,15 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur3 = rewritten_chan ? rewritten_chan : cur2;
     size_t cur3_n = rewritten_chan ? strlen(rewritten_chan) : cur2_n;
 
+    /* Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V and vec_new<T>/map_new<K,V> -> init calls */
+    char* rewritten_generic = cc_rewrite_generic_containers(cur3, cur3_n, input_path);
+    const char* cur3g = rewritten_generic ? rewritten_generic : cur3;
+    size_t cur3g_n = rewritten_generic ? strlen(rewritten_generic) : cur3_n;
+
     /* Rewrite T? -> CCOptional_T */
-    char* rewritten_opt = cc__rewrite_optional_types(cur3, cur3_n, input_path);
-    const char* cur4 = rewritten_opt ? rewritten_opt : cur3;
-    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3_n;
+    char* rewritten_opt = cc__rewrite_optional_types(cur3g, cur3g_n, input_path);
+    const char* cur4 = rewritten_opt ? rewritten_opt : cur3g;
+    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3g_n;
 
     /* Infer cc_ok(v)/cc_err(e) types from function signatures BEFORE result type rewrite */
     char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4, cur4_n);
@@ -2077,7 +2350,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_infer); free(rewritten_opt);
-        free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
+        free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
         return -1;
     }
@@ -2087,6 +2360,47 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     // Rewrite @link("lib") -> marker comments for linker
     char* rewritten_link = cc__rewrite_link_directives(cur8, cur8_n);
     const char* use = rewritten_link ? rewritten_link : cur8;
+
+    /* Emit container type declarations from type registry */
+    {
+        size_t n_vec = cc_type_registry_vec_count(reg);
+        size_t n_map = cc_type_registry_map_count(reg);
+        
+        if (n_vec > 0 || n_map > 0) {
+            fprintf(out, "/* --- CC generic container declarations --- */\n");
+            fprintf(out, "#include <ccc/std/vec.cch>\n");
+            fprintf(out, "#include <ccc/std/map.cch>\n");
+            
+            /* Emit Vec declarations */
+            for (size_t i = 0; i < n_vec; i++) {
+                const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
+                if (inst && inst->type1 && inst->mangled_name) {
+                    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                }
+            }
+            
+            /* Emit Map declarations (using default hash functions for known types) */
+            for (size_t i = 0; i < n_map; i++) {
+                const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
+                if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
+                    /* Determine hash/eq functions based on key type */
+                    const char* hash_fn = "cc_kh_hash_i32";
+                    const char* eq_fn = "cc_kh_eq_i32";
+                    if (strcmp(inst->type1, "int") == 0) {
+                        hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                    } else if (strstr(inst->type1, "64") != NULL) {
+                        hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                    } else if (strstr(inst->type1, "slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
+                        hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
+                    }
+                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
+                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                }
+            }
+            
+            fprintf(out, "/* --- end container declarations --- */\n\n");
+        }
+    }
 
     char rel[1024];
     fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
@@ -2099,6 +2413,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_res);
     free(rewritten_infer);
     free(rewritten_opt);
+    free(rewritten_generic);
     free(rewritten_chan);
     free(rewritten_slice);
     free(rewritten_match);

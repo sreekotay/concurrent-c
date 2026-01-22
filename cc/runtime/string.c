@@ -1,6 +1,6 @@
-#include "cc_arena.cch"
-#include "cc_slice.cch"
-#include "std/string.cch"
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/std/string.cch>
 
 #include <string.h>
 

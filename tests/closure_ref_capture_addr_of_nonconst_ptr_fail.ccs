@@ -1,5 +1,5 @@
 /* Test (2B): passing &x to a known T* parameter is rejected (potential write race). */
-#include "cc_nursery.cch"
+#include <ccc/cc_nursery.cch>
 
 static void maybe_write_i32(int* p) {
     if (p) *p = 123;

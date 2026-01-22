@@ -12,8 +12,8 @@
  */
 @link("curl")
 
-#include "cc_runtime.cch"
-#include "std/http.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/http.cch>
 #include <stdio.h>
 #include <string.h>
 

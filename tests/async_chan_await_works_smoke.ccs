@@ -1,8 +1,8 @@
 /* Test that channel ops with await in @async functions work correctly.
    Uses cc_chan_*_task() directly since chan_send/recv are macros that
    don't interact well with await in the current implementation. */
-#include "cc_runtime.cch"
-#include "std/task_intptr.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
 #include <stdio.h>
 #include <assert.h>
 

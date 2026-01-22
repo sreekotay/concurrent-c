@@ -10,8 +10,8 @@
 #include <errno.h>
 #include <stdio.h>
 
-#include "../cc_exec.cch"
-#include "../cc_sched.cch"
+#include <ccc/cc_exec.cch>
+#include <ccc/cc_sched.cch>
 
 /* Minimal channel API surface to avoid header cycles. */
 typedef struct CCChan CCChan;

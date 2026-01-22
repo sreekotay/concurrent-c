@@ -1,5 +1,5 @@
 /* Test: @unsafe escape hatch allows mutation of reference capture */
-#include "cc_nursery.cch"
+#include <ccc/cc_nursery.cch>
 #include <stdio.h>
 
 int main(void) {

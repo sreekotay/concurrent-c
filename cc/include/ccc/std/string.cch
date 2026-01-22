@@ -32,7 +32,7 @@ typedef int bool;
 #include <stdint.h>
 #include <math.h>
 
-#include "../cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 typedef struct {
     char *ptr;
