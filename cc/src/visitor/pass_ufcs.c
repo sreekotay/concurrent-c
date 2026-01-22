@@ -66,7 +66,8 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         int col_end;
         const char* method;
         int occurrence_1based;
-        int is_under_await; /* 1 if this UFCS call is inside an `await` expression */
+        int is_under_await;      /* 1 if this UFCS call is inside an `await` expression */
+        int recv_type_is_ptr;    /* 1 if receiver's resolved type is a pointer (from TCC) */
     };
     struct UFCSNode* nodes = NULL;
     int node_count = 0;
@@ -89,6 +90,8 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         }
         int occ = (n[i].aux2 >> 8) & 0x00ffffff;
         if (occ <= 0) occ = 1;
+        /* bit1 of aux2 = receiver's resolved type is a pointer (from TCC) */
+        int recv_type_is_ptr = (n[i].aux2 & 2) ? 1 : 0;
         /* Check if this node is under an AWAIT ancestor */
         int under_await = 0;
         for (int p = n[i].parent; p >= 0 && p < root->node_count; p = n[p].parent) {
@@ -102,6 +105,7 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
             .method = n[i].aux_s1,
             .occurrence_1based = occ,
             .is_under_await = under_await,
+            .recv_type_is_ptr = recv_type_is_ptr,
         };
     }
 
@@ -158,8 +162,8 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         if (!expr) { free(out_buf); continue; }
         memcpy(expr, cur + sp.start, expr_len);
         expr[expr_len] = '\0';
-        /* Use await-aware rewrite if this UFCS call is under an `await` expression */
-        if (cc_ufcs_rewrite_line_await(expr, out_buf, out_cap, nodes[i].is_under_await) == 0) {
+        /* Use extended rewrite with await context and type info */
+        if (cc_ufcs_rewrite_line_ex(expr, out_buf, out_cap, nodes[i].is_under_await, nodes[i].recv_type_is_ptr) == 0) {
             size_t repl_len = strlen(out_buf);
             size_t new_len = cur_len - expr_len + repl_len;
             char* next = (char*)malloc(new_len + 1);

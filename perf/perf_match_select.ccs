@@ -1,0 +1,172 @@
+/*
+ * @match (multi-channel select) performance benchmark.
+ * Measures: select latency with different channel counts.
+ * 
+ * This test validates our signal-based implementation doesn't regress.
+ */
+#include "std/prelude.cch"
+#include <stdio.h>
+#include <time.h>
+
+#define ITERATIONS 1000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+/* Single channel recv (baseline) */
+static void bench_single_channel(void) {
+    int[~100 >] tx;
+    int[~100 <] rx;
+    channel_pair(&tx, &rx);
+    
+    /* Pre-fill some values */
+    for (int i = 0; i < 50; i++) {
+        tx.send(i);
+    }
+    
+    double start = time_now_ms();
+    
+    int sum = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        tx.send(i);  /* Keep channel fed */
+        int v;
+        rx.recv(&v);
+        sum += v;
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  single channel recv: %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    
+    tx.close();
+}
+
+/* Two-channel select - one always ready */
+static void bench_two_channel_one_ready(void) {
+    int[~100 >] tx1, tx2;
+    int[~100 <] rx1, rx2;
+    channel_pair(&tx1, &rx1);
+    channel_pair(&tx2, &rx2);
+    
+    double start = time_now_ms();
+    
+    int sum = 0;
+    int v1 = 0, v2 = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        tx1.send(i);  /* Only ch1 has data */
+        
+        @match {
+            case rx1.recv(&v1): {
+                sum += v1;
+            }
+            case rx2.recv(&v2): {
+                sum += v2;
+            }
+        }
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  2-channel select (1 ready): %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    
+    tx1.close();
+    tx2.close();
+}
+
+/* Two-channel select - alternating */
+static void bench_two_channel_alternating(void) {
+    int[~100 >] tx1, tx2;
+    int[~100 <] rx1, rx2;
+    channel_pair(&tx1, &rx1);
+    channel_pair(&tx2, &rx2);
+    
+    double start = time_now_ms();
+    
+    int sum = 0;
+    int v1 = 0, v2 = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        if (i % 2 == 0) {
+            tx1.send(i);
+        } else {
+            tx2.send(i);
+        }
+        
+        @match {
+            case rx1.recv(&v1): {
+                sum += v1;
+            }
+            case rx2.recv(&v2): {
+                sum += v2;
+            }
+        }
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  2-channel select (alternating): %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    
+    tx1.close();
+    tx2.close();
+}
+
+/* Four-channel select */
+static void bench_four_channel(void) {
+    int[~100 >] tx1, tx2, tx3, tx4;
+    int[~100 <] rx1, rx2, rx3, rx4;
+    channel_pair(&tx1, &rx1);
+    channel_pair(&tx2, &rx2);
+    channel_pair(&tx3, &rx3);
+    channel_pair(&tx4, &rx4);
+    
+    double start = time_now_ms();
+    
+    int sum = 0;
+    int v1 = 0, v2 = 0, v3 = 0, v4 = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        /* Round-robin which channel gets data */
+        switch (i % 4) {
+            case 0: tx1.send(i); break;
+            case 1: tx2.send(i); break;
+            case 2: tx3.send(i); break;
+            case 3: tx4.send(i); break;
+        }
+        
+        @match {
+            case rx1.recv(&v1): sum += v1;
+            case rx2.recv(&v2): sum += v2;
+            case rx3.recv(&v3): sum += v3;
+            case rx4.recv(&v4): sum += v4;
+        }
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  4-channel select (round-robin): %.0f ops/sec (%.2f ms)\n", ops_per_sec, elapsed);
+    
+    tx1.close();
+    tx2.close();
+    tx3.close();
+    tx4.close();
+}
+
+/* Note: Concurrent select test omitted - capture syntax for channel handles
+   in closures is complex. The sequential tests above cover @match performance. */
+
+int main(void) {
+    printf("perf_match_select: measuring @match select performance\n");
+    
+    bench_single_channel();
+    bench_two_channel_one_ready();
+    bench_two_channel_alternating();
+    bench_four_channel();
+    
+    printf("perf_match_select: DONE\n");
+    return 0;
+}

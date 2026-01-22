@@ -1,0 +1,124 @@
+/*
+ * Async task overhead benchmark.
+ * Measures: task creation, state machine transitions, cc_block_on overhead.
+ */
+#include "std/prelude.cch"
+#include <stdio.h>
+#include <time.h>
+
+#define ITERATIONS 10000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+/* Minimal async function - just returns */
+@async int trivial_async(int x) {
+    return x + 1;
+}
+
+/* Async with computation (no yields) */
+@async int compute_async(int x) {
+    int sum = 0;
+    for (int i = 0; i < 100; i++) {
+        sum += x + i;
+    }
+    return sum;
+}
+
+/* Benchmark trivial async task creation + execution */
+static void bench_trivial_async(void) {
+    double start = time_now_ms();
+    
+    long sum = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        sum += cc_block_on(int, trivial_async(i));
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double tasks_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  trivial async (no yields): %.0f tasks/sec (%.1f ms, sum=%ld)\n",
+           tasks_per_sec, elapsed, sum);
+}
+
+/* Benchmark async with computation */
+static void bench_compute_async(void) {
+    double start = time_now_ms();
+    
+    long sum = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        sum += cc_block_on(int, compute_async(i));
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double tasks_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  compute async (100 iterations): %.0f tasks/sec (%.1f ms)\n",
+           tasks_per_sec, elapsed);
+}
+
+/* Benchmark cc_block_all overhead */
+static void bench_block_all(void) {
+    int batch_size = 10;
+    int batches = ITERATIONS / batch_size;
+    
+    double start = time_now_ms();
+    
+    long sum = 0;
+    for (int b = 0; b < batches; b++) {
+        CCTaskIntptr tasks[10];
+        for (int i = 0; i < batch_size; i++) {
+            tasks[i] = trivial_async(b * batch_size + i);
+        }
+        
+        intptr_t results[10];
+        cc_block_all(batch_size, tasks, results);
+        
+        for (int i = 0; i < batch_size; i++) {
+            sum += results[i];
+        }
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double tasks_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  cc_block_all (batch=%d): %.0f tasks/sec (%.1f ms, sum=%ld)\n",
+           batch_size, tasks_per_sec, elapsed, sum);
+}
+
+/* Benchmark spawn overhead (baseline comparison) */
+static void bench_spawn_overhead(void) {
+    cc_atomic_int counter = 0;
+    cc_atomic_int* counter_ptr = &counter;
+    
+    double start = time_now_ms();
+    
+    @nursery {
+        for (int i = 0; i < ITERATIONS; i++) {
+            spawn([counter_ptr]() => {
+                cc_atomic_fetch_add(counter_ptr, 1);
+            });
+        }
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double spawns_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  spawn (baseline): %.0f spawns/sec (%.1f ms, count=%d)\n",
+           spawns_per_sec, elapsed, cc_atomic_load(counter_ptr));
+}
+
+int main(void) {
+    printf("perf_async_overhead: measuring async task performance\n");
+    
+    bench_trivial_async();
+    bench_compute_async();
+    bench_block_all();
+    bench_spawn_overhead();
+    
+    printf("perf_async_overhead: DONE\n");
+    return 0;
+}

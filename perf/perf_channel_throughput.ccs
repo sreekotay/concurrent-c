@@ -1,0 +1,113 @@
+/*
+ * Channel throughput benchmark.
+ * Measures: operations per second for buffered and unbuffered channels.
+ */
+#include "std/prelude.cch"
+#include <stdio.h>
+#include <time.h>
+
+#define ITERATIONS 100000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+/* Buffered channel: producer/consumer in separate tasks */
+static void bench_buffered(void) {
+    int[~1000 >] tx;
+    int[~1000 <] rx;
+    channel_pair(&tx, &rx);
+    
+    double start = time_now_ms();
+    
+    @nursery closing(tx) {
+        /* Producer */
+        spawn([tx]() => {
+            for (int i = 0; i < ITERATIONS; i++) {
+                tx.send(i);
+            }
+        });
+        
+        /* Consumer */
+        spawn([rx]() => {
+            int v;
+            for (int i = 0; i < ITERATIONS; i++) {
+                rx.recv(&v);
+            }
+        });
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = (ITERATIONS * 2.0) / (elapsed / 1000.0);  /* send + recv */
+    
+    printf("  buffered (cap=1000): %.0f ops/sec (%.1f ms for %d pairs)\n", 
+           ops_per_sec, elapsed, ITERATIONS);
+}
+
+/* Unbuffered channel: rendezvous */
+static void bench_unbuffered(void) {
+    int[~ >] tx;
+    int[~ <] rx;
+    channel_pair(&tx, &rx);  /* unbuffered */
+    
+    int iterations = ITERATIONS / 10;  /* Unbuffered is slower */
+    double start = time_now_ms();
+    
+    @nursery closing(tx) {
+        spawn([tx, iterations]() => {
+            for (int i = 0; i < iterations; i++) {
+                tx.send(i);
+            }
+        });
+        
+        spawn([rx, iterations]() => {
+            int v;
+            for (int i = 0; i < iterations; i++) {
+                rx.recv(&v);
+            }
+        });
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = (iterations * 2.0) / (elapsed / 1000.0);
+    
+    printf("  unbuffered (rendezvous): %.0f ops/sec (%.1f ms for %d pairs)\n",
+           ops_per_sec, elapsed, iterations);
+}
+
+/* Single-threaded throughput (no contention) */
+static void bench_single_thread(void) {
+    int[~1000 >] tx;
+    int[~1000 <] rx;
+    channel_pair(&tx, &rx);
+    
+    double start = time_now_ms();
+    
+    /* Alternate send/recv to avoid filling buffer */
+    for (int i = 0; i < ITERATIONS; i++) {
+        tx.send(i);
+        int v;
+        rx.recv(&v);
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = (ITERATIONS * 2.0) / (elapsed / 1000.0);
+    
+    printf("  single-thread (no contention): %.0f ops/sec (%.1f ms)\n",
+           ops_per_sec, elapsed);
+    
+    tx.close();
+}
+
+int main(void) {
+    printf("perf_channel_throughput: measuring channel performance\n");
+    
+    bench_single_thread();
+    bench_buffered();
+    bench_unbuffered();
+    
+    printf("perf_channel_throughput: DONE\n");
+    return 0;
+}

@@ -14,6 +14,10 @@ static int is_ident_char(char c) {
 // Channel ops should emit task-returning variants when set.
 static _Thread_local int g_ufcs_await_context = 0;
 
+// Thread-local context: set to 1 when receiver's resolved type is a pointer.
+// Used for free() dispatch: ptr.free() -> cc_chan_free(ptr) vs handle.free() -> chan_free(handle).
+static _Thread_local int g_ufcs_recv_type_is_ptr = 0;
+
 // Map a receiver+method to a desugared function call prefix.
 // Returns number of bytes written to out (not including args), or -1 on failure.
 static const char* skip_ws(const char* s) {
@@ -107,6 +111,11 @@ static int emit_desugared_call(char* out,
         return snprintf(out, cap, "chan_close(%s%s)", recv_is_ptr ? "*":"", recv);
     }
     if (strcmp(method, "free") == 0) {
+        /* If receiver's resolved type is a pointer (e.g., CCChan*), call cc_chan_free directly.
+           Otherwise use chan_free macro which expects a handle with .raw field. */
+        if (g_ufcs_recv_type_is_ptr) {
+            return snprintf(out, cap, "cc_chan_free(%s%s)", recv_is_ptr ? "*":"", recv);
+        }
         return snprintf(out, cap, "chan_free(%s%s)", recv_is_ptr ? "*":"", recv);
     }
 
@@ -309,5 +318,15 @@ int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is
     g_ufcs_await_context = is_await;
     int rc = cc_ufcs_rewrite_line(in, out, out_cap);
     g_ufcs_await_context = 0;
+    return rc;
+}
+
+// Extended rewrite with type info from TCC.
+int cc_ufcs_rewrite_line_ex(const char* in, char* out, size_t out_cap, int is_await, int recv_type_is_ptr) {
+    g_ufcs_await_context = is_await;
+    g_ufcs_recv_type_is_ptr = recv_type_is_ptr;
+    int rc = cc_ufcs_rewrite_line(in, out, out_cap);
+    g_ufcs_await_context = 0;
+    g_ufcs_recv_type_is_ptr = 0;
     return rc;
 }

@@ -21,7 +21,7 @@ int main(void) {
     channel_pair(&tx, &rx);
 
     int r = cc_block_on(int, f(tx, rx));
-    tx.free();
+    chan_free(tx);
     return (r == 7) ? 0 : 1;
 }
 

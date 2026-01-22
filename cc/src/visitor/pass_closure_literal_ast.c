@@ -1025,8 +1025,8 @@ static int cc__parse_closure_from_src(const char* src,
         size_t j = l0 + 1;
         while (j < l1 && (s[j] == ' ' || s[j] == '\t')) j++;
         /* Disallow capture-all sugar: `[&]` and `[=]` */
-        if (j + 1 < l1 && s[j] == '&' && s[j + 1] == ']') return 0;
-        if (j < l1 && s[j] == '=' && (j + 1 == l1 || s[j + 1] == ']')) return 0;
+        if (j + 1 < l1 && s[j] == '&' && s[j + 1] == ']') return -2; /* capture-all [&] banned */
+        if (j < l1 && s[j] == '=' && (j + 1 == l1 || s[j + 1] == ']')) return -3; /* capture-all [=] banned */
 
         /* Find matching ']' */
         int sq = 1;
@@ -1438,7 +1438,25 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d file=%s line=%d start_off=%zu end_off=%zu tail=\"%.*s\"\n",
                     d->id, f, n[i].line_start, d->start_off, d->end_off, (int)tail_n, in_src + tail_s);
         }
-        cc__parse_closure_from_src(in_src, d->start_off, d->end_off, n[i].aux1, d);
+        int pr = cc__parse_closure_from_src(in_src, d->start_off, d->end_off, n[i].aux1, d);
+        if (pr == -2) {
+            const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            fprintf(stderr, "%s:%d: error: capture-all [&] is not allowed\n", f, n[i].line_start);
+            cc__free_closure_desc(d);
+            free(descs);
+            free(idxs);
+            cc__free_func_sigs(sigs, sig_n);
+            return -1;
+        }
+        if (pr == -3) {
+            const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            fprintf(stderr, "%s:%d: error: capture-all [=] is not allowed\n", f, n[i].line_start);
+            cc__free_closure_desc(d);
+            free(descs);
+            free(idxs);
+            cc__free_func_sigs(sigs, sig_n);
+            return -1;
+        }
     }
 
     /* Walk file text in order, record simple decls, and compute captures for each closure at its location. */

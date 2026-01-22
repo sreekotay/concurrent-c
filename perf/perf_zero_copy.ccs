@@ -1,0 +1,140 @@
+/*
+ * Payload size channel benchmark.
+ * Compares channel throughput with different payload sizes.
+ */
+#include "std/prelude.cch"
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#define ITERATIONS 10000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+/* Small struct payload */
+typedef struct {
+    int a, b, c, d;  /* 16 bytes */
+} Small;
+
+/* Medium struct payload */
+typedef struct {
+    int data[64];  /* 256 bytes */
+} Medium;
+
+/* Large struct payload */
+typedef struct {
+    int data[256];  /* 1024 bytes */
+} Large;
+
+static void bench_int(void) {
+    int[~100 >] tx;
+    int[~100 <] rx;
+    channel_pair(&tx, &rx);
+    
+    double start = time_now_ms();
+    long sum = 0;
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        tx.send(i);
+        int v;
+        rx.recv(&v);
+        sum += v;
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    
+    printf("  int (4 bytes): %.0f ops/sec (%.1f ms)\n", ops_per_sec, elapsed);
+    tx.close();
+}
+
+static void bench_small(void) {
+    Small[~100 >] tx;
+    Small[~100 <] rx;
+    channel_pair(&tx, &rx);
+    
+    double start = time_now_ms();
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        Small s = { i, i+1, i+2, i+3 };
+        tx.send(s);
+        Small out;
+        rx.recv(&out);
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    double mb_per_sec = (ITERATIONS * sizeof(Small) / 1048576.0) / (elapsed / 1000.0);
+    
+    printf("  Small (%zu bytes): %.0f ops/sec, %.1f MB/sec\n", 
+           sizeof(Small), ops_per_sec, mb_per_sec);
+    tx.close();
+}
+
+static void bench_medium(void) {
+    Medium[~100 >] tx;
+    Medium[~100 <] rx;
+    channel_pair(&tx, &rx);
+    
+    double start = time_now_ms();
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        Medium m;
+        memset(&m, (char)i, sizeof(m));
+        tx.send(m);
+        Medium out;
+        rx.recv(&out);
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = ITERATIONS / (elapsed / 1000.0);
+    double mb_per_sec = (ITERATIONS * sizeof(Medium) / 1048576.0) / (elapsed / 1000.0);
+    
+    printf("  Medium (%zu bytes): %.0f ops/sec, %.1f MB/sec\n",
+           sizeof(Medium), ops_per_sec, mb_per_sec);
+    tx.close();
+}
+
+static void bench_large(void) {
+    Large[~50 >] tx;  /* Smaller buffer for large payloads */
+    Large[~50 <] rx;
+    channel_pair(&tx, &rx);
+    
+    int iterations = ITERATIONS / 2;
+    double start = time_now_ms();
+    
+    for (int i = 0; i < iterations; i++) {
+        Large l;
+        memset(&l, (char)i, sizeof(l));
+        tx.send(l);
+        Large out;
+        rx.recv(&out);
+    }
+    
+    double elapsed = time_now_ms() - start;
+    double ops_per_sec = iterations / (elapsed / 1000.0);
+    double mb_per_sec = (iterations * sizeof(Large) / 1048576.0) / (elapsed / 1000.0);
+    
+    printf("  Large (%zu bytes): %.0f ops/sec, %.1f MB/sec\n",
+           sizeof(Large), ops_per_sec, mb_per_sec);
+    tx.close();
+}
+
+int main(void) {
+    printf("perf_zero_copy: measuring channel throughput by payload size\n\n");
+    
+    bench_int();
+    bench_small();
+    bench_medium();
+    bench_large();
+    
+    printf("\n  Note: For true zero-copy, use recv() -> send_take() pipeline\n");
+    printf("  with unique slices from channel receives.\n");
+    
+    printf("\nperf_zero_copy: DONE\n");
+    return 0;
+}

@@ -19,5 +19,9 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap);
 // emit task-returning variants (cc_chan_*_task) for use in @async functions.
 int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is_await);
 
+// Extended rewrite with type info. recv_type_is_ptr=1 when the receiver's resolved
+// type is a pointer (from TCC), enabling correct dispatch for ptr.free() vs handle.free().
+int cc_ufcs_rewrite_line_ex(const char* in, char* out, size_t out_cap, int is_await, int recv_type_is_ptr);
+
 #endif // CC_VISITOR_UFCS_H
 
