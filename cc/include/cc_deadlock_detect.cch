@@ -36,7 +36,7 @@ void cc_deadlock_progress(void);
 /* Get current blocked count (for testing/debugging) */
 int cc_deadlock_get_blocked_count(void);
 
-/* Check if deadlock detection is enabled (via CC_DEADLOCK_DETECT=1) */
+/* Check if deadlock detection is enabled (default on; disable with CC_DEADLOCK_DETECT=0) */
 int cc_deadlock_is_enabled(void);
 
 #endif /* CC_DEADLOCK_DETECT_H */

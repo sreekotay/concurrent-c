@@ -2,13 +2,13 @@
  * Test: Deadlock Detection
  *
  * This test intentionally creates a deadlock pattern that should be detected
- * by the runtime deadlock watchdog when CC_DEADLOCK_DETECT=1.
+ * by the runtime deadlock watchdog (enabled by default).
  *
  * The pattern: cc_block_on inside spawn with channel ops that wait on each other.
  * 
  * Expected behavior:
- * - Without CC_DEADLOCK_DETECT=1: hangs forever
- * - With CC_DEADLOCK_DETECT=1: prints deadlock warning after ~3 seconds
+ * - By default: prints deadlock warning after ~3 seconds
+ * - With CC_DEADLOCK_DETECT=0: hangs forever
  */
 #include "cc_runtime.cch"
 #include "std/task_intptr.cch"
@@ -34,7 +34,7 @@ int main(void) {
     printf("Deadlock Detection Test\n");
     printf("========================\n");
     printf("This test creates an intentional deadlock.\n");
-    printf("Set CC_DEADLOCK_DETECT=1 to enable detection.\n\n");
+    printf("Set CC_DEADLOCK_DETECT=0 to disable detection.\n\n");
     
     int[~ >] tx;  /* Unbuffered channel - requires rendezvous */
     int[~ <] rx;
@@ -42,16 +42,10 @@ int main(void) {
     
     /* THIS IS THE BAD PATTERN */
     /* cc_block_on inside spawn blocks the spawn's thread,
-       so neither the producer nor consumer can make progress */
+       and with no receiver, the send will deadlock */
     
     @nursery {
-        /* Consumer spawn - blocks on cc_block_on waiting for recv */
-        spawn(() => {
-            int v = cc_block_on(int, consumer(rx));  /* Blocks this thread! */
-            (void)v;
-        });
-        
-        /* Producer spawn - blocks on cc_block_on waiting for send */
+        /* Producer spawn - blocks on cc_block_on waiting for send (no receiver exists) */
         spawn(() => {
             int r = cc_block_on(int, producer(tx));  /* Blocks this thread! */
             (void)r;

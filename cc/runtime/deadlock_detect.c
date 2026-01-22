@@ -9,7 +9,7 @@
  *    - If this persists for N seconds, likely deadlock
  *
  * Environment variables:
- *   CC_DEADLOCK_DETECT=1  Enable deadlock detection (default: aborts on deadlock)
+ *   CC_DEADLOCK_DETECT=0  Disable deadlock detection (default: enabled)
  *   CC_DEADLOCK_ABORT=0   Disable abort, just warn (for debugging)
  *   CC_DEADLOCK_TIMEOUT=N Set timeout in seconds (default: 10)
  */
@@ -198,9 +198,9 @@ void cc_deadlock_detect_init(void) {
         return;  /* Already initialized */
     }
     
-    /* Check if enabled */
+    /* Enabled by default; allow opt-out with CC_DEADLOCK_DETECT=0 */
     const char* env = getenv("CC_DEADLOCK_DETECT");
-    if (!env || env[0] != '1') {
+    if (env && env[0] == '0') {
         pthread_mutex_unlock(&g_init_mutex);
         return;  /* Disabled */
     }

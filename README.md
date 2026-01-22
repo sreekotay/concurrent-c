@@ -6,7 +6,7 @@ This repo is an early prototype of **Concurrent‑C (CC)** built by extending **
 
 At this stage CC is a “C-with-extensions” toolchain:
 - A `ccc` compiler (`out/cc/bin/ccc` or wrapper `cc/bin/ccc`) that lowers `.ccs` → C (with `#line` sourcemaps) and then optionally compiles/links using the host C compiler.
-- A small runtime/stdlib (header-first, prefixed APIs) under `cc/include` and `cc/runtime`.
+- A light/statically linked runtime/stdlib (header-first, prefixed APIs) under `cc/include` and `cc/runtime`.
 - A test runner (`tools/cc_test`) that drives `cc/bin/ccc` end-to-end.
 
 ---
@@ -146,7 +146,7 @@ Fix: Move consumer **outside** the nursery.
 Enable runtime deadlock detection for fuzzy patterns:
 
 ```bash
-CC_DEADLOCK_DETECT=1 ./my_program
+CC_DEADLOCK_DETECT=0 ./my_program   # disable watchdog (default is enabled)
 ```
 
 When all threads are blocked with no progress for 10+ seconds:

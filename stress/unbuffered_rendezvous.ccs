@@ -6,6 +6,7 @@
  */
 #include "cc_runtime.cch"
 #include "cc_atomic.cch"
+#include "std/task_intptr.cch"
 #include <stdio.h>
 
 #define NUM_PAIRS 50
@@ -15,6 +16,33 @@ cc_atomic_int g_total_sent = 0;
 cc_atomic_int g_total_received = 0;
 cc_atomic_int g_checksum_sent = 0;
 cc_atomic_int g_checksum_received = 0;
+
+@async int recv_task(int[~ <] rx) {
+    int val = 0;
+    for (int i = 0; i < MSGS_PER_PAIR; i++) {
+        intptr_t rc = await rx.recv(&val);
+        if (rc == 0) {
+            cc_atomic_fetch_add(&g_total_received, 1);
+            cc_atomic_fetch_add(&g_checksum_received, val);
+        } else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+@async int send_task(int[~ >] tx, int sender_id) {
+    for (int i = 0; i < MSGS_PER_PAIR; i++) {
+        int val = sender_id * 1000 + i;
+        intptr_t rc = await tx.send(val);
+        if (rc != 0) {
+            return -1;
+        }
+        cc_atomic_fetch_add(&g_total_sent, 1);
+        cc_atomic_fetch_add(&g_checksum_sent, val);
+    }
+    return 0;
+}
 
 /* Global unbuffered channel for many-to-many test */
 int[~ >] g_tx;  /* Unbuffered */
@@ -26,33 +54,24 @@ int main(void) {
 
     g_ch = channel_pair(&g_tx, &g_rx);
 
-    @nursery {
-        /* Receivers - must be ready before senders can proceed */
-        for (int r = 0; r < NUM_PAIRS; r++) {
-            int receiver_id = r;
-            spawn(() => {
-                int val;
-                for (int i = 0; i < MSGS_PER_PAIR; i++) {
-                    if (chan_recv(g_rx, &val) == 0) {
-                        cc_atomic_fetch_add(&g_total_received, 1);
-                        cc_atomic_fetch_add(&g_checksum_received, val);
-                    }
-                }
-            });
-        }
+    CCTaskIntptr tasks[NUM_PAIRS * 2];
+    intptr_t results[NUM_PAIRS * 2];
+    int task_count = 0;
 
-        /* Senders - each send blocks until a receiver is ready */
-        for (int s = 0; s < NUM_PAIRS; s++) {
-            int sender_id = s;
-            spawn(() => {
-                for (int i = 0; i < MSGS_PER_PAIR; i++) {
-                    int val = sender_id * 1000 + i;
-                    chan_send(g_tx, val);
-                    cc_atomic_fetch_add(&g_total_sent, 1);
-                    cc_atomic_fetch_add(&g_checksum_sent, val);
-                }
-            });
-        }
+    /* Receivers */
+    for (int r = 0; r < NUM_PAIRS; r++) {
+        tasks[task_count++] = recv_task(g_rx);
+    }
+    /* Senders */
+    for (int s = 0; s < NUM_PAIRS; s++) {
+        tasks[task_count++] = send_task(g_tx, s);
+    }
+
+    int err = cc_block_all(task_count, tasks, results);
+    if (err != 0) {
+        printf("ERROR: cc_block_all failed with err=%d\n", err);
+        cc_chan_free(g_ch);
+        return 1;
     }
 
     chan_close(g_tx);

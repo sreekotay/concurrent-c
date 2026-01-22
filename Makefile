@@ -7,7 +7,7 @@ CURL_BUILD := $(CURL_DIR)/build
 .PHONY: all cc clean fmt lint example example-c smoke test tools
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
-.PHONY: examples-check stress-check perf-check
+.PHONY: examples-check stress-check perf-check full-check
 
 all: cc
 
@@ -79,11 +79,22 @@ stress-check: cc
 	@failed=0; \
 	for f in stress/*.ccs; do \
 		printf "  %-40s" "$$f"; \
-		if $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; then \
-			echo "OK"; \
+		if [ "$$f" = "stress/deadlock_detect_demo.ccs" ]; then \
+			CC_DEADLOCK_TIMEOUT=1 $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; \
+			rc=$$?; \
+			if [ $$rc -eq 124 ] || [ $$rc -eq 1 ]; then \
+				echo "OK"; \
+			else \
+				echo "FAIL"; \
+				failed=$$((failed + 1)); \
+			fi; \
 		else \
-			echo "FAIL"; \
-			failed=$$((failed + 1)); \
+			if $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; then \
+				echo "OK"; \
+			else \
+				echo "FAIL"; \
+				failed=$$((failed + 1)); \
+			fi; \
 		fi; \
 	done; \
 	if [ $$failed -gt 0 ]; then \
@@ -110,6 +121,9 @@ perf-check: cc
 		exit 1; \
 	fi; \
 	echo "All perf tests OK"
+
+# Run examples, stress, and perf in one go.
+full-check: examples-check stress-check perf-check
 
 # ---- Dependencies -----------------------------------------------------------
 #

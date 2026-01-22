@@ -3835,7 +3835,7 @@ For deadlocks that escape compile-time analysis (e.g., complex patterns, dynamic
 **Enabling:**
 
 ```bash
-CC_DEADLOCK_DETECT=1 ./my_program
+CC_DEADLOCK_DETECT=0 ./my_program
 ```
 
 **How it works:**
@@ -3875,7 +3875,7 @@ Suggested fixes:
 **Key features:**
 
 - **No false positives on temporary saturation:** Only triggers if blocked with zero progress for multiple seconds
-- **Minimal overhead when disabled:** All tracking is no-op when `CC_DEADLOCK_DETECT` is not set
+- **Minimal overhead when disabled:** All tracking is no-op when `CC_DEADLOCK_DETECT=0`
 - **Non-intrusive:** Warns but doesn't abort (deadlocked programs can still be killed normally)
 
 **Limitations:**

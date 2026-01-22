@@ -283,7 +283,8 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             }
         }
         cc_deadlock_exit_blocking();
-        if (ch->closed && !ch->rv_has_value) { ch->rv_recv_waiters--; return EPIPE; }
+        if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+        if (ch->closed && !ch->rv_has_value) { return EPIPE; }
         return 0;
     }
     /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
@@ -336,7 +337,6 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
     if (ch->cap == 0) {
         memcpy(out_value, ch->buf, ch->elem_size);
         ch->rv_has_value = 0;
-        if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
         pthread_cond_broadcast(&ch->not_full);
         cc__chan_broadcast_activity();
         return;
@@ -420,12 +420,24 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+    if (ch->cap == 0) {
+        /* Non-blocking rendezvous: only send if a receiver is waiting and slot is free. */
+        if (ch->rv_has_value || ch->rv_recv_waiters == 0) {
+            pthread_mutex_unlock(&ch->mu);
+            return EAGAIN;
+        }
+        cc_chan_enqueue(ch, value);
+        pthread_mutex_unlock(&ch->mu);
+        cc_deadlock_progress();  /* Successful send */
+        return 0;
+    }
     if (ch->count == ch->cap) {
         err = cc_chan_handle_full_send(ch, value, NULL);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     }
     cc_chan_enqueue(ch, value);
     pthread_mutex_unlock(&ch->mu);
+    cc_deadlock_progress();  /* Successful send */
     return 0;
 }
 
@@ -434,9 +446,20 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
+    if (ch->cap == 0) {
+        if (!ch->rv_has_value) {
+            pthread_mutex_unlock(&ch->mu);
+            return ch->closed ? EPIPE : EAGAIN;
+        }
+        cc_chan_dequeue(ch, out_value);
+        pthread_mutex_unlock(&ch->mu);
+        cc_deadlock_progress();  /* Successful recv */
+        return 0;
+    }
     if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? EPIPE : EAGAIN; }
     cc_chan_dequeue(ch, out_value);
     pthread_mutex_unlock(&ch->mu);
+    cc_deadlock_progress();  /* Successful recv */
     return 0;
 }
 
@@ -752,6 +775,7 @@ typedef struct {
     int is_send;         /* 1=send, 0=recv */
     int completed;
     int result;          /* 0 success, errno on error */
+    int waiting;         /* recv-only: whether we've registered as a waiting receiver */
 } CCChanTaskFrame;
 
 static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* out_err) {
@@ -776,6 +800,25 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
         rc = cc_chan_try_send(f->ch, f->buf, f->elem_size);
     } else {
         rc = cc_chan_try_recv(f->ch, f->buf, f->elem_size);
+        if (f->ch && f->ch->cap == 0) {
+            if (rc == EAGAIN && !f->waiting) {
+                /* Unbuffered rendezvous: register as waiting receiver so senders can proceed. */
+                pthread_mutex_lock(&f->ch->mu);
+                f->ch->rv_recv_waiters++;
+                pthread_cond_broadcast(&f->ch->not_full);
+                pthread_mutex_unlock(&f->ch->mu);
+                f->waiting = 1;
+            } else if (rc != EAGAIN && f->waiting) {
+                /* We were counted as a waiting receiver; remove our waiter count
+                   only if the recv failed (success path already decremented). */
+                if (rc != 0) {
+                    pthread_mutex_lock(&f->ch->mu);
+                    if (f->ch->rv_recv_waiters > 0) f->ch->rv_recv_waiters--;
+                    pthread_mutex_unlock(&f->ch->mu);
+                }
+                f->waiting = 0;
+            }
+        }
     }
 
     if (rc == EAGAIN) {
@@ -798,6 +841,30 @@ static int cc__chan_task_wait(void* frame) {
     if (!f || !f->ch) return EINVAL;
     CCChan* ch = f->ch;
     pthread_mutex_lock(&ch->mu);
+    if (ch->cap == 0) {
+        if (f->is_send) {
+            /* Rendezvous: sender waits for a receiver and a free slot */
+            while (!ch->closed && (ch->rv_has_value || ch->rv_recv_waiters == 0)) {
+                pthread_cond_wait(&ch->not_full, &ch->mu);
+            }
+            pthread_mutex_unlock(&ch->mu);
+            return ch->closed ? EPIPE : 0;
+        } else {
+            /* Rendezvous: receiver waits for a sender to place a value */
+            ch->rv_recv_waiters++;
+            pthread_cond_broadcast(&ch->not_full); /* wake senders waiting for a receiver */
+            while (!ch->closed && !ch->rv_has_value) {
+                pthread_cond_wait(&ch->not_empty, &ch->mu);
+            }
+            if (ch->closed && !ch->rv_has_value) {
+                ch->rv_recv_waiters--;
+                pthread_mutex_unlock(&ch->mu);
+                return EPIPE;
+            }
+            pthread_mutex_unlock(&ch->mu);
+            return 0;
+        }
+    }
     if (f->is_send) {
         while (!ch->closed && ch->count == ch->cap) {
             pthread_cond_wait(&ch->not_full, &ch->mu);

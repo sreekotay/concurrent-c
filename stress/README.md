@@ -24,7 +24,7 @@ Stress tests that push the compiler and runtime with demanding patterns.
 
 | Test | Description |
 |------|-------------|
-| `deadlock_detect_demo` | Intentional deadlock to demo detection |
+| `deadlock_detect_demo` | Intentional deadlock to demo detection (watchdog default-on) |
 
 ## Running
 
@@ -48,10 +48,10 @@ done
 
 ## Deadlock Detection
 
-Concurrent-C includes runtime deadlock detection. Enable it with:
+Concurrent-C includes runtime deadlock detection (enabled by default). Disable it with:
 
 ```bash
-CC_DEADLOCK_DETECT=1 ./cc/bin/ccc run stress/deadlock_detect_demo.ccs
+CC_DEADLOCK_DETECT=0 ./cc/bin/ccc run stress/deadlock_detect_demo.ccs
 ```
 
 When enabled, the runtime:
