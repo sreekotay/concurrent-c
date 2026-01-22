@@ -1,0 +1,52 @@
+/*
+ * GoBench GoKer: grpc#660 (done channel not drained).
+ * Ported kernel: sender blocks forever on unbuffered done channel.
+ */
+#include <ccc/cc_runtime.cch>
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+
+typedef struct {
+    CCChan* done_ch;
+    CCChan* progress_ch;
+} SenderArgs;
+
+static void* sender_thread(void* arg) {
+    SenderArgs* args = (SenderArgs*)arg;
+    int v = 1;
+    cc_chan_send(args->done_ch, &v, sizeof(v)); /* blocks if not drained */
+    v = 2;
+    cc_chan_send(args->progress_ch, &v, sizeof(v));
+    return NULL;
+}
+
+int main(void) {
+    CCChan* done_ch = cc_chan_create(0);
+    CCChan* progress_ch = cc_chan_create(1);
+    if (!done_ch || !progress_ch) return 2;
+    if (cc_chan_init_elem(done_ch, sizeof(int)) != 0) return 3;
+    if (cc_chan_init_elem(progress_ch, sizeof(int)) != 0) return 4;
+
+    SenderArgs args = { .done_ch = done_ch, .progress_ch = progress_ch };
+    pthread_t tid;
+    pthread_create(&tid, NULL, sender_thread, &args);
+
+    int v = 0;
+    int rc = 0;
+    @with_deadline(millis(20)) {
+        rc = cc_chan_recv(progress_ch, &v, sizeof(v));
+    }
+
+    /* Expect timeout because done channel is never drained. */
+    if (rc != ETIMEDOUT) return 10;
+
+    /* Cleanup: drain done channel to unblock sender. */
+    (void)cc_chan_recv(done_ch, &v, sizeof(v));
+    pthread_join(tid, NULL);
+
+    cc_chan_free(done_ch);
+    cc_chan_free(progress_ch);
+    printf("gobench goker grpc660: PASS\n");
+    return 0;
+}

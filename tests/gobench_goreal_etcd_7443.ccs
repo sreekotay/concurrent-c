@@ -1,0 +1,74 @@
+/*
+ * GoBench GoReal: etcd#7443 (channel + lock mixed deadlock).
+ * Simplified port: lock held while waiting on channel; sender needs same lock.
+ */
+#include <ccc/cc_runtime.cch>
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+
+typedef struct {
+    pthread_mutex_t* mu;
+    CCChan* notify_ch;
+    CCChan* progress_ch;
+} WorkerArgs;
+
+static void* waiter_thread(void* arg) {
+    WorkerArgs* a = (WorkerArgs*)arg;
+    pthread_mutex_lock(a->mu);
+    int v = 0;
+    (void)cc_chan_recv(a->notify_ch, &v, sizeof(v)); /* blocks while holding lock */
+    pthread_mutex_unlock(a->mu);
+    v = 1;
+    cc_chan_send(a->progress_ch, &v, sizeof(v));
+    return NULL;
+}
+
+static void* sender_thread(void* arg) {
+    WorkerArgs* a = (WorkerArgs*)arg;
+    pthread_mutex_lock(a->mu); /* blocked because waiter holds lock */
+    int v = 1;
+    cc_chan_send(a->notify_ch, &v, sizeof(v));
+    pthread_mutex_unlock(a->mu);
+    v = 2;
+    cc_chan_send(a->progress_ch, &v, sizeof(v));
+    return NULL;
+}
+
+int main(void) {
+    pthread_mutex_t mu;
+    pthread_mutex_init(&mu, NULL);
+
+    CCChan* notify_ch = cc_chan_create(0);
+    CCChan* progress_ch = cc_chan_create(2);
+    if (!notify_ch || !progress_ch) return 2;
+    if (cc_chan_init_elem(notify_ch, sizeof(int)) != 0) return 3;
+    if (cc_chan_init_elem(progress_ch, sizeof(int)) != 0) return 4;
+
+    WorkerArgs args = { .mu = &mu, .notify_ch = notify_ch, .progress_ch = progress_ch };
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, waiter_thread, &args);
+    pthread_create(&t2, NULL, sender_thread, &args);
+
+    int v = 0;
+    int rc = 0;
+    @with_deadline(millis(20)) {
+        rc = cc_chan_recv(progress_ch, &v, sizeof(v));
+    }
+
+    /* Expect timeout: sender cannot acquire lock to signal notify channel. */
+    if (rc != ETIMEDOUT) return 10;
+
+    /* Cleanup: release deadlock by signaling notify channel. */
+    v = 7;
+    cc_chan_send(notify_ch, &v, sizeof(v));
+    (void)cc_chan_recv(notify_ch, &v, sizeof(v));
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+
+    cc_chan_free(notify_ch);
+    cc_chan_free(progress_ch);
+    pthread_mutex_destroy(&mu);
+    printf("gobench goreal etcd7443: PASS\n");
+    return 0;
+}

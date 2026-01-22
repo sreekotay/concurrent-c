@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <errno.h>
 
 static CCExec *g_exec = NULL;
 static const CCAsyncBackendOps* g_backend = NULL;
@@ -78,6 +79,18 @@ CCExec* cc_async_runtime_exec(void) {
     CCExec* ex = g_exec;
     pthread_mutex_unlock(&g_mu);
     return ex;
+}
+
+int cc_async_runtime_stats(CCExecStats* out) {
+    if (!out) return EINVAL;
+    pthread_mutex_lock(&g_mu);
+    CCExec* ex = g_exec;
+    pthread_mutex_unlock(&g_mu);
+    if (!ex) {
+        memset(out, 0, sizeof(*out));
+        return 0;
+    }
+    return cc_exec_stats(ex, out);
 }
 
 void cc_async_runtime_shutdown(void) {

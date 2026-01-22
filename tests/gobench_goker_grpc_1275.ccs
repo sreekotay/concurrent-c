@@ -1,0 +1,53 @@
+/*
+ * GoBench GoKer: grpc#1275 (channel deadlock).
+ * Ported kernel: reader waits on channel, closer never signals.
+ */
+#include <ccc/cc_runtime.cch>
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+
+typedef struct {
+    CCChan* recv_ch;
+    CCChan* done_ch;
+} ReaderArgs;
+
+static void* reader_thread(void* arg) {
+    ReaderArgs* args = (ReaderArgs*)arg;
+    int v = 0;
+    (void)cc_chan_recv(args->recv_ch, &v, sizeof(v)); /* blocks */
+    v = 1;
+    cc_chan_send(args->done_ch, &v, sizeof(v));
+    return NULL;
+}
+
+int main(void) {
+    CCChan* recv_ch = cc_chan_create(0);
+    CCChan* done_ch = cc_chan_create(1);
+    if (!recv_ch || !done_ch) return 2;
+    if (cc_chan_init_elem(recv_ch, sizeof(int)) != 0) return 3;
+    if (cc_chan_init_elem(done_ch, sizeof(int)) != 0) return 4;
+
+    ReaderArgs args = { .recv_ch = recv_ch, .done_ch = done_ch };
+    pthread_t tid;
+    pthread_create(&tid, NULL, reader_thread, &args);
+
+    int v = 0;
+    int rc = 0;
+    @with_deadline(millis(20)) {
+        rc = cc_chan_recv(done_ch, &v, sizeof(v));
+    }
+
+    /* Expect timeout because CloseStream never signals recv. */
+    if (rc != ETIMEDOUT) return 10;
+
+    /* Cleanup: unblock reader and join. */
+    v = 42;
+    cc_chan_send(recv_ch, &v, sizeof(v));
+    pthread_join(tid, NULL);
+
+    cc_chan_free(recv_ch);
+    cc_chan_free(done_ch);
+    printf("gobench goker grpc1275: PASS\n");
+    return 0;
+}

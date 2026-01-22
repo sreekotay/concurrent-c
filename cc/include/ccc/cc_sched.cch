@@ -30,6 +30,12 @@ typedef struct {
     int cancelled;            // cooperative flag
 } CCDeadline;
 
+typedef struct {
+    size_t workers;
+    size_t queue_cap;
+    size_t queue_len;
+} CCSchedulerStats;
+
 // Initialize/shutdown scheduler (no-op for pthread-backed stub).
 int cc_scheduler_init(void);
 void cc_scheduler_shutdown(void);
@@ -49,6 +55,9 @@ int cc_task_join_result(CCTask* task, void** out_result);
 
 // Free task handle (after join or if spawn failed after allocation).
 void cc_task_free(CCTask* task);
+
+// Snapshot scheduler stats; returns 0 on success.
+int cc_scheduler_stats(CCSchedulerStats* out);
 
 // Sleep for at least ms milliseconds (best-effort).
 int cc_sleep_ms(unsigned int ms);

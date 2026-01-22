@@ -8,12 +8,14 @@
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_deadlock_detect.cch>
+#include <ccc/cc_atomic.cch>
 
 #include <errno.h>
 
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef struct {
     CCChan* done;
@@ -24,11 +26,22 @@ typedef struct {
 
 static CCExec* g_task_exec = NULL;
 static pthread_mutex_t g_task_exec_mu = PTHREAD_MUTEX_INITIALIZER;
+static cc_atomic_u64 g_task_submit_failures = 0;
+
+/* cc__env_size defined in scheduler.c */
+
+static size_t cc__default_blocking_workers(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n > 0 && n < 4) return (size_t)n;
+    return 4;
+}
 
 static CCExec* cc__task_exec_lazy(void) {
     pthread_mutex_lock(&g_task_exec_mu);
     if (!g_task_exec) {
-        g_task_exec = cc_exec_create(4, 256);
+        size_t workers = cc__env_size("CC_BLOCKING_WORKERS", cc__default_blocking_workers());
+        size_t qcap = cc__env_size("CC_BLOCKING_QUEUE_CAP", 256);
+        g_task_exec = cc_exec_create(workers, qcap);
     }
     CCExec* ex = g_task_exec;
     pthread_mutex_unlock(&g_task_exec_mu);
@@ -83,6 +96,7 @@ CCTaskIntptr cc_run_blocking_task_intptr(CCClosure0 c) {
 
     int sub = cc_exec_submit(ex, cc__task_intptr_job, h);
     if (sub != 0) {
+        cc_atomic_fetch_add(&g_task_submit_failures, 1);
         if (h->done) {
             cc_chan_close(h->done);
             cc_chan_free(h->done);
@@ -93,6 +107,19 @@ CCTaskIntptr cc_run_blocking_task_intptr(CCClosure0 c) {
         return out;
     }
     return out;
+}
+
+int cc_blocking_pool_stats(CCExecStats* out_exec, uint64_t* out_submit_failures) {
+    if (out_submit_failures) {
+        *out_submit_failures = (uint64_t)cc_atomic_load(&g_task_submit_failures);
+    }
+    CCExec* ex = cc__task_exec_lazy();
+    if (!out_exec) return ex ? 0 : ENOMEM;
+    if (!ex) {
+        memset(out_exec, 0, sizeof(*out_exec));
+        return 0;
+    }
+    return cc_exec_stats(ex, out_exec);
 }
 
 CCFutureStatus cc_task_intptr_poll(CCTaskIntptr* t, intptr_t* out_val, int* out_err) {

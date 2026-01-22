@@ -25,6 +25,13 @@ typedef struct CCExec CCExec;
 
 typedef void (*cc_exec_fn)(void *arg);
 
+typedef struct {
+    size_t workers;
+    size_t queue_cap;
+    size_t queue_len;
+    int shutting_down;
+} CCExecStats;
+
 // Initialize executor with a fixed worker count and queue capacity.
 // Returns NULL on failure.
 CCExec* cc_exec_create(size_t workers, size_t queue_cap);
@@ -37,6 +44,9 @@ int cc_exec_submit(CCExec* ex, cc_exec_fn fn, void *arg);
 
 // Graceful shutdown: no new work, waits for queued tasks to finish.
 void cc_exec_shutdown(CCExec* ex);
+
+// Snapshot executor stats; returns 0 on success.
+int cc_exec_stats(CCExec* ex, CCExecStats* out);
 
 // Force free (after shutdown).
 void cc_exec_free(CCExec* ex);

@@ -1,66 +1,158 @@
 /*
- * Minimal pthread-backed scheduler facade with cooperative deadlines.
+ * Executor-backed scheduler facade with cooperative deadlines.
  */
 
 #include <ccc/cc_sched.cch>
+#include <ccc/cc_exec.cch>
 
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 struct CCTask {
-    pthread_t thread;
-};
-
-int cc_scheduler_init(void) { return 0; }
-void cc_scheduler_shutdown(void) { }
-
-typedef struct {
     void* (*fn)(void*);
     void* arg;
-} CCThunk;
+    void* result;
+    int done;
+    int detached;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+};
 
-static void* cc_task_trampoline(void* p) {
-    CCThunk* t = (CCThunk*)p;
-    void* (*fn)(void*) = t->fn;
-    void* arg = t->arg;
-    free(t);
-    return fn ? fn(arg) : NULL;
+static CCExec* g_sched_exec = NULL;
+static pthread_mutex_t g_sched_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static size_t cc__env_size(const char* name, size_t fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    unsigned long n = strtoul(v, &end, 10);
+    if (!end || end == v || *end != 0) return fallback;
+    return (size_t)n;
+}
+
+static size_t cc__default_workers(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n > 0) return (size_t)n;
+    return 4;
+}
+
+static CCExec* cc__sched_exec_lazy(void) {
+    pthread_mutex_lock(&g_sched_mu);
+    if (!g_sched_exec) {
+        size_t workers = cc__env_size("CC_WORKERS", cc__default_workers());
+        size_t qcap = cc__env_size("CC_SPAWN_QUEUE_CAP", 1024);
+        g_sched_exec = cc_exec_create(workers, qcap);
+    }
+    CCExec* ex = g_sched_exec;
+    pthread_mutex_unlock(&g_sched_mu);
+    return ex;
+}
+
+int cc_scheduler_init(void) {
+    return cc__sched_exec_lazy() ? 0 : -1;
+}
+
+void cc_scheduler_shutdown(void) {
+    pthread_mutex_lock(&g_sched_mu);
+    if (g_sched_exec) {
+        cc_exec_shutdown(g_sched_exec);
+        cc_exec_free(g_sched_exec);
+        g_sched_exec = NULL;
+    }
+    pthread_mutex_unlock(&g_sched_mu);
+}
+
+int cc_scheduler_stats(CCSchedulerStats* out) {
+    if (!out) return EINVAL;
+    CCExec* ex = cc__sched_exec_lazy();
+    if (!ex) return ENOMEM;
+    CCExecStats stats;
+    int err = cc_exec_stats(ex, &stats);
+    if (err != 0) return err;
+    out->workers = stats.workers;
+    out->queue_cap = stats.queue_cap;
+    out->queue_len = stats.queue_len;
+    return 0;
+}
+
+static void cc__task_free_internal(CCTask* task) {
+    if (!task) return;
+    pthread_mutex_destroy(&task->mu);
+    pthread_cond_destroy(&task->cv);
+    free(task);
+}
+
+static void cc__task_job(void* arg) {
+    CCTask* task = (CCTask*)arg;
+    if (!task) return;
+    void* r = NULL;
+    if (task->fn) r = task->fn(task->arg);
+    pthread_mutex_lock(&task->mu);
+    task->result = r;
+    task->done = 1;
+    pthread_cond_broadcast(&task->cv);
+    int detach = task->detached;
+    pthread_mutex_unlock(&task->mu);
+    if (detach) {
+        cc__task_free_internal(task);
+    }
 }
 
 int cc_spawn(CCTask** out_task, void* (*fn)(void*), void* arg) {
     if (!out_task || !fn) return EINVAL;
     *out_task = NULL;
-    CCTask* task = (CCTask*)malloc(sizeof(CCTask));
+    CCExec* ex = cc__sched_exec_lazy();
+    if (!ex) return ENOMEM;
+    CCTask* task = (CCTask*)calloc(1, sizeof(CCTask));
     if (!task) return ENOMEM;
-    CCThunk* thunk = (CCThunk*)malloc(sizeof(CCThunk));
-    if (!thunk) { free(task); return ENOMEM; }
-    thunk->fn = fn;
-    thunk->arg = arg;
-    int err = pthread_create(&task->thread, NULL, cc_task_trampoline, thunk);
-    if (err != 0) { free(thunk); free(task); return err; }
+    task->fn = fn;
+    task->arg = arg;
+    pthread_mutex_init(&task->mu, NULL);
+    pthread_cond_init(&task->cv, NULL);
+    int err = cc_exec_submit(ex, cc__task_job, task);
+    if (err != 0) {
+        cc__task_free_internal(task);
+        return err;
+    }
     *out_task = task;
     return 0;
 }
 
 int cc_task_join(CCTask* task) {
     if (!task) return EINVAL;
-    return pthread_join(task->thread, NULL);
+    pthread_mutex_lock(&task->mu);
+    while (!task->done) {
+        pthread_cond_wait(&task->cv, &task->mu);
+    }
+    pthread_mutex_unlock(&task->mu);
+    return 0;
 }
 
 int cc_task_join_result(CCTask* task, void** out_result) {
     if (!task) return EINVAL;
-    void* r = NULL;
-    int err = pthread_join(task->thread, &r);
-    if (err != 0) return err;
-    if (out_result) *out_result = r;
+    pthread_mutex_lock(&task->mu);
+    while (!task->done) {
+        pthread_cond_wait(&task->cv, &task->mu);
+    }
+    if (out_result) *out_result = task->result;
+    pthread_mutex_unlock(&task->mu);
     return 0;
 }
 
 void cc_task_free(CCTask* task) {
     if (!task) return;
-    free(task);
+    pthread_mutex_lock(&task->mu);
+    if (task->done) {
+        pthread_mutex_unlock(&task->mu);
+        cc__task_free_internal(task);
+        return;
+    }
+    task->detached = 1;
+    pthread_mutex_unlock(&task->mu);
 }
 
 int cc_sleep_ms(unsigned int ms) {

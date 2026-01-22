@@ -8,6 +8,7 @@
 #define CC_STD_TASK_INTPTR_H
 
 #include <stdint.h>
+#include <ccc/cc_exec.cch>
 #include "future.cch"
 
 #if defined(CC_PARSER_MODE)
@@ -22,6 +23,11 @@ typedef CCFutureStatus (*cc_task_intptr_poll_fn)(void* frame, intptr_t* out_val,
 #define cc_block_on_intptr(t) (0)
 #define cc_block_on(T, task_expr) ((T)0)
 #define cc_await(T, task_expr) ((T)0)
+static inline int cc_blocking_pool_stats(CCExecStats* out_exec, uint64_t* out_submit_failures) {
+    (void)out_exec;
+    if (out_submit_failures) *out_submit_failures = 0;
+    return 0;
+}
 static inline CCFutureStatus cc_task_intptr_poll(CCTaskIntptr* t, intptr_t* out_val, int* out_err) {
     (void)t;
     if (out_val) *out_val = 0;
@@ -93,6 +99,9 @@ int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result)
    winner: index of first success. result: its return value.
    Returns 0 if any succeeded, ECANCELED if all failed. */
 int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result);
+
+/* Snapshot blocking pool stats (executor + submit failures). */
+int cc_blocking_pool_stats(CCExecStats* out_exec, uint64_t* out_submit_failures);
 #endif /* !CC_PARSER_MODE */
 
 #if !defined(CC_PARSER_MODE)

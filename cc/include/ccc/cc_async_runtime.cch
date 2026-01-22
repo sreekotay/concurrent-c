@@ -25,6 +25,9 @@ const char* cc_async_runtime_backend_name(void);
 // Get shared executor (NULL if not initialized).
 CCExec* cc_async_runtime_exec(void);
 
+// Snapshot executor stats for the async runtime (0 if not initialized).
+int cc_async_runtime_stats(CCExecStats* out);
+
 // Shutdown and free runtime resources.
 void cc_async_runtime_shutdown(void);
 

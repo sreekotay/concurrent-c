@@ -107,6 +107,17 @@ void cc_exec_shutdown(CCExec* ex) {
     }
 }
 
+int cc_exec_stats(CCExec* ex, CCExecStats* out) {
+    if (!ex || !out) return EINVAL;
+    pthread_mutex_lock(&ex->mu);
+    out->workers = ex->nthreads;
+    out->queue_cap = ex->qcap;
+    out->queue_len = ex->qlen;
+    out->shutting_down = ex->shutting_down;
+    pthread_mutex_unlock(&ex->mu);
+    return 0;
+}
+
 void cc_exec_free(CCExec* ex) {
     if (!ex) return;
     pthread_mutex_destroy(&ex->mu);

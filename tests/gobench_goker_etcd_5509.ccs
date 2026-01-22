@@ -1,0 +1,51 @@
+/*
+ * GoBench GoKer: etcd#5509 (double locking / missing unlock).
+ * Ported kernel: read-lock leak blocks writer forever.
+ */
+#include <ccc/cc_runtime.cch>
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+
+static pthread_rwlock_t g_lock;
+static CCChan* g_done;
+
+static void* writer_thread(void* arg) {
+    (void)arg;
+    pthread_rwlock_wrlock(&g_lock);
+    int v = 1;
+    cc_chan_send(g_done, &v, sizeof(v));
+    pthread_rwlock_unlock(&g_lock);
+    return NULL;
+}
+
+int main(void) {
+    pthread_rwlock_init(&g_lock, NULL);
+    g_done = cc_chan_create(0);
+    if (!g_done) return 2;
+    if (cc_chan_init_elem(g_done, sizeof(int)) != 0) return 3;
+
+    pthread_rwlock_rdlock(&g_lock); /* leaked read lock */
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, writer_thread, NULL);
+
+    int v = 0;
+    int rc = 0;
+    @with_deadline(millis(20)) {
+        rc = cc_chan_recv(g_done, &v, sizeof(v));
+    }
+
+    /* Expect timeout because writer is blocked by leaked read lock. */
+    if (rc != ETIMEDOUT) return 10;
+
+    /* Cleanup: release lock so writer can finish. */
+    pthread_rwlock_unlock(&g_lock);
+    (void)cc_chan_recv(g_done, &v, sizeof(v));
+    pthread_join(tid, NULL);
+
+    cc_chan_free(g_done);
+    pthread_rwlock_destroy(&g_lock);
+    printf("gobench goker etcd5509: PASS\n");
+    return 0;
+}
