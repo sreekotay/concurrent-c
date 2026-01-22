@@ -11,12 +11,75 @@ int cc__strip_cc_decl_markers(const char* in, size_t in_len, char** out, size_t*
 
     /* Remove only these markers: @async, @noblock, @latency_sensitive.
        This is a conservative text pass so the generated C compiles; real semantics
-       will be implemented by async lowering later. */
+       will be implemented by async lowering later.
+       
+       IMPORTANT: Skip markers inside strings, char literals, and comments to avoid
+       corrupting string contents like "@async is cool". */
     char* buf = (char*)malloc(in_len + 1);
     if (!buf) return 0;
     size_t w = 0;
+    int in_string = 0;
+    int in_char = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    
     for (size_t i = 0; i < in_len; ) {
-        if (in[i] == '@') {
+        char c = in[i];
+        char c2 = (i + 1 < in_len) ? in[i + 1] : 0;
+        
+        /* Handle comment/string state transitions */
+        if (in_line_comment) {
+            buf[w++] = in[i++];
+            if (c == '\n') in_line_comment = 0;
+            continue;
+        }
+        if (in_block_comment) {
+            buf[w++] = in[i++];
+            if (c == '*' && c2 == '/') {
+                buf[w++] = in[i++];
+                in_block_comment = 0;
+            }
+            continue;
+        }
+        if (in_string) {
+            buf[w++] = in[i++];
+            if (c == '\\' && i < in_len) { buf[w++] = in[i++]; continue; }
+            if (c == '"') in_string = 0;
+            continue;
+        }
+        if (in_char) {
+            buf[w++] = in[i++];
+            if (c == '\\' && i < in_len) { buf[w++] = in[i++]; continue; }
+            if (c == '\'') in_char = 0;
+            continue;
+        }
+        
+        /* Enter comment/string states */
+        if (c == '/' && c2 == '/') {
+            buf[w++] = in[i++];
+            buf[w++] = in[i++];
+            in_line_comment = 1;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            buf[w++] = in[i++];
+            buf[w++] = in[i++];
+            in_block_comment = 1;
+            continue;
+        }
+        if (c == '"') {
+            buf[w++] = in[i++];
+            in_string = 1;
+            continue;
+        }
+        if (c == '\'') {
+            buf[w++] = in[i++];
+            in_char = 1;
+            continue;
+        }
+        
+        /* Now safe to check for @ markers (we're not in string/comment) */
+        if (c == '@') {
             const char* kw = NULL;
             size_t kw_len = 0;
             if (i + 6 <= in_len && memcmp(in + i + 1, "async", 5) == 0) { kw = "async"; kw_len = 5; }

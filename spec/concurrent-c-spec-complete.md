@@ -87,8 +87,14 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 
 | Function | Purpose | Example |
 |----------|---------|---------|
-| `cc_ok(T)` | Construct success Result | `return cc_ok(42);` |
-| `cc_err(E)` | Construct error Result | `return cc_err(IoError.FileNotFound);` |
+| `cc_ok(value)` | Construct T!E success (inferred) | `return cc_ok(42);` |
+| `cc_err(error)` | Construct T!E error (inferred) | `return cc_err(MyError_NotFound);` |
+| `cc_ok(void)` | Construct void!E success (inferred) | `return cc_ok(void);` |
+| `cc_err(CC_ERR_*, "msg")` | CCError shorthand | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
+| `cc_ok(T, value)` | T!CCError success (explicit) | `return cc_ok(int, 42);` |
+| `cc_ok(T, E, value)` | T!E success (explicit) | `return cc_ok(int, MyError, 42);` |
+| `cc_err(T, error)` | T!CCError error (explicit) | `return cc_err(int, cc_error(...));` |
+| `cc_err(T, E, error)` | T!E error (explicit) | `return cc_err(int, MyError, err);` |
 | `cc_move(x)` | Explicit move of move-only value | `ch.send_take(arr, cc_move(arr));` |
 | `cc_cancel()` | Cancel current task or nursery | `if (timeout) cc_cancel();` |
 | `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }` |
@@ -497,8 +503,13 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `spawn (expr)` | Create task (must be in `@nursery`) | `spawn (handler(request));` |
 | **Block Forms** | `cc_with_deadline(d) { }` | Apply timeout/deadline to block | `cc_with_deadline(seconds(5)) { await op(); }` |
 | | `try { } catch (E e) { }` | Multi-error handling block | `try { op1(); op2(); } catch (Err e) { }` |
-| **Library Functions** | `cc_ok(T)` | Construct success Result | `return cc_ok(42);` |
-| | `cc_err(E)` | Construct error Result | `return cc_err(IoError.FileNotFound);` |
+| **Library Functions** | `cc_ok(value)` | Construct T!E success (inferred) | `return cc_ok(42);` |
+| | `cc_ok(void)` | Construct void!E success (inferred) | `return cc_ok(void);` |
+| | `cc_err(error)` | Construct T!E error (inferred) | `return cc_err(MyError_NotFound);` |
+| | `cc_ok(T, value)` | T!CCError success (explicit) | `return cc_ok(int, 42);` |
+| | `cc_ok(T, E, v)` | T!E success (explicit) | `return cc_ok(int, MyError, 42);` |
+| | `cc_err(T, e)` | T!CCError error (explicit) | `return cc_err(int, cc_error(...));` |
+| | `cc_err(T, E, e)` | T!E error (explicit) | `return cc_err(int, MyError, err);` |
 | | `cc_move(x)` | Explicit move of move-only value | `ch.send_take(arr, cc_move(arr));` |
 | | `cc_cancel()` | Cancel current task/nursery | `if (timeout) cc_cancel();` |
 | | `cc_with_deadline(Duration)` | Create deadline scope | `cc_with_deadline(seconds(30)) { }` |
@@ -668,12 +679,38 @@ Surface syntax `*x` maps to `x.u.value` in lowered code.
 
 `T!E` represents **success or failure** with an explicit error value.
 
-* Either `cc_ok(T)` or `cc_err(E)`.
+* **Unified constructor syntax**:
+  * **Inferred (preferred inside a function returning `T!E`):**
+    * `cc_ok(value)` - construct `T!E` success (T,E inferred from function return type)
+    * `cc_err(error)` - construct `T!E` error (T,E inferred from function return type)
+    * `cc_err(CC_ERR_*)` or `cc_err(CC_ERR_*, "msg")` - shorthand for `cc_error(...)` when `E` is `CCError`
+  * **Explicit (required outside return-context or when ambiguous):**
+    * `cc_ok(T, value)` - construct `T!CCError` success
+    * `cc_ok(T, E, value)` - construct `T!E` success (custom error type)
+    * `cc_ok(void)` - construct `void!CCError` success
+    * `cc_err(T, error)` - construct `T!CCError` error
+    * `cc_err(T, E, error)` - construct `T!E` error (custom error type)
 * Shorthand for `Result<T, E>`.
 
 ```c
-int!IoError x = cc_ok(42);
-int!IoError y = cc_err(IoError.FileNotFound);
+// Inferred constructors inside a function returning T!E
+int!CCError parse_int_safe(char[:] s) {
+    if (s.len() == 0) return cc_err(CC_ERR_INVALID_ARG, "empty");
+    int val = parse_int(s);
+    return cc_ok(val);
+}
+
+// Inferred constructors (preferred)
+int!CCError x = cc_ok(42);
+int!CCError y = cc_err(cc_error(CC_ERR_NOT_FOUND, "file not found"));
+int!IoError a = cc_ok(42);
+int!IoError b = cc_err(IoError_FileNotFound);
+
+// Explicit constructors (still available)
+int!CCError x2 = cc_ok(int, 42);
+int!CCError y2 = cc_err(int, cc_error(CC_ERR_NOT_FOUND, "file not found"));
+int!IoError a2 = cc_ok(int, IoError, 42);
+int!IoError b2 = cc_err(int, IoError, IoError_FileNotFound);
 
 if (x.ok) use(x.value);
 else handle(x.error);
@@ -683,10 +720,17 @@ else handle(x.error);
 
 ```c
 // T!E lowers to a tagged union:
-struct Result_T_E {
+struct CCResult_T_E {
     bool ok;
     union { T value; E error; } u;
 };
+
+// Constructor macros (explicit forms):
+// cc_ok(void)        → cc_ok_CCResult_void_CCError()     // 1 arg: void!CCError
+// cc_ok(T, v)        → cc_ok_CCResult_T_CCError(v)       // 2 args: T!CCError
+// cc_ok(T, E, v)     → cc_ok_CCResult_T_E(v)             // 3 args: T!E (custom)
+// cc_err(T, e)       → cc_err_CCResult_T_CCError(e)      // 2 args: T!CCError
+// cc_err(T, E, e)    → cc_err_CCResult_T_E(e)            // 3 args: T!E (custom)
 ```
 
 Surface syntax `x.value` maps to `x.u.value`; `x.error` maps to `x.u.error`.
@@ -973,7 +1017,7 @@ struct Container {
 If a function has `@scoped` values in scope at a suspension point, that's a compile error. The typical fix is to release the value before suspending:
 
 ```c
-@async void!Error correct(Mutex<int>* m) {
+@async int!Error correct(Mutex<int>* m) {
     let val = {
         @lock (m) as g {
             g + 1
@@ -1033,7 +1077,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§ 7
 **Example:**
 
 ```c
-@async void!Error pattern(Mutex<int>* m) {
+@async int!Error pattern(Mutex<int>* m) {
     // ✅ CORRECT: use guard, then release, then suspend
     let val = {
         @lock (m) as g {
@@ -1045,7 +1089,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§ 7
     return cc_ok(val);
 }
 
-@async void!Error antipattern(Mutex<int>* m) {
+@async int!Error antipattern(Mutex<int>* m) {
     @lock (m) as g {
         let val = g + 1;
         
@@ -2620,11 +2664,11 @@ A nursery does **not** guarantee:
 The implicit nursery in an `@async` function is created at function entry and joined at function exit (including early returns and error propagation).
 
 ```c
-@async void!Error work() {
+@async int!Error work() {
     int n = read(0, buf, 128);  // auto-wrapped in implicit nursery
-    
+
     if (n < 0) return cc_err(Error.Fail);  // implicit nursery joined here
-    
+
     return cc_ok(n);  // implicit nursery joined here
 }
 ```
@@ -2939,7 +2983,7 @@ Function signatures make clear what context is required:
 
 ```c
 // Clearly async
-@async void!Error async_reader(int[~ <] ch) {
+@async int!Error async_reader(int[~ <] ch) {
     int x = await recv(&ch);  // obvious: must await
     return cc_ok(x);
 }
@@ -3107,7 +3151,7 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
     spawn (timeout_enforcer());
 }
 
-@async void!Error reader(int[~ <] ch) {
+@async int!Error reader(int[~ <] ch) {
     @match {
         case int x = await ch.recv():
             return cc_ok(x);
@@ -3118,7 +3162,7 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
 @async void!Error timeout_enforcer() {
     @match {
         case await sleep(Duration{5, 0}):
-            return cc_err(Error.Timeout);
+            return cc_err(void, Error.Timeout);
         // implicit cancel case
     }
 }
@@ -3222,7 +3266,7 @@ enum WorkerError {
     Timeout,
 }
 
-@async void!WorkerError worker() {
+@async int!WorkerError worker() {
     @match {
         case result = async_io():
             return cc_ok(result);
@@ -3271,8 +3315,8 @@ Task<T!Cancelled> with_timeout_cancellable<T>(Task<T!Cancelled> t, Duration d);
         int!Cancelled? x = await ch.recv_cancellable();
         
         if (try err = x) {
-            if (err == Cancelled) return cc_ok(());  // task was cancelled
-            return cc_err(err);
+            if (err == Cancelled) return cc_ok(void);  // task was cancelled
+            return cc_err(void, err);
         }
         
         process(*x);
@@ -3363,8 +3407,8 @@ enum WorkerError {
 @async void!WorkerError timeout_enforcer() {
     @match {
         case sleep(Duration{5, 0}):
-            return cc_err(WorkerError.Timeout);
-        // implicit: case is_cancelled(): return cc_ok({});
+            return cc_err(void, WorkerError.Timeout);
+        // implicit: case is_cancelled(): return cc_ok(void);
     }
 }
 ```
@@ -3409,7 +3453,7 @@ enum TaskError {
     IoError(IoError),
 }
 
-@async void!TaskError worker() {
+@async int!TaskError worker() {
     @match {
         case int x = ch.recv():
             return cc_ok(x);
@@ -3418,7 +3462,7 @@ enum TaskError {
 }
 
 // Bad: no Cancelled variant, so implicit case can't work
-@async void!IoError reader() {
+@async int!IoError reader() {
     int x = await ch.recv();  // ❌ can't be cancelled effectively
     return cc_ok(x);
 }
@@ -4629,9 +4673,13 @@ int!IoError read_value(char[:] path) {
     return try f.read_int();
 }
 
-// Explicit construction
+// Inferred construction (recommended)
 int!IoError x = cc_ok(42);
 int!IoError y = cc_err(IoError.FileNotFound);
+
+// Explicit construction (still supported)
+int!IoError x2 = cc_ok(int, IoError, 42);
+int!IoError y2 = cc_err(int, IoError, IoError.FileNotFound);
 ```
 
 ---
@@ -4697,7 +4745,7 @@ try {
     process(result);
 } catch (SqlError e) {
     log("SQL error: %s", e.msg);
-    return cc_err(e);  // or handle and return cc_ok(...)
+    return cc_err(T, e);  // or handle and return cc_ok(T, ...)
 }
 
 // Multiple catch clauses (dispatched by type)
@@ -4715,16 +4763,16 @@ try {
 // Catch and continue
 try {
     process_item(item);
-    return cc_ok();
+    return cc_ok(void);
 } catch (SkippableError e) {
     log("Skipped: %s", e.reason);
-    return cc_ok();  // Error handled; continue
+    return cc_ok(void);  // Error handled; continue
 } catch (FatalError e) {
     log("Fatal: %s", e.reason);
-    return cc_err(e);  // Propagate fatal errors
+    return cc_err(void, e);  // Propagate fatal errors
 }
 
-// Nested try/catch for layered handling
+// Nested try/catch for layered handling (returns Data!NetworkError)
 try {
     try {
         data = try fetch_from_cache(key);
@@ -4732,10 +4780,10 @@ try {
         log("Cache miss");
         data = try fetch_from_network(key);  // Fallback: try network
     }
-    return cc_ok(data);
+    return cc_ok(Data, data);
 } catch (NetworkError e) {
     log("All sources failed");
-    return cc_err(e);
+    return cc_err(Data, e);
 }
 ```
 
@@ -6392,7 +6440,7 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
         try await drain_with_timeout(conn, ms(200)); // bounded drain/flush if applicable
     }
 
-    return cc_ok(());
+    return cc_ok(void);
 }
 ```
 

@@ -160,8 +160,8 @@ int val = cc_unwrap(maybe);
 typedef struct { int code; } MyError;
 
 int!MyError divide(int a, int b) {
-    if (b == 0) return cc_err(MyError, {.code = 1});
-    return cc_ok(int, MyError, a / b);
+    if (b == 0) return cc_err((MyError){.code = 1});
+    return cc_ok(a / b);
 }
 
 // Usage
@@ -175,7 +175,7 @@ if (cc_is_ok(result)) {
 // Propagate errors with try
 int!MyError caller(void) {
     int val = try divide(10, 0);  // returns early on error
-    return cc_ok(int, MyError, val * 2);
+    return cc_ok(val * 2);
 }
 ```
 

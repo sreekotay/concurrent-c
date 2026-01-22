@@ -113,7 +113,9 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
             i++;
             while (i < n && cc_is_ident_char(src[i])) i++;
             size_t sl = i - s0;
-            int is_wd = (sl == strlen("with_deadline") && memcmp(src + s0, "with_deadline", sl) == 0);
+            /* Accept both with_deadline and cc_with_deadline */
+            int is_wd = (sl == strlen("with_deadline") && memcmp(src + s0, "with_deadline", sl) == 0) ||
+                        (sl == strlen("cc_with_deadline") && memcmp(src + s0, "cc_with_deadline", sl) == 0);
             if (!is_wd || (s0 > 0 && cc_is_ident_char(src[s0 - 1]))) {
                 cc_sb_append(&out, &olen, &ocap, src + s0, sl);
                 continue;

@@ -1052,6 +1052,192 @@ static char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* 
     return out;
 }
 
+/* Rewrite cc_ok(...) and cc_err(...) to fully qualified forms based on enclosing function's return type.
+   Inside a function returning CCResult_T_E:
+     cc_ok(v)   -> cc_ok_CCResult_T_E(v)
+     cc_err(e)  -> cc_err_CCResult_T_E(e)
+   This allows users to write just cc_ok(42) instead of cc_ok(int, 42). */
+static char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    
+    /* Track current function's result type (if any) */
+    char current_result_type[256] = {0};  /* e.g., "CCResult_int_CCError" */
+    int brace_depth = 0;
+    int fn_brace_depth = -1;  /* brace depth when we entered the function body */
+    
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    size_t i = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        /* Handle comment/string states */
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Track brace depth */
+        if (c == '{') {
+            brace_depth++;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            brace_depth--;
+            /* Exit function scope */
+            if (fn_brace_depth >= 0 && brace_depth < fn_brace_depth) {
+                current_result_type[0] = 0;
+                fn_brace_depth = -1;
+            }
+            i++;
+            continue;
+        }
+        
+        /* Detect function definition with CCResult_T_E return type */
+        if (c == 'C' && i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0 && fn_brace_depth < 0) {
+            /* Found CCResult_ - extract the full type name */
+            size_t type_start = i;
+            size_t j = i + 9;
+            /* Read T part */
+            while (j < n && (cc__is_ident_char_local(src[j]))) j++;
+            if (j < n && src[j] == '_') {
+                j++;
+                /* Read E part */
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+            }
+            size_t type_end = j;
+            
+            /* Check if this is a function definition (followed by identifier + '(' + ')' + '{') */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r' || src[j] == '*')) j++;
+            if (j < n && cc__is_ident_start_local2(src[j])) {
+                /* Skip function name */
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (j < n && src[j] == '(') {
+                    /* Skip params */
+                    int pdepth = 1;
+                    j++;
+                    while (j < n && pdepth > 0) {
+                        if (src[j] == '(') pdepth++;
+                        else if (src[j] == ')') pdepth--;
+                        else if (src[j] == '"') { j++; while (j < n && src[j] != '"') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
+                        else if (src[j] == '\'') { j++; while (j < n && src[j] != '\'') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
+                        j++;
+                    }
+                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                    if (j < n && src[j] == '{') {
+                        /* This is a function definition! Save the result type */
+                        size_t tlen = type_end - type_start;
+                        if (tlen < sizeof(current_result_type) - 1) {
+                            memcpy(current_result_type, src + type_start, tlen);
+                            current_result_type[tlen] = 0;
+                            fn_brace_depth = brace_depth;  /* Will increment when we hit the '{' */
+                        }
+                    }
+                }
+            }
+            i++;
+            continue;
+        }
+        
+        /* Detect cc_ok(...) or cc_err(...) when inside a result-returning function */
+        if (current_result_type[0] && c == 'c' && i + 5 < n) {
+            int is_ok = (memcmp(src + i, "cc_ok(", 6) == 0);
+            int is_err = (memcmp(src + i, "cc_err(", 7) == 0);
+            
+            if (is_ok || is_err) {
+                /* Check word boundary before */
+                int word_start = (i == 0) || !cc__is_ident_char_local(src[i-1]);
+                if (word_start) {
+                    size_t macro_start = i;
+                    size_t paren_pos = i + (is_ok ? 5 : 6);
+                    
+                    /* Check if it's the short form (no type args) by looking at args */
+                    /* Short form: cc_ok(value) or cc_err(error)
+                       Long form: cc_ok(Type, value) or cc_ok(Type, ErrType, value) */
+                    size_t args_start = paren_pos + 1;
+                    size_t j = args_start;
+                    int depth = 1;
+                    int comma_count = 0;
+                    int in_s = 0, in_c = 0;
+                    while (j < n && depth > 0) {
+                        char ch = src[j];
+                        if (in_s) { if (ch == '\\' && j+1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
+                        if (in_c) { if (ch == '\\' && j+1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                        if (ch == '"') { in_s = 1; j++; continue; }
+                        if (ch == '\'') { in_c = 1; j++; continue; }
+                        if (ch == '(') depth++;
+                        else if (ch == ')') { depth--; if (depth == 0) break; }
+                        else if (ch == ',' && depth == 1) comma_count++;
+                        j++;
+                    }
+                    
+                    /* Shorthand: cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(...)) */
+                    size_t crt_len = strlen(current_result_type);
+                    int is_default_err = (crt_len >= 8 &&
+                                          strcmp(current_result_type + crt_len - 8, "_CCError") == 0);
+                    if (is_err && is_default_err && depth == 0) {
+                        size_t k = args_start;
+                        while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
+                        if (k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(cc_error(");
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                            if (comma_count == 0) {
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, ", NULL");
+                            }
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "))");
+                            last_emit = j + 1;
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+
+                    /* Short form has 0 commas for cc_ok(v) or cc_err(e)
+                       Long form has 1+ commas for cc_ok(T,v) or cc_ok(T,E,v) */
+                    int is_short_form = (is_ok && comma_count == 0) || (is_err && comma_count == 0);
+                    
+                    if (is_short_form && depth == 0) {
+                        /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) */
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                        if (is_ok) {
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_ok_");
+                        } else {
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
+                        }
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(");
+                        /* Copy the argument */
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
+                        last_emit = j + 1;  /* skip past the closing ')' */
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL;  /* No rewrites done */
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Rewrite try expressions: try expr -> cc_try(expr) */
 static char* cc__rewrite_try_exprs_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     (void)ctx;
@@ -1836,23 +2022,51 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             
             /* Insert result type declarations into source at the right position.
-               We look for "int main(" or first function definition and insert before it. */
+               Find first usage, then back up to before the enclosing function. */
             if (cc__cg_result_type_count > 0) {
-                const char* insert_pos = strstr(src_ufcs, "int main(");
-                if (!insert_pos) insert_pos = strstr(src_ufcs, "void main(");
-                if (!insert_pos) {
-                    /* Try to find any function definition: "type name(" at start of line */
-                    for (size_t k = 0; k < src_ufcs_len && !insert_pos; k++) {
-                        if ((k == 0 || src_ufcs[k-1] == '\n') && 
-                            (isalpha((unsigned char)src_ufcs[k]) || src_ufcs[k] == '_')) {
-                            /* Scan to see if this looks like a function def */
-                            size_t fn_start = k;
-                            while (k < src_ufcs_len && src_ufcs[k] != '(' && src_ufcs[k] != ';' && src_ufcs[k] != '\n') k++;
-                            if (k < src_ufcs_len && src_ufcs[k] == '(') {
-                                insert_pos = src_ufcs + fn_start;
-                            }
-                        }
+                const char* insert_pos = NULL;
+                /* Find the first usage of any CCResult_T_E type in the source */
+                size_t earliest_pos = src_ufcs_len;
+                for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
+                    CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
+                    char pattern[256];
+                    snprintf(pattern, sizeof(pattern), "CCResult_%s_%s", p->mangled_ok, p->mangled_err);
+                    const char* found = strstr(src_ufcs, pattern);
+                    if (found && (size_t)(found - src_ufcs) < earliest_pos) {
+                        earliest_pos = (size_t)(found - src_ufcs);
                     }
+                }
+                if (earliest_pos < src_ufcs_len) {
+                    /* Back up to find the enclosing function definition.
+                       Look for "int main(" or "type name(" at start of line. */
+                    size_t pos = earliest_pos;
+                    while (pos > 0) {
+                        /* Find start of current line */
+                        size_t line_start = pos;
+                        while (line_start > 0 && src_ufcs[line_start - 1] != '\n') line_start--;
+                        
+                        /* Check if this line looks like a function definition */
+                        const char* line = src_ufcs + line_start;
+                        /* Skip leading whitespace */
+                        while (*line == ' ' || *line == '\t') line++;
+                        
+                        /* Check for common function patterns */
+                        if ((strncmp(line, "int ", 4) == 0 || strncmp(line, "void ", 5) == 0 ||
+                             strncmp(line, "static ", 7) == 0 || strncmp(line, "CCResult_", 9) == 0) &&
+                            strchr(line, '(') != NULL && strchr(line, '{') != NULL) {
+                            /* Found a function definition - insert before this line */
+                            earliest_pos = line_start;
+                            break;
+                        }
+                        
+                        /* Move to previous line */
+                        if (line_start == 0) break;
+                        pos = line_start - 1;
+                    }
+                    insert_pos = src_ufcs + earliest_pos;
+                } else {
+                    /* No usage found (shouldn't happen) - insert at end */
+                    insert_pos = src_ufcs + src_ufcs_len;
                 }
                 
                 if (insert_pos) {
@@ -1886,6 +2100,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     src_ufcs = new_src;
                     src_ufcs_len = new_len;
                 }
+            }
+        }
+        /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on enclosing function return type */
+        {
+            char* rew_infer = cc__rewrite_inferred_result_constructors(src_ufcs, src_ufcs_len);
+            if (rew_infer) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rew_infer;
+                src_ufcs_len = strlen(src_ufcs);
             }
         }
         /* Rewrite try expr -> cc_try(expr) */

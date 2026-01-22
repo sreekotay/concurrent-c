@@ -10,7 +10,7 @@ int main(void) {
 
     int v = 0;
     int rc = 0;
-    with_deadline(1000) {
+    @with_deadline(seconds(1)) {
         cc_cancel(); /* cancel the current deadline scope */
         if (!cc_is_cancelled()) return 3;
         rc = cc_chan_recv(ch, &v, sizeof(v));

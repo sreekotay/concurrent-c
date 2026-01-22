@@ -5,19 +5,19 @@
 
 int!CCError level3(int x) {
     if (x < 0) {
-        return cc_err_CCResult_int_CCError(cc_error(CC_ERR_INVALID_ARG, "negative"));
+        return cc_err(CC_ERR_INVALID_ARG, "negative");
     }
-    return cc_ok_CCResult_int_CCError(x * 3);
+    return cc_ok(x * 3);
 }
 
 int!CCError level2(int x) {
     int v = try level3(x);
-    return cc_ok_CCResult_int_CCError(v + 2);
+    return cc_ok(v + 2);
 }
 
 int!CCError level1(int x) {
     int v = try level2(x);
-    return cc_ok_CCResult_int_CCError(v + 1);
+    return cc_ok(v + 1);
 }
 
 int main(void) {

@@ -2,7 +2,7 @@
 
 int main(void) {
     int x = 0;
-    @with_deadline(5) {
+    @with_deadline(millis(5)) {
         x = 123;
     }
     return (x == 123) ? 0 : 1;

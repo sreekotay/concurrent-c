@@ -2,7 +2,8 @@
  * Recipe: Timeout / Deadline
  *
  * Demonstrates:
- *   - @with_deadline(ms) sets a deadline on a scope
+ *   - @with_deadline(duration) { } sets a deadline on a scope
+ *   - Duration helpers: seconds(n), millis(n), micros(n)
  *   - cc_deadline_expired() checks if time limit passed
  *   - Tasks exit gracefully when deadline expires
  *
@@ -16,8 +17,8 @@
 int work_completed = 0;
 
 int main(void) {
-    /* Worker does work until deadline expires. */
-    @with_deadline(50) {
+    /* Worker does work until deadline expires */
+    @with_deadline(millis(50)) {
         CCDeadline* dl = cc_current_deadline();
         while (!cc_deadline_expired(dl)) {
             work_completed++;

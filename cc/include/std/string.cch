@@ -77,6 +77,24 @@ typedef struct {
 
 static inline size_t cc_slice_len(CCSlice s) { return s.len; }
 
+/*
+ * Forward declarations for UFCS methods.
+ * TCC parser mode needs these to avoid "cannot convert int to struct" errors
+ * when it encounters UFCS calls like s.trim() before the UFCS pass rewrites them.
+ * Using old-style function declarations (no params) to accept any arguments.
+ */
+#ifdef CC_PARSER_MODE
+/* These dummy declarations tell TCC the return types for UFCS method names */
+static CCSlice trim();
+static CCSlice trim_left();
+static CCSlice trim_right();
+static CCSlice sub();
+static char at();
+static bool starts_with();
+static bool ends_with();
+/* len, is_empty, eq already return int/bool which matches TCC's implicit decl */
+#endif
+
 static inline bool cc_slice_is_ascii(CCSlice s) {
     const unsigned char *p = (const unsigned char *)s.ptr;
     for (size_t i = 0; i < s.len; ++i) {
@@ -346,6 +364,33 @@ static inline bool cc_slice_eq(CCSlice a, CCSlice b) {
     if (a.ptr == b.ptr) return true;
     if (!a.ptr || !b.ptr) return false;
     return memcmp(a.ptr, b.ptr, a.len) == 0;
+}
+
+/*
+ * UFCS-compatible slice methods.
+ * These allow: s.len(), s.trim(), s.at(i), etc.
+ * UFCS transforms s.method() to CCSlice_method(&s).
+ */
+static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
+static inline CCSlice CCSlice_trim(CCSlice* s) { return s ? cc_slice_trim(*s) : cc_slice_empty(); }
+static inline CCSlice CCSlice_trim_left(CCSlice* s) { return s ? cc_slice_trim_left(*s) : cc_slice_empty(); }
+static inline CCSlice CCSlice_trim_right(CCSlice* s) { return s ? cc_slice_trim_right(*s) : cc_slice_empty(); }
+static inline bool CCSlice_is_empty(CCSlice* s) { return !s || s->len == 0; }
+static inline char CCSlice_at(CCSlice* s, size_t idx) { 
+    if (!s || idx >= s->len || !s->ptr) return 0;
+    return ((char*)s->ptr)[idx];
+}
+static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
+    return s ? cc_slice_sub(*s, start, end) : cc_slice_empty();
+}
+static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) {
+    return s && cc_slice_starts_with(*s, prefix);
+}
+static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
+    return s && cc_slice_ends_with(*s, suffix);
+}
+static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
+    return s && cc_slice_eq(*s, other);
 }
 
 #endif // CC_STD_STRING_H

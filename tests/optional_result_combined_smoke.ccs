@@ -15,18 +15,18 @@ int? find_positive(int x) {
 /* Returns a result - failure is an error condition */
 int!CCError require_positive(int x) {
     if (x > 0) {
-        return cc_ok_CCResult_int_CCError(x);
+        return cc_ok(x);
     }
-    return cc_err_CCResult_int_CCError(cc_error(CC_ERR_INVALID_ARG, "must be positive"));
+    return cc_err(CC_ERR_INVALID_ARG, "must be positive");
 }
 
 /* Pattern: Optional input, Result output */
 int!CCError process_if_found(int x) {
     int? maybe = find_positive(x);
     if (!maybe.has) {
-        return cc_err_CCResult_int_CCError(cc_error(CC_ERR_NOT_FOUND, "no positive value"));
+        return cc_err(CC_ERR_NOT_FOUND, "no positive value");
     }
-    return cc_ok_CCResult_int_CCError(*maybe * 2);
+    return cc_ok(*maybe * 2);
 }
 
 int main(void) {

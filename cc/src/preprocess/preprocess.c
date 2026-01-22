@@ -1724,6 +1724,220 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
     return warnings;
 }
 
+/* Infer result constructor types from enclosing function signature.
+   Within a function returning `T!E`:
+     cc_ok(v)   -> cc_ok(T, v)     for T!CCError
+     cc_ok(v)   -> cc_ok(T, E, v)  for T!E (custom error)
+     cc_err(e)  -> cc_err(T, e)    for T!CCError  
+     cc_err(e)  -> cc_err(T, E, e) for T!E (custom error)
+   
+   This allows users to write just `cc_ok(42)` and have the compiler infer the type. */
+static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    
+    /* Track current function's result type */
+    char current_ok_type[128] = {0};   /* e.g., "int" */
+    char current_err_type[128] = {0};  /* e.g., "CCError" or custom */
+    int brace_depth = 0;
+    int fn_brace_depth = -1;
+    
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    
+    for (size_t i = 0; i < n; ) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        /* Skip comments and strings */
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Track braces */
+        if (c == '{') {
+            brace_depth++;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            brace_depth--;
+            if (fn_brace_depth >= 0 && brace_depth < fn_brace_depth) {
+                current_ok_type[0] = 0;
+                current_err_type[0] = 0;
+                fn_brace_depth = -1;
+            }
+            i++;
+            continue;
+        }
+        
+        /* Detect function returning T!E - look for pattern: T!E name( */
+        if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
+            char prev = src[i - 1];
+            if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
+                /* Check for error type after ! */
+                size_t j = i + 1;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (j < n && cc_is_ident_start(src[j])) {
+                    size_t err_start = j;
+                    while (j < n && cc_is_ident_char(src[j])) j++;
+                    size_t err_end = j;
+                    
+                    /* Skip whitespace, then check for identifier followed by '(' */
+                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '*')) j++;
+                    if (j < n && cc_is_ident_start(src[j])) {
+                        size_t name_start = j;
+                        while (j < n && cc_is_ident_char(src[j])) j++;
+                        (void)name_start; /* function name, not needed */
+                        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                        if (j < n && src[j] == '(') {
+                            /* Skip params to find '{' */
+                            int pdepth = 1;
+                            j++;
+                            while (j < n && pdepth > 0) {
+                                if (src[j] == '(') pdepth++;
+                                else if (src[j] == ')') pdepth--;
+                                else if (src[j] == '"') { j++; while (j < n && src[j] != '"') { if (src[j] == '\\' && j+1<n) j++; j++; } }
+                                else if (src[j] == '\'') { j++; while (j < n && src[j] != '\'') { if (src[j] == '\\' && j+1<n) j++; j++; } }
+                                j++;
+                            }
+                            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                            if (j < n && src[j] == '{') {
+                                /* Found function definition! Extract ok and err types */
+                                size_t ty_start = cc__scan_back_to_delim(src, i);
+                                if (ty_start < i) {
+                                    size_t ty_len = i - ty_start;
+                                    if (ty_len < sizeof(current_ok_type) - 1) {
+                                        /* Trim whitespace */
+                                        while (ty_len > 0 && (src[ty_start + ty_len - 1] == ' ' || src[ty_start + ty_len - 1] == '\t')) ty_len--;
+                                        memcpy(current_ok_type, src + ty_start, ty_len);
+                                        current_ok_type[ty_len] = 0;
+                                    }
+                                    size_t err_len = err_end - err_start;
+                                    if (err_len < sizeof(current_err_type) - 1) {
+                                        memcpy(current_err_type, src + err_start, err_len);
+                                        current_err_type[err_len] = 0;
+                                    }
+                                    fn_brace_depth = brace_depth;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i++;
+            continue;
+        }
+        
+        /* Rewrite cc_ok(...) and cc_err(...) when inside result-returning function */
+        if (current_ok_type[0] && c == 'c' && i + 5 < n) {
+            int is_ok = (memcmp(src + i, "cc_ok(", 6) == 0);
+            int is_err = (memcmp(src + i, "cc_err(", 7) == 0);
+            
+            if (is_ok || is_err) {
+                /* Check word boundary */
+                int word_start = (i == 0) || !cc_is_ident_char(src[i - 1]);
+                if (word_start) {
+                    size_t macro_start = i;
+                    size_t paren_pos = i + (is_ok ? 5 : 6);
+                    
+                    /* Count args to determine if short form */
+                    size_t args_start = paren_pos + 1;
+                    size_t j = args_start;
+                    int depth = 1;
+                    int comma_count = 0;
+                    int in_s = 0, in_c = 0;
+                    while (j < n && depth > 0) {
+                        char ch = src[j];
+                        if (in_s) { if (ch == '\\' && j+1<n) j++; else if (ch == '"') in_s = 0; j++; continue; }
+                        if (in_c) { if (ch == '\\' && j+1<n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                        if (ch == '"') { in_s = 1; j++; continue; }
+                        if (ch == '\'') { in_c = 1; j++; continue; }
+                        if (ch == '(') depth++;
+                        else if (ch == ')') { depth--; if (depth == 0) break; }
+                        else if (ch == ',' && depth == 1) comma_count++;
+                        j++;
+                    }
+                    
+                    /* Short form: cc_ok(v) has 0 commas, cc_err(e) has 0 commas
+                       Long form: cc_ok(T,v) has 1+ commas
+                       Shorthand: cc_err(CC_ERR_*, "msg") has 1 comma - expand to cc_error() */
+                    int is_short = (comma_count == 0);
+                    
+                    /* Check for cc_err shorthand: cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") */
+                    int is_err_shorthand = 0;
+                    int is_err_shorthand_no_msg = 0;
+                    if (is_err && strcmp(current_err_type, "CCError") == 0) {
+                        /* Check if first arg starts with CC_ERR_ */
+                        size_t k = args_start;
+                        while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
+                        if (k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                            is_err_shorthand = 1;
+                            is_err_shorthand_no_msg = (comma_count == 0);
+                        }
+                    }
+                    
+                    if (is_err_shorthand && depth == 0) {
+                        /* Rewrite cc_err(CC_ERR_*) -> cc_err(cc_error(CC_ERR_*, NULL))
+                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err(cc_error(CC_ERR_*, "msg")) */
+                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err(");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_ok_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", cc_error(");
+                        /* Copy args */
+                        cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        if (is_err_shorthand_no_msg) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL");
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "))");
+                        last_emit = j + 1;
+                        i = j + 1;
+                        continue;
+                    }
+                    
+                    if (is_short && depth == 0) {
+                        /* Rewrite short form to long form */
+                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                        
+                        if (is_ok) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_ok(");
+                        } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err(");
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_ok_type);
+                        /* Add error type if not CCError */
+                        if (strcmp(current_err_type, "CCError") != 0) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, current_err_type);
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                        /* Copy argument */
+                        cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                        last_emit = j + 1;
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Check for cc_concurrent usage and emit error with migration guidance.
    cc_concurrent syntax is deprecated; use cc_block_all instead. */
 static char* cc__rewrite_cc_concurrent(const char* src, size_t n) {
@@ -1839,10 +2053,15 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur4 = rewritten_opt ? rewritten_opt : cur3;
     size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3_n;
 
+    /* Infer cc_ok(v)/cc_err(e) types from function signatures BEFORE result type rewrite */
+    char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4, cur4_n);
+    const char* cur4b = rewritten_infer ? rewritten_infer : cur4;
+    size_t cur4b_n = rewritten_infer ? strlen(rewritten_infer) : cur4_n;
+
     /* Rewrite T!E -> CCResult_T_E */
-    char* rewritten_res = cc__rewrite_result_types(cur4, cur4_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4_n;
+    char* rewritten_res = cc__rewrite_result_types(cur4b, cur4b_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4b;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4b_n;
 
     /* Rewrite try expr -> cc_try(expr) */
     char* rewritten_try = cc__rewrite_try_exprs(cur5, cur5_n);
@@ -1857,7 +2076,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_opt);
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_infer); free(rewritten_opt);
         free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
         return -1;
@@ -1878,6 +2097,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_res);
+    free(rewritten_infer);
     free(rewritten_opt);
     free(rewritten_chan);
     free(rewritten_slice);

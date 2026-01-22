@@ -7,7 +7,7 @@ CURL_BUILD := $(CURL_DIR)/build
 .PHONY: all cc clean fmt lint example example-c smoke test tools
 .PHONY: tcc-patch-apply tcc-patch-regen tcc-update-check
 .PHONY: deps bearssl bearssl-clean curl curl-clean deps-update
-.PHONY: examples-check stress-check
+.PHONY: examples-check stress-check perf-check
 
 all: cc
 
@@ -91,6 +91,25 @@ stress-check: cc
 		exit 1; \
 	fi; \
 	echo "All stress tests OK"
+
+# Verify all perf tests compile and run.
+perf-check: cc
+	@echo "=== Running perf tests ==="
+	@failed=0; \
+	for f in perf/*.ccs; do \
+		printf "  %-40s" "$$f"; \
+		if $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; then \
+			echo "OK"; \
+		else \
+			echo "FAIL"; \
+			failed=$$((failed + 1)); \
+		fi; \
+	done; \
+	if [ $$failed -gt 0 ]; then \
+		echo "$$failed perf test(s) failed"; \
+		exit 1; \
+	fi; \
+	echo "All perf tests OK"
 
 # ---- Dependencies -----------------------------------------------------------
 #

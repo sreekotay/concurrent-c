@@ -197,4 +197,40 @@ static inline __CCResultGeneric __cc_result_generic_err(long long e) {
 #define cc_try(expr) ((expr).u.value)
 #endif /* CC_PARSER_MODE */
 
+/*
+ * Generic result constructors.
+ *
+ * cc_ok(T, v)        - For T!CCError (default error type)
+ * cc_ok(T, E, v)     - For T!E (custom error type)
+ * cc_ok(void)        - For void!CCError
+ *
+ * cc_err(T, e)       - For T!CCError
+ * cc_err(T, E, e)    - For T!E
+ *
+ * Examples:
+ *   return cc_ok(int, 42);                              // int!CCError
+ *   return cc_err(int, cc_error(CC_ERR_NOT_FOUND, "")); // int!CCError
+ *   return cc_ok(int, MyError, 42);                     // int!MyError
+ *   return cc_err(int, MyError, MyError_NotFound);      // int!MyError
+ */
+
+/* Argument counting machinery for macro overloading */
+#define __CC_ARG_N(_1,_2,_3,_4,N,...) N
+#define __CC_NARGS(...) __CC_ARG_N(__VA_ARGS__,4,3,2,1,0)
+
+/* cc_ok: 1 arg = void!CCError, 2 args = T!CCError, 3 args = T!E */
+#define __CC_OK_1(T)        cc_ok_CCResult_##T##_CCError()
+#define __CC_OK_2(T, v)     cc_ok_CCResult_##T##_CCError(v)
+#define __CC_OK_3(T, E, v)  cc_ok_CCResult_##T##_##E(v)
+#define __CC_OK_DISPATCH(N) __CC_OK_##N
+#define __CC_OK_EXPAND(N)   __CC_OK_DISPATCH(N)
+#define cc_ok(...) __CC_OK_EXPAND(__CC_NARGS(__VA_ARGS__))(__VA_ARGS__)
+
+/* cc_err: 2 args = T!CCError, 3 args = T!E */
+#define __CC_ERR_2(T, e)    cc_err_CCResult_##T##_CCError(e)
+#define __CC_ERR_3(T, E, e) cc_err_CCResult_##T##_##E(e)
+#define __CC_ERR_DISPATCH(N) __CC_ERR_##N
+#define __CC_ERR_EXPAND(N)   __CC_ERR_DISPATCH(N)
+#define cc_err(...) __CC_ERR_EXPAND(__CC_NARGS(__VA_ARGS__))(__VA_ARGS__)
+
 #endif /* CC_RESULT_H */

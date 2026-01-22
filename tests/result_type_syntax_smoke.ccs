@@ -4,12 +4,20 @@
 
 // CCResult_int_CCError is pre-declared in cc_result.cch via CC_DECL_RESULT_SPEC
 
+int!CCError make_ok(void) {
+    return cc_ok(42);
+}
+
+int!CCError make_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "not found");
+}
+
 int main(void) {
     // Declare a result using T!E syntax
     int!CCError r;
     
-    // Initialize to ok
-    r = cc_ok_CCResult_int_CCError(42);
+    // Initialize to ok - inferred from return type
+    r = make_ok();
     if (!r.ok) {
         printf("FAIL: r should be ok\n");
         return 1;
@@ -19,8 +27,8 @@ int main(void) {
         return 1;
     }
     
-    // Initialize to error
-    r = cc_err_CCResult_int_CCError(cc_error(CC_ERR_NOT_FOUND, "not found"));
+    // Initialize to error - shorthand error form
+    r = make_err();
     if (r.ok) {
         printf("FAIL: r should be error\n");
         return 1;

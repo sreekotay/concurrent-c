@@ -118,6 +118,20 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     return cc_slice_from_parts(ptr, count, id, count);
 }
 
+/*
+ * Spec-aligned type-safe arena allocation macros.
+ * Usage:
+ *   int* arr = arena_alloc(int, arena, 100);   // allocate 100 ints
+ *   char* buf = arena_alloc(char, arena, 256); // allocate 256 chars
+ *
+ * These are sugar for cc_arena_alloc(arena, count * sizeof(T), alignof(T)).
+ */
+#define arena_alloc(T, arena, count) \
+    ((T*)cc_arena_alloc((arena), (count) * sizeof(T), _Alignof(T)))
+
+/* Single-element version */
+#define arena_alloc1(T, arena) arena_alloc(T, arena, 1)
+
 #endif // CC_ARENA_H
 
 

@@ -61,6 +61,16 @@ void cc_cancel(CCDeadline* d);
 bool cc_is_cancelled(const CCDeadline* d);
 const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct timespec* out);
 
+/*
+ * Duration helpers for spec-aligned deadline syntax.
+ * Usage: @with_deadline(seconds(30)) { ... }
+ *        @with_deadline(millis(500)) { ... }
+ * These return milliseconds for use with cc_deadline_after_ms().
+ */
+static inline uint64_t seconds(uint64_t s) { return s * 1000; }
+static inline uint64_t millis(uint64_t ms) { return ms; }
+static inline uint64_t micros(uint64_t us) { return us / 1000; }  /* truncates to ms */
+
 // Thread-local "current deadline" scope (used by `with_deadline(...) {}` lowering).
 // These are runtime helpers; the language-level `cc_cancel()`/`cc_is_cancelled()` are provided
 // as macros in cc_runtime.cch to avoid colliding with the existing cc_cancel(CCDeadline*) API.

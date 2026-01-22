@@ -11,16 +11,23 @@ CCResult_int_CCError[~4 >] results_tx;
 CCResult_int_CCError[~4 <] results_rx;
 CCChan* g_ch;
 
+int!CCError make_ok_result(void) {
+    return cc_ok(42);
+}
+
+int!CCError make_err_result(void) {
+    return cc_err(CC_ERR_PARSE, "bad input");
+}
+
 int main(void) {
     g_ch = channel_pair(&results_tx, &results_rx);
     
     // Send a success
-    CCResult_int_CCError ok_result = cc_ok_CCResult_int_CCError(42);
+    CCResult_int_CCError ok_result = make_ok_result();
     results_tx.send(ok_result);
     
     // Send an error
-    CCError err = cc_error(CC_ERR_PARSE, "bad input");
-    CCResult_int_CCError err_result = cc_err_CCResult_int_CCError(err);
+    CCResult_int_CCError err_result = make_err_result();
     results_tx.send(err_result);
     
     results_tx.close();

@@ -128,6 +128,69 @@ static int emit_desugared_call(char* out,
         return recv_is_ptr ? snprintf(out, cap, "string_append(%s, ", recv)
                            : snprintf(out, cap, "string_append(&%s, ", recv);
     }
+    
+    /* Slice UFCS methods: s.len(), s.trim(), s.at(i), etc.
+       These dispatch to CCSlice_* functions. */
+    if (strcmp(method, "len") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_len(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_len(&%s)", recv);
+    }
+    if (strcmp(method, "trim") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_trim(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_trim(&%s)", recv);
+    }
+    if (strcmp(method, "trim_left") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_trim_left(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_trim_left(&%s)", recv);
+    }
+    if (strcmp(method, "trim_right") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_trim_right(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_trim_right(&%s)", recv);
+    }
+    if (strcmp(method, "is_empty") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_is_empty(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_is_empty(&%s)", recv);
+    }
+    if (strcmp(method, "at") == 0) {
+        if (!has_args || !args_rewritten) {
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_at(%s, 0)", recv)
+                               : snprintf(out, cap, "CCSlice_at(&%s, 0)", recv);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_at(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_at(&%s, %s)", recv, args_rewritten);
+    }
+    if (strcmp(method, "sub") == 0) {
+        if (!has_args || !args_rewritten) {
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_sub(%s, 0, 0)", recv)
+                               : snprintf(out, cap, "CCSlice_sub(&%s, 0, 0)", recv);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_sub(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_sub(&%s, %s)", recv, args_rewritten);
+    }
+    if (strcmp(method, "starts_with") == 0) {
+        if (!has_args || !args_rewritten) {
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_starts_with(%s, (CCSlice){0})", recv)
+                               : snprintf(out, cap, "CCSlice_starts_with(&%s, (CCSlice){0})", recv);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_starts_with(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_starts_with(&%s, %s)", recv, args_rewritten);
+    }
+    if (strcmp(method, "ends_with") == 0) {
+        if (!has_args || !args_rewritten) {
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_ends_with(%s, (CCSlice){0})", recv)
+                               : snprintf(out, cap, "CCSlice_ends_with(&%s, (CCSlice){0})", recv);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_ends_with(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_ends_with(&%s, %s)", recv, args_rewritten);
+    }
+    if (strcmp(method, "eq") == 0) {
+        if (!has_args || !args_rewritten) {
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq(%s, (CCSlice){0})", recv)
+                               : snprintf(out, cap, "CCSlice_eq(&%s, (CCSlice){0})", recv);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_eq(&%s, %s)", recv, args_rewritten);
+    }
     if (strcmp(recv, "std_out") == 0 && strcmp(method, "write") == 0) {
         /* Overload selection lives in the compiler:
            - String: cc_std_out_write_string(&s) (or pass-through if already &s)
