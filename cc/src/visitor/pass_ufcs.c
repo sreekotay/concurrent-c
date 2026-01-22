@@ -65,6 +65,7 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         int col_start;
         int col_end;
         const char* method;
+        const char* recv_type;   /* Receiver type name from TCC (e.g., "Point", "Vec_int") */
         int occurrence_1based;
         int is_under_await;      /* 1 if this UFCS call is inside an `await` expression */
         int recv_type_is_ptr;    /* 1 if receiver's resolved type is a pointer (from TCC) */
@@ -103,6 +104,7 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
             .col_start = n[i].col_start,
             .col_end = n[i].col_end,
             .method = n[i].aux_s1,
+            .recv_type = n[i].aux_s2,  /* Receiver type name from TCC */
             .occurrence_1based = occ,
             .is_under_await = under_await,
             .recv_type_is_ptr = recv_type_is_ptr,
@@ -162,8 +164,9 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         if (!expr) { free(out_buf); continue; }
         memcpy(expr, cur + sp.start, expr_len);
         expr[expr_len] = '\0';
-        /* Use extended rewrite with await context and type info */
-        if (cc_ufcs_rewrite_line_ex(expr, out_buf, out_cap, nodes[i].is_under_await, nodes[i].recv_type_is_ptr) == 0) {
+        /* Use full rewrite with await context, type info, and receiver type */
+        if (cc_ufcs_rewrite_line_full(expr, out_buf, out_cap, nodes[i].is_under_await, 
+                                       nodes[i].recv_type_is_ptr, nodes[i].recv_type) == 0) {
             size_t repl_len = strlen(out_buf);
             size_t new_len = cur_len - expr_len + repl_len;
             char* next = (char*)malloc(new_len + 1);

@@ -20,6 +20,10 @@ static _Thread_local int g_ufcs_await_context = 0;
 // Used for free() dispatch: ptr.free() -> cc_chan_free(ptr) vs handle.free() -> chan_free(handle).
 static _Thread_local int g_ufcs_recv_type_is_ptr = 0;
 
+// Thread-local context: receiver type name from TCC (e.g., "Point", "Vec_int").
+// When set, UFCS generates TypeName_method(&recv, ...) for struct types.
+static _Thread_local const char* g_ufcs_recv_type = NULL;
+
 // Map a receiver+method to a desugared function call prefix.
 // Returns number of bytes written to out (not including args), or -1 on failure.
 static const char* skip_ws(const char* s) {
@@ -255,7 +259,17 @@ static int emit_desugared_call(char* out,
         }
     }
 
-    // Generic UFCS: method(&recv,
+    /* Struct UFCS with known type: TypeName_method(&recv, ...) */
+    if (g_ufcs_recv_type && g_ufcs_recv_type[0]) {
+        if (has_args) {
+            return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s, ", g_ufcs_recv_type, method, recv)
+                               : snprintf(out, cap, "%s_%s(&%s, ", g_ufcs_recv_type, method, recv);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s)", g_ufcs_recv_type, method, recv)
+                           : snprintf(out, cap, "%s_%s(&%s)", g_ufcs_recv_type, method, recv);
+    }
+
+    // Generic UFCS (fallback): method(&recv,
     if (has_args) {
         return recv_is_ptr ? snprintf(out, cap, "%s(%s, ", method, recv)
                            : snprintf(out, cap, "%s(&%s, ", method, recv);
@@ -411,8 +425,22 @@ int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is
 int cc_ufcs_rewrite_line_ex(const char* in, char* out, size_t out_cap, int is_await, int recv_type_is_ptr) {
     g_ufcs_await_context = is_await;
     g_ufcs_recv_type_is_ptr = recv_type_is_ptr;
+    g_ufcs_recv_type = NULL;
     int rc = cc_ufcs_rewrite_line(in, out, out_cap);
     g_ufcs_await_context = 0;
     g_ufcs_recv_type_is_ptr = 0;
+    return rc;
+}
+
+// Full UFCS rewrite with receiver type from TCC.
+int cc_ufcs_rewrite_line_full(const char* in, char* out, size_t out_cap, 
+                              int is_await, int recv_type_is_ptr, const char* recv_type) {
+    g_ufcs_await_context = is_await;
+    g_ufcs_recv_type_is_ptr = recv_type_is_ptr;
+    g_ufcs_recv_type = recv_type;
+    int rc = cc_ufcs_rewrite_line(in, out, out_cap);
+    g_ufcs_await_context = 0;
+    g_ufcs_recv_type_is_ptr = 0;
+    g_ufcs_recv_type = NULL;
     return rc;
 }

@@ -1,8 +1,21 @@
+diff --git a/libtcc.c b/libtcc.c
+index b0342bb8..45d40c53 100644
+--- a/libtcc.c
++++ b/libtcc.c
+@@ -109,6 +109,8 @@ PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path
+ #endif
+     tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
+     s->filetype = AFF_TYPE_C;
++    /* Suppress warnings for __cc_closure_make_N etc. which are generated later. */
++    s->warn_implicit_function_declaration = 0;
+     /* Parser-only mode: allow CC headers to expose helpers (e.g. move markers) that
+        should be visible to the stub recorder but not necessarily to the final C backend. */
+     tcc_define_symbol(s, "CC_PARSER_MODE", "1");
 diff --git a/tcc.h b/tcc.h
-index 2b6e4edf..30dc1cf9 100644
+index 2b6e4edf..6b007d06 100644
 --- a/tcc.h
 +++ b/tcc.h
-@@ -940,7 +940,7 @@ struct TCCState {
+@@ -940,9 +940,10 @@ struct TCCState {
      int cc_node_stack_cap;
      /* CC UFCS scratch: last member access before a call. */
      int cc_last_member_tok;
@@ -10,12 +23,131 @@ index 2b6e4edf..30dc1cf9 100644
 +    int cc_last_member_flags; /* bit0=syntactic arrow (->), bit1=recv type is pointer */
      int cc_last_member_line;
      int cc_last_member_col;
++    char cc_last_recv_type[128]; /* Receiver type name for UFCS (e.g., "Point", "Vec_int") */
      int cc_last_rparen_line;
+     int cc_last_rparen_col;
+     /* CC UFCS disambiguation: per-line occurrence counter for UFCS calls. */
 diff --git a/tccgen.c b/tccgen.c
-index 9ec4162e..1b7b5077 100644
+index 9ec4162e..d4545b64 100644
 --- a/tccgen.c
 +++ b/tccgen.c
-@@ -6711,7 +6711,10 @@ special_math_val:
+@@ -196,7 +196,9 @@ static void cc_ast_record_call(int flags) {
+     tcc_state->cc_nodes[idx].aux1 = callee_tok;
+     tcc_state->cc_nodes[idx].aux2 = (flags & 1) | (is_ufcs ? 2 : 0) | (occ << 8);
+     tcc_state->cc_nodes[idx].aux_s1 = callee_name ? tcc_strdup(callee_name) : NULL;
+-    tcc_state->cc_nodes[idx].aux_s2 = NULL;
++    /* Store receiver type name for UFCS calls */
++    tcc_state->cc_nodes[idx].aux_s2 = (is_ufcs && tcc_state->cc_last_recv_type[0]) 
++        ? tcc_strdup(tcc_state->cc_last_recv_type) : NULL;
+ 
+     /* Best-effort start span: for UFCS use the member token location. */
+     if (is_ufcs && tcc_state->cc_last_member_line) {
+@@ -5906,6 +5908,104 @@ ST_FUNC void unary(void)
+         ad.section = rodata_section;
+         decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
+         break;
++#ifdef CONFIG_CC_EXT
++    case '@':
++        /* CC extension: @unsafe [...](...)  => closure literal */
++        {
++            int cc_unsafe_start_line = file ? file->line_num : 0;
++            int cc_unsafe_start_col = tok_col;
++            next(); /* consume '@' */
++            const char* kw = get_tok_str(tok, NULL);
++            if (!kw || strcmp(kw, "unsafe") != 0) {
++                tcc_error("unexpected '@' in expression (expected '@unsafe')");
++            }
++            next(); /* consume 'unsafe' */
++            if (tok != '[') {
++                tcc_error("expected '[' after '@unsafe' in closure");
++            }
++            /* Fall through to '[' handling with is_unsafe flag set */
++            goto cc_closure_with_captures;
++        }
++    case '[':
++        /* CC extension: closure literal with capture list `[x, &y]() => { ... }` 
++           We peek ahead to detect the pattern: '[' captures ']' '(' ... ')' '=>'
++           If detected, we record it as a closure and let CC handle the lowering. */
++        cc_closure_with_captures:
++        {
++            int cc_cap_start_line = file ? file->line_num : 0;
++            int cc_cap_start_col = tok_col;
++            /* Save current state for potential restore */
++            next(); /* consume '[' */
++            /* Skip capture list contents */
++            int sq = 1;
++            while (tok != TOK_EOF && sq > 0) {
++                if (tok == '[') sq++;
++                else if (tok == ']') sq--;
++                if (sq > 0) next();
++            }
++            if (tok != ']') {
++                tcc_error("unmatched '[' in closure capture list");
++            }
++            next(); /* consume ']' */
++            /* Now expect '(' ... ')' '=>' */
++            if (tok != '(') {
++                tcc_error("expected '(' after capture list in closure");
++            }
++            next(); /* consume '(' */
++            /* Skip params until ')' */
++            int par = 1;
++            while (tok != TOK_EOF && par > 0) {
++                if (tok == '(') par++;
++                else if (tok == ')') par--;
++                if (par > 0) next();
++            }
++            if (tok != ')') {
++                tcc_error("unmatched '(' in closure parameter list");
++            }
++            next(); /* consume ')' */
++            if (tok != TOK_CC_ARROW) {
++                tcc_error("expected '=>' after closure parameters");
++            }
++            /* Record closure node */
++            cc_ast_record_start(CC_AST_NODE_CLOSURE);
++            if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
++                int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++                tcc_state->cc_nodes[idx].line_start = cc_cap_start_line;
++                tcc_state->cc_nodes[idx].col_start = cc_cap_start_col;
++                tcc_state->cc_nodes[idx].aux1 = 0; /* param count determined later by CC */
++                tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("closure");
++            }
++            next(); /* consume '=>' */
++            int saved_ncw = nocode_wanted;
++            ++nocode_wanted; /* parse-only */
++            if (tcc_state) tcc_state->cc_in_closure_body++;
++            if (tok == '{') {
++                block(0);
++                if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
++                    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++                    tcc_state->cc_nodes[idx].aux2 = 1; /* body is block */
++                }
++            } else {
++                expr_eq();
++                vpop();
++                if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
++                    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++                    tcc_state->cc_nodes[idx].aux2 = 2; /* body is expr */
++                }
++            }
++            if (tcc_state) tcc_state->cc_in_closure_body--;
++            nocode_wanted = saved_ncw;
++            if (tcc_state && file && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
++                int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
++                tcc_state->cc_nodes[idx].line_end = file->line_num;
++                tcc_state->cc_nodes[idx].col_end = tok_col;
++                tcc_state->cc_nodes[idx].aux2 |= (int)(1U << 31);
++            }
++            cc_ast_record_end();
++            vpushi(0);
++        }
++        break;
++#endif
+     case TOK_SOTYPE:
+     case '(':
+         t = tok;
+@@ -6711,9 +6811,48 @@ special_math_val:
              }
              if (cc_is_ufcs) {
                  tcc_state->cc_last_member_tok = cc_method_tok;
@@ -26,4 +158,221 @@ index 9ec4162e..1b7b5077 100644
 +                tcc_state->cc_last_member_flags = (cc_recv_is_ptr ? 1 : 0) | (cc_recv_type_is_ptr ? 2 : 0);
                  tcc_state->cc_last_member_col = cc_member_col;
                  tcc_state->cc_last_member_line = cc_member_line;
++                
++                /* Record receiver type name for UFCS rewriting.
++                   For struct/union types, extract the tag name. For typedefs, use the typedef name. */
++                tcc_state->cc_last_recv_type[0] = '\0';
++                if (vtop >= vstack) {
++                    CType recv_type = vtop->type;
++                    /* For direct struct access, if ref is NULL, try to get it from the symbol */
++                    if ((recv_type.t & VT_BTYPE) == VT_STRUCT && !recv_type.ref && vtop->sym) {
++                        recv_type = vtop->sym->type;
++                    }
++                    /* Dereference pointer if needed to get underlying type */
++                    if ((recv_type.t & VT_BTYPE) == VT_PTR) {
++                        recv_type = *pointed_type(&recv_type);
++                    }
++                    /* Extract type name */
++                    int bt = recv_type.t & VT_BTYPE;
++                    if (bt == VT_STRUCT && recv_type.ref) {
++                        Sym *s = recv_type.ref;
++                        int v = s->v;
++                        /* The struct's v value has SYM_STRUCT flag for named structs. */
++                        if (v & SYM_STRUCT) {
++                            int tok = v & ~SYM_STRUCT & ~SYM_FIELD;
++                            if (tok < SYM_FIRST_ANOM) {
++                                /* Named struct tag - use it as the type prefix */
++                                const char *name = get_tok_str(tok, NULL);
++                                if (name) {
++                                    strncpy(tcc_state->cc_last_recv_type, name, sizeof(tcc_state->cc_last_recv_type) - 1);
++                                    tcc_state->cc_last_recv_type[sizeof(tcc_state->cc_last_recv_type) - 1] = '\0';
++                                }
++                            }
++                            /* Anonymous structs (typedef'd or not) - leave type empty.
++                               Using the variable name would be wrong (p.method -> p_method).
++                               For typedef'd structs, users should use named struct tags. */
++                        }
++                    }
++                }
  
+                 /* Drop receiver expression; treat member name as function identifier. */
+                 vpop();
+@@ -7920,6 +8059,7 @@ again:
+             tcc_error("expected identifier after '@'");
+         const char *cc_at = get_tok_str(tok, NULL);
+         if (strcmp(cc_at, "arena") != 0 &&
++            strcmp(cc_at, "arena_init") != 0 &&
+             strcmp(cc_at, "nursery") != 0 &&
+             strcmp(cc_at, "defer") != 0)
+             tcc_error("unknown '@%s' block", cc_at);
+@@ -7979,10 +8119,11 @@ again:
+                 tcc_error("expected '{' after @nursery");
+             t = '{';
+             /* Fall through to normal block parsing; we'll end nursery record at block close. */
+-        } else {
+-            /* --- @arena (existing behavior) --- */
++        } else if (strcmp(cc_at, "arena") == 0 || strcmp(cc_at, "arena_init") == 0) {
++            /* --- @arena or @arena_init --- */
++        int is_arena_init = (strcmp(cc_at, "arena_init") == 0);
+         next();
+-        /* Optional args: @arena(name?, size?) { ... } */
++        /* Optional args: @arena(name?, size?) { ... } or @arena_init(buf, size) { ... } */
+         cc_arena_name_tok = tok_alloc_const("arena");
+         cc_arena_name_str = NULL;
+         cc_arena_size_str = NULL;
+@@ -7994,62 +8135,108 @@ again:
+             cstr_new(&sz);
+             next(); /* after '(' */
+ 
+-            /* Parse first arg: if it's IDENT and then ',' or ')', it's the name. Otherwise it
+-               is part of the size expression. */
+-            if (tok >= TOK_IDENT) {
+-                int first = tok;
+-                next();
+-                if (tok == ',' || tok == ')') {
+-                    cc_arena_name_tok = first;
+-                    cc_arena_name_str = tcc_strdup(get_tok_str(first, NULL));
+-                    if (tok == ',') {
+-                        had_comma = 1;
+-                        next(); /* consume ','; start of size expr */
+-                    } else {
+-                        /* tok == ')' : no size */
++            if (is_arena_init) {
++                /* @arena_init(buf, size): collect buf_expr until ',', then size_expr until ')' */
++                CString buf;
++                cstr_new(&buf);
++                /* Collect first arg (buffer) */
++                while (tok && tok != ',' && depth > 0) {
++                    if (tok == '(') depth++;
++                    else if (tok == ')') { depth--; if (depth == 0) break; }
++                    cstr_cat(&buf, get_tok_str(tok, &tokc), -1);
++                    cstr_ccat(&buf, ' ');
++                    next();
++                }
++                if (tok == ',') {
++                    next(); /* consume ',' */
++                    /* Collect second arg (size) */
++                    depth = 1;
++                    while (tok && depth > 0) {
++                        if (tok == '(') depth++;
++                        else if (tok == ')') { depth--; if (depth == 0) break; }
++                        cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
++                        cstr_ccat(&sz, ' ');
++                        next();
+                     }
+-                } else {
+-                    /* Not a plain name; treat it as size expr starting with `first` + whatever
+-                       we've already advanced to. */
+-                    cstr_cat(&sz, get_tok_str(first, NULL), -1);
+-                    cstr_ccat(&sz, ' ');
+-                    cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
+-                    cstr_ccat(&sz, ' ');
+-                    had_comma = 1; /* we are now collecting size until matching ')' */
++                }
++                if (tok != ')') tcc_error("expected ')' after @arena_init(");
++                /* Trim trailing spaces */
++                if (buf.size >= 1 && buf.data[buf.size - 1] == ' ') buf.data[--buf.size] = '\0';
++                if (sz.size >= 1 && sz.data[sz.size - 1] == ' ') sz.data[--sz.size] = '\0';
++                cstr_ccat(&buf, '\0');
++                cstr_ccat(&sz, '\0');
++                /* Pack as @buf:buffer;size for CC pass */
++                CString packed;
++                cstr_new(&packed);
++                cstr_cat(&packed, "@buf:", -1);
++                cstr_cat(&packed, buf.data, -1);
++                cstr_ccat(&packed, ';');
++                cstr_cat(&packed, sz.data, -1);
++                cstr_ccat(&packed, '\0');
++                cc_arena_size_str = tcc_strdup(packed.data);
++                cc_arena_name_str = tcc_strdup("arena"); /* default name */
++                cstr_free(&buf);
++                cstr_free(&packed);
++                next(); /* consume ')' */
++            } else {
++                /* @arena(name?, size?): existing behavior */
++                /* Parse first arg: if it's IDENT and then ',' or ')', it's the name. Otherwise it
++                   is part of the size expression. */
++                if (tok >= TOK_IDENT) {
++                    int first = tok;
+                     next();
++                    if (tok == ',' || tok == ')') {
++                        cc_arena_name_tok = first;
++                        cc_arena_name_str = tcc_strdup(get_tok_str(first, NULL));
++                        if (tok == ',') {
++                            had_comma = 1;
++                            next(); /* consume ','; start of size expr */
++                        } else {
++                            /* tok == ')' : no size */
++                        }
++                    } else {
++                        /* Not a plain name; treat it as size expr starting with `first` + whatever
++                           we've already advanced to. */
++                        cstr_cat(&sz, get_tok_str(first, NULL), -1);
++                        cstr_ccat(&sz, ' ');
++                        cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
++                        cstr_ccat(&sz, ' ');
++                        had_comma = 1; /* we are now collecting size until matching ')' */
++                        next();
++                    }
++                } else if (tok != ')') {
++                    had_comma = 1; /* collect as size */
+                 }
+-            } else if (tok != ')') {
+-                had_comma = 1; /* collect as size */
+-            }
+ 
+-            /* Collect remaining tokens into size expr until matching ')'. */
+-            while (tok && depth > 0) {
+-                if (tok == '(') {
+-                    depth++;
+-                } else if (tok == ')') {
+-                    depth--;
+-                    if (depth == 0)
+-                        break;
++                /* Collect remaining tokens into size expr until matching ')'. */
++                while (tok && depth > 0) {
++                    if (tok == '(') {
++                        depth++;
++                    } else if (tok == ')') {
++                        depth--;
++                        if (depth == 0)
++                            break;
++                    }
++                    if (had_comma) {
++                        cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
++                        cstr_ccat(&sz, ' ');
++                    }
++                    next();
+                 }
+-                if (had_comma) {
+-                    cstr_cat(&sz, get_tok_str(tok, &tokc), -1);
+-                    cstr_ccat(&sz, ' ');
++                if (depth != 0)
++                    tcc_error("expected ')' after @arena(");
++
++                if (had_comma && sz.data && sz.size > 0) {
++                    /* Trim trailing space. */
++                    if (sz.size >= 1 && sz.data[sz.size - 1] == ' ')
++                        sz.data[sz.size - 1] = '\0', sz.size--;
++                    cstr_ccat(&sz, '\0');
++                    cc_arena_size_str = tcc_strdup(sz.data);
+                 }
+-                next();
+-            }
+-            if (depth != 0)
+-                tcc_error("expected ')' after @arena(");
+ 
+-            if (had_comma && sz.data && sz.size > 0) {
+-                /* Trim trailing space. */
+-                if (sz.size >= 1 && sz.data[sz.size - 1] == ' ')
+-                    sz.data[sz.size - 1] = '\0', sz.size--;
+-                cstr_ccat(&sz, '\0');
+-                cc_arena_size_str = tcc_strdup(sz.data);
++                next(); /* consume ')' */
+             }
+             cstr_free(&sz);
+-
+-            next(); /* consume ')' */
+         }
+         if (tok != '{')
+             tcc_error("expected '{' after @arena");

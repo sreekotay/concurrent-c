@@ -23,5 +23,10 @@ int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is
 // type is a pointer (from TCC), enabling correct dispatch for ptr.free() vs handle.free().
 int cc_ufcs_rewrite_line_ex(const char* in, char* out, size_t out_cap, int is_await, int recv_type_is_ptr);
 
+// Full UFCS rewrite with receiver type from TCC. If recv_type is non-NULL,
+// generates TypeName_method(&recv, ...) for struct types.
+int cc_ufcs_rewrite_line_full(const char* in, char* out, size_t out_cap, 
+                              int is_await, int recv_type_is_ptr, const char* recv_type);
+
 #endif // CC_VISITOR_UFCS_H
 

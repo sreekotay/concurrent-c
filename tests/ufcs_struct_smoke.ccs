@@ -1,0 +1,41 @@
+// Test: UFCS on named struct types works via AST-based rewriting.
+// The receiver type from TCC is used to generate TypeName_method(&recv, ...).
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+// Named struct - UFCS will generate Point_method(&p, ...)
+struct Point { int x; int y; };
+
+static inline void Point_move(struct Point* p, int dx, int dy) { 
+    p->x += dx; 
+    p->y += dy; 
+}
+
+static inline void Point_print(struct Point* p) { 
+    printf("(%d, %d)", p->x, p->y); 
+}
+
+static inline int Point_magnitude_sq(struct Point* p) {
+    return p->x * p->x + p->y * p->y;
+}
+
+int main(void) {
+    struct Point p = {3, 4};
+    
+    // UFCS on named struct
+    p.move(2, 1);  // -> Point_move(&p, 2, 1)
+    p.print();     // -> Point_print(&p)
+    printf("\n");
+    
+    // UFCS with return value
+    int mag = p.magnitude_sq();  // -> Point_magnitude_sq(&p)
+    printf("mag_sq = %d\n", mag);
+    
+    // UFCS via pointer
+    struct Point* pp = &p;
+    pp->move(1, 1);  // -> Point_move(pp, 1, 1)
+    pp->print();
+    printf("\n");
+    
+    return 0;
+}
