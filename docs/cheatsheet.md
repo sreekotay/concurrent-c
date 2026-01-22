@@ -20,7 +20,7 @@ ccc build -g file.ccs               # debug build
 ## Structured Concurrency
 
 ```c
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 
 // Basic nursery - waits for all spawned tasks
 @nursery {
@@ -318,7 +318,7 @@ ccc build --build-file path/build.cc
 ## Includes
 
 ```c
-#include "cc_runtime.cch"     // Core runtime (nursery, spawn, channels)
-#include "std/prelude.cch"    // Convenience (kilobytes, heap arena, etc.)
-#include "cc_atomic.cch"      // Portable atomics
+#include <ccc/cc_runtime.cch>     // Core runtime (nursery, spawn, channels)
+#include <ccc/std/prelude.cch>    // Convenience (kilobytes, heap arena, etc.)
+#include <ccc/cc_atomic.cch>      // Portable atomics
 ```

@@ -25,6 +25,7 @@
 #include "visitor/text_span.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
+#include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
 
@@ -1543,18 +1544,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
 
-    fprintf(stderr, "CC_DEBUG: visit_codegen after file read: src_all=%p, src_len=%zu\n", 
-            (void*)src_all, src_len);
-
     /* Rewrite generic container syntax: Vec<T> -> Vec_T, vec_new<T>() -> Vec_T_init() */
     if (src_ufcs && src_ufcs_len) {
-        if (getenv("CC_DEBUG_GENERIC")) {
-            fprintf(stderr, "CC: calling cc_rewrite_generic_containers, len=%zu\n", src_ufcs_len);
-        }
         char* rewritten = cc_rewrite_generic_containers(src_ufcs, src_ufcs_len, ctx->input_path);
-        if (getenv("CC_DEBUG_GENERIC")) {
-            fprintf(stderr, "CC: cc_rewrite_generic_containers returned %s\n", rewritten ? "non-NULL" : "NULL");
-        }
         if (rewritten) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
@@ -1564,10 +1556,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* Rewrite `with_deadline(expr) { ... }` (not valid C) into CCDeadline scope syntax
        using @defer, so the rest of the pipeline sees valid parseable text. */
-    if (src_all && src_len) {
+    if (src_ufcs && src_ufcs_len) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
-        if (cc__rewrite_with_deadline_syntax(src_all, src_len, &rewritten, &rewritten_len) == 0 && rewritten) {
+        if (cc__rewrite_with_deadline_syntax(src_ufcs, src_ufcs_len, &rewritten, &rewritten_len) == 0 && rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
             src_ufcs_len = rewritten_len;
         }
@@ -1967,6 +1960,47 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "  return NULL;\n");
     fprintf(out, "}\n");
     fprintf(out, "/* --- end spawn helpers --- */\n\n");
+
+    /* Emit container type declarations from type registry (populated by generic rewriting) */
+    {
+        CCTypeRegistry* reg = cc_type_registry_get_global();
+        if (reg) {
+            size_t n_vec = cc_type_registry_vec_count(reg);
+            size_t n_map = cc_type_registry_map_count(reg);
+            
+            if (n_vec > 0 || n_map > 0) {
+                fprintf(out, "/* --- CC generic container declarations --- */\n");
+                fprintf(out, "#include <ccc/std/vec.cch>\n");
+                fprintf(out, "#include <ccc/std/map.cch>\n");
+                
+                /* Emit Vec declarations */
+                for (size_t i = 0; i < n_vec; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
+                    if (inst && inst->type1 && inst->mangled_name) {
+                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                    }
+                }
+                
+                /* Emit Map declarations */
+                for (size_t i = 0; i < n_map; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
+                    if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
+                        /* Use default hash functions for known types */
+                        const char* hash_fn = "cc_kh_hash_i32";
+                        const char* eq_fn = "cc_kh_eq_i32";
+                        if (strcmp(inst->type1, "uint64_t") == 0) {
+                            hash_fn = "cc_kh_hash_u64";
+                            eq_fn = "cc_kh_eq_u64";
+                        }
+                        fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
+                                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                    }
+                }
+                
+                fprintf(out, "/* --- end container declarations --- */\n\n");
+            }
+        }
+    }
 
     /* Captures are lowered via __cc_closure_make_N factories. */
     if (closure_protos && closure_protos_len > 0) {

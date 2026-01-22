@@ -297,7 +297,7 @@ Run stress tests with ThreadSanitizer (race detection) and AddressSanitizer (mem
 For user code needing thread-safe counters or lock-free structures, include `cc_atomic.cch`:
 
 ```c
-#include "cc_atomic.cch"
+#include <ccc/cc_atomic.cch>
 
 cc_atomic_int counter = 0;
 

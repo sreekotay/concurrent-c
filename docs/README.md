@@ -23,7 +23,7 @@ The compiler binary is at `cc/bin/ccc`.
 ## Quick Example
 
 ```c
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 int main(void) {

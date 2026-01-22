@@ -547,7 +547,7 @@ void Runtime.set_log_level(LogLevel level);
 **Examples:**
 
 ```c
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 
 LogEvent evt = {
     .level = Info,
@@ -782,7 +782,7 @@ if (Request? r = active.get(id)) {
 **Updated Prelude Example:**
 
 ```c
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 
 @async void main() {
     Arena arena = arena(megabytes(1));
@@ -1254,8 +1254,8 @@ struct ServerConfig {
 **Usage Example: Unary Request/Response (HTTP/1.1 with Keep-Alive)**
 
 ```c
-#include <std/prelude.cch>
-#include <std/server.cch>
+#include <ccc/std/prelude.cch>
+#include <ccc/std/server.cch>
 
 @async @latency_sensitive ServerAction!IoError api_handler(Request* req, Arena* req_arena) {
     if (req.path == "/api/users") {
@@ -1494,7 +1494,7 @@ void process_csv(char* filename) {
 ### After (With UFCS Stdlib)
 
 ```c
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 
 @async void process_csv(char[:] filename) {
     Arena arena = arena(megabytes(1));
@@ -1525,7 +1525,7 @@ void process_csv(char* filename) {
 ### Advanced Example: Data Processing Pipeline
 
 ```c
-#include <std/prelude.cch>
+#include <ccc/std/prelude.cch>
 
 @async void process_logs() {
     Arena arena = arena(megabytes(10));
@@ -2086,7 +2086,7 @@ struct TlsSession {
 #### 6.2 Types
 
 ```c
-#include "cc_atomic.cch"
+#include <ccc/cc_atomic.cch>
 
 // Atomic integer types
 cc_atomic_int       // atomic int
@@ -2138,7 +2138,7 @@ All operations use **sequential consistency** (`memory_order_seq_cst`) for simpl
 **Counter:**
 
 ```c
-#include "cc_atomic.cch"
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 cc_atomic_int g_counter = 0;
@@ -2159,7 +2159,7 @@ void reset_count(void) {
 **Lock-free stack (simple example):**
 
 ```c
-#include "cc_atomic.cch"
+#include <ccc/cc_atomic.cch>
 
 struct Node {
     int value;
@@ -2191,8 +2191,8 @@ struct Node* pop(void) {
 **Concurrent accumulator in spawned tasks:**
 
 ```c
-#include "cc_runtime.cch"
-#include "cc_atomic.cch"
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 
 cc_atomic_int g_sum = 0;
 

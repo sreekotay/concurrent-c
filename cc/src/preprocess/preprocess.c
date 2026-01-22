@@ -905,10 +905,6 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     (void)input_path;
     if (!src || n == 0) return NULL;
     
-    if (getenv("CC_DEBUG_GENERIC")) {
-        fprintf(stderr, "CC: cc_rewrite_generic_containers called, n=%zu\n", n);
-    }
-    
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;

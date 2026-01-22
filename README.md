@@ -76,10 +76,33 @@ CC_HOME=/opt/ccc ccc run myfile.ccs
 
 ---
 
-### Run examples
+### Run examples, stress tests, and benchmarks
+
+The repo has a root `build.cc` with targets for all examples, stress tests, and perf benchmarks:
 
 ```bash
-make example TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libtcc.a
+# List all targets
+./cc/bin/ccc build --help
+
+# Run examples
+./cc/bin/ccc build run hello              # hello world
+./cc/bin/ccc build run recipe_async       # async/await recipe
+./cc/bin/ccc build run recipe_pipeline    # channel pipeline
+
+# Run stress tests
+./cc/bin/ccc build run stress_spawn       # spawn storm (1000 tasks)
+./cc/bin/ccc build run stress_channel     # channel flood
+
+# Run benchmarks
+./cc/bin/ccc build run perf_channel       # channel throughput
+./cc/bin/ccc build run perf_async         # async overhead
+```
+
+Or run a single file directly:
+
+```bash
+./cc/bin/ccc run examples/hello.ccs
+./cc/bin/ccc run stress/spawn_storm.ccs
 ```
 
 ---
@@ -88,14 +111,7 @@ make example TCC_EXT=1 TCC_INC=third_party/tcc TCC_LIB=../third_party/tcc/libtcc
 
 All commands below assume you’re in the repo root and have built the compiler (`make -C cc ...`).
 
-#### Build + run a single file
-
-```bash
-./cc/bin/ccc run examples/hello.ccs           # shorthand
-./cc/bin/ccc build run examples/hello.ccs     # explicit
-```
-
-Pass args to the produced binary:
+#### Pass args to the produced binary
 
 ```bash
 ./cc/bin/ccc run examples/hello.ccs -- --help
@@ -108,12 +124,14 @@ Pass args to the produced binary:
 ls -l out/hello.c
 ```
 
-#### Use `build.cc` (targets + options + consts)
+#### Custom `build.cc` files
+
+Multi-file projects use `build.cc` to define targets. The root `build.cc` is auto-discovered; use `--build-file` for others:
 
 ```bash
 ./cc/bin/ccc build --help --build-file examples/build_graph/build.cc
-./cc/bin/ccc build --build-file examples/build_graph/build.cc --summary     # builds CC_DEFAULT
-./cc/bin/ccc build multi --build-file examples/build_graph/build.cc --summary
+./cc/bin/ccc build --build-file examples/build_graph/build.cc --summary
+./cc/bin/ccc build multi --build-file examples/build_graph/build.cc
 ```
 
 #### Mixed CC + C sources

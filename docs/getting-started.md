@@ -21,7 +21,7 @@ The compiler is now at `./cc/bin/ccc`.
 Create `hello.ccs`:
 
 ```c
-#include "cc_runtime.cch"
+#include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 int main(void) {

@@ -450,27 +450,23 @@ static int cc__rm_rf(const char* path) {
 
 static int cc__clean_artifacts(int all) {
     // These are rooted under the selected out/bin dirs.
-    char p1[PATH_MAX], p2[PATH_MAX], p3[PATH_MAX], p4[PATH_MAX];
+    // Note: We do NOT delete out/cc/ which contains the compiler itself.
+    char p1[PATH_MAX], p2[PATH_MAX], p3[PATH_MAX];
     snprintf(p1, sizeof(p1), "%s/.cc-build", g_out_root);
     snprintf(p2, sizeof(p2), "%s/.cc_test", g_out_root);
     snprintf(p3, sizeof(p3), "%s/.cc_test", g_bin_root);
-    // Optional: wipe conventional build outputs too.
-    snprintf(p4, sizeof(p4), "%s/cc", g_out_root);
 
     int bad = 0;
     bad |= cc__rm_rf(p1);
     bad |= cc__rm_rf(p2);
     bad |= cc__rm_rf(p3);
     if (all) {
-        bad |= cc__rm_rf(p4);
-        // Also remove top-level emitted files (common in dev).
-        {
-            char cmd[PATH_MAX * 2];
-            snprintf(cmd, sizeof(cmd),
-                     "rm -f \"%s\"/*.c \"%s\"/*.o \"%s\"/*.d \"%s\"/*.stderr \"%s\"/*.stdout \"%s\"/*.txt 2>/dev/null || true",
-                     g_out_root, g_out_root, g_out_root, g_out_root, g_out_root, g_out_root);
-            (void)system(cmd);
-        }
+        // Remove top-level emitted files (common in dev), but preserve out/cc/.
+        char cmd[PATH_MAX * 2];
+        snprintf(cmd, sizeof(cmd),
+                 "rm -f \"%s\"/*.c \"%s\"/*.o \"%s\"/*.d \"%s\"/*.stderr \"%s\"/*.stdout \"%s\"/*.txt 2>/dev/null || true",
+                 g_out_root, g_out_root, g_out_root, g_out_root, g_out_root, g_out_root);
+        (void)system(cmd);
     }
     return bad ? -1 : 0;
 }
