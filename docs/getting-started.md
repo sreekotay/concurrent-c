@@ -113,6 +113,45 @@ Fast bump allocation with automatic cleanup:
 // Arena freed automatically
 ```
 
+### Async/Await
+
+For cooperative concurrency without threads:
+
+```c
+@async int fetch_value(int id) {
+    // await suspends until operation completes
+    intptr_t rc = await some_async_op();
+    return (int)rc;
+}
+
+int main(void) {
+    // Run async function to completion
+    int result = cc_block_on(int, fetch_value(42));
+}
+```
+
+### Task Combinators
+
+Run multiple async tasks concurrently:
+
+```c
+// Create task handles
+CCTaskIntptr tasks[] = {
+    fetch_value(1),
+    fetch_value(2),
+    fetch_value(3),
+};
+intptr_t results[3];
+
+// Wait for ALL to complete
+cc_block_all(3, tasks, results);
+
+// Or wait for first to complete (race)
+int winner;
+intptr_t first_result;
+cc_block_race(3, tasks, &winner, &first_result);
+```
+
 ## Next Steps
 
 - Browse [examples/](../examples/) for more patterns

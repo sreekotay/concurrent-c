@@ -2354,20 +2354,9 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         }
         for (int k = 0; k < aw_total; k++) cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", aw_names[k]);
         for (int k = 0; k < param_n; k++) {
-            /* Use actual type for struct-like params (starts with CC or contains "struct"),
-               otherwise use intptr_t for scalars/pointers. */
-            int is_struct = 0;
-            if (param_tys[k]) {
-                if (strncmp(param_tys[k], "CC", 2) == 0) is_struct = 1;
-                else if (strstr(param_tys[k], "struct")) is_struct = 1;
-                else if (!strchr(param_tys[k], '*')) {
-                    /* No pointer, might be a typedef'd struct - check for uppercase start. */
-                    const char* t = param_tys[k];
-                    while (*t == ' ' || *t == '\t') t++;
-                    if (*t >= 'A' && *t <= 'Z' && strncmp(t, "int", 3) != 0 && strncmp(t, "Int", 3) != 0) is_struct = 1;
-                }
-            }
-            if (is_struct && param_tys[k]) {
+            /* Preserve actual type for all parameters to avoid format warnings.
+               Fall back to intptr_t only if type is unknown. */
+            if (param_tys[k] && param_tys[k][0]) {
                 cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s __p_%s;\n", param_tys[k], param_names[k]);
             } else {
                 cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t __p_%s;\n", param_names[k]);
@@ -2444,22 +2433,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  }\n");
         cc__sb_append_cstr(&repl, &repl_len, &repl_cap, "  __f->__st = 0;\n");
         for (int k = 0; k < param_n; k++) {
-            /* Use direct assignment for struct-like params, (intptr_t) cast otherwise. */
-            int is_struct = 0;
-            if (param_tys[k]) {
-                if (strncmp(param_tys[k], "CC", 2) == 0) is_struct = 1;
-                else if (strstr(param_tys[k], "struct")) is_struct = 1;
-                else if (!strchr(param_tys[k], '*')) {
-                    const char* t = param_tys[k];
-                    while (*t == ' ' || *t == '\t') t++;
-                    if (*t >= 'A' && *t <= 'Z' && strncmp(t, "int", 3) != 0 && strncmp(t, "Int", 3) != 0) is_struct = 1;
-                }
-            }
-            if (is_struct) {
-                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = %s;\n", param_names[k], param_names[k]);
-            } else {
-                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = (intptr_t)(%s);\n", param_names[k], param_names[k]);
-            }
+            /* Direct assignment - types now match in frame struct. */
+            cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  __f->__p_%s = %s;\n", param_names[k], param_names[k]);
         }
         cc__sb_append_fmt(&repl, &repl_len, &repl_cap,
                           "  return cc_task_intptr_make_poll_ex(%s, NULL, __f, %s);\n",

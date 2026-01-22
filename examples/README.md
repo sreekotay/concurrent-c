@@ -18,10 +18,11 @@ New to Concurrent-C? Work through these in order:
 | 1 | `hello.ccs` | First nursery | `@nursery`, `spawn()`, basic structured concurrency |
 | 2 | `recipe_fanout_capture.ccs` | Multiple tasks | Spawning N tasks, closure captures |
 | 3 | `recipe_channel_pipeline.ccs` | Communication | Channels, `closing()`, producer/consumer |
-| 4 | `recipe_timeout.ccs` | Cancellation | `@with_deadline`, cooperative exit |
-| 5 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
-| 6 | `recipe_arena_scope.ccs` | Memory | `@arena`, scoped allocation |
-| 7 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
+| 4 | `recipe_async_await.ccs` | Async/Await | `@async` functions, `await`, `cc_block_on` |
+| 5 | `recipe_timeout.ccs` | Cancellation | `@with_deadline`, cooperative exit |
+| 6 | `recipe_worker_pool.ccs` | Real pattern | Putting it together: workers + channels |
+| 7 | `recipe_arena_scope.ccs` | Memory | `@arena`, scoped allocation |
+| 8 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` for resource management |
 
 After these, explore the remaining recipes and build system examples.
 
@@ -37,6 +38,7 @@ Minimal concurrent hello world — shows nursery and spawn.
 | `recipe_fanout_capture.ccs` | Fan-out | N tasks with captured data |
 | `recipe_explicit_capture.ccs` | Capture semantics | Value vs reference capture |
 | `recipe_channel_pipeline.ccs` | Producer/consumer | Nested nursery + `closing()` |
+| `recipe_async_await.ccs` | Async/Await | `@async`, `await`, `cc_block_on` |
 | `recipe_worker_pool.ccs` | Worker pool | N workers, shared queue |
 | `recipe_arena_scope.ccs` | Scoped memory | Arena reset per iteration |
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |

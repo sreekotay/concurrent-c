@@ -1,0 +1,158 @@
+/*
+ * Stress Test: Block Combinators
+ *
+ * Stress tests for cc_block_all, cc_block_race, and cc_block_any.
+ * Tests combinator overhead and correctness under load.
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define BATCH_SIZE 20
+#define NUM_BATCHES 50
+#define RACE_SIZE 8
+#define NUM_RACES 100
+
+cc_atomic_int g_total_completed = 0;
+
+@async int compute(int x) {
+    /* Simple computation to avoid being optimized away */
+    int result = 0;
+    for (int i = 0; i < 10; i++) {
+        result += x + i;
+    }
+    return result;
+}
+
+@async int slow_task(int delay_factor) {
+    /* Simulate varying work amounts */
+    int result = 0;
+    for (int i = 0; i < delay_factor * 100; i++) {
+        result += i % 7;
+    }
+    return result;
+}
+
+@async int may_fail(int id) {
+    /* Odd IDs "fail" by returning negative */
+    if (id % 2 == 1) {
+        return -1;  /* Failure indicator */
+    }
+    return id * 10;  /* Success */
+}
+
+/* Test cc_block_all with many batches */
+int test_block_all(void) {
+    printf("  block_all: %d batches x %d tasks\n", NUM_BATCHES, BATCH_SIZE);
+
+    int total_sum = 0;
+
+    for (int batch = 0; batch < NUM_BATCHES; batch++) {
+        CCTaskIntptr tasks[BATCH_SIZE];
+        intptr_t results[BATCH_SIZE];
+
+        /* Create batch of tasks */
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            tasks[i] = compute(batch * BATCH_SIZE + i);
+        }
+
+        /* Run all concurrently */
+        int err = cc_block_all(BATCH_SIZE, tasks, results);
+        if (err != 0) {
+            printf("  block_all: batch %d failed with err=%d\n", batch, err);
+            return 1;
+        }
+
+        /* Sum results */
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            total_sum += (int)results[i];
+            cc_atomic_fetch_add(&g_total_completed, 1);
+        }
+    }
+
+    printf("  block_all: completed, total_sum=%d\n", total_sum);
+    return 0;
+}
+
+/* Test cc_block_race with many races */
+int test_block_race(void) {
+    printf("  block_race: %d races x %d tasks\n", NUM_RACES, RACE_SIZE);
+
+    int winners_sum = 0;
+
+    for (int race = 0; race < NUM_RACES; race++) {
+        CCTaskIntptr tasks[RACE_SIZE];
+
+        /* Create tasks with varying "speeds" */
+        for (int i = 0; i < RACE_SIZE; i++) {
+            /* Lower i = "faster" (less work) */
+            tasks[i] = slow_task(i + 1);
+        }
+
+        int winner;
+        intptr_t result;
+        int err = cc_block_race(RACE_SIZE, tasks, &winner, &result);
+        if (err != 0) {
+            printf("  block_race: race %d failed with err=%d\n", race, err);
+            return 1;
+        }
+
+        winners_sum += winner;
+        cc_atomic_fetch_add(&g_total_completed, 1);
+    }
+
+    printf("  block_race: completed, winners_sum=%d\n", winners_sum);
+    return 0;
+}
+
+/* Test cc_block_any with tasks that may fail */
+int test_block_any(void) {
+    printf("  block_any: testing success-seeking behavior\n");
+
+    int success_count = 0;
+    int fail_count = 0;
+
+    for (int round = 0; round < 50; round++) {
+        CCTaskIntptr tasks[4];
+
+        /* Mix of succeeding and failing tasks */
+        tasks[0] = may_fail(round * 4 + 0);  /* Even: success */
+        tasks[1] = may_fail(round * 4 + 1);  /* Odd: fail */
+        tasks[2] = may_fail(round * 4 + 2);  /* Even: success */
+        tasks[3] = may_fail(round * 4 + 3);  /* Odd: fail */
+
+        int winner;
+        intptr_t result;
+        int err = cc_block_any(4, tasks, &winner, &result);
+
+        if (err == 0 && result >= 0) {
+            success_count++;
+        } else {
+            fail_count++;
+        }
+        cc_atomic_fetch_add(&g_total_completed, 1);
+    }
+
+    printf("  block_any: success=%d, fail=%d\n", success_count, fail_count);
+    /* Most rounds should find a success since 2/4 tasks succeed */
+    return (success_count > 40) ? 0 : 1;
+}
+
+int main(void) {
+    printf("block_combinators_stress: starting\n");
+
+    int err = 0;
+
+    err = test_block_all();
+    if (err != 0) return err;
+
+    err = test_block_race();
+    if (err != 0) return err;
+
+    err = test_block_any();
+    if (err != 0) return err;
+
+    int completed = cc_atomic_load(&g_total_completed);
+    printf("block_combinators_stress: total completed=%d\n", completed);
+    return 0;
+}

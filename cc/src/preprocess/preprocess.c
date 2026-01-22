@@ -1709,7 +1709,7 @@ static int cc__check_block_on_nonblocking(const char* src, size_t n, const char*
                         cc_path_rel_to_repo(input_path, rel, sizeof(rel));
                         fprintf(stderr, "%s:%d:%d: warning: cc_block_on with '%s' may deadlock\n",
                                 rel, call_line, call_col, fn_name);
-                        fprintf(stderr, "%s:%d:%d: note: '%s' has channel ops in a loop; consider using cc_concurrent or larger buffer\n",
+                        fprintf(stderr, "%s:%d:%d: note: '%s' has channel ops in a loop; consider @nursery for concurrency or larger buffer\n",
                                 rel, call_line, call_col, fn_name);
                         warnings++;
                     }

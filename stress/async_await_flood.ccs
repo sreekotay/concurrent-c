@@ -1,0 +1,80 @@
+/*
+ * Stress Test: Async/Await Flood
+ *
+ * Many concurrent async tasks using await for channel operations.
+ * Tests the async runtime under heavy concurrent await pressure.
+ */
+#include "cc_runtime.cch"
+#include "cc_atomic.cch"
+#include <stdio.h>
+
+#define NUM_PRODUCERS 10
+#define NUM_CONSUMERS 10
+#define MSGS_PER_PRODUCER 100
+#define CHAN_CAPACITY 16
+
+cc_atomic_int g_sent = 0;
+cc_atomic_int g_received = 0;
+
+/* Shared channel */
+int[~CHAN_CAPACITY >] g_tx;
+int[~CHAN_CAPACITY <] g_rx;
+
+@async int producer(int id) {
+    for (int i = 0; i < MSGS_PER_PRODUCER; i++) {
+        int val = id * 1000 + i;
+        await g_tx.send(val);
+        cc_atomic_fetch_add(&g_sent, 1);
+    }
+    return id;
+}
+
+@async int consumer(int id) {
+    int count = 0;
+    int val;
+    /* Each consumer drains until error (channel closed) */
+    while (await g_rx.recv(&val) == 0) {
+        cc_atomic_fetch_add(&g_received, 1);
+        count++;
+    }
+    return count;
+}
+
+int main(void) {
+    int expected = NUM_PRODUCERS * MSGS_PER_PRODUCER;
+    printf("async_await_flood: %d producers x %d msgs = %d total\n",
+           NUM_PRODUCERS, MSGS_PER_PRODUCER, expected);
+
+    channel_pair(&g_tx, &g_rx);
+
+    @nursery {
+        /* Start consumers */
+        for (int c = 0; c < NUM_CONSUMERS; c++) {
+            int consumer_id = c;
+            spawn(() => {
+                CCTaskIntptr task = consumer(consumer_id);
+                cc_block_on_intptr(task);
+            });
+        }
+
+        /* Start producers in inner nursery with closing */
+        @nursery closing(g_tx) {
+            for (int p = 0; p < NUM_PRODUCERS; p++) {
+                int producer_id = p;
+                spawn(() => {
+                    CCTaskIntptr task = producer(producer_id);
+                    cc_block_on_intptr(task);
+                });
+            }
+        }
+    }
+
+    chan_free(g_tx);
+
+    int sent = cc_atomic_load(&g_sent);
+    int received = cc_atomic_load(&g_received);
+
+    printf("async_await_flood: sent %d, received %d (expected %d)\n",
+           sent, received, expected);
+    return (sent == expected && received == expected) ? 0 : 1;
+}
