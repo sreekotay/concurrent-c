@@ -700,6 +700,45 @@ static int cc_is_ident_char_local(char c) {
     return (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'));
 }
 
+/* Scan backwards from pos to find the start of a member access chain (e.g., obj.field or ptr->field).
+   Returns the start position of the full expression. Handles chains like a.b.c or a->b->c.
+   Limitation: does not handle (expr).field, arr[i].field, or func().field patterns. */
+static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t limit) {
+    if (pos == 0 || pos <= limit) return pos;
+    
+    size_t p = pos;
+    /* Skip whitespace backwards */
+    while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
+    
+    /* Check for '.' or '->' before this position */
+    int has_access = 0;
+    if (p > limit && src[p-1] == '.') {
+        has_access = 1;
+        p--;
+    } else if (p >= 2 + limit && src[p-1] == '>' && src[p-2] == '-') {
+        has_access = 1;
+        p -= 2;
+    }
+    
+    if (!has_access) return pos;
+    
+    /* Scan back through identifier chain (a.b->c.d pattern) */
+    while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
+    while (p > limit) {
+        if (cc_is_ident_char(src[p-1])) {
+            p--;
+        } else if (src[p-1] == '.') {
+            p--;
+        } else if (p >= 2 + limit && src[p-1] == '>' && src[p-2] == '-') {
+            p -= 2;
+        } else {
+            break;
+        }
+        while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
+    }
+    return p;
+}
+
 static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* out_qual, size_t out_cap) {
     /* Returns the new start offset after consuming leading qualifiers; writes qualifiers (with trailing space) into out_qual. */
     if (!s || !out_qual || out_cap == 0) return ty_start;
@@ -1189,7 +1228,18 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
                             const char* type_name = cc_type_registry_lookup_var(reg, var_name);
                             if (type_name && (strncmp(type_name, "Vec_", 4) == 0 || 
                                               strncmp(type_name, "Map_", 4) == 0)) {
-                                /* This is a container UFCS call! Rewrite it. */
+                                /* Container UFCS call - rewrite var.method(...) to Type_method(&var, ...).
+                                   Handle chained access like obj.field or ptr->field by scanning back
+                                   to find the full receiver expression. 
+                                   Limitation: doesn't handle (expr).field, arr[i].field, or func().field. */
+                                size_t recv_start = cc_scan_back_for_member_access(src, ident_start, last_emit);
+                                
+                                char full_recv[256];
+                                size_t recv_len = ident_end - recv_start;
+                                if (recv_len >= sizeof(full_recv)) recv_len = sizeof(full_recv) - 1;
+                                memcpy(full_recv, src + recv_start, recv_len);
+                                full_recv[recv_len] = 0;
+                                
                                 char method_name[64];
                                 if (method_len < sizeof(method_name)) {
                                     memcpy(method_name, src + method_start, method_len);
@@ -1198,10 +1248,10 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
                                     /* Find matching close paren */
                                     size_t paren_end = 0;
                                     if (cc_find_matching_paren(src, n, k, &paren_end)) {
-                                        /* Emit everything up to ident_start */
-                                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+                                        /* Emit everything up to recv_start (not ident_start) */
+                                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
                                         
-                                        /* Emit: Type_method(&var, args) for Vec, Type_method(var, args) for Map (already pointer) */
+                                        /* Emit: Type_method(&recv, args) for Vec, Type_method(recv, args) for Map */
                                         cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
                                         cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
                                         cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
@@ -1211,7 +1261,7 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
                                         } else {
                                             cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
                                         }
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, var_name);
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, full_recv);
                                         
                                         /* Extract args (content between parens) */
                                         size_t args_start = k + 1;

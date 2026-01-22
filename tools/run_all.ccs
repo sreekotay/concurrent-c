@@ -18,18 +18,34 @@ typedef struct {
     int skipped;
 } Stats;
 
+/* Skip files that run indefinitely or exit non-zero by design */
+static int should_skip(const char* path) {
+    if (strstr(path, "tcp_echo") != NULL) return 1;       /* Server */
+    if (strstr(path, "http_get") != NULL) return 1;       /* Needs network */
+    if (strstr(path, "worker_pool") != NULL) return 1;    /* Long-running */
+    if (strstr(path, "deadlock_detect_demo") != NULL) return 1;  /* Intentional exit(1) */
+    return 0;
+}
+
 static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats) {
     printf("\n=== %s ===\n", label);
 
     CCGlobResult files = cc_glob(arena, pattern);
-    size_t n = files.len();
+    size_t n = cc_glob_result_len(&files);
     if (n == 0) {
         printf("  (no files matching %s)\n", pattern);
         return;
     }
 
     for (size_t i = 0; i < n; i++) {
-        const char* path = files.get(i);
+        const char* path = cc_glob_result_get(&files, i);
+        
+        if (should_skip(path)) {
+            printf("  [%zu/%zu] %s ... SKIP (server/long-running)\n", i + 1, n, path);
+            stats->skipped++;
+            continue;
+        }
+        
         printf("  [%zu/%zu] %s ... ", i + 1, n, path);
         fflush(stdout);
 
@@ -43,18 +59,18 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         }
 
         CCProcessOutput out = res.ok;
-        if (out.success()) {
+        if (cc_process_output_success(&out)) {
             printf("OK\n");
             stats->passed++;
         } else {
-            printf("FAIL (exit %d)\n", out.exit_code());
+            printf("FAIL (exit %d)\n", cc_process_output_exit_code(&out));
             stats->failed++;
             // Show first few lines of output on failure
-            size_t errlen = out.stderr_len();
+            size_t errlen = cc_process_output_stderr_len(&out);
             if (errlen > 0) {
                 printf("    stderr: %.*s\n",
                        (int)(errlen > 200 ? 200 : errlen),
-                       out.stderr_str());
+                       cc_process_output_stderr_str(&out));
             }
         }
     }
@@ -90,7 +106,6 @@ int main(int argc, char** argv) {
 
     if (do_examples) {
         run_files(&arena, "examples/*.ccs", "Examples", &stats);
-        run_files(&arena, "examples/recipe_*.ccs", "Recipes", &stats);
     }
 
     if (do_stress) {

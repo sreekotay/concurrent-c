@@ -1,0 +1,43 @@
+/* Test UFCS method calls on struct field containers */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct {
+    Vec<int> items;
+} Container;
+
+int main(void) {
+    CCArena arena = cc_heap_arena(kilobytes(4));
+    
+    Container c;
+    c.items = vec_new<int>(&arena);
+    
+    /* Field access UFCS: c.items.push(...) -> Vec_int_push(&c.items, ...) */
+    c.items.push(10);
+    c.items.push(20);
+    c.items.push(30);
+    
+    if (Vec_int_len(&c.items) != 3) {
+        printf("FAIL: expected 3 elements\n");
+        return 1;
+    }
+    
+    CCOptional_int val = c.items.get(1);
+    if (!val.has || val.u.value != 20) {
+        printf("FAIL: get(1) expected 20\n");
+        return 1;
+    }
+    
+    /* Also test pointer receiver */
+    Vec<int>* vp = &c.items;
+    vp->push(40);
+    
+    if (Vec_int_len(vp) != 4) {
+        printf("FAIL: expected 4 elements after ptr push\n");
+        return 1;
+    }
+    
+    printf("ok\n");
+    cc_heap_arena_free(&arena);
+    return 0;
+}
