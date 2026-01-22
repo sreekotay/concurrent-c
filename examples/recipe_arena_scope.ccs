@@ -26,6 +26,14 @@ int main(void) {
             s.append("\n");
             
             std_out.write(s);
+
+            /* Checkpoints: reclaim temporary allocations without resetting the whole arena. */
+            ArenaCheckpoint cp = arena_checkpoint(arena);
+            char* scratch = arena_alloc(char, arena, 64);
+            if (scratch) {
+                scratch[0] = '\0';
+            }
+            arena_restore(cp);  /* Scratch allocations reclaimed */
         }
         /* Arena reset here - O(1), no matter how much was allocated. */
     }
