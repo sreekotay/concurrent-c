@@ -32,6 +32,46 @@ The `~` means "channel" (a queue, not inline storage). The `>/<` indicate direct
 
 ---
 
+### Generic Containers: Vec and Map
+
+CC provides arena-backed generic containers with UFCS method syntax:
+
+```c
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCArena arena = cc_heap_arena(kilobytes(4));
+    
+    // Vec<T> - dynamic array
+    Vec<int> numbers = vec_new<int>(&arena);
+    numbers.push(10);
+    numbers.push(20);
+    numbers.push(30);
+    
+    int? val = numbers.get(1);   // Optional return: Some(20)
+    int? oob = numbers.get(100); // Optional return: None
+    
+    // Map<K, V> - hash table
+    Map<int, char*> names = map_new<int, char*>(&arena);
+    names.insert(1, "Alice");
+    names.insert(2, "Bob");
+    
+    char*? name = names.get(1);  // Optional return: Some("Alice")
+    
+    cc_heap_arena_free(&arena);
+    return 0;
+}
+```
+
+The `Vec<T>` and `v.method(...)` syntax is lowered by the compiler:
+- `Vec<int>` → `Vec_int`
+- `vec_new<int>(&arena)` → `Vec_int_init(&arena, CC_VEC_INITIAL_CAP)`
+- `v.push(x)` → `Vec_int_push(&v, x)`
+
+See the [stdlib spec](spec/concurrent-c-stdlib-spec.md) for full API documentation.
+
+---
+
 ### Build
 
 #### Build the compiler

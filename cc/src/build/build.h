@@ -50,6 +50,7 @@ typedef struct {
     const char* ldflags;    // optional raw flags string (heap)
 } CCBuildTargetDecl;
 
+
 // Stub loader: if build.cc exists, return a fixed const set; else empty.
 // Returns 0 on success, non-zero on error. The returned bindings are owned
 // by the caller (no allocations are performed here).

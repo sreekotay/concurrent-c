@@ -52,7 +52,7 @@ void cc_free_ast(CCASTRoot* root) {
     }
 #endif
     if (root->lowered_path) {
-        if (root->lowered_is_temp) unlink(root->lowered_path);
+        if (root->lowered_is_temp && !getenv("CC_KEEP_PP")) unlink(root->lowered_path);
         free(root->lowered_path);
     }
     free(root);

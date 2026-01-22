@@ -234,8 +234,23 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (inst && inst->type1 && inst->mangled_name) {
-                        /* Also declare the optional type for the element */
-                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                        /* Check if type is complex (pointer, struct) - needs FULL macro */
+                        int is_complex = (strchr(inst->type1, '*') != NULL || 
+                                          strncmp(inst->type1, "struct ", 7) == 0 ||
+                                          strncmp(inst->type1, "union ", 6) == 0);
+                        if (is_complex) {
+                            const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                            int is_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
+                                                  strcmp(mangled_elem, "intptr") == 0 ||
+                                                  strcmp(mangled_elem, "voidptr") == 0);
+                            if (!is_predeclared) {
+                                fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
+                            }
+                            fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
+                                    inst->type1, inst->mangled_name, mangled_elem);
+                        } else {
+                            fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                        }
                     }
                 }
                 

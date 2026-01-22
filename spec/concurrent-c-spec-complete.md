@@ -5371,6 +5371,8 @@ V? x = m.get(key);
 m.remove(key);
 ```
 
+**Implementation note:** The `Vec<T>` and `Map<K,V>` syntax is compile-time sugar that lowers to concrete C types (e.g., `Vec<int>` → `Vec_int`). UFCS method calls on containers also lower to function calls (e.g., `v.push(x)` → `Vec_int_push(&v, x)`). See the stdlib spec for full lowering rules.
+
 ---
 
 ## 12. Compile-Time Evaluation (`comptime`)

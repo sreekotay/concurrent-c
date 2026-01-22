@@ -1,0 +1,38 @@
+/* Test UFCS method calls on generic Map containers */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_heap_arena(kilobytes(4));
+    
+    Map<int, int> m = map_new<int, int>(&arena);
+    
+    /* UFCS method calls - m.method(args) -> Map_int_int_method(&m, args) */
+    m.insert(1, 100);
+    m.insert(2, 200);
+    m.insert(3, 300);
+    
+    CCOptional_int val = m.get(2);
+    if (!val.has || val.u.value != 200) {
+        printf("FAIL: get(2) expected 200\n");
+        return 1;
+    }
+    
+    /* Test remove */
+    int removed = m.remove(2);
+    if (!removed) {
+        printf("FAIL: remove(2) should return true\n");
+        return 1;
+    }
+    
+    /* Verify removed */
+    CCOptional_int after = m.get(2);
+    if (after.has) {
+        printf("FAIL: get(2) should be None after remove\n");
+        return 1;
+    }
+    
+    printf("ok\n");
+    cc_heap_arena_free(&arena);
+    return 0;
+}

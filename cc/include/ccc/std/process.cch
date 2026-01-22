@@ -1,0 +1,280 @@
+/*
+ * Process spawning and management for Concurrent-C stdlib.
+ * Cross-platform: POSIX (macOS, Linux, BSD) and Windows.
+ *
+ * C ABI uses prefixed names (cc_process_*).
+ * Short aliases available via CC_ENABLE_SHORT_NAMES.
+ */
+#ifndef CC_STD_PROCESS_H
+#define CC_STD_PROCESS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_io.cch>
+
+/* Process handle (opaque, platform-specific internals) */
+typedef struct CCProcess {
+#ifdef _WIN32
+    void* handle;       /* HANDLE */
+    uint32_t pid;       /* DWORD */
+#else
+    int pid;            /* pid_t */
+#endif
+    int stdin_fd;       /* Write end of stdin pipe (-1 if not piped) */
+    int stdout_fd;      /* Read end of stdout pipe (-1 if not piped) */
+    int stderr_fd;      /* Read end of stderr pipe (-1 if not piped) */
+} CCProcess;
+
+/* Process exit status */
+typedef struct CCProcessStatus {
+    bool exited;        /* True if process exited normally */
+    bool signaled;      /* True if process was killed by signal (POSIX) */
+    int exit_code;      /* Exit code if exited, signal number if signaled */
+} CCProcessStatus;
+
+/* Process spawn configuration */
+typedef struct CCProcessConfig {
+    const char* program;        /* Program path or name */
+    const char** args;          /* NULL-terminated argument array (args[0] = program name) */
+    const char** env;           /* NULL-terminated environment array, or NULL for inherit */
+    const char* cwd;            /* Working directory, or NULL for inherit */
+    bool pipe_stdin;            /* Create pipe for stdin */
+    bool pipe_stdout;           /* Create pipe for stdout */
+    bool pipe_stderr;           /* Create pipe for stderr */
+    bool merge_stderr;          /* Redirect stderr to stdout */
+} CCProcessConfig;
+
+/* Result types */
+CC_DECL_RESULT(CCResultProcessIoError, CCProcess, CCIoError)
+CC_DECL_RESULT(CCResultStatusIoError, CCProcessStatus, CCIoError)
+CC_DECL_RESULT(CCResultIntIoError, int, CCIoError)
+
+/* ============================================================================
+ * Process Spawning
+ * ============================================================================ */
+
+/*
+ * Spawn a new process with full configuration.
+ * Returns process handle on success.
+ *
+ * Example:
+ *   const char* args[] = {"ls", "-la", NULL};
+ *   CCProcessConfig cfg = {.program = "ls", .args = args, .pipe_stdout = true};
+ *   CCProcess proc = try cc_process_spawn(&cfg);
+ */
+CCResultProcessIoError cc_process_spawn(const CCProcessConfig* config);
+
+/*
+ * Spawn a simple command (no pipes, inherit environment).
+ * Convenience wrapper around cc_process_spawn.
+ *
+ * Example:
+ *   CCProcess proc = try cc_process_spawn_simple("ls", (const char*[]){"ls", "-la", NULL});
+ */
+CCResultProcessIoError cc_process_spawn_simple(const char* program, const char** args);
+
+/*
+ * Spawn a shell command (via /bin/sh -c on POSIX, cmd /c on Windows).
+ * Useful for running commands with shell features (pipes, redirects, etc).
+ *
+ * Example:
+ *   CCProcess proc = try cc_process_spawn_shell("ls -la | grep foo");
+ */
+CCResultProcessIoError cc_process_spawn_shell(const char* command);
+
+/* ============================================================================
+ * Process Management
+ * ============================================================================ */
+
+/*
+ * Wait for process to exit (blocking).
+ * Returns exit status.
+ */
+CCResultStatusIoError cc_process_wait(CCProcess* proc);
+
+/*
+ * Check if process has exited (non-blocking).
+ * Returns status if exited, or error with CC_IO_BUSY if still running.
+ */
+CCResultStatusIoError cc_process_try_wait(CCProcess* proc);
+
+/*
+ * Send signal to process (POSIX: signal number, Windows: TerminateProcess for SIGKILL/SIGTERM).
+ * Common signals: SIGTERM (15), SIGKILL (9), SIGINT (2)
+ */
+CCResultBoolIoError cc_process_kill(CCProcess* proc, int signal);
+
+/*
+ * Get process ID.
+ */
+static inline int cc_process_id(const CCProcess* proc) {
+    if (!proc) return -1;
+#ifdef _WIN32
+    return (int)proc->pid;
+#else
+    return proc->pid;
+#endif
+}
+
+/* ============================================================================
+ * Process I/O (when pipes are configured)
+ * ============================================================================ */
+
+/*
+ * Write to process stdin.
+ * Requires pipe_stdin = true in config.
+ */
+CCResultSizeIoError cc_process_write(CCProcess* proc, CCSlice data);
+
+/*
+ * Read from process stdout.
+ * Requires pipe_stdout = true in config.
+ * Allocates result in arena.
+ */
+CCResultSliceIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes);
+
+/*
+ * Read from process stderr.
+ * Requires pipe_stderr = true in config.
+ * Allocates result in arena.
+ */
+CCResultSliceIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes);
+
+/*
+ * Close stdin pipe (signals EOF to child).
+ */
+void cc_process_close_stdin(CCProcess* proc);
+
+/*
+ * Read all stdout until EOF.
+ * Allocates result in arena.
+ */
+CCResultSliceIoError cc_process_read_all(CCProcess* proc, CCArena* arena);
+
+/*
+ * Read all stderr until EOF.
+ * Allocates result in arena.
+ */
+CCResultSliceIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
+
+/* ============================================================================
+ * Convenience: Run and Capture
+ * ============================================================================ */
+
+/* Output capture result */
+typedef struct CCProcessOutput {
+    CCSlice stdout_data;    /* Captured stdout, allocated in arena */
+    CCSlice stderr_data;    /* Captured stderr, allocated in arena */
+    CCProcessStatus status; /* Exit status */
+} CCProcessOutput;
+
+/* UFCS accessors for CCProcessOutput: out.stdout_str(), out.stderr_str(), out.exit_code() */
+static inline const char* cc_process_output_stdout_str(const CCProcessOutput* o) {
+    return o ? (const char*)o->stdout_data.ptr : NULL;
+}
+
+static inline size_t cc_process_output_stdout_len(const CCProcessOutput* o) {
+    return o ? o->stdout_data.len : 0;
+}
+
+static inline const char* cc_process_output_stderr_str(const CCProcessOutput* o) {
+    return o ? (const char*)o->stderr_data.ptr : NULL;
+}
+
+static inline size_t cc_process_output_stderr_len(const CCProcessOutput* o) {
+    return o ? o->stderr_data.len : 0;
+}
+
+static inline int cc_process_output_exit_code(const CCProcessOutput* o) {
+    return o ? o->status.exit_code : -1;
+}
+
+static inline bool cc_process_output_success(const CCProcessOutput* o) {
+    return o && o->status.exited && o->status.exit_code == 0;
+}
+
+CC_DECL_RESULT(CCResultProcessOutputIoError, CCProcessOutput, CCIoError)
+
+/*
+ * Run command and capture all output (blocking).
+ * Spawns process, captures stdout/stderr, waits for exit.
+ *
+ * Example:
+ *   CCProcessOutput out = try cc_process_run(arena, "ls", (const char*[]){"ls", "-la", NULL});
+ *   printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
+ *   printf("exit: %d\n", out.status.exit_code);
+ */
+CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program, const char** args);
+
+/*
+ * Run shell command and capture output.
+ *
+ * Example:
+ *   CCProcessOutput out = try cc_process_run_shell(arena, "ls -la | wc -l");
+ */
+CCResultProcessOutputIoError cc_process_run_shell(CCArena* arena, const char* command);
+
+/* ============================================================================
+ * Environment
+ * ============================================================================ */
+
+/*
+ * Get environment variable value.
+ * Returns empty slice if not set.
+ * Allocates result in arena.
+ */
+CCSlice cc_env_get(CCArena* arena, const char* name);
+
+/*
+ * Set environment variable for current process.
+ */
+CCResultBoolIoError cc_env_set(const char* name, const char* value);
+
+/*
+ * Unset environment variable for current process.
+ */
+CCResultBoolIoError cc_env_unset(const char* name);
+
+/* ============================================================================
+ * Short Names (opt-in via CC_ENABLE_SHORT_NAMES)
+ * ============================================================================ */
+
+#ifdef CC_ENABLE_SHORT_NAMES
+#define Process CCProcess
+#define ProcessStatus CCProcessStatus
+#define ProcessConfig CCProcessConfig
+#define ProcessOutput CCProcessOutput
+
+static inline CCResultProcessIoError process_spawn(const CCProcessConfig* c) { return cc_process_spawn(c); }
+static inline CCResultProcessIoError process_spawn_simple(const char* p, const char** a) { return cc_process_spawn_simple(p, a); }
+static inline CCResultProcessIoError process_spawn_shell(const char* c) { return cc_process_spawn_shell(c); }
+static inline CCResultStatusIoError process_wait(CCProcess* p) { return cc_process_wait(p); }
+static inline CCResultStatusIoError process_try_wait(CCProcess* p) { return cc_process_try_wait(p); }
+static inline CCResultBoolIoError process_kill(CCProcess* p, int s) { return cc_process_kill(p, s); }
+static inline int process_id(const CCProcess* p) { return cc_process_id(p); }
+static inline CCResultProcessOutputIoError process_run(CCArena* a, const char* p, const char** args) { return cc_process_run(a, p, args); }
+static inline CCResultProcessOutputIoError process_run_shell(CCArena* a, const char* c) { return cc_process_run_shell(a, c); }
+static inline CCSlice env_get(CCArena* a, const char* n) { return cc_env_get(a, n); }
+static inline CCResultBoolIoError env_set(const char* n, const char* v) { return cc_env_set(n, v); }
+static inline CCResultBoolIoError env_unset(const char* n) { return cc_env_unset(n); }
+#endif
+
+#endif /* CC_STD_PROCESS_H */

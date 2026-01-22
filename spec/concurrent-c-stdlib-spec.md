@@ -758,6 +758,239 @@ if (Request? r = active.get(id)) {
 
 ---
 
+### 4. Directory & Filesystem (`<std/dir.cch>`)
+
+#### 4.1 Overview
+
+Cross-platform directory operations: iteration, path existence checks, directory creation/removal, and glob pattern matching. Works on macOS, Linux, BSD, and Windows.
+
+#### 4.2 Directory Iteration
+
+```c
+// Directory entry type
+enum CCDirEntryType {
+    CC_DIRENT_FILE,
+    CC_DIRENT_DIR,
+    CC_DIRENT_SYMLINK,
+    CC_DIRENT_OTHER
+};
+
+// Directory entry
+struct CCDirEntry {
+    char[:] name;           // Entry name (not full path)
+    CCDirEntryType type;
+};
+
+// Open directory for iteration
+CCDirIter*!IoError cc_dir_open(Arena* arena, char[:] path);
+
+// Read next entry (returns error with CC_IO_EOF when done)
+CCDirEntry!IoError cc_dir_next(CCDirIter* iter, Arena* arena);
+
+// Close iterator
+void cc_dir_close(CCDirIter* iter);
+```
+
+**Example:**
+
+```c
+Arena arena = cc_heap_arena(megabytes(1));
+CCDirIter* iter = try cc_dir_open(&arena, "src");
+
+while (true) {
+    CCDirEntry!IoError entry_res = cc_dir_next(iter, &arena);
+    if (entry_res is IoError) break;  // EOF or error
+    
+    CCDirEntry entry = entry_res.unwrap();
+    printf("%s (%s)\n", entry.name.ptr,
+           entry.type == CC_DIRENT_DIR ? "dir" : "file");
+}
+
+cc_dir_close(iter);
+```
+
+#### 4.3 Path Operations
+
+```c
+bool cc_path_exists(char[:] path);     // Check if path exists
+bool cc_path_is_dir(char[:] path);     // Check if path is directory
+bool cc_path_is_file(char[:] path);    // Check if path is regular file
+
+bool!IoError cc_dir_create(char[:] path);      // Create directory
+bool!IoError cc_dir_create_all(char[:] path);  // Create directory and parents
+bool!IoError cc_dir_remove(char[:] path);      // Remove empty directory
+bool!IoError cc_file_remove(char[:] path);     // Remove file
+
+char[:] cc_dir_cwd(Arena* arena);              // Get current working directory
+bool!IoError cc_dir_chdir(char[:] path);       // Change working directory
+```
+
+#### 4.4 Glob Pattern Matching
+
+```c
+// Glob result: array of matching paths
+struct CCGlobResult {
+    char[:]* paths;     // Array of path slices
+    size_t count;       // Number of matches
+};
+
+// Find files matching pattern
+// Supports: * (any chars), ? (single char), ** (recursive)
+CCGlobResult cc_glob(Arena* arena, char[:] pattern);
+
+// Check if name matches pattern (no directory traversal)
+bool cc_glob_match(char[:] pattern, char[:] name);
+```
+
+**Examples:**
+
+```c
+Arena arena = cc_heap_arena(megabytes(1));
+
+// Find all .ccs files in current directory
+CCGlobResult r1 = cc_glob(&arena, "*.ccs");
+for (size_t i = 0; i < r1.count; i++) {
+    printf("Found: %s\n", r1.paths[i].ptr);
+}
+
+// Find all .ccs files recursively
+CCGlobResult r2 = cc_glob(&arena, "**/*.ccs");
+
+// Find test files
+CCGlobResult r3 = cc_glob(&arena, "tests/test_*.ccs");
+```
+
+---
+
+### 5. Process Spawning (`<std/process.cch>`)
+
+#### 5.1 Overview
+
+Cross-platform process spawning, I/O piping, and environment management. Works on macOS, Linux, BSD, and Windows.
+
+#### 5.2 Process Configuration
+
+```c
+struct CCProcessConfig {
+    char[:] program;        // Program path or name
+    char[:]* args;          // NULL-terminated argument array
+    char[:]* env;           // Environment (NULL = inherit)
+    char[:] cwd;            // Working directory (NULL = inherit)
+    bool pipe_stdin;        // Create stdin pipe
+    bool pipe_stdout;       // Create stdout pipe
+    bool pipe_stderr;       // Create stderr pipe
+    bool merge_stderr;      // Redirect stderr to stdout
+};
+
+struct CCProcessStatus {
+    bool exited;            // Exited normally
+    bool signaled;          // Killed by signal (POSIX)
+    int exit_code;          // Exit code or signal number
+};
+```
+
+#### 5.3 Process Spawning
+
+```c
+// Spawn with full configuration
+CCProcess!IoError cc_process_spawn(CCProcessConfig* config);
+
+// Simple spawn (no pipes)
+CCProcess!IoError cc_process_spawn_simple(char[:] program, char[:]* args);
+
+// Spawn shell command
+CCProcess!IoError cc_process_spawn_shell(char[:] command);
+```
+
+#### 5.4 Process Management
+
+```c
+// Wait for exit (blocking)
+CCProcessStatus!IoError cc_process_wait(CCProcess* proc);
+
+// Check if exited (non-blocking, returns CC_IO_BUSY if running)
+CCProcessStatus!IoError cc_process_try_wait(CCProcess* proc);
+
+// Send signal (POSIX: signal number; Windows: TerminateProcess)
+bool!IoError cc_process_kill(CCProcess* proc, int signal);
+
+// Get process ID
+int cc_process_id(CCProcess* proc);
+```
+
+#### 5.5 Process I/O
+
+```c
+// Write to stdin (requires pipe_stdin)
+size_t!IoError cc_process_write(CCProcess* proc, char[:] data);
+
+// Read from stdout/stderr (requires pipe_stdout/pipe_stderr)
+char[:]!IoError cc_process_read(CCProcess* proc, Arena* arena, size_t max);
+char[:]!IoError cc_process_read_stderr(CCProcess* proc, Arena* arena, size_t max);
+
+// Read all output until EOF
+char[:]!IoError cc_process_read_all(CCProcess* proc, Arena* arena);
+char[:]!IoError cc_process_read_all_stderr(CCProcess* proc, Arena* arena);
+
+// Close stdin (signals EOF to child)
+void cc_process_close_stdin(CCProcess* proc);
+```
+
+#### 5.6 Convenience: Run and Capture
+
+```c
+struct CCProcessOutput {
+    char[:] stdout_data;
+    char[:] stderr_data;
+    CCProcessStatus status;
+};
+
+// Run command and capture all output (blocking)
+CCProcessOutput!IoError cc_process_run(Arena* arena, char[:] program, char[:]* args);
+
+// Run shell command and capture output
+CCProcessOutput!IoError cc_process_run_shell(Arena* arena, char[:] command);
+```
+
+**Examples:**
+
+```c
+Arena arena = cc_heap_arena(megabytes(1));
+
+// Run and capture output
+CCProcessOutput out = try cc_process_run_shell(&arena, "ls -la");
+printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
+printf("exit: %d\n", out.status.exit_code);
+
+// Spawn with pipes for interactive use
+CCProcessConfig cfg = {
+    .program = "cat",
+    .args = (char*[]){"cat", NULL},
+    .pipe_stdin = true,
+    .pipe_stdout = true
+};
+CCProcess proc = try cc_process_spawn(&cfg);
+
+try cc_process_write(&proc, "hello\n");
+cc_process_close_stdin(&proc);
+
+char[:] output = try cc_process_read_all(&proc, &arena);
+CCProcessStatus status = try cc_process_wait(&proc);
+```
+
+#### 5.7 Environment
+
+```c
+// Get environment variable (empty if not set)
+char[:] cc_env_get(Arena* arena, char[:] name);
+
+// Set/unset environment variable for current process
+bool!IoError cc_env_set(char[:] name, char[:] value);
+bool!IoError cc_env_unset(char[:] name);
+```
+
+---
+
 ## Module Structure
 
 ```
@@ -766,6 +999,8 @@ if (Request? r = active.get(id)) {
 <std/io.cch>             // File, StdStream
 <std/log.cch>            // Structured logging (LogEvent, log_drop/block/sample)
 <std/fs.cch>             // Path utilities
+<std/dir.cch>            // Directory iteration, glob patterns
+<std/process.cch>        // Process spawning, environment
 <std/vec.cch>            // Vec<T> dynamic array with UFCS methods
 <std/map.cch>            // Map<K, V> hash map with UFCS methods
 <std/net.cch>            // TCP/UDP sockets, Listener
@@ -943,6 +1178,54 @@ size_t T.len();  // desugars to len(&self)
 ```
 
 This allows both function composition and ergonomic method chaining.
+
+### Generic Container Syntax Lowering
+
+The `Vec<T>` and `Map<K, V>` syntax is **compile-time sugar** that lowers to concrete C types via macro-based monomorphization:
+
+```c
+// CC source code
+Vec<int> v = vec_new<int>(&arena);
+v.push(42);
+v.push(100);
+int? val = v.get(0);
+
+// Lowers to (generated C)
+Vec_int v = Vec_int_init(&arena, CC_VEC_INITIAL_CAP);
+Vec_int_push(&v, 42);
+Vec_int_push(&v, 100);
+CCOptional_int val = Vec_int_get(&v, 0);
+```
+
+**Lowering rules:**
+
+| Surface Syntax | Lowered Form |
+|----------------|--------------|
+| `Vec<T>` | `Vec_mangled` where `mangled` is `T` with non-ident chars replaced by `_` |
+| `vec_new<T>(&arena)` | `Vec_mangled_init(&arena, CC_VEC_INITIAL_CAP)` |
+| `Map<K, V>` | `Map_mangledK_mangledV` |
+| `map_new<K, V>(&arena)` | `Map_mangledK_mangledV_init(&arena)` |
+| `v.method(args)` | `Vec_mangled_method(&v, args)` (UFCS on containers) |
+
+**Type mangling examples:**
+
+| Type Parameter | Mangled Name |
+|----------------|--------------|
+| `int` | `int` |
+| `char*` | `char_ptr` |
+| `int*` | `int_ptr` |
+| `size_t` | `size_t` |
+| `struct Foo` | `struct_Foo` |
+
+**Container declarations** are automatically emitted based on types used:
+
+```c
+// Automatically generated for Vec<int> usage
+CC_VEC_DECL_ARENA(int, Vec_int)
+
+// Automatically generated for Map<int, char*> usage
+CC_MAP_DECL_ARENA(int, char_ptr, Map_int_char_ptr, cc_kh_hash_i32, cc_kh_eq_i32)
+```
 
 ### Testing
 

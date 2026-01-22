@@ -125,6 +125,17 @@ static inline CCSlice cc_slice_sub(CCSlice s, size_t start, size_t end) {
     return sub;
 }
 
+/* Typed accessors for common uses (UFCS: s.str(), s.bytes()) */
+static inline const char* cc_slice_str(CCSlice* s) {
+    return (const char*)s->ptr;
+}
+
+static inline const uint8_t* cc_slice_bytes(CCSlice* s) {
+    return (const uint8_t*)s->ptr;
+}
+
+/* cc_slice_len is defined in std/string.cch - use pass-by-value version there */
+
 #endif // CC_SLICE_H
 
 

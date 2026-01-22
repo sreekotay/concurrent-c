@@ -66,3 +66,9 @@ CC_TARGET perf_async exe perf/perf_async_overhead.ccs
 CC_TARGET perf_channel exe perf/perf_channel_throughput.ccs
 CC_TARGET perf_match exe perf/perf_match_select.ccs
 CC_TARGET perf_zerocopy exe perf/perf_zero_copy.ccs
+
+// ============================================================================
+// Tools
+// ============================================================================
+
+CC_TARGET run_all exe tools/run_all.ccs

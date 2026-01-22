@@ -786,7 +786,7 @@ static void cc__apply_deadlock_env(const CCBuildOptions* opt) {
     }
 }
 
-static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, CCCompileConfig* cfg) {
+static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_deadlock_env(opt);
     return cc_compile_with_config(in_path, out_path, cfg);
 }

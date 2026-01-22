@@ -1,0 +1,113 @@
+/*
+ * Run all examples, stress tests, or perf benchmarks.
+ *
+ * Usage:
+ *   ccc run tools/run_all.ccs -- examples   # run all examples
+ *   ccc run tools/run_all.ccs -- stress     # run all stress tests
+ *   ccc run tools/run_all.ccs -- perf       # run all perf benchmarks
+ *   ccc run tools/run_all.ccs -- all        # run everything
+ *
+ * This demonstrates the dir and process stdlib modules.
+ */
+
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int passed;
+    int failed;
+    int skipped;
+} Stats;
+
+static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats) {
+    printf("\n=== %s ===\n", label);
+
+    CCGlobResult files = cc_glob(arena, pattern);
+    size_t n = files.len();
+    if (n == 0) {
+        printf("  (no files matching %s)\n", pattern);
+        return;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        const char* path = files.get(i);
+        printf("  [%zu/%zu] %s ... ", i + 1, n, path);
+        fflush(stdout);
+
+        const char* args[] = {"ccc", "run", path, NULL};
+        CCResultProcessOutputIoError res = cc_process_run(arena, "./out/cc/bin/ccc", args);
+
+        if (res.is_err) {
+            printf("SKIP (spawn error)\n");
+            stats->skipped++;
+            continue;
+        }
+
+        CCProcessOutput out = res.ok;
+        if (out.success()) {
+            printf("OK\n");
+            stats->passed++;
+        } else {
+            printf("FAIL (exit %d)\n", out.exit_code());
+            stats->failed++;
+            // Show first few lines of output on failure
+            size_t errlen = out.stderr_len();
+            if (errlen > 0) {
+                printf("    stderr: %.*s\n",
+                       (int)(errlen > 200 ? 200 : errlen),
+                       out.stderr_str());
+            }
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    CCArena arena = cc_heap_arena(megabytes(16));
+    Stats stats = {0};
+
+    // Parse args
+    int do_examples = 0, do_stress = 0, do_perf = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "examples") == 0) do_examples = 1;
+        else if (strcmp(argv[i], "stress") == 0) do_stress = 1;
+        else if (strcmp(argv[i], "perf") == 0) do_perf = 1;
+        else if (strcmp(argv[i], "all") == 0) {
+            do_examples = do_stress = do_perf = 1;
+        }
+    }
+
+    if (!do_examples && !do_stress && !do_perf) {
+        printf("Usage: ccc run tools/run_all.ccs -- <category>\n");
+        printf("\nCategories:\n");
+        printf("  examples  - run all example programs\n");
+        printf("  stress    - run all stress tests\n");
+        printf("  perf      - run all performance benchmarks\n");
+        printf("  all       - run everything\n");
+        return 1;
+    }
+
+    printf("Concurrent-C Test Runner\n");
+
+    if (do_examples) {
+        run_files(&arena, "examples/*.ccs", "Examples", &stats);
+        run_files(&arena, "examples/recipe_*.ccs", "Recipes", &stats);
+    }
+
+    if (do_stress) {
+        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats);
+    }
+
+    if (do_perf) {
+        run_files(&arena, "perf/*.ccs", "Performance Benchmarks", &stats);
+    }
+
+    // Summary
+    printf("\n=== Summary ===\n");
+    printf("  Passed:  %d\n", stats.passed);
+    printf("  Failed:  %d\n", stats.failed);
+    printf("  Skipped: %d\n", stats.skipped);
+    printf("  Total:   %d\n", stats.passed + stats.failed + stats.skipped);
+
+    cc_heap_arena_free(&arena);
+    return stats.failed > 0 ? 1 : 0;
+}

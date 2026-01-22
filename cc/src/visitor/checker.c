@@ -322,6 +322,7 @@ static size_t cc__find_block_end_naive(const char* buf, size_t n, size_t start_b
     return 0;
 }
 
+__attribute__((unused))
 static int cc__find_next_spawn_body(const char* buf, size_t n, size_t start,
                                     size_t* out_body_s, size_t* out_body_e) {
     if (!buf || !out_body_s || !out_body_e) return 0;

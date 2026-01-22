@@ -1,0 +1,212 @@
+/*
+ * Directory and filesystem operations for Concurrent-C stdlib.
+ * Cross-platform: POSIX (macOS, Linux, BSD) and Windows.
+ *
+ * C ABI uses prefixed names (cc_dir_*, cc_glob_*).
+ * Short aliases available via CC_ENABLE_SHORT_NAMES.
+ */
+#ifndef CC_STD_DIR_H
+#define CC_STD_DIR_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_io.cch>
+
+/* Directory entry type */
+typedef enum {
+    CC_DIRENT_FILE,
+    CC_DIRENT_DIR,
+    CC_DIRENT_SYMLINK,
+    CC_DIRENT_OTHER
+} CCDirEntryType;
+
+/* Directory entry */
+typedef struct {
+    CCSlice name;           /* Entry name (not full path), allocated in arena */
+    CCDirEntryType type;    /* Type of entry */
+} CCDirEntry;
+
+/* UFCS accessors for CCDirEntry: e.name_str(), e.is_dir(), e.is_file() */
+static inline const char* cc_dir_entry_name_str(const CCDirEntry* e) {
+    return e ? (const char*)e->name.ptr : NULL;
+}
+
+static inline bool cc_dir_entry_is_dir(const CCDirEntry* e) {
+    return e && e->type == CC_DIRENT_DIR;
+}
+
+static inline bool cc_dir_entry_is_file(const CCDirEntry* e) {
+    return e && e->type == CC_DIRENT_FILE;
+}
+
+static inline bool cc_dir_entry_is_symlink(const CCDirEntry* e) {
+    return e && e->type == CC_DIRENT_SYMLINK;
+}
+
+/* Directory iterator (opaque handle) */
+typedef struct CCDirIter CCDirIter;
+
+/* Result types */
+CC_DECL_RESULT(CCResultDirIterIoError, CCDirIter*, CCIoError)
+CC_DECL_RESULT(CCResultDirEntryIoError, CCDirEntry, CCIoError)
+CC_DECL_RESULT(CCResultBoolIoError, bool, CCIoError)
+
+/* ============================================================================
+ * Directory Iteration
+ * ============================================================================ */
+
+/*
+ * Open directory for iteration.
+ * Returns iterator that must be closed with cc_dir_close().
+ * Path can be relative or absolute.
+ */
+CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path);
+
+/*
+ * Read next directory entry.
+ * Returns entry with name allocated in arena.
+ * Returns error with CC_IO_EOF when no more entries.
+ */
+CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena);
+
+/*
+ * Close directory iterator.
+ */
+void cc_dir_close(CCDirIter* iter);
+
+/* ============================================================================
+ * Directory Operations
+ * ============================================================================ */
+
+/*
+ * Check if path exists.
+ */
+bool cc_path_exists(const char* path);
+
+/*
+ * Check if path is a directory.
+ */
+bool cc_path_is_dir(const char* path);
+
+/*
+ * Check if path is a regular file.
+ */
+bool cc_path_is_file(const char* path);
+
+/*
+ * Create directory. Does not create parents.
+ * Returns 0 on success, IoError on failure.
+ */
+CCResultBoolIoError cc_dir_create(const char* path);
+
+/*
+ * Create directory and all parents.
+ * Returns 0 on success, IoError on failure.
+ */
+CCResultBoolIoError cc_dir_create_all(const char* path);
+
+/*
+ * Remove empty directory.
+ * Returns 0 on success, IoError on failure.
+ */
+CCResultBoolIoError cc_dir_remove(const char* path);
+
+/*
+ * Remove file.
+ * Returns 0 on success, IoError on failure.
+ */
+CCResultBoolIoError cc_file_remove(const char* path);
+
+/*
+ * Get current working directory.
+ * Allocates result in arena.
+ */
+CCSlice cc_dir_cwd(CCArena* arena);
+
+/*
+ * Change current working directory.
+ */
+CCResultBoolIoError cc_dir_chdir(const char* path);
+
+/* ============================================================================
+ * Glob Pattern Matching
+ * ============================================================================ */
+
+/*
+ * Glob result: array of matching paths.
+ */
+typedef struct {
+    CCSlice* paths;     /* Array of path slices, allocated in arena */
+    size_t count;       /* Number of matches */
+    size_t capacity;    /* Capacity of paths array */
+} CCGlobResult;
+
+/* UFCS accessors for CCGlobResult: r.len(), r.get(i) */
+static inline size_t cc_glob_result_len(const CCGlobResult* r) {
+    return r ? r->count : 0;
+}
+
+static inline const char* cc_glob_result_get(const CCGlobResult* r, size_t i) {
+    if (!r || i >= r->count) return NULL;
+    return (const char*)r->paths[i].ptr;
+}
+
+/* Find files matching glob pattern.
+   Supports: * (any chars), ? (single char), ** (recursive)
+   Returns matches allocated in arena. */
+CCGlobResult cc_glob(CCArena* arena, const char* pattern);
+
+/*
+ * Check if filename matches glob pattern (no directory traversal).
+ * Supports: * (any chars), ? (single char)
+ */
+bool cc_glob_match(const char* pattern, const char* name);
+
+/* ============================================================================
+ * Short Names (opt-in via CC_ENABLE_SHORT_NAMES)
+ * ============================================================================ */
+
+#ifdef CC_ENABLE_SHORT_NAMES
+#define DirEntry CCDirEntry
+#define DirIter CCDirIter
+#define DirEntryType CCDirEntryType
+#define DIRENT_FILE CC_DIRENT_FILE
+#define DIRENT_DIR CC_DIRENT_DIR
+#define DIRENT_SYMLINK CC_DIRENT_SYMLINK
+#define DIRENT_OTHER CC_DIRENT_OTHER
+
+static inline CCResultDirIterIoError dir_open(CCArena* a, const char* p) { return cc_dir_open(a, p); }
+static inline CCResultDirEntryIoError dir_next(CCDirIter* i, CCArena* a) { return cc_dir_next(i, a); }
+static inline void dir_close(CCDirIter* i) { cc_dir_close(i); }
+static inline bool path_exists(const char* p) { return cc_path_exists(p); }
+static inline bool path_is_dir(const char* p) { return cc_path_is_dir(p); }
+static inline bool path_is_file(const char* p) { return cc_path_is_file(p); }
+static inline CCResultBoolIoError dir_create(const char* p) { return cc_dir_create(p); }
+static inline CCResultBoolIoError dir_create_all(const char* p) { return cc_dir_create_all(p); }
+static inline CCResultBoolIoError dir_remove(const char* p) { return cc_dir_remove(p); }
+static inline CCResultBoolIoError file_remove(const char* p) { return cc_file_remove(p); }
+static inline CCSlice dir_cwd(CCArena* a) { return cc_dir_cwd(a); }
+static inline CCResultBoolIoError dir_chdir(const char* p) { return cc_dir_chdir(p); }
+static inline CCGlobResult glob(CCArena* a, const char* p) { return cc_glob(a, p); }
+static inline bool glob_match(const char* p, const char* n) { return cc_glob_match(p, n); }
+#endif
+
+#endif /* CC_STD_DIR_H */

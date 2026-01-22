@@ -20,5 +20,12 @@ char* cc__rewrite_link_directives(const char* src, size_t n);
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);
 
+// Rewrite UFCS method calls on container variables:
+//   v.push(x) -> Vec_int_push(&v, x)
+//   m.get(k)  -> Map_K_V_get(&m, k)
+// Relies on type registry being populated by cc_rewrite_generic_containers.
+// Returns newly allocated string with rewrites, or NULL if no changes.
+char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path);
+
 #endif // CC_PREPROCESS_H
 

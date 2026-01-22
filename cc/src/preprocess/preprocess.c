@@ -10,8 +10,6 @@
 #include "util/path.h"
 #include "util/text.h"
 
-CC_DEFINE_SB_APPEND_FMT
-
 /* Rewrite `@match { case <hdr>: <body> ... }` into valid C using cc_chan_match_select.
    This is intentionally text-based: the construct is not valid C, so TCC must see rewritten code.
 
@@ -972,14 +970,27 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             char elem_type[128] = {0};
             char key_type[128] = {0};
             char val_type[128] = {0};
+            char orig_elem_type[128] = {0};  /* Original type for macro emission */
+            char orig_key_type[128] = {0};
+            char orig_val_type[128] = {0};
             
             if (is_vec_type || is_vec_new) {
-                /* Single type parameter */
+                /* Single type parameter - save both original and mangled */
+                /* Original (trimmed): copy params as-is for macro */
+                size_t ti = 0;
+                while (ti < params_len && (params[ti] == ' ' || params[ti] == '\t')) ti++;
+                size_t te = params_len;
+                while (te > ti && (params[te-1] == ' ' || params[te-1] == '\t')) te--;
+                size_t orig_len = te - ti;
+                if (orig_len >= sizeof(orig_elem_type)) orig_len = sizeof(orig_elem_type) - 1;
+                memcpy(orig_elem_type, params + ti, orig_len);
+                orig_elem_type[orig_len] = 0;
+                
                 cc__mangle_container_type_param(params, params_len, elem_type, sizeof(elem_type));
                 snprintf(mangled, sizeof(mangled), "Vec_%s", elem_type);
                 
                 if (reg) {
-                    cc_type_registry_add_vec(reg, elem_type, mangled);
+                    cc_type_registry_add_vec(reg, orig_elem_type, mangled);
                 }
             } else {
                 /* Two type parameters: K, V */
@@ -1004,12 +1015,37 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 size_t v_start = (size_t)(comma - params) + 1;
                 size_t v_len = params_len - v_start;
                 
+                /* Save original key type (trimmed) */
+                {
+                    size_t ti = 0;
+                    while (ti < k_len && (params[ti] == ' ' || params[ti] == '\t')) ti++;
+                    size_t te = k_len;
+                    while (te > ti && (params[te-1] == ' ' || params[te-1] == '\t')) te--;
+                    size_t orig_len = te - ti;
+                    if (orig_len >= sizeof(orig_key_type)) orig_len = sizeof(orig_key_type) - 1;
+                    memcpy(orig_key_type, params + ti, orig_len);
+                    orig_key_type[orig_len] = 0;
+                }
+                
+                /* Save original val type (trimmed) */
+                {
+                    const char* vparams = params + v_start;
+                    size_t ti = 0;
+                    while (ti < v_len && (vparams[ti] == ' ' || vparams[ti] == '\t')) ti++;
+                    size_t te = v_len;
+                    while (te > ti && (vparams[te-1] == ' ' || vparams[te-1] == '\t')) te--;
+                    size_t orig_len = te - ti;
+                    if (orig_len >= sizeof(orig_val_type)) orig_len = sizeof(orig_val_type) - 1;
+                    memcpy(orig_val_type, vparams + ti, orig_len);
+                    orig_val_type[orig_len] = 0;
+                }
+                
                 cc__mangle_container_type_param(params, k_len, key_type, sizeof(key_type));
                 cc__mangle_container_type_param(params + v_start, v_len, val_type, sizeof(val_type));
                 snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
                 
                 if (reg) {
-                    cc_type_registry_add_map(reg, key_type, val_type, mangled);
+                    cc_type_registry_add_map(reg, orig_key_type, orig_val_type, mangled);
                 }
             }
             
@@ -1017,8 +1053,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, kw_start - last_emit);
             
             if (is_vec_type || is_map_type) {
-                /* Emit mangled type name */
+                /* Emit mangled type name - Map uses pointers (khashl returns ptr from init) */
                 cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
+                if (is_map_type) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "*");
+                }
                 last_emit = angle_end + 1;
                 
                 /* Try to extract variable name for type registry */
@@ -1075,6 +1114,142 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         }
         
         i++;
+    }
+    
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite UFCS method calls on container variables:
+   v.push(x)    -> Vec_int_push(&v, x)
+   v.pop()      -> Vec_int_pop(&v)
+   v.get(i)     -> Vec_int_get(&v, i)
+   m.insert(k,v)-> Map_K_V_insert(&m, k, v)
+   m.get(k)     -> Map_K_V_get(&m, k)
+   
+   This relies on the type registry being populated with var->type mappings
+   from the generic container lowering pass. */
+char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path) {
+    (void)input_path;
+    if (!src || n == 0) return NULL;
+    
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!reg) return NULL;
+    
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        /* Track comment/string state */
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for identifier followed by '.' - potential UFCS call */
+        if (cc_is_ident_start(c)) {
+            size_t ident_start = i;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            size_t ident_end = i;
+            size_t ident_len = ident_end - ident_start;
+            
+            /* Check for '.' after identifier (skip whitespace) */
+            size_t j = cc_skip_ws_and_comments(src, n, ident_end);
+            if (j < n && src[j] == '.') {
+                /* Found 'ident.' - check if it's a method call */
+                j = cc_skip_ws_and_comments(src, n, j + 1);
+                
+                /* Look for method name */
+                if (j < n && cc_is_ident_start(src[j])) {
+                    size_t method_start = j;
+                    while (j < n && cc_is_ident_char(src[j])) j++;
+                    size_t method_end = j;
+                    size_t method_len = method_end - method_start;
+                    
+                    /* Check for '(' after method name */
+                    size_t k = cc_skip_ws_and_comments(src, n, method_end);
+                    if (k < n && src[k] == '(') {
+                        /* Extract identifier name and look up in registry */
+                        char var_name[128];
+                        if (ident_len < sizeof(var_name)) {
+                            memcpy(var_name, src + ident_start, ident_len);
+                            var_name[ident_len] = 0;
+                            
+                            const char* type_name = cc_type_registry_lookup_var(reg, var_name);
+                            if (type_name && (strncmp(type_name, "Vec_", 4) == 0 || 
+                                              strncmp(type_name, "Map_", 4) == 0)) {
+                                /* This is a container UFCS call! Rewrite it. */
+                                char method_name[64];
+                                if (method_len < sizeof(method_name)) {
+                                    memcpy(method_name, src + method_start, method_len);
+                                    method_name[method_len] = 0;
+                                    
+                                    /* Find matching close paren */
+                                    size_t paren_end = 0;
+                                    if (cc_find_matching_paren(src, n, k, &paren_end)) {
+                                        /* Emit everything up to ident_start */
+                                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+                                        
+                                        /* Emit: Type_method(&var, args) for Vec, Type_method(var, args) for Map (already pointer) */
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+                                        /* Map types are already pointers, Vec types need & */
+                                        if (strncmp(type_name, "Map_", 4) == 0) {
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                                        } else {
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
+                                        }
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, var_name);
+                                        
+                                        /* Extract args (content between parens) */
+                                        size_t args_start = k + 1;
+                                        size_t args_end = paren_end;
+                                        size_t args_len = args_end - args_start;
+                                        
+                                        /* Skip leading whitespace in args */
+                                        while (args_start < args_end && (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n')) {
+                                            args_start++;
+                                            args_len--;
+                                        }
+                                        
+                                        if (args_len > 0) {
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                                            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_len);
+                                        }
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                                        
+                                        last_emit = paren_end + 1;
+                                        i = paren_end + 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            /* Not a UFCS call, continue from after identifier */
+            continue;
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) {
+        /* No changes made */
+        return NULL;
     }
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -2239,11 +2414,9 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
 
     /* Create type registry for this file (or reuse existing global) */
     CCTypeRegistry* reg = cc_type_registry_get_global();
-    int reg_owned = 0;
     if (!reg) {
         reg = cc_type_registry_new();
         cc_type_registry_set_global(reg);
-        reg_owned = 1;
     }
 
     FILE *in = fopen(input_path, "r");
@@ -2317,10 +2490,15 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur3g = rewritten_generic ? rewritten_generic : cur3;
     size_t cur3g_n = rewritten_generic ? strlen(rewritten_generic) : cur3_n;
 
+    /* Rewrite container UFCS: v.push(x) -> Vec_T_push(&v, x) */
+    char* rewritten_ufcs = cc_rewrite_ufcs_container_calls(cur3g, cur3g_n, input_path);
+    const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3g;
+    size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3g_n;
+
     /* Rewrite T? -> CCOptional_T */
-    char* rewritten_opt = cc__rewrite_optional_types(cur3g, cur3g_n, input_path);
-    const char* cur4 = rewritten_opt ? rewritten_opt : cur3g;
-    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3g_n;
+    char* rewritten_opt = cc__rewrite_optional_types(cur3u, cur3u_n, input_path);
+    const char* cur4 = rewritten_opt ? rewritten_opt : cur3u;
+    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3u_n;
 
     /* Infer cc_ok(v)/cc_err(e) types from function signatures BEFORE result type rewrite */
     char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4, cur4_n);
@@ -2371,7 +2549,27 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             for (size_t i = 0; i < n_vec; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                 if (inst && inst->type1 && inst->mangled_name) {
-                    fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                    /* Check if type is complex (pointer, struct) - needs FULL macro with explicit optional */
+                    int is_complex = (strchr(inst->type1, '*') != NULL || 
+                                      strncmp(inst->type1, "struct ", 7) == 0 ||
+                                      strncmp(inst->type1, "union ", 6) == 0);
+                    if (is_complex) {
+                        /* Extract mangled element name from Vec_xxx */
+                        const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                        /* Check if this optional is already pre-declared in cc_optional.cch */
+                        int is_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
+                                              strcmp(mangled_elem, "intptr") == 0 ||
+                                              strcmp(mangled_elem, "voidptr") == 0);
+                        if (!is_predeclared) {
+                            /* Emit optional type declaration first */
+                            fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
+                        }
+                        /* Use FULL macro with explicit optional type */
+                        fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
+                                inst->type1, inst->mangled_name, mangled_elem);
+                    } else {
+                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                    }
                 }
             }
             

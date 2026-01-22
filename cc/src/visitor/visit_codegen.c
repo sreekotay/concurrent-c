@@ -1554,6 +1554,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Rewrite UFCS method calls on containers: v.push(x) -> Vec_int_push(&v, x) */
+    if (src_ufcs && src_ufcs_len) {
+        char* rewritten = cc_rewrite_ufcs_container_calls(src_ufcs, src_ufcs_len, ctx->input_path);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
+
     /* Rewrite `with_deadline(expr) { ... }` (not valid C) into CCDeadline scope syntax
        using @defer, so the rest of the pipeline sees valid parseable text. */
     if (src_ufcs && src_ufcs_len) {
@@ -1977,7 +1987,23 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (inst && inst->type1 && inst->mangled_name) {
-                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                        /* Check if type is complex (pointer, struct) - needs FULL macro */
+                        int is_complex = (strchr(inst->type1, '*') != NULL || 
+                                          strncmp(inst->type1, "struct ", 7) == 0 ||
+                                          strncmp(inst->type1, "union ", 6) == 0);
+                        if (is_complex) {
+                            const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                            int is_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
+                                                  strcmp(mangled_elem, "intptr") == 0 ||
+                                                  strcmp(mangled_elem, "voidptr") == 0);
+                            if (!is_predeclared) {
+                                fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
+                            }
+                            fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
+                                    inst->type1, inst->mangled_name, mangled_elem);
+                        } else {
+                            fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                        }
                     }
                 }
                 

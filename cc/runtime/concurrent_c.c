@@ -21,6 +21,8 @@
 #include "exec.c"
 #include "arena_state.c"
 #include "net.c"
+#include "dir.c"
+#include "process.c"
 
 #ifdef CC_ENABLE_ASYNC
 #include "async_chan.c"

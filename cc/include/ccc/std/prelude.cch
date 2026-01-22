@@ -20,6 +20,8 @@
 #include "io.cch"
 #include "vec.cch"
 #include "map.cch"
+#include "dir.cch"
+#include "process.cch"
 #include "async_io.cch"
 #include "future.cch"
 
