@@ -122,10 +122,10 @@ index 00000000..0118ed29
 +
 +#endif /* CC_AST_RECORD_H */
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..66bfc604 100644
+index 171e3622..32d4844d 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,160 @@
+@@ -66,6 +66,154 @@
  
  #include "tcc.h"
  
@@ -180,7 +180,8 @@ index 171e3622..66bfc604 100644
 +#ifdef CONFIG_CC_EXT
 +    s->cc_parser_mode = 1;
 +#endif
-+    /* Add basic include paths for CC std headers (relative to caller cwd). */
++    /* Add basic include paths for CC std headers (relative to caller cwd).
++       The CC driver adds absolute paths via tcc_add_include_path() as needed. */
 +    tcc_add_include_path(s, ".");
 +    tcc_add_include_path(s, "include");
 +    tcc_add_include_path(s, "cc/include");
@@ -191,18 +192,11 @@ index 171e3622..66bfc604 100644
 +    tcc_add_sysinclude_path(s, "cc/include");
 +    tcc_add_sysinclude_path(s, "./cc/include");
 +    tcc_add_sysinclude_path(s, "../cc/include");
-+    /* Absolute fallbacks for CC headers. */
-+    tcc_add_include_path(s, "/Users/skotay/Documents/code/concurrent-c");
-+    tcc_add_include_path(s, "/Users/skotay/Documents/code/concurrent-c/cc/include");
-+    tcc_add_include_path(s, "/Users/skotay/Documents/code/concurrent-c/include");
-+    tcc_add_sysinclude_path(s, "/Users/skotay/Documents/code/concurrent-c");
-+    tcc_add_sysinclude_path(s, "/Users/skotay/Documents/code/concurrent-c/cc/include");
-+    tcc_add_sysinclude_path(s, "/Users/skotay/Documents/code/concurrent-c/include");
-+    /* System SDK paths for std headers. */
-+    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include");
++#ifdef __APPLE__
++    /* macOS SDK paths for std headers. */
 +    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
-+    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/usr/include");
-+    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include");
++    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include");
++#endif
 +    tcc_add_sysinclude_path(s, "/usr/include");
 +
 +    /* Ensure local includes like `#include "foo.h"` work even if we are parsing a temp file:
@@ -286,7 +280,7 @@ index 171e3622..66bfc604 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +892,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +886,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */

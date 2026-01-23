@@ -10,6 +10,7 @@ Focused benchmarks that measure throughput and latency. Use these to catch perfo
 | `perf_async_overhead` | Async task creation, state machine transitions, cc_block_all |
 | `perf_match_select` | @match multi-channel select latency |
 | `perf_zero_copy` | Slice copy throughput by payload size |
+| `perf_gobench_blocking_pressure` | GoBench-derived scheduler + auto-blocking pressure |
 
 ## Running
 

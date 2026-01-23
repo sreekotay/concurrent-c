@@ -1,0 +1,130 @@
+/*
+ * GoBench-derived scheduler/auto-blocking pressure benchmark.
+ * Pattern: many tasks parked on channel recv, subset released; optional blocking load.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define DEFAULT_TASKS 20000
+#define DEFAULT_RELEASES 5000
+#define DEFAULT_BLOCKING_TASKS 1000
+#define DEFAULT_BLOCKING_SLEEP_US 1000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int env_int(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0) return fallback;
+    return (int)n;
+}
+
+static void blocking_sleep(int us) {
+    if (us <= 0) return;
+    struct timespec ts;
+    ts.tv_sec = us / 1000000;
+    ts.tv_nsec = (long)(us % 1000000) * 1000L;
+    nanosleep(&ts, NULL);
+}
+
+static void print_sched_stats(const char* label) {
+    CCSchedulerStats s;
+    if (cc_scheduler_stats(&s) == 0) {
+        printf("  %s: sched workers=%zu queue=%zu/%zu\n",
+               label, s.workers, s.queue_len, s.queue_cap);
+    }
+    CCExecStats ex;
+    uint64_t fails = 0;
+    if (cc_blocking_pool_stats(&ex, &fails) == 0) {
+        printf("  %s: blocking workers=%zu queue=%zu/%zu fails=%llu\n",
+               label, ex.workers, ex.queue_len, ex.queue_cap,
+               (unsigned long long)fails);
+    }
+}
+
+int main(void) {
+    int tasks = env_int("CC_BENCH_TASKS", DEFAULT_TASKS);
+    int releases = env_int("CC_BENCH_RELEASES", DEFAULT_RELEASES);
+    int blocking_tasks = env_int("CC_BENCH_BLOCKING_TASKS", DEFAULT_BLOCKING_TASKS);
+    int blocking_sleep_us = env_int("CC_BENCH_BLOCKING_SLEEP_US", DEFAULT_BLOCKING_SLEEP_US);
+
+    if (releases > tasks) releases = tasks;
+    if (tasks <= 0) tasks = 1;
+    if (releases < 0) releases = 0;
+    if (blocking_tasks < 0) blocking_tasks = 0;
+
+    CCChan* work = cc_chan_create((size_t)(releases > 0 ? releases : 1));
+    CCChan* done = cc_chan_create((size_t)(releases > 0 ? releases : 1));
+    CCChan* block_done = cc_chan_create((size_t)(blocking_tasks > 0 ? blocking_tasks : 1));
+    if (!work || !done || !block_done) return 2;
+    if (cc_chan_init_elem(work, sizeof(int)) != 0) return 3;
+    if (cc_chan_init_elem(done, sizeof(int)) != 0) return 4;
+    if (cc_chan_init_elem(block_done, sizeof(int)) != 0) return 5;
+
+    printf("perf_gobench_blocking_pressure: tasks=%d releases=%d block=%d sleep_us=%d\n",
+           tasks, releases, blocking_tasks, blocking_sleep_us);
+    print_sched_stats("start");
+
+    double start = time_now_ms();
+    @nursery {
+        for (int i = 0; i < tasks; i++) {
+            spawn([work, done]() => {
+                int v = 0;
+                int err = cc_chan_recv(work, &v, sizeof(v));
+                if (err == 0) {
+                    cc_chan_send(done, &v, sizeof(v));
+                }
+            });
+        }
+        for (int i = 0; i < blocking_tasks; i++) {
+            spawn([block_done, blocking_sleep_us]() => {
+                blocking_sleep(blocking_sleep_us);
+                int v = 1;
+                cc_chan_send(block_done, &v, sizeof(v));
+            });
+        }
+
+        for (int i = 0; i < releases; i++) {
+            int v = i;
+            cc_chan_send(work, &v, sizeof(v));
+        }
+        cc_chan_close(work);
+
+        int ok = 0;
+        @with_deadline(millis(2000)) {
+            for (int i = 0; i < releases; i++) {
+                int v = 0;
+                if (cc_chan_recv(done, &v, sizeof(v)) != 0) break;
+                ok++;
+            }
+        }
+        int bdone = 0;
+        @with_deadline(millis(2000)) {
+            for (int i = 0; i < blocking_tasks; i++) {
+                int v = 0;
+                if (cc_chan_recv(block_done, &v, sizeof(v)) != 0) break;
+                bdone++;
+            }
+        }
+        printf("  released=%d/%d blocking_done=%d/%d\n",
+               ok, releases, bdone, blocking_tasks);
+    }
+    double elapsed = time_now_ms() - start;
+
+    print_sched_stats("end");
+    printf("  elapsed_ms=%.1f\n", elapsed);
+    printf("perf_gobench_blocking_pressure: DONE\n");
+
+    cc_chan_free(work);
+    cc_chan_free(done);
+    cc_chan_free(block_done);
+    return 0;
+}
