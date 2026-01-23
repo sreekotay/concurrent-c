@@ -60,6 +60,35 @@ static int is_addr_of_ident(const char* s) {
     return is_ident_only(s);
 }
 
+static const char* scan_receiver_start_left(const char* base, const char* sep) {
+    if (!base || !sep || sep <= base) return base;
+    const char* r_end = sep;
+    while (r_end > base && isspace((unsigned char)r_end[-1])) r_end--;
+    if (r_end <= base) return base;
+
+    int par = 0, br = 0, brc = 0;
+    const char* r = r_end;
+    while (r > base) {
+        char c = r[-1];
+        if (c == ')') { par++; r--; continue; }
+        if (c == ']') { br++; r--; continue; }
+        if (c == '}') { brc++; r--; continue; }
+        if (c == '(' && par > 0) { par--; r--; continue; }
+        if (c == '[' && br > 0) { br--; r--; continue; }
+        if (c == '{' && brc > 0) { brc--; r--; continue; }
+        if (par || br || brc) { r--; continue; }
+        if (c == ',' || c == ';' || c == '=' || c == '\n' ||
+            c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
+            c == '&' || c == '|' || c == '^' || c == '!' || c == '~' ||
+            c == '<' || c == '>' || c == '?' || c == ':' ) {
+            break;
+        }
+        r--;
+    }
+    while (r < r_end && isspace((unsigned char)*r)) r++;
+    return r;
+}
+
 static int emit_desugared_call(char* out,
                                size_t cap,
                                const char* recv,
@@ -68,6 +97,7 @@ static int emit_desugared_call(char* out,
                                const char* args_rewritten,
                                bool has_args) {
     if (!out || cap == 0 || !recv || !method) return -1;
+    int recv_is_simple = is_ident_only(recv) || is_addr_of_ident(recv);
 
     /* Channel ergonomic sugar:
        Prefer the surface chan_* helpers and do NOT auto-take address-of for handles.
@@ -248,13 +278,15 @@ static int emit_desugared_call(char* out,
             int is_vec = (strncmp(type_name, "Vec_", 4) == 0);
             int is_map = (strncmp(type_name, "Map_", 4) == 0);
             if (is_vec || is_map) {
-                /* Container method: emit TypeName_method(&recv, args) */
+                /* Container method: emit TypeName_method(recv, ...) or TypeName_method(&recv, ...) */
                 if (has_args) {
-                    return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s, ", type_name, method, recv)
-                                       : snprintf(out, cap, "%s_%s(&%s, ", type_name, method, recv);
+                    if (recv_is_ptr || !recv_is_simple)
+                        return snprintf(out, cap, "%s_%s(%s, ", type_name, method, recv);
+                    return snprintf(out, cap, "%s_%s(&%s, ", type_name, method, recv);
                 }
-                return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s)", type_name, method, recv)
-                                   : snprintf(out, cap, "%s_%s(&%s)", type_name, method, recv);
+                if (recv_is_ptr || !recv_is_simple)
+                    return snprintf(out, cap, "%s_%s(%s)", type_name, method, recv);
+                return snprintf(out, cap, "%s_%s(&%s)", type_name, method, recv);
             }
         }
     }
@@ -262,20 +294,24 @@ static int emit_desugared_call(char* out,
     /* Struct UFCS with known type: TypeName_method(&recv, ...) */
     if (g_ufcs_recv_type && g_ufcs_recv_type[0]) {
         if (has_args) {
-            return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s, ", g_ufcs_recv_type, method, recv)
-                               : snprintf(out, cap, "%s_%s(&%s, ", g_ufcs_recv_type, method, recv);
+            if (recv_is_ptr || !recv_is_simple)
+                return snprintf(out, cap, "%s_%s(%s, ", g_ufcs_recv_type, method, recv);
+            return snprintf(out, cap, "%s_%s(&%s, ", g_ufcs_recv_type, method, recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "%s_%s(%s)", g_ufcs_recv_type, method, recv)
-                           : snprintf(out, cap, "%s_%s(&%s)", g_ufcs_recv_type, method, recv);
+        if (recv_is_ptr || !recv_is_simple)
+            return snprintf(out, cap, "%s_%s(%s)", g_ufcs_recv_type, method, recv);
+        return snprintf(out, cap, "%s_%s(&%s)", g_ufcs_recv_type, method, recv);
     }
 
-    // Generic UFCS (fallback): method(&recv,
+    // Generic UFCS (fallback): method(recv, ...) or method(&recv, ...)
     if (has_args) {
-        return recv_is_ptr ? snprintf(out, cap, "%s(%s, ", method, recv)
-                           : snprintf(out, cap, "%s(&%s, ", method, recv);
+        if (recv_is_ptr || !recv_is_simple)
+            return snprintf(out, cap, "%s(%s, ", method, recv);
+        return snprintf(out, cap, "%s(&%s, ", method, recv);
     }
-    return recv_is_ptr ? snprintf(out, cap, "%s(%s)", method, recv)
-                       : snprintf(out, cap, "%s(&%s)", method, recv);
+    if (recv_is_ptr || !recv_is_simple)
+        return snprintf(out, cap, "%s(%s)", method, recv);
+    return snprintf(out, cap, "%s(&%s)", method, recv);
 }
 
 // Rewrite one line, handling nested method calls.

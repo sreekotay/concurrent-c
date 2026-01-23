@@ -31,6 +31,7 @@ static int cc__find_ufcs_span_in_range(const char* s,
                                        const char* method,
                                        int occurrence_1based,
                                        struct CC__UFCSSpan* out_span);
+static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end);
 
 int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
                                      const CCVisitorCtx* ctx,
@@ -117,15 +118,24 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
     cur[in_len] = '\0';
     size_t cur_len = in_len;
 
-    /* Sort nodes by decreasing span length so outer rewrites happen before inner,
-       then by increasing start line for determinism. */
+    /* Sort nodes so rewrites on the same line proceed right-to-left.
+       This keeps line/col offsets valid after earlier replacements. */
     for (int i = 0; i < node_count; i++) {
         for (int j = i + 1; j < node_count; j++) {
             int li = nodes[i].line_end - nodes[i].line_start;
             int lj = nodes[j].line_end - nodes[j].line_start;
             int swap = 0;
             if (lj > li) swap = 1;
-            else if (lj == li && nodes[j].line_start < nodes[i].line_start) swap = 1;
+            else if (lj == li) {
+                if (nodes[j].line_start < nodes[i].line_start) swap = 1;
+                else if (nodes[j].line_start == nodes[i].line_start) {
+                    /* Same line: process right-to-left by column when available. */
+                    if (nodes[j].col_start > 0 && nodes[i].col_start > 0 &&
+                        nodes[j].col_start > nodes[i].col_start) {
+                        swap = 1;
+                    }
+                }
+            }
             if (swap) {
                 struct UFCSNode tmp = nodes[i];
                 nodes[i] = nodes[j];
@@ -133,6 +143,11 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
             }
         }
     }
+
+    /* Track rewritten spans to avoid double-rewriting chains. */
+    struct CC__UFCSSpan* done = NULL;
+    int done_count = 0;
+    int done_cap = 0;
 
     for (int i = 0; i < node_count; i++) {
         int ls = nodes[i].line_start;
@@ -155,6 +170,19 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
                 continue;
         }
         if (sp.end > cur_len || sp.start >= sp.end) continue;
+
+        /* Extend span to include chained UFCS segments like ".foo(...).bar(...)" */
+        sp.end = cc__ufcs_extend_chain_end(cur, cur_len, sp.end);
+
+        /* Skip if this span is fully inside an already rewritten span. */
+        int covered = 0;
+        for (int k = 0; k < done_count; k++) {
+            if (sp.start >= done[k].start && sp.end <= done[k].end) {
+                covered = 1;
+                break;
+            }
+        }
+        if (covered) continue;
 
         size_t expr_len = sp.end - sp.start;
         size_t out_cap = expr_len * 2 + 256; /* Extra space for task variants */
@@ -182,9 +210,18 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         }
         free(expr);
         free(out_buf);
+
+        if (done_count == done_cap) {
+            done_cap = done_cap ? done_cap * 2 : 16;
+            done = (struct CC__UFCSSpan*)realloc(done, (size_t)done_cap * sizeof(*done));
+        }
+        if (done) {
+            done[done_count++] = sp;
+        }
     }
 
     free(nodes);
+    free(done);
     *out_src = cur;
     *out_len = cur_len;
     return 1;
@@ -323,6 +360,48 @@ static int cc__find_ufcs_span_in_range(const char* s,
         return 0;
     }
     return 0;
+}
+
+static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
+    if (!s || end >= len) return end;
+    size_t p = end;
+    for (;;) {
+        while (p < len && isspace((unsigned char)s[p])) p++;
+        if (p >= len) break;
+        if (s[p] == '.') {
+            p++;
+        } else if (p + 1 < len && s[p] == '-' && s[p + 1] == '>') {
+            p += 2;
+        } else {
+            break;
+        }
+
+        while (p < len && isspace((unsigned char)s[p])) p++;
+        if (p >= len || !isalpha((unsigned char)s[p]) && s[p] != '_') break;
+        while (p < len && (isalnum((unsigned char)s[p]) || s[p] == '_')) p++;
+        while (p < len && isspace((unsigned char)s[p])) p++;
+        if (p >= len || s[p] != '(') break;
+
+        /* Scan to matching ')' of this call. */
+        int depth = 0;
+        while (p < len) {
+            char c = s[p++];
+            if (c == '(') depth++;
+            else if (c == ')') {
+                depth--;
+                if (depth == 0) break;
+            } else if (c == '"' || c == '\'') {
+                char q = c;
+                while (p < len) {
+                    char d = s[p++];
+                    if (d == '\\' && p < len) { p++; continue; }
+                    if (d == q) break;
+                }
+            }
+        }
+        end = p;
+    }
+    return end;
 }
 
 static const char* cc__basename(const char* path) {

@@ -1,0 +1,40 @@
+// Test: UFCS with nested method calls as arguments
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+struct Point { int x; int y; };
+
+static inline int Point_x(struct Point* p) { return p->x; }
+static inline int Point_y(struct Point* p) { return p->y; }
+static inline int Point_sum(struct Point* p) { return p->x + p->y; }
+static inline int Point_add_values(struct Point* p, int a, int b) { return p->x + p->y + a + b; }
+
+struct Calculator { int base; };
+
+static inline int Calculator_compute(struct Calculator* c, int a, int b, int d) {
+    return c->base + a + b + d;
+}
+
+int main(void) {
+    struct Point p1 = {10, 20};
+    struct Point p2 = {5, 7};
+    struct Calculator calc = {100};
+    
+    // Nested UFCS: method results as arguments to regular functions
+    int r1 = Calculator_compute(&calc, p1.x(), p1.y(), p2.sum());
+    // 100 + 10 + 20 + 12 = 142
+    printf("r1 = %d\n", r1);
+
+    // Deeply nested UFCS as arguments
+    int r2 = Point_add_values(&p1, p2.x(), p2.y());
+    // 10 + 20 + 5 + 7 = 42
+    printf("r2 = %d\n", r2);
+
+    // Multiple nesting levels
+    struct Point p3 = {1, 2};
+    int r3 = Calculator_compute(&calc, p1.sum(), p2.sum(), p3.sum());
+    // 100 + 30 + 12 + 3 = 145
+    printf("r3 = %d\n", r3);
+
+    return (r1 == 142 && r2 == 42 && r3 == 145) ? 0 : 1;
+}

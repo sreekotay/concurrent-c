@@ -428,7 +428,7 @@ static void cc__maybe_record_decl(char*** scope_names,
             }
             continue;
         }
-        if (*cur == '=' || *cur == ',' || *cur == ';') break;
+        if (*cur == '=' || *cur == ';') break;
         if (!cc__is_ident_start_char(*cur)) { cur++; continue; }
         const char* s = cur++;
         while (cur < semi && cc__is_ident_char2(*cur)) cur++;

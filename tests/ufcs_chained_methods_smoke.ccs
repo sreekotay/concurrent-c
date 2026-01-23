@@ -1,0 +1,46 @@
+// Test: UFCS with in-place modification (chaining via mutation)
+// Note: Return-value chaining requires TCC to track expression types,
+// which is not implemented yet. Use in-place operations for now.
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+struct Builder { int value; };
+
+static inline void Builder_new(struct Builder* b) {
+    b->value = 0;
+}
+
+static inline void Builder_add(struct Builder* b, int x) {
+    b->value += x;
+}
+
+static inline void Builder_mul(struct Builder* b, int x) {
+    b->value *= x;
+}
+
+static inline int Builder_build(struct Builder* b) {
+    return b->value;
+}
+
+int main(void) {
+    // UFCS chaining with in-place operations
+    struct Builder b;
+    Builder_new(&b);
+    b.add(5);      // 0 + 5 = 5
+    b.mul(3);      // 5 * 3 = 15
+    b.add(2);      // 15 + 2 = 17
+    int result = b.build();
+    printf("result = %d\n", result);
+
+    // More complex chaining
+    struct Builder c;
+    Builder_new(&c);
+    c.add(10);
+    c.add(20);
+    c.mul(2);
+    int r2 = c.build();
+    // (0 + 10 + 20) * 2 = 60
+    printf("r2 = %d\n", r2);
+
+    return (result == 17 && r2 == 60) ? 0 : 1;
+}

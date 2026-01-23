@@ -1,0 +1,102 @@
+/*
+ * GoBench-derived async pressure benchmark.
+ * Pattern: many tasks parked on async channel recv, subset released.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define DEFAULT_TASKS 20000
+#define DEFAULT_RELEASES 5000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int env_int(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0) return fallback;
+    return (int)n;
+}
+
+static void print_sched_stats(const char* label) {
+    CCSchedulerStats s;
+    if (cc_scheduler_stats(&s) == 0) {
+        printf("  %s: sched workers=%zu queue=%zu/%zu\n",
+               label, s.workers, s.queue_len, s.queue_cap);
+    }
+    CCExecStats ex;
+    uint64_t fails = 0;
+    if (cc_blocking_pool_stats(&ex, &fails) == 0) {
+        printf("  %s: blocking workers=%zu queue=%zu/%zu fails=%llu\n",
+               label, ex.workers, ex.queue_len, ex.queue_cap,
+               (unsigned long long)fails);
+    }
+}
+
+int main(void) {
+    int tasks = env_int("CC_BENCH_TASKS", DEFAULT_TASKS);
+    int releases = env_int("CC_BENCH_RELEASES", DEFAULT_RELEASES);
+
+    if (releases > tasks) releases = tasks;
+    if (tasks <= 0) tasks = 1;
+    if (releases < 0) releases = 0;
+
+    CCChan* work = cc_chan_create((size_t)(releases > 0 ? releases : 1));
+    if (!work) return 2;
+    if (cc_chan_init_elem(work, sizeof(int)) != 0) return 3;
+
+    printf("perf_gobench_async_pressure: tasks=%d releases=%d\n", tasks, releases);
+    print_sched_stats("start");
+
+    double start = time_now_ms();
+    int* vals = (int*)calloc((size_t)tasks, sizeof(int));
+    if (!vals) return 4;
+    CCTaskIntptr* t = (CCTaskIntptr*)calloc((size_t)tasks, sizeof(CCTaskIntptr));
+    if (!t) return 5;
+
+    for (int i = 0; i < tasks; i++) {
+        t[i] = cc_chan_recv_task(work, &vals[i], sizeof(int));
+    }
+
+    for (int i = 0; i < releases; i++) {
+        int v = i;
+        cc_chan_send(work, &v, sizeof(v));
+    }
+    cc_chan_close(work);
+
+    int ok = 0;
+    double deadline = time_now_ms() + 2000.0;
+    while (ok < releases && time_now_ms() < deadline) {
+        for (int i = 0; i < tasks; i++) {
+            intptr_t out = 0;
+            int err = 0;
+            CCFutureStatus st = cc_task_intptr_poll(&t[i], &out, &err);
+            if (st == CC_FUTURE_READY) {
+                if (err == 0 && ok < releases) ok++;
+            }
+        }
+        cc_sleep_ms(1);
+    }
+
+    printf("  released=%d/%d\n", ok, releases);
+    double elapsed = time_now_ms() - start;
+
+    print_sched_stats("end");
+    printf("  elapsed_ms=%.1f\n", elapsed);
+    printf("perf_gobench_async_pressure: DONE\n");
+
+    for (int i = 0; i < tasks; i++) {
+        cc_task_intptr_free(&t[i]);
+    }
+    free(t);
+    free(vals);
+    cc_chan_free(work);
+    return 0;
+}

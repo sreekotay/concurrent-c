@@ -1,0 +1,24 @@
+// Test: Nested closures with captures at different levels
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+
+int main(void) {
+    int outer = 100;
+    
+    @nursery {
+        spawn([outer]() => {
+            int middle = 50;
+            
+            // Inner nursery with nested closure
+            @nursery {
+                spawn([outer, middle]() => {
+                    int inner = 25;
+                    printf("outer=%d middle=%d inner=%d\n", outer, middle, inner);
+                    printf("sum=%d\n", outer + middle + inner);
+                });
+            }
+        });
+    }
+    
+    return 0;
+}

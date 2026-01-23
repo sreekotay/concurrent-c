@@ -1,0 +1,26 @@
+// Test: Closure capturing many variables
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+
+int main(void) {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    int d = 4;
+    int e = 5;
+    int f = 6;
+    int g = 7;
+    int h = 8;
+    int i = 9;
+    int j = 10;
+    
+    @nursery {
+        // Capture 10 variables by value
+        spawn([a, b, c, d, e, f, g, h, i, j]() => {
+            int sum = a + b + c + d + e + f + g + h + i + j;
+            printf("sum = %d\n", sum);  // 1+2+...+10 = 55
+        });
+    }
+    
+    return 0;
+}
