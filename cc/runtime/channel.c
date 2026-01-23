@@ -12,6 +12,7 @@
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_exec.cch>
+#include <ccc/cc_async_runtime.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_deadlock_detect.cch>
 #include <ccc/std/async_io.cch>
@@ -491,14 +492,14 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
 }
 
 int cc_chan_deadline_send(CCChan* ch, const void* value, size_t value_size, const CCDeadline* deadline) {
-    if (deadline && cc_is_cancelled(deadline)) return ECANCELED;
+    if (deadline && deadline->cancelled) return ECANCELED;
     struct timespec ts;
     const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
     return cc_chan_timed_send(ch, value, value_size, p);
 }
 
 int cc_chan_deadline_recv(CCChan* ch, void* out_value, size_t value_size, const CCDeadline* deadline) {
-    if (deadline && cc_is_cancelled(deadline)) return ECANCELED;
+    if (deadline && deadline->cancelled) return ECANCELED;
     struct timespec ts;
     const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
     return cc_chan_timed_recv(ch, out_value, value_size, p);
@@ -776,6 +777,8 @@ typedef struct {
     int completed;
     int result;          /* 0 success, errno on error */
     int waiting;         /* recv-only: whether we've registered as a waiting receiver */
+    int pending_async;
+    CCChanAsync async;
 } CCChanTaskFrame;
 
 static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* out_err) {
@@ -784,6 +787,30 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
         if (out_val) *out_val = (intptr_t)f->result;
         if (out_err) *out_err = f->result;
         return CC_FUTURE_READY;
+    }
+
+    if (f->pending_async) {
+        int err = 0;
+        int rc = cc_chan_try_recv(f->async.handle.done, &err, sizeof(err));
+        if (rc == 0) {
+            cc_async_handle_free(&f->async.handle);
+            f->pending_async = 0;
+            f->completed = 1;
+            f->result = err;
+            if (out_val) *out_val = (intptr_t)f->result;
+            if (out_err) *out_err = f->result;
+            return CC_FUTURE_READY;
+        }
+        if (rc == EPIPE) {
+            cc_async_handle_free(&f->async.handle);
+            f->pending_async = 0;
+            f->completed = 1;
+            f->result = EPIPE;
+            if (out_val) *out_val = (intptr_t)f->result;
+            if (out_err) *out_err = f->result;
+            return CC_FUTURE_READY;
+        }
+        return CC_FUTURE_PENDING;
     }
 
     /* Check deadline */
@@ -822,7 +849,19 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
     }
 
     if (rc == EAGAIN) {
-        /* Would block - return pending, let scheduler poll again */
+        /* Would block - offload to async executor if available */
+        CCExec* ex = cc_async_runtime_exec();
+        if (ex) {
+            int sub = 0;
+            if (f->is_send) {
+                sub = cc_chan_send_async(ex, f->ch, f->buf, f->elem_size, &f->async, f->deadline);
+            } else {
+                sub = cc_chan_recv_async(ex, f->ch, f->buf, f->elem_size, &f->async, f->deadline);
+            }
+            if (sub == 0) {
+                f->pending_async = 1;
+            }
+        }
         return CC_FUTURE_PENDING;
     }
 
@@ -839,6 +878,13 @@ static int cc__chan_task_wait(void* frame) {
        Uses the channel's condition variables for efficient waiting. */
     CCChanTaskFrame* f = (CCChanTaskFrame*)frame;
     if (!f || !f->ch) return EINVAL;
+    if (f->pending_async) {
+        int err = cc_async_wait_deadline(&f->async.handle, f->deadline);
+        f->pending_async = 0;
+        f->completed = 1;
+        f->result = err;
+        return err;
+    }
     CCChan* ch = f->ch;
     pthread_mutex_lock(&ch->mu);
     if (ch->cap == 0) {

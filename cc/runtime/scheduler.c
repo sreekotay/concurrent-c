@@ -188,6 +188,9 @@ bool cc_deadline_expired(const CCDeadline* d) {
     return false;
 }
 
+/* Undefine language-level macros to expose the CCDeadline*-taking API. */
+#undef cc_cancel
+#undef cc_is_cancelled
 void cc_cancel(CCDeadline* d) { if (d) d->cancelled = 1; }
 bool cc_is_cancelled(const CCDeadline* d) { return d && d->cancelled; }
 
