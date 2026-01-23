@@ -97,9 +97,9 @@ Note: Comparisons use primary metric from each benchmark
 **Current Status (M:N Fiber Scheduler Implemented):**
 - **Channel throughput**: Competitive with Go (0.53x = 47% of Go performance)
 - **Sequential spawns**: Much faster than Go (5.69x) - due to @async optimization
-- **Nursery spawns**: 7% of Go (0.07x) - fiber scheduler eliminates thread-per-task overhead
+- **Nursery spawns**: 7% of Go (0.07x) - **16x slower than C's thread-per-task model**
 
-*Note: Implemented true M:N model with fiber scheduler. Remaining gap due to Go's optimized runtime.*
+*Critical Finding: Fiber scheduler overhead is 16x higher than simple thread-per-task for fine-grained tasks. The M:N model works but has too much overhead compared to Go's optimized runtime.*
 
 ## Red Flags
 
