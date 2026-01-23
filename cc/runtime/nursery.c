@@ -1,5 +1,8 @@
 /*
- * Simple structured concurrency nursery built on the fiber scheduler.
+ * Structured concurrency nursery built on the fiber scheduler.
+ * 
+ * spawn() pushes tasks to global queue, workers execute them.
+ * Nursery tracks tasks for join and handles cancellation/deadlines.
  */
 
 #include <ccc/cc_nursery.cch>
@@ -24,7 +27,7 @@ void cc_fiber_task_free(fiber_task* t);
 __thread CCNursery* cc__tls_current_nursery = NULL;
 
 struct CCNursery {
-    CCTask** tasks;
+    fiber_task** tasks;     /* Tasks spawned in this nursery */
     size_t count;
     size_t cap;
     int cancelled;
@@ -69,7 +72,7 @@ CCNursery* cc_nursery_create(void) {
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
     n->cap = 8;
-    n->tasks = (CCTask**)calloc(n->cap, sizeof(CCTask*));
+    n->tasks = (fiber_task**)calloc(n->cap, sizeof(fiber_task*));
     if (!n->tasks) {
         free(n);
         return NULL;
@@ -124,7 +127,7 @@ bool cc_nursery_is_cancelled(const CCNursery* n) {
 
 static int cc_nursery_grow(CCNursery* n) {
     size_t new_cap = n->cap ? n->cap * 2 : 8;
-    CCTask** nt = (CCTask**)realloc(n->tasks, new_cap * sizeof(CCTask*));
+    fiber_task** nt = (fiber_task**)realloc(n->tasks, new_cap * sizeof(fiber_task*));
     if (!nt) return ENOMEM;
     memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(fiber_task*));
     n->tasks = nt;
@@ -141,20 +144,20 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     th->fn = fn;
     th->arg = arg;
 
-    CCTask* t = NULL;
-    int err = cc_spawn(&t, cc__nursery_task_trampoline, th);
-    if (err != 0) {
+    /* Spawn task on fiber scheduler */
+    fiber_task* t = cc_fiber_spawn(cc__nursery_task_trampoline, th);
+    if (!t) {
         free(th);
-        return err;
+        return ENOMEM;
     }
 
     pthread_mutex_lock(&n->mu);
-    // Grow if needed (rare case in benchmarks)
+    /* Grow if needed */
     if (n->count == n->cap) {
         int grow_err = cc_nursery_grow(n);
         if (grow_err != 0) {
             pthread_mutex_unlock(&n->mu);
-            cc_task_free(t);
+            cc_fiber_task_free(t);
             free(th);
             return grow_err;
         }
@@ -167,17 +170,19 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
     int first_err = 0;
-    // IMPORTANT (spec): join children first, then close registered channels.
-    // The closing(...) clause exists to avoid close-before-send races.
+    
+    /* Join all tasks - spec: join children first, then close channels */
     for (size_t i = 0; i < n->count; ++i) {
         if (!n->tasks[i]) continue;
-        int err = cc_task_join(n->tasks[i]);
+        int err = cc_fiber_join(n->tasks[i], NULL);
         if (first_err == 0 && err != 0) {
             first_err = err;
         }
-        cc_task_free(n->tasks[i]);
+        cc_fiber_task_free(n->tasks[i]);
         n->tasks[i] = NULL;
     }
+    
+    /* Close registered channels */
     for (size_t i = 0; i < n->closing_count; ++i) {
         if (n->closing[i]) cc_chan_close(n->closing[i]);
     }
@@ -189,10 +194,10 @@ void cc_nursery_free(CCNursery* n) {
     if (!n) return;
     for (size_t i = 0; i < n->count; ++i) {
         if (n->tasks[i]) {
-            cc_task_free(n->tasks[i]);
+            cc_fiber_task_free(n->tasks[i]);
         }
     }
-    // Close registered channels as a last step (best-effort safety if user never waited).
+    /* Close registered channels as a last step */
     for (size_t i = 0; i < n->closing_count; ++i) {
         if (n->closing[i]) cc_chan_close(n->closing[i]);
     }
@@ -219,4 +224,3 @@ int cc_nursery_add_closing_chan(CCNursery* n, CCChan* ch) {
     cc__chan_set_autoclose_owner(ch, n);
     return 0;
 }
-

@@ -12,7 +12,6 @@
 
 #include "deadlock_detect.c"
 #include "channel.c"
-#include "fiber.c"
 #include "fiber_sched.c"
 #include "scheduler.c"
 #include "nursery.c"

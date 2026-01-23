@@ -9,9 +9,12 @@
  *    - If this persists for N seconds, likely deadlock
  *
  * Environment variables:
- *   CC_DEADLOCK_DETECT=0  Disable deadlock detection (default: enabled)
+ *   CC_DEADLOCK_DETECT=1  Enable legacy deadlock detection (default: disabled)
  *   CC_DEADLOCK_ABORT=0   Disable abort, just warn (for debugging)
  *   CC_DEADLOCK_TIMEOUT=N Set timeout in seconds (default: 10)
+ *
+ * NOTE: This legacy detector is disabled by default. The task scheduler
+ * has integrated deadlock detection that works better with the fiber model.
  */
 
 #include <ccc/cc_deadlock_detect.cch>
@@ -198,11 +201,11 @@ void cc_deadlock_detect_init(void) {
         return;  /* Already initialized */
     }
     
-    /* Enabled by default; allow opt-out with CC_DEADLOCK_DETECT=0 */
+    /* Disabled by default; allow opt-in with CC_DEADLOCK_DETECT=1 */
     const char* env = getenv("CC_DEADLOCK_DETECT");
-    if (env && env[0] == '0') {
+    if (!env || env[0] != '1') {
         pthread_mutex_unlock(&g_init_mutex);
-        return;  /* Disabled */
+        return;  /* Disabled (default) */
     }
     
     /* Check if abort should be disabled (default is abort=1) */

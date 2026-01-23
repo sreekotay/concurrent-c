@@ -1,0 +1,39 @@
+/*
+ * Simple spawn benchmark - no closures, minimal overhead.
+ * Measures: raw spawn/join throughput with direct function calls.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+
+#define ITERATIONS 10
+
+static int global_counter = 0;
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+int main(void) {
+    printf("spawn_simple: measuring simple spawn throughput\n");
+
+    double start = time_now_ms();
+
+    for (int i = 0; i < ITERATIONS; i++) {
+        @nursery {
+                spawn(() => { global_counter++; });
+        }
+    }
+
+    double elapsed = time_now_ms() - start;
+    int total_spawns = global_counter;
+    double spawns_per_sec = total_spawns / (elapsed / 1000.0);
+
+    printf("  simple spawns: %.0f spawns/sec (%.1f ms, total=%d)\n",
+           spawns_per_sec, elapsed, total_spawns);
+
+    printf("spawn_simple: DONE\n");
+    return 0;
+}

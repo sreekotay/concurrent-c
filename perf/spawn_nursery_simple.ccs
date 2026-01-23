@@ -1,0 +1,48 @@
+/*
+ * Spawn nursery throughput benchmark - simplified, no closures.
+ * Measures: nursery-based spawn creation and completion throughput.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+
+#define ITERATIONS 100000
+
+static cc_atomic_int global_counter = 0;
+
+static void* increment_task(void* arg) {
+    (void)arg;
+    cc_atomic_fetch_add(&global_counter, 1);
+    return NULL;
+}
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+int main(void) {
+    printf("spawn_nursery_simple: measuring nursery spawn throughput (no closures)\n");
+
+    double start = time_now_ms();
+
+    for (int batch = 0; batch < ITERATIONS / 1000; batch++) {
+        @nursery {
+            for (int i = 0; i < 1000; i++) {
+                // Try direct nursery spawn without closure overhead
+                spawn(increment_task, NULL);
+            }
+        }
+    }
+
+    double elapsed = time_now_ms() - start;
+    int total_spawns = cc_atomic_load(&global_counter);
+    double spawns_per_sec = total_spawns / (elapsed / 1000.0);
+
+    printf("  nursery spawns: %.0f spawns/sec (%.1f ms, total=%d)\n",
+           spawns_per_sec, elapsed, total_spawns);
+
+    printf("spawn_nursery_simple: DONE\n");
+    return 0;
+}

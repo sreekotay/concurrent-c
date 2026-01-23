@@ -1912,6 +1912,30 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     return 0;
 }
 
+// Check if prebuilt runtime object is stale (runtime sources newer than object).
+static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
+    if (!runtime_obj_path || !file_exists(runtime_obj_path)) return 1;
+    struct stat obj_stat;
+    if (stat(runtime_obj_path, &obj_stat) != 0) return 1;
+    time_t obj_mtime = obj_stat.st_mtime;
+    
+    // Check key runtime source files
+    const char* runtime_sources[] = {
+        "concurrent_c.c", "scheduler.c", "fiber_sched.c", "nursery.c",
+        "channel.c", "fiber.c", "exec.c", "closure.c", "task_intptr.c",
+        NULL
+    };
+    char src_path[PATH_MAX];
+    for (int i = 0; runtime_sources[i]; ++i) {
+        snprintf(src_path, sizeof(src_path), "%s/cc/runtime/%s", g_repo_root, runtime_sources[i]);
+        struct stat src_stat;
+        if (stat(src_path, &src_stat) == 0 && src_stat.st_mtime > obj_mtime) {
+            return 1;  // Source is newer than object
+        }
+    }
+    return 0;  // Object is up-to-date
+}
+
 static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
                                  const char* target_part,
                                  const char* sysroot_part,
@@ -1930,11 +1954,17 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     // It may not be compiled with -ffunction-sections/-fdata-sections, which prevents
     // the linker from dead-stripping unused runtime code.
     // NOTE: For TCC, don't reuse prebuilt - TCC can't link Mach-O/ELF from other compilers.
-    if (!opt->opt_release && !is_tcc && file_exists(g_cc_runtime_o)) {
+    // NOTE: Check if prebuilt is stale (runtime sources changed but make not run).
+    if (!opt->opt_release && !is_tcc && file_exists(g_cc_runtime_o) && !cc__runtime_obj_is_stale(g_cc_runtime_o)) {
         strncpy(out_runtime_path, g_cc_runtime_o, out_runtime_cap);
         out_runtime_path[out_runtime_cap - 1] = '\0';
         if (out_reused) *out_reused = 1;
         return 0;
+    }
+    
+    // Warn if prebuilt exists but is stale
+    if (file_exists(g_cc_runtime_o) && cc__runtime_obj_is_stale(g_cc_runtime_o)) {
+        fprintf(stderr, "cc: warning: prebuilt runtime is stale, rebuilding (run 'make -C cc' to update)\n");
     }
 
     // Build a runtime object under out/obj/runtime.o
