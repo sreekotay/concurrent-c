@@ -34,7 +34,7 @@ echo "=========================================="
 # Function to extract numeric value from benchmark output
 extract_number() {
     local line="$1"
-    echo "$line" | grep -o '[0-9]\+\([,.][0-9]\+\)*' | head -1 | tr -d ','
+    echo "$line" | sed 's/.*: \([0-9,]*\).*/\1/' | tr -d ','
 }
 
 # Function to extract unit from benchmark output
@@ -84,8 +84,10 @@ BENCHMARKS=(
 )
 
 echo ""
-printf "${CYAN}%-25s ${GREEN}%-12s ${BLUE}%-12s ${YELLOW}%-8s${NC}\n" "Benchmark" "Concurrent-C" "Go" "Ratio"
-echo "--------------------------------------------------------------------------------"
+echo -e "${BLUE}Performance Comparison: Concurrent-C vs Go${NC}"
+echo "=========================================="
+printf "${CYAN}%-20s ${GREEN}%-18s ${BLUE}%-18s ${YELLOW}%-8s${NC}\n" "Benchmark" "Concurrent-C" "Go" "C/Go"
+echo "------------------------------------------------------------------------------------------"
 
 for bench_spec in "${BENCHMARKS[@]}"; do
     IFS=':' read -r name cc_file go_file desc <<< "$bench_spec"
@@ -101,7 +103,7 @@ for bench_spec in "${BENCHMARKS[@]}"; do
     go_status=$?
 
     if [ $cc_status -ne 0 ] || [ $go_status -ne 0 ]; then
-        printf "%-25s ${RED}%-12s ${RED}%-12s ${RED}%-8s${NC}\n" "$name" "FAILED" "FAILED" "N/A"
+        printf "%-20s ${RED}%-18s ${RED}%-18s ${RED}%-8s${NC}\n" "$name" "FAILED" "FAILED" "N/A"
         continue
     fi
 
@@ -124,14 +126,12 @@ for bench_spec in "${BENCHMARKS[@]}"; do
     cc_formatted=$(format_number "$cc_value")
     go_formatted=$(format_number "$go_value")
 
-    printf "%-25s ${GREEN}%-12s ${BLUE}%-12s ${YELLOW}%-8s${NC}\n" \
+    printf "%-20s ${GREEN}%-18s ${BLUE}%-18s ${YELLOW}%-8s${NC}\n" \
            "$name" "${cc_formatted} $unit" "${go_formatted} $unit" "$ratio_str"
 done
 
 echo ""
-echo -e "${GREEN}Comparison completed!${NC}"
+echo -e "${GREEN}✓ Comparison completed${NC}"
 echo ""
-echo "Note: Ratio shows Concurrent-C performance relative to Go (higher = better)"
-echo "      For spawn_nursery: Concurrent-C nursery spawns vs Go goroutine spawns"
-echo "      For spawn_sequential: Concurrent-C @async vs Go sequential goroutines"
-echo "      For channel_throughput: First metric comparison (single-thread)"
+echo "Ratio: Concurrent-C performance relative to Go (higher = better)"
+echo "Note: Comparisons use primary metric from each benchmark"
