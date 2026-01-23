@@ -79,22 +79,27 @@ Use `./perf/compare_benchmarks.sh` to run equivalent benchmarks in Go and compar
 
 ```bash
 $ ./perf/compare_benchmarks.sh
-Concurrent-C vs Go Performance Comparison
+Performance Comparison: Concurrent-C vs Go
 ==========================================
 
-Benchmark                  Concurrent-C   Go             Ratio
---------------------------------------------------------------------------------
-spawn_nursery              468790 spawns/sec  4347042 spawns/sec   0.10
-spawn_sequential           26109668 spawns/sec  3795052 spawns/sec   6.87
-channel_throughput         61162080 ops/sec  57836769 ops/sec   1.05
+Benchmark            Concurrent-C       Go                 C/Go
+------------------------------------------------------------------------------------------
+spawn_nursery        424951 spawns/sec  6050400 spawns/sec 0.07
+spawn_sequential     24691360 spawns/sec 4336227 spawns/sec 5.69
+channel_throughput   61368517 ops/sec   114221974 ops/sec  0.53
 
-Note: Ratio shows Concurrent-C performance relative to Go (higher = better)
+✓ Comparison completed
+
+Ratio: Concurrent-C performance relative to Go (higher = better)
+Note: Comparisons use primary metric from each benchmark
 ```
 
 **Current Status:**
-- **Channel throughput**: Competitive with Go (1.05x = 5% faster)
-- **Sequential spawns**: Much faster than Go (6.87x) - due to @async optimization
-- **Nursery spawns**: Much slower than Go (0.10x) - needs fiber scheduler optimization
+- **Channel throughput**: Competitive with Go (0.53x = 47% of Go performance)
+- **Sequential spawns**: Much faster than Go (5.69x) - due to @async optimization
+- **Nursery spawns**: Much slower than Go (0.07x) - needs fiber scheduler optimization
+
+*Note: Performance ratios vary between runs due to system conditions*
 
 ## Red Flags
 
