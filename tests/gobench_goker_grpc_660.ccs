@@ -7,17 +7,15 @@
 #include <stdio.h>
 #include <errno.h>
 
-typedef struct {
-    CCChan* done_ch;
-    CCChan* progress_ch;
-} SenderArgs;
+static CCChan* g_done_ch = NULL;
+static CCChan* g_progress_ch = NULL;
 
 static void* sender_thread(void* arg) {
-    SenderArgs* args = (SenderArgs*)arg;
+    (void)arg;
     int v = 1;
-    cc_chan_send(args->done_ch, &v, sizeof(v)); /* blocks if not drained */
+    cc_chan_send(g_done_ch, &v, sizeof(v)); /* blocks if not drained */
     v = 2;
-    cc_chan_send(args->progress_ch, &v, sizeof(v));
+    cc_chan_send(g_progress_ch, &v, sizeof(v));
     return NULL;
 }
 
@@ -28,9 +26,10 @@ int main(void) {
     if (cc_chan_init_elem(done_ch, sizeof(int)) != 0) return 3;
     if (cc_chan_init_elem(progress_ch, sizeof(int)) != 0) return 4;
 
-    SenderArgs args = { .done_ch = done_ch, .progress_ch = progress_ch };
     pthread_t tid;
-    pthread_create(&tid, NULL, sender_thread, &args);
+    g_done_ch = done_ch;
+    g_progress_ch = progress_ch;
+    pthread_create(&tid, NULL, sender_thread, NULL);
 
     int v = 0;
     int rc = 0;

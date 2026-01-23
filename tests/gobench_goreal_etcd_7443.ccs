@@ -7,31 +7,29 @@
 #include <stdio.h>
 #include <errno.h>
 
-typedef struct {
-    pthread_mutex_t* mu;
-    CCChan* notify_ch;
-    CCChan* progress_ch;
-} WorkerArgs;
+static pthread_mutex_t* g_mu = NULL;
+static CCChan* g_notify_ch = NULL;
+static CCChan* g_progress_ch = NULL;
 
 static void* waiter_thread(void* arg) {
-    WorkerArgs* a = (WorkerArgs*)arg;
-    pthread_mutex_lock(a->mu);
+    (void)arg;
+    pthread_mutex_lock(g_mu);
     int v = 0;
-    (void)cc_chan_recv(a->notify_ch, &v, sizeof(v)); /* blocks while holding lock */
-    pthread_mutex_unlock(a->mu);
+    (void)cc_chan_recv(g_notify_ch, &v, sizeof(v)); /* blocks while holding lock */
+    pthread_mutex_unlock(g_mu);
     v = 1;
-    cc_chan_send(a->progress_ch, &v, sizeof(v));
+    cc_chan_send(g_progress_ch, &v, sizeof(v));
     return NULL;
 }
 
 static void* sender_thread(void* arg) {
-    WorkerArgs* a = (WorkerArgs*)arg;
-    pthread_mutex_lock(a->mu); /* blocked because waiter holds lock */
+    (void)arg;
+    pthread_mutex_lock(g_mu); /* blocked because waiter holds lock */
     int v = 1;
-    cc_chan_send(a->notify_ch, &v, sizeof(v));
-    pthread_mutex_unlock(a->mu);
+    cc_chan_send(g_notify_ch, &v, sizeof(v));
+    pthread_mutex_unlock(g_mu);
     v = 2;
-    cc_chan_send(a->progress_ch, &v, sizeof(v));
+    cc_chan_send(g_progress_ch, &v, sizeof(v));
     return NULL;
 }
 
@@ -45,10 +43,12 @@ int main(void) {
     if (cc_chan_init_elem(notify_ch, sizeof(int)) != 0) return 3;
     if (cc_chan_init_elem(progress_ch, sizeof(int)) != 0) return 4;
 
-    WorkerArgs args = { .mu = &mu, .notify_ch = notify_ch, .progress_ch = progress_ch };
     pthread_t t1, t2;
-    pthread_create(&t1, NULL, waiter_thread, &args);
-    pthread_create(&t2, NULL, sender_thread, &args);
+    g_mu = &mu;
+    g_notify_ch = notify_ch;
+    g_progress_ch = progress_ch;
+    pthread_create(&t1, NULL, waiter_thread, NULL);
+    pthread_create(&t2, NULL, sender_thread, NULL);
 
     int v = 0;
     int rc = 0;

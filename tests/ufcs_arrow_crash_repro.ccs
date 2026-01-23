@@ -1,0 +1,23 @@
+/*
+ * Test: UFCS on pointer member access.
+ * Uses named struct tag so UFCS can extract the type name.
+ */
+#include <ccc/cc_runtime.cch>
+
+struct Foo {
+    int x;
+};
+
+static int Foo_get(struct Foo* f) {
+    return f ? f->x : 0;
+}
+
+int main(void) {
+    struct Foo f = {0};
+    struct Foo* p = &f;
+    int v = p->x;
+    int u = p->get();  /* UFCS: -> Foo_get(p) */
+    (void)v;
+    (void)u;
+    return 0;
+}

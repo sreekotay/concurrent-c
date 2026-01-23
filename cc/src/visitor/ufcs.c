@@ -325,10 +325,10 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
         const char* paren = m_end;
         while (*paren && isspace((unsigned char)*paren)) paren++;
         if (*paren != '(') {
-            size_t chunk = (size_t)((dot + 1) - p);
+            size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
-            p = dot + 1;
+            p = sep + (recv_is_ptr ? 2 : 1);
             continue;
         }
 
@@ -342,10 +342,10 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
             args_end++;
         }
         if (depth != 0) {
-            size_t chunk = (size_t)((dot + 1) - p);
+            size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
-            p = dot + 1;
+            p = sep + (recv_is_ptr ? 2 : 1);
             continue;
         }
         args_end--; // points to ')'

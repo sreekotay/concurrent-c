@@ -7,17 +7,15 @@
 #include <stdio.h>
 #include <errno.h>
 
-typedef struct {
-    CCChan* goaway_ch;
-    CCChan* done_ch;
-} ReaderArgs;
+static CCChan* g_goaway_ch = NULL;
+static CCChan* g_done_ch = NULL;
 
 static void* reader_thread(void* arg) {
-    ReaderArgs* a = (ReaderArgs*)arg;
+    (void)arg;
     int v = 0;
-    (void)cc_chan_recv(a->goaway_ch, &v, sizeof(v)); /* waits for GOAWAY */
+    (void)cc_chan_recv(g_goaway_ch, &v, sizeof(v)); /* waits for GOAWAY */
     v = 1;
-    cc_chan_send(a->done_ch, &v, sizeof(v));
+    cc_chan_send(g_done_ch, &v, sizeof(v));
     return NULL;
 }
 
@@ -28,9 +26,10 @@ int main(void) {
     if (cc_chan_init_elem(goaway_ch, sizeof(int)) != 0) return 3;
     if (cc_chan_init_elem(done_ch, sizeof(int)) != 0) return 4;
 
-    ReaderArgs args = { .goaway_ch = goaway_ch, .done_ch = done_ch };
     pthread_t tid;
-    pthread_create(&tid, NULL, reader_thread, &args);
+    g_goaway_ch = goaway_ch;
+    g_done_ch = done_ch;
+    pthread_create(&tid, NULL, reader_thread, NULL);
 
     /* Close path forgets to send GOAWAY. */
     int v = 0;

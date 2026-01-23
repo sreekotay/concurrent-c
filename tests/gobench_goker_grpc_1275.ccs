@@ -7,17 +7,15 @@
 #include <stdio.h>
 #include <errno.h>
 
-typedef struct {
-    CCChan* recv_ch;
-    CCChan* done_ch;
-} ReaderArgs;
+static CCChan* g_recv_ch = NULL;
+static CCChan* g_done_ch = NULL;
 
 static void* reader_thread(void* arg) {
-    ReaderArgs* args = (ReaderArgs*)arg;
+    (void)arg;
     int v = 0;
-    (void)cc_chan_recv(args->recv_ch, &v, sizeof(v)); /* blocks */
+    (void)cc_chan_recv(g_recv_ch, &v, sizeof(v)); /* blocks */
     v = 1;
-    cc_chan_send(args->done_ch, &v, sizeof(v));
+    cc_chan_send(g_done_ch, &v, sizeof(v));
     return NULL;
 }
 
@@ -28,9 +26,10 @@ int main(void) {
     if (cc_chan_init_elem(recv_ch, sizeof(int)) != 0) return 3;
     if (cc_chan_init_elem(done_ch, sizeof(int)) != 0) return 4;
 
-    ReaderArgs args = { .recv_ch = recv_ch, .done_ch = done_ch };
     pthread_t tid;
-    pthread_create(&tid, NULL, reader_thread, &args);
+    g_recv_ch = recv_ch;
+    g_done_ch = done_ch;
+    pthread_create(&tid, NULL, reader_thread, NULL);
 
     int v = 0;
     int rc = 0;
