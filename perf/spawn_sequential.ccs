@@ -1,0 +1,41 @@
+/*
+ * Spawn sequential benchmark.
+ * Measures: sequential spawn + join throughput (no parallelism).
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+
+#define ITERATIONS 10000
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+/* Simple async function for sequential testing */
+@async int simple_task(int x) {
+    return x * 2;
+}
+
+int main(void) {
+    printf("spawn_sequential: measuring sequential spawn+join throughput\n");
+
+    double start = time_now_ms();
+    int total = 0;
+
+    for (int i = 0; i < ITERATIONS; i++) {
+        CCTaskIntptr task = simple_task(i);
+        total += cc_block_on(int, task);
+    }
+
+    double elapsed = time_now_ms() - start;
+    double spawns_per_sec = ITERATIONS / (elapsed / 1000.0);
+
+    printf("  sequential spawns: %.0f spawns/sec (%.1f ms, sum=%d)\n",
+           spawns_per_sec, elapsed, total);
+
+    printf("spawn_sequential: DONE\n");
+    return 0;
+}

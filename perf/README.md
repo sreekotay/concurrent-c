@@ -11,6 +11,8 @@ Focused benchmarks that measure throughput and latency. Use these to catch perfo
 | `perf_match_select` | @match multi-channel select latency |
 | `perf_zero_copy` | Slice copy throughput by payload size |
 | `perf_gobench_blocking_pressure` | GoBench-derived scheduler + auto-blocking pressure |
+| `spawn_nursery` | Nursery-based spawn throughput benchmark |
+| `spawn_sequential` | Sequential spawn+join throughput benchmark |
 | `perf_gobench_async_pressure` | GoBench-derived async scheduler pressure |
 
 ## Running
