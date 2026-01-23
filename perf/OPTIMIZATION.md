@@ -304,3 +304,23 @@ The 14% gap is primarily due to:
 1. Go's hand-tuned assembly context switch
 2. Segmented stacks allowing more goroutines
 3. Integrated runtime with compiler cooperation
+
+## Final Assessment: M:N Fiber Scheduler Attempt
+
+**Attempted**: Implement true M:N threading with fiber scheduler to replace thread-per-task model.
+
+**Result**: Failed due to excessive overhead and implementation complexity.
+
+**Key Issues**:
+- Fiber scheduler caused test timeouts and hangs
+- 16x performance penalty vs simple thread-per-task
+- Complex work-stealing and atomic operations added too much overhead
+- Nursery reverted to working thread-per-task executor
+
+**Conclusion**: Achieving Go-like M:N performance requires:
+- Assembly-level context switching (not C function calls)
+- Runtime deeply integrated with compiler
+- Years of performance tuning and optimization
+- Fundamental architectural changes beyond what can be easily implemented in C
+
+**Current State**: Nursery uses reliable thread-per-task executor. Fiber scheduler code preserved for future advanced implementations.

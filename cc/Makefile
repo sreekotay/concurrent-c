@@ -45,8 +45,8 @@ ifeq ($(TCC_EXT),1)
   endif
 endif
 
-# Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/io/string/exec and async shards when CC_ENABLE_ASYNC.
-SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
+# Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
+SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
