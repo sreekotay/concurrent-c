@@ -13,13 +13,27 @@ Focused benchmarks that measure throughput and latency. Use these to catch perfo
 | `perf_gobench_blocking_pressure` | GoBench-derived scheduler + auto-blocking pressure |
 | `spawn_nursery` | Nursery-based spawn throughput benchmark |
 | `spawn_sequential` | Sequential spawn+join throughput benchmark |
+
+### Go Benchmarks (`perf/go/`)
+
+| Benchmark | What it measures |
+|-----------|------------------|
+| `spawn_nursery.go` | Nursery-based goroutine spawn throughput |
+| `spawn_sequential.go` | Sequential goroutine spawn+join throughput |
+| `channel_throughput.go` | Channel operations throughput (single-thread, buffered, unbuffered) |
 | `perf_gobench_async_pressure` | GoBench-derived async scheduler pressure |
 
 ## Running
 
 ```bash
-# Run all benchmarks
-for f in perf/*.ccs; do ./cc/bin/ccc run "$f"; done
+# Run all Concurrent-C benchmarks
+./perf/run_benchmarks.sh
+
+# Run all Go benchmarks
+./perf/run_go_benchmarks.sh
+
+# Run comparison between Concurrent-C and Go
+./perf/compare_benchmarks.sh
 
 # Run a specific benchmark
 ./cc/bin/ccc run perf/perf_channel_throughput.ccs
@@ -58,6 +72,29 @@ These are rough baselines on typical hardware (M1/M2 Mac, Linux x64). Actual num
 - Large (1KB): **11M+** ops/sec, ~11 GB/sec
 
 **Note:** These numbers reflect our optimized signal-based implementation (no 1ms polling).
+
+## Go Comparison
+
+Use `./perf/compare_benchmarks.sh` to run equivalent benchmarks in Go and compare performance:
+
+```bash
+$ ./perf/compare_benchmarks.sh
+Concurrent-C vs Go Performance Comparison
+==========================================
+
+Benchmark                  Concurrent-C   Go             Ratio
+--------------------------------------------------------------------------------
+spawn_nursery              468790 spawns/sec  4347042 spawns/sec   0.10
+spawn_sequential           26109668 spawns/sec  3795052 spawns/sec   6.87
+channel_throughput         61162080 ops/sec  57836769 ops/sec   1.05
+
+Note: Ratio shows Concurrent-C performance relative to Go (higher = better)
+```
+
+**Current Status:**
+- **Channel throughput**: Competitive with Go (1.05x = 5% faster)
+- **Sequential spawns**: Much faster than Go (6.87x) - due to @async optimization
+- **Nursery spawns**: Much slower than Go (0.10x) - needs fiber scheduler optimization
 
 ## Red Flags
 
