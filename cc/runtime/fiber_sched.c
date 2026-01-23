@@ -295,24 +295,45 @@ static void* worker_main(void* arg) {
             atomic_fetch_add_explicit(&ws->tasks_executed, 1, memory_order_relaxed);
             atomic_fetch_sub_explicit(&g_sched.pending_count, 1, memory_order_relaxed);
         } else {
-            /* No work found - brief spin then check again */
-            for (int spin = 0; spin < 32; spin++) {
+            /* No work found - spin with frequent checks */
+            for (int spin = 0; spin < 2000; spin++) {
                 #if defined(__x86_64__) || defined(_M_X64)
                 __asm__ volatile("pause");
                 #elif defined(__aarch64__)
                 __asm__ volatile("yield");
                 #endif
+
+                /* Check for work every 50 spins */
+                if (spin % 50 == 0) {
+                    t = deque_pop(&ws->local_queue);
+                    if (!t) t = queue_pop(&g_sched.global_queue);
+                    if (!t) t = try_steal(ws);
+                    if (t) break;
+                }
             }
-            
-            /* Still no work - yield and possibly block */
+
+            /* Still no work - yield briefly, don't block */
             if (!t) {
                 sched_yield();
-                
-                /* Only block if truly idle */
-                if (atomic_load_explicit(&g_sched.pending_count, memory_order_relaxed) == 0) {
+
+                /* Quick check again before potentially blocking */
+                t = deque_pop(&ws->local_queue);
+                if (!t) t = queue_pop(&g_sched.global_queue);
+                if (!t) t = try_steal(ws);
+
+                /* Only block if we've been truly idle for a while */
+                if (!t) {
+                    /* Busy wait a bit longer if there are pending tasks */
+                    if (atomic_load_explicit(&g_sched.pending_count, memory_order_relaxed) > 0) {
+                        /* There are pending tasks somewhere, keep looking */
+                        continue;
+                    }
+
+                    /* No pending tasks, safe to block */
                     pthread_mutex_lock(&g_sched.wake_mu);
                     if (atomic_load_explicit(&g_sched.pending_count, memory_order_relaxed) == 0 &&
                         atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
+                        /* Block until woken */
                         pthread_cond_wait(&g_sched.wake_cv, &g_sched.wake_mu);
                     }
                     pthread_mutex_unlock(&g_sched.wake_mu);
@@ -421,13 +442,18 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             return NULL;
         }
     }
-    
-    /* Increment pending and wake a worker */
-    atomic_fetch_add_explicit(&g_sched.pending_count, 1, memory_order_relaxed);
-    pthread_mutex_lock(&g_sched.wake_mu);
-    pthread_cond_signal(&g_sched.wake_cv);
-    pthread_mutex_unlock(&g_sched.wake_mu);
-    
+
+    /* Increment pending count */
+    size_t prev_pending = atomic_fetch_add_explicit(&g_sched.pending_count, 1, memory_order_relaxed);
+
+    /* Only wake a worker if we just went from 0 to 1 pending tasks */
+    /* This reduces unnecessary wakeups when workers are already active */
+    if (prev_pending == 0) {
+        pthread_mutex_lock(&g_sched.wake_mu);
+        pthread_cond_signal(&g_sched.wake_cv);
+        pthread_mutex_unlock(&g_sched.wake_mu);
+    }
+
     return t;
 }
 

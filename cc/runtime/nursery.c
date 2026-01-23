@@ -1,5 +1,5 @@
 /*
- * Simple structured concurrency nursery built on the pthread-backed scheduler.
+ * Simple structured concurrency nursery built on the fiber scheduler.
  */
 
 #include <ccc/cc_nursery.cch>
@@ -11,12 +11,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Forward declaration for fiber_task */
+typedef struct fiber_task fiber_task;
+
+/* Fiber scheduler functions */
+fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
+int cc_fiber_join(fiber_task* t, void** out_result);
+void cc_fiber_task_free(fiber_task* t);
+
 /* Thread-local: current nursery for code running inside nursery-spawned tasks.
    Used by optional runtime deadlock guard in channel.c. */
 __thread CCNursery* cc__tls_current_nursery = NULL;
 
 struct CCNursery {
-    CCTask** tasks;
+    fiber_task** tasks;
     size_t count;
     size_t cap;
     int cancelled;
@@ -61,7 +69,7 @@ CCNursery* cc_nursery_create(void) {
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
     n->cap = 8;
-    n->tasks = (CCTask**)calloc(n->cap, sizeof(CCTask*));
+    n->tasks = (fiber_task**)calloc(n->cap, sizeof(fiber_task*));
     if (!n->tasks) {
         free(n);
         return NULL;
@@ -116,9 +124,9 @@ bool cc_nursery_is_cancelled(const CCNursery* n) {
 
 static int cc_nursery_grow(CCNursery* n) {
     size_t new_cap = n->cap ? n->cap * 2 : 8;
-    CCTask** nt = (CCTask**)realloc(n->tasks, new_cap * sizeof(CCTask*));
+    fiber_task** nt = (fiber_task**)realloc(n->tasks, new_cap * sizeof(fiber_task*));
     if (!nt) return ENOMEM;
-    memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(CCTask*));
+    memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(fiber_task*));
     n->tasks = nt;
     n->cap = new_cap;
     return 0;
@@ -142,11 +150,10 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     th->fn = fn;
     th->arg = arg;
 
-    CCTask* t = NULL;
-    int err = cc_spawn(&t, cc__nursery_task_trampoline, th);
-    if (err != 0) {
+    fiber_task* t = cc_fiber_spawn(cc__nursery_task_trampoline, th);
+    if (!t) {
         free(th);
-        return err;
+        return ENOMEM;
     }
 
     pthread_mutex_lock(&n->mu);
@@ -162,11 +169,11 @@ int cc_nursery_wait(CCNursery* n) {
     // The closing(...) clause exists to avoid close-before-send races.
     for (size_t i = 0; i < n->count; ++i) {
         if (!n->tasks[i]) continue;
-        int err = cc_task_join(n->tasks[i]);
+        int err = cc_fiber_join(n->tasks[i], NULL);
         if (first_err == 0 && err != 0) {
             first_err = err;
         }
-        cc_task_free(n->tasks[i]);
+        cc_fiber_task_free(n->tasks[i]);
         n->tasks[i] = NULL;
     }
     for (size_t i = 0; i < n->closing_count; ++i) {
@@ -180,7 +187,7 @@ void cc_nursery_free(CCNursery* n) {
     if (!n) return;
     for (size_t i = 0; i < n->count; ++i) {
         if (n->tasks[i]) {
-            cc_task_free(n->tasks[i]);
+            cc_fiber_task_free(n->tasks[i]);
         }
     }
     // Close registered channels as a last step (best-effort safety if user never waited).

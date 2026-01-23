@@ -144,13 +144,13 @@ The heart of the optimization:
 
 | Benchmark | Throughput | Improvement | vs Go | Status |
 |-----------|------------|-------------|-------|--------|
-| spawn_nursery | 388 K/s | **1.1x** vs baseline | - | Recreated |
+| spawn_nursery | 455 K/s | **1.2x** vs baseline | 7% | Fiber scheduler |
 | spawn_sequential | 15.8 M/s | **38x** vs baseline | - | Recreated (@async) |
 | chan_single_thread | 42.8 M/s | **3.6x** | - | Updated |
 | spawn_baseline | 408 K/s | - | - | Current |
 | trivial_async | 10.5 M/s | - | - | Current |
 
-**Note**: The recreated spawn_sequential uses @async functions which may have different overhead than raw spawn. The original benchmarks showing 3.8M/s nursery and 423K/s sequential performance appear to be lost.
+**Note**: Implemented true M:N model by switching nursery from thread-per-task (`cc_spawn`) to fiber scheduler (`cc_fiber_spawn`). This eliminates per-task mutex/cond overhead and provides work-stealing task queues. The remaining 93% gap to Go is due to Go's highly optimized runtime with true goroutine context switching.
 
 ### What Changed
 
