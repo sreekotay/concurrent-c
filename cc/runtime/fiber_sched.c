@@ -115,8 +115,8 @@ void cc_nursery_dump_timing(void);
  * Spin-then-condvar constants
  * ============================================================================ */
 
-#define SPIN_FAST_ITERS 32
-#define SPIN_YIELD_ITERS 64
+#define SPIN_FAST_ITERS 64
+#define SPIN_YIELD_ITERS 4
 
 /* ============================================================================
  * Configuration
@@ -180,22 +180,31 @@ typedef struct {
 } fiber_queue;
 
 static int fq_push(fiber_queue* q, fiber_task* f) {
+    int pause_round = 0;
     for (int retry = 0; retry < 1000; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
         size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
-        
+
         if (tail - head >= CC_FIBER_QUEUE_SIZE) {
-            sched_yield();
+            if (++pause_round >= 16) {
+                pause_round = 0;
+                sched_yield();
+            } else {
+                cpu_pause();
+            }
             continue;
         }
-        
+
         if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
                                                    memory_order_release,
                                                    memory_order_relaxed)) {
             atomic_store_explicit(&q->slots[tail % CC_FIBER_QUEUE_SIZE], f, memory_order_release);
             return 0;
         }
+        pause_round = 0;
+        cpu_pause();
     }
+    sched_yield();
     return -1;
 }
 
@@ -603,7 +612,7 @@ static void* worker_main(void* arg) {
         atomic_fetch_add_explicit(&g_sched.spinning, 1, memory_order_relaxed);
         
         /* Spin briefly checking local, global, and stealing */
-        for (int spin = 0; spin < 64; spin++) {
+        for (int spin = 0; spin < SPIN_FAST_ITERS; spin++) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = fq_pop(&g_sched.run_queue);
             if (f) {
@@ -617,7 +626,7 @@ static void* worker_main(void* arg) {
         }
         
         /* Yield a few times before sleeping */
-        for (int y = 0; y < 4; y++) {
+        for (int y = 0; y < SPIN_YIELD_ITERS; y++) {
             sched_yield();
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = fq_pop(&g_sched.run_queue);
