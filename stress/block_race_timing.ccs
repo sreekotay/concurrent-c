@@ -1,0 +1,87 @@
+/*
+ * Stress test: cc_block_race correctness
+ * 
+ * Tests that cc_block_race returns valid results.
+ * 
+ * NOTE: Due to current async runtime limitations (cc_sleep_ms blocks 
+ * the polling thread, not just the fiber), timing-based "fast wins"
+ * behavior is not reliable. This test focuses on correctness:
+ * - No errors
+ * - Winner index is valid (0 or 1)
+ * - Result matches the winner's return value
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 50
+
+@async int task_a(void) {
+    cc_sleep_ms(5);
+    return 42;
+}
+
+@async int task_b(void) {
+    cc_sleep_ms(10);
+    return 99;
+}
+
+int main(void) {
+    printf("block_race_timing: %d iterations (correctness test)\n", ITERATIONS);
+    
+    int a_wins = 0;
+    int b_wins = 0;
+    int errors = 0;
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        CCTaskIntptr tasks[] = {
+            task_a(),  /* index 0, returns 42 */
+            task_b()   /* index 1, returns 99 */
+        };
+        
+        int winner = -1;
+        intptr_t result = 0;
+        int err = cc_block_race(2, tasks, &winner, &result);
+        
+        if (err != 0) {
+            errors++;
+            fprintf(stderr, "  iter %d: ERROR err=%d\n", iter, err);
+            continue;
+        }
+        
+        /* Validate result matches winner */
+        if (winner == 0) {
+            if (result != 42) {
+                errors++;
+                fprintf(stderr, "  iter %d: winner=0 but result=%d (expected 42)\n", iter, (int)result);
+            } else {
+                a_wins++;
+            }
+        } else if (winner == 1) {
+            if (result != 99) {
+                errors++;
+                fprintf(stderr, "  iter %d: winner=1 but result=%d (expected 99)\n", iter, (int)result);
+            } else {
+                b_wins++;
+            }
+        } else {
+            errors++;
+            fprintf(stderr, "  iter %d: invalid winner=%d\n", iter, winner);
+        }
+        
+        if ((iter + 1) % 10 == 0) {
+            printf("  completed %d/%d (a=%d, b=%d, err=%d)\n", 
+                   iter + 1, ITERATIONS, a_wins, b_wins, errors);
+        }
+    }
+    
+    printf("\nResults: task_a_wins=%d, task_b_wins=%d, errors=%d\n", 
+           a_wins, b_wins, errors);
+    
+    if (errors > 0) {
+        fprintf(stderr, "FAIL: %d errors\n", errors);
+        return 1;
+    }
+    
+    printf("block_race_timing: PASS (correctness verified)\n");
+    return 0;
+}

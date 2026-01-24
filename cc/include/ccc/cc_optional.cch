@@ -65,6 +65,13 @@ CC_DECL_OPTIONAL(CCOptional_voidptr, void*)
 CC_DECL_OPTIONAL(CCOptional_charptr, char*)
 CC_DECL_OPTIONAL(CCOptional_intptr, int*)
 
+/* Forward declare CCSlice for optional - actual definition in cc_slice.cch */
+#ifndef CC_SLICE_H
+struct CCSlice_fwd { void *ptr; size_t len; uint64_t id; size_t alen; };
+typedef struct CCSlice_fwd CCSlice;
+#endif
+CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
+
 /* ============================================================================
  * Unwrap helper for optional types.
  * cc_unwrap_opt(opt) - returns value or aborts if none.

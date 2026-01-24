@@ -1739,6 +1739,8 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                                d->cap_names[ci] ? d->cap_names[ci] : "__cap",
                                d->cap_names[ci] ? d->cap_names[ci] : "__cap");
             }
+            /* TSan release: ensure captured values are visible to worker thread */
+            cc__append_str(&defs, &defs_len, &defs_cap, "  CC_TSAN_RELEASE(__env);\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
                            "  return %s(__cc_closure_entry_%d, __env, __cc_closure_env_%d_drop);\n",
                            mkfn, d->id, d->id);

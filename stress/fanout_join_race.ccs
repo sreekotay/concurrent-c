@@ -1,0 +1,59 @@
+/*
+ * Stress test: fan-out then join all via nursery
+ * 
+ * Tests the race between:
+ * 1. Many fibers completing concurrently
+ * 2. Nursery waiting for all to complete
+ * 
+ * This stresses completion signaling and join synchronization.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define FAN_SIZE 200
+#define ITERATIONS 50
+
+cc_atomic_int sum = 0;
+
+void* fan_task(void* arg) {
+    int id = (int)(intptr_t)arg;
+    
+    /* Variable amount of work based on ID */
+    for (volatile int i = 0; i < (id % 100); i++) {}
+    
+    cc_atomic_fetch_add(&sum, id);
+    return (void*)(intptr_t)id;
+}
+
+int main(void) {
+    printf("fanout_join_race: fan_size=%d, iterations=%d\n", FAN_SIZE, ITERATIONS);
+    
+    /* Expected sum: 0 + 1 + 2 + ... + (FAN_SIZE-1) = FAN_SIZE*(FAN_SIZE-1)/2 */
+    int expected_sum = FAN_SIZE * (FAN_SIZE - 1) / 2;
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&sum, 0);
+        
+        /* Fan-out: spawn all in one nursery */
+        CCNursery* n = cc_nursery_create();
+        for (int i = 0; i < FAN_SIZE; i++) {
+            cc_nursery_spawn(n, fan_task, (void*)(intptr_t)i);
+        }
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        int s = cc_atomic_load(&sum);
+        
+        if (s != expected_sum) {
+            fprintf(stderr, "FAIL: iter %d: sum=%d, expected=%d\n", iter, s, expected_sum);
+            return 1;
+        }
+        
+        if ((iter + 1) % 10 == 0) {
+            printf("  completed %d/%d (sum=%d)\n", iter + 1, ITERATIONS, s);
+        }
+    }
+    
+    printf("fanout_join_race: PASS\n");
+    return 0;
+}

@@ -1952,6 +1952,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "#include <ccc/std/task_intptr.cch>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
+    
+    /* TSan synchronization for closure captures using atomic fence.
+     * This creates a release point after writing captures. The corresponding
+     * acquire is in the closure trampoline before reading captures. */
+    fprintf(out, "\n/* --- Closure capture synchronization --- */\n");
+    fprintf(out, "#include <stdatomic.h>\n");
+    fprintf(out, "#define CC_TSAN_RELEASE(addr) atomic_thread_fence(memory_order_release)\n");
+    
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
     fprintf(out, "\n");
     fprintf(out, "/* --- CC spawn lowering helpers (best-effort) --- */\n");

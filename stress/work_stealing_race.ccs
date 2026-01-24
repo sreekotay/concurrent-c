@@ -1,0 +1,75 @@
+/*
+ * Stress test: work stealing race
+ * 
+ * Tests the race between:
+ * 1. Owner popping from local queue
+ * 2. Other workers stealing from the same queue
+ * 
+ * Creates a burst of work that will overflow local queues
+ * and trigger aggressive work stealing.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define BURST_SIZE 1000
+#define ITERATIONS 100
+
+cc_atomic_int completed = 0;
+cc_atomic_int duplicates = 0;
+cc_atomic_int task_ids[BURST_SIZE];
+
+void* burst_task(void* arg) {
+    int id = (int)(intptr_t)arg;
+    
+    /* Check for duplicate execution (race detection) - fetch_add returns old value */
+    int prev = cc_atomic_fetch_add(&task_ids[id], 1);
+    if (prev != 0) {
+        cc_atomic_fetch_add(&duplicates, 1);
+    }
+    
+    /* Small amount of work */
+    for (volatile int i = 0; i < 50; i++) {}
+    
+    cc_atomic_fetch_add(&completed, 1);
+    return NULL;
+}
+
+int main(void) {
+    printf("work_stealing_race: burst=%d, iterations=%d\n", BURST_SIZE, ITERATIONS);
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&completed, 0);
+        cc_atomic_store(&duplicates, 0);
+        for (int i = 0; i < BURST_SIZE; i++) {
+            cc_atomic_store(&task_ids[i], 0);
+        }
+        
+        /* Spawn burst of tasks - will overflow local queue and go to global */
+        CCNursery* n = cc_nursery_create();
+        for (int i = 0; i < BURST_SIZE; i++) {
+            cc_nursery_spawn(n, burst_task, (void*)(intptr_t)i);
+        }
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        int c = cc_atomic_load(&completed);
+        int d = cc_atomic_load(&duplicates);
+        
+        if (c != BURST_SIZE) {
+            fprintf(stderr, "FAIL: iter %d: only %d/%d tasks completed\n", iter, c, BURST_SIZE);
+            return 1;
+        }
+        
+        if (d > 0) {
+            fprintf(stderr, "FAIL: iter %d: %d duplicate executions (RACE!)\n", iter, d);
+            return 1;
+        }
+        
+        if ((iter + 1) % 20 == 0) {
+            printf("  completed %d/%d\n", iter + 1, ITERATIONS);
+        }
+    }
+    
+    printf("work_stealing_race: PASS\n");
+    return 0;
+}

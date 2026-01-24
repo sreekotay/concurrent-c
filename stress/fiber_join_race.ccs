@@ -1,0 +1,52 @@
+/*
+ * Stress test: fiber join race condition
+ * 
+ * Tests the race between:
+ * 1. Fiber completing and trying to signal joiners
+ * 2. Joiner registering and initializing the per-fiber condvar
+ * 
+ * The race is:
+ *   - Joiner increments join_waiters
+ *   - Fiber sees join_waiters > 0, tries to use condvar (not initialized yet!)
+ *   - Joiner initializes condvar (too late)
+ * 
+ * This test spawns many short-lived fibers and immediately joins them,
+ * maximizing the chance of hitting this race window.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 10000
+#define BATCH_SIZE 100
+
+/* Minimal work - just return immediately to maximize race window */
+static void* trivial_task(void* arg) {
+    (void)arg;
+    return NULL;
+}
+
+int main(void) {
+    printf("fiber_join_race: testing join/completion race condition\n");
+    printf("  iterations=%d, batch_size=%d\n", ITERATIONS, BATCH_SIZE);
+    
+    int completed = 0;
+    
+    for (int iter = 0; iter < ITERATIONS / BATCH_SIZE; iter++) {
+        @nursery {
+            for (int i = 0; i < BATCH_SIZE; i++) {
+                spawn(() => {
+                    /* Trivial work - complete as fast as possible */
+                });
+            }
+        }
+        completed += BATCH_SIZE;
+        
+        /* Progress indicator every 1000 */
+        if (completed % 1000 == 0) {
+            printf("  completed %d/%d\n", completed, ITERATIONS);
+        }
+    }
+    
+    printf("fiber_join_race: PASS (%d spawns completed)\n", completed);
+    return 0;
+}

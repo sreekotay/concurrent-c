@@ -77,7 +77,7 @@ typedef struct {
     CCFile *file;
     CCArena *arena;
     size_t n;
-    CCFileReadResult *out;
+    CCOptional_CCSlice *out;
     CCAsyncHandle *handle;
     CCDeadline deadline;
 } CCReadCtx;
@@ -86,7 +86,7 @@ static void cc__job_read(void *arg) {
     CCReadCtx *ctx = (CCReadCtx*)arg;
     int err = cc__check_pre(ctx->handle, &ctx->deadline);
     if (err == 0) {
-        CCResultFileReadIoError res = cc_file_read(ctx->file, ctx->arena, ctx->n);
+        CCResultOptSliceIoError res = cc_file_read(ctx->file, ctx->arena, ctx->n);
         err = res.is_err ? EIO : 0;
         if (!res.is_err && ctx->out) *(ctx->out) = res.ok;
     }
@@ -94,11 +94,11 @@ static void cc__job_read(void *arg) {
     free(ctx);
 }
 
-int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h) {
+int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCOptional_CCSlice* out, CCAsyncHandle* h) {
     return cc_file_read_async_deadline(ex, file, arena, n, out, h, NULL);
 }
 
-int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* deadline) {
+int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline) {
     if (!file || !arena || !out || !h) return EINVAL;
     int pre = cc__check_pre(h, deadline);
     if (pre != 0) return pre;
@@ -120,7 +120,7 @@ int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t
 typedef struct {
     CCFile *file;
     CCArena *arena;
-    CCFileReadResult *out;
+    CCOptional_CCSlice *out;
     CCAsyncHandle *handle;
     CCDeadline deadline;
 } CCReadLineCtx;
@@ -129,7 +129,7 @@ static void cc__job_read_line(void *arg) {
     CCReadLineCtx *ctx = (CCReadLineCtx*)arg;
     int err = cc__check_pre(ctx->handle, &ctx->deadline);
     if (err == 0) {
-        CCResultFileReadIoError res = cc_file_read_line(ctx->file, ctx->arena);
+        CCResultOptSliceIoError res = cc_file_read_line(ctx->file, ctx->arena);
         err = res.is_err ? EIO : 0;
         if (!res.is_err && ctx->out) *(ctx->out) = res.ok;
     }
@@ -137,11 +137,11 @@ static void cc__job_read_line(void *arg) {
     free(ctx);
 }
 
-int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h) {
+int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCOptional_CCSlice* out, CCAsyncHandle* h) {
     return cc_file_read_line_async_deadline(ex, file, arena, out, h, NULL);
 }
 
-int cc_file_read_line_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* deadline) {
+int cc_file_read_line_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline) {
     if (!file || !arena || !out || !h) return EINVAL;
     int pre = cc__check_pre(h, deadline);
     if (pre != 0) return pre;

@@ -1,0 +1,39 @@
+/*
+ * Stress test: nested nursery race condition
+ * 
+ * Reproduces the pattern from closure_nested_ast_smoke.ccs
+ * that fails intermittently under parallel test execution.
+ * 
+ * Pattern: spawn a closure that creates a nested nursery with another spawn.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 1000
+
+cc_atomic_int g = 0;  /* Must be atomic - accessed from multiple fibers */
+
+int main(void) {
+    printf("nested_nursery_race: testing nested nursery pattern\n");
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        int x = i;
+        
+        @nursery {
+            spawn ([x]() => {
+                @nursery {
+                    spawn ([x]() => { 
+                        cc_atomic_store(&g, x); 
+                    });
+                }
+            });
+        }
+        
+        if ((i + 1) % 100 == 0) {
+            printf("  completed %d/%d (g=%d)\n", i + 1, ITERATIONS, cc_atomic_load(&g));
+        }
+    }
+    
+    printf("nested_nursery_race: PASS (%d iterations)\n", ITERATIONS);
+    return 0;
+}

@@ -1,0 +1,64 @@
+/*
+ * Stress test: multiple fibers racing to join the same nursery
+ * 
+ * Uses nested nurseries where multiple outer tasks wait for the same inner
+ * nursery's completion, testing join synchronization under contention.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 500
+#define NUM_WAITERS 10
+
+cc_atomic_int completed = 0;
+cc_atomic_int inner_done = 0;
+
+void* inner_task(void* arg) {
+    int iter = (int)(intptr_t)arg;
+    /* Simulate some work */
+    for (volatile int i = 0; i < 100; i++) {}
+    cc_atomic_store(&inner_done, 1);
+    return (void*)(intptr_t)(iter * 2);
+}
+
+void* waiter_task(void* arg) {
+    (void)arg;
+    /* Spin until inner is done (simulates multiple tasks racing to observe completion) */
+    while (!cc_atomic_load(&inner_done)) {
+        for (volatile int i = 0; i < 10; i++) {}
+    }
+    cc_atomic_fetch_add(&completed, 1);
+    return NULL;
+}
+
+int main(void) {
+    printf("fiber_multi_joiner_race: %d iterations, %d waiters each\n", ITERATIONS, NUM_WAITERS);
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&completed, 0);
+        cc_atomic_store(&inner_done, 0);
+        
+        /* Spawn inner task and multiple waiters */
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, inner_task, (void*)(intptr_t)iter);
+        for (int j = 0; j < NUM_WAITERS; j++) {
+            cc_nursery_spawn(n, waiter_task, NULL);
+        }
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        /* All waiters should have completed */
+        int c = cc_atomic_load(&completed);
+        if (c != NUM_WAITERS) {
+            fprintf(stderr, "FAIL: iter %d: only %d/%d waiters completed\n", iter, c, NUM_WAITERS);
+            return 1;
+        }
+        
+        if ((iter + 1) % 100 == 0) {
+            printf("  completed %d/%d\n", iter + 1, ITERATIONS);
+        }
+    }
+    
+    printf("fiber_multi_joiner_race: PASS\n");
+    return 0;
+}

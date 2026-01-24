@@ -14,8 +14,8 @@ typedef struct CCAsyncBackendOps {
     int (*open)(void* ctx, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h, const CCDeadline* d);
     int (*close)(void* ctx, CCFile *file, CCAsyncHandle* h, const CCDeadline* d);
     int (*read_all)(void* ctx, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* d);
-    int (*read)(void* ctx, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* d);
-    int (*read_line)(void* ctx, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* d);
+    int (*read)(void* ctx, CCFile *file, CCArena *arena, size_t n, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* d);
+    int (*read_line)(void* ctx, CCFile *file, CCArena *arena, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* d);
     int (*write)(void* ctx, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* d);
 } CCAsyncBackendOps;
 

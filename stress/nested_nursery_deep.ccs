@@ -1,0 +1,64 @@
+/*
+ * Stress test: deep nursery nesting
+ * 
+ * Tests fiber parking with deeply nested nurseries.
+ * Each level spawns a fiber that creates another nested nursery.
+ * 
+ * This stresses:
+ * 1. Multiple parked fibers waiting on join
+ * 2. Unparking chain (inner completes -> unpark outer -> outer completes -> ...)
+ * 3. Worker thread utilization under deep blocking
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define DEPTH 20
+#define ITERATIONS 100
+
+cc_atomic_int deepest_reached = 0;
+
+void* nested_task(void* arg);
+
+void* nested_task(void* arg) {
+    int depth = (int)(intptr_t)arg;
+    
+    if (depth > cc_atomic_load(&deepest_reached)) {
+        cc_atomic_store(&deepest_reached, depth);
+    }
+    
+    if (depth < DEPTH) {
+        /* Create nested nursery */
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, nested_task, (void*)(intptr_t)(depth + 1));
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+    }
+    
+    return (void*)(intptr_t)depth;
+}
+
+int main(void) {
+    printf("nested_nursery_deep: depth=%d, iterations=%d\n", DEPTH, ITERATIONS);
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&deepest_reached, 0);
+        
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, nested_task, (void*)(intptr_t)1);
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        int reached = cc_atomic_load(&deepest_reached);
+        if (reached != DEPTH) {
+            fprintf(stderr, "FAIL: iter %d: only reached depth %d/%d\n", iter, reached, DEPTH);
+            return 1;
+        }
+        
+        if ((iter + 1) % 20 == 0) {
+            printf("  completed %d/%d (deepest=%d)\n", iter + 1, ITERATIONS, reached);
+        }
+    }
+    
+    printf("nested_nursery_deep: PASS\n");
+    return 0;
+}

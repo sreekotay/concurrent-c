@@ -1,0 +1,40 @@
+/*
+ * TSan test: closure capture synchronization
+ * 
+ * This test should pass with TSan enabled and report NO data races.
+ * If TSan reports races on closure captures, the synchronization is broken.
+ * 
+ * Run with: CC=clang CFLAGS="-fsanitize=thread" ./cc/bin/ccc run tests/tsan_closure_capture_smoke.ccs
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 100
+
+cc_atomic_int sum = 0;
+
+int main(void) {
+    for (int i = 0; i < ITERATIONS; i++) {
+        int x = i;
+        int y = i * 2;
+        
+        @nursery {
+            spawn ([x, y]() => {
+                /* Read captured values - this should synchronize properly */
+                cc_atomic_fetch_add(&sum, x + y);
+            });
+        }
+    }
+    
+    /* Expected: 0+0 + 1+2 + 2+4 + ... + 99+198 = sum(i*3) for i=0..99 = 3*99*100/2 = 14850 */
+    int expected = 3 * (ITERATIONS - 1) * ITERATIONS / 2;
+    int actual = cc_atomic_load(&sum);
+    
+    if (actual != expected) {
+        fprintf(stderr, "FAIL: sum=%d, expected=%d\n", actual, expected);
+        return 1;
+    }
+    
+    printf("tsan_closure_capture: PASS (sum=%d)\n", actual);
+    return 0;
+}

@@ -66,7 +66,7 @@ static int backend_read_all(void* ctx, CCFile *file, CCArena *arena, CCSlice* ou
     return 0;
 }
 
-static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
     if (!file || !file->handle || !arena || !out || !h) return EINVAL;
     int fd = fileno(file->handle); if (fd < 0) return EBADF;
@@ -87,15 +87,20 @@ static int backend_read(void* ctx, CCFile *file, CCArena *arena, size_t n, CCFil
         off += (size_t)r;
         if (cc_deadline_expired(d)) break;
     }
-    out->data.ptr = buf; out->data.len = off; out->data.id = 0; out->data.alen = n;
-    out->bytes_read = off; out->eof = eof;
+    // Return Ok(None) if EOF with no data, Ok(Some(slice)) otherwise
+    if (eof && off == 0) {
+        *out = cc_none_CCOptional_CCSlice();
+    } else {
+        CCSlice slice = {buf, off, 0, n};
+        *out = cc_some_CCOptional_CCSlice(slice);
+    }
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));
     return 0;
 }
 
-static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCFileReadResult* out, CCAsyncHandle* h, const CCDeadline* d) {
+static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCOptional_CCSlice* out, CCAsyncHandle* h, const CCDeadline* d) {
     (void)ctx;
     if (!file || !file->handle || !arena || !out || !h) return EINVAL;
     int fd = fileno(file->handle); if (fd < 0) return EBADF;
@@ -119,8 +124,13 @@ static int backend_read_line(void* ctx, CCFile *file, CCArena *arena, CCFileRead
         buf[len++] = c;
         if (c == '\n') break;
     }
-    out->data.ptr = buf; out->data.len = len; out->data.id = 0; out->data.alen = cap;
-    out->bytes_read = len; out->eof = eof && len == 0;
+    // Return Ok(None) if EOF with no data, Ok(Some(slice)) otherwise
+    if (eof && len == 0) {
+        *out = cc_none_CCOptional_CCSlice();
+    } else {
+        CCSlice slice = {buf, len, 0, cap};
+        *out = cc_some_CCOptional_CCSlice(slice);
+    }
     CC_ASYNC_HANDLE_ALLOC(h, 1);
     int err = 0;
     cc_chan_send(h->done, &err, sizeof(int));

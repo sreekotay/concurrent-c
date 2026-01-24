@@ -112,71 +112,11 @@ void cc_fiber_dump_timing(void) {
 void cc_nursery_dump_timing(void);
 
 /* ============================================================================
- * Spin-then-condvar wait primitive
+ * Spin-then-condvar constants
  * ============================================================================ */
 
-typedef struct {
-    pthread_mutex_t mu;
-    pthread_cond_t cv;
-    _Atomic int waiters;
-} spin_condvar;
-
-#define SPIN_CONDVAR_INIT { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0 }
-
-static inline void spin_condvar_init(spin_condvar* sc) {
-    pthread_mutex_init(&sc->mu, NULL);
-    pthread_cond_init(&sc->cv, NULL);
-    atomic_store(&sc->waiters, 0);
-}
-
-static inline void spin_condvar_destroy(spin_condvar* sc) {
-    pthread_mutex_destroy(&sc->mu);
-    pthread_cond_destroy(&sc->cv);
-}
-
-/* Spin-then-condvar wait: spin for a bit, then fall back to condvar */
 #define SPIN_FAST_ITERS 32
 #define SPIN_YIELD_ITERS 64
-
-static inline void spin_condvar_wait(spin_condvar* sc, _Atomic int* flag, int target) {
-    /* Fast path: spin with cpu_pause */
-    for (int i = 0; i < SPIN_FAST_ITERS; i++) {
-        if (atomic_load_explicit(flag, memory_order_acquire) == target) return;
-        cpu_pause();
-    }
-    
-    /* Medium path: spin with sched_yield */
-    for (int i = 0; i < SPIN_YIELD_ITERS; i++) {
-        if (atomic_load_explicit(flag, memory_order_acquire) == target) return;
-        sched_yield();
-    }
-    
-    /* Slow path: condvar wait */
-    atomic_fetch_add_explicit(&sc->waiters, 1, memory_order_relaxed);
-    pthread_mutex_lock(&sc->mu);
-    while (atomic_load_explicit(flag, memory_order_acquire) != target) {
-        pthread_cond_wait(&sc->cv, &sc->mu);
-    }
-    pthread_mutex_unlock(&sc->mu);
-    atomic_fetch_sub_explicit(&sc->waiters, 1, memory_order_relaxed);
-}
-
-/* Signal waiters if any are waiting on condvar */
-static inline void spin_condvar_signal(spin_condvar* sc) {
-    if (atomic_load_explicit(&sc->waiters, memory_order_relaxed) > 0) {
-        pthread_mutex_lock(&sc->mu);
-        pthread_cond_signal(&sc->cv);
-        pthread_mutex_unlock(&sc->mu);
-    }
-}
-
-static inline void spin_condvar_broadcast(spin_condvar* sc) {
-    if (atomic_load_explicit(&sc->waiters, memory_order_relaxed) > 0) {
-        pthread_mutex_lock(&sc->mu);
-        pthread_cond_broadcast(&sc->cv);
-        pthread_mutex_unlock(&sc->mu);
-    }
-}
 
 /* ============================================================================
  * Configuration
@@ -195,6 +135,7 @@ static inline void spin_condvar_broadcast(spin_condvar* sc) {
 #endif
 
 #define MAX_WORKERS 64
+#define CACHE_LINE_SIZE 64
 
 /* ============================================================================
  * Fiber State
@@ -209,6 +150,7 @@ typedef enum {
 } fiber_state;
 
 typedef struct fiber_task {
+    /* Hot path fields - accessed during execution */
     mco_coro* coro;           /* minicoro coroutine handle */
     void* (*fn)(void*);       /* User function */
     void* arg;                /* User argument */
@@ -216,6 +158,14 @@ typedef struct fiber_task {
     _Atomic int state;
     _Atomic int done;
     _Atomic int running_lock; /* Serialize resume/unpark */
+    
+    /* Per-fiber join synchronization */
+    _Atomic int join_waiters;           /* Count of threads/fibers waiting to join */
+    struct fiber_task* _Atomic join_waiter_fiber;  /* Single waiting fiber (common case) */
+    pthread_mutex_t join_mu;            /* Mutex for join condvar (thread waiters) */
+    pthread_cond_t join_cv;             /* Per-fiber condvar for thread waiters */
+    int join_cv_initialized;            /* Lazy init flag for condvar */
+    
     struct fiber_task* next;  /* For free list / queues */
 } fiber_task;
 
@@ -300,15 +250,17 @@ typedef struct {
     pthread_cond_t wake_cv;
     _Atomic size_t pending;
     
-    /* Global join condvar for waiters */
-    spin_condvar join_cv;
-    
-    /* Track worker states for smarter waking */
+    /* Track worker states for smarter waking - cache line padded to avoid false sharing */
     _Atomic size_t active;      /* Workers currently executing fibers */
-    _Atomic size_t sleeping;    /* Workers blocked on condvar */
-    _Atomic size_t spinning;    /* Workers actively polling (not sleeping yet) */
+    char _pad_active[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
     
-    /* Stats */
+    _Atomic size_t sleeping;    /* Workers blocked on condvar */
+    char _pad_sleeping[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
+    
+    _Atomic size_t spinning;    /* Workers actively polling (not sleeping yet) */
+    char _pad_spinning[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
+    
+    /* Stats - less hot, can share cache lines */
     _Atomic size_t parked;
     _Atomic size_t completed;
     _Atomic size_t coro_reused;
@@ -327,33 +279,63 @@ static inline int lq_push(local_queue* q, fiber_task* f) {
     size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
     size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
     if (tail - head >= LOCAL_QUEUE_SIZE) return -1;  /* Full */
-    atomic_store_explicit(&q->slots[tail % LOCAL_QUEUE_SIZE], f, memory_order_relaxed);
+    /* Use release on slot store to ensure closure contents are visible to consumer.
+     * The consumer uses acquire on the exchange, creating a release-acquire pair. */
+    atomic_store_explicit(&q->slots[tail % LOCAL_QUEUE_SIZE], f, memory_order_release);
     atomic_store_explicit(&q->tail, tail + 1, memory_order_release);
     return 0;
 }
 
-/* Fast local queue pop (single consumer - owner) */
+/* Fast local queue pop (owner only - but must handle concurrent stealers) 
+ * Uses atomic exchange to claim slot first, then try to advance head once.
+ * Limited retries to avoid infinite loop under pathological contention. */
 static inline fiber_task* lq_pop(local_queue* q) {
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    if (head >= tail) return NULL;  /* Empty */
-    fiber_task* f = atomic_load_explicit(&q->slots[head % LOCAL_QUEUE_SIZE], memory_order_relaxed);
-    atomic_store_explicit(&q->head, head + 1, memory_order_release);
-    return f;
+    for (int retry = 0; retry < 64; retry++) {
+        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+        if (head >= tail) return NULL;  /* Empty */
+        
+        size_t idx = head % LOCAL_QUEUE_SIZE;
+        
+        /* Atomically exchange slot with NULL to claim it */
+        fiber_task* f = atomic_exchange_explicit(&q->slots[idx], NULL, memory_order_acquire);
+        if (!f) {
+            /* Lost race with stealer - they cleared slot, try to help advance head */
+            atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
+                                                   memory_order_release, memory_order_relaxed);
+            continue;
+        }
+        
+        /* We got the task. Try to advance head once.
+         * If CAS fails, someone else advanced it for us - that's fine. */
+        atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
+                                               memory_order_release, memory_order_relaxed);
+        return f;
+    }
+    return NULL;  /* Too much contention, let caller try global queue */
 }
 
-/* Work stealing: steal half from another worker's queue */
+/* Work stealing: steal from another worker's queue.
+ * Uses atomic exchange to claim slot first, then CAS to advance head. */
 static inline fiber_task* lq_steal(local_queue* q) {
     size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
     size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
     if (head >= tail) return NULL;  /* Empty */
-    fiber_task* f = atomic_load_explicit(&q->slots[head % LOCAL_QUEUE_SIZE], memory_order_acquire);
-    if (!f) return NULL;
-    if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                               memory_order_release, memory_order_relaxed)) {
-        return f;
+    
+    size_t idx = head % LOCAL_QUEUE_SIZE;
+    
+    /* Atomically exchange slot with NULL to claim it */
+    fiber_task* f = atomic_exchange_explicit(&q->slots[idx], NULL, memory_order_acquire);
+    if (!f) return NULL;  /* Lost race */
+    
+    /* We got the task. Now try to advance head. If we fail, someone else advanced it. */
+    if (!atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
+                                                memory_order_release, memory_order_relaxed)) {
+        /* Lost CAS but we still have the task - another thread advanced head.
+         * This can happen if owner also exchanged slot (both got NULL except us).
+         * But since we got f != NULL, we're the winner. Just return it. */
     }
-    return NULL;  /* Lost race */
+    return f;
 }
 
 /* Dump scheduler state for debugging hangs */
@@ -401,24 +383,34 @@ static fiber_task* fiber_alloc(void) {
         if (atomic_compare_exchange_weak_explicit(&g_sched.free_list, &f, next,
                                                    memory_order_release,
                                                    memory_order_acquire)) {
-            /* Reuse pooled fiber - reset state but KEEP the coro */
+            /* Reuse pooled fiber - reset state but KEEP the coro and join_cv */
             f->fn = NULL;
             f->arg = NULL;
             f->result = NULL;
             atomic_store(&f->state, FIBER_CREATED);
             atomic_store(&f->done, 0);
             atomic_store(&f->running_lock, 0);
+            atomic_store(&f->join_waiters, 0);
+            atomic_store(&f->join_waiter_fiber, NULL);
             f->next = NULL;
-            /* f->coro is kept for reuse! */
+            /* f->coro and f->join_cv are kept for reuse! */
             return f;
         }
     }
-    return (fiber_task*)calloc(1, sizeof(fiber_task));
+    
+    /* Allocate new fiber */
+    fiber_task* nf = (fiber_task*)calloc(1, sizeof(fiber_task));
+    if (nf) {
+        nf->join_cv_initialized = 0;
+        atomic_store(&nf->join_waiters, 0);
+        atomic_store(&nf->join_waiter_fiber, NULL);
+    }
+    return nf;
 }
 
 static void fiber_free(fiber_task* f) {
     if (!f) return;
-    /* Keep the coro for pooling - don't destroy it! */
+    /* Keep the coro and join_cv for pooling - don't destroy them! */
     fiber_task* head;
     do {
         head = atomic_load_explicit(&g_sched.free_list, memory_order_relaxed);
@@ -426,6 +418,17 @@ static void fiber_free(fiber_task* f) {
     } while (!atomic_compare_exchange_weak_explicit(&g_sched.free_list, &head, f,
                                                      memory_order_release,
                                                      memory_order_relaxed));
+}
+
+/* Fully destroy a fiber (called during shutdown) */
+static void fiber_destroy(fiber_task* f) {
+    if (!f) return;
+    if (f->coro) mco_destroy(f->coro);
+    if (f->join_cv_initialized) {
+        pthread_mutex_destroy(&f->join_mu);
+        pthread_cond_destroy(&f->join_cv);
+    }
+    free(f);
 }
 
 /* ============================================================================
@@ -473,9 +476,25 @@ static void fiber_panic(const char* msg, fiber_task* f, mco_result res) {
  * Fiber Entry Point
  * ============================================================================ */
 
+/* TSan annotation to establish synchronization - tells TSan that this point
+ * synchronizes with a corresponding __tsan_release on the same address. */
+#if defined(__SANITIZE_THREAD__) || defined(__has_feature) && __has_feature(thread_sanitizer)
+extern void __tsan_acquire(void* addr);
+extern void __tsan_release(void* addr);
+#define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
+#define TSAN_RELEASE(addr) __tsan_release(addr)
+#else
+#define TSAN_ACQUIRE(addr) ((void)0)
+#define TSAN_RELEASE(addr) ((void)0)
+#endif
+
 static void fiber_entry(mco_coro* co) {
     fiber_task* f = (fiber_task*)mco_get_user_data(co);
     if (f && f->fn) {
+        /* Acquire fence + TSan annotation ensures all writes by spawner 
+         * (including closure captures) are visible before we execute. */
+        atomic_thread_fence(memory_order_acquire);
+        TSAN_ACQUIRE(f->arg);  /* Tell TSan: sync with release on same address */
         f->result = f->fn(f->arg);
     }
     atomic_store_explicit(&f->state, FIBER_DONE, memory_order_release);
@@ -483,8 +502,21 @@ static void fiber_entry(mco_coro* co) {
     atomic_fetch_sub_explicit(&g_sched.pending, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_sched.completed, 1, memory_order_relaxed);
     
-    /* Signal any joiners waiting on condvar */
-    spin_condvar_broadcast(&g_sched.join_cv);
+    /* Signal per-fiber joiners - targeted wakeup */
+    if (atomic_load_explicit(&f->join_waiters, memory_order_acquire) > 0) {
+        /* First, unpark any fiber waiter (common case for nested nurseries) */
+        fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
+        if (waiter) {
+            cc__fiber_unpark(waiter);
+        }
+        
+        /* Then signal thread waiters via condvar if initialized */
+        if (atomic_load_explicit((_Atomic int*)&f->join_cv_initialized, memory_order_acquire)) {
+            pthread_mutex_lock(&f->join_mu);
+            pthread_cond_broadcast(&f->join_cv);
+            pthread_mutex_unlock(&f->join_mu);
+        }
+    }
     
     /* Coroutine returns, will be cleaned up by caller (nursery) */
 }
@@ -674,7 +706,6 @@ int cc_fiber_sched_init(size_t num_workers) {
     atomic_store(&g_sched.running, 1);
     pthread_mutex_init(&g_sched.wake_mu, NULL);
     pthread_cond_init(&g_sched.wake_cv, NULL);
-    spin_condvar_init(&g_sched.join_cv);
     
     for (size_t i = 0; i < num_workers; i++) {
         pthread_create(&g_sched.workers[i], NULL, worker_main, (void*)i);
@@ -705,18 +736,16 @@ void cc_fiber_sched_shutdown(void) {
         pthread_join(g_sched.workers[i], NULL);
     }
     
-    /* Free pooled fibers (including their coros) */
+    /* Free pooled fibers (including their coros and join_cvs) */
     fiber_task* f = atomic_load(&g_sched.free_list);
     while (f) {
         fiber_task* next = f->next;
-        if (f->coro) mco_destroy(f->coro);
-        free(f);
+        fiber_destroy(f);
         f = next;
     }
     
     pthread_mutex_destroy(&g_sched.wake_mu);
     pthread_cond_destroy(&g_sched.wake_cv);
-    spin_condvar_destroy(&g_sched.join_cv);
     atomic_store(&g_initialized, 0);
 }
 
@@ -738,6 +767,9 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     f->fn = fn;
     f->arg = arg;
     atomic_store(&f->state, FIBER_READY);
+    
+    /* TSan release: establish synchronization with acquire in fiber_entry */
+    TSAN_RELEASE(arg);
     
     /* Reuse existing coro if available (pooling), otherwise create new */
     int reused = 0;
@@ -889,14 +921,60 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         sched_yield();
     }
     
-    /* Slow path: condvar wait */
-    atomic_fetch_add_explicit(&g_sched.join_cv.waiters, 1, memory_order_relaxed);
-    pthread_mutex_lock(&g_sched.join_cv.mu);
-    while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
-        pthread_cond_wait(&g_sched.join_cv.cv, &g_sched.join_cv.mu);
+    /* Register as waiter */
+    atomic_fetch_add_explicit(&f->join_waiters, 1, memory_order_acq_rel);
+    
+    /* Check again - fiber might have completed during registration */
+    if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+        atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
+        if (out_result) *out_result = f->result;
+        return 0;
     }
-    pthread_mutex_unlock(&g_sched.join_cv.mu);
-    atomic_fetch_sub_explicit(&g_sched.join_cv.waiters, 1, memory_order_relaxed);
+    
+    /* Slow path: choose strategy based on context */
+    fiber_task* current = tls_current_fiber;
+    
+    if (current && current->coro) {
+        /* We're inside a fiber - PARK instead of blocking the worker thread.
+         * This is critical for nested nurseries to avoid deadlock. */
+        
+        /* Store ourselves as the waiter fiber */
+        fiber_task* expected = NULL;
+        if (atomic_compare_exchange_strong_explicit(&f->join_waiter_fiber, &expected, current,
+                                                     memory_order_acq_rel, memory_order_acquire)) {
+            /* Successfully registered as fiber waiter - park until woken */
+            while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+                atomic_store_explicit(&current->state, FIBER_PARKED, memory_order_release);
+                atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
+                mco_yield(current->coro);
+                atomic_fetch_sub_explicit(&g_sched.parked, 1, memory_order_relaxed);
+                atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
+            }
+        } else {
+            /* Another fiber already waiting - fall back to spin-wait 
+             * (rare case, and condvar would deadlock) */
+            while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+                sched_yield();
+            }
+        }
+    } else {
+        /* Not in fiber context - use condvar (safe to block thread) */
+        
+        /* Lazy init condvar */
+        if (!f->join_cv_initialized) {
+            pthread_mutex_init(&f->join_mu, NULL);
+            pthread_cond_init(&f->join_cv, NULL);
+            f->join_cv_initialized = 1;
+        }
+        
+        pthread_mutex_lock(&f->join_mu);
+        while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+            pthread_cond_wait(&f->join_cv, &f->join_mu);
+        }
+        pthread_mutex_unlock(&f->join_mu);
+    }
+    
+    atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
     
     if (out_result) *out_result = f->result;
     return 0;

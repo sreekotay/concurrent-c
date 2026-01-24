@@ -52,11 +52,12 @@ int main(void) {
 
     int v = 0;
     int rc = 0;
-    @with_deadline(millis(20)) {
+    @with_deadline(millis(500)) {
         rc = cc_chan_recv(progress_ch, &v, sizeof(v));
     }
 
-    /* Expect timeout: sender cannot acquire lock to signal notify channel. */
+    /* Expect timeout: sender cannot acquire lock to signal notify channel.
+       500ms gives ample time for deadlock to establish even under heavy load. */
     if (rc != ETIMEDOUT) return 10;
 
     /* Cleanup: release deadlock by signaling notify channel. */

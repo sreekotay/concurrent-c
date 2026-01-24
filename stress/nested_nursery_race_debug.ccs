@@ -1,0 +1,62 @@
+/*
+ * Debug version of nested nursery race test
+ * Using function pointer to create nested nursery
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+cc_atomic_int g = 0;
+cc_atomic_int* gptr = &g;
+
+void* inner_task(void* arg) {
+    int iter = (int)(intptr_t)arg;
+    fprintf(stderr, "DEBUG: iter %d - inner fiber\n", iter);
+    fflush(stderr);
+    cc_atomic_fetch_add(gptr, 1);
+    return NULL;
+}
+
+void* outer_task(void* arg) {
+    int iter = (int)(intptr_t)arg;
+    fprintf(stderr, "DEBUG: iter %d - outer fiber start\n", iter);
+    fflush(stderr);
+    
+    /* Create inner nursery using C API */
+    CCNursery* inner = cc_nursery_create();
+    cc_nursery_spawn(inner, inner_task, (void*)(intptr_t)iter);
+    fprintf(stderr, "DEBUG: iter %d - inner spawned, waiting\n", iter);
+    fflush(stderr);
+    cc_nursery_wait(inner);
+    fprintf(stderr, "DEBUG: iter %d - inner done\n", iter);
+    fflush(stderr);
+    cc_nursery_free(inner);
+    
+    fprintf(stderr, "DEBUG: iter %d - outer fiber done\n", iter);
+    fflush(stderr);
+    return NULL;
+}
+
+int main(void) {
+    fprintf(stderr, "DEBUG: starting\n");
+    fflush(stderr);
+    
+    for (int i = 0; i < 10; i++) {
+        fprintf(stderr, "DEBUG: iter %d - outer nursery start\n", i);
+        fflush(stderr);
+        
+        CCNursery* outer = cc_nursery_create();
+        cc_nursery_spawn(outer, outer_task, (void*)(intptr_t)i);
+        fprintf(stderr, "DEBUG: iter %d - outer spawned, waiting\n", i);
+        fflush(stderr);
+        cc_nursery_wait(outer);
+        fprintf(stderr, "DEBUG: iter %d - outer done\n", i);
+        fflush(stderr);
+        cc_nursery_free(outer);
+        
+        fprintf(stderr, "DEBUG: iter %d - outer nursery done\n", i);
+        fflush(stderr);
+    }
+    
+    fprintf(stderr, "DEBUG: PASS (g=%d)\n", cc_atomic_load(&g));
+    return 0;
+}

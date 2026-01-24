@@ -1,0 +1,46 @@
+/*
+ * Stress test: tight spawn-join loop via nursery
+ * 
+ * Tests the race between:
+ * 1. Spawning a fiber
+ * 2. Fiber completing immediately
+ * 3. Nursery join racing with completion
+ * 
+ * The "immediate completion" scenario maximizes the race window.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 50000
+
+cc_atomic_int counter = 0;
+
+void* instant_task(void* arg) {
+    (void)arg;
+    cc_atomic_fetch_add(&counter, 1);
+    return NULL;
+}
+
+int main(void) {
+    printf("fiber_spawn_join_tight: %d iterations\n", ITERATIONS);
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, instant_task, NULL);
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        if ((iter + 1) % 10000 == 0) {
+            printf("  completed %d/%d (counter=%d)\n", iter + 1, ITERATIONS, cc_atomic_load(&counter));
+        }
+    }
+    
+    int c = cc_atomic_load(&counter);
+    if (c != ITERATIONS) {
+        fprintf(stderr, "FAIL: counter=%d, expected=%d\n", c, ITERATIONS);
+        return 1;
+    }
+    
+    printf("fiber_spawn_join_tight: PASS\n");
+    return 0;
+}

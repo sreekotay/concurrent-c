@@ -1,0 +1,65 @@
+/*
+ * Stress test: join initialization race
+ * 
+ * Tests the race between:
+ * 1. Target fiber completing
+ * 2. Multiple fibers trying to observe completion
+ * 
+ * Uses nested nurseries to create the race scenario.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 1000
+
+cc_atomic_int target_done = 0;
+cc_atomic_int observers_done = 0;
+
+void* target_task(void* arg) {
+    int iter = (int)(intptr_t)arg;
+    /* Brief computation */
+    for (volatile int i = 0; i < 10; i++) {}
+    cc_atomic_store(&target_done, 1);
+    return (void*)(intptr_t)(iter * 3);
+}
+
+void* observer_task(void* arg) {
+    (void)arg;
+    /* Spin until target is done */
+    while (!cc_atomic_load(&target_done)) {
+        for (volatile int i = 0; i < 5; i++) {}
+    }
+    cc_atomic_fetch_add(&observers_done, 1);
+    return NULL;
+}
+
+int main(void) {
+    printf("join_init_race: %d iterations\n", ITERATIONS);
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&target_done, 0);
+        cc_atomic_store(&observers_done, 0);
+        
+        /* Spawn target and 3 observers that race to see completion */
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, target_task, (void*)(intptr_t)iter);
+        cc_nursery_spawn(n, observer_task, NULL);
+        cc_nursery_spawn(n, observer_task, NULL);
+        cc_nursery_spawn(n, observer_task, NULL);
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        int obs = cc_atomic_load(&observers_done);
+        if (obs != 3) {
+            fprintf(stderr, "FAIL: iter %d: only %d/3 observers done\n", iter, obs);
+            return 1;
+        }
+        
+        if ((iter + 1) % 200 == 0) {
+            printf("  completed %d/%d\n", iter + 1, ITERATIONS);
+        }
+    }
+    
+    printf("join_init_race: PASS\n");
+    return 0;
+}
