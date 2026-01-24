@@ -26,6 +26,8 @@
 #include <sched.h>
 #include <time.h>
 
+#include "wake_primitive.h"
+
 /* ============================================================================
  * CPU pause for spin loops
  * ============================================================================ */
@@ -113,10 +115,40 @@ void cc_nursery_dump_timing(void);
 
 /* ============================================================================
  * Spin-then-condvar constants
+ * 
+ * Tuned for high-throughput channel operations. More spinning reduces condvar
+ * syscall overhead at the cost of CPU usage when idle. Override via env vars:
+ *   CC_SPIN_FAST_ITERS=512   (default: 256)
+ *   CC_SPIN_YIELD_ITERS=32   (default: 16)
  * ============================================================================ */
 
-#define SPIN_FAST_ITERS 64
-#define SPIN_YIELD_ITERS 4
+#define SPIN_FAST_ITERS_DEFAULT 256
+#define SPIN_YIELD_ITERS_DEFAULT 16
+
+static int g_spin_fast_iters = -1;   /* -1 = not initialized */
+static int g_spin_yield_iters = -1;
+
+static int get_spin_fast_iters(void) {
+    if (g_spin_fast_iters < 0) {
+        const char* env = getenv("CC_SPIN_FAST_ITERS");
+        g_spin_fast_iters = env ? atoi(env) : SPIN_FAST_ITERS_DEFAULT;
+        if (g_spin_fast_iters <= 0) g_spin_fast_iters = SPIN_FAST_ITERS_DEFAULT;
+    }
+    return g_spin_fast_iters;
+}
+
+static int get_spin_yield_iters(void) {
+    if (g_spin_yield_iters < 0) {
+        const char* env = getenv("CC_SPIN_YIELD_ITERS");
+        g_spin_yield_iters = env ? atoi(env) : SPIN_YIELD_ITERS_DEFAULT;
+        if (g_spin_yield_iters <= 0) g_spin_yield_iters = SPIN_YIELD_ITERS_DEFAULT;
+    }
+    return g_spin_yield_iters;
+}
+
+/* Backward compatibility macros - used in hot paths, cached after first call */
+#define SPIN_FAST_ITERS get_spin_fast_iters()
+#define SPIN_YIELD_ITERS get_spin_yield_iters()
 
 /* ============================================================================
  * Configuration
@@ -255,8 +287,7 @@ typedef struct {
     local_queue local_queues[MAX_WORKERS];  /* Per-worker local queues */
     fiber_task* _Atomic free_list;
     
-    pthread_mutex_t wake_mu;
-    pthread_cond_t wake_cv;
+    wake_primitive wake_prim;       /* Fast worker wake (futex/ulock instead of condvar) */
     _Atomic size_t pending;
     
     /* Track worker states for smarter waking - cache line padded to avoid false sharing */
@@ -646,15 +677,15 @@ static void* worker_main(void* arg) {
             continue;
         }
         
-        /* Sleep on condvar */
-        pthread_mutex_lock(&g_sched.wake_mu);
+        /* Sleep using fast wake primitive (futex/ulock instead of condvar) */
         atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
+        uint32_t wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
         while (atomic_load_explicit(&g_sched.pending, memory_order_relaxed) == 0 &&
                atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
-            pthread_cond_wait(&g_sched.wake_cv, &g_sched.wake_mu);
+            wake_primitive_wait(&g_sched.wake_prim, wake_val);
+            wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
         }
         atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
-        pthread_mutex_unlock(&g_sched.wake_mu);
         
         next_iteration:;
     }
@@ -713,8 +744,7 @@ int cc_fiber_sched_init(size_t num_workers) {
     memset(&g_sched, 0, sizeof(g_sched));
     g_sched.num_workers = num_workers;
     atomic_store(&g_sched.running, 1);
-    pthread_mutex_init(&g_sched.wake_mu, NULL);
-    pthread_cond_init(&g_sched.wake_cv, NULL);
+    wake_primitive_init(&g_sched.wake_prim);
     
     for (size_t i = 0; i < num_workers; i++) {
         pthread_create(&g_sched.workers[i], NULL, worker_main, (void*)i);
@@ -737,9 +767,7 @@ void cc_fiber_sched_shutdown(void) {
     }
     
     atomic_store_explicit(&g_sched.running, 0, memory_order_release);
-    pthread_mutex_lock(&g_sched.wake_mu);
-    pthread_cond_broadcast(&g_sched.wake_cv);
-    pthread_mutex_unlock(&g_sched.wake_mu);
+    wake_primitive_wake_all(&g_sched.wake_prim);
     
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         pthread_join(g_sched.workers[i], NULL);
@@ -753,8 +781,7 @@ void cc_fiber_sched_shutdown(void) {
         f = next;
     }
     
-    pthread_mutex_destroy(&g_sched.wake_mu);
-    pthread_cond_destroy(&g_sched.wake_cv);
+    wake_primitive_destroy(&g_sched.wake_prim);
     atomic_store(&g_initialized, 0);
 }
 
@@ -869,9 +896,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
         if (spinning == 0) {
             size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
             if (sleeping > 0) {
-                pthread_mutex_lock(&g_sched.wake_mu);
-                pthread_cond_signal(&g_sched.wake_cv);
-                pthread_mutex_unlock(&g_sched.wake_mu);
+                wake_primitive_wake_one(&g_sched.wake_prim);
                 if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
             } else {
                 if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
@@ -1052,9 +1077,7 @@ void cc__fiber_unpark(void* fiber_ptr) {
     /* Wake a worker if any are sleeping - unparked fibers need immediate attention */
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     if (sleeping > 0) {
-        pthread_mutex_lock(&g_sched.wake_mu);
-        pthread_cond_signal(&g_sched.wake_cv);
-        pthread_mutex_unlock(&g_sched.wake_mu);
+        wake_primitive_wake_one(&g_sched.wake_prim);
     }
 }
 

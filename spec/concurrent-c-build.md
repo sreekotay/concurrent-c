@@ -24,6 +24,8 @@ This matches C's own philosophy: simple things are simple (`int x = 5;`), comple
 - `ccc --emit-c-only ...` — stop after emitting C.
 - `ccc --compile ...` — emit C and compile to object; no link.
 - `ccc --link ...` — emit C, compile, link (default).
+- `--print-cflags` — print the required `-I` flags for Concurrent-C headers.
+- `--print-libs` — print the path to the runtime source and required linker flags.
 - `ccc build ...` — integrates `build.cc` (consts + targets).
 
 Build steps:
@@ -362,6 +364,7 @@ See `<cc_atomic.cch>` documentation in the stdlib spec for full API.
 
 ## Compatibility Guidance
 - For Make/CMake integration: use `ccc --emit-c-only` to generate C and let the existing build drive compile/link, or `ccc --compile` to produce objects.
+- Use `ccc --print-cflags` and `ccc --print-libs` to get the necessary compiler and linker flags for your build system.
 - Keep generated C stable to aid caching and diagnostics.
 - Support `--verbose` to print all invoked commands.
 

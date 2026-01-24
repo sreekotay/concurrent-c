@@ -417,6 +417,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --emit-c-only       Stop after emitting C (output defaults to out/<stem>.c)\n");
     fprintf(stderr, "  --compile           Emit C and compile to object (output defaults to out/<stem>.o)\n");
     fprintf(stderr, "  --link              Emit C, compile, and link (default; binary defaults to out/<stem>)\n");
+    fprintf(stderr, "  --print-cflags      Print compiler flags for Concurrent-C headers\n");
+    fprintf(stderr, "  --print-libs        Print linker flags and runtime source for Concurrent-C\n");
     fprintf(stderr, "Build integration:\n");
     fprintf(stderr, "  -DNAME[=VALUE]      Define comptime const (VALUE defaults to 1, build mode only)\n");
     fprintf(stderr, "  --build-file PATH   Use explicit build.cc path (overrides discovery)\n");
@@ -2262,7 +2264,6 @@ static int run_build_mode(int argc, char** argv) {
     int saw_o = 0;
     const char* obj_out = NULL;
     const char* build_override = NULL;
-    const char* out_stem_override = NULL;
     const char* cc_bin = NULL;
     const char* cc_flags = NULL;
     const char* ld_flags = NULL;
@@ -3425,6 +3426,14 @@ int main(int argc, char **argv) {
     cc_init_paths(argv[0]);
     if (argc >= 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
         usage(argv[0]);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "--print-cflags") == 0) {
+        printf("-I%s\n", g_cc_include);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "--print-libs") == 0) {
+        printf("%s -lpthread\n", g_cc_runtime_c);
         return 0;
     }
     if (argc >= 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {

@@ -107,27 +107,55 @@ for bench_spec in "${BENCHMARKS[@]}"; do
         continue
     fi
 
-    # Parse results - we need to compare corresponding metrics
-    # For now, just compare the first metric from each
-    cc_line=$(echo "$cc_results" | head -1)
-    go_line=$(echo "$go_results" | head -1)
-
-    cc_value=$(extract_number "$cc_line")
-    go_value=$(extract_number "$go_line")
-    unit=$(extract_unit "$cc_line")
-
-    if [ -n "$cc_value" ] && [ -n "$go_value" ] && [ "$go_value" -gt 0 ]; then
-        ratio=$(echo "scale=2; $cc_value / $go_value" | bc -l 2>/dev/null || echo "0")
-        ratio_str=$(printf "%.2f" "$ratio")
+    # For channel_throughput, show all three metrics
+    if [ "$name" = "channel_throughput" ]; then
+        # Get metric names from output
+        metrics=("single-thread" "buffered" "unbuffered")
+        for metric in "${metrics[@]}"; do
+            cc_line=$(echo "$cc_results" | grep "$metric" | head -1)
+            go_line=$(echo "$go_results" | grep "$metric" | head -1)
+            
+            if [ -n "$cc_line" ] && [ -n "$go_line" ]; then
+                cc_value=$(extract_number "$cc_line")
+                go_value=$(extract_number "$go_line")
+                unit=$(extract_unit "$cc_line")
+                
+                if [ -n "$cc_value" ] && [ -n "$go_value" ] && [ "$go_value" -gt 0 ]; then
+                    ratio=$(echo "scale=2; $cc_value / $go_value" | bc -l 2>/dev/null || echo "0")
+                    ratio_str=$(printf "%.2f" "$ratio")
+                else
+                    ratio_str="N/A"
+                fi
+                
+                cc_formatted=$(format_number "$cc_value")
+                go_formatted=$(format_number "$go_value")
+                
+                printf "  %-18s ${GREEN}%-18s ${BLUE}%-18s ${YELLOW}%-8s${NC}\n" \
+                       "$metric" "${cc_formatted} $unit" "${go_formatted} $unit" "$ratio_str"
+            fi
+        done
     else
-        ratio_str="N/A"
+        # For other benchmarks, just compare the first metric
+        cc_line=$(echo "$cc_results" | head -1)
+        go_line=$(echo "$go_results" | head -1)
+
+        cc_value=$(extract_number "$cc_line")
+        go_value=$(extract_number "$go_line")
+        unit=$(extract_unit "$cc_line")
+
+        if [ -n "$cc_value" ] && [ -n "$go_value" ] && [ "$go_value" -gt 0 ]; then
+            ratio=$(echo "scale=2; $cc_value / $go_value" | bc -l 2>/dev/null || echo "0")
+            ratio_str=$(printf "%.2f" "$ratio")
+        else
+            ratio_str="N/A"
+        fi
+
+        cc_formatted=$(format_number "$cc_value")
+        go_formatted=$(format_number "$go_value")
+
+        printf "%-20s ${GREEN}%-18s ${BLUE}%-18s ${YELLOW}%-8s${NC}\n" \
+               "$name" "${cc_formatted} $unit" "${go_formatted} $unit" "$ratio_str"
     fi
-
-    cc_formatted=$(format_number "$cc_value")
-    go_formatted=$(format_number "$go_value")
-
-    printf "%-20s ${GREEN}%-18s ${BLUE}%-18s ${YELLOW}%-8s${NC}\n" \
-           "$name" "${cc_formatted} $unit" "${go_formatted} $unit" "$ratio_str"
 done
 
 echo ""
