@@ -112,6 +112,9 @@ void cc_chan_free(CCChan* ch);
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size);
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
 
+// Batched send/recv: sends or receives `count` elements from/to contiguous buffers.
+// Returns 0 on success or errno-style error.
+
 // Non-blocking: return EAGAIN if would block.
 int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size);
 int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size);

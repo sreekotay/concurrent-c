@@ -51,9 +51,11 @@ typedef struct {
     _Atomic uint64_t send_cycles;
     _Atomic uint64_t send_lock_cycles;
     _Atomic uint64_t send_enqueue_cycles;
+    _Atomic uint64_t send_wake_cycles;
     _Atomic uint64_t recv_cycles;
     _Atomic uint64_t recv_lock_cycles;
     _Atomic uint64_t recv_dequeue_cycles;
+    _Atomic uint64_t recv_wake_cycles;
     _Atomic size_t send_count;
     _Atomic size_t recv_count;
 } channel_timing;
@@ -86,19 +88,25 @@ static void channel_timing_dump(void) {
         uint64_t total = atomic_load_explicit(&g_channel_timing.send_cycles, memory_order_relaxed);
         uint64_t lock = atomic_load_explicit(&g_channel_timing.send_lock_cycles, memory_order_relaxed);
         uint64_t enqueue = atomic_load_explicit(&g_channel_timing.send_enqueue_cycles, memory_order_relaxed);
+        uint64_t wake = atomic_load_explicit(&g_channel_timing.send_wake_cycles, memory_order_relaxed);
         fprintf(stderr, "  send: total=%8.1f cycles (%zu ops)\n", (double)total / send, send);
         fprintf(stderr, "    lock=%8.1f cycles/op (%5.1f%%) enqueue=%8.1f cycles/op (%5.1f%%)\n",
                 (double)lock / send, total ? 100.0 * lock / total : 0.0,
                 (double)enqueue / send, total ? 100.0 * enqueue / total : 0.0);
+        fprintf(stderr, "    wake=%8.1f cycles/op (%5.1f%%)\n",
+                (double)wake / send, total ? 100.0 * wake / total : 0.0);
     }
     if (recv) {
         uint64_t total = atomic_load_explicit(&g_channel_timing.recv_cycles, memory_order_relaxed);
         uint64_t lock = atomic_load_explicit(&g_channel_timing.recv_lock_cycles, memory_order_relaxed);
         uint64_t dequeue = atomic_load_explicit(&g_channel_timing.recv_dequeue_cycles, memory_order_relaxed);
+        uint64_t wake = atomic_load_explicit(&g_channel_timing.recv_wake_cycles, memory_order_relaxed);
         fprintf(stderr, "  recv: total=%8.1f cycles (%zu ops)\n", (double)total / recv, recv);
         fprintf(stderr, "    lock=%8.1f cycles/op (%5.1f%%) dequeue=%8.1f cycles/op (%5.1f%%)\n",
                 (double)lock / recv, total ? 100.0 * lock / total : 0.0,
                 (double)dequeue / recv, total ? 100.0 * dequeue / total : 0.0);
+        fprintf(stderr, "    wake=%8.1f cycles/op (%5.1f%%)\n",
+                (double)wake / recv, total ? 100.0 * wake / total : 0.0);
     }
     fprintf(stderr, "======================\n\n");
 }
@@ -113,17 +121,19 @@ static int channel_timing_enabled(void) {
     return g_channel_timing_enabled;
 }
 
-static inline void channel_timing_record_send(uint64_t start, uint64_t lock, uint64_t enqueue, uint64_t end) {
+static inline void channel_timing_record_send(uint64_t start, uint64_t lock, uint64_t enqueue, uint64_t wake, uint64_t end) {
     atomic_fetch_add_explicit(&g_channel_timing.send_cycles, end - start, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_channel_timing.send_lock_cycles, lock - start, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_channel_timing.send_enqueue_cycles, enqueue - lock, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.send_wake_cycles, end - wake, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_channel_timing.send_count, 1, memory_order_relaxed);
 }
 
-static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uint64_t dequeue, uint64_t end) {
+static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uint64_t dequeue, uint64_t wake, uint64_t end) {
     atomic_fetch_add_explicit(&g_channel_timing.recv_cycles, end - start, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_channel_timing.recv_lock_cycles, lock - start, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_channel_timing.recv_dequeue_cycles, dequeue - lock, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.recv_wake_cycles, end - wake, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_channel_timing.recv_count, 1, memory_order_relaxed);
 }
 
@@ -298,6 +308,10 @@ struct CCChan {
     cc__fiber_wait_node* recv_waiters_tail;
 };
 
+static inline void cc_chan_lock(CCChan* ch) {
+    pthread_mutex_lock(&ch->mu);
+}
+
 /* ============================================================================
  * Fiber Wait Queue Helpers
  * ============================================================================ */
@@ -391,7 +405,7 @@ static void cc__chan_wake_all_waiters(CCChan* ch) {
 /* Called by nursery.c when registering `closing(ch)` (same TU). */
 void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner) {
     if (!ch) return;
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     if (!ch->autoclose_owner) ch->autoclose_owner = owner;
     ch->warned_autoclose_block = 0;
     pthread_mutex_unlock(&ch->mu);
@@ -669,10 +683,50 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     return 0;
 }
 
+static inline void channel_store_slot(void* slot, const void* value, size_t size) {
+    switch (size) {
+        case 1:
+            *(uint8_t*)slot = *(const uint8_t*)value;
+            break;
+        case 2:
+            *(uint16_t*)slot = *(const uint16_t*)value;
+            break;
+        case 4:
+            *(uint32_t*)slot = *(const uint32_t*)value;
+            break;
+        case 8:
+            *(uint64_t*)slot = *(const uint64_t*)value;
+            break;
+        default:
+            memcpy(slot, value, size);
+            break;
+    }
+}
+
+static inline void channel_load_slot(const void* slot, void* out_value, size_t size) {
+    switch (size) {
+        case 1:
+            *(uint8_t*)out_value = *(const uint8_t*)slot;
+            break;
+        case 2:
+            *(uint16_t*)out_value = *(const uint16_t*)slot;
+            break;
+        case 4:
+            *(uint32_t*)out_value = *(const uint32_t*)slot;
+            break;
+        case 8:
+            *(uint64_t*)out_value = *(const uint64_t*)slot;
+            break;
+        default:
+            memcpy(out_value, slot, size);
+            break;
+    }
+}
+
 static void cc_chan_enqueue(CCChan* ch, const void* value) {
     if (ch->cap == 0) {
         /* Unbuffered: always signal - rendezvous has complex handshake timing */
-        memcpy(ch->buf, value, ch->elem_size);
+        channel_store_slot(ch->buf, value, ch->elem_size);
         ch->rv_has_value = 1;
         pthread_cond_signal(&ch->not_empty);
         cc__chan_wake_one_recv_waiter(ch);
@@ -681,7 +735,7 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
     }
     /* Buffered: only signal when waiters exist */
     void *slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
-    memcpy(slot, value, ch->elem_size);
+    channel_store_slot(slot, value, ch->elem_size);
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->count++;
     if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
@@ -692,7 +746,7 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
 static void cc_chan_dequeue(CCChan* ch, void* out_value) {
     if (ch->cap == 0) {
         /* Unbuffered: always signal - rendezvous has complex handshake timing */
-        memcpy(out_value, ch->buf, ch->elem_size);
+        channel_load_slot(ch->buf, out_value, ch->elem_size);
         ch->rv_has_value = 0;
         pthread_cond_broadcast(&ch->not_full);
         cc__chan_wake_one_send_waiter(ch);
@@ -701,7 +755,7 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
     }
     /* Buffered: only signal when waiters exist */
     void *slot = (uint8_t*)ch->buf + ch->head * ch->elem_size;
-    memcpy(out_value, slot, ch->elem_size);
+    channel_load_slot(slot, out_value, ch->elem_size);
     ch->head = (ch->head + 1) % ch->cap;
     ch->count--;
     if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
@@ -732,7 +786,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     uint64_t t0 = timing ? channel_rdtsc() : 0;
     uint64_t t_lock = 0;
     uint64_t t_enqueue = 0;
-    pthread_mutex_lock(&ch->mu);
+    uint64_t t_wake = 0;
+    cc_chan_lock(ch);
+    if (timing) t_lock = channel_rdtsc();
     if (timing) t_lock = channel_rdtsc();
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -777,10 +833,11 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         }
         cc_deadlock_exit_blocking();
         pthread_mutex_unlock(&ch->mu);
+        if (timing) t_wake = channel_rdtsc();
         wake_batch_flush();  /* Flush any pending wakes */
         if (timing && err == 0) {
             uint64_t done = channel_rdtsc();
-            channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, done);
+            channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, t_wake ? t_wake : done, done);
         }
         return ch->closed ? EPIPE : 0;
     }
@@ -791,10 +848,11 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     cc_chan_enqueue(ch, value);
     if (timing) t_enqueue = channel_rdtsc();
     pthread_mutex_unlock(&ch->mu);
+    if (timing) t_wake = channel_rdtsc();
     wake_batch_flush();  /* Flush any pending fiber wakes */
     if (timing && err == 0) {
         uint64_t done = channel_rdtsc();
-        channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, done);
+        channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, t_wake ? t_wake : done, done);
     }
     return 0;
 }
@@ -809,6 +867,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     uint64_t t0 = timing ? channel_rdtsc() : 0;
     uint64_t t_lock = 0;
     uint64_t t_dequeue = 0;
+    uint64_t t_wake = 0;
     pthread_mutex_lock(&ch->mu);
     if (timing) t_lock = channel_rdtsc();
     int err = cc_chan_ensure_buf(ch, value_size);
@@ -819,13 +878,15 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (timing) t_dequeue = channel_rdtsc();
     if (ch->cap == 0) pthread_cond_broadcast(&ch->not_full);  /* Unbuffered: always signal */
     pthread_mutex_unlock(&ch->mu);
+    if (timing) t_wake = channel_rdtsc();
     wake_batch_flush();  /* Flush any pending fiber wakes */
     if (timing && err == 0) {
         uint64_t done = channel_rdtsc();
-        channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, done);
+        channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
     }
     return 0;
 }
+
 
 int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     if (!ch || !value || value_size == 0) return EINVAL;
