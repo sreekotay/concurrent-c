@@ -21,11 +21,13 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <stdint.h>
 
 /* ============================================================================
  * Fiber-Aware Blocking Infrastructure
@@ -40,8 +42,93 @@ extern __thread CCNursery* cc__tls_current_nursery;
 __thread CCDeadline* cc__tls_current_deadline = NULL;
 
 /* ============================================================================
+ * Channel timing instrumentation
+ * Enables CC_CHANNEL_TIMING=1 to report send/recv lock/enqueue/dequeue costs.
+ * ============================================================================
+ */
+
+typedef struct {
+    _Atomic uint64_t send_cycles;
+    _Atomic uint64_t send_lock_cycles;
+    _Atomic uint64_t send_enqueue_cycles;
+    _Atomic uint64_t recv_cycles;
+    _Atomic uint64_t recv_lock_cycles;
+    _Atomic uint64_t recv_dequeue_cycles;
+    _Atomic size_t send_count;
+    _Atomic size_t recv_count;
+} channel_timing;
+
+static channel_timing g_channel_timing = {0};
+static int g_channel_timing_enabled = -1;
+
+static inline uint64_t channel_rdtsc(void) {
+    #if defined(__x86_64__) || defined(_M_X64)
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+    #elif defined(__aarch64__) || defined(__arm64__)
+    uint64_t val;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+    #else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    #endif
+}
+
+static void channel_timing_dump(void) {
+    size_t send = atomic_load_explicit(&g_channel_timing.send_count, memory_order_relaxed);
+    size_t recv = atomic_load_explicit(&g_channel_timing.recv_count, memory_order_relaxed);
+    if (send == 0 && recv == 0) return;
+    fprintf(stderr, "\n=== CHANNEL TIMING ===\n");
+    if (send) {
+        uint64_t total = atomic_load_explicit(&g_channel_timing.send_cycles, memory_order_relaxed);
+        uint64_t lock = atomic_load_explicit(&g_channel_timing.send_lock_cycles, memory_order_relaxed);
+        uint64_t enqueue = atomic_load_explicit(&g_channel_timing.send_enqueue_cycles, memory_order_relaxed);
+        fprintf(stderr, "  send: total=%8.1f cycles (%zu ops)\n", (double)total / send, send);
+        fprintf(stderr, "    lock=%8.1f cycles/op (%5.1f%%) enqueue=%8.1f cycles/op (%5.1f%%)\n",
+                (double)lock / send, total ? 100.0 * lock / total : 0.0,
+                (double)enqueue / send, total ? 100.0 * enqueue / total : 0.0);
+    }
+    if (recv) {
+        uint64_t total = atomic_load_explicit(&g_channel_timing.recv_cycles, memory_order_relaxed);
+        uint64_t lock = atomic_load_explicit(&g_channel_timing.recv_lock_cycles, memory_order_relaxed);
+        uint64_t dequeue = atomic_load_explicit(&g_channel_timing.recv_dequeue_cycles, memory_order_relaxed);
+        fprintf(stderr, "  recv: total=%8.1f cycles (%zu ops)\n", (double)total / recv, recv);
+        fprintf(stderr, "    lock=%8.1f cycles/op (%5.1f%%) dequeue=%8.1f cycles/op (%5.1f%%)\n",
+                (double)lock / recv, total ? 100.0 * lock / total : 0.0,
+                (double)dequeue / recv, total ? 100.0 * dequeue / total : 0.0);
+    }
+    fprintf(stderr, "======================\n\n");
+}
+
+static int channel_timing_enabled(void) {
+    if (g_channel_timing_enabled < 0) {
+        g_channel_timing_enabled = getenv("CC_CHANNEL_TIMING") ? 1 : 0;
+        if (g_channel_timing_enabled) {
+            atexit(channel_timing_dump);
+        }
+    }
+    return g_channel_timing_enabled;
+}
+
+static inline void channel_timing_record_send(uint64_t start, uint64_t lock, uint64_t enqueue, uint64_t end) {
+    atomic_fetch_add_explicit(&g_channel_timing.send_cycles, end - start, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.send_lock_cycles, lock - start, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.send_enqueue_cycles, enqueue - lock, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.send_count, 1, memory_order_relaxed);
+}
+
+static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uint64_t dequeue, uint64_t end) {
+    atomic_fetch_add_explicit(&g_channel_timing.recv_cycles, end - start, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.recv_lock_cycles, lock - start, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.recv_dequeue_cycles, dequeue - lock, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_channel_timing.recv_count, 1, memory_order_relaxed);
+}
+
+/* ============================================================================
  * Batch Wake Operations
- * Accumulate fiber wakes and flush them together to amortize scheduler overhead
  * ============================================================================ */
 
 #define WAKE_BATCH_SIZE 16
@@ -641,7 +728,12 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (cc__tls_current_deadline) {
         return cc_chan_deadline_send(ch, value, value_size, cc__tls_current_deadline);
     }
+    int timing = channel_timing_enabled();
+    uint64_t t0 = timing ? channel_rdtsc() : 0;
+    uint64_t t_lock = 0;
+    uint64_t t_enqueue = 0;
     pthread_mutex_lock(&ch->mu);
+    if (timing) t_lock = channel_rdtsc();
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
@@ -686,6 +778,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         cc_deadlock_exit_blocking();
         pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();  /* Flush any pending wakes */
+        if (timing && err == 0) {
+            uint64_t done = channel_rdtsc();
+            channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, done);
+        }
         return ch->closed ? EPIPE : 0;
     }
     if (ch->count == ch->cap) {
@@ -693,8 +789,13 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     }
     cc_chan_enqueue(ch, value);
+    if (timing) t_enqueue = channel_rdtsc();
     pthread_mutex_unlock(&ch->mu);
     wake_batch_flush();  /* Flush any pending fiber wakes */
+    if (timing && err == 0) {
+        uint64_t done = channel_rdtsc();
+        channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, done);
+    }
     return 0;
 }
 
@@ -704,15 +805,25 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (cc__tls_current_deadline) {
         return cc_chan_deadline_recv(ch, out_value, value_size, cc__tls_current_deadline);
     }
+    int timing = channel_timing_enabled();
+    uint64_t t0 = timing ? channel_rdtsc() : 0;
+    uint64_t t_lock = 0;
+    uint64_t t_dequeue = 0;
     pthread_mutex_lock(&ch->mu);
+    if (timing) t_lock = channel_rdtsc();
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     err = cc_chan_wait_empty(ch, NULL);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     cc_chan_dequeue(ch, out_value);
+    if (timing) t_dequeue = channel_rdtsc();
     if (ch->cap == 0) pthread_cond_broadcast(&ch->not_full);  /* Unbuffered: always signal */
     pthread_mutex_unlock(&ch->mu);
     wake_batch_flush();  /* Flush any pending fiber wakes */
+    if (timing && err == 0) {
+        uint64_t done = channel_rdtsc();
+        channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, done);
+    }
     return 0;
 }
 

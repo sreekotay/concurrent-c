@@ -192,6 +192,59 @@ CCResultStatusIoError cc_process_try_wait(CCProcess* proc) {
     return cc_ok_CCResultStatusIoError(status);
 }
 
+CCResultStatusIoError cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms) {
+    if (!proc || proc->pid <= 0) {
+        return cc_err_CCResultStatusIoError(cc_io_from_errno(EINVAL));
+    }
+    if (timeout_ms < 0) {
+        return cc_process_wait(proc);
+    }
+    if (timeout_ms == 0) {
+        return cc_process_try_wait(proc);
+    }
+
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    for (;;) {
+        int wstatus;
+        pid_t result = waitpid(proc->pid, &wstatus, WNOHANG);
+        if (result < 0) {
+            return cc_err_CCResultStatusIoError(cc_io_from_errno(errno));
+        }
+        if (result > 0) {
+            CCProcessStatus status = {0};
+            if (WIFEXITED(wstatus)) {
+                status.exited = true;
+                status.exit_code = WEXITSTATUS(wstatus);
+            } else if (WIFSIGNALED(wstatus)) {
+                status.signaled = true;
+                status.exit_code = WTERMSIG(wstatus);
+            }
+            proc->pid = -1;
+            return cc_ok_CCResultStatusIoError(status);
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t elapsed_ms = (int64_t)(now.tv_sec - start.tv_sec) * 1000LL +
+                             (int64_t)(now.tv_nsec - start.tv_nsec) / 1000000LL;
+        if (elapsed_ms >= timeout_ms) {
+            return cc_err_CCResultStatusIoError(cc_io_from_errno(ETIMEDOUT));
+        }
+
+        struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 1000000L};
+        nanosleep(&sleep_ts, NULL);
+    }
+}
+
+CCResultStatusIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec) {
+    if (timeout_sec < 0) {
+        return cc_process_wait(proc);
+    }
+    return cc_process_wait_timeout_ms(proc, (int64_t)timeout_sec * 1000LL);
+}
+
 CCResultBoolIoError cc_process_kill(CCProcess* proc, int sig) {
     if (!proc || proc->pid <= 0) {
         return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
@@ -365,6 +418,43 @@ CCResultStatusIoError cc_process_try_wait(CCProcess* proc) {
     proc->pid = 0;
 
     return cc_ok_CCResultStatusIoError(status);
+}
+
+CCResultStatusIoError cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms) {
+    if (!proc || !proc->handle) {
+        return cc_err_CCResultStatusIoError(cc_io_from_errno(EINVAL));
+    }
+    if (timeout_ms < 0) {
+        return cc_process_wait(proc);
+    }
+    DWORD wait_ms = (timeout_ms > 0) ? (DWORD)timeout_ms : 0;
+    DWORD result = WaitForSingleObject(proc->handle, wait_ms);
+    if (result == WAIT_TIMEOUT) {
+        return cc_err_CCResultStatusIoError(cc_io_from_errno(ETIMEDOUT));
+    }
+    if (result != WAIT_OBJECT_0) {
+        CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
+        return cc_err_CCResultStatusIoError(e);
+    }
+
+    CCProcessStatus status = {0};
+    DWORD exit_code;
+    if (GetExitCodeProcess(proc->handle, &exit_code)) {
+        status.exited = true;
+        status.exit_code = (int)exit_code;
+    }
+
+    CloseHandle(proc->handle);
+    proc->handle = NULL;
+    proc->pid = 0;
+    return cc_ok_CCResultStatusIoError(status);
+}
+
+CCResultStatusIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec) {
+    if (timeout_sec < 0) {
+        return cc_process_wait(proc);
+    }
+    return cc_process_wait_timeout_ms(proc, (int64_t)timeout_sec * 1000LL);
 }
 
 CCResultBoolIoError cc_process_kill(CCProcess* proc, int sig) {

@@ -70,9 +70,21 @@ Output paths use basename only, so files with the same name in different directo
 
 This flat naming is intentional for simplicity in single-file workflows. Multi-file projects should use `build.cc` for explicit control.
 
+`ccc` automatically detects when multiple inputs share a basename and will widen the stem (by incorporating directory segments) so `out/` and `bin/` files no longer overwrite one another.  For finer control or to impose a custom identity, pass `--out-stem NAME`.
+
+### Output naming customization
+Automated builds can still conflict when legacy trees contain repeated basenames. Use `--out-stem NAME` to override the stem used for the generated `out/<stem>.*` and `bin/<stem>` outputs.
+
+```bash
+./cc/bin/ccc --out-stem examples_main build examples/main.ccs
+```
+
+now emits `out/examples_main.c` / `bin/examples_main`. This lets teams keep the simple layout while disambiguating outputs from legacy directories.
+
 ## Output directories
 - `--out-dir DIR` / `CC_OUT_DIR`: override where generated C and objects are written (default: `<repo>/out`).
 - `--bin-dir DIR` / `CC_BIN_DIR`: override where linked executables are written (default: `<repo>/bin`).
+- `--out-stem NAME`: override the basename/stem used for generated files (auto disambiguation keeps derived names unique).
 
 ## Incremental cache
 - Default behavior: `ccc build` uses a lightweight cache under `out/.cc-build/` to skip redundant emit/compile/link work when inputs and flags are unchanged.
@@ -176,6 +188,9 @@ The end goal is `build.cc` as real CC code with comptime evaluation:
 
 This is imperative (matches C thinking), uses the same language (no DSL to learn), and handles complex builds naturally.
 
+### Comptime helper utilities (non-normative)
+Some lightweight helper utilities may be added to support legacy build script patterns, but they are not specified or required for this draft. Today the build integration supports declarative `CC_*` lines plus `--dump-comptime`/`ccc build graph` introspection.
+
 ### Declarative Syntax (Current & Permanent)
 
 For simple builds, declarative lines are more convenient. These desugar to equivalent comptime API calls:
@@ -254,11 +269,38 @@ Per-target properties (optional):
   - Used by `ccc build install <target>` to copy the produced binary to `<DEST>`.
   - `<DEST>` is resolved relative to repo root unless it is an absolute path.
 
+#### Target grouping
+`CC_TARGET_GROUP <GROUP_NAME>` collects multiple declarative directives into a logical block that shares configuration. Inside a group you can omit repeated `CC_TARGET` names and the group name prefixes generated targets. Group-level directives that set include paths, defines, libs, or deps are applied to every target declared within the block, reducing boilerplate for legacy suites that define many similar binaries. The group desugars to per-target calls such as:
+
+```c
+@comptime {
+    CCTarget* exe = cc_exe("server-foo");
+    exe.include("server/include");
+    cc_default(exe);
+}
+```
+
+where `server-foo` is the concatenation of `CC_TARGET_GROUP` plus the nested `CC_TARGET` name.
+
 ### Introspection
 - `ccc build list` prints the declared target graph (and key per-target properties).
 - `ccc build graph` prints the target graph as `--format json` (default) or `--format dot`.
+- `--graph-out PATH` writes the graph output (json/dot) to PATH for downstream build systems.
 - `--dump-consts` prints merged const bindings then compiles.
+- `--dump-comptime` prints the computed const bindings, targets, and option bindings produced by `build.cc` before any emit/compile work.
 - `--dry-run` resolves consts / prints commands, and skips compile/link.
+
+### Legacy build integration
+`ccc` can emit self-describing fragments so existing Make/CMake graphs can keep driving compilation while `ccc` owns C emission. The `ccc build export-make <target>` (alias: `ccc build export-ninja <target>`) subcommand writes a build-system fragment listing:
+
+```
+CCC_TARGET_<TARGET>_SRCS := main.ccs utils.c
+CCC_TARGET_<TARGET>_CFLAGS := $(CCC_FLAGS) -Ilegacy/include
+CCC_TARGET_<TARGET>_LDFLAGS := -lm
+CCC_TARGET_<TARGET>_OUT := bin/legacy
+```
+
+These fragments include dependencies, per-target outputs, computed libs, and the `CCC_TARGET_<TARGET>_COMPTIME` bool that signals whether the target came from a `@comptime` block or declarative syntax. Legacy Makefiles can `include` the fragment and then run `$(CCC_TARGET_<TARGET>_SRCS)` through their existing rules, while still calling `ccc build` for C emission and caching. This keeps the declarative metadata in sync with `build.cc` without duplicating logic.
 
 ## Testing Infrastructure
 
@@ -340,6 +382,13 @@ See `<cc_atomic.cch>` documentation in the stdlib spec for full API.
 Following Zig's pattern, standardize common options:
 - `-Doptimize=Debug|ReleaseSafe|ReleaseFast|ReleaseSmall`
 - `-Dtarget=<triple>`
+
+### Legacy Integration Helpers
+- **Comptime helper library** — expose a small set of `comptime` utilities (path normalization, simple JSON/TOML readers, flag expansion, etc.) so messy legacy build scripts can be re‑expressed inside `@comptime` blocks without hand‑rolling low-level parsing logic.
+- **Automatic stem disambiguation** — add `--out-stem <prefix>` (or similar `build.cc` hook) that prefixes generated files with their relative directories when basenames collide, letting legacy trees with reused filenames drop into the new output layout without accidental overwrites.
+- **Declarative → Make/Ninja bridge** — provide a way to emit target metadata (`cc_target` names, sources, deps, flags) as Makefile or Ninja fragments that legacy `Makefile`s can include, so `ccc build` can coexist with existing dependency graphs instead of replacing them wholesale.
+- **`--dump-comptime` mode** — add a build flag that prints the resolved `@comptime` state (constants, generated targets, selected branches) before running the compiler; this helps users debug why the comptime script produced a particular graph in a messy repo.
+- **Target grouping sugar** — allow `CC_TARGET_GROUP <name> { ... }` (or similar) so a block can declare multiple related `CC_TARGET` entries without repeating boilerplate when importing sprawling legacy target lists.
 
 ## Inspiration: Zig `zig build`
 

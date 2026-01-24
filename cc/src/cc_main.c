@@ -4,12 +4,15 @@
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "build/build.h"
+#include <ccc/cc_build_helpers.cch>
 #include "driver.h"
 #include "preprocess/preprocess.h"
 
@@ -419,6 +422,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --build-file PATH   Use explicit build.cc path (overrides discovery)\n");
     fprintf(stderr, "  --no-build          Disable build.cc even if present\n");
     fprintf(stderr, "  --dump-consts       Print merged const bindings then compile\n");
+    fprintf(stderr, "  --dump-comptime     Print consts/targets before compiling (--dump-consts implied)\n");
     fprintf(stderr, "  --dry-run           Resolve consts / show commands, skip compile/link\n");
     fprintf(stderr, "Toolchain:\n");
     fprintf(stderr, "  -o PATH             Output (mode dependent: C/object/binary)\n");
@@ -432,9 +436,11 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --keep-c            Do not delete generated C file\n");
     fprintf(stderr, "  --out-dir DIR       Output dir for generated C + objects (default: <repo>/out)\n");
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
+    fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
     fprintf(stderr, "  --strict-deadlock   Treat deadlock heuristics as errors (also: CC_STRICT_DEADLOCK=1)\n");
     fprintf(stderr, "  --no-strict-deadlock  Disable strict deadlock mode for this run\n");
+    fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
 }
 
@@ -492,6 +498,8 @@ static void usage_build(const char* prog) {
     fprintf(stderr, "\n");
     fprintf(stderr, "Project options:\n");
     fprintf(stderr, "  build.cc may declare options using: CC_OPTION <NAME> <HELP...>\n");
+    fprintf(stderr, "  --dump-comptime     Print build consts/targets before running the step\n");
+    fprintf(stderr, "  --graph-out PATH    Write the graph output (json/dot) to PATH instead of stdout\n");
 }
 
 // Tiny helper to check for file existence.
@@ -577,69 +585,44 @@ static int ensure_out_dir(void) {
     return 0;
 }
 
-static int derive_default_output(const char* in_path, char* out_buf, size_t out_buf_size) {
-    if (!in_path || !out_buf || out_buf_size == 0) return -1;
-    const char* base = strrchr(in_path, '/');
-    base = base ? base + 1 : in_path;
-    size_t base_len = strlen(base);
-    size_t stem_len = base_len;
-    const char* dot = strrchr(base, '.');
-    if (dot && dot != base) {
-        stem_len = (size_t)(dot - base);
-    }
-    size_t dir_len = strlen(g_out_root);
-    if (dir_len + 1 + stem_len + 2 > out_buf_size) { // "/" + ".c" + NUL
-        return -1;
-    }
-    memcpy(out_buf, g_out_root, dir_len);
+static void cc__stem_from_path(const char* path, char* out, size_t cap);
+static int cc__unique_stem(const char* desired, char used[][128], size_t* used_count, size_t used_cap, char* out, size_t out_cap);
+static int cc__compute_relative_path(const char* path, char* out, size_t cap);
+static int cc__resolve_stems(const char** inputs, int count, const char* override, char (*out_stems)[128]);
+
+static int derive_path_from_stem(const char* stem, const char* dir_root, const char* suffix, char* out_buf, size_t out_buf_size) {
+    if (!stem || !dir_root || !suffix || !out_buf || out_buf_size == 0) return -1;
+    size_t dir_len = strlen(dir_root);
+    size_t stem_len = strlen(stem);
+    size_t suffix_len = strlen(suffix);
+    if (dir_len + 1 + stem_len + suffix_len + 1 > out_buf_size) return -1;
+    memcpy(out_buf, dir_root, dir_len);
     out_buf[dir_len] = '/';
-    memcpy(out_buf + dir_len + 1, base, stem_len);
+    memcpy(out_buf + dir_len + 1, stem, stem_len);
     out_buf[dir_len + 1 + stem_len] = '\0';
-    strcat(out_buf, ".c");
+    strcat(out_buf, suffix);
     return 0;
+}
+
+static int derive_default_output(const char* in_path, char* out_buf, size_t out_buf_size) {
+    if (!in_path) return -1;
+    char stem[128];
+    cc__stem_from_path(in_path, stem, sizeof(stem));
+    return derive_path_from_stem(stem, g_out_root, ".c", out_buf, out_buf_size);
 }
 
 static int derive_default_obj(const char* in_path, char* out_buf, size_t out_buf_size) {
-    if (!in_path || !out_buf || out_buf_size == 0) return -1;
-    const char* base = strrchr(in_path, '/');
-    base = base ? base + 1 : in_path;
-    size_t base_len = strlen(base);
-    size_t stem_len = base_len;
-    const char* dot = strrchr(base, '.');
-    if (dot && dot != base) {
-        stem_len = (size_t)(dot - base);
-    }
-    size_t dir_len = strlen(g_out_root);
-    if (dir_len + 1 + stem_len + 3 > out_buf_size) { // "/" + ".o"+NUL
-        return -1;
-    }
-    memcpy(out_buf, g_out_root, dir_len);
-    out_buf[dir_len] = '/';
-    memcpy(out_buf + dir_len + 1, base, stem_len);
-    out_buf[dir_len + 1 + stem_len] = '\0';
-    strcat(out_buf, ".o");
-    return 0;
+    if (!in_path) return -1;
+    char stem[128];
+    cc__stem_from_path(in_path, stem, sizeof(stem));
+    return derive_path_from_stem(stem, g_out_root, ".o", out_buf, out_buf_size);
 }
 
 static int derive_default_bin(const char* in_path, char* out_buf, size_t out_buf_size) {
-    if (!in_path || !out_buf || out_buf_size == 0) return -1;
-    const char* base = strrchr(in_path, '/');
-    base = base ? base + 1 : in_path;
-    size_t base_len = strlen(base);
-    size_t stem_len = base_len;
-    const char* dot = strrchr(base, '.');
-    if (dot && dot != base) {
-        stem_len = (size_t)(dot - base);
-    }
-    size_t dir_len = strlen(g_bin_root);
-    if (dir_len + 1 + stem_len + 1 > out_buf_size) { // "/" + NUL
-        return -1;
-    }
-    memcpy(out_buf, g_bin_root, dir_len);
-    out_buf[dir_len] = '/';
-    memcpy(out_buf + dir_len + 1, base, stem_len);
-    out_buf[dir_len + 1 + stem_len] = '\0';
-    return 0;
+    if (!in_path) return -1;
+    char stem[128];
+    cc__stem_from_path(in_path, stem, sizeof(stem));
+    return derive_path_from_stem(stem, g_bin_root, "", out_buf, out_buf_size);
 }
 
 static const char* pick_cc_bin(const char* override) {
@@ -688,6 +671,62 @@ static int run_exec(const char* bin_path, char* const* argv, int verbose) {
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return 1;
+}
+
+static int run_exec_timeout(const char* bin_path, char* const* argv, int verbose, int timeout_sec) {
+    if (timeout_sec < 0) {
+        return run_exec(bin_path, argv, verbose);
+    }
+    if (!bin_path || !argv || !argv[0]) return -1;
+    if (verbose) {
+        fprintf(stderr, "cc: run (timeout=%ds):", timeout_sec);
+        for (int i = 0; argv[i]; ++i) {
+            fprintf(stderr, " %s", argv[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+    if (pid == 0) {
+        execv(bin_path, argv);
+        perror("execv");
+        _exit(127);
+    }
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    int status = 0;
+    while (1) {
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc < 0) {
+            perror("waitpid");
+            return -1;
+        }
+        if (rc > 0) {
+            if (WIFEXITED(status)) return WEXITSTATUS(status);
+            if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+            return 1;
+        }
+        if (timeout_sec == 0) break;
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000L +
+                          (now.tv_nsec - start.tv_nsec) / 1000000L;
+        if (elapsed_ms >= (long)timeout_sec * 1000L) {
+            fprintf(stderr, "cc: run timed out after %d seconds\n", timeout_sec);
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            return 124;
+        }
+        struct timespec sleep_ts = {.tv_sec = 0, .tv_nsec = 10000000L};
+        nanosleep(&sleep_ts, NULL);
+    }
+    fprintf(stderr, "cc: run timed out after %d seconds\n", timeout_sec);
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    return 124;
 }
 
 // Add/override binding in-place; last writer wins.
@@ -767,6 +806,7 @@ typedef struct {
     const char* build_override;
     int no_build;
     int dump_consts;
+    int dump_comptime;
     int dry_run;
     int summary;
     const char* out_dir;
@@ -831,6 +871,80 @@ static void cc__stem_from_path(const char* path, char* out, size_t cap) {
     if (n + 1 > cap) n = cap - 1;
     memcpy(out, base, n);
     out[n] = '\0';
+}
+
+static int cc__compute_relative_path(const char* path, char* out, size_t cap) {
+    if (!path || !out || cap == 0) return -1;
+    char abs_path[PATH_MAX];
+    if (realpath(path, abs_path) == NULL) {
+        strncpy(abs_path, path, sizeof(abs_path));
+        abs_path[sizeof(abs_path) - 1] = '\0';
+    }
+    size_t root_len = strlen(g_repo_root);
+    const char* rel = abs_path;
+    if (root_len && strncmp(abs_path, g_repo_root, root_len) == 0) {
+        rel = abs_path + root_len;
+        if (*rel == '/' || *rel == '\\') rel++;
+    }
+    strncpy(out, rel, cap);
+    out[cap - 1] = '\0';
+    return 0;
+}
+
+static int cc__resolve_stems(const char** inputs, int count, const char* override, char (*out_stems)[128]) {
+    if (!out_stems || count <= 0) return 0;
+    if (override) {
+        if (count > 1) return -1;
+        strncpy(out_stems[0], override, 128);
+        out_stems[0][127] = '\0';
+        return 0;
+    }
+    struct StemEntry {
+        char name[128];
+        int count;
+    } stems[64] = {{0}};
+    size_t stem_count = 0;
+    char base_stems[64][128] = {{0}};
+    for (int i = 0; i < count; ++i) {
+        cc__stem_from_path(inputs[i], base_stems[i], sizeof(base_stems[i]));
+        int found = -1;
+        for (size_t j = 0; j < stem_count; ++j) {
+            if (strcmp(stems[j].name, base_stems[i]) == 0) {
+                stems[j].count++;
+                found = (int)j;
+                break;
+            }
+        }
+        if (found < 0) {
+            if (stem_count >= 64) return -1;
+            strncpy(stems[stem_count].name, base_stems[i], sizeof(stems[stem_count].name));
+            stems[stem_count].count = 1;
+            stem_count++;
+        }
+    }
+
+    char used[64][128] = {{0}};
+    size_t used_count = 0;
+    for (int i = 0; i < count; ++i) {
+        char desired[128];
+        int duplicate = 0;
+        for (size_t j = 0; j < stem_count; ++j) {
+            if (strcmp(stems[j].name, base_stems[i]) == 0) {
+                duplicate = stems[j].count > 1;
+                break;
+            }
+        }
+        if (duplicate) {
+            char rel[PATH_MAX];
+            if (cc__compute_relative_path(inputs[i], rel, sizeof(rel)) != 0) return -1;
+            if (cc_build_make_stem(desired, sizeof(desired), rel) != 0) return -1;
+        } else {
+            strncpy(desired, base_stems[i], sizeof(desired));
+        }
+        desired[sizeof(desired) - 1] = '\0';
+        if (cc__unique_stem(desired, used, &used_count, 64, out_stems[i], 128) != 0) return -1;
+    }
+    return 0;
 }
 
 static int cc__unique_stem(const char* desired,
@@ -1481,6 +1595,8 @@ static int cc__gather_obj_closure(int idx,
 }
 
 static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bindings, size_t* count);
+static void cc__print_comptime_targets(const char* build_path);
+static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path, const CCConstBinding* bindings, size_t count);
 
 // Core compile helper shared by default and build modes.
 static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary_out) {
@@ -1504,7 +1620,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         .consts = bindings,
         .const_count = count
     };
-    if (opt->dump_consts) {
+    if (opt->dump_consts && !opt->dump_comptime) {
         for (size_t i = 0; i < count; ++i) {
             printf("CONST %s=%lld\n", bindings[i].name, bindings[i].value);
         }
@@ -1843,7 +1959,56 @@ static int cc__load_const_bindings(const CCBuildOptions* opt, CCConstBinding* bi
             fprintf(stderr, "cc: warning: overriding const %s from build.cc with CLI -D\n", name);
         }
     }
+    if (opt->dump_comptime) {
+        cc__print_comptime_state(opt, build_path, bindings, *count);
+    }
     return 0;
+}
+
+static void cc__print_comptime_targets(const char* build_path) {
+    if (!build_path) return;
+    CCBuildTargetDecl targets[64];
+    size_t target_count = 0;
+    char* def_name = NULL;
+    if (cc_build_list_targets(build_path, targets, &target_count, 64, &def_name) != 0) {
+        return;
+    }
+    printf("COMPTIME targets (%zu):\n", target_count);
+    if (def_name) {
+        printf("  default: %s\n", def_name);
+    }
+    for (size_t i = 0; i < target_count; ++i) {
+        const char* kind = targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe";
+        printf("  target=%s kind=%s src=", targets[i].name, kind);
+        for (size_t j = 0; j < targets[i].src_count; ++j) {
+            if (j) printf(",");
+            printf("%s", targets[i].srcs[j]);
+        }
+        printf(" deps=");
+        for (size_t j = 0; j < targets[i].dep_count; ++j) {
+            if (j) printf(",");
+            printf("%s", targets[i].deps[j]);
+        }
+        printf("\n");
+    }
+    cc_build_free_targets(targets, target_count, def_name);
+}
+
+static void cc__print_comptime_state(const CCBuildOptions* opt, const char* build_path,
+                                    const CCConstBinding* bindings, size_t count) {
+    if (!opt || !opt->dump_comptime) return;
+    if (build_path && build_path[0]) {
+        printf("COMPTIME build_file=%s\n", build_path);
+    } else {
+        printf("COMPTIME build_file=(none)\n");
+    }
+    printf("COMPTIME consts (%zu):\n", count);
+    for (size_t i = 0; i < count; ++i) {
+        printf("  %s=%lld\n", bindings[i].name, bindings[i].value);
+    }
+    if (build_path) {
+        cc__print_comptime_targets(build_path);
+    }
 }
 
 static int cc__compile_c_to_obj(const CCBuildOptions* opt,
@@ -2097,6 +2262,7 @@ static int run_build_mode(int argc, char** argv) {
     int saw_o = 0;
     const char* obj_out = NULL;
     const char* build_override = NULL;
+    const char* out_stem_override = NULL;
     const char* cc_bin = NULL;
     const char* cc_flags = NULL;
     const char* ld_flags = NULL;
@@ -2104,10 +2270,12 @@ static int run_build_mode(int argc, char** argv) {
     const char* sysroot_flag = NULL;
     const char* out_dir = NULL;
     const char* bin_dir = NULL;
+    const char* graph_out = NULL;
     int opt_release = 0;
     int opt_debug = 0;
     int help = 0;
     int dump_consts = 0;
+    int dump_comptime = 0;
     int dry_run = 0;
     int no_build = 0;
     int no_runtime = 0;
@@ -2129,6 +2297,7 @@ static int run_build_mode(int argc, char** argv) {
     } step = CC_BUILD_STEP_DEFAULT;
     int run_argc = 0;
     char** run_argv = NULL;
+    int run_timeout = -1;
 
     int argi = 2;
     if (argc >= 3 && argv[2] && argv[2][0] && argv[2][0] != '-') {
@@ -2188,6 +2357,11 @@ static int run_build_mode(int argc, char** argv) {
             bin_dir = argv[++i];
             continue;
         }
+        if (strcmp(argv[i], "--graph-out") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --graph-out requires a path\n"); goto parse_fail; }
+            graph_out = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
         if (strcmp(argv[i], "--compile") == 0) { mode = CC_MODE_COMPILE; continue; }
         if (strcmp(argv[i], "--link") == 0) { mode = CC_MODE_LINK; continue; }
@@ -2213,6 +2387,7 @@ static int run_build_mode(int argc, char** argv) {
         }
         if (strcmp(argv[i], "--no-build") == 0) { no_build = 1; continue; }
         if (strcmp(argv[i], "--dump-consts") == 0) { dump_consts = 1; continue; }
+        if (strcmp(argv[i], "--dump-comptime") == 0) { dump_comptime = 1; dump_consts = 1; continue; }
         if (strcmp(argv[i], "--dry-run") == 0) { dry_run = 1; continue; }
         if (strcmp(argv[i], "--no-runtime") == 0) { no_runtime = 1; continue; }
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
@@ -2225,6 +2400,12 @@ static int run_build_mode(int argc, char** argv) {
         if (strcmp(argv[i], "--cc-flags") == 0) {
             if (i + 1 >= argc) { fprintf(stderr, "cc: --cc-flags requires a value\n"); goto parse_fail; }
             cc_flags = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--timeout") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --timeout requires seconds\n"); goto parse_fail; }
+            run_timeout = atoi(argv[++i]);
+            if (run_timeout < 0) run_timeout = -1;
             continue;
         }
         if (strcmp(argv[i], "--ld-flags") == 0) {
@@ -2432,41 +2613,52 @@ static int run_build_mode(int argc, char** argv) {
             goto parse_fail;
         }
 
-        if (strcmp(format, "dot") == 0) {
-            printf("digraph build {\n");
-            if (def_name) printf("  \"__default__\" [shape=box,label=\"default=%s\"];\n", def_name);
-            for (size_t i = 0; i < target_count; ++i) {
-                const char* kind = targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe";
-                printf("  \"%s\" [label=\"%s (%s)\"];\n", targets[i].name, targets[i].name, kind);
+        FILE* graph_fp = stdout;
+        FILE* graph_file = NULL;
+        if (graph_out) {
+            graph_file = fopen(graph_out, "w");
+            if (!graph_file) {
+                fprintf(stderr, "cc: failed to open graph output: %s\n", graph_out);
+                cc_build_free_targets(targets, target_count, def_name);
+                goto parse_fail;
             }
-            for (size_t i = 0; i < target_count; ++i) {
-                for (size_t j = 0; j < targets[i].dep_count; ++j) {
-                    printf("  \"%s\" -> \"%s\";\n", targets[i].name, targets[i].deps[j]);
-                }
-            }
-            printf("}\n");
-        } else {
-            // JSON (minimal; strings are assumed to be simple path/name tokens).
-            printf("{\"build_file\":\"%s\",\"default\":", build_path_for_help);
-            if (def_name) printf("\"%s\"", def_name); else printf("null");
-            printf(",\"targets\":[");
-            for (size_t i = 0; i < target_count; ++i) {
-                const char* kind = targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe";
-                if (i) printf(",");
-                printf("{\"name\":\"%s\",\"kind\":\"%s\",\"src\":[", targets[i].name, kind);
-                for (size_t j = 0; j < targets[i].src_count; ++j) {
-                    if (j) printf(",");
-                    printf("\"%s\"", targets[i].srcs[j]);
-                }
-                printf("],\"deps\":[");
-                for (size_t j = 0; j < targets[i].dep_count; ++j) {
-                    if (j) printf(",");
-                    printf("\"%s\"", targets[i].deps[j]);
-                }
-                printf("]}");
-            }
-            printf("]}\n");
+            graph_fp = graph_file;
         }
+        if (strcmp(format, "dot") == 0) {
+            fprintf(graph_fp, "digraph build {\n");
+            if (def_name) fprintf(graph_fp, "  \"__default__\" [shape=box,label=\"default=%s\"];\n", def_name);
+            for (size_t i = 0; i < target_count; ++i) {
+                const char* kind = targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe";
+                fprintf(graph_fp, "  \"%s\" [label=\"%s (%s)\"];\n", targets[i].name, targets[i].name, kind);
+            }
+            for (size_t i = 0; i < target_count; ++i) {
+                for (size_t j = 0; j < targets[i].dep_count; ++j) {
+                    fprintf(graph_fp, "  \"%s\" -> \"%s\";\n", targets[i].name, targets[i].deps[j]);
+                }
+            }
+            fprintf(graph_fp, "}\n");
+        } else {
+            fprintf(graph_fp, "{\"build_file\":\"%s\",\"default\":", build_path_for_help);
+            if (def_name) fprintf(graph_fp, "\"%s\"", def_name); else fprintf(graph_fp, "null");
+            fprintf(graph_fp, ",\"targets\":[");
+            for (size_t i = 0; i < target_count; ++i) {
+                const char* kind = targets[i].kind == CC_BUILD_TARGET_OBJ ? "obj" : "exe";
+                if (i) fprintf(graph_fp, ",");
+                fprintf(graph_fp, "{\"name\":\"%s\",\"kind\":\"%s\",\"src\":[", targets[i].name, kind);
+                for (size_t j = 0; j < targets[i].src_count; ++j) {
+                    if (j) fprintf(graph_fp, ",");
+                    fprintf(graph_fp, "\"%s\"", targets[i].srcs[j]);
+                }
+                fprintf(graph_fp, "],\"deps\":[");
+                for (size_t j = 0; j < targets[i].dep_count; ++j) {
+                    if (j) fprintf(graph_fp, ",");
+                    fprintf(graph_fp, "\"%s\"", targets[i].deps[j]);
+                }
+                fprintf(graph_fp, "]}");
+            }
+            fprintf(graph_fp, "]}\n");
+        }
+        if (graph_file) fclose(graph_file);
 
         cc_build_free_targets(targets, target_count, def_name);
         for (size_t i = 0; i < cli_count; ++i) free(cli_names[i]);
@@ -2625,6 +2817,7 @@ static int run_build_mode(int argc, char** argv) {
                 .build_override = build_path_for_help,
                 .no_build = no_build,
                 .dump_consts = dump_consts,
+                .dump_comptime = dump_comptime,
                 .dry_run = dry_run,
                 .summary = summary,
                 .out_dir = g_out_root,
@@ -2870,6 +3063,7 @@ static int run_build_mode(int argc, char** argv) {
             .build_override = build_override,
             .no_build = no_build,
             .dump_consts = dump_consts,
+            .dump_comptime = dump_comptime,
             .dry_run = dry_run,
             .summary = summary,
             .out_dir = g_out_root,
@@ -3186,6 +3380,7 @@ static int run_build_mode(int argc, char** argv) {
         .build_override = build_override,
         .no_build = no_build,
         .dump_consts = dump_consts,
+        .dump_comptime = dump_comptime,
         .dry_run = dry_run,
         .summary = summary,
         .out_dir = g_out_root,
@@ -3215,7 +3410,7 @@ static int run_build_mode(int argc, char** argv) {
             exec_argv[idx++] = run_argv[j];
         }
         exec_argv[idx] = NULL;
-        return run_exec(bin_path, exec_argv, verbose);
+        return run_exec_timeout(bin_path, exec_argv, verbose, run_timeout);
     }
     return 0;
 
@@ -3288,6 +3483,7 @@ int main(int argc, char **argv) {
     int saw_o = 0;
     const char* obj_out = NULL;
     const char* build_override = NULL;
+    const char* out_stem_override = NULL;
     const char* cc_bin = NULL;
     const char* cc_flags = NULL;
     const char* ld_flags = NULL;
@@ -3306,7 +3502,10 @@ int main(int argc, char **argv) {
     int no_cache = 0;
     int strict_deadlock = 0;
     int strict_deadlock_set = 0;
+    int dump_comptime = 0;
     CCMode mode = CC_MODE_LINK;
+    char out_stem_buf[128];
+    out_stem_buf[0] = '\0';
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--emit-c-only") == 0) { mode = CC_MODE_EMIT_C; continue; }
@@ -3319,8 +3518,21 @@ int main(int argc, char **argv) {
             build_override = argv[++i];
             continue;
         }
+        if (strcmp(argv[i], "--out-stem") == 0) {
+            if (i + 1 >= argc) { fprintf(stderr, "cc: --out-stem requires a value\n"); usage(argv[0]); return 1; }
+            char tmp_stem[128];
+            if (cc_build_make_stem(tmp_stem, sizeof(tmp_stem), argv[++i]) != 0) {
+                fprintf(stderr, "cc: --out-stem value is too long\n");
+                return 1;
+            }
+            strncpy(out_stem_buf, tmp_stem, sizeof(out_stem_buf));
+            out_stem_buf[sizeof(out_stem_buf) - 1] = '\0';
+            out_stem_override = out_stem_buf;
+            continue;
+        }
         if (strcmp(argv[i], "--no-build") == 0) { no_build = 1; continue; }
         if (strcmp(argv[i], "--dump-consts") == 0) { dump_consts = 1; continue; }
+        if (strcmp(argv[i], "--dump-comptime") == 0) { dump_comptime = 1; dump_consts = 1; continue; }
         if (strcmp(argv[i], "--dry-run") == 0) { dry_run = 1; continue; }
         if (strcmp(argv[i], "--no-runtime") == 0) { no_runtime = 1; continue; }
         if (strcmp(argv[i], "--keep-c") == 0) { keep_c = 1; continue; }
@@ -3459,6 +3671,7 @@ int main(int argc, char **argv) {
             .build_override = build_override,
             .no_build = no_build,
             .dump_consts = dump_consts,
+            .dump_comptime = dump_comptime,
             .dry_run = dry_run,
             .summary = 0,
             .out_dir = g_out_root,
@@ -3482,17 +3695,22 @@ int main(int argc, char **argv) {
         if (target_flag && *target_flag) snprintf(target_part, sizeof(target_part), "--target %s", target_flag);
         if (sysroot_flag && *sysroot_flag) snprintf(sysroot_part, sizeof(sysroot_part), "--sysroot %s", sysroot_flag);
 
-        char used[64][128]; size_t used_count = 0;
+        char resolved_stems[64][128] = {{0}};
+        if (cc__resolve_stems(inputs, input_count, out_stem_override, resolved_stems) != 0) {
+            fprintf(stderr, "cc: failed to derive unique stems for inputs\n");
+            return 1;
+        }
         const char* obj_paths[64];
         char obj_bufs[64][PATH_MAX];
         char c_bufs[64][PATH_MAX];
         char dep_bufs[64][PATH_MAX];
         char src_dir_bufs[64][PATH_MAX];
         for (int i = 0; i < input_count; ++i) {
-            char stem0[128];
-            char stem[128];
-            cc__stem_from_path(inputs[i], stem0, sizeof(stem0));
-            if (cc__unique_stem(stem0, used, &used_count, 64, stem, sizeof(stem)) != 0) return 1;
+            const char* stem = resolved_stems[i];
+            if (!stem || !stem[0]) {
+                fprintf(stderr, "cc: invalid stem for input %s\n", inputs[i]);
+                return 1;
+            }
             cc__derive_c_path_from_stem(stem, c_bufs[i], sizeof(c_bufs[i]));
             cc__derive_o_path_from_stem(stem, obj_bufs[i], sizeof(obj_bufs[i]));
             cc__derive_d_path_from_stem(stem, dep_bufs[i], sizeof(dep_bufs[i]));
@@ -3545,17 +3763,27 @@ int main(int argc, char **argv) {
     }
 
     int raw_c = cc__is_raw_c(in_path_abs);
+    int use_stem_override = out_stem_override && out_stem_override[0];
     if (mode == CC_MODE_EMIT_C) {
         if (user_out) {
             strncpy(c_out, user_out, sizeof(c_out));
             c_out[sizeof(c_out)-1] = '\0';
+        } else if (use_stem_override) {
+            if (derive_path_from_stem(out_stem_override, g_out_root, ".c", c_out, sizeof(c_out)) != 0) {
+                fprintf(stderr, "cc: failed to derive C output from --out-stem\n");
+                return 1;
+            }
         } else if (derive_default_output(in_path_abs, c_out, sizeof(c_out)) != 0) {
             fprintf(stderr, "cc: failed to derive default C output\n");
             return 1;
         }
     } else {
-        // For .c inputs, treat the input itself as the C file (no CC lowering).
-        if (raw_c) {
+        if (use_stem_override) {
+            if (derive_path_from_stem(out_stem_override, g_out_root, ".c", c_out, sizeof(c_out)) != 0) {
+                fprintf(stderr, "cc: failed to derive C output from --out-stem\n");
+                return 1;
+            }
+        } else if (raw_c) {
             strncpy(c_out, in_path_abs, sizeof(c_out));
             c_out[sizeof(c_out)-1] = '\0';
         } else {
@@ -3605,6 +3833,7 @@ int main(int argc, char **argv) {
         .build_override = build_override,
         .no_build = no_build,
         .dump_consts = dump_consts,
+        .dump_comptime = dump_comptime,
         .dry_run = dry_run,
         .summary = 0,
         .out_dir = g_out_root,

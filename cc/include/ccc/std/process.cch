@@ -117,6 +117,18 @@ CCResultStatusIoError cc_process_wait(CCProcess* proc);
 CCResultStatusIoError cc_process_try_wait(CCProcess* proc);
 
 /*
+ * Wait for process to exit with a timeout in milliseconds.
+ * Returns CC_IO_OTHER with ETIMEDOUT when the deadline passes.
+ */
+CCResultStatusIoError cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms);
+
+/*
+ * Wait for process to exit with a timeout in seconds.
+ * Returns CC_IO_OTHER with ETIMEDOUT when the deadline passes.
+ */
+CCResultStatusIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec);
+
+/*
  * Send signal to process (POSIX: signal number, Windows: TerminateProcess for SIGKILL/SIGTERM).
  * Common signals: SIGTERM (15), SIGKILL (9), SIGINT (2)
  */

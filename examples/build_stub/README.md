@@ -15,6 +15,17 @@ Commands:
 # CONST DEBUG=1
 # CONST USE_TLS=0
 # CONST NUM_WORKERS=8
+
+./cc/bin/ccc build --build-file examples/build_stub/build.cc --dump-comptime --dry-run
+# Expect:
+# COMPTIME build_file=...
+# COMPTIME consts (...)
+# COMPTIME targets (...)
+
+./cc/bin/ccc build graph --build-file examples/build_stub/build.cc --format json
+./cc/bin/ccc build graph --build-file examples/build_stub/build.cc --format dot
+./cc/bin/ccc build graph --build-file examples/build_stub/build.cc --format json --graph-out /tmp/ccc_graph.json
+./cc/bin/ccc build graph --build-file examples/build_stub/build.cc --format dot --graph-out /tmp/ccc_graph.dot
 ```
 
 Notes:
