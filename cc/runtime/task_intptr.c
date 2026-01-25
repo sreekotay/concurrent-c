@@ -206,7 +206,6 @@ void cc_task_intptr_cancel(CCTaskIntptr* t) {
 intptr_t cc_block_on_intptr(CCTaskIntptr t) {
     intptr_t r = 0;
     int err = 0;
-    int spin_count = 0;
     cc_deadlock_enter_blocking(CC_BLOCK_ON_TASK);
     for (;;) {
         CCFutureStatus st = cc_task_intptr_poll(&t, &r, &err);
@@ -220,15 +219,9 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
             } else if (t.kind == CC_TASK_INTPTR_KIND_POLL && t.poll.wait) {
                 /* Task has a wait function - use it to block efficiently */
                 (void)t.poll.wait(t.poll.frame);
-                spin_count = 0;  /* Reset after wait */
             }
-            /* For POLL tasks without wait: spin a few times before yielding.
-               Simple async functions complete in 1-2 polls (tight loop, fast).
-               Nested async tasks with blocking need yield after spinning. */
-            if (++spin_count > 4) {
-                sched_yield();
-                spin_count = 0;
-            }
+            /* For POLL tasks without wait: tight loop. These are pure state machines
+               making progress on every poll (no external blocking). No yield needed. */
             continue;
         }
         break;

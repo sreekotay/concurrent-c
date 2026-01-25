@@ -1178,10 +1178,12 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
 
         if (deadline && err == ETIMEDOUT) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
+            cc__chan_remove_send_waiter_recv(ch, &node);  /* Remove from queue before returning */
             return ETIMEDOUT;
         }
         if (ch->closed) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
+            cc__chan_remove_send_waiter_recv(ch, &node);  /* Remove from queue before returning */
             return EPIPE;
         }
     }
@@ -1238,11 +1240,13 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
 
         if (deadline && err == ETIMEDOUT) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
+            cc__chan_remove_recv_waiter(ch, &node);  /* Remove from queue before returning */
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
             return ETIMEDOUT;
         }
         if (ch->closed) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
+            cc__chan_remove_recv_waiter(ch, &node);  /* Remove from queue before returning */
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
             return EPIPE;
         }
@@ -2118,7 +2122,26 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
     }
 
     if (rc == EAGAIN) {
-        /* Would block - offload to async executor if available */
+        /* Would block. For unbuffered channels in fiber context, do blocking
+           directly (fiber-aware) instead of using the executor pool which can
+           starve with multiple concurrent waiters. */
+        if (f->ch->cap == 0 && cc__fiber_in_context()) {
+            CCChan* ch = f->ch;
+            pthread_mutex_lock(&ch->mu);
+            struct timespec ts;
+            const struct timespec* p = f->deadline ? cc_deadline_as_timespec(f->deadline, &ts) : NULL;
+            int err = f->is_send
+                ? cc_chan_send_unbuffered(ch, f->buf, p)
+                : cc_chan_recv_unbuffered(ch, f->buf, p);
+            pthread_mutex_unlock(&ch->mu);
+            wake_batch_flush();
+            f->completed = 1;
+            f->result = err;
+            if (out_val) *out_val = (intptr_t)err;
+            if (out_err) *out_err = err;
+            return CC_FUTURE_READY;
+        }
+        /* Otherwise, offload to async executor if available */
         CCExec* ex = cc_async_runtime_exec();
         if (ex) {
             int sub = 0;
