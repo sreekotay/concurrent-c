@@ -2140,7 +2140,7 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -c %s -o %s",
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -c %s -o %s",
              cc_bin,
              ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",

@@ -1,0 +1,99 @@
+/*
+ * Debug: Minimal unbuffered channel deadlock reproducer
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task_intptr.cch>
+#include <stdio.h>
+
+#define NUM_SENDERS 3
+#define NUM_RECEIVERS 3
+#define MSGS_PER 10
+
+cc_atomic_int g_sent = 0;
+cc_atomic_int g_recv = 0;
+
+int[~ >] g_tx;
+int[~ <] g_rx;
+CCChan* g_ch;
+
+/* External debug function */
+void cc_fiber_dump_state(const char* reason);
+
+@async int sender(int id) {
+    printf("S%d: STARTED\n", id);
+    fflush(stdout);
+    for (int i = 0; i < MSGS_PER; i++) {
+        int val = id * 100 + i;
+        printf("S%d: sending %d...\n", id, val);
+        fflush(stdout);
+        intptr_t rc = await g_tx.send(val);
+        printf("S%d: send returned rc=%ld\n", id, (long)rc);
+        fflush(stdout);
+        if (rc != 0) {
+            printf("S%d: send failed rc=%ld\n", id, (long)rc);
+            return -1;
+        }
+        cc_atomic_fetch_add(&g_sent, 1);
+        printf("S%d: sent %d (total=%d)\n", id, val, cc_atomic_load(&g_sent));
+        fflush(stdout);
+    }
+    printf("S%d: done\n", id);
+    return 0;
+}
+
+@async int receiver(int id) {
+    printf("R%d: STARTED\n", id);
+    fflush(stdout);
+    for (int i = 0; i < MSGS_PER; i++) {
+        int val = 0;
+        printf("R%d: receiving...\n", id);
+        fflush(stdout);
+        intptr_t rc = await g_rx.recv(&val);
+        printf("R%d: recv returned rc=%ld val=%d\n", id, (long)rc, val);
+        fflush(stdout);
+        if (rc != 0) {
+            printf("R%d: recv failed rc=%ld\n", id, (long)rc);
+            return -1;
+        }
+        cc_atomic_fetch_add(&g_recv, 1);
+        printf("R%d: got %d (total=%d)\n", id, val, cc_atomic_load(&g_recv));
+        fflush(stdout);
+    }
+    printf("R%d: done\n", id);
+    return 0;
+}
+
+int main(void) {
+    printf("unbuffered_debug: %d senders, %d receivers, %d msgs each\n",
+           NUM_SENDERS, NUM_RECEIVERS, MSGS_PER);
+    fflush(stdout);
+
+    g_ch = channel_pair(&g_tx, &g_rx);
+
+    CCTaskIntptr tasks[NUM_SENDERS + NUM_RECEIVERS];
+    intptr_t results[NUM_SENDERS + NUM_RECEIVERS];
+    int n = 0;
+
+    /* Interleave senders and receivers */
+    for (int i = 0; i < NUM_SENDERS; i++) {
+        tasks[n++] = sender(i);
+        tasks[n++] = receiver(i);
+    }
+
+    printf("Calling cc_block_all with %d tasks...\n", n);
+    fflush(stdout);
+
+    int err = cc_block_all(n, tasks, results);
+    
+    printf("cc_block_all returned %d\n", err);
+    printf("sent=%d, recv=%d (expected=%d)\n",
+           cc_atomic_load(&g_sent), cc_atomic_load(&g_recv),
+           NUM_SENDERS * MSGS_PER);
+
+    chan_close(g_tx);
+    cc_chan_free(g_ch);
+    
+    return (cc_atomic_load(&g_sent) == NUM_SENDERS * MSGS_PER && 
+            cc_atomic_load(&g_recv) == NUM_RECEIVERS * MSGS_PER) ? 0 : 1;
+}

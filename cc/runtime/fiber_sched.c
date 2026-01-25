@@ -159,7 +159,7 @@ static int get_spin_yield_iters(void) {
 #endif
 
 #ifndef CC_FIBER_STACK_SIZE
-#define CC_FIBER_STACK_SIZE (32 * 1024)  /* 32KB per fiber */
+#define CC_FIBER_STACK_SIZE (128 * 1024)  /* 128KB per fiber */
 #endif
 
 #ifndef CC_FIBER_QUEUE_SIZE
@@ -190,6 +190,7 @@ typedef struct fiber_task {
     _Atomic int state;
     _Atomic int done;
     _Atomic int running_lock; /* Serialize resume/unpark */
+    _Atomic int unpark_pending; /* Wake happened before park */
     
     /* Per-fiber join synchronization */
     _Atomic int join_waiters;           /* Count of threads/fibers waiting to join */
@@ -430,6 +431,7 @@ static fiber_task* fiber_alloc(void) {
             atomic_store(&f->state, FIBER_CREATED);
             atomic_store(&f->done, 0);
             atomic_store(&f->running_lock, 0);
+            atomic_store(&f->unpark_pending, 0);
             atomic_store(&f->join_waiters, 0);
             atomic_store(&f->join_waiter_fiber, NULL);
             f->next = NULL;
@@ -1036,7 +1038,19 @@ void cc__fiber_park(void) {
     fiber_task* f = tls_current_fiber;
     if (!f || !f->coro) return;
     
+    /* If an unpark raced before we try to park, skip parking. */
+    if (atomic_exchange_explicit(&f->unpark_pending, 0, memory_order_acq_rel)) {
+        return;
+    }
+
     atomic_store_explicit(&f->state, FIBER_PARKED, memory_order_release);
+
+    /* If an unpark raced after we set PARKED but before we yield, skip parking. */
+    if (atomic_exchange_explicit(&f->unpark_pending, 0, memory_order_acq_rel)) {
+        atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
+        return;
+    }
+
     atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
     
     /* Yield back to worker */
@@ -1061,14 +1075,20 @@ void cc__fiber_unpark(void* fiber_ptr) {
         cpu_pause();
     }
     
-    /* CAS: PARKED -> READY */
+    /* CAS: PARKED -> READY. If fiber isn't PARKED yet, set unpark_pending
+     * so the upcoming park will skip sleeping. */
     int expected = FIBER_PARKED;
     if (!atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_READY,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
+        if (expected == FIBER_READY) {
+            return;
+        }
+        /* Fiber is still RUNNING; record pending wake and return. */
+        atomic_store_explicit(&f->unpark_pending, 1, memory_order_release);
         return;
     }
-    
+
     /* Re-enqueue */
     while (fq_push(&g_sched.run_queue, f) != 0) {
         sched_yield();

@@ -220,9 +220,10 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
                 /* Task has a wait function - use it to block efficiently */
                 (void)t.poll.wait(t.poll.frame);
             }
-            /* For POLL tasks without wait: tight-loop poll (no sleep).
-               We're the sole driver, so spinning is correct.
-               This makes @async functions without await points fast. */
+            /* For POLL tasks without wait: yield to let other threads run.
+               This is needed when @async state machines poll inner tasks
+               that have their own wait functions. */
+            sched_yield();
             continue;
         }
         break;

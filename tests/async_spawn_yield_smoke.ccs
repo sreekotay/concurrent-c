@@ -1,0 +1,48 @@
+/*
+ * Smoke test: Multiple spawns completing
+ * Tests that concurrent fibers properly yield and complete.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+int g_results[4] = {0};
+
+int main(void) {
+    @nursery {
+        spawn(() => {
+            int sum = 0;
+            for (int i = 0; i < 100; i++) sum += i;
+            g_results[0] = sum;
+        });
+        spawn(() => {
+            int sum = 0;
+            for (int i = 0; i < 200; i++) sum += i;
+            g_results[1] = sum;
+        });
+        spawn(() => {
+            int sum = 0;
+            for (int i = 0; i < 300; i++) sum += i;
+            g_results[2] = sum;
+        });
+        spawn(() => {
+            int sum = 0;
+            for (int i = 0; i < 400; i++) sum += i;
+            g_results[3] = sum;
+        });
+    }
+    
+    /* 0+1+...+99 = 4950, 0+1+...+199 = 19900, etc */
+    int expected[4] = {4950, 19900, 44850, 79800};
+    int pass = 1;
+    for (int i = 0; i < 4; i++) {
+        if (g_results[i] != expected[i]) {
+            printf("FAIL: results[%d] = %d, expected %d\n", i, g_results[i], expected[i]);
+            pass = 0;
+        }
+    }
+    
+    if (pass) {
+        printf("async_spawn_yield_smoke: PASS\n");
+    }
+    return pass ? 0 : 1;
+}

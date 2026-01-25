@@ -1,0 +1,39 @@
+/*
+ * Smoke test: Channel operations in concurrent spawns
+ * Tests poll/wait integration with fiber scheduling.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~ >] tx;
+    int[~ <] rx;
+    channel_pair(&tx, &rx);
+    
+    int sent = 0;
+    int received = 0;
+    
+    @nursery closing(tx) {
+        spawn(@unsafe [tx, &sent]() => {
+            for (int i = 0; i < 10; i++) tx.send(i);
+            sent = 10;
+        });
+        
+        spawn(@unsafe [rx, &received]() => {
+            int v;
+            for (int i = 0; i < 10; i++) {
+                rx.recv(&v);
+                received += v;
+            }
+        });
+    }
+    
+    /* 0+1+2+...+9 = 45 */
+    if (sent == 10 && received == 45) {
+        printf("async_channel_poll_wait_smoke: PASS\n");
+        return 0;
+    } else {
+        printf("async_channel_poll_wait_smoke: FAIL (sent=%d, received=%d)\n", sent, received);
+        return 1;
+    }
+}

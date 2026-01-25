@@ -1,0 +1,47 @@
+/*
+ * Smoke test: Unbuffered channel ping-pong
+ * Tests strict alternation on unbuffered channels.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~ >] ping_tx;
+    int[~ <] ping_rx;
+    int[~ >] pong_tx;
+    int[~ <] pong_rx;
+    
+    channel_pair(&ping_tx, &ping_rx);
+    channel_pair(&pong_tx, &pong_rx);
+    
+    int pass = 0;
+    
+    @nursery closing(ping_tx, pong_tx) {
+        /* Ping side: send, wait for pong */
+        spawn([ping_tx, pong_rx]() => {
+            for (int i = 0; i < 50; i++) {
+                ping_tx.send(i);
+                int v;
+                pong_rx.recv(&v);
+            }
+        });
+        
+        /* Pong side: wait for ping, reply */
+        spawn(@unsafe [ping_rx, pong_tx, &pass]() => {
+            int v;
+            for (int i = 0; i < 50; i++) {
+                ping_rx.recv(&v);
+                pong_tx.send(v + 1);
+            }
+            pass = 1;
+        });
+    }
+    
+    if (pass) {
+        printf("unbuffered_pingpong_smoke: PASS\n");
+    } else {
+        printf("unbuffered_pingpong_smoke: FAIL\n");
+        return 1;
+    }
+    return 0;
+}

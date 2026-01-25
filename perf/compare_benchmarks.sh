@@ -48,7 +48,8 @@ run_cc_benchmark() {
     local file="$1"
     local output
 
-    if ! output=$("$CCC" run "$file" 2>&1); then
+    # Use --release for optimized builds (like Go's default)
+    if ! output=$("$CCC" run --release "$file" 2>&1); then
         echo "FAILED" >&2
         return 1
     fi

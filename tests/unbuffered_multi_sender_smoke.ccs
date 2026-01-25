@@ -1,0 +1,37 @@
+/*
+ * Smoke test: Multiple senders on unbuffered channel
+ * 
+ * This tests the rendezvous pattern with 2 senders + 1 receiver.
+ * Bug: Currently deadlocks because unbuffered channel wakes multiple
+ * senders when a receiver arrives, causing a race condition.
+ * 
+ * Expected: All 20 messages sent and received, prints "PASS"
+ * Actual: Deadlocks (timeout)
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~ >] tx;  /* Unbuffered */
+    int[~ <] rx;
+    channel_pair(&tx, &rx);
+
+    @nursery closing(tx) {
+        /* 2 senders, each sends 10 messages */
+        spawn([tx]() => {
+            for (int i = 0; i < 10; i++) tx.send(i);
+        });
+        spawn([tx]() => {
+            for (int i = 0; i < 10; i++) tx.send(100 + i);
+        });
+        
+        /* 1 receiver, receives all 20 messages */
+        spawn([rx]() => {
+            int v;
+            for (int i = 0; i < 20; i++) rx.recv(&v);
+        });
+    }
+
+    printf("unbuffered_multi_sender_smoke: PASS\n");
+    return 0;
+}

@@ -38,9 +38,9 @@ run_benchmark() {
     local file="$2"
     local desc="$3"
 
-    # Run benchmark and capture output
+    # Run benchmark with --release for optimized builds
     local output
-    if ! output=$("$CCC" run "$file" 2>&1); then
+    if ! output=$("$CCC" run --release "$file" 2>&1); then
         echo "$name:FAILED"
         return 1
     fi
