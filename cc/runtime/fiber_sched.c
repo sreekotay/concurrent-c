@@ -11,6 +11,13 @@
  * This enables high-performance channel operations without kernel syscalls.
  */
 
+/* Enable virtual memory backed allocator for growable stacks.
+ * This reserves large virtual address space (2MB) but only commits
+ * physical memory on demand (~4KB pages as stack grows).
+ * Trade-off: mco_create/destroy are slower (mmap/munmap syscalls),
+ * but coroutine pooling (99% reuse) amortizes this cost. */
+#define MCO_USE_VMEM_ALLOCATOR
+
 #define MINICORO_IMPL
 #include "minicoro.h"
 
@@ -159,7 +166,13 @@ static int get_spin_yield_iters(void) {
 #endif
 
 #ifndef CC_FIBER_STACK_SIZE
+/* With MCO_USE_VMEM_ALLOCATOR, physical memory is only committed on demand.
+ * We can use large virtual stack (2MB) with low physical memory cost. */
+#ifdef MCO_USE_VMEM_ALLOCATOR
+#define CC_FIBER_STACK_SIZE (2 * 1024 * 1024)  /* 2MB virtual, ~8KB physical */
+#else
 #define CC_FIBER_STACK_SIZE (128 * 1024)  /* 128KB per fiber */
+#endif
 #endif
 
 #ifndef CC_FIBER_QUEUE_SIZE
