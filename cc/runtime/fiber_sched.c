@@ -827,7 +827,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     /* Reuse existing coro if available (pooling), otherwise create new */
     int reused = 0;
     if (f->coro) {
-        mco_state st = mco_status(f->coro);
+        mco_state st = f->coro->state;  /* Inline mco_status for speed */
         if (st == MCO_DEAD || st == MCO_SUSPENDED) {
             /* MCO_DEAD: completed coro from pool, needs context reset
              * MCO_SUSPENDED: pre-warmed coro, already has valid context */
