@@ -634,9 +634,11 @@ static void* worker_main(void* arg) {
             batch[count++] = f;
         }
         
-        /* Priority 3: Steal from other workers */
+        /* Priority 3: Steal from other workers (randomized start to avoid thundering herd) */
         if (count == 0) {
-            for (size_t i = 0; i < g_sched.num_workers && count < WORKER_BATCH_SIZE; i++) {
+            size_t start = (size_t)worker_id;  /* Start from different positions */
+            for (size_t j = 0; j < g_sched.num_workers && count < WORKER_BATCH_SIZE; j++) {
+                size_t i = (start + j + 1) % g_sched.num_workers;
                 if ((int)i == worker_id) continue;
                 fiber_task* f = lq_steal(&g_sched.local_queues[i]);
                 if (f) batch[count++] = f;
