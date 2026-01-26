@@ -935,11 +935,15 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
         atomic_fetch_add_explicit(&g_spawn_timing.count, 1, memory_order_relaxed);
     }
     
-    /* Track reuse stats (lightweight) */
-    if (reused) {
-        atomic_fetch_add_explicit(&g_sched.coro_reused, 1, memory_order_relaxed);
-    } else {
-        atomic_fetch_add_explicit(&g_sched.coro_created, 1, memory_order_relaxed);
+    /* Track reuse stats (only when CC_FIBER_STATS is set) */
+    static int stats_enabled = -1;
+    if (stats_enabled < 0) stats_enabled = getenv("CC_FIBER_STATS") != NULL;
+    if (stats_enabled) {
+        if (reused) {
+            atomic_fetch_add_explicit(&g_sched.coro_reused, 1, memory_order_relaxed);
+        } else {
+            atomic_fetch_add_explicit(&g_sched.coro_created, 1, memory_order_relaxed);
+        }
     }
     
     return f;
