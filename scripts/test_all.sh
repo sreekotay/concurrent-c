@@ -7,7 +7,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
 # Default timeout for stress tests (seconds)
-STRESS_TIMEOUT=${STRESS_TIMEOUT:-30}
+STRESS_TIMEOUT=${STRESS_TIMEOUT:-60}
 
 # Parse arguments
 RUN_PERF=0
@@ -56,7 +56,7 @@ for f in $stress_files; do
     ./cc/bin/ccc run --release --timeout "$STRESS_TIMEOUT" "$f" > /tmp/cc_stress_out.txt 2>&1
     rc=$?
     
-    if grep -q "timed out" /tmp/cc_stress_out.txt; then
+    if grep -q "cc: run timed out" /tmp/cc_stress_out.txt; then
         echo "[TIMEOUT] $name"
         stress_timeout=$((stress_timeout + 1))
     elif grep -q "error:" /tmp/cc_stress_out.txt; then

@@ -513,19 +513,60 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
     return NULL;
 }
 
-/* Wake all waiters (for close) - batched */
+/* Wake one recv waiter for close (notified=3 means "woken by close") */
+static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
+    if (!ch || !ch->recv_waiters_head) return;
+    cc__fiber_wait_node* node = ch->recv_waiters_head;
+    ch->recv_waiters_head = node->next;
+    if (ch->recv_waiters_head) {
+        ch->recv_waiters_head->prev = NULL;
+    } else {
+        ch->recv_waiters_tail = NULL;
+    }
+    atomic_store_explicit(&node->notified, 3, memory_order_release);  /* 3 = close */
+    wake_batch_add(node->fiber);
+}
+
+/* Wake one send waiter for close (notified=3 means "woken by close") */
+static void cc__chan_wake_one_send_waiter_recv_close(CCChan* ch) {
+    if (!ch || !ch->send_waiters_recv_head) return;
+    cc__fiber_wait_node* node = ch->send_waiters_recv_head;
+    ch->send_waiters_recv_head = node->next;
+    if (ch->send_waiters_recv_head) {
+        ch->send_waiters_recv_head->prev = NULL;
+    } else {
+        ch->send_waiters_recv_tail = NULL;
+    }
+    atomic_store_explicit(&node->notified, 3, memory_order_release);  /* 3 = close */
+    wake_batch_add(node->fiber);
+}
+
+static void cc__chan_wake_one_send_waiter_consume_close(CCChan* ch) {
+    if (!ch || !ch->send_waiters_consume_head) return;
+    cc__fiber_wait_node* node = ch->send_waiters_consume_head;
+    ch->send_waiters_consume_head = node->next;
+    if (ch->send_waiters_consume_head) {
+        ch->send_waiters_consume_head->prev = NULL;
+    } else {
+        ch->send_waiters_consume_tail = NULL;
+    }
+    atomic_store_explicit(&node->notified, 3, memory_order_release);  /* 3 = close */
+    wake_batch_add(node->fiber);
+}
+
+/* Wake all waiters (for close) - batched, uses notified=3 */
 static void cc__chan_wake_all_waiters(CCChan* ch) {
     if (!ch) return;
-    /* Wake all send waiters */
+    /* Wake all send waiters with close signal */
     while (ch->send_waiters_recv_head) {
-        cc__chan_wake_one_send_waiter_recv(ch);
+        cc__chan_wake_one_send_waiter_recv_close(ch);
     }
     while (ch->send_waiters_consume_head) {
-        cc__chan_wake_one_send_waiter_consume(ch);
+        cc__chan_wake_one_send_waiter_consume_close(ch);
     }
-    /* Wake all recv waiters */
+    /* Wake all recv waiters with close signal */
     while (ch->recv_waiters_head) {
-        cc__chan_wake_one_recv_waiter(ch);
+        cc__chan_wake_one_recv_waiter_close(ch);
     }
 }
 
@@ -1172,8 +1213,16 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
             }
         }
 
-        if (atomic_load_explicit(&node.notified, memory_order_acquire)) {
-            return 0;
+        {
+            int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
+            if (notify_val == 1) {
+                /* notified=1 means a receiver actually took our data */
+                return 0;
+            }
+            if (notify_val == 3) {
+                /* notified=3 means woken by close */
+                return EPIPE;
+            }
         }
 
         if (deadline && err == ETIMEDOUT) {
@@ -1233,9 +1282,18 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             }
         }
 
-        if (atomic_load_explicit(&node.notified, memory_order_acquire)) {
-            if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-            return 0;
+        {
+            int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
+            if (notify_val == 1) {
+                /* notified=1 means a sender actually delivered data */
+                if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+                return 0;
+            }
+            if (notify_val == 3) {
+                /* notified=3 means woken by close with no data */
+                if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+                return EPIPE;
+            }
         }
 
         if (deadline && err == ETIMEDOUT) {
@@ -2122,18 +2180,26 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
     }
 
     if (rc == EAGAIN) {
-        /* Would block. For unbuffered channels in fiber context, do blocking
-           directly (fiber-aware) instead of using the executor pool which can
-           starve with multiple concurrent waiters. */
-        if (f->ch->cap == 0 && cc__fiber_in_context()) {
+        /* Would block. In fiber context, do blocking directly (fiber-aware)
+           instead of using the executor pool which can starve with multiple
+           concurrent waiters. Pass NULL deadline to get fiber-aware blocking
+           (deadline is handled at outer scope). */
+        if (cc__fiber_in_context()) {
             CCChan* ch = f->ch;
-            pthread_mutex_lock(&ch->mu);
-            struct timespec ts;
-            const struct timespec* p = f->deadline ? cc_deadline_as_timespec(f->deadline, &ts) : NULL;
-            int err = f->is_send
-                ? cc_chan_send_unbuffered(ch, f->buf, p)
-                : cc_chan_recv_unbuffered(ch, f->buf, p);
-            pthread_mutex_unlock(&ch->mu);
+            int err;
+            if (ch->cap == 0) {
+                /* Unbuffered: use direct handoff with fiber blocking */
+                pthread_mutex_lock(&ch->mu);
+                err = f->is_send
+                    ? cc_chan_send_unbuffered(ch, f->buf, NULL)
+                    : cc_chan_recv_unbuffered(ch, f->buf, NULL);
+                pthread_mutex_unlock(&ch->mu);
+            } else {
+                /* Buffered: use timed send/recv with NULL deadline for fiber blocking */
+                err = f->is_send
+                    ? cc_chan_timed_send(ch, f->buf, f->elem_size, NULL)
+                    : cc_chan_timed_recv(ch, f->buf, f->elem_size, NULL);
+            }
             wake_batch_flush();
             f->completed = 1;
             f->result = err;
@@ -2141,7 +2207,7 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
             if (out_err) *out_err = err;
             return CC_FUTURE_READY;
         }
-        /* Otherwise, offload to async executor if available */
+        /* Non-fiber context: offload to async executor if available */
         CCExec* ex = cc_async_runtime_exec();
         if (ex) {
             int sub = 0;

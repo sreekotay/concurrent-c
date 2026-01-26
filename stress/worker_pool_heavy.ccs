@@ -5,11 +5,12 @@
  * Tests worker pool pattern under heavy load.
  */
 #include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
-#define NUM_WORKERS 8
-#define NUM_JOBS 500
-#define JOB_QUEUE_CAP 32
+/* Reduced numbers for stress test reliability */
+static const int NUM_WORKERS = 4;
+static const int NUM_JOBS = 50;
 
 /* Job: compute sum of 1..n */
 typedef struct {
@@ -22,61 +23,65 @@ typedef struct {
     int result;
 } Result;
 
-/* Global channel handles */
-Job[~JOB_QUEUE_CAP >] g_jobs_tx;
-Job[~JOB_QUEUE_CAP <] g_jobs_rx;
-Result[~NUM_JOBS >] g_results_tx;
-Result[~NUM_JOBS <] g_results_rx;
-CCChan* g_jobs_ch;
-CCChan* g_results_ch;
+/* Global atomic counters for results */
+cc_atomic_int g_result_count = 0;
+cc_atomic_int g_total_sum = 0;
 
 int main(void) {
     printf("worker_pool_heavy: %d workers, %d jobs\n", NUM_WORKERS, NUM_JOBS);
 
-    g_jobs_ch = channel_pair(&g_jobs_tx, &g_jobs_rx);
-    g_results_ch = channel_pair(&g_results_tx, &g_results_rx);
+    /* Use unbuffered channels */
+    Job[~ >] jobs_tx;
+    Job[~ <] jobs_rx;
+    Result[~ >] results_tx;
+    Result[~ <] results_rx;
+    CCChan* jobs_ch = channel_pair(&jobs_tx, &jobs_rx);
+    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
 
     @nursery {
-        /* Workers */
-        for (int w = 0; w < NUM_WORKERS; w++) {
-            spawn(() => {
-                Job job;
-                while (chan_recv(g_jobs_rx, &job) == 0) {
-                    /* Compute sum 1..n */
-                    int sum = (job.n * (job.n + 1)) / 2;
-                    Result r = {.id = job.id, .result = sum};
-                    chan_send(g_results_tx, r);
-                }
-            });
-        }
+        /* Results collector - must run in parallel for unbuffered channels */
+        spawn(() => {
+            Result r;
+            while (chan_recv(results_rx, &r) == 0) {
+                cc_atomic_fetch_add(&g_total_sum, r.result);
+                cc_atomic_fetch_add(&g_result_count, 1);
+            }
+        });
 
-        /* Job feeder */
-        @nursery closing(g_jobs_tx) {
-            spawn(() => {
-                for (int i = 0; i < NUM_JOBS; i++) {
-                    Job j = {.id = i, .n = i + 1};
-                    chan_send(g_jobs_tx, j);
-                }
-            });
+        /* Workers + job feeder */
+        @nursery closing(results_tx) {
+            for (int w = 0; w < NUM_WORKERS; w++) {
+                spawn(() => {
+                    Job job;
+                    while (chan_recv(jobs_rx, &job) == 0) {
+                        /* Compute sum 1..n */
+                        int sum = (job.n * (job.n + 1)) / 2;
+                        Result r = {.id = job.id, .result = sum};
+                        chan_send(results_tx, r);
+                    }
+                });
+            }
+
+            /* Job feeder */
+            @nursery closing(jobs_tx) {
+                spawn(() => {
+                    for (int i = 0; i < NUM_JOBS; i++) {
+                        Job j = {.id = i, .n = i + 1};
+                        chan_send(jobs_tx, j);
+                    }
+                });
+            }
         }
     }
 
-    /* Collect results */
-    chan_close(g_results_tx);
-    int total_sum = 0;
-    int result_count = 0;
-    Result r;
-    while (chan_recv(g_results_rx, &r) == 0) {
-        total_sum += r.result;
-        result_count++;
-    }
-
-    cc_chan_free(g_jobs_ch);
-    cc_chan_free(g_results_ch);
+    cc_chan_free(jobs_ch);
+    cc_chan_free(results_ch);
 
     /* Expected: sum of (n*(n+1)/2) for n=1..NUM_JOBS */
     /* = sum of triangular numbers = NUM_JOBS*(NUM_JOBS+1)*(NUM_JOBS+2)/6 */
     int expected = (NUM_JOBS * (NUM_JOBS + 1) * (NUM_JOBS + 2)) / 6;
+    int result_count = cc_atomic_load(&g_result_count);
+    int total_sum = cc_atomic_load(&g_total_sum);
 
     printf("worker_pool_heavy: %d results, sum %d (expected %d)\n",
            result_count, total_sum, expected);

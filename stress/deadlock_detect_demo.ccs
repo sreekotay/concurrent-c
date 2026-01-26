@@ -1,7 +1,10 @@
 /*
- * Test: Deadlock Detection
+ * Test: Deadlock Detection DEMO
  *
- * This test intentionally creates a deadlock pattern that should be detected
+ * NOTE: This is a DEMONSTRATION test that intentionally deadlocks.
+ * It is EXPECTED to timeout in stress test runs.
+ *
+ * This test creates a deadlock pattern that should be detected
  * by the runtime deadlock watchdog (enabled by default).
  *
  * The pattern: cc_block_on inside spawn with channel ops that wait on each other.
