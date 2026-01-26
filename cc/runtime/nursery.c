@@ -110,7 +110,7 @@ typedef struct CCNurseryThunk {
     struct CCNurseryThunk* next;  /* For free list pooling */
 } CCNurseryThunk;
 
-/* Lock-free thunk pool */
+/* Lock-free thunk pool (Treiber stack) */
 static CCNurseryThunk* _Atomic g_thunk_free_list = NULL;
 
 static CCNurseryThunk* thunk_alloc(void) {
