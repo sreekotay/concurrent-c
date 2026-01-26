@@ -826,7 +826,9 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     int reused = 0;
     if (f->coro) {
         mco_state st = mco_status(f->coro);
-        if (st == MCO_DEAD) {
+        if (st == MCO_DEAD || st == MCO_SUSPENDED) {
+            /* MCO_DEAD: completed coro from pool, needs context reset
+             * MCO_SUSPENDED: pre-warmed coro, already has valid context */
             /* Fast path: Reset the coroutine context directly without full mco_init.
              * mco_init does expensive memsets that aren't needed for reuse.
              * We only need to reset the context registers and update metadata. */
@@ -1120,4 +1122,35 @@ void cc__fiber_sched_enqueue(void* fiber_ptr) {
 
 int cc__fiber_sched_active(void) {
     return atomic_load_explicit(&g_initialized, memory_order_acquire) == 2;
+}
+
+/* Pre-warm the fiber pool by creating N fibers with coroutines.
+ * Call this at startup to avoid cold-start penalty on first nursery.
+ * Returns number of fibers successfully pre-warmed. */
+int cc_fiber_pool_prewarm(size_t n) {
+    /* Ensure scheduler is initialized */
+    if (atomic_load_explicit(&g_initialized, memory_order_acquire) != 2) {
+        cc_fiber_sched_init(0);
+    }
+    
+    size_t created = 0;
+    for (size_t i = 0; i < n; i++) {
+        fiber_task* f = (fiber_task*)calloc(1, sizeof(fiber_task));
+        if (!f) break;
+        
+        /* Create coroutine */
+        mco_desc desc = mco_desc_init(fiber_entry, CC_FIBER_STACK_SIZE);
+        desc.user_data = f;
+        mco_result res = mco_create(&f->coro, &desc);
+        if (res != MCO_SUCCESS) {
+            free(f);
+            break;
+        }
+        
+        /* Add to free list */
+        fiber_free(f);
+        created++;
+    }
+    
+    return (int)created;
 }

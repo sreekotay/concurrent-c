@@ -47,14 +47,6 @@
  * waiter synchronization due to the mutex integration pattern. */
 
 /* ============================================================================
- * Lock-Free Rendezvous State Constants
- * ============================================================================ */
-#define RV_STATE_EMPTY         0  /* No one waiting */
-#define RV_STATE_SENDER_READY  1  /* Sender has data, waiting for receiver */
-#define RV_STATE_RECEIVER_READY 2 /* Receiver waiting for sender */
-#define RV_STATE_EXCHANGING    3  /* Exchange in progress */
-
-/* ============================================================================
  * Fiber-Aware Blocking Infrastructure
  * ============================================================================ */
 
@@ -318,10 +310,6 @@ struct CCChan {
     int rv_has_value;
     int rv_recv_waiters;
     
-    /* Lock-free rendezvous state for unbuffered channels */
-    /* States: 0=EMPTY, 1=SENDER_READY, 2=RECEIVER_READY, 3=EXCHANGING */
-    _Atomic int rv_state;
-    _Atomic int rv_exchange_done;  /* Sender waits for this after placing data */
     /* Condvar waiter counts for signaling optimization */
     int send_cond_waiters;     /* threads blocked waiting to send (buffer full) */
     int recv_cond_waiters;     /* threads blocked waiting to recv (buffer empty) */
@@ -642,10 +630,6 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
     pthread_mutex_init(&ch->mu, NULL);
     pthread_cond_init(&ch->not_empty, NULL);
     pthread_cond_init(&ch->not_full, NULL);
-    
-    /* Initialize lock-free rendezvous state for unbuffered channels */
-    atomic_store(&ch->rv_state, RV_STATE_EMPTY);
-    atomic_store(&ch->rv_exchange_done, 0);
     
     /* Initialize lock-free queue for buffered channels */
     ch->use_lockfree = 0;
@@ -1130,44 +1114,9 @@ static int cc_chan_try_dequeue_lockfree(CCChan* ch, void* out_value) {
 /* ============================================================================
  * Unbuffered Channel (Rendezvous) Operations
  * ============================================================================
- * Simple approach: unbuffered channels go directly through the mutex+condvar
- * path. The "lock-free" functions just return EAGAIN to trigger the fallback.
- * 
- * This is similar to Go's unbuffered channel implementation which uses
- * a lightweight lock + direct handoff rather than complex lock-free protocols.
+ * Unbuffered channels use mutex+condvar for direct handoff between sender
+ * and receiver. This is similar to Go's unbuffered channel implementation.
  */
-
-/* Try non-blocking send for unbuffered channel - always falls back */
-static int cc_chan_try_send_rendezvous_lockfree(CCChan* ch, const void* value) {
-    (void)value;
-    if (ch->cap != 0) return EAGAIN;
-    if (ch->closed) return EPIPE;
-    return EAGAIN;
-}
-
-/* Try non-blocking recv for unbuffered channel - always falls back */
-static int cc_chan_try_recv_rendezvous_lockfree(CCChan* ch, void* out_value) {
-    (void)out_value;
-    if (ch->cap != 0) return EAGAIN;
-    if (ch->closed) return EPIPE;
-    return EAGAIN;
-}
-
-/* Blocking send for unbuffered channel - go directly to mutex+condvar path */
-static int cc_chan_send_rendezvous_lockfree_blocking(CCChan* ch, const void* value) {
-    (void)value;
-    if (ch->cap != 0) return EAGAIN;
-    if (ch->closed) return EPIPE;
-    return EAGAIN;  /* Fall through to mutex path */
-}
-
-/* Blocking recv for unbuffered channel - go directly to mutex+condvar path */
-static int cc_chan_recv_rendezvous_lockfree_blocking(CCChan* ch, void* out_value) {
-    (void)out_value;
-    if (ch->cap != 0) return EAGAIN;
-    if (ch->closed) return EPIPE;
-    return EAGAIN;  /* Fall through to mutex path */
-}
 
 /* Direct handoff rendezvous helpers (cap == 0). Expects ch->mu locked. */
 static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct timespec* deadline) {
@@ -1363,20 +1312,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         /* Lock-free enqueue failed (queue full), fall through to blocking path */
     }
     
-    /* Lock-free fast path for unbuffered channels (rendezvous) */
-    if (ch->cap == 0 && ch->elem_size == value_size && ch->buf) {
-        int rc = cc_chan_send_rendezvous_lockfree_blocking(ch, value);
-        if (rc == 0) {
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_send(t0, t0, done, done, done);
-            }
-            cc__chan_broadcast_activity();
-            return 0;
-        }
-        if (rc == EPIPE) return EPIPE;
-        /* Lock-free failed (EAGAIN), fall through to mutex path */
-    }
+    /* Unbuffered channels: check closed before mutex path */
+    if (ch->cap == 0 && ch->closed) return EPIPE;
     
     /* Standard mutex path (unbuffered, initial setup, or lock-free full) */
     cc_chan_lock(ch);
@@ -1528,21 +1465,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         /* Lock-free dequeue failed (queue empty), fall through to blocking path */
     }
     
-    /* Lock-free fast path for unbuffered channels (rendezvous) */
-    if (ch->cap == 0 && ch->elem_size == value_size && ch->buf) {
-        int rc = cc_chan_recv_rendezvous_lockfree_blocking(ch, out_value);
-        if (rc == 0) {
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_recv(t0, t0, done, done, done);
-            }
-            cc__chan_broadcast_activity();
-            return 0;
-        }
-        if (rc == EPIPE) return EPIPE;
-        /* Lock-free failed (EAGAIN), fall through to mutex path */
-    }
-    
     /* Standard mutex path */
     pthread_mutex_lock(&ch->mu);
     if (timing) t_lock = channel_rdtsc();
@@ -1660,16 +1582,8 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         return EAGAIN;
     }
     
-    /* Lock-free fast path for unbuffered channels (rendezvous) */
-    if (ch->cap == 0 && ch->elem_size == value_size && ch->buf) {
-        int rc = cc_chan_try_send_rendezvous_lockfree(ch, value);
-        if (rc == 0) {
-            cc__chan_broadcast_activity();
-            return 0;
-        }
-        if (rc == EPIPE) return EPIPE;
-        /* EAGAIN: fall through to mutex path to check rv_recv_waiters */
-    }
+    /* Unbuffered channels: check closed before mutex path */
+    if (ch->cap == 0 && ch->closed) return EPIPE;
     
     /* Standard mutex path */
     pthread_mutex_lock(&ch->mu);
@@ -1740,17 +1654,6 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             return 0;
         }
         return ch->closed ? EPIPE : EAGAIN;
-    }
-    
-    /* Lock-free fast path for unbuffered channels (rendezvous) */
-    if (ch->cap == 0 && ch->elem_size == value_size && ch->buf) {
-        int rc = cc_chan_try_recv_rendezvous_lockfree(ch, out_value);
-        if (rc == 0) {
-            cc__chan_broadcast_activity();
-            return 0;
-        }
-        if (rc == EPIPE) return EPIPE;
-        /* EAGAIN: fall through to mutex path to check rv_has_value */
     }
     
     /* Standard mutex path */
