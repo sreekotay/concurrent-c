@@ -903,7 +903,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     if (timing) t3 = rdtsc();
     
-    atomic_fetch_add_explicit(&g_sched.pending, 1, memory_order_release);
+    atomic_fetch_add_explicit(&g_sched.pending, 1, memory_order_relaxed);
     
     /* Wake a sleeping worker only if:
      * - We pushed to global queue (local queue will be picked up by owner)
