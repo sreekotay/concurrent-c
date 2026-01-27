@@ -2230,9 +2230,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 "#include \"std/prelude.cch\"\n"
                 "int main(void) {\n"
                 "  CCArena a = cc_heap_arena(kilobytes(1));\n"
-                "  CCString s = cc_string_new(&a, 0);\n"
-                "  cc_string_append_cstr(&a, &s, \"Hello, \");\n"
-                "  cc_string_append_cstr(&a, &s, \"Concurrent-C via UFCS!\\n\");\n"
+                "  CCString s = cc_string_new(&a);\n"
+                "  cc_string_push(&s, cc_slice_from_buffer(\"Hello, \", sizeof(\"Hello, \") - 1));\n"
+                "  cc_string_push(&s, cc_slice_from_buffer(\"Concurrent-C via UFCS!\\n\", sizeof(\"Concurrent-C via UFCS!\\n\") - 1));\n"
                 "  cc_std_out_write(cc_string_as_slice(&s));\n"
                 "  return 0;\n"
                 "}\n");

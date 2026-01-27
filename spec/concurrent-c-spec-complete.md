@@ -4383,159 +4383,52 @@ Vec<int> result = vec_map(vec_filter(input, is_even), double);
 
 ### 8.1 Strings
 
-**Type:** `str` — Immutable owned string
+**Type:** `String` — Arena-backed growable string (Vec<char>)
 
 ```c
-struct str {
-    char* ptr;
-    size_t len;
-    size_t cap;
-}
+// C ABI (prefixed): typedef Vec_char CCString;
+// Language surface: String
 ```
 
-Allocations come from the current arena. Strings have move semantics (copyable by default if the arena stays valid).
+`String` is a small, moveable handle to an arena-backed buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
 
-#### 8.1.1 Core Methods
+#### 8.1.1 Core API
 
 ```c
 // Normative (free function form)
-size_t len(str* s);
-char at(str* s, int index);                  // bounds-checked, debug error on fail
-str slice(str* s, int start, int end);      // substring [start, end)
-char[:] as_slice(str* s);                   // view as char[:]
+String  string_new(Arena* a);
+String  string_from(Arena* a, char[:] initial);
+String* cc_string_push(String* s, char[:] data);
+String* cc_string_push_char(String* s, char c);
+String* cc_string_push_int(String* s, i64 value);
+String* cc_string_push_uint(String* s, u64 value);
+String* cc_string_push_float(String* s, f64 value);
+String* cc_string_clear(String* s);
+char[:] cc_string_as_slice(String* s);
 
-// UFCS methods (primary for users)
-size_t  s.len();
-char    s.at(int index);
-str     s.slice(int start, int end);
+// UFCS (primary for users)
+String* s.append(char[:] data);        // alias for push
+String* s.push(char[:] data);          // appends data
+String* s.push_char(char c);
+String* s.push_int(i64 value);
+String* s.push_uint(u64 value);
+String* s.push_float(f64 value);
+String* s.clear();
 char[:] s.as_slice();
+size_t  s.len();                       // Vec<T> UFCS
+size_t  s.cap();                       // Vec<T> UFCS
 ```
+
+**Slice lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `push()`, `clear()`). For stable references, use `.clone(a)`.
 
 Example:
 ```c
-str s = "hello world";
-size_t len = s.len();                    // 11
-char first = s.at(0);                    // 'h'
-str sub = s.slice(0, 5);                 // "hello"
-char[:] view = s.as_slice();             // view
-```
-
-#### 8.1.2 Query Methods
-
-```c
-// Normative
-bool is_empty(str* s);
-bool is_ascii(str* s);
-bool starts_with(str* s, str prefix);
-bool ends_with(str* s, str suffix);
-bool contains(str* s, str needle);
-int index_of(str* s, str needle);        // -1 if not found
-int last_index_of(str* s, str needle);
-int count_occurrences(str* s, str needle);
-
-// UFCS
-bool s.is_empty();
-bool s.is_ascii();
-bool s.starts_with(str prefix);
-bool s.ends_with(str suffix);
-bool s.contains(str needle);
-int  s.index_of(str needle);
-int  s.last_index_of(str needle);
-int  s.count(str needle);
-```
-
-Example:
-```c
-if (url.starts_with("https://") && url.contains("example.com")) {
-    process_url(url);
-}
-
-int idx = text.index_of("pattern");
-if (idx >= 0) {
-    str after = text.slice(idx + 7, text.len());
-}
-```
-
-#### 8.1.3 Transform Methods (Return Owned)
-
-```c
-// Normative
-str upper(str* s, Arena* a);             // a = NULL uses current arena
-str lower(str* s, Arena* a);
-str trim(str* s, Arena* a);              // both ends
-str trim_left(str* s, Arena* a);
-str trim_right(str* s, Arena* a);
-str replace(str* s, str old, str new, Arena* a);
-str replace_all(str* s, str old, str new, Arena* a);
-str repeat(str* s, int times, Arena* a);
-str reverse(str* s, Arena* a);
-
-// UFCS (arena defaults to current)
-str s.upper();
-str s.lower();
-str s.trim();
-str s.trim_left();
-str s.trim_right();
-str s.replace(str old, str new);
-str s.replace_all(str old, str new);
-str s.repeat(int times);
-str s.reverse();
-```
-
-Example (with chaining):
-```c
-str result = input
-    .trim()
-    .lower()
-    .replace("foo", "bar")
-    .slice(0, 10);
-    // Can't chain right now without explicit `await` but this shows intent
-```
-
-#### 8.1.4 Split / Join
-
-```c
-// Normative
-str[:] split(str* s, str delimiter, Arena* a);
-str join(str[:] parts, str separator, Arena* a);
-
-// UFCS
-str[:] s.split(str delimiter);
-str s.join(str separator);  // on str[:] array
-```
-
-Example:
-```c
-str line = "one,two,three";
-str[:] fields = line.split(",");
-
-for (str field : fields) {
-    process(field);
-}
-
-str joined = fields.join(" | ");
-```
-
-#### 8.1.5 Parsing
-
-```c
-// Normative
-int? parse_int(str* s);
-f64? parse_f64(str* s);
-bool? parse_bool(str* s);
-
-// UFCS
-int?  s.parse_int();
-f64?  s.parse_f64();
-bool? s.parse_bool();
-```
-
-Example:
-```c
-str num_str = "42";
-if (try int val = num_str.parse_int()) {
-    process(val);
-}
+Arena arena = arena(megabytes(1));
+String s = string_new(&arena);
+s.append("count=")
+ .push_char('x')
+ .push_int(42);
+char[:] view = s.as_slice();
 ```
 
 #### 8.1.6 Formatting (Global)

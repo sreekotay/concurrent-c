@@ -8,7 +8,7 @@ int main(void) {
         String s = string_new(arena);
         int v = helper_add(2, 5);
         s.append("mixed_c helper_add(2,5)=");
-        cc_string_append_int(arena, &s, v);
+        cc_string_push_int(&s, v);
         s.append("\n");
         std_out.write(s);
     }

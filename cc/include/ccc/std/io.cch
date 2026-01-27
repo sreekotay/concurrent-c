@@ -126,11 +126,13 @@ static inline CCResultOptSliceIoError cc_file_read_line(CCFile *file, CCArena *a
     if (!file || !file->handle || !arena) {
         return cc_err_CCResultOptSliceIoError(cc_io_from_errno(EINVAL));
     }
-    CCString line = cc_string_new(arena, 128);
-    if (!line.ptr) return cc_err_CCResultOptSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+    CCString line = cc_string_new(arena);
+    if (!line.data) return cc_err_CCResultOptSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
     int c;
     while ((c = fgetc(file->handle)) != EOF) {
-        cc_string_append_char(arena, &line, (char)c);
+        if (!cc_string_push_char(&line, (char)c)) {
+            return cc_err_CCResultOptSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+        }
         if (c == '\n') break;
     }
     if (line.len == 0 && c == EOF) {
@@ -302,8 +304,8 @@ static inline CCResultOptSliceIoError cc_buf_reader_read_line(CCBufReader *r, CC
     if (!r || !r->file || !r->file->handle || !arena) {
         return cc_err_CCResultOptSliceIoError(cc_io_from_errno(EINVAL));
     }
-    CCString line = cc_string_new(arena, 128);
-    if (!line.ptr) return cc_err_CCResultOptSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+    CCString line = cc_string_new(arena);
+    if (!line.data) return cc_err_CCResultOptSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
     while (1) {
         if (r->pos >= r->len) {
             CCResultOptSliceIoError fill = cc_buf_reader_next(r, r->cap);
@@ -320,7 +322,9 @@ static inline CCResultOptSliceIoError cc_buf_reader_read_line(CCBufReader *r, CC
         }
         if (r->pos >= r->len) break;
         char c = r->buf[r->pos++];
-        cc_string_append_char(arena, &line, c);
+        if (!cc_string_push_char(&line, c)) {
+            return cc_err_CCResultOptSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+        }
         if (c == '\n') break;
     }
     CCSlice slice = cc_string_as_slice(&line);

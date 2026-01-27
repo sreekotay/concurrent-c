@@ -18,7 +18,7 @@ static inline uint64_t cc_hash_slice(CCSlice s) {
 }
 
 static inline bool cc_eq_slice(CCSlice a, CCSlice b) {
-    return cc_slice_eq(a, b);
+    return CCSlice_eq(&a, b);
 }
 
 #endif // CC_STD_HASH_H

@@ -22,7 +22,7 @@ int main(void) {
             
             /* UFCS: method syntax on plain C types. */
             s.append("Processing request ");
-            cc_string_append_int(arena, &s, i);
+            cc_string_push_int(&s, i);
             s.append("\n");
             
             std_out.write(s);

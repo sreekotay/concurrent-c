@@ -4,111 +4,66 @@
 
 #include <string.h>
 
-static char *cc_string_alloc(CCArena *arena, size_t cap) {
-    if (!arena || cap == 0) {
-        return NULL;
-    }
-    return (char *)cc_arena_alloc(arena, cap, sizeof(char));
-}
-
-CCString cc_string_new(CCArena *arena, size_t initial_cap) {
-    size_t cap = initial_cap ? initial_cap : 64;
-    char *buf = cc_string_alloc(arena, cap);
-    if (!buf) {
-        CCString empty = {0};
-        return empty;
-    }
-    buf[0] = '\0';
-    CCString s = {.ptr = buf, .len = 0, .cap = cap, .arena = arena};
+CCString cc_string_new(CCArena *arena) {
+    CCString s = Vec_char_init(arena, 0);
+    if (s.data) s.data[0] = '\0';
     return s;
 }
 
 CCString cc_string_from_slice(CCArena *arena, CCSlice slice) {
-    CCString s = cc_string_new(arena, slice.len + 1);
-    if (!s.ptr) {
-        return s;
+    CCString s = cc_string_new(arena);
+    if (!s.data) return s;
+    if (!cc_string_push(&s, slice)) {
+        CCString empty = {0};
+        return empty;
     }
-    if (slice.ptr && slice.len) {
-        memcpy(s.ptr, slice.ptr, slice.len);
-    }
-    s.len = slice.len;
-    s.ptr[s.len] = '\0';
     return s;
 }
 
-int cc_string_reserve(CCArena *arena, CCString *str, size_t need) {
-    if (!str) {
-        return -1;
-    }
-    CCArena* a = arena ? arena : str->arena;
-    if (!a) return -1;
-    size_t required = need + 1;
-    if (str->cap >= required) {
-        return 0;
-    }
-    size_t new_cap = str->cap ? str->cap : 64;
-    while (new_cap < required) {
-        new_cap *= 2;
-    }
-    char *new_buf = cc_string_alloc(a, new_cap);
-    if (!new_buf) {
-        return -1;
-    }
-    if (str->ptr && str->len) {
-        memcpy(new_buf, str->ptr, str->len);
-    }
-    new_buf[str->len] = '\0';
-    str->ptr = new_buf;
-    str->cap = new_cap;
-    str->arena = a;
-    return 0;
-}
-
-int cc_string_append_slice(CCArena *arena, CCString *str, CCSlice data) {
-    if (!str) {
-        return -1;
-    }
-    CCArena* a = arena ? arena : str->arena;
-    if (!a) return -1;
+CCString* cc_string_push(CCString *str, CCSlice data) {
+    if (!str || !str->arena) return NULL;
     size_t new_len = str->len + data.len;
-    if (cc_string_reserve(a, str, new_len) != 0) {
-        return -1;
-    }
+    if (Vec_char_reserve(str, new_len + 1) != 0) return NULL;
     if (data.ptr && data.len) {
-        memcpy(str->ptr + str->len, data.ptr, data.len);
+        memcpy(str->data + str->len, data.ptr, data.len);
     }
     str->len = new_len;
-    str->ptr[str->len] = '\0';
-    str->arena = a;
-    return 0;
+    str->data[str->len] = '\0';
+    return str;
 }
 
-int cc_string_append_cstr(CCArena *arena, CCString *str, const char *cstr) {
-    if (!cstr) {
-        return 0;
-    }
-    CCSlice slice = cc_slice_from_buffer((void *)cstr, strlen(cstr));
-    return cc_string_append_slice(arena ? arena : (str ? str->arena : NULL), str, slice);
+CCString* cc_string_clear(CCString *str) {
+    if (!str) return NULL;
+    str->len = 0;
+    if (str->data) str->data[0] = '\0';
+    return str;
 }
 
 CCSlice cc_string_as_slice(const CCString *str) {
-    if (!str || !str->ptr) {
+    if (!str || !str->data) {
         return cc_slice_empty();
     }
-    return cc_slice_from_parts(str->ptr, str->len, CC_SLICE_ID_NONE, str->cap);
+    return cc_slice_from_parts(str->data, str->len, CC_SLICE_ID_NONE, str->cap);
 }
 
 const char *cc_string_cstr(CCString *str) {
-    if (!str || !str->ptr) {
+    if (!str || !str->data) {
         return NULL;
     }
-    str->ptr[str->len] = '\0';
-    return str->ptr;
+    if (str->len + 1 > str->cap) {
+        if (Vec_char_reserve(str, str->len + 1) != 0) return NULL;
+    }
+    str->data[str->len] = '\0';
+    return str->data;
 }
 
 #ifdef CC_ENABLE_SHORT_NAMES
-CCString string_new(CCArena *arena) { return cc_string_new(arena, 0); }
-int string_append(CCString *str, const char *cstr) { return cc_string_append_cstr(str ? str->arena : NULL, str, cstr); }
+CCString string_new(CCArena *arena) { return cc_string_new(arena); }
+CCString* string_append(CCString *str, const char *cstr) {
+    if (!cstr) return str;
+    CCSlice s = cc_slice_from_buffer((void *)cstr, strlen(cstr));
+    return cc_string_push(str, s);
+}
 CCSlice string_as_slice(const CCString *str) { return cc_string_as_slice(str); }
 #endif
 

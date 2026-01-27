@@ -100,11 +100,10 @@ str result = input
     .slice(0, 10);
 
 // Or fluent builder
-StringBuilder sb = StringBuilder::new();
-sb.append("Hello")
-  .append(" ")
-  .append("World")
-  .build();
+String s = string_new(&arena);
+s.append("Hello")
+ .append(" ")
+ .append("World");
 ```
 
 ---
@@ -113,10 +112,10 @@ sb.append("Hello")
 
 ```c
 // Language surface: String
-// C ABI (prefixed): typedef struct CCString CCString;
+// C ABI (prefixed): typedef Vec_char CCString;   // String = Vec<char>
 ```
 
-**Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
+**Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer (a Vec<char>). Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
 
 **Factory (free function)**
 
@@ -126,15 +125,15 @@ String string_from(Arena* a, char[:] initial);
 
 // UFCS Methods only
 String* String.append(char[:] data);          // Append data, return for chaining
-String* String.append_char(char c);           // Append single character
-String* String.append_int(i64 value);         // Append formatted i64
-String* String.append_float(f64 value);       // Append formatted f64
-String* String.append_uint(u64 value);        // Append formatted u64
-String* String.append_if(bool cond, char[:] data);  // Conditional append
-String* String.clear();                        // Clear contents, reuse allocation
-char[:] String.as_slice();                     // Get immutable view
-size_t String.len();                           // Length in bytes
-size_t String.cap();                           // Capacity
+String* String.push(char[:] data);            // Alias of append
+String* String.push_char(char c);             // Append single character
+String* String.push_int(i64 value);           // Append formatted i64
+String* String.push_float(f64 value);         // Append formatted f64
+String* String.push_uint(u64 value);          // Append formatted u64
+String* String.clear();                       // Clear contents, reuse allocation
+char[:] String.as_slice();                    // Get immutable view
+size_t String.len();                          // Length in bytes (Vec<T> UFCS)
+size_t String.cap();                          // Capacity (Vec<T> UFCS)
 ```
 
 **Slice Lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
@@ -154,7 +153,7 @@ char[:] result = sb.as_slice();  // "count=x42"
 // Or more readable step-by-step
 String greeting = string_new(&arena);
 greeting.append("Hello");
-greeting.append_char(' ');
+greeting.push_char(' ');
 greeting.append("world");
 printf("%.*s\n", (int)greeting.as_slice().len, greeting.as_slice().ptr);
 ```
@@ -169,7 +168,7 @@ String json = string_new(&arena);
 json.append("{\"name\":\"")
     .append(name)
     .append("\",\"age\":")
-    .append_int(age)
+    .push_int(age)
     .append("}");
 char[:] json_str = json.as_slice();
 
@@ -182,7 +181,7 @@ if (has_filter_name)
          .append("'");
 if (has_filter_age)
     query.append(" AND age > ")
-         .append_int(min_age);
+         .push_int(min_age);
 ```
 
 ---
@@ -473,12 +472,14 @@ void! std_err.write(char[:] data);
 // String overloads for ergonomics
 void! std_out.write(String s);
 void! std_err.write(String s);
-// Overload resolution is handled by the compiler's UFCS lowering; both map to prefixed C ABI (`cc_std_out_write`, `cc_std_out_write_string`, etc.).
+// Overload resolution is handled by UFCS lowering; the compiler selects the
+// best match and emits prefixed C ABI calls (`cc_std_out_write` or
+// `cc_std_out_write_string`) with pointer-based signatures.
 
 **UFCS receiver conversion (general rule):**
 - Overload selection prefers an exact receiver type match.
 - If no exact match, the compiler may apply these implicit receiver conversions (in order) to find a viable overload:
-  1) `String -> char[:]` (view of contents)
+  1) `String -> char[:]` (view of contents via `cc_string_as_slice`)
   2) `char[N]` / string literal -> `char[:]`
   3) `CCSlice` alias -> `char[:]`
 - If no overload is viable after these conversions, resolution fails.

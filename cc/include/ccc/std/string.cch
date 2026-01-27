@@ -33,13 +33,11 @@ typedef int bool;
 #include <math.h>
 
 #include <ccc/cc_runtime.cch>
+#include <ccc/std/vec.cch>
 
-typedef struct {
-    char *ptr;
-    size_t len;
-    size_t cap;
-    CCArena *arena; // backing arena for growth
-} CCString;
+CC_VEC_DECL_ARENA(char, Vec_char)
+
+typedef Vec_char CCString;
 
 // Forward declare string type for helpers that return CCString later.
 // ------------------------- Parse error enums ------------------------------
@@ -74,8 +72,6 @@ typedef struct {
     CCSlice *items;
     size_t len;
 } CCSliceArray;
-
-static inline size_t cc_slice_len(CCSlice s) { return s.len; }
 
 /*
  * Forward declarations for UFCS methods.
@@ -126,15 +122,6 @@ static inline char *cc_slice_c_str(CCArena *arena, CCSlice s) {
     if (s.ptr && s.len) memcpy(buf, s.ptr, s.len);
     buf[s.len] = '\0';
     return buf;
-}
-
-static inline bool cc_slice_starts_with(CCSlice s, CCSlice prefix) {
-    return s.len >= prefix.len && memcmp(s.ptr, prefix.ptr, prefix.len) == 0;
-}
-
-static inline bool cc_slice_ends_with(CCSlice s, CCSlice suffix) {
-    if (s.len < suffix.len) return false;
-    return memcmp((uint8_t *)s.ptr + (s.len - suffix.len), suffix.ptr, suffix.len) == 0;
 }
 
 static inline size_t cc_slice_index_of(CCSlice s, CCSlice needle, bool *found) {
@@ -188,23 +175,6 @@ static inline size_t cc__trim_right_idx(CCSlice s) {
     return i;
 }
 
-static inline CCSlice cc_slice_trim(CCSlice s) {
-    size_t start = cc__trim_left_idx(s);
-    CCSlice sub = cc_slice_sub(s, start, s.len);
-    size_t end = cc__trim_right_idx(sub);
-    return cc_slice_sub(sub, 0, end);
-}
-
-static inline CCSlice cc_slice_trim_left(CCSlice s) {
-    return cc_slice_sub(s, cc__trim_left_idx(s), s.len);
-}
-
-static inline CCSlice cc_slice_trim_right(CCSlice s) {
-    CCSlice sub = s;
-    size_t end = cc__trim_right_idx(sub);
-    return cc_slice_sub(sub, 0, end);
-}
-
 static inline bool cc__in_set(char c, CCSlice set) {
     const char *p = (const char *)set.ptr;
     for (size_t i = 0; i < set.len; ++i) {
@@ -250,40 +220,43 @@ static inline CCSliceArray cc_slice_split_all(CCArena *arena, CCSlice s, CCSlice
 
 // ------------------------- String builder ---------------------------------
 
-CCString cc_string_new(CCArena *arena, size_t initial_cap);
+CCString cc_string_new(CCArena *arena);
 CCString cc_string_from_slice(CCArena *arena, CCSlice slice);
-int cc_string_reserve(CCArena *arena, CCString *str, size_t need);
-int cc_string_append_slice(CCArena *arena, CCString *str, CCSlice data);
-int cc_string_append_cstr(CCArena *arena, CCString *str, const char *cstr);
+CCString* cc_string_push(CCString *str, CCSlice data);
+CCString* cc_string_clear(CCString *str);
 CCSlice cc_string_as_slice(const CCString *str);
 const char *cc_string_cstr(CCString *str);
 
-static inline int cc_string_append_char(CCArena *arena, CCString *str, char c) {
+static inline CCString* cc_string_push_char(CCString *str, char c) {
     CCSlice s = cc_slice_from_buffer(&c, 1);
-    return cc_string_append_slice(arena, str, s);
+    return cc_string_push(str, s);
 }
-static inline int cc_string_append_int(CCArena *arena, CCString *str, int64_t v) {
+static inline CCString* cc_string_push_int(CCString *str, int64_t v) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
-    if (n < 0) return -1;
-    return cc_string_append_slice(arena, str, cc_slice_from_buffer(buf, (size_t)n));
+    if (n < 0) return NULL;
+    return cc_string_push(str, cc_slice_from_buffer(buf, (size_t)n));
 }
-static inline int cc_string_append_uint(CCArena *arena, CCString *str, uint64_t v) {
+static inline CCString* cc_string_push_uint(CCString *str, uint64_t v) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
-    if (n < 0) return -1;
-    return cc_string_append_slice(arena, str, cc_slice_from_buffer(buf, (size_t)n));
+    if (n < 0) return NULL;
+    return cc_string_push(str, cc_slice_from_buffer(buf, (size_t)n));
 }
-static inline int cc_string_append_float(CCArena *arena, CCString *str, double v) {
+static inline CCString* cc_string_push_float(CCString *str, double v) {
     char buf[64];
     int n = snprintf(buf, sizeof(buf), "%g", v);
-    if (n < 0) return -1;
-    return cc_string_append_slice(arena, str, cc_slice_from_buffer(buf, (size_t)n));
+    if (n < 0) return NULL;
+    return cc_string_push(str, cc_slice_from_buffer(buf, (size_t)n));
 }
 
 // Convenience wrappers matching CC surface API (no explicit arena argument).
-static inline CCString string_new(CCArena *arena) { return cc_string_new(arena, 0); }
-static inline int string_append(CCString *str, const char *cstr) { return cc_string_append_cstr(str ? str->arena : NULL, str, cstr); }
+static inline CCString string_new(CCArena *arena) { return cc_string_new(arena); }
+static inline CCString* string_append(CCString *str, const char *cstr) {
+    if (!cstr) return str;
+    CCSlice s = cc_slice_from_buffer((void *)cstr, strlen(cstr));
+    return cc_string_push(str, s);
+}
 static inline CCSlice string_as_slice(const CCString *str) { return cc_string_as_slice(str); }
 
 // ------------------------- Parse helpers ----------------------------------
@@ -359,7 +332,7 @@ static inline uint64_t cc_slice_hash64(CCSlice s) {
     return cc_fnv1a64(s.ptr, s.len);
 }
 
-static inline bool cc_slice_eq(CCSlice a, CCSlice b) {
+static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
     if (a.len != b.len) return false;
     if (a.ptr == b.ptr) return true;
     if (!a.ptr || !b.ptr) return false;
@@ -372,9 +345,21 @@ static inline bool cc_slice_eq(CCSlice a, CCSlice b) {
  * UFCS transforms s.method() to CCSlice_method(&s).
  */
 static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
-static inline CCSlice CCSlice_trim(CCSlice* s) { return s ? cc_slice_trim(*s) : cc_slice_empty(); }
-static inline CCSlice CCSlice_trim_left(CCSlice* s) { return s ? cc_slice_trim_left(*s) : cc_slice_empty(); }
-static inline CCSlice CCSlice_trim_right(CCSlice* s) { return s ? cc_slice_trim_right(*s) : cc_slice_empty(); }
+static inline CCSlice CCSlice_trim(CCSlice* s) {
+    if (!s) return cc_slice_empty();
+    size_t start = cc__trim_left_idx(*s);
+    CCSlice sub = cc_slice_sub(*s, start, s->len);
+    size_t end = cc__trim_right_idx(sub);
+    return cc_slice_sub(sub, 0, end);
+}
+static inline CCSlice CCSlice_trim_left(CCSlice* s) {
+    return s ? cc_slice_sub(*s, cc__trim_left_idx(*s), s->len) : cc_slice_empty();
+}
+static inline CCSlice CCSlice_trim_right(CCSlice* s) {
+    if (!s) return cc_slice_empty();
+    size_t end = cc__trim_right_idx(*s);
+    return cc_slice_sub(*s, 0, end);
+}
 static inline bool CCSlice_is_empty(CCSlice* s) { return !s || s->len == 0; }
 static inline char CCSlice_at(CCSlice* s, size_t idx) { 
     if (!s || idx >= s->len || !s->ptr) return 0;
@@ -384,13 +369,14 @@ static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
     return s ? cc_slice_sub(*s, start, end) : cc_slice_empty();
 }
 static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) {
-    return s && cc_slice_starts_with(*s, prefix);
+    return s && s->len >= prefix.len && memcmp(s->ptr, prefix.ptr, prefix.len) == 0;
 }
 static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
-    return s && cc_slice_ends_with(*s, suffix);
+    return s && s->len >= suffix.len &&
+        memcmp((uint8_t *)s->ptr + (s->len - suffix.len), suffix.ptr, suffix.len) == 0;
 }
 static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
-    return s && cc_slice_eq(*s, other);
+    return s && cc__slice_eq(*s, other);
 }
 
 #endif // CC_STD_STRING_H

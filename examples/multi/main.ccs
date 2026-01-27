@@ -8,7 +8,7 @@ int main(void) {
     @arena {
         String s = string_new(arena);
         s.append("multi ok: ");
-        cc_string_append_int(arena, &s, v);
+        cc_string_push_int(&s, v);
         s.append("\n");
         std_out.write(s);
     }

@@ -134,7 +134,7 @@ static inline const uint8_t* cc_slice_bytes(CCSlice* s) {
     return (const uint8_t*)s->ptr;
 }
 
-/* cc_slice_len is defined in std/string.cch - use pass-by-value version there */
+/* CCSlice_len is defined in std/string.cch for UFCS use. */
 
 #endif // CC_SLICE_H
 

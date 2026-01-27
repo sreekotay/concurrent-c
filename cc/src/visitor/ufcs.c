@@ -89,6 +89,8 @@ static const char* scan_receiver_start_left(const char* base, const char* sep) {
     return r;
 }
 
+static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
+
 static int emit_desugared_call(char* out,
                                size_t cap,
                                const char* recv,
@@ -157,12 +159,49 @@ static int emit_desugared_call(char* out,
 
     // Special cases for stdlib convenience.
     if (strcmp(method, "as_slice") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "string_as_slice(%s)", recv)
-                           : snprintf(out, cap, "string_as_slice(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_as_slice(%s)", recv)
+                           : snprintf(out, cap, "cc_string_as_slice(&%s)", recv);
     }
-    if (strcmp(method, "append") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "string_append(%s, ", recv)
-                           : snprintf(out, cap, "string_append(&%s, ", recv);
+    if (strcmp(method, "append") == 0 || strcmp(method, "push") == 0) {
+        if (!has_args || !args_rewritten) {
+            return recv_is_ptr ? snprintf(out, cap, "cc_string_push(%s, cc_slice_empty())", recv)
+                               : snprintf(out, cap, "cc_string_push(&%s, cc_slice_empty())", recv);
+        }
+        char tmp[512];
+        strncpy(tmp, args_rewritten, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        trim_ws_in_place(tmp);
+        if (tmp[0] == '"') {
+            return recv_is_ptr
+                       ? snprintf(out, cap,
+                                  "cc_string_push(%s, cc_slice_from_buffer(%s, sizeof(%s) - 1))",
+                                  recv, tmp, tmp)
+                       : snprintf(out, cap,
+                                  "cc_string_push(&%s, cc_slice_from_buffer(%s, sizeof(%s) - 1))",
+                                  recv, tmp, tmp);
+        }
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_push(%s, %s)", recv, tmp)
+                           : snprintf(out, cap, "cc_string_push(&%s, %s)", recv, tmp);
+    }
+    if (strcmp(method, "push_char") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_char(%s, ", recv)
+                           : snprintf(out, cap, "cc_string_push_char(&%s, ", recv);
+    }
+    if (strcmp(method, "push_int") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_int(%s, ", recv)
+                           : snprintf(out, cap, "cc_string_push_int(&%s, ", recv);
+    }
+    if (strcmp(method, "push_uint") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_uint(%s, ", recv)
+                           : snprintf(out, cap, "cc_string_push_uint(&%s, ", recv);
+    }
+    if (strcmp(method, "push_float") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_float(%s, ", recv)
+                           : snprintf(out, cap, "cc_string_push_float(&%s, ", recv);
+    }
+    if (strcmp(method, "clear") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_string_clear(%s)", recv)
+                           : snprintf(out, cap, "cc_string_clear(&%s)", recv);
     }
     
     /* Slice UFCS methods: s.len(), s.trim(), s.at(i), etc.
@@ -314,8 +353,205 @@ static int emit_desugared_call(char* out,
     return snprintf(out, cap, "%s(&%s)", method, recv);
 }
 
-// Rewrite one line, handling nested method calls.
-int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
+static int emit_full_call(char* out,
+                          size_t cap,
+                          const char* recv,
+                          const char* method,
+                          bool recv_is_ptr,
+                          const char* args_rewritten,
+                          bool has_args) {
+    char tmp[1024];
+    int n = emit_desugared_call(tmp, sizeof(tmp), recv, method, recv_is_ptr, args_rewritten, has_args);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) return -1;
+    if (n > 0 && tmp[n - 1] == ')') {
+        return snprintf(out, cap, "%s", tmp);
+    }
+    if (has_args && args_rewritten) {
+        return snprintf(out, cap, "%s%s)", tmp, args_rewritten);
+    }
+    return snprintf(out, cap, "%s)", tmp);
+}
+
+struct CCUFCSSegment {
+    char method[64];
+    char args[512];
+    bool recv_is_ptr;
+};
+
+static int cc__parse_ufcs_chain(const char* in,
+                                char* recv,
+                                size_t recv_cap,
+                                struct CCUFCSSegment* segs,
+                                int* seg_count) {
+    if (!in || !recv || !segs || !seg_count || recv_cap == 0) return 0;
+    *seg_count = 0;
+
+    const char* s = in;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (!*s) return 0;
+
+    int par = 0, br = 0, brc = 0;
+    const char* sep = NULL;
+    bool sep_is_ptr = false;
+    for (const char* p = s; *p; p++) {
+        char c = *p;
+        if (c == '"' || c == '\'') {
+            char q = c;
+            p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) { p++; continue; }
+                if (*p == q) break;
+                p++;
+            }
+            continue;
+        }
+        if (c == '(') { par++; continue; }
+        if (c == ')') { if (par > 0) par--; continue; }
+        if (c == '[') { br++; continue; }
+        if (c == ']') { if (br > 0) br--; continue; }
+        if (c == '{') { brc++; continue; }
+        if (c == '}') { if (brc > 0) brc--; continue; }
+        if (par || br || brc) continue;
+        if (c == '.') { sep = p; sep_is_ptr = false; break; }
+        if (c == '-' && p[1] == '>') { sep = p; sep_is_ptr = true; break; }
+    }
+    if (!sep) return 0;
+
+    const char* r_end = sep;
+    while (r_end > s && isspace((unsigned char)r_end[-1])) r_end--;
+    size_t recv_len = (size_t)(r_end - s);
+    if (recv_len == 0 || recv_len >= recv_cap) return 0;
+    memcpy(recv, s, recv_len);
+    recv[recv_len] = '\0';
+    trim_ws_in_place(recv);
+
+    const char* p = sep + (sep_is_ptr ? 2 : 1);
+    for (;;) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!is_ident_char(*p)) return 0;
+        const char* m_start = p;
+        while (is_ident_char(*p)) p++;
+        size_t m_len = (size_t)(p - m_start);
+        if (m_len == 0 || m_len >= sizeof(segs[0].method)) return 0;
+
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p != '(') return 0;
+
+        const char* args_start = p + 1;
+        int depth = 1;
+        p++;
+        while (*p && depth > 0) {
+            if (*p == '(') depth++;
+            else if (*p == ')') depth--;
+            else if (*p == '"' || *p == '\'') {
+                char q = *p++;
+                while (*p) {
+                    if (*p == '\\' && p[1]) { p += 2; continue; }
+                    if (*p == q) { p++; break; }
+                    p++;
+                }
+                continue;
+            }
+            if (depth > 0) p++;
+        }
+        if (depth != 0) return 0;
+        const char* args_end = p - 1;
+
+        if (*seg_count >= 8) return 0;
+        struct CCUFCSSegment* seg = &segs[(*seg_count)++];
+        memcpy(seg->method, m_start, m_len);
+        seg->method[m_len] = '\0';
+        seg->recv_is_ptr = sep_is_ptr;
+
+        size_t args_len = (size_t)(args_end - args_start);
+        if (args_len >= sizeof(seg->args)) args_len = sizeof(seg->args) - 1;
+        memcpy(seg->args, args_start, args_len);
+        seg->args[args_len] = '\0';
+
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == '.' || (*p == '-' && p[1] == '>')) {
+            sep_is_ptr = (*p == '-');
+            p += sep_is_ptr ? 2 : 1;
+            continue;
+        }
+        break;
+    }
+
+    while (*p && isspace((unsigned char)*p)) p++;
+    return *p == '\0';
+}
+
+static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
+    char recv[256];
+    struct CCUFCSSegment segs[8];
+    int seg_count = 0;
+    if (!cc__parse_ufcs_chain(in, recv, sizeof(recv), segs, &seg_count)) return 1;
+    if (seg_count <= 0) return 1;
+
+    char rewritten_args[512];
+    const char* recv_expr = recv;
+    const int recv_needs_tmp = (!segs[0].recv_is_ptr && !is_ident_only(recv) && !is_addr_of_ident(recv));
+    const int needs_temps = (seg_count > 1) || recv_needs_tmp;
+
+    if (!needs_temps) {
+        if (cc__ufcs_rewrite_line_simple(segs[0].args, rewritten_args, sizeof(rewritten_args)) != 0) {
+            strncpy(rewritten_args, segs[0].args, sizeof(rewritten_args) - 1);
+            rewritten_args[sizeof(rewritten_args) - 1] = '\0';
+        }
+        size_t args_len = strnlen(rewritten_args, sizeof(rewritten_args));
+        bool has_args = args_len > 0;
+        int n = emit_full_call(out, out_cap, recv_expr, segs[0].method, segs[0].recv_is_ptr,
+                               rewritten_args, has_args);
+        return (n < 0 || (size_t)n >= out_cap) ? -1 : 0;
+    }
+
+    char* o = out;
+    size_t cap = out_cap;
+    int n = snprintf(o, cap, "({ ");
+    if (n < 0 || (size_t)n >= cap) return -1;
+    o += n; cap -= (size_t)n;
+    if (recv_needs_tmp) {
+        n = snprintf(o, cap, "__typeof__(%s) __cc_ufcs_recv = %s; ", recv, recv);
+        if (n < 0 || (size_t)n >= cap) return -1;
+        o += n; cap -= (size_t)n;
+        recv_expr = "__cc_ufcs_recv";
+    }
+
+    for (int i = 0; i < seg_count; i++) {
+        if (cc__ufcs_rewrite_line_simple(segs[i].args, rewritten_args, sizeof(rewritten_args)) != 0) {
+            strncpy(rewritten_args, segs[i].args, sizeof(rewritten_args) - 1);
+            rewritten_args[sizeof(rewritten_args) - 1] = '\0';
+        }
+        size_t args_len = strnlen(rewritten_args, sizeof(rewritten_args));
+        bool has_args = args_len > 0;
+
+        char call[1024];
+        const char* recv_for_call = recv_expr;
+        char tmp_name[32];
+        if (i > 0) {
+            snprintf(tmp_name, sizeof(tmp_name), "__cc_ufcs_tmp%d", i);
+            recv_for_call = tmp_name;
+        }
+        int cn = emit_full_call(call, sizeof(call), recv_for_call, segs[i].method,
+                                segs[i].recv_is_ptr, rewritten_args, has_args);
+        if (cn < 0 || (size_t)cn >= sizeof(call)) return -1;
+
+        if (i < seg_count - 1) {
+            n = snprintf(o, cap, "__typeof__(%s) __cc_ufcs_tmp%d = %s; ", call, i + 1, call);
+        } else {
+            n = snprintf(o, cap, "%s; ", call);
+        }
+        if (n < 0 || (size_t)n >= cap) return -1;
+        o += n; cap -= (size_t)n;
+    }
+
+    n = snprintf(o, cap, "})");
+    if (n < 0 || (size_t)n >= cap) return -1;
+    o += n; cap -= (size_t)n;
+    return 0;
+}
+
+static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap) {
     if (!in || !out || out_cap == 0) return -1;
     const char* p = in;
     char* o = out;
@@ -441,6 +677,12 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
     while (*p && cap > 1) { *o++ = *p++; cap--; }
     *o = '\0';
     return 0;
+}
+
+// Rewrite one line, handling nested method calls.
+int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
+    if (cc__rewrite_ufcs_chain(in, out, out_cap) == 0) return 0;
+    return cc__ufcs_rewrite_line_simple(in, out, out_cap);
 }
 
 int cc_ufcs_rewrite(CCASTRoot* root) {
