@@ -2,16 +2,16 @@
  * Test: Deadlock Detection DEMO
  *
  * NOTE: This is a DEMONSTRATION test that intentionally deadlocks.
- * It is EXPECTED to timeout in stress test runs.
+ * It is EXPECTED to fail/abort in stress test runs (exit code 124).
  *
- * This test creates a deadlock pattern that should be detected
- * by the runtime deadlock watchdog (enabled by default).
+ * This test creates a deadlock pattern that is automatically detected
+ * by the fiber scheduler's integrated deadlock detection.
  *
  * The pattern: cc_block_on inside spawn with channel ops that wait on each other.
  * 
  * Expected behavior:
- * - By default: prints deadlock warning after ~3 seconds
- * - With CC_DEADLOCK_DETECT=0: hangs forever
+ * - By default: detects deadlock and aborts with exit code 124
+ * - With CC_DEADLOCK_ABORT=0: prints warning but continues (hangs forever)
  */
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task_intptr.cch>

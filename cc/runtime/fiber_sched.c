@@ -254,6 +254,13 @@ static int fq_push(fiber_queue* q, fiber_task* f) {
     return -1;
 }
 
+/* Check if global queue has items (non-destructive peek) */
+static int fq_peek(fiber_queue* q) {
+    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    return head < tail;
+}
+
 static fiber_task* fq_pop(fiber_queue* q) {
     for (int retry = 0; retry < 100; retry++) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
@@ -323,6 +330,41 @@ typedef struct {
 
 static fiber_sched g_sched = {0};
 static _Atomic int g_initialized = 0;
+static _Atomic int g_deadlock_reported = 0;
+
+/* Deadlock detection: called when a worker is about to sleep */
+static void cc__fiber_check_deadlock(void) {
+    /* Quick check: all workers sleeping + parked fibers waiting */
+    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
+    size_t parked = atomic_load_explicit(&g_sched.parked, memory_order_acquire);
+    
+    /* Deadlock: all workers sleeping + parked fibers (no runnable work to wake them) */
+    if (sleeping >= g_sched.num_workers && parked > 0) {
+        /* Potential deadlock - all workers idle but fibers are waiting */
+        int expected = 0;
+        if (atomic_compare_exchange_strong(&g_deadlock_reported, &expected, 1)) {
+            /* First to detect - report it */
+            fprintf(stderr, "\n");
+            fprintf(stderr, "=== DEADLOCK DETECTED ===\n");
+            fprintf(stderr, "All %zu workers are idle, but %zu fiber(s) are parked waiting.\n",
+                    g_sched.num_workers, parked);
+            fprintf(stderr, "No runnable work exists to unblock them.\n");
+            fprintf(stderr, "\n");
+            fprintf(stderr, "Common causes:\n");
+            fprintf(stderr, "  - Channel send/recv with no matching peer\n");
+            fprintf(stderr, "  - cc_block_on() inside spawn blocking the only worker\n");
+            fprintf(stderr, "  - Circular wait between fibers\n");
+            fprintf(stderr, "=========================\n\n");
+            
+            /* Check env var for abort behavior */
+            const char* abort_env = getenv("CC_DEADLOCK_ABORT");
+            if (!abort_env || abort_env[0] != '0') {
+                fprintf(stderr, "Aborting (set CC_DEADLOCK_ABORT=0 to continue).\n");
+                _exit(124);
+            }
+        }
+    }
+}
 
 /* Per-worker thread-local state */
 static __thread fiber_task* tls_current_fiber = NULL;
@@ -338,6 +380,13 @@ static inline int lq_push(local_queue* q, fiber_task* f) {
     atomic_store_explicit(&q->slots[tail % LOCAL_QUEUE_SIZE], f, memory_order_release);
     atomic_store_explicit(&q->tail, tail + 1, memory_order_release);
     return 0;
+}
+
+/* Check if local queue has items (non-destructive peek) */
+static inline int lq_peek(local_queue* q) {
+    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    return head < tail;
 }
 
 /* Fast local queue pop (owner only - but must handle concurrent stealers) 
@@ -689,16 +738,20 @@ static void* worker_main(void* arg) {
         
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
         
-        /* Check if there's still pending work before sleeping */
-        if (atomic_load_explicit(&g_sched.pending, memory_order_relaxed) > 0) {
-            continue;
-        }
-        
         /* Sleep using fast wake primitive (futex/ulock instead of condvar) */
-        atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
+        /* Note: we check queue emptiness, not pending count, because parked fibers
+         * are "pending" but not runnable. We wake when new runnable work is added. */
+        atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
+        
+        /* Check for deadlock: all workers sleeping + parked fibers + no runnable work */
+        cc__fiber_check_deadlock();
+        
         uint32_t wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
-        while (atomic_load_explicit(&g_sched.pending, memory_order_relaxed) == 0 &&
-               atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
+        /* Sleep while no runnable work (check local queue, global queue) and still running.
+         * Wake primitive is signaled when fibers are spawned or unparked. */
+        while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
+            /* Check if there's runnable work */
+            if (lq_peek(my_queue) || fq_peek(&g_sched.run_queue)) break;
             wake_primitive_wait(&g_sched.wake_prim, wake_val);
             wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
         }

@@ -1,20 +1,18 @@
 /*
- * Runtime deadlock detection for Concurrent-C.
+ * Legacy runtime deadlock detection for Concurrent-C (thread-level blocking).
  *
- * Strategy:
- * 1. Track how many threads are blocked on channel ops or cc_block_on
- * 2. Track a progress counter that gets bumped on any successful operation
- * 3. A watchdog thread periodically checks:
- *    - If blocked count > 0 AND progress hasn't changed
- *    - If this persists for N seconds, likely deadlock
+ * NOTE: This legacy detector tracks OS-thread-level blocking (cc_block_on, etc.)
+ * and is DISABLED by default. The fiber scheduler (fiber_sched.c) has integrated
+ * deadlock detection that catches fiber-level deadlocks automatically.
+ *
+ * This legacy detector is useful for:
+ *   - Blocking patterns that bypass fibers (direct cc_block_on calls)
+ *   - Mixed fiber + thread blocking scenarios
  *
  * Environment variables:
- *   CC_DEADLOCK_DETECT=1  Enable legacy deadlock detection (default: disabled)
+ *   CC_DEADLOCK_DETECT=1  Enable legacy watchdog (default: disabled)
  *   CC_DEADLOCK_ABORT=0   Disable abort, just warn (for debugging)
  *   CC_DEADLOCK_TIMEOUT=N Set timeout in seconds (default: 10)
- *
- * NOTE: This legacy detector is disabled by default. The task scheduler
- * has integrated deadlock detection that works better with the fiber model.
  */
 
 #include <ccc/cc_deadlock_detect.cch>

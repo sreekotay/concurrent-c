@@ -45,18 +45,28 @@ CC_TARGET recipe_worker exe examples/recipe_worker_pool.ccs
 CC_TARGET stress_arena exe stress/arena_concurrent.ccs
 CC_TARGET stress_async exe stress/async_await_flood.ccs
 CC_TARGET stress_block exe stress/block_combinators_stress.ccs
+CC_TARGET stress_block_race exe stress/block_race_timing.ccs
 CC_TARGET stress_cancel exe stress/cancellation_close_race.ccs
 CC_TARGET stress_channel exe stress/channel_flood.ccs
 CC_TARGET stress_closure exe stress/closure_capture_storm.ccs
 CC_TARGET stress_deadline exe stress/deadline_race.ccs
 CC_TARGET stress_deadlock exe stress/deadlock_detect_demo.ccs
 CC_TARGET stress_fanout exe stress/fanout_fanin.ccs
+CC_TARGET stress_fanout_join exe stress/fanout_join_race.ccs
+CC_TARGET stress_fiber_join exe stress/fiber_join_race.ccs
+CC_TARGET stress_fiber_multi exe stress/fiber_multi_joiner_race.ccs
+CC_TARGET stress_fiber_tight exe stress/fiber_spawn_join_tight.ccs
+CC_TARGET stress_join_init exe stress/join_init_race.ccs
+CC_TARGET stress_nested_deep exe stress/nested_nursery_deep.ccs
+CC_TARGET stress_nested_race exe stress/nested_nursery_race.ccs
+CC_TARGET stress_nested_debug exe stress/nested_nursery_race_debug.ccs
 CC_TARGET stress_nursery exe stress/nursery_deep.ccs
 CC_TARGET stress_pipeline exe stress/pipeline_long.ccs
 CC_TARGET stress_mixed exe stress/spawn_async_mixed.ccs
 CC_TARGET stress_spawn exe stress/spawn_storm.ccs
 CC_TARGET stress_unbuf exe stress/unbuffered_rendezvous.ccs
 CC_TARGET stress_worker exe stress/worker_pool_heavy.ccs
+CC_TARGET stress_worksteal exe stress/work_stealing_race.ccs
 
 // ============================================================================
 // Performance Benchmarks
