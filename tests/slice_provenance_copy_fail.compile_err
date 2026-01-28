@@ -1,3 +1,3 @@
-# CC should fail compilation for copy of move-only slice
-CC: cannot copy move-only slice
+# CC should fail compilation for copy of unique slice
+cannot copy unique slice
 

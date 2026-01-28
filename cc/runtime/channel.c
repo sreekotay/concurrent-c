@@ -1787,7 +1787,9 @@ static int cc_chan_check_slice_take(const CCSlice* slice) {
     return 0;
 }
 
-int cc_chan_send_take_slice(CCChan* ch, const CCSlice* slice) {
+/* Ownership-transferring slice send functions.
+ * CCSliceUnique parameter documents that caller transfers ownership. */
+int cc_chan_send_take_slice(CCChan* ch, const CCSliceUnique* slice) {
     if (!ch) return EINVAL;
     if (!ch->allow_take) return EINVAL;
     int elig = cc_chan_check_slice_take(slice);
@@ -1796,7 +1798,7 @@ int cc_chan_send_take_slice(CCChan* ch, const CCSlice* slice) {
     return cc_chan_send(ch, slice, sizeof(CCSlice));
 }
 
-int cc_chan_try_send_take_slice(CCChan* ch, const CCSlice* slice) {
+int cc_chan_try_send_take_slice(CCChan* ch, const CCSliceUnique* slice) {
     if (!ch) return EINVAL;
     if (!ch->allow_take) return EINVAL;
     int elig = cc_chan_check_slice_take(slice);
@@ -1805,7 +1807,7 @@ int cc_chan_try_send_take_slice(CCChan* ch, const CCSlice* slice) {
     return cc_chan_try_send(ch, slice, sizeof(CCSlice));
 }
 
-int cc_chan_timed_send_take_slice(CCChan* ch, const CCSlice* slice, const struct timespec* abs_deadline) {
+int cc_chan_timed_send_take_slice(CCChan* ch, const CCSliceUnique* slice, const struct timespec* abs_deadline) {
     if (!ch) return EINVAL;
     if (!ch->allow_take) return EINVAL;
     int elig = cc_chan_check_slice_take(slice);
@@ -1814,7 +1816,7 @@ int cc_chan_timed_send_take_slice(CCChan* ch, const CCSlice* slice, const struct
     return cc_chan_timed_send(ch, slice, sizeof(CCSlice), abs_deadline);
 }
 
-int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSlice* slice, const CCDeadline* deadline) {
+int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSliceUnique* slice, const CCDeadline* deadline) {
     struct timespec ts;
     const struct timespec* p = cc_deadline_as_timespec(deadline, &ts);
     return cc_chan_timed_send_take_slice(ch, slice, p);
@@ -1835,7 +1837,7 @@ int cc_chan_nursery_send_take(CCChan* ch, CCNursery* n, void* ptr) {
     return cc_chan_deadline_send_take(ch, ptr, &d);
 }
 
-int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSlice* slice) {
+int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSliceUnique* slice) {
     CCDeadline d = cc_nursery_as_deadline(n);
     return cc_chan_deadline_send_take_slice(ch, slice, &d);
 }

@@ -1,5 +1,6 @@
 #include "checker.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -174,6 +175,19 @@ static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const c
     fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
 }
 
+static void cc__emit_err_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, const char* fmt, ...) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
+    int line = n ? n->line_start : 0;
+    int col = n ? n->col_start : 0;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: error: ", path, line, col);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
 static void cc__emit_warn(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
     const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
     int line = n ? n->line_start : 0;
@@ -188,6 +202,19 @@ static void cc__emit_note(const CCCheckerCtx* ctx, const StubNodeView* n, const 
     int col = n ? n->col_start : 0;
     if (col <= 0) col = 1;
     fprintf(stderr, "%s:%d:%d: note: %s\n", path, line, col, msg);
+}
+
+static void cc__emit_note_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, const char* fmt, ...) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
+    int line = n ? n->line_start : 0;
+    int col = n ? n->col_start : 0;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: note: ", path, line, col);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
 }
 
 static int cc__deadlock_warn_as_error(void) {
@@ -971,7 +998,8 @@ static int cc__walk_assign(int idx,
             /* Only treat as a slice copy/move when RHS isn't being projected via member access. */
             if (!saw_member) {
                 if (rhs_v->move_only && !has_move_marker) {
-                    cc__emit_err(ctx, n, "CC: cannot copy move-only slice (use cc_move(x))");
+                    cc__emit_err_fmt(ctx, n, "cannot copy unique slice '%s' (type T[:!])", rhs_v->name ? rhs_v->name : "?");
+                    cc__emit_note(ctx, n, "unique slices have move-only semantics; use cc_move(x) to transfer ownership");
                     ctx->errors++;
                     return -1;
                 }
@@ -1010,7 +1038,8 @@ static int cc__walk_return(int idx,
             int saw_member = cc__subtree_has_kind(nodes, kids, idx, CC_STUB_MEMBER);
             int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
             if (v->move_only && !has_move_marker && !saw_member) {
-                cc__emit_err(ctx, n, "CC: cannot return move-only slice (use cc_move(x))");
+                cc__emit_err_fmt(ctx, n, "cannot return unique slice '%s' without move", name);
+                cc__emit_note(ctx, n, "unique slices (T[:!]) require explicit ownership transfer; use: return cc_move(x)");
                 ctx->errors++;
                 return -1;
             }
@@ -1113,7 +1142,8 @@ static int cc__walk(int idx,
                 int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
                 int is_simple_copy = cc__subtree_should_apply_slice_copy_rule(nodes, kids, idx, v->name, copy_from);
                 if (rhs && rhs->is_slice && rhs->move_only && !has_move_marker && is_simple_copy) {
-                    cc__emit_err(ctx, n, "CC: cannot copy move-only slice (use cc_move(x))");
+                    cc__emit_err_fmt(ctx, n, "cannot copy unique slice '%s' (type T[:!])", copy_from);
+                    cc__emit_note(ctx, n, "unique slices have move-only semantics; use cc_move(x) to transfer ownership");
                     ctx->errors++;
                     return -1;
                 }
@@ -1128,7 +1158,14 @@ static int cc__walk(int idx,
     if (n->kind == CC_STUB_IDENT && n->aux_s1) {
         CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, n->aux_s1);
         if (v && v->is_slice && v->moved) {
-            cc__emit_err(ctx, n, "CC: use after move of slice");
+            cc__emit_err_fmt(ctx, n, "use of moved slice '%s'", n->aux_s1);
+            if (v->decl_line > 0) {
+                StubNodeView decl_node = {0};
+                decl_node.line_start = v->decl_line;
+                decl_node.col_start = v->decl_col;
+                cc__emit_note_fmt(ctx, &decl_node, "'%s' was declared here and has been moved", n->aux_s1);
+            }
+            cc__emit_note(ctx, n, "after cc_move(x), the source variable is no longer valid");
             ctx->errors++;
             return -1;
         }

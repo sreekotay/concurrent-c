@@ -1,1 +1,1 @@
-CC: cannot copy move-only slice
+cannot copy unique slice

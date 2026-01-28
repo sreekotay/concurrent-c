@@ -136,16 +136,17 @@ int cc_chan_deadline_send_take(CCChan* ch, void* ptr, const CCDeadline* deadline
 // Slice-aware transfer with eligibility checks (unique + transferable + not subslice).
 // Stores the slice descriptor in-channel (structure copy); ownership of the backing
 // allocation is transferred on success. Fails with EINVAL if eligibility fails.
-int cc_chan_send_take_slice(CCChan* ch, const CCSlice* slice);
-int cc_chan_try_send_take_slice(CCChan* ch, const CCSlice* slice);
-int cc_chan_timed_send_take_slice(CCChan* ch, const CCSlice* slice, const struct timespec* abs_deadline);
-int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSlice* slice, const CCDeadline* deadline);
+// Note: CCSliceUnique documents that caller is transferring ownership.
+int cc_chan_send_take_slice(CCChan* ch, const CCSliceUnique* slice);
+int cc_chan_try_send_take_slice(CCChan* ch, const CCSliceUnique* slice);
+int cc_chan_timed_send_take_slice(CCChan* ch, const CCSliceUnique* slice, const struct timespec* abs_deadline);
+int cc_chan_deadline_send_take_slice(CCChan* ch, const CCSliceUnique* slice, const CCDeadline* deadline);
 
 // Nursery-aware helpers: use nursery deadline/cancel state.
 int cc_chan_nursery_send(CCChan* ch, CCNursery* n, const void* value, size_t value_size);
 int cc_chan_nursery_recv(CCChan* ch, CCNursery* n, void* out_value, size_t value_size);
 int cc_chan_nursery_send_take(CCChan* ch, CCNursery* n, void* ptr);
-int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSlice* slice);
+int cc_chan_nursery_send_take_slice(CCChan* ch, CCNursery* n, const CCSliceUnique* slice);
 
 // Async send/recv using executor; completion signaled on done channel.
 typedef enum {
