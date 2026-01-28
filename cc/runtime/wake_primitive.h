@@ -72,6 +72,13 @@ static inline void wake_primitive_wait(wake_primitive* wp, uint32_t expected) {
     /* Ignore return value - spurious wakeups are fine, caller will re-check */
 }
 
+/* Wait with timeout (milliseconds). Returns on wake, timeout, or spurious. */
+static inline void wake_primitive_wait_timeout(wake_primitive* wp, uint32_t expected, uint32_t timeout_ms) {
+    struct timespec ts = { .tv_sec = timeout_ms / 1000, .tv_nsec = (timeout_ms % 1000) * 1000000L };
+    syscall(SYS_futex, &wp->value, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 
+            expected, &ts, NULL, 0);
+}
+
 /* Wake one waiting thread */
 static inline void wake_primitive_wake_one(wake_primitive* wp) {
     atomic_fetch_add_explicit(&wp->value, 1, memory_order_release);
@@ -115,6 +122,12 @@ static inline void wake_primitive_wait(wake_primitive* wp, uint32_t expected) {
     /* Ignore return value - spurious wakeups are fine */
 }
 
+/* Wait with timeout (milliseconds). Returns on wake, timeout, or spurious. */
+static inline void wake_primitive_wait_timeout(wake_primitive* wp, uint32_t expected, uint32_t timeout_ms) {
+    /* __ulock_wait timeout is in microseconds */
+    __ulock_wait(UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, &wp->value, expected, timeout_ms * 1000);
+}
+
 /* Wake one waiting thread */
 static inline void wake_primitive_wake_one(wake_primitive* wp) {
     atomic_fetch_add_explicit(&wp->value, 1, memory_order_release);
@@ -151,6 +164,21 @@ static inline void wake_primitive_wait(wake_primitive* wp, uint32_t expected) {
     pthread_mutex_lock(&wp->mutex);
     while (atomic_load_explicit(&wp->value, memory_order_acquire) == expected) {
         pthread_cond_wait(&wp->cond, &wp->mutex);
+    }
+    pthread_mutex_unlock(&wp->mutex);
+}
+
+/* Wait with timeout (milliseconds). Returns on wake, timeout, or spurious. */
+static inline void wake_primitive_wait_timeout(wake_primitive* wp, uint32_t expected, uint32_t timeout_ms) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    
+    pthread_mutex_lock(&wp->mutex);
+    if (atomic_load_explicit(&wp->value, memory_order_acquire) == expected) {
+        pthread_cond_timedwait(&wp->cond, &wp->mutex, &ts);
     }
     pthread_mutex_unlock(&wp->mutex);
 }

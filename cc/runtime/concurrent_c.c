@@ -10,7 +10,6 @@
  *   CC_ENABLE_TLS   - Enable TLS support (requires BearSSL)
  */
 
-#include "deadlock_detect.c"
 #include "channel.c"
 #include "fiber_sched.c"
 #include "scheduler.c"

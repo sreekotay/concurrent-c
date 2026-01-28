@@ -7,8 +7,11 @@
 #include <ccc/cc_exec.cch>
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_nursery.cch>
-#include <ccc/cc_deadlock_detect.cch>
 #include <ccc/cc_atomic.cch>
+
+/* Unified deadlock tracking (defined in fiber_sched.c) */
+void cc__deadlock_thread_block(void);
+void cc__deadlock_thread_unblock(void);
 
 #include <errno.h>
 
@@ -206,7 +209,7 @@ void cc_task_intptr_cancel(CCTaskIntptr* t) {
 intptr_t cc_block_on_intptr(CCTaskIntptr t) {
     intptr_t r = 0;
     int err = 0;
-    cc_deadlock_enter_blocking(CC_BLOCK_ON_TASK);
+    cc__deadlock_thread_block();  /* Track that this thread is blocking */
     for (;;) {
         CCFutureStatus st = cc_task_intptr_poll(&t, &r, &err);
         if (st == CC_FUTURE_PENDING) {
@@ -226,8 +229,7 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
         }
         break;
     }
-    cc_deadlock_exit_blocking();
-    cc_deadlock_progress();  /* Task completed */
+    cc__deadlock_thread_unblock();
     cc_task_intptr_free(&t);
     (void)err;
     return r;

@@ -25,9 +25,13 @@ typedef struct cc__fiber_wait_node {
 int cc__fiber_in_context(void);
 void* cc__fiber_current(void);
 void cc__fiber_park(void);
+void cc__fiber_park_reason(const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
 void cc__fiber_sched_enqueue(void* fiber);
 void cc_fiber_dump_state(const char* reason);  /* Debug: dump scheduler state */
 int cc__fiber_sched_active(void);
+
+/* Convenience macro to park with source location */
+#define CC_FIBER_PARK(reason) cc__fiber_park_reason(reason, __FILE__, __LINE__)
 
 #endif /* CC_FIBER_INTERNAL_H */
