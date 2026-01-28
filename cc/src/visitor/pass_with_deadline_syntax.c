@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "util/text.h"
+#include "visitor/edit_buffer.h"
 
 int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, size_t* out_len) {
     if (!out_src || !out_len) return -1;
@@ -218,4 +219,212 @@ int cc__rewrite_with_deadline_syntax(const char* src, size_t n, char** out_src, 
     *out_src = out ? out : strdup(src);
     *out_len = out ? olen : n;
     return 0;
+}
+
+/* NEW: Collect with_deadline edits into EditBuffer without applying.
+   Returns number of edits added (>= 0), or -1 on error. */
+int cc__collect_with_deadline_edits(CCEditBuffer* eb) {
+    if (!eb || !eb->src) return 0;
+
+    const char* src = eb->src;
+    size_t n = eb->src_len;
+    if (n == 0) return 0;
+
+    int edits_added = 0;
+    size_t i = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    unsigned long counter = 0;
+
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = 0;
+            i++;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && c2 == '/') {
+                i += 2;
+                in_block_comment = 0;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) {
+                i += 2;
+                continue;
+            }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) {
+                i += 2;
+                continue;
+            }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+
+        if (c == '/' && c2 == '/') {
+            i += 2;
+            in_line_comment = 1;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            i += 2;
+            in_block_comment = 1;
+            continue;
+        }
+        if (c == '"') {
+            i++;
+            in_str = 1;
+            continue;
+        }
+        if (c == '\'') {
+            i++;
+            in_chr = 1;
+            continue;
+        }
+
+        /* Handle @with_deadline(ms) as alias for with_deadline(ms) */
+        size_t start_off = i;
+        if (c == '@') {
+            size_t peek = i + 1;
+            while (peek < n && (src[peek] == ' ' || src[peek] == '\t')) peek++;
+            if (peek + strlen("with_deadline") <= n &&
+                memcmp(src + peek, "with_deadline", strlen("with_deadline")) == 0 &&
+                (peek + strlen("with_deadline") >= n || !cc_is_ident_char(src[peek + strlen("with_deadline")]))) {
+                /* Process with @with_deadline - start_off is at @ */
+                start_off = i;
+                i = peek; /* Move to 'with_deadline' */
+            } else {
+                i++;
+                continue;
+            }
+        }
+
+        if (cc_is_ident_start(c) || (start_off < i && src[i] == 'w')) {
+            size_t s0 = i;
+            if (cc_is_ident_start(src[i])) {
+                i++;
+                while (i < n && cc_is_ident_char(src[i])) i++;
+            }
+            size_t sl = i - s0;
+            /* Accept both with_deadline and cc_with_deadline */
+            int is_wd = (sl == strlen("with_deadline") && memcmp(src + s0, "with_deadline", sl) == 0) ||
+                        (sl == strlen("cc_with_deadline") && memcmp(src + s0, "cc_with_deadline", sl) == 0);
+            if (!is_wd || (s0 > 0 && s0 == start_off && cc_is_ident_char(src[s0 - 1]))) {
+                continue;
+            }
+
+            size_t j = i;
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\r' || src[j] == '\n')) j++;
+            if (j >= n || src[j] != '(') {
+                i = j;
+                continue;
+            }
+
+            size_t expr_l = j + 1;
+            int par = 1;
+            int in_s2 = 0, in_lc2 = 0, in_bc2 = 0;
+            char q2 = 0;
+            size_t k = expr_l;
+            for (; k < n; k++) {
+                char ch = src[k];
+                char ch2 = (k + 1 < n) ? src[k + 1] : 0;
+                if (in_lc2) { if (ch == '\n') in_lc2 = 0; continue; }
+                if (in_bc2) { if (ch == '*' && ch2 == '/') { in_bc2 = 0; k++; } continue; }
+                if (in_s2) {
+                    if (ch == '\\' && k + 1 < n) { k++; continue; }
+                    if (ch == q2) in_s2 = 0;
+                    continue;
+                }
+                if (ch == '/' && ch2 == '/') { in_lc2 = 1; k++; continue; }
+                if (ch == '/' && ch2 == '*') { in_bc2 = 1; k++; continue; }
+                if (ch == '"' || ch == '\'') { in_s2 = 1; q2 = ch; continue; }
+                if (ch == '(') par++;
+                else if (ch == ')') { par--; if (par == 0) break; }
+            }
+            if (k >= n || par != 0) {
+                i = j;
+                continue;
+            }
+
+            size_t expr_r = k;
+            size_t after_paren = expr_r + 1;
+            while (after_paren < n && (src[after_paren] == ' ' || src[after_paren] == '\t' || src[after_paren] == '\r' || src[after_paren] == '\n')) after_paren++;
+            if (after_paren >= n || src[after_paren] != '{') {
+                i = j;
+                continue;
+            }
+
+            size_t body_s = after_paren;
+            int br = 1;
+            int in_s3 = 0, in_lc3 = 0, in_bc3 = 0;
+            char q3 = 0;
+            size_t m = body_s + 1;
+            for (; m < n; m++) {
+                char ch = src[m];
+                char ch2 = (m + 1 < n) ? src[m + 1] : 0;
+                if (in_lc3) { if (ch == '\n') in_lc3 = 0; continue; }
+                if (in_bc3) { if (ch == '*' && ch2 == '/') { in_bc3 = 0; m++; } continue; }
+                if (in_s3) {
+                    if (ch == '\\' && m + 1 < n) { m++; continue; }
+                    if (ch == q3) in_s3 = 0;
+                    continue;
+                }
+                if (ch == '/' && ch2 == '/') { in_lc3 = 1; m++; continue; }
+                if (ch == '/' && ch2 == '*') { in_bc3 = 1; m++; continue; }
+                if (ch == '"' || ch == '\'') { in_s3 = 1; q3 = ch; continue; }
+                if (ch == '{') br++;
+                else if (ch == '}') { br--; if (br == 0) { m++; break; } }
+            }
+            if (m > n || br != 0) {
+                i = j;
+                continue;
+            }
+
+            size_t body_e = m;
+
+            counter++;
+            char hdr[512];
+            snprintf(hdr, sizeof(hdr),
+                     "{ CCDeadline __cc_dl%lu = cc_deadline_after_ms((uint64_t)(%.*s)); "
+                     "CCDeadline* __cc_prev%lu = cc_deadline_push(&__cc_dl%lu); "
+                     "@defer cc_deadline_pop(__cc_prev%lu); ",
+                     counter,
+                     (int)(expr_r - expr_l), src + expr_l,
+                     counter, counter, counter);
+
+            /* Build replacement string */
+            char* repl = NULL;
+            size_t repl_len = 0, repl_cap = 0;
+            cc_sb_append_cstr(&repl, &repl_len, &repl_cap, hdr);
+            cc_sb_append(&repl, &repl_len, &repl_cap, src + body_s, body_e - body_s);
+            cc_sb_append_cstr(&repl, &repl_len, &repl_cap, " }");
+
+            /* Add edit from start_off to body_e */
+            if (cc_edit_buffer_add(eb, start_off, body_e, repl, 45, "with_deadline") == 0) {
+                edits_added++;
+            }
+            free(repl);
+
+            i = body_e;
+            continue;
+        }
+
+        i++;
+    }
+
+    return edits_added;
 }

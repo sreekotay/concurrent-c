@@ -7,77 +7,14 @@
 #include <string.h>
 
 #include "util/text.h"
-#include "visitor/text_span.h"
+#include "visitor/pass_common.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
 #endif
 
-/* Keep in sync with async_ast.c's CC_AST_KIND enum. */
-enum {
-    CC_AST_NODE_UNKNOWN = 0,
-    CC_AST_NODE_DECL = 1,
-    CC_AST_NODE_BLOCK = 2,
-    CC_AST_NODE_STMT = 3,
-};
-
-typedef struct {
-    int kind;
-    int parent;
-    const char* file;
-    int line_start;
-    int line_end;
-    int col_start;
-    int col_end;
-    int aux1;
-    int aux2;
-    const char* aux_s1;
-    const char* aux_s2;
-} NodeView;
-
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* last = path;
-    for (const char* p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') last = p + 1;
-    }
-    return last;
-}
-
-static const char* cc__path_suffix2(const char* path) {
-    if (!path) return NULL;
-    const char* end = path + strlen(path);
-    int seps = 0;
-    for (const char* p = end; p > path; ) {
-        p--;
-        if (*p == '/' || *p == '\\') {
-            seps++;
-            if (seps == 2) return p + 1;
-        }
-    }
-    return cc__basename(path);
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    if (strcmp(a, b) == 0) return 1;
-    const char* a_base = cc__basename(a);
-    const char* b_base = cc__basename(b);
-    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
-    const char* a_suf = cc__path_suffix2(a);
-    const char* b_suf = cc__path_suffix2(b);
-    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
-    return 1;
-}
-
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* node_file) {
-    if (!ctx || !ctx->input_path || !node_file) return 0;
-    if (cc__same_source_file(ctx->input_path, node_file)) return 1;
-    if (root && root->lowered_path && cc__same_source_file(root->lowered_path, node_file)) return 1;
-    return 0;
-}
+/* Alias shared types for local use */
+typedef CCNodeView NodeView;
 
 
 static int cc__find_substr_in_range(const char* s,
@@ -150,7 +87,7 @@ static int cc__stmt_marker_start_off(const CCASTRoot* root,
                                     int* out_col_1based) {
     if (!root || !ctx || !n || !in_src || !marker || marker_len == 0) return 0;
     if (node_i < 0 || node_i >= root->node_count) return 0;
-    if (!cc__node_file_matches_this_tu(root, ctx, n[node_i].file)) return 0;
+    if (!cc_pass_node_in_tu(root, ctx, n[node_i].file)) return 0;
     if (n[node_i].line_start <= 0) return 0;
 
     size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[node_i].line_start);
@@ -853,3 +790,283 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
+/* NEW: Collect nursery edits into EditBuffer without applying. */
+int cc__collect_nursery_edits(const CCASTRoot* root,
+                              const CCVisitorCtx* ctx,
+                              CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
+    if (!root->nodes || root->node_count <= 0) return 0;
+    
+    const char* in_src = eb->src;
+    size_t in_len = eb->src_len;
+    const NodeView* n = (const NodeView*)root->nodes;
+
+    int* id_by_node = (int*)calloc((size_t)root->node_count, sizeof(int));
+    if (!id_by_node) return 0;
+    int max_id = 0;
+    cc__build_nursery_id_map(root, ctx, in_src, in_len, id_by_node, root->node_count, &max_id);
+
+    int edits_added = 0;
+
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != CC_AST_NODE_STMT) continue;
+        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, "nursery") != 0) continue;
+        if (n[i].line_end <= 0) continue;
+
+        int id = id_by_node[i];
+        if (id <= 0) continue;
+
+        size_t start = 0;
+        int col1 = 1;
+        int sr = cc__stmt_marker_start_off(root, ctx, n, i, in_src, in_len, "@nursery", 8, &start, &col1);
+        if (sr == 0) continue;
+        if (sr < 0) { free(id_by_node); return -1; }
+        size_t end = 0;
+        if (n[i].col_end > 0) {
+            end = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);
+        } else {
+            end = cc__offset_of_line_1based(in_src, in_len, n[i].line_end + 1);
+        }
+        if (start >= in_len) continue;
+        if (end > in_len) end = in_len;
+        if (end <= start) continue;
+
+        /* Find '{' and last '}' within span. */
+        size_t brace = (size_t)-1;
+        for (size_t p = start; p < end; p++) {
+            if (in_src[p] == '{') { brace = p; break; }
+        }
+        if (brace == (size_t)-1) continue;
+        size_t close = (size_t)-1;
+        if (!cc__scan_matching_rbrace(in_src, in_len, brace, &close)) continue;
+        if (close == (size_t)-1 || close <= brace) continue;
+
+        size_t ind_len = cc__line_indent_len(in_src, in_len, n[i].line_start);
+        size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
+        const char* indent = (line_off + ind_len <= in_len) ? (in_src + line_off) : "";        /* Build prologue */
+        char* pro = NULL;
+        size_t pro_len = 0, pro_cap = 0;
+        cc__append_fmt(&pro, &pro_len, &pro_cap,
+                       "%.*s{\n"
+                       "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
+                       "%.*sif (!__cc_nursery%d) abort();\n",
+                       (int)ind_len, indent,
+                       (int)ind_len, indent, id,
+                       (int)ind_len, indent, id);
+        if (!pro) continue;
+
+        /* Optional: closing(ch1, ch2) clause */
+        {
+            char chans[16][64];
+            int cn = cc__parse_closing_clause(ctx, n, i, in_src, start, brace, chans, 16);
+            if (cn < 0) { free(pro); free(id_by_node); return -1; }
+            for (int ci = 0; ci < cn; ci++) {
+                cc__append_fmt(&pro, &pro_len, &pro_cap,
+                               "%.*scc_nursery_add_closing_tx(__cc_nursery%d, %s);\n",
+                               (int)ind_len, indent, id, chans[ci]);
+            }
+        }
+
+        /* Add prologue edit: replace [start, brace+1) */
+        if (cc_edit_buffer_add(eb, start, brace + 1, pro, 10, "nursery") == 0) {
+            edits_added++;
+        }
+        free(pro);
+
+        /* Build epilogue */
+        size_t close_line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_end);
+        size_t close_ind_len = cc__line_indent_len(in_src, in_len, n[i].line_end);
+        const char* cindent = (close_line_off + close_ind_len <= in_len) ? (in_src + close_line_off) : "";
+        char epi[256];
+        int en2 = snprintf(epi, sizeof(epi),
+                           "%.*s  cc_nursery_wait(__cc_nursery%d);\n"
+                           "%.*s  cc_nursery_free(__cc_nursery%d);\n",
+                           (int)close_ind_len, cindent, id,
+                           (int)close_ind_len, cindent, id);
+        if (en2 > 0 && (size_t)en2 < sizeof(epi)) {
+            /* Add epilogue edit: insert before close */
+            if (cc_edit_buffer_add(eb, close, close, epi, 10, "nursery") == 0) {
+                edits_added++;
+            }
+        }
+    }
+
+    free(id_by_node);
+    return edits_added;
+}/* NEW: Collect spawn edits into EditBuffer without applying. */
+int cc__collect_spawn_edits(const CCASTRoot* root,
+                            const CCVisitorCtx* ctx,
+                            CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
+    if (!root->nodes || root->node_count <= 0) return 0;
+
+    const char* in_src = eb->src;
+    size_t in_len = eb->src_len;
+    const NodeView* n = (const NodeView*)root->nodes;
+
+    int* id_by_node = (int*)calloc((size_t)root->node_count, sizeof(int));
+    if (!id_by_node) return 0;
+    int max_id = 0;
+    cc__build_nursery_id_map(root, ctx, in_src, in_len, id_by_node, root->node_count, &max_id);
+
+    int edits_added = 0;
+
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != CC_AST_NODE_STMT) continue;
+        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, "spawn") != 0) continue;
+        if (n[i].line_end <= 0) continue;
+
+        size_t start = 0;
+        int col1 = 1;
+        int sr = cc__stmt_marker_start_off(root, ctx, n, i, in_src, in_len, "spawn", 5, &start, &col1);
+        if (sr == 0) continue;
+        if (sr < 0) { free(id_by_node); return -1; }
+
+        int nursery_i = cc__find_enclosing_nursery_node_i(root, i);
+        int nid = (nursery_i >= 0 && nursery_i < root->node_count) ? id_by_node[nursery_i] : 0;
+        if (nid == 0) {
+            const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            fprintf(stderr, "%s:%d:%d: error: CC: 'spawn' must be inside an '@nursery { ... }' block\n",
+                    f, n[i].line_start, col1);
+            free(id_by_node);
+            return -1;
+        }        size_t end = cc__infer_spawn_stmt_end_off(in_src, in_len, start);
+        if (end == 0) {
+            if (n[i].col_end > 0) {
+                end = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);
+            } else {
+                end = cc__offset_of_line_1based(in_src, in_len, n[i].line_end + 1);
+            }
+        }
+        if (start >= in_len) continue;
+        if (end > in_len) end = in_len;
+        if (end <= start) continue;
+
+        const char* stmt = in_src + start;
+        size_t stmt_len = end - start;
+
+        size_t lp = (size_t)-1;
+        for (size_t k = 0; k < stmt_len; k++) {
+            if (stmt[k] == '(') { lp = k; break; }
+        }
+        if (lp == (size_t)-1) continue;
+        size_t rp = (size_t)-1;
+        for (size_t k = stmt_len; k-- > lp; ) {
+            if (stmt[k] == ')') { rp = k; break; }
+        }
+        if (rp == (size_t)-1 || rp <= lp) continue;
+
+        size_t arg_off = lp + 1;
+        size_t arg_len = rp - (lp + 1);
+        cc__trim_span(stmt, &arg_off, &arg_len);
+
+        size_t ind_len = cc__line_indent_len(in_src, in_len, n[i].line_start);
+        size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
+        const char* indent = (line_off + ind_len <= in_len) ? (in_src + line_off) : "";
+
+        char* repl = NULL;
+        size_t repl_len = 0, repl_cap = 0;
+
+        /* Prefer "simple function call" spawn form */
+        {
+            char fn[96] = {0};
+            int has_arg = 0;
+            long arg = 0;
+            int looks_closure_make = 0;
+            for (size_t k = 0; k + 16 <= arg_len; k++) {
+                if (memcmp(stmt + arg_off + k, "__cc_closure_make_", 16) == 0) { looks_closure_make = 1; break; }
+            }
+            if (!looks_closure_make && cc__parse_simple_fn_call(stmt + arg_off, arg_len, fn, sizeof(fn), &has_arg, &arg)) {
+                char b[512];
+                if (!has_arg) {
+                    int nn = snprintf(b, sizeof(b),
+                                      "%.*s{ __cc_spawn_void_arg* __a = (__cc_spawn_void_arg*)malloc(sizeof(__cc_spawn_void_arg));\n"
+                                      "%.*s  if (!__a) abort();\n"
+                                      "%.*s  __a->fn = %s;\n"
+                                      "%.*s  cc_nursery_spawn(__cc_nursery%d, __cc_spawn_thunk_void, __a);\n"
+                                      "%.*s}\n",
+                                      (int)ind_len, indent,
+                                      (int)ind_len, indent,
+                                      (int)ind_len, indent, fn,
+                                      (int)ind_len, indent, nid,
+                                      (int)ind_len, indent);
+                    if (nn > 0 && (size_t)nn < sizeof(b)) {
+                        cc__append_n(&repl, &repl_len, &repl_cap, b, (size_t)nn);
+                    }
+                } else {
+                    int nn = snprintf(b, sizeof(b),
+                                      "%.*s{ __cc_spawn_int_arg* __a = (__cc_spawn_int_arg*)malloc(sizeof(__cc_spawn_int_arg));\n"
+                                      "%.*s  if (!__a) abort();\n"
+                                      "%.*s  __a->fn = %s;\n"
+                                      "%.*s  __a->arg = (int)%ld;\n"
+                                      "%.*s  cc_nursery_spawn(__cc_nursery%d, __cc_spawn_thunk_int, __a);\n"
+                                      "%.*s}\n",
+                                      (int)ind_len, indent,
+                                      (int)ind_len, indent,
+                                      (int)ind_len, indent, fn,
+                                      (int)ind_len, indent, arg,
+                                      (int)ind_len, indent, nid,
+                                      (int)ind_len, indent);
+                    if (nn > 0 && (size_t)nn < sizeof(b)) {
+                        cc__append_n(&repl, &repl_len, &repl_cap, b, (size_t)nn);
+                    }
+                }
+            }
+        }
+
+        /* Otherwise interpret as closure spawn forms */
+        if (!repl) {
+            int commas[2] = {0, 0};
+            int comma_n = cc__split_top_level_commas(stmt + arg_off, arg_len, commas, 2);
+
+            if (comma_n == 1 || comma_n == 2) {
+                size_t c0_off = arg_off;
+                size_t c0_len = (size_t)commas[0];
+                size_t c1_off = arg_off + (size_t)commas[0] + 1;
+                size_t c1_len = (comma_n == 2) ? ((size_t)commas[1] - (size_t)commas[0] - 1) : (arg_len - (size_t)commas[0] - 1);
+                size_t c2_off = (comma_n == 2) ? (arg_off + (size_t)commas[1] + 1) : 0;
+                size_t c2_len = (comma_n == 2) ? (arg_len - (size_t)commas[1] - 1) : 0;
+
+                cc__trim_span(stmt, &c0_off, &c0_len);
+                cc__trim_span(stmt, &c1_off, &c1_len);
+                if (comma_n == 2) cc__trim_span(stmt, &c2_off, &c2_len);
+
+                if (comma_n == 1) {
+                    cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure1 __c = ");
+                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap,
+                                   "; cc_nursery_spawn_closure1(__cc_nursery%d, __c, (intptr_t)(", nid);
+                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c1_off, c1_len);
+                    cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
+                } else {
+                    cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure2 __c = ");
+                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap,
+                                   "; cc_nursery_spawn_closure2(__cc_nursery%d, __c, (intptr_t)(", nid);
+                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c1_off, c1_len);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "), (intptr_t)(");
+                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c2_off, c2_len);
+                    cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
+                }
+            } else {
+                cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
+                cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure0 __c = ");
+                cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
+                cc__append_fmt(&repl, &repl_len, &repl_cap,
+                               "; cc_nursery_spawn_closure0(__cc_nursery%d, __c); }\n", nid);
+            }
+        }
+
+        if (!repl) continue;
+        
+        if (cc_edit_buffer_add(eb, start, end, repl, 10, "spawn") == 0) {
+            edits_added++;
+        }
+        free(repl);
+    }
+
+    free(id_by_node);
+    return edits_added;
+}

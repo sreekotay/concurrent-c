@@ -1670,7 +1670,7 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
     char meta_path[PATH_MAX];
     cc__cache_key_paths(meta_path, sizeof(meta_path), NULL, 0, stem);
     if (!is_raw_c && cache_ok) {
-        CCFileSig in_sig, build_sig, cc_sig;
+        CCFileSig in_sig, build_sig, cc_sig, ccc_sig;
         (void)cc__stat_sig(opt->in_path, &in_sig);
         char build_buf[512];
         int multiple = 0;
@@ -1678,6 +1678,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         if (multiple) build_path = NULL;
         if (build_path && cc__stat_sig(build_path, &build_sig) != 0) { build_sig.mtime_sec = 0; build_sig.size = 0; }
         if (cc__stat_sig(opt->cc_bin_override ? opt->cc_bin_override : "cc", &cc_sig) != 0) { cc_sig.mtime_sec = 0; cc_sig.size = 0; }
+        // Also include the ccc binary itself so cache invalidates when lowering logic changes
+        if (cc__stat_sig(g_ccc_sig_path[0] ? g_ccc_sig_path : g_ccc_path, &ccc_sig) != 0) { ccc_sig.mtime_sec = 0; ccc_sig.size = 0; }
 
         uint64_t h = 1469598103934665603ULL;
         h = cc__fnv1a64_str(h, opt->in_path);
@@ -1688,6 +1690,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         h = cc__fnv1a64_i64(h, build_sig.size);
         h = cc__fnv1a64_i64(h, cc_sig.mtime_sec);
         h = cc__fnv1a64_i64(h, cc_sig.size);
+        h = cc__fnv1a64_i64(h, ccc_sig.mtime_sec);
+        h = cc__fnv1a64_i64(h, ccc_sig.size);
         h = cc__fnv1a64_str(h, opt->target_flag);
         h = cc__fnv1a64_str(h, opt->sysroot_flag);
         h = cc__fnv1a64_str(h, opt->cc_flags);

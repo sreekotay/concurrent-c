@@ -8,73 +8,14 @@
 
 #include "util/path.h"
 #include "util/text.h"
-#include "visitor/text_span.h"
+#include "visitor/pass_common.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
 #endif
 
-enum {
-    CC_AST_NODE_CLOSURE = 9,
-};
-
-typedef struct {
-    int kind;
-    int parent;
-    const char* file;
-    int line_start;
-    int line_end;
-    int col_start;
-    int col_end;
-    int aux1;
-    int aux2;
-    const char* aux_s1;
-    const char* aux_s2;
-} NodeView;
-
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* last = path;
-    for (const char* p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') last = p + 1;
-    }
-    return last;
-}
-
-static const char* cc__path_suffix2(const char* path) {
-    if (!path) return NULL;
-    const char* end = path + strlen(path);
-    int seps = 0;
-    for (const char* p = end; p > path; ) {
-        p--;
-        if (*p == '/' || *p == '\\') {
-            seps++;
-            if (seps == 2) return p + 1;
-        }
-    }
-    return cc__basename(path);
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    if (strcmp(a, b) == 0) return 1;
-    const char* a_base = cc__basename(a);
-    const char* b_base = cc__basename(b);
-    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
-    const char* a_suf = cc__path_suffix2(a);
-    const char* b_suf = cc__path_suffix2(b);
-    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
-    return 1;
-}
-
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* node_file) {
-    if (!ctx || !ctx->input_path || !node_file) return 0;
-    if (cc__same_source_file(ctx->input_path, node_file)) return 1;
-    if (root && root->lowered_path && cc__same_source_file(root->lowered_path, node_file)) return 1;
-    return 0;
-}
+/* Alias shared types for local use */
+typedef CCNodeView NodeView;
 
 
 /* Local aliases for the shared helpers */
@@ -187,15 +128,33 @@ static size_t cc__infer_closure_end_off(const char* src, size_t len, size_t star
         if (ch == '{' && par == 0 && brk == 0) {
             /* Block body: match braces starting here. */
             int br2 = 0;
-            int in2 = 0;
+            int in2 = 0;  /* in string */
             char q2 = 0;
+            int in_lc = 0; /* in line comment */
+            int in_bc = 0; /* in block comment */
             for (; i < len; i++) {
                 char c2 = src[i];
+                /* Handle line comment */
+                if (in_lc) {
+                    if (c2 == '\n') in_lc = 0;
+                    continue;
+                }
+                /* Handle block comment */
+                if (in_bc) {
+                    if (c2 == '*' && i + 1 < len && src[i + 1] == '/') { in_bc = 0; i++; }
+                    continue;
+                }
+                /* Handle string */
                 if (in2) {
                     if (c2 == '\\' && i + 1 < len) { i++; continue; }
                     if (c2 == q2) in2 = 0;
                     continue;
                 }
+                /* Start of line comment */
+                if (c2 == '/' && i + 1 < len && src[i + 1] == '/') { in_lc = 1; i++; continue; }
+                /* Start of block comment */
+                if (c2 == '/' && i + 1 < len && src[i + 1] == '*') { in_bc = 1; i++; continue; }
+                /* Start of string */
                 if (c2 == '"' || c2 == '\'') { in2 = 1; q2 = c2; continue; }
                 if (c2 == '{') br2++;
                 else if (c2 == '}') {
@@ -589,15 +548,21 @@ static char** cc__dup_string_list(char** xs, int n) {
 typedef struct {
     char* name;
     char** param_types;
+    char** param_names;  /* Parameter names for closure capture */
     int param_count;
+    int line_start;      /* Line where function body starts */
 } CCFuncSig;
 
 static void cc__free_func_sigs(CCFuncSig* sigs, int n) {
     if (!sigs) return;
     for (int i = 0; i < n; i++) {
         free(sigs[i].name);
-        for (int k = 0; k < sigs[i].param_count; k++) free(sigs[i].param_types ? sigs[i].param_types[k] : NULL);
+        for (int k = 0; k < sigs[i].param_count; k++) {
+            free(sigs[i].param_types ? sigs[i].param_types[k] : NULL);
+            free(sigs[i].param_names ? sigs[i].param_names[k] : NULL);
+        }
         free(sigs[i].param_types);
+        free(sigs[i].param_names);
     }
     free(sigs);
 }
@@ -976,7 +941,12 @@ static int cc__parse_closure_from_src(const char* src,
                                      size_t end_off,
                                      int aux_param_count,
                                      CCClosureDesc* out) {
-    if (!src || !out || end_off <= start_off) return 0;
+    if (!src || !out || end_off <= start_off) {
+        if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
+            fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: parse_closure early return (null or bad range)\n");
+        }
+        return 0;
+    }
     const char* s = src + start_off;
     size_t n = end_off - start_off;
 
@@ -1185,18 +1155,30 @@ static int cc__parse_closure_from_src(const char* src,
     size_t body_start = b0;
     size_t body_end = n;
     if (s[body_start] == '{') {
-        /* Find matching '}' within literal span. */
+        /* Find matching '}' within literal span, skipping strings and comments. */
         int br = 0;
         int in_str = 0;
         char qch = 0;
+        int in_lc = 0; /* line comment */
+        int in_bc = 0; /* block comment */
         size_t i = body_start;
         for (; i < n; i++) {
             char ch = s[i];
+            if (in_lc) {
+                if (ch == '\n') in_lc = 0;
+                continue;
+            }
+            if (in_bc) {
+                if (ch == '*' && i + 1 < n && s[i + 1] == '/') { in_bc = 0; i++; }
+                continue;
+            }
             if (in_str) {
                 if (ch == '\\' && i + 1 < n) { i++; continue; }
                 if (ch == qch) in_str = 0;
                 continue;
             }
+            if (ch == '/' && i + 1 < n && s[i + 1] == '/') { in_lc = 1; i++; continue; }
+            if (ch == '/' && i + 1 < n && s[i + 1] == '*') { in_bc = 1; i++; continue; }
             if (ch == '"' || ch == '\'') { in_str = 1; qch = ch; continue; }
             if (ch == '{') br++;
             else if (ch == '}') {
@@ -1300,11 +1282,12 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     const NodeView* n = (const NodeView*)root->nodes;
 
     /* Build a best-effort function signature table from stub-AST FUNC/PARAM nodes.
-       Used to allow `&x` only when passed to a known `const T*` parameter (2B). */
+       Used to allow `&x` only when passed to a known `const T*` parameter (2B),
+       AND to register function parameters as capturable variables (closure support). */
     CCFuncSig* sigs = NULL;
     int sig_n = 0;
     {
-        typedef struct { char** tys; int n; int cap; } Tmp;
+        typedef struct { char** tys; char** names; int n; int cap; } Tmp;
         Tmp* tmp = (Tmp*)calloc((size_t)root->node_count, sizeof(Tmp));
         if (tmp) {
             for (int i = 0; i < root->node_count; i++) {
@@ -1313,20 +1296,24 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                 if (p < 0 || p >= root->node_count) continue;
                 if (n[p].kind != 17) continue; /* CC_AST_NODE_FUNC */
                 if (!n[i].aux_s2) continue;
-                if (!cc__node_file_matches_this_tu(root, ctx, n[p].file)) continue;
+                if (!cc_pass_node_in_tu(root, ctx, n[p].file)) continue;
                 if (tmp[p].n == tmp[p].cap) {
                     int nc = tmp[p].cap ? tmp[p].cap * 2 : 8;
                     char** nt = (char**)realloc(tmp[p].tys, (size_t)nc * sizeof(char*));
-                    if (!nt) continue;
+                    char** nn = (char**)realloc(tmp[p].names, (size_t)nc * sizeof(char*));
+                    if (!nt || !nn) { free(nt); free(nn); continue; }
                     tmp[p].tys = nt;
+                    tmp[p].names = nn;
                     tmp[p].cap = nc;
                 }
-                tmp[p].tys[tmp[p].n++] = strdup(n[i].aux_s2);
+                tmp[p].tys[tmp[p].n] = strdup(n[i].aux_s2);
+                tmp[p].names[tmp[p].n] = n[i].aux_s1 ? strdup(n[i].aux_s1) : NULL;
+                tmp[p].n++;
             }
             for (int i = 0; i < root->node_count; i++) {
                 if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
                 if (!n[i].aux_s1) continue;
-                if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+                if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
                 /* Insert/replace by name. */
                 int idx = -1;
                 for (int k = 0; k < sig_n; k++) {
@@ -1340,23 +1327,35 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     memset(&sigs[idx], 0, sizeof(sigs[idx]));
                 } else {
                     free(sigs[idx].name);
-                    for (int k = 0; k < sigs[idx].param_count; k++) free(sigs[idx].param_types ? sigs[idx].param_types[k] : NULL);
+                    for (int k = 0; k < sigs[idx].param_count; k++) {
+                        free(sigs[idx].param_types ? sigs[idx].param_types[k] : NULL);
+                        free(sigs[idx].param_names ? sigs[idx].param_names[k] : NULL);
+                    }
                     free(sigs[idx].param_types);
+                    free(sigs[idx].param_names);
                     sigs[idx].name = NULL;
                     sigs[idx].param_types = NULL;
+                    sigs[idx].param_names = NULL;
                     sigs[idx].param_count = 0;
                 }
                 sigs[idx].name = strdup(n[i].aux_s1);
                 sigs[idx].param_types = tmp[i].tys;
+                sigs[idx].param_names = tmp[i].names;
                 sigs[idx].param_count = tmp[i].n;
+                sigs[idx].line_start = n[i].line_start;
                 tmp[i].tys = NULL;
+                tmp[i].names = NULL;
                 tmp[i].n = 0;
                 tmp[i].cap = 0;
             }
             /* cleanup tmp leftovers */
             for (int i = 0; i < root->node_count; i++) {
-                for (int k = 0; k < tmp[i].n; k++) free(tmp[i].tys ? tmp[i].tys[k] : NULL);
+                for (int k = 0; k < tmp[i].n; k++) {
+                    free(tmp[i].tys ? tmp[i].tys[k] : NULL);
+                    free(tmp[i].names ? tmp[i].names[k] : NULL);
+                }
                 free(tmp[i].tys);
+                free(tmp[i].names);
             }
             free(tmp);
         }
@@ -1369,7 +1368,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     if (!idxs) return 0;
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != CC_AST_NODE_CLOSURE) continue;
-        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         if (n[i].line_start <= 0) continue;
         if (n[i].line_end <= 0) continue;
         if (idx_n == idxs_cap) {
@@ -1435,10 +1434,17 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
             size_t tail_s = (d->end_off > 32) ? (d->end_off - 32) : 0;
             size_t tail_n = d->end_off - tail_s;
-            fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d file=%s line=%d start_off=%zu end_off=%zu tail=\"%.*s\"\n",
-                    d->id, f, n[i].line_start, d->start_off, d->end_off, (int)tail_n, in_src + tail_s);
+            fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS: id=%d file=%s line=%d col_start=%d start_off=%zu end_off=%zu tail=\"%.*s\"\n",
+                    d->id, f, n[i].line_start, n[i].col_start, d->start_off, d->end_off, (int)tail_n, in_src + tail_s);
+            /* Also show what text is at start_off */
+            size_t show_len = (d->end_off - d->start_off > 60) ? 60 : (d->end_off - d->start_off);
+            fprintf(stderr, "CC_DEBUG_CLOSURE_SPANS:   start_text=\"%.*s\"\n", (int)show_len, in_src + d->start_off);
         }
         int pr = cc__parse_closure_from_src(in_src, d->start_off, d->end_off, n[i].aux1, d);
+        if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
+            fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: parse_closure id=%d returned %d body_text=%s\n",
+                    d->id, pr, d->body_text ? "yes" : "NULL");
+        }
         if (pr == -2) {
             const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
             fprintf(stderr, "%s:%d: error: capture-all [&] is not allowed\n", f, n[i].line_start);
@@ -1467,6 +1473,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     for (int d = 0; d < 256; d++) { scope_names[d] = NULL; scope_types[d] = NULL; scope_flags[d] = NULL; scope_counts[d] = 0; }
     int depth = 0;
     int cur_closure = 0;
+    int line_num = 1;  /* Current line number (1-based) for function param registration */
 
     const char* cur = in_src;
     size_t off = 0;
@@ -1632,6 +1639,30 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         for (const char* x = line_start; x < line_end; x++) {
             if (*x == '{') {
                 depth++;
+                /* When entering a new scope, check if this is a function body and register its parameters.
+                   This enables closures to capture function parameters, not just local variables. */
+                for (int si = 0; si < sig_n; si++) {
+                    if (sigs[si].line_start == line_num && sigs[si].param_names) {
+                        for (int pi = 0; pi < sigs[si].param_count; pi++) {
+                            if (!sigs[si].param_names[pi] || !sigs[si].param_types[pi]) continue;
+                            /* Register this parameter as a declaration at current depth */
+                            int cur_n = scope_counts[depth];
+                            char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
+                            char** tnext = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
+                            unsigned char* fnext = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n + 1) * sizeof(unsigned char));
+                            if (next && tnext && fnext) {
+                                scope_names[depth] = next;
+                                scope_types[depth] = tnext;
+                                scope_flags[depth] = fnext;
+                                scope_names[depth][cur_n] = strdup(sigs[si].param_names[pi]);
+                                scope_types[depth][cur_n] = strdup(sigs[si].param_types[pi]);
+                                scope_flags[depth][cur_n] = 0;
+                                scope_counts[depth] = cur_n + 1;
+                            }
+                        }
+                        break;
+                    }
+                }
             } else if (*x == '}') {
                 if (depth > 0) {
                     for (int j = 0; j < scope_counts[depth]; j++) free(scope_names[depth][j]);
@@ -1648,6 +1679,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (!nl) break;
         cur = nl + 1;
         off = (size_t)(cur - in_src);
+        line_num++;  /* Advance line counter for function param registration */
     }
 
     /* Emit protos/defs and build rewrite edits for all closure literals. */
@@ -1660,15 +1692,23 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
 
     Edit edits[2048];
     int en = 0;
+    if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
+        fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: processing %d closure descriptors\n", idx_n);
+    }
     for (int k = 0; k < idx_n && en < (int)(sizeof(edits) / sizeof(edits[0])); k++) {
         CCClosureDesc* d = &descs[k];
+        if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
+            fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: desc[%d] id=%d body_text=%s\n",
+                    k, d->id, d->body_text ? "yes" : "NULL");
+        }
         if (!d->body_text) continue;
 
-        /* protos */
+        /* protos - entry function and make function prototypes */
         if (d->param_count == 0) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*);\n", d->id);
         else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t);\n", d->id);
         else cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t, intptr_t);\n", d->id);
 
+        /* __cc_closure_make_N prototype - includes captured variable types */
         const char* cty_p = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
         cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_%d(", cty_p, d->id);
         if (d->cap_count == 0) {
@@ -1828,13 +1868,22 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         /* Important: do not apply nested closure edits to the main source buffer.
            The outermost closure rewrite removes the body text from the source, and we rewrite nested closures
            inside the generated entry function body separately (cc__lower_nested_closures_in_body). */
-        if (!cc__closure_is_nested_in_any_other(k, descs, idx_n)) {
+        int is_nested = cc__closure_is_nested_in_any_other(k, descs, idx_n);
+        if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
+            fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: id=%d nested=%d start=%zu end=%zu\n",
+                    d->id, is_nested, d->start_off, d->end_off);
+        }
+        if (!is_nested) {
             edits[en++] = (Edit){ .start = d->start_off, .end = d->end_off, .repl = call };
         } else {
             free(call);
         }
     }
     cc__append_str(&defs, &defs_len, &defs_cap, "/* --- end generated closures --- */\n");
+
+    if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
+        fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: applying %d edits to source (len=%zu)\n", en, in_len);
+    }
 
     /* Apply edits to source. */
     size_t rewritten_len = 0;
@@ -1869,3 +1918,57 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
+/* NEW: Collect closure literal edits into EditBuffer.
+   NOTE: This pass generates protos and defs that must be emitted separately.
+   The function adds the source edits to eb, and protos/defs via add_protos/add_defs.
+   Returns number of edits added (>= 0), or -1 on error. */
+int cc__collect_closure_edits(const CCASTRoot* root,
+                              const CCVisitorCtx* ctx,
+                              CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
+
+    char* rewritten = NULL;
+    size_t rewritten_len = 0;
+    char* protos = NULL;
+    size_t protos_len = 0;
+    char* defs = NULL;
+    size_t defs_len = 0;
+
+    int r = cc__rewrite_closure_literals_with_nodes(root, ctx, eb->src, eb->src_len,
+                                                    &rewritten, &rewritten_len,
+                                                    &protos, &protos_len,
+                                                    &defs, &defs_len);
+    if (r < 0) {
+        free(rewritten);
+        free(protos);
+        free(defs);
+        return -1;
+    }
+    if (r == 0 || !rewritten) {
+        free(protos);
+        free(defs);
+        return 0;
+    }
+
+    int edits_added = 0;
+
+    /* Add protos and defs to the EditBuffer */
+    if (protos && protos_len > 0) {
+        cc_edit_buffer_add_protos(eb, protos, protos_len);
+    }
+    if (defs && defs_len > 0) {
+        cc_edit_buffer_add_defs(eb, defs, defs_len);
+    }
+
+    /* Add source replacement edit */
+    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
+        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 60, "closure_literals") == 0) {
+            edits_added = 1;
+        }
+    }
+
+    free(rewritten);
+    free(protos);
+    free(defs);
+    return edits_added;
+}

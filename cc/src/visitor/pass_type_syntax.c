@@ -1,0 +1,815 @@
+/* pass_type_syntax.c - Type syntax lowering passes.
+ *
+ * Extracted from visit_codegen.c for maintainability.
+ */
+
+#include "pass_type_syntax.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "util/path.h"
+#include "util/text.h"
+
+/* Local aliases for shared helpers */
+#define cc__sb_append_local cc_sb_append
+#define cc__sb_append_cstr_local cc_sb_append_cstr
+#define cc__is_ident_char_local cc_is_ident_char
+#define cc__is_ident_char_local2 cc_is_ident_char
+#define cc__is_ident_start_local2 cc_is_ident_start
+#define cc__skip_ws_local2 cc_skip_ws
+
+static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* out_qual, size_t out_cap) {
+    if (!s || !out_qual || out_cap == 0) return ty_start;
+    out_qual[0] = 0;
+    size_t p = ty_start;
+    while (s[p] == ' ' || s[p] == '\t') p++;
+    for (;;) {
+        int matched = 0;
+        if (strncmp(s + p, "const", 5) == 0 && !cc__is_ident_char_local(s[p + 5])) {
+            strncat(out_qual, "const ", out_cap - strlen(out_qual) - 1);
+            p += 5;
+            while (s[p] == ' ' || s[p] == '\t') p++;
+            matched = 1;
+        } else if (strncmp(s + p, "volatile", 8) == 0 && !cc__is_ident_char_local(s[p + 8])) {
+            strncat(out_qual, "volatile ", out_cap - strlen(out_qual) - 1);
+            p += 8;
+            while (s[p] == ' ' || s[p] == '\t') p++;
+            matched = 1;
+        }
+        if (!matched) break;
+    }
+    return p;
+}
+
+char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    int line = 1, col = 1;
+
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+
+        if (c == '[') {
+            size_t j = i + 1;
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j < n && src[j] == ':') {
+                size_t k = j + 1;
+                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                int is_unique = 0;
+                if (k < n && src[k] == '!') { is_unique = 1; k++; }
+                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                if (k >= n || src[k] != ']') {
+                    char rel[1024];
+                    fprintf(stderr, "CC: error: unterminated slice type (missing ']') at %s:%d:%d\n",
+                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col);
+                    free(out);
+                    return NULL;
+                }
+                /* Find start of type token sequence and preserve leading cv qualifiers */
+                size_t ty_start = i;
+                while (ty_start > 0) {
+                    char p = src[ty_start - 1];
+                    if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+                    ty_start--;
+                }
+                while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
+
+                if (ty_start >= last_emit) {
+                    char quals[64];
+                    size_t after_qual = cc__strip_leading_cv_qual(src, ty_start, quals, sizeof(quals));
+                    (void)after_qual;
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, quals);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, is_unique ? "CCSliceUnique" : "CCSlice");
+                    last_emit = k + 1;
+                }
+                while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
+                    continue;
+                }
+        }
+
+        i++; col++;
+    }
+
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Mangle a type name for use in CCOptional_T or CCResult_T_E. */
+static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
+    if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
+    
+    /* Skip leading whitespace */
+    while (len > 0 && (*src == ' ' || *src == '\t')) { src++; len--; }
+    /* Skip trailing whitespace */
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
+    
+    size_t j = 0;
+    for (size_t i = 0; i < len && j < out_sz - 1; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\t') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '*') {
+            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
+        } else if (c == '[' || c == ']') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '<' || c == '>' || c == ',') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+                                } else {
+            out[j++] = c;
+        }
+    }
+    /* Remove trailing underscore */
+    while (j > 0 && out[j - 1] == '_') j--;
+    out[j] = 0;
+}
+
+/* Scan back from position `from` to find the start of a type token (delimited by ; { } , ( ) newline). */
+static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
+    size_t i = from;
+    while (i > 0) {
+        char p = s[i - 1];
+        if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+        i--;
+    }
+    while (s[i] && (s[i] == ' ' || s[i] == '\t')) i++;
+    return i;
+}
+
+/* Rewrite optional types: T? -> CCOptional_T */
+char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    (void)ctx;
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Detect T? pattern: identifier followed by '?' (not '?:' ternary or '??') */
+        if (c == '?' && c2 != ':' && c2 != '?') {
+            if (i > 0) {
+                char prev = src[i - 1];
+                /* Valid type-ending chars: identifier char, ')', ']', '>' */
+                if (cc__is_ident_char_local(prev) || prev == ')' || prev == ']' || prev == '>') {
+                    size_t ty_start = cc__scan_back_to_type_start(src, i);
+                    if (ty_start < i) {
+                        size_t ty_len = i - ty_start;
+                        char mangled[256];
+                        cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
+                        
+                        if (mangled[0]) {
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCOptional_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled);
+                            last_emit = i + 1; /* skip past '?' */
+                        }
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Collection of result type pairs for CC_DECL_RESULT_SPEC emission (extern in header) */
+CCCodegenResultTypePair cc__cg_result_types[64];
+size_t cc__cg_result_type_count = 0;
+
+static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
+                                    const char* mangled_ok, const char* mangled_err) {
+    /* Skip built-in result types (already declared in cc_result.cch) */
+    if (strcmp(mangled_err, "CCError") == 0) return;
+    
+    /* Check for duplicates */
+    for (size_t i = 0; i < cc__cg_result_type_count; i++) {
+        if (strcmp(cc__cg_result_types[i].mangled_ok, mangled_ok) == 0 &&
+            strcmp(cc__cg_result_types[i].mangled_err, mangled_err) == 0) {
+            return; /* Already have this type */
+        }
+    }
+    if (cc__cg_result_type_count >= sizeof(cc__cg_result_types)/sizeof(cc__cg_result_types[0])) return;
+    CCCodegenResultTypePair* p = &cc__cg_result_types[cc__cg_result_type_count++];
+    if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
+    if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
+    memcpy(p->ok_type, ok, ok_len);
+    p->ok_type[ok_len] = '\0';
+    memcpy(p->err_type, err, err_len);
+    p->err_type[err_len] = '\0';
+    strncpy(p->mangled_ok, mangled_ok, sizeof(p->mangled_ok) - 1);
+    p->mangled_ok[sizeof(p->mangled_ok) - 1] = '\0';
+    strncpy(p->mangled_err, mangled_err, sizeof(p->mangled_err) - 1);
+    p->mangled_err[sizeof(p->mangled_err) - 1] = '\0';
+}
+
+/* Scan for already-lowered CCResult_T_E patterns and collect type pairs.
+   This handles the case where the preprocessor already rewrote T!E -> CCResult_T_E */
+static void cc__scan_for_existing_result_types(const char* src, size_t n) {
+    /* Reset collection */
+    cc__cg_result_type_count = 0;
+    
+    const char* prefix = "CCResult_";
+    size_t prefix_len = strlen(prefix);
+    
+    size_t i = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for CCResult_ prefix */
+        if (i + prefix_len < n && strncmp(src + i, prefix, prefix_len) == 0) {
+            /* Make sure this isn't part of a longer identifier (check char before) */
+            if (i > 0 && cc__is_ident_char_local(src[i-1])) {
+                i++;
+                continue;
+            }
+            
+            /* Parse: CCResult_OkType_ErrType */
+            size_t j = i + prefix_len;
+            
+            /* Find the ok type (everything until next '_') */
+            size_t ok_start = j;
+            while (j < n && src[j] != '_' && cc__is_ident_char_local(src[j])) j++;
+            if (j >= n || src[j] != '_') { i++; continue; }
+            size_t ok_end = j;
+            
+            j++; /* skip '_' */
+            
+            /* Find the error type (rest of identifier) */
+            size_t err_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t err_end = j;
+            
+            if (ok_end > ok_start && err_end > err_start) {
+                /* Extract type names */
+                char ok_type[128];
+                char err_type[128];
+                size_t ok_len = ok_end - ok_start;
+                size_t err_len = err_end - err_start;
+                
+                if (ok_len < sizeof(ok_type) && err_len < sizeof(err_type)) {
+                    memcpy(ok_type, src + ok_start, ok_len);
+                    ok_type[ok_len] = '\0';
+                    memcpy(err_type, src + err_start, err_len);
+                    err_type[err_len] = '\0';
+                    
+                    /* Skip built-in result types (those are already declared in cc_result.cch) */
+                    if (strcmp(err_type, "CCError") != 0) {
+                        cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
+                    }
+                }
+            }
+            
+            i = j;
+            continue;
+        }
+        
+        i++;
+    }
+}
+
+/* Rewrite result types: T!E -> CCResult_T_E, also collect pairs for declaration emission */
+char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    (void)ctx;
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    /* First, scan for any existing CCResult_T_E patterns (preprocessor may have already rewritten) */
+    cc__scan_for_existing_result_types(src, n);
+
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Detect T!E pattern: type followed by '!' followed by error type (not '!=') */
+        if (c == '!' && c2 != '=') {
+            if (i > 0) {
+                char prev = src[i - 1];
+                /* Valid type-ending chars: identifier char, ')', ']', '>' */
+                if (cc__is_ident_char_local(prev) || prev == ')' || prev == ']' || prev == '>') {
+                    /* Check what follows the '!' - must be an identifier (error type) */
+                    size_t j = i + 1;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && cc__is_ident_start_local2(src[j])) {
+                        size_t err_start = j;
+                        while (j < n && cc__is_ident_char_local(src[j])) j++;
+                        size_t err_end = j;
+                        
+                        size_t ty_start = cc__scan_back_to_type_start(src, i);
+                        if (ty_start < i) {
+                            size_t ty_len = i - ty_start;
+                            size_t err_len = err_end - err_start;
+                            
+                            char mangled_ok[256];
+                            char mangled_err[256];
+                            cc__mangle_type_name(src + ty_start, ty_len, mangled_ok, sizeof(mangled_ok));
+                            cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
+                            
+                            if (mangled_ok[0] && mangled_err[0]) {
+                                /* Collect this result type pair for declaration */
+                                cc__cg_add_result_type(src + ty_start, ty_len, 
+                                                       src + err_start, err_len,
+                                                       mangled_ok, mangled_err);
+                                
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCResult_");
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_ok);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_err);
+                                last_emit = err_end;
+                                i = err_end;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite cc_ok(...) and cc_err(...) to fully qualified forms based on enclosing function's return type.
+   Inside a function returning CCResult_T_E:
+     cc_ok(v)   -> cc_ok_CCResult_T_E(v)
+     cc_err(e)  -> cc_err_CCResult_T_E(e)
+   This allows users to write just cc_ok(42) instead of cc_ok(int, 42). */
+char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    
+    /* Track current function's result type (if any) */
+    char current_result_type[256] = {0};  /* e.g., "CCResult_int_CCError" */
+    int brace_depth = 0;
+    int fn_brace_depth = -1;  /* brace depth when we entered the function body */
+    
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    size_t i = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        /* Handle comment/string states */
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Track brace depth */
+        if (c == '{') {
+            brace_depth++;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            brace_depth--;
+            /* Exit function scope */
+            if (fn_brace_depth >= 0 && brace_depth < fn_brace_depth) {
+                current_result_type[0] = 0;
+                fn_brace_depth = -1;
+            }
+            i++;
+            continue;
+        }
+        
+        /* Detect function definition with CCResult_T_E return type */
+        if (c == 'C' && i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0 && fn_brace_depth < 0) {
+            /* Found CCResult_ - extract the full type name */
+            size_t type_start = i;
+            size_t j = i + 9;
+            /* Read T part */
+            while (j < n && (cc__is_ident_char_local(src[j]))) j++;
+            if (j < n && src[j] == '_') {
+                j++;
+                /* Read E part */
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+            }
+            size_t type_end = j;
+            
+            /* Check if this is a function definition (followed by identifier + '(' + ')' + '{') */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r' || src[j] == '*')) j++;
+            if (j < n && cc__is_ident_start_local2(src[j])) {
+                /* Skip function name */
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (j < n && src[j] == '(') {
+                    /* Skip params */
+                    int pdepth = 1;
+                    j++;
+                    while (j < n && pdepth > 0) {
+                        if (src[j] == '(') pdepth++;
+                        else if (src[j] == ')') pdepth--;
+                        else if (src[j] == '"') { j++; while (j < n && src[j] != '"') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
+                        else if (src[j] == '\'') { j++; while (j < n && src[j] != '\'') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
+                        j++;
+                    }
+                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                    if (j < n && src[j] == '{') {
+                        /* This is a function definition! Save the result type */
+                        size_t tlen = type_end - type_start;
+                        if (tlen < sizeof(current_result_type) - 1) {
+                            memcpy(current_result_type, src + type_start, tlen);
+                            current_result_type[tlen] = 0;
+                            fn_brace_depth = brace_depth;  /* Will increment when we hit the '{' */
+                        }
+                    }
+                }
+            }
+            i++;
+            continue;
+        }
+        
+        /* Detect cc_ok(...) or cc_err(...) when inside a result-returning function */
+        if (current_result_type[0] && c == 'c' && i + 5 < n) {
+            int is_ok = (memcmp(src + i, "cc_ok(", 6) == 0);
+            int is_err = (memcmp(src + i, "cc_err(", 7) == 0);
+            
+            if (is_ok || is_err) {
+                /* Check word boundary before */
+                int word_start = (i == 0) || !cc__is_ident_char_local(src[i-1]);
+                if (word_start) {
+                    size_t macro_start = i;
+                    size_t paren_pos = i + (is_ok ? 5 : 6);
+                    
+                    /* Check if it's the short form (no type args) by looking at args */
+                    /* Short form: cc_ok(value) or cc_err(error)
+                       Long form: cc_ok(Type, value) or cc_ok(Type, ErrType, value) */
+                    size_t args_start = paren_pos + 1;
+                    size_t j = args_start;
+                    int depth = 1;
+                    int comma_count = 0;
+                    int in_s = 0, in_c = 0;
+                    while (j < n && depth > 0) {
+                        char ch = src[j];
+                        if (in_s) { if (ch == '\\' && j+1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
+                        if (in_c) { if (ch == '\\' && j+1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                        if (ch == '"') { in_s = 1; j++; continue; }
+                        if (ch == '\'') { in_c = 1; j++; continue; }
+                        if (ch == '(') depth++;
+                        else if (ch == ')') { depth--; if (depth == 0) break; }
+                        else if (ch == ',' && depth == 1) comma_count++;
+                        j++;
+                    }
+                    
+                    /* Shorthand: cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(...)) */
+                    size_t crt_len = strlen(current_result_type);
+                    int is_default_err = (crt_len >= 8 &&
+                                          strcmp(current_result_type + crt_len - 8, "_CCError") == 0);
+                    if (is_err && is_default_err && depth == 0) {
+                        size_t k = args_start;
+                        while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
+                        if (k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(cc_error(");
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                            if (comma_count == 0) {
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, ", NULL");
+                            }
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "))");
+                            last_emit = j + 1;
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+
+                    /* Short form has 0 commas for cc_ok(v) or cc_err(e)
+                       Long form has 1+ commas for cc_ok(T,v) or cc_ok(T,E,v) */
+                    int is_short_form = (is_ok && comma_count == 0) || (is_err && comma_count == 0);
+                    
+                    if (is_short_form && depth == 0) {
+                        /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) */
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                        if (is_ok) {
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_ok_");
+                        } else {
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
+                        }
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(");
+                        /* Copy the argument */
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
+                        last_emit = j + 1;  /* skip past the closing ')' */
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL;  /* No rewrites done */
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite try expressions: try expr -> cc_try(expr) */
+char* cc__rewrite_try_exprs_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    (void)ctx;
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Detect 'try' keyword followed by space and not followed by '{' (try-block form, handled elsewhere) */
+        if (c == 't' && i + 3 < n && src[i+1] == 'r' && src[i+2] == 'y') {
+            /* Check word boundary before */
+            int word_start = (i == 0) || !cc__is_ident_char_local(src[i-1]);
+            if (word_start) {
+                size_t after_try = i + 3;
+                /* Skip whitespace */
+                while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t')) after_try++;
+                
+                /* Check it's not try { block } form */
+                if (after_try < n && src[after_try] != '{' && cc__is_ident_char_local(src[after_try]) == 0 && src[after_try] != '(') {
+                    /* Not a try-block or try identifier, skip */
+                } else if (after_try < n && src[after_try] == '{') {
+                    /* try { ... } block form - skip, not handled here */
+                } else if (after_try < n && (cc__is_ident_start_local2(src[after_try]) || src[after_try] == '(')) {
+                    /* 'try expr' form - need to find end of expression */
+                    size_t expr_start = after_try;
+                    size_t expr_end = expr_start;
+                    
+                    /* Scan expression with balanced parens/braces */
+                    int paren = 0, brace = 0, bracket = 0;
+                    int in_s = 0, in_c = 0;
+                    while (expr_end < n) {
+                        char ec = src[expr_end];
+                        
+                        if (in_s) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '"') in_s = 0; expr_end++; continue; }
+                        if (in_c) { if (ec == '\\' && expr_end + 1 < n) { expr_end += 2; continue; } if (ec == '\'') in_c = 0; expr_end++; continue; }
+                        if (ec == '"') { in_s = 1; expr_end++; continue; }
+                        if (ec == '\'') { in_c = 1; expr_end++; continue; }
+                        
+                        if (ec == '(' ) { paren++; expr_end++; continue; }
+                        if (ec == ')' ) { if (paren > 0) { paren--; expr_end++; continue; } else break; }
+                        if (ec == '{' ) { brace++; expr_end++; continue; }
+                        if (ec == '}' ) { if (brace > 0) { brace--; expr_end++; continue; } else break; }
+                        if (ec == '[' ) { bracket++; expr_end++; continue; }
+                        if (ec == ']' ) { if (bracket > 0) { bracket--; expr_end++; continue; } else break; }
+                        
+                        /* End expression at ';', ',', or unbalanced ')' */
+                        if (paren == 0 && brace == 0 && bracket == 0) {
+                            if (ec == ';' || ec == ',') break;
+                        }
+                        
+                        expr_end++;
+                    }
+                    
+                    /* Only rewrite if we found a valid expression */
+                    if (expr_end > expr_start) {
+                        /* Emit: everything up to 'try', then 'cc_try(', then expr, then ')' */
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_try(");
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
+                        last_emit = expr_end;
+                        i = expr_end;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite *opt -> cc_unwrap_opt(opt) for variables declared with CCOptional_* type.
+   Two-pass approach:
+   1. Scan for CCOptional_<T> <varname> declarations
+   2. Rewrite *varname to cc_unwrap_opt(varname)
+*/
+char* cc__rewrite_optional_unwrap_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    (void)ctx;
+    if (!src || n == 0) return NULL;
+    
+    /* Pass 1: Collect optional variable names */
+    #define MAX_OPT_VARS_LOCAL 256
+    char* opt_vars[MAX_OPT_VARS_LOCAL];
+    int opt_var_count = 0;
+    
+    size_t i = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n && opt_var_count < MAX_OPT_VARS_LOCAL) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for CCOptional_ type declarations */
+        if (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0) {
+            /* Skip to end of type name */
+            i += 11;
+            while (i < n && cc__is_ident_char_local(src[i])) i++;
+            /* Skip whitespace */
+            while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n')) i++;
+            /* Check for variable name (not function) */
+            if (i < n && cc__is_ident_start_local2(src[i])) {
+                size_t var_start = i;
+                while (i < n && cc__is_ident_char_local(src[i])) i++;
+                size_t var_len = i - var_start;
+                /* Skip whitespace */
+                while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
+                /* If followed by '=' or ';', it's a variable declaration */
+                if (i < n && (src[i] == '=' || src[i] == ';' || src[i] == ',')) {
+                    char* varname = (char*)malloc(var_len + 1);
+                    if (varname) {
+                        memcpy(varname, src + var_start, var_len);
+                        varname[var_len] = 0;
+                        opt_vars[opt_var_count++] = varname;
+                    }
+                }
+            }
+            continue;
+        }
+        
+        i++;
+    }
+    
+    /* If no optional vars found, nothing to rewrite */
+    if (opt_var_count == 0) return NULL;
+    
+    /* Pass 2: Rewrite *varname to cc_unwrap_opt(varname) */
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    i = 0;
+    size_t last_emit = 0;
+    in_line_comment = 0; in_block_comment = 0; in_str = 0; in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for * followed by an optional variable name */
+        if (c == '*') {
+            size_t star_pos = i;
+            i++;
+            /* Skip whitespace */
+            while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
+            /* Check for identifier */
+            if (i < n && cc__is_ident_start_local2(src[i])) {
+                size_t var_start = i;
+                while (i < n && cc__is_ident_char_local(src[i])) i++;
+                size_t var_len = i - var_start;
+                
+                /* Check if this identifier is in our opt_vars list */
+                int is_opt = 0;
+                for (int j = 0; j < opt_var_count; j++) {
+                    if (strlen(opt_vars[j]) == var_len && strncmp(opt_vars[j], src + var_start, var_len) == 0) {
+                        is_opt = 1;
+                        break;
+                    }
+                }
+                
+                if (is_opt) {
+                    /* Rewrite *varname to cc_unwrap_opt(varname) */
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, star_pos - last_emit);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_unwrap_opt(");
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + var_start, var_len);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
+                    last_emit = i;
+                }
+            }
+            continue;
+        }
+        
+        i++;
+    }
+    
+    /* Free opt_vars */
+    for (int j = 0; j < opt_var_count; j++) {
+        free(opt_vars[j]);
+    }
+    
+    if (last_emit == 0) {
+        /* No rewrites done */
+        return NULL;
+    }
+    
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}

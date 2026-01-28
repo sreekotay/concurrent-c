@@ -7,68 +7,14 @@
 #include <string.h>
 
 #include "util/text.h"
-#include "visitor/text_span.h"
-#include "visitor/visitor.h"
+#include "visitor/pass_common.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
 #endif
 
-/* Stub AST kinds from patched TCC (see third_party/tcc/tcc.h). */
-enum {
-    CC_AST_NODE_UNKNOWN = 0,
-    CC_AST_NODE_DECL = 1,
-    CC_AST_NODE_BLOCK = 2,
-    CC_AST_NODE_STMT = 3,
-    CC_AST_NODE_ARENA = 4,
-    CC_AST_NODE_CALL = 5,
-    CC_AST_NODE_AWAIT = 6,
-    CC_AST_NODE_SEND_TAKE = 7,
-    CC_AST_NODE_SUBSLICE = 8,
-    CC_AST_NODE_CLOSURE = 9,
-    CC_AST_NODE_IDENT = 10,
-    CC_AST_NODE_CONST = 11,
-    CC_AST_NODE_DECL_ITEM = 12,
-    CC_AST_NODE_MEMBER = 13,
-    CC_AST_NODE_ASSIGN = 14,
-    CC_AST_NODE_RETURN = 15,
-    CC_AST_NODE_PARAM = 16,
-    CC_AST_NODE_FUNC = 17,
-};
-
-typedef struct {
-    int kind;
-    int parent;
-    const char* file;
-    int line_start;
-    int line_end;
-    int col_start;
-    int col_end;
-    int aux1;
-    int aux2;
-    const char* aux_s1;
-    const char* aux_s2;
-} NodeView;
-
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* p = strrchr(path, '/');
-    return p ? p + 1 : path;
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    const char* as = cc__basename(a);
-    const char* bs = cc__basename(b);
-    return strcmp(a, b) == 0 || strcmp(as, bs) == 0;
-}
-
-static int cc__node_in_this_tu(const CCASTRoot* root, const CCVisitorCtx* ctx, const char* node_file) {
-    if (!ctx || !ctx->input_path || !node_file) return 0;
-    if (cc__same_source_file(ctx->input_path, node_file)) return 1;
-    if (root && root->lowered_path && cc__same_source_file(root->lowered_path, node_file)) return 1;
-    return 0;
-}
+/* Alias shared types for local use */
+typedef CCNodeView NodeView;
 
 static int cc__find_func_ret_is_void(const CCASTRoot* root,
                                      const CCVisitorCtx* ctx,
@@ -79,8 +25,8 @@ static int cc__find_func_ret_is_void(const CCASTRoot* root,
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
         if (!n[i].aux_s1 || strcmp(n[i].aux_s1, fn_name) != 0) continue;
-        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
-        if (file && !cc__same_source_file(file, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
+        if (file && !cc_pass_same_file(file, n[i].file)) continue;
         if (n[i].aux_s2) {
             const char* r = n[i].aux_s2;
             const char* endt = r + strlen(r);
@@ -96,7 +42,7 @@ static int cc__is_async_owner(const CCASTRoot* root,
                               const NodeView* n,
                               int idx) {
     for (int cur = idx; cur >= 0 && cur < root->node_count; cur = n[cur].parent) {
-        if (!cc__node_in_this_tu(root, ctx, n[cur].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[cur].file)) continue;
         if (n[cur].kind == CC_AST_NODE_FUNC) {
             return (n[cur].aux1 & (1u << 0)) != 0;
         }
@@ -120,7 +66,7 @@ static int cc__is_inside_arena(const CCASTRoot* root,
                               int idx) {
     if (!root || !ctx || !n) return 0;
     for (int cur = idx; cur >= 0 && cur < root->node_count; cur = n[cur].parent) {
-        if (!cc__node_in_this_tu(root, ctx, n[cur].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[cur].file)) continue;
         if (n[cur].kind == CC_AST_NODE_ARENA) return 1;
     }
     return 0;
@@ -709,7 +655,7 @@ static int cc__collect_child(const CCASTRoot* root, const CCVisitorCtx* ctx, con
     for (int i = 0; i < root->node_count && c < out_cap; i++) {
         if (n[i].kind != kind) continue;
         if (n[i].parent != parent_idx) continue;
-        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         out[c++] = i;
     }
     return c;
@@ -858,7 +804,7 @@ static int cc__find_loop_body_stmt(const CCASTRoot* root,
         for (int i = 0; i < root->node_count; i++) {
             if (n[i].kind != CC_AST_NODE_STMT) continue;
             if (n[i].parent != decl_idx) continue;
-            if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+            if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
             /* stable ordering: prefer later statements (higher line_start) */
             size_t k = (size_t)(n[i].line_start > 0 ? n[i].line_start : 0);
             if (best < 0 || k > best_start || (k == best_start && i > best)) {
@@ -873,7 +819,7 @@ static int cc__find_loop_body_stmt(const CCASTRoot* root,
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != CC_AST_NODE_STMT) continue;
         if (n[i].parent != loop_internal_block_idx) continue;
-        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         size_t k = (size_t)(n[i].line_start > 0 ? n[i].line_start : 0);
         if (best < 0 || k > best_start || (k == best_start && i > best)) {
             best_start = k;
@@ -1175,7 +1121,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
     for (int i = 0; i < root->node_count && ref_n < 768; i++) {
         if (n[i].kind != CC_AST_NODE_STMT) continue;
         if (n[i].parent != block_idx) continue;
-        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         /* If the statement start column is missing, spans are not usable enough to safely
            slice the statement text. Prefer falling back to brace-bounded text parsing. */
         if (n[i].col_start <= 0) continue;
@@ -1189,7 +1135,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
         int d = decls[di];
         for (int i = 0; i < root->node_count && ref_n < 768; i++) {
             if (n[i].parent != d) continue;
-            if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+            if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
             if (n[i].kind == CC_AST_NODE_STMT) {
                 if (n[i].col_start <= 0) continue;
                 refs[ref_n++] = (NodeRef){ .kind = CC_AST_NODE_STMT, .idx = i, .start = cc__node_start_off(src, src_len, &n[i]) };
@@ -1891,7 +1837,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
     /* Diagnose await outside @async and unsupported await contexts early. */
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != CC_AST_NODE_AWAIT) continue;
-        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         if (!cc__is_async_owner(root, ctx, n, n[i].parent)) {
             const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
             fprintf(stderr, "CC: await is only valid inside @async functions\n");
@@ -1922,7 +1868,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
     for (int i = 0; i < root->node_count && fn_n < 256; i++) {
         if (n[i].kind != CC_AST_NODE_DECL_ITEM && n[i].kind != 17) continue; /* DECL_ITEM or FUNC */
-        if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         const char* fn_name = n[i].aux_s1;
         if (!fn_name) continue;
 
@@ -1941,7 +1887,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             for (int k = 0; k < root->node_count; k++) {
                 if (n[k].kind != 17) continue;
                 if (!n[k].aux_s1 || strcmp(n[k].aux_s1, fn_name) != 0) continue;
-                if (!cc__node_in_this_tu(root, ctx, n[k].file)) continue;
+                if (!cc_pass_node_in_tu(root, ctx, n[k].file)) continue;
                 func_idx = k;
                 break;
             }
@@ -1989,7 +1935,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             size_t best_span = (size_t)-1;
             for (int b = 0; b < root->node_count; b++) {
                 if (n[b].kind != CC_AST_NODE_BLOCK) continue;
-                if (!cc__node_in_this_tu(root, ctx, n[b].file)) continue;
+                if (!cc_pass_node_in_tu(root, ctx, n[b].file)) continue;
                 if (!cc__node_is_descendant_of(n, b, i)) continue;
                 size_t bs = cc__node_start_off(in_src, in_len, &n[b]);
                 size_t be = cc__node_end_off(in_src, in_len, &n[b]);
@@ -2097,7 +2043,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         memset(local_tys, 0, sizeof(local_tys));
         for (int i = 0; i < root->node_count && local_n < 256; i++) {
             if (n[i].kind != CC_AST_NODE_DECL_ITEM) continue;
-            if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+            if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
             if (!n[i].aux_s1) continue;
             if (!n[i].aux_s2) continue;
             /* Hoist scalar locals (modeled as intptr_t) and pointer locals (modeled with their type).
@@ -2208,7 +2154,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         int aw_total = 0;
         for (int i = 0; i < root->node_count; i++) {
             if (n[i].kind != CC_AST_NODE_AWAIT) continue;
-            if (!cc__node_in_this_tu(root, ctx, n[i].file)) continue;
+            if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
             int p = n[i].parent;
             int ok = 0;
             while (p >= 0) { if (p == fn->decl_item_idx) { ok = 1; break; } p = n[p].parent; }

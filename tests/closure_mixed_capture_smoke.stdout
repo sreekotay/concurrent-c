@@ -1,0 +1,2 @@
+value x=10, ref y=20
+param capture: level=42, name=hello

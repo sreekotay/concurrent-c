@@ -30,8 +30,7 @@
 
 #include "comptime/symbols.h"
 #include "util/path.h"
-#include "visitor/text_span.h"
-#include "visitor/visitor.h"
+#include "visitor/pass_common.h"
 
 enum {
     CC_FN_ATTR_ASYNC = 1u << 0,
@@ -39,19 +38,8 @@ enum {
     CC_FN_ATTR_LATENCY_SENSITIVE = 1u << 2,
 };
 
-typedef struct {
-    int kind;
-    int parent;
-    const char* file;
-    int line_start;
-    int line_end;
-    int col_start;
-    int col_end;
-    int aux1;
-    int aux2;
-    const char* aux_s1;
-    const char* aux_s2;
-} NodeView;
+/* Alias shared types for local use */
+typedef CCNodeView NodeView;
 
 static int cc__node_is_descendant_of_kind(const CCASTRoot* root,
                                          const NodeView* n,
@@ -64,58 +52,7 @@ static int cc__node_is_descendant_of_kind(const CCASTRoot* root,
     return 0;
 }
 
-/* ---- small shared helpers (duplicated from visitor.c) ---- */
-
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* last = path;
-    for (const char* p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') last = p + 1;
-    }
-    return last;
-}
-
-/* Return pointer to a stable suffix (last 2 path components) inside `path`.
-   If `path` has fewer than 2 components, returns basename. */
-static const char* cc__path_suffix2(const char* path) {
-    if (!path) return NULL;
-    const char* end = path + strlen(path);
-    int seps = 0;
-    for (const char* p = end; p > path; ) {
-        p--;
-        if (*p == '/' || *p == '\\') {
-            seps++;
-            if (seps == 2) return p + 1;
-        }
-    }
-    return cc__basename(path);
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    if (strcmp(a, b) == 0) return 1;
-
-    const char* a_base = cc__basename(a);
-    const char* b_base = cc__basename(b);
-    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
-
-    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
-    const char* a_suf = cc__path_suffix2(a);
-    const char* b_suf = cc__path_suffix2(b);
-    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
-
-    /* Fallback: basename-only match. */
-    return 1;
-}
-
-static int cc__node_file_matches_this_tu(const CCASTRoot* root,
-                                        const CCVisitorCtx* ctx,
-                                        const char* node_file) {
-    if (!ctx || !ctx->input_path || !node_file) return 0;
-    if (cc__same_source_file(ctx->input_path, node_file)) return 1;
-    if (root && root->lowered_path && cc__same_source_file(root->lowered_path, node_file)) return 1;
-    return 0;
-}
+/* ---- pass-specific helpers ---- */
 
 static int cc__lookup_func_attrs(const CCASTRoot* root,
                                  const CCVisitorCtx* ctx,
@@ -127,7 +64,7 @@ static int cc__lookup_func_attrs(const CCASTRoot* root,
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
         if (!n[i].aux_s1 || strcmp(n[i].aux_s1, name) != 0) continue;
-        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         if (out_attrs) *out_attrs = (unsigned int)n[i].aux1;
         return 1;
     }
@@ -283,7 +220,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         int is_ufcs = (n[i].aux2 & 2) != 0;
         if (is_ufcs) continue;
         if (!n[i].aux_s1) continue; /* callee name */
-        if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;
+        if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
 
         /* Calls inside `await ...` are async call sites; skip unless it's a channel op.
            Channel ops return CCTaskIntptr via cc_chan_*_task, so they must be awaited.
@@ -310,7 +247,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         unsigned int owner_attrs = 0;
         while (cur >= 0 && cur < root->node_count) {
             if (n[cur].kind == 12 && n[cur].aux_s1 && n[cur].aux_s2 && strchr(n[cur].aux_s2, '(') &&
-                cc__node_file_matches_this_tu(root, ctx, n[cur].file)) {
+                cc_pass_node_in_tu(root, ctx, n[cur].file)) {
                 owner = n[cur].aux_s1;
                 owner_attrs = (unsigned int)n[cur].aux2;
                 break;
@@ -372,7 +309,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         for (int k = 0; k < root->node_count; k++) {
             if (n[k].kind != 17) continue; /* CC_AST_NODE_FUNC */
             if (!n[k].aux_s1 || strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
-            if (!cc__node_file_matches_this_tu(root, ctx, n[k].file)) continue;
+            if (!cc_pass_node_in_tu(root, ctx, n[k].file)) continue;
             found_func = 1;
             ret_str = n[k].aux_s2;
             /* collect params */
@@ -389,7 +326,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             for (int k = 0; k < root->node_count; k++) {
                 if (n[k].kind != 12) continue; /* DECL_ITEM */
                 if (!n[k].aux_s1 || !n[k].aux_s2) continue;
-                if (!cc__node_file_matches_this_tu(root, ctx, n[k].file)) continue;
+                if (!cc_pass_node_in_tu(root, ctx, n[k].file)) continue;
                 if (strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
                 if (!strchr(n[k].aux_s2, '(')) continue;
                 callee_sig = n[k].aux_s2;
@@ -1299,3 +1236,26 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
+/* NEW: Collect autoblocking edits into EditBuffer.
+   NOTE: This pass has complex batching and nesting logic.
+   For now, this function runs the rewrite and uses a coarse-grained edit.
+   Future: refactor to collect edits directly. */
+int cc__collect_autoblocking_edits(const CCASTRoot* root,
+                                   const CCVisitorCtx* ctx,
+                                   CCEditBuffer* eb) {
+    if (!root || !ctx || !ctx->symbols || !eb || !eb->src) return 0;
+
+    char* rewritten = NULL;
+    size_t rewritten_len = 0;
+    int r = cc__rewrite_autoblocking_calls_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
+    if (r <= 0 || !rewritten) return 0;
+
+    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
+        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 80, "autoblock") == 0) {
+            free(rewritten);
+            return 1;
+        }
+    }
+    free(rewritten);
+    return 0;
+}

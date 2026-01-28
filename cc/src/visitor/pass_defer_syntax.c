@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "util/text.h"
+#include "visitor/edit_buffer.h"
 
 typedef struct {
     int line_no;
@@ -373,5 +374,34 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
     *out_src = out;
     *out_len = outl;
     return 1;
+}
+
+/* NEW: Collect @defer edits into EditBuffer without applying.
+   NOTE: Due to the complexity of defer semantics (scope tracking, multiple injection points),
+   this function uses the existing rewrite function and adds a single whole-file edit.
+   Returns number of edits added (>= 0), or -1 on error. */
+int cc__collect_defer_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
+    if (!ctx || !eb || !eb->src) return 0;
+
+    char* rewritten = NULL;
+    size_t rewritten_len = 0;
+    int r = cc__rewrite_defer_syntax(ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
+    
+    if (r < 0) {
+        /* Error already printed */
+        return -1;
+    }
+    if (r == 0 || !rewritten) {
+        /* No changes */
+        return 0;
+    }
+
+    /* Add a whole-file replacement edit */
+    int edits_added = 0;
+    if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 40, "defer") == 0) {
+        edits_added = 1;
+    }
+    free(rewritten);
+    return edits_added;
 }
 

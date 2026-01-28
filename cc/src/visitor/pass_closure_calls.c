@@ -12,7 +12,7 @@
 #include <string.h>
 
 #include "util/text.h"
-#include "visitor/text_span.h"
+#include "visitor/pass_common.h"
 
 /* Local aliases for the shared helpers */
 #define cc__is_ident_start_char cc_is_ident_start
@@ -721,4 +721,28 @@ int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
     *out_src = out;
     *out_len = out_len2;
     return 1;
+}
+
+/* NEW: Collect closure call edits into EditBuffer.
+   NOTE: This pass has complex span nesting logic.
+   For now, this function runs the rewrite and uses a coarse-grained edit.
+   Future: refactor to collect edits directly. */
+int cc__collect_closure_calls_edits(const CCASTRoot* root,
+                                    const CCVisitorCtx* ctx,
+                                    CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
+
+    char* rewritten = NULL;
+    size_t rewritten_len = 0;
+    int r = cc__rewrite_all_closure_calls_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
+    if (r <= 0 || !rewritten) return 0;
+
+    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
+        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 90, "closure_calls") == 0) {
+            free(rewritten);
+            return 1;
+        }
+    }
+    free(rewritten);
+    return 0;
 }

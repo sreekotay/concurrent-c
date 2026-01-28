@@ -1,0 +1,47 @@
+/* Test: closure brace matching correctly skips apostrophes in comments.
+   
+   Bug found: comment containing "can't" would cause the apostrophe to be
+   treated as a string start, breaking brace matching and causing closure
+   parsing to fail.
+*/
+
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+void test_apostrophe_in_comment(int level) {
+    @nursery {
+        spawn([level]() => {  /* Can't use @defer inside closures! */
+            printf("level=%d\n", level);
+        });
+    }
+}
+
+void test_multiple_comments(int x) {
+    @nursery {
+        spawn([x]() => {
+            /* It's a test */
+            int y = x;
+            /* Don't forget this */
+            printf("y=%d\n", y);
+            /* That's all folks */
+        });
+    }
+}
+
+void test_line_comment_apostrophe(int val) {
+    @nursery {
+        spawn([val]() => {
+            // This comment's apostrophe shouldn't break parsing
+            printf("val=%d\n", val);
+        });
+    }
+}
+
+int main(void) {
+    test_apostrophe_in_comment(42);
+    test_multiple_comments(123);
+    test_line_comment_apostrophe(99);
+    printf("All tests passed!\n");
+    return 0;
+}

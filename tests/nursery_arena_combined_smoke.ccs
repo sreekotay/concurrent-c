@@ -1,0 +1,82 @@
+/* Test: @nursery and @arena in the same function.
+   
+   This tests the EditBuffer fix - previously nursery and arena used the same AST
+   but nursery would modify the source first, leaving arena with stale offsets.
+   Now both collect edits into a shared EditBuffer and apply them together.
+*/
+
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+void test_nursery_then_arena(void) {
+    printf("test_nursery_then_arena:\n");
+    
+    @nursery {
+        spawn(() => {
+            printf("  spawned task\n");
+        });
+    }
+    
+    @arena(a, kilobytes(4)) {
+        int* p = arena_alloc(int, a, 1);
+        *p = 42;
+        printf("  arena allocated: %d\n", *p);
+    }
+    
+    printf("  done\n");
+}
+
+void test_arena_then_nursery(void) {
+    printf("test_arena_then_nursery:\n");
+    
+    @arena(a, kilobytes(4)) {
+        int* p = arena_alloc(int, a, 1);
+        *p = 123;
+        printf("  arena allocated: %d\n", *p);
+    }
+    
+    @nursery {
+        spawn(() => {
+            printf("  spawned task\n");
+        });
+    }
+    
+    printf("  done\n");
+}
+
+void test_interleaved(void) {
+    printf("test_interleaved:\n");
+    
+    @arena(a1, kilobytes(4)) {
+        printf("  arena a1 active\n");
+        
+        @nursery {
+            spawn(() => {
+                printf("  spawned inside arena\n");
+            });
+        }
+        
+        printf("  nursery inside arena done\n");
+    }
+    
+    @nursery {
+        @arena(a2, kilobytes(4)) {
+            printf("  arena inside nursery\n");
+        }
+        
+        spawn(() => {
+            printf("  spawned after arena\n");
+        });
+    }
+    
+    printf("  done\n");
+}
+
+int main(void) {
+    test_nursery_then_arena();
+    test_arena_then_nursery();
+    test_interleaved();
+    printf("All combined tests passed!\n");
+    return 0;
+}

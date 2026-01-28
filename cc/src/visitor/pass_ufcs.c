@@ -7,12 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "visitor/text_span.h"
+#include "visitor/pass_common.h"
 #include "visitor/ufcs.h"
-
-static const char* cc__basename(const char* path);
-static const char* cc__path_suffix2(const char* path);
-static int cc__same_source_file(const char* a, const char* b);
 
 struct CC__UFCSSpan {
     size_t start; /* inclusive */
@@ -78,8 +74,8 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != 5) continue;         /* CALL */
         if (!n[i].aux_s1) continue;           /* only UFCS calls */
-        if (!cc__same_source_file(ctx->input_path, n[i].file) &&
-            !(root->lowered_path && cc__same_source_file(root->lowered_path, n[i].file)))
+        if (!cc_pass_same_file(ctx->input_path, n[i].file) &&
+            !(root->lowered_path && cc_pass_same_file(root->lowered_path, n[i].file)))
             continue;
         int ls = n[i].line_start;
         int le = n[i].line_end;
@@ -404,44 +400,33 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
     return end;
 }
 
-static const char* cc__basename(const char* path) {
-    if (!path) return NULL;
-    const char* last = path;
-    for (const char* p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') last = p + 1;
-    }
-    return last;
-}
+/* Path helpers are now in pass_common.h */
 
-/* Return pointer to a stable suffix (last 2 path components) inside `path`.
-   If `path` has fewer than 2 components, returns basename. */
-static const char* cc__path_suffix2(const char* path) {
-    if (!path) return NULL;
-    const char* end = path + strlen(path);
-    int seps = 0;
-    for (const char* p = end; p > path; ) {
-        p--;
-        if (*p == '/' || *p == '\\') {
-            seps++;
-            if (seps == 2) return p + 1;
+/* NEW: Collect UFCS edits into EditBuffer.
+   NOTE: UFCS is complex (incremental processing with chain extension).
+   For now, this function runs the rewrite and diffs the result to extract edits.
+   Future: refactor to collect edits directly without intermediate rewrite. */
+int cc__collect_ufcs_edits(const CCASTRoot* root,
+                           const CCVisitorCtx* ctx,
+                           CCEditBuffer* eb) {
+    if (!root || !ctx || !eb || !eb->src) return 0;
+
+    char* rewritten = NULL;
+    size_t rewritten_len = 0;
+    int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
+    if (r <= 0 || !rewritten) return 0;
+
+    /* UFCS does many small same-line transforms. Rather than diff, for now we use a
+       single "replace all" edit which is semantically correct but coarse.
+       Future: track individual span rewrites for finer-grained edits. */
+    if (rewritten_len != eb->src_len || memcmp(rewritten, eb->src, eb->src_len) != 0) {
+        /* Replace entire source - this works but loses granularity.
+           Since UFCS is typically first in its group, this is acceptable. */
+        if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 100, "ufcs") == 0) {
+            free(rewritten);
+            return 1;
         }
     }
-    return cc__basename(path);
-}
-
-static int cc__same_source_file(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    if (strcmp(a, b) == 0) return 1;
-
-    const char* a_base = cc__basename(a);
-    const char* b_base = cc__basename(b);
-    if (!a_base || !b_base || strcmp(a_base, b_base) != 0) return 0;
-
-    /* Prefer 2-component suffix match (handles duplicate basenames across dirs). */
-    const char* a_suf = cc__path_suffix2(a);
-    const char* b_suf = cc__path_suffix2(b);
-    if (a_suf && b_suf && strcmp(a_suf, b_suf) == 0) return 1;
-
-    /* Fallback: basename-only match. */
-    return 1;
+    free(rewritten);
+    return 0;
 }

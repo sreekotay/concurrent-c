@@ -1,0 +1,16 @@
+test_nursery_then_arena:
+  spawned task
+  arena allocated: 42
+  done
+test_arena_then_nursery:
+  arena allocated: 123
+  spawned task
+  done
+test_interleaved:
+  arena a1 active
+  spawned inside arena
+  nursery inside arena done
+  arena inside nursery
+  spawned after arena
+  done
+All combined tests passed!
