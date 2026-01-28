@@ -1564,6 +1564,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Rewrite std_out.write()/std_err.write() UFCS patterns */
+    if (src_ufcs && src_ufcs_len) {
+        char* rewritten = cc_rewrite_std_io_ufcs(src_ufcs, src_ufcs_len);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
+
     /* Rewrite `with_deadline(expr) { ... }` (not valid C) into CCDeadline scope syntax
        using @defer, so the rest of the pipeline sees valid parseable text. */
     if (src_ufcs && src_ufcs_len) {

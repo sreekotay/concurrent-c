@@ -1196,94 +1196,103 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for identifier followed by '.' - potential UFCS call */
+        /* Look for identifier followed by '.' or '->' - potential UFCS call */
         if (cc_is_ident_start(c)) {
             size_t ident_start = i;
             while (i < n && cc_is_ident_char(src[i])) i++;
             size_t ident_end = i;
             size_t ident_len = ident_end - ident_start;
             
-            /* Check for '.' after identifier (skip whitespace) */
+            /* Check for '.' or '->' after identifier (skip whitespace) */
             size_t j = cc_skip_ws_and_comments(src, n, ident_end);
+            int is_arrow = 0;
             if (j < n && src[j] == '.') {
-                /* Found 'ident.' - check if it's a method call */
                 j = cc_skip_ws_and_comments(src, n, j + 1);
+            } else if (j + 1 < n && src[j] == '-' && src[j + 1] == '>') {
+                is_arrow = 1;
+                j = cc_skip_ws_and_comments(src, n, j + 2);
+            } else {
+                /* Not a UFCS pattern, continue */
+                continue;
+            }
+            
+            /* Found 'ident.' or 'ident->' - check if it's a method call */
+            /* Look for method name */
+            if (j < n && cc_is_ident_start(src[j])) {
+                size_t method_start = j;
+                while (j < n && cc_is_ident_char(src[j])) j++;
+                size_t method_end = j;
+                size_t method_len = method_end - method_start;
                 
-                /* Look for method name */
-                if (j < n && cc_is_ident_start(src[j])) {
-                    size_t method_start = j;
-                    while (j < n && cc_is_ident_char(src[j])) j++;
-                    size_t method_end = j;
-                    size_t method_len = method_end - method_start;
-                    
-                    /* Check for '(' after method name */
-                    size_t k = cc_skip_ws_and_comments(src, n, method_end);
-                    if (k < n && src[k] == '(') {
-                        /* Extract identifier name and look up in registry */
-                        char var_name[128];
-                        if (ident_len < sizeof(var_name)) {
-                            memcpy(var_name, src + ident_start, ident_len);
-                            var_name[ident_len] = 0;
+                /* Check for '(' after method name */
+                size_t k = cc_skip_ws_and_comments(src, n, method_end);
+                if (k < n && src[k] == '(') {
+                    /* Extract identifier name and look up in registry */
+                    char var_name[128];
+                    if (ident_len < sizeof(var_name)) {
+                        memcpy(var_name, src + ident_start, ident_len);
+                        var_name[ident_len] = 0;
+                        
+                        const char* type_name = cc_type_registry_lookup_var(reg, var_name);
+                        if (type_name && (strncmp(type_name, "Vec_", 4) == 0 || 
+                                          strncmp(type_name, "Map_", 4) == 0)) {
+                            /* Container UFCS call - rewrite var.method(...) to Type_method(&var, ...).
+                               For pointer receivers (->), don't add & since it's already a pointer.
+                               Handle chained access like obj.field or ptr->field by scanning back
+                               to find the full receiver expression. 
+                               Limitation: doesn't handle (expr).field, arr[i].field, or func().field. */
+                            size_t recv_start = cc_scan_back_for_member_access(src, ident_start, last_emit);
                             
-                            const char* type_name = cc_type_registry_lookup_var(reg, var_name);
-                            if (type_name && (strncmp(type_name, "Vec_", 4) == 0 || 
-                                              strncmp(type_name, "Map_", 4) == 0)) {
-                                /* Container UFCS call - rewrite var.method(...) to Type_method(&var, ...).
-                                   Handle chained access like obj.field or ptr->field by scanning back
-                                   to find the full receiver expression. 
-                                   Limitation: doesn't handle (expr).field, arr[i].field, or func().field. */
-                                size_t recv_start = cc_scan_back_for_member_access(src, ident_start, last_emit);
+                            char full_recv[256];
+                            size_t recv_len = ident_end - recv_start;
+                            if (recv_len >= sizeof(full_recv)) recv_len = sizeof(full_recv) - 1;
+                            memcpy(full_recv, src + recv_start, recv_len);
+                            full_recv[recv_len] = 0;
+                            
+                            char method_name[64];
+                            if (method_len < sizeof(method_name)) {
+                                memcpy(method_name, src + method_start, method_len);
+                                method_name[method_len] = 0;
                                 
-                                char full_recv[256];
-                                size_t recv_len = ident_end - recv_start;
-                                if (recv_len >= sizeof(full_recv)) recv_len = sizeof(full_recv) - 1;
-                                memcpy(full_recv, src + recv_start, recv_len);
-                                full_recv[recv_len] = 0;
-                                
-                                char method_name[64];
-                                if (method_len < sizeof(method_name)) {
-                                    memcpy(method_name, src + method_start, method_len);
-                                    method_name[method_len] = 0;
+                                /* Find matching close paren */
+                                size_t paren_end = 0;
+                                if (cc_find_matching_paren(src, n, k, &paren_end)) {
+                                    /* Emit everything up to recv_start (not ident_start) */
+                                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
                                     
-                                    /* Find matching close paren */
-                                    size_t paren_end = 0;
-                                    if (cc_find_matching_paren(src, n, k, &paren_end)) {
-                                        /* Emit everything up to recv_start (not ident_start) */
-                                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
-                                        
-                                        /* Emit: Type_method(&recv, args) for Vec, Type_method(recv, args) for Map */
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
-                                        /* Map types are already pointers, Vec types need & */
-                                        if (strncmp(type_name, "Map_", 4) == 0) {
-                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                                        } else {
-                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
-                                        }
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, full_recv);
-                                        
-                                        /* Extract args (content between parens) */
-                                        size_t args_start = k + 1;
-                                        size_t args_end = paren_end;
-                                        size_t args_len = args_end - args_start;
-                                        
-                                        /* Skip leading whitespace in args */
-                                        while (args_start < args_end && (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n')) {
-                                            args_start++;
-                                            args_len--;
-                                        }
-                                        
-                                        if (args_len > 0) {
-                                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                                            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_len);
-                                        }
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-                                        
-                                        last_emit = paren_end + 1;
-                                        i = paren_end + 1;
-                                        continue;
+                                    /* Emit: Type_method(&recv, args) for Vec with '.', 
+                                             Type_method(recv, args) for Map or pointer receivers */
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+                                    /* Map types are already pointers, Vec with -> is pointer, Vec with . needs & */
+                                    if (strncmp(type_name, "Map_", 4) == 0 || is_arrow) {
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                                    } else {
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
                                     }
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, full_recv);
+                                    
+                                    /* Extract args (content between parens) */
+                                    size_t args_start = k + 1;
+                                    size_t args_end = paren_end;
+                                    size_t args_len = args_end - args_start;
+                                    
+                                    /* Skip leading whitespace in args */
+                                    while (args_start < args_end && (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n')) {
+                                        args_start++;
+                                        args_len--;
+                                    }
+                                    
+                                    if (args_len > 0) {
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                                        cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_len);
+                                    }
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                                    
+                                    last_emit = paren_end + 1;
+                                    i = paren_end + 1;
+                                    continue;
                                 }
                             }
                         }
@@ -1299,6 +1308,198 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
     
     if (last_emit == 0) {
         /* No changes made */
+        return NULL;
+    }
+    
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite std_out.write() and std_err.write() UFCS patterns.
+   These are synthetic receivers (not real variables), so need special handling.
+   
+   Rewrites:
+   - std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer("literal", sizeof("literal") - 1))
+   - std_out.write(s) -> cc_std_out_write_string(&s) (for String variables)
+   - std_out.write(expr) -> cc_std_out_write(expr) (for other expressions)
+   - std_err.write(...) similarly
+*/
+char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        /* Track comment/string state */
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for std_out or std_err */
+        if (i + 7 <= n && (strncmp(src + i, "std_out", 7) == 0 || strncmp(src + i, "std_err", 7) == 0)) {
+            int is_err = (src[i + 4] == 'e');
+            size_t kw_start = i;
+            i += 7;
+            
+            /* Check for .write( pattern */
+            size_t j = cc_skip_ws_and_comments(src, n, i);
+            if (j < n && src[j] == '.') {
+                j = cc_skip_ws_and_comments(src, n, j + 1);
+                if (j + 5 <= n && strncmp(src + j, "write", 5) == 0) {
+                    j += 5;
+                    size_t k = cc_skip_ws_and_comments(src, n, j);
+                    if (k < n && src[k] == '(') {
+                        /* Found std_out.write( or std_err.write( */
+                        size_t paren_end = 0;
+                        if (cc_find_matching_paren(src, n, k, &paren_end)) {
+                            /* Extract argument */
+                            size_t arg_start = k + 1;
+                            size_t arg_end = paren_end;
+                            
+                            /* Skip whitespace in arg */
+                            while (arg_start < arg_end && (src[arg_start] == ' ' || src[arg_start] == '\t' || src[arg_start] == '\n'))
+                                arg_start++;
+                            while (arg_end > arg_start && (src[arg_end - 1] == ' ' || src[arg_end - 1] == '\t' || src[arg_end - 1] == '\n'))
+                                arg_end--;
+                            
+                            size_t arg_len = arg_end - arg_start;
+                            
+                            /* Check for nested UFCS BEFORE emitting anything */
+                            int has_ufcs = 0;
+                            if (arg_len > 0 && src[arg_start] != '"') {
+                                for (size_t x = arg_start; x < arg_end; x++) {
+                                    char ac = src[x];
+                                    if (ac == '.' || (ac == '-' && x + 1 < arg_end && src[x + 1] == '>')) {
+                                        has_ufcs = 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (has_ufcs) {
+                                /* Nested UFCS in argument (e.g., std_out.write(s.as_slice())).
+                                   Rewrite the inner UFCS first, then wrap with cc_std_out_write.
+                                   We handle common patterns like ident.as_slice() here. */
+                                
+                                /* Extract the argument as a string for analysis */
+                                char arg_buf[512];
+                                if (arg_len < sizeof(arg_buf)) {
+                                    memcpy(arg_buf, src + arg_start, arg_len);
+                                    arg_buf[arg_len] = 0;
+                                    
+                                    /* Normalize: trim all whitespace to find the pattern */
+                                    char normalized[512];
+                                    char* np = normalized;
+                                    int in_ws = 0;
+                                    for (char* p = arg_buf; *p; p++) {
+                                        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+                                            in_ws = 1;
+                                        } else {
+                                            if (in_ws && np > normalized) *np++ = ' ';
+                                            in_ws = 0;
+                                            *np++ = *p;
+                                        }
+                                    }
+                                    *np = 0;
+                                    
+                                    /* Check for ident.as_slice() pattern */
+                                    char* dot = strchr(normalized, '.');
+                                    if (dot && strcmp(dot, ".as_slice()") == 0) {
+                                        /* Extract receiver identifier */
+                                        *dot = 0;
+                                        char* recv = normalized;
+                                        
+                                        /* Check if receiver is a simple identifier */
+                                        int recv_is_ident = (*recv != 0);
+                                        for (char* p = recv; *p && recv_is_ident; p++) {
+                                            if (!cc_is_ident_char(*p)) recv_is_ident = 0;
+                                        }
+                                        
+                                        if (recv_is_ident) {
+                                            /* Emit: cc_std_out_write(cc_string_as_slice(&recv)) */
+                                            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, kw_start - last_emit);
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, is_err ? "cc_std_err_write(cc_string_as_slice(&" : "cc_std_out_write(cc_string_as_slice(&");
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, recv);
+                                            cc_sb_append_cstr(&out, &out_len, &out_cap, "))");
+                                            
+                                            last_emit = paren_end + 1;
+                                            i = paren_end + 1;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                
+                                /* Fallback: skip and let TCC/visitor handle it */
+                                i = kw_start + 7;
+                                continue;
+                            }
+                            
+                            /* Emit everything up to std_out/std_err */
+                            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, kw_start - last_emit);
+                            
+                            /* Determine what kind of argument we have */
+                            if (arg_len > 0 && src[arg_start] == '"') {
+                                /* String literal: cc_std_out_write(cc_slice_from_buffer("lit", sizeof("lit") - 1)) */
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, is_err ? "cc_std_err_write(cc_slice_from_buffer(" : "cc_std_out_write(cc_slice_from_buffer(");
+                                cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_len);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ", sizeof(");
+                                cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_len);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ") - 1))");
+                            } else if (arg_len > 0) {
+                                /* Check if it's a simple identifier */
+                                int is_simple_ident = 1;
+                                for (size_t x = arg_start; x < arg_end; x++) {
+                                    char ac = src[x];
+                                    if (!cc_is_ident_char(ac) && ac != ' ' && ac != '\t' && ac != '\n') {
+                                        is_simple_ident = 0;
+                                        break;
+                                    }
+                                }
+                                
+                                if (is_simple_ident) {
+                                    /* Simple identifier - assume it's a String, use _string variant */
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, is_err ? "cc_std_err_write_string(&" : "cc_std_out_write_string(&");
+                                    cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_len);
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                                } else {
+                                    /* Complex expression without nested UFCS - wrap with cc_std_out_write */
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, is_err ? "cc_std_err_write(" : "cc_std_out_write(");
+                                    cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_len);
+                                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                                }
+                            } else {
+                                /* Empty args - just emit cc_std_out_write() */
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, is_err ? "cc_std_err_write()" : "cc_std_out_write()");
+                            }
+                            
+                            last_emit = paren_end + 1;
+                            i = paren_end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            /* Not a match, continue from after std_out/std_err */
+            continue;
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) {
         return NULL;
     }
     
@@ -2545,10 +2746,15 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3g;
     size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3g_n;
 
+    /* Rewrite std_out.write()/std_err.write() UFCS patterns */
+    char* rewritten_stdio = cc_rewrite_std_io_ufcs(cur3u, cur3u_n);
+    const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3u;
+    size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3u_n;
+
     /* Rewrite T? -> CCOptional_T */
-    char* rewritten_opt = cc__rewrite_optional_types(cur3u, cur3u_n, input_path);
-    const char* cur4 = rewritten_opt ? rewritten_opt : cur3u;
-    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3u_n;
+    char* rewritten_opt = cc__rewrite_optional_types(cur3s, cur3s_n, input_path);
+    const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
+    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
 
     /* Infer cc_ok(v)/cc_err(e) types from function signatures BEFORE result type rewrite */
     char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4, cur4_n);
@@ -2574,6 +2780,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_infer); free(rewritten_opt);
+        free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
         return -1;
@@ -2657,6 +2864,8 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_res);
     free(rewritten_infer);
     free(rewritten_opt);
+    free(rewritten_stdio);
+    free(rewritten_ufcs);
     free(rewritten_generic);
     free(rewritten_chan);
     free(rewritten_slice);

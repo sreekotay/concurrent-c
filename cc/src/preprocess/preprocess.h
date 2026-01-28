@@ -27,5 +27,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path);
 
+// Rewrite std_out.write()/std_err.write() UFCS patterns to cc_std_out_write() etc.
+// These are synthetic receivers that don't exist as real variables.
+// Returns newly allocated string with rewrites, or NULL if no changes.
+char* cc_rewrite_std_io_ufcs(const char* src, size_t n);
+
 #endif // CC_PREPROCESS_H
 

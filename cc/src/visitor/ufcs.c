@@ -128,7 +128,20 @@ static int emit_desugared_call(char* out,
         return snprintf(out, cap, "chan_free(%s%s)", recv_is_ptr ? "*":"", recv);
     }
 
-    // Special cases for stdlib convenience.
+    /* Special cases for stdlib convenience (String methods).
+       
+       IMPORTANT: These String-specific handlers run BEFORE the type-qualified
+       dispatch below (g_ufcs_recv_type check at ~line 305). This means "push"
+       on a String will be handled here, not via Type_push().
+       
+       This ordering is safe because:
+       1. Container UFCS (Vec/Map) is handled by preprocessing (cc_rewrite_ufcs_container_calls)
+          before this code ever sees it - the type registry routes v.push() to Vec_T_push().
+       2. Pointer receiver UFCS (vp->push) is also handled by preprocessing.
+       3. Only String UFCS actually reaches this code path for "push"/"append".
+       
+       If preprocessing is ever bypassed for containers, this would cause incorrect
+       dispatch (Vec.push would become cc_string_push). The tests catch this. */
     if (strcmp(method, "as_slice") == 0) {
         return recv_is_ptr ? snprintf(out, cap, "cc_string_as_slice(%s)", recv)
                            : snprintf(out, cap, "cc_string_as_slice(&%s)", recv);

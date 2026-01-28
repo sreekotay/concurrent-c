@@ -1,0 +1,52 @@
+/* UFCS edge cases smoke test.
+   Tests the interaction between preprocessing and TCC-based UFCS handling.
+   
+   Key cases:
+   1. std_out.write("literal") - preprocessed to cc_std_out_write(cc_slice_from_buffer(...))
+   2. std_out.write(s) - preprocessed to cc_std_out_write_string(&s)
+   3. vp->push(x) - pointer receiver UFCS, preprocessed to Vec_T_push(vp, x)
+   
+   Note: Nested UFCS (std_out.write(s.as_slice())) is tested separately in ufcs_nested_multiline.ccs
+*/
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    Vec<int> items;
+} Container;
+
+int main(void) {
+    @arena {
+        // Case 1: String literal argument
+        std_out.write("case1:");
+        
+        // Case 2: Simple String identifier
+        String s = string_new(arena);
+        s.append("case2:");
+        std_out.write(s);
+        
+        // Case 3: Pointer receiver UFCS on Vec
+        Container c;
+        c.items = vec_new<int>(arena);
+        c.items.push(10);  // Direct access via field
+        
+        Vec<int>* vp = &c.items;
+        vp->push(20);      // Pointer receiver - must become Vec_int_push(vp, 20)
+        vp->push(30);
+        
+        // Verify Vec contents using UFCS .get() which returns CCOptional_int
+        CCOptional_int v0 = c.items.get(0);
+        CCOptional_int v1 = c.items.get(1);
+        CCOptional_int v2 = c.items.get(2);
+        
+        if (c.items.len() == 3 &&
+            v0.has && v0.u.value == 10 &&
+            v1.has && v1.u.value == 20 &&
+            v2.has && v2.u.value == 30) {
+            std_out.write("case3:ok\n");
+        } else {
+            std_out.write("case3:FAIL\n");
+        }
+    }
+    return 0;
+}
