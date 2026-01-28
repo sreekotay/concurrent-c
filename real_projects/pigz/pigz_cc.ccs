@@ -70,7 +70,7 @@ CCFile g_out_file;
  * Compress a single block using zlib deflate.
  * Allocates result in the provided arena.
  */
-Result compress_block(Block* blk, int level, CCArena* arena) {
+Result compress_block(Block* blk, int level) {
     Result res = {0};
     res.seq = blk->seq;
     res.last = blk->last;
@@ -79,11 +79,11 @@ Result compress_block(Block* blk, int level, CCArena* arena) {
     /* Calculate CRC of input */
     res.crc = zw_crc32(0UL, (const unsigned char*)blk->data.ptr, blk->data.len);
     
-    /* Allocate output buffer in arena (worst case: input + overhead) */
+    /* Allocate output buffer with malloc (must outlive until writer consumes it) */
     size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-    unsigned char* out_buf = (unsigned char*)cc_arena_alloc(arena, max_out, 1);
+    unsigned char* out_buf = (unsigned char*)malloc(max_out);
     if (!out_buf) {
-        fprintf(stderr, "pigz_cc: arena exhausted\n");
+        fprintf(stderr, "pigz_cc: malloc failed\n");
         exit(1);
     }
     
@@ -96,11 +96,12 @@ Result compress_block(Block* blk, int level, CCArena* arena) {
     );
     
     if (compressed_len == 0 && blk->data.len > 0) {
+        free(out_buf);
         fprintf(stderr, "pigz_cc: deflate failed\n");
         exit(1);
     }
     
-    /* Create result slice pointing to arena memory */
+    /* Create result slice pointing to malloc'd memory */
     res.data = cc_slice_from_parts(out_buf, compressed_len, CC_SLICE_ID_NONE, compressed_len);
     
     /* Update global statistics */
@@ -182,11 +183,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     @defer cc_chan_free(blocks_ch);
     @defer cc_chan_free(results_ch);
     
-    /* Write gzip header */
-    write_gzip_header(&g_out_file);
+    /* Each compressed block now includes its own gzip header/trailer,
+       so we don't write a global header. Multiple gzip members are
+       concatenated and gunzip handles them correctly. */
     
-    /* Reset global state */
-    g_total_crc = zw_crc32(0UL, NULL, 0);
+    /* Reset global state (for statistics only now) */
+    g_total_crc = 0;
     g_total_ulen = 0;
     
     /*
@@ -223,8 +225,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     continue;
                 }
                 
-                /* Write this result */
+                /* Write this result and free the buffer */
                 cc_file_write(&g_out_file, r.data);
+                free((void*)r.data.ptr);
                 g_total_crc = crc32_combine_cc(g_total_crc, r.crc, r.ulen);
                 g_total_ulen += r.ulen;
                 next_seq++;
@@ -236,6 +239,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     for (int i = 0; i < pending_count; i++) {
                         if (pending[i].seq == next_seq) {
                             cc_file_write(&g_out_file, pending[i].data);
+                            free((void*)pending[i].data.ptr);
                             g_total_crc = crc32_combine_cc(g_total_crc, pending[i].crc, pending[i].ulen);
                             g_total_ulen += pending[i].ulen;
                             next_seq++;
@@ -252,23 +256,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         
         /* Workers + Reader in nested nurseries */
         @nursery closing(results_tx) {
-            /* Spawn compression workers - each has its own arena */
+            /* Spawn compression workers */
             for (int w = 0; w < num_workers; w++) {
-                spawn([level]() => {  /* Can capture function params directly! */
-                    /* Per-worker arena for compression buffers */
-                    CCArena worker_arena = cc_heap_arena(4 * 1024 * 1024);
-                    
+                spawn([level]() => {
                     Block blk;
                     while (chan_recv(blocks_rx, &blk) == 0) {
-                        Result res = compress_block(&blk, level, &worker_arena);
+                        Result res = compress_block(&blk, level);
                         chan_send(results_tx, res);
-                        
-                        /* Reset worker arena after each block */
-                        cc_arena_reset(&worker_arena);
                     }
-                    
-                    /* Manual cleanup (can't use @defer inside closures) */
-                    cc_heap_arena_free(&worker_arena);
                 });
             }
             
@@ -334,8 +329,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
     /* All tasks complete here */
     
-    /* Write gzip trailer with combined CRC and length */
-    write_gzip_trailer(&g_out_file, g_total_crc, g_total_ulen);
+    /* No global trailer needed - each block has its own gzip trailer */
     
     /* Sync to disk */
     cc_file_sync(&g_out_file);
