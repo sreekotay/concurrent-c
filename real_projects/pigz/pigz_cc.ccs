@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sched.h>
 #include "zlib_wrapper.h"
 
 /* ============================================================================
@@ -188,9 +189,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     @defer cc_file_close(&g_out_file);
     
     /* Channel types for pipeline */
-    /* Channel buffers */
-    Block[~4 >] blocks_tx;
-    Block[~4 <] blocks_rx;
+    /* Channel buffers - larger now that scheduler yields for fairness */
+    Block[~8 >] blocks_tx;
+    Block[~8 <] blocks_rx;
     Result[~16 >] results_tx;
     Result[~16 <] results_rx;
     

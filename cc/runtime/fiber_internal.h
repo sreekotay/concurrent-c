@@ -27,6 +27,7 @@ void* cc__fiber_current(void);
 void cc__fiber_park(void);
 void cc__fiber_park_reason(const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
+void cc__fiber_yield(void);  /* Cooperative yield - give other fibers a chance */
 void cc__fiber_sched_enqueue(void* fiber);
 void cc_fiber_dump_state(const char* reason);  /* Debug: dump scheduler state */
 int cc__fiber_sched_active(void);

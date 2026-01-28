@@ -1,0 +1,159 @@
+/*
+ * channel_fairness.ccs - Demonstrates fiber scheduler fairness issue
+ *
+ * Issue: When chan_send() wakes a waiting receiver, the sender continues
+ * running instead of yielding. With buffered channels, the producer can
+ * fill the entire buffer before any consumer wakes up, causing one
+ * consumer to drain everything.
+ *
+ * Expected: With N workers and M items, each worker should get ~M/N items
+ * Actual: Worker 0 gets almost all items
+ */
+
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define NUM_ITEMS 100
+#define NUM_WORKERS 4
+
+typedef struct {
+    int value;
+} Item;
+
+/* Track how many items each worker processed */
+cc_atomic_int g_worker_counts[NUM_WORKERS];
+
+void print_distribution(const char* label) {
+    printf("\n=== %s ===\n", label);
+    printf("Distribution:\n");
+    int total = 0;
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        int count = cc_atomic_load(&g_worker_counts[i]);
+        total += count;
+        float pct = 100.0f * count / NUM_ITEMS;
+        printf("  Worker %d: %3d items (%5.1f%%)", i, count, pct);
+        printf(" |");
+        int bar_len = (count * 40) / NUM_ITEMS;
+        for (int j = 0; j < bar_len; j++) printf("#");
+        for (int j = bar_len; j < 40; j++) printf(" ");
+        printf("|\n");
+    }
+    printf("  Total: %d (expected %d)\n", total, NUM_ITEMS);
+    
+    int expected_per_worker = NUM_ITEMS / NUM_WORKERS;
+    int max_count = 0, min_count = NUM_ITEMS;
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        int count = cc_atomic_load(&g_worker_counts[i]);
+        if (count > max_count) max_count = count;
+        if (count < min_count) min_count = count;
+    }
+    float imbalance = (float)(max_count - min_count) / expected_per_worker * 100;
+    printf("  Imbalance: %.1f%% (max=%d, min=%d, expected~%d)\n", 
+           imbalance, max_count, min_count, expected_per_worker);
+}
+
+/* Test 1: Large buffer - demonstrates unfairness */
+void run_test_large_buffer(void) {
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        cc_atomic_store(&g_worker_counts[i], 0);
+    }
+    
+    Item[~16 >] tx;
+    Item[~16 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+    
+    @nursery {
+        /* Producer sends all items then closes */
+        spawn(() => {
+            for (int i = 0; i < NUM_ITEMS; i++) {
+                Item item = {i};
+                chan_send(tx, item);
+            }
+            chan_close(tx);
+        });
+        
+        /* Workers receive until channel closed */
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            int wid = w;
+            spawn([wid]() => {
+                Item item;
+                while (chan_recv(rx, &item) == 0) {
+                    cc_atomic_fetch_add(&g_worker_counts[wid], 1);
+                    /* Small work simulation */
+                    volatile int x = 0;
+                    for (int i = 0; i < 1000; i++) x += i;
+                }
+            });
+        }
+    }
+    
+    cc_chan_free(ch);
+    print_distribution("Large Buffer (size=16)");
+}
+
+/* Test 2: Small buffer - forces better distribution */
+void run_test_small_buffer(void) {
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        cc_atomic_store(&g_worker_counts[i], 0);
+    }
+    
+    Item[~1 >] tx;
+    Item[~1 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+    
+    @nursery {
+        spawn(() => {
+            for (int i = 0; i < NUM_ITEMS; i++) {
+                Item item = {i};
+                chan_send(tx, item);
+            }
+            chan_close(tx);
+        });
+        
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            int wid = w;
+            spawn([wid]() => {
+                Item item;
+                while (chan_recv(rx, &item) == 0) {
+                    cc_atomic_fetch_add(&g_worker_counts[wid], 1);
+                    volatile int x = 0;
+                    for (int i = 0; i < 1000; i++) x += i;
+                }
+            });
+        }
+    }
+    
+    cc_chan_free(ch);
+    print_distribution("Small Buffer (size=1)");
+}
+
+int main(void) {
+    printf("Channel Fairness Benchmark\n");
+    printf("==========================\n");
+    printf("Demonstrates fiber scheduler fairness issue.\n");
+    printf("\n%d workers competing for %d items.\n", NUM_WORKERS, NUM_ITEMS);
+    printf("Fair distribution: ~%d items/worker.\n", NUM_ITEMS / NUM_WORKERS);
+    
+    run_test_large_buffer();
+    run_test_small_buffer();
+    
+    printf("\n");
+    printf("Root Cause:\n");
+    printf("-----------\n");
+    printf("When chan_send() wakes a waiting receiver, the sender\n");
+    printf("continues running without yielding. With large buffers,\n");
+    printf("the producer fills the buffer before workers wake,\n");
+    printf("then one worker drains everything.\n");
+    printf("\n");
+    printf("Fix Options:\n");
+    printf("1. chan_send() yields to woken waiter (immediate fairness)\n");
+    printf("2. FIFO wake + preemptive scheduling (OS-level fairness)\n");
+    printf("3. Work-stealing with fair queue (runtime change)\n");
+    
+    return 0;
+}

@@ -1298,7 +1298,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 channel_timing_record_send(t0, t0, done, done, done);
             }
             /* Wake any waiters - check atomically to avoid lock */
-            if (ch->recv_waiters_head || ch->recv_cond_waiters > 0) {
+            int had_waiter = ch->recv_waiters_head != NULL;
+            if (had_waiter || ch->recv_cond_waiters > 0) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_recv_waiter(ch);
                 if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
@@ -1448,6 +1449,10 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 wake_batch_flush();
             }
             cc__chan_broadcast_activity();
+            /* Fairness: yield after successful receive for larger buffers */
+            if (cc__fiber_in_context() && ch->cap > 2) {
+                cc__fiber_yield();
+            }
             return 0;
         }
         /* Check if closed and empty */
@@ -1495,6 +1500,10 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         if (timing && err == 0) {
             uint64_t done = channel_rdtsc();
             channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
+        }
+        /* Fairness: yield after successful receive for larger buffers */
+        if (cc__fiber_in_context() && ch->cap > 2) {
+            cc__fiber_yield();
         }
         return 0;
     }

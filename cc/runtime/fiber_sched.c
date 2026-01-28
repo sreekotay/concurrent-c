@@ -1325,6 +1325,35 @@ void cc__fiber_sched_enqueue(void* fiber_ptr) {
     cc__fiber_unpark(fiber_ptr);
 }
 
+/* Cooperative yield: give other fibers a chance to run.
+ * Re-enqueues current fiber and switches to scheduler.
+ * Used for fairness in producer-consumer patterns. */
+void cc__fiber_yield(void) {
+    fiber_task* current = tls_current_fiber;
+    if (!current || !current->coro) {
+        /* Not in fiber context - OS yield */
+        sched_yield();
+        return;
+    }
+    
+    /* Push self back onto run queue */
+    if (tls_worker_id >= 0) {
+        if (lq_push(&g_sched.local_queues[tls_worker_id], current) != 0) {
+            /* Local queue full, use global */
+            while (fq_push(&g_sched.run_queue, current) != 0) {
+                sched_yield();
+            }
+        }
+    } else {
+        while (fq_push(&g_sched.run_queue, current) != 0) {
+            sched_yield();
+        }
+    }
+    
+    /* Yield to scheduler - will pick up next runnable fiber */
+    mco_yield(current->coro);
+}
+
 int cc__fiber_sched_active(void) {
     return atomic_load_explicit(&g_initialized, memory_order_acquire) == 2;
 }
