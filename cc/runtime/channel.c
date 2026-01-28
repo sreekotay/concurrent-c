@@ -334,6 +334,7 @@ struct CCChan {
     struct lfds711_queue_bmm_state lfqueue_state;   /* liblfds queue state */
     struct lfds711_queue_bmm_element *lfqueue_elements; /* Pre-allocated element array */
     _Atomic int lfqueue_count;                      /* Approximate count for fast full/empty check */
+    _Atomic int recv_fairness_ctr;                  /* For yield-every-N fairness */
 };
 
 static inline void cc_chan_lock(CCChan* ch) {
@@ -635,14 +636,18 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
     ch->lfqueue_cap = 0;
     ch->lfqueue_elements = NULL;
     atomic_store(&ch->lfqueue_count, 0);
+    atomic_store(&ch->recv_fairness_ctr, 0);
     
-    if (cap > 0) {
+    if (cap > 1) {  /* Only use lock-free for cap > 1 (liblfds needs at least 2) */
         /* Buffered channel: allocate lock-free queue */
         size_t lfcap = next_power_of_2(cap);
         ch->lfqueue_cap = lfcap;
+        /* macOS requires aligned_alloc size to be multiple of alignment */
+        size_t alloc_size = sizeof(struct lfds711_queue_bmm_element) * lfcap;
+        size_t align = LFDS711_PAL_ATOMIC_ISOLATION_IN_BYTES;
+        alloc_size = ((alloc_size + align - 1) / align) * align;
         ch->lfqueue_elements = (struct lfds711_queue_bmm_element*)
-            aligned_alloc(LFDS711_PAL_ATOMIC_ISOLATION_IN_BYTES,
-                          sizeof(struct lfds711_queue_bmm_element) * lfcap);
+            aligned_alloc(align, alloc_size);
         if (ch->lfqueue_elements) {
             lfds711_queue_bmm_init_valid_on_current_logical_core(
                 &ch->lfqueue_state, ch->lfqueue_elements, lfcap, NULL);
@@ -1309,7 +1314,11 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             cc__chan_broadcast_activity();
             return 0;
         }
-        /* Lock-free enqueue failed (queue full), fall through to blocking path */
+        /* Lock-free enqueue failed (queue full) - handle mode */
+        if (ch->mode == CC_CHAN_MODE_DROP_NEW) {
+            return EAGAIN;
+        }
+        /* DROP_OLD or BLOCK mode: fall through to blocking path */
     }
     
     /* Unbuffered channels: check closed before mutex path */
@@ -1449,9 +1458,11 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 wake_batch_flush();
             }
             cc__chan_broadcast_activity();
-            /* Fairness: yield after successful receive for larger buffers */
+            /* Fairness: yield every 8th recv for MPMC patterns */
             if (cc__fiber_in_context() && ch->cap > 2) {
-                cc__fiber_yield();
+                if ((atomic_fetch_add(&ch->recv_fairness_ctr, 1) & 7) == 7) {
+                    cc__fiber_yield();
+                }
             }
             return 0;
         }
@@ -1500,10 +1511,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         if (timing && err == 0) {
             uint64_t done = channel_rdtsc();
             channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
-        }
-        /* Fairness: yield after successful receive for larger buffers */
-        if (cc__fiber_in_context() && ch->cap > 2) {
-            cc__fiber_yield();
         }
         return 0;
     }
