@@ -51,7 +51,7 @@ CCResultSliceIoError cc_file_read_all(CCFile *file, CCArena *arena) {
         return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
     }
     buf[read] = '\0';
-    CCSlice slice = cc_slice_from_parts(buf, read, CC_SLICE_ID_NONE, read + 1);
+    CCSlice slice = cc_slice_from_parts(buf, read, CC_SLICE_ID_UNTRACKED, read + 1);
     return cc_ok_CCResultSliceIoError(slice);
 }
 

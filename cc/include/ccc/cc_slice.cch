@@ -30,8 +30,11 @@ typedef int bool;
 #include <stddef.h>
 #include <stdint.h>
 
-#ifndef CC_SLICE_ID_NONE
-#define CC_SLICE_ID_NONE 0ULL
+// Explicit "untracked" id - signals this slice has no provenance tracking.
+// Use sparingly: passing untracked slices through channels or storing them
+// in data structures can lead to use-after-free if the backing memory is freed.
+#ifndef CC_SLICE_ID_UNTRACKED
+#define CC_SLICE_ID_UNTRACKED 0ULL
 #endif
 
 // Slice id bit layout (matches spec):
@@ -81,8 +84,9 @@ static inline bool cc_slice_is_transferable(CCSlice s) { return cc_slice_is_tran
 static inline bool cc_slice_is_subslice(CCSlice s) { return cc_slice_is_subslice_id(s.id); }
 
 static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
-    // Default: untracked/static slice (id=0), non-unique, non-transferable, full-range.
-    CCSlice s = {ptr, len, CC_SLICE_ID_NONE, len};
+    // Creates an UNTRACKED slice - safe only for static/global buffers or
+    // stack buffers that outlive all uses. Avoid for heap/arena allocations.
+    CCSlice s = {ptr, len, CC_SLICE_ID_UNTRACKED, len};
     return s;
 }
 

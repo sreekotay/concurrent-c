@@ -112,7 +112,7 @@ static inline CCSlice cc_slice_clone(CCArena *arena, CCSlice s) {
     void *buf = cc_arena_alloc(arena, s.len, sizeof(char));
     if (!buf) return cc_slice_empty();
     if (s.ptr && s.len) memcpy(buf, s.ptr, s.len);
-    return cc_slice_from_parts(buf, s.len, CC_SLICE_ID_NONE, s.len);
+    return cc_slice_from_parts(buf, s.len, CC_SLICE_ID_UNTRACKED, s.len);
 }
 
 static inline char *cc_slice_c_str(CCArena *arena, CCSlice s) {

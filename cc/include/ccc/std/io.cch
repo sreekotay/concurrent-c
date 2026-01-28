@@ -109,7 +109,7 @@ static inline CCResultOptSliceIoError cc_file_read(CCFile *file, CCArena *arena,
         return cc_ok_CCResultOptSliceIoError(cc_none_CCOptional_CCSlice());
     }
     // Got data: return Ok(Some(slice))
-    CCSlice slice = cc_slice_from_parts(buf, got, CC_SLICE_ID_NONE, n);
+    CCSlice slice = cc_slice_from_parts(buf, got, CC_SLICE_ID_UNTRACKED, n);
     return cc_ok_CCResultOptSliceIoError(cc_some_CCOptional_CCSlice(slice));
 }
 
@@ -216,7 +216,7 @@ static inline CCSlice cc_path_join(CCArena *arena, CCSlice a, CCSlice b) {
     if (need_sep) { buf[off++] = cc_path_sep(); }
     if (b.len) { memcpy(buf + off, b.ptr, b.len); off += b.len; }
     buf[off] = '\0';
-    return cc_slice_from_parts(buf, off, CC_SLICE_ID_NONE, off + 1);
+    return cc_slice_from_parts(buf, off, CC_SLICE_ID_UNTRACKED, off + 1);
 }
 
 // Dirname: returns parent directory (or "." if none). Allocates in arena.
@@ -234,7 +234,7 @@ static inline CCSlice cc_path_dirname(CCArena *arena, CCSlice path) {
     if (!buf) return cc_slice_empty();
     memcpy(buf, p, i);
     buf[i] = '\0';
-    return cc_slice_from_parts(buf, i, CC_SLICE_ID_NONE, i + 1);
+    return cc_slice_from_parts(buf, i, CC_SLICE_ID_UNTRACKED, i + 1);
 }
 
 // Basename: returns last path component (empty if path ends with separator). Allocates in arena.
@@ -253,7 +253,7 @@ static inline CCSlice cc_path_basename(CCArena *arena, CCSlice path) {
     if (!buf) return cc_slice_empty();
     if (out_len) memcpy(buf, p + start, out_len);
     buf[out_len] = '\0';
-    return cc_slice_from_parts(buf, out_len, CC_SLICE_ID_NONE, out_len + 1);
+    return cc_slice_from_parts(buf, out_len, CC_SLICE_ID_UNTRACKED, out_len + 1);
 }
 
 // ------------------------- Buffered reader/writer --------------------------
@@ -295,7 +295,7 @@ static inline CCResultOptSliceIoError cc_buf_reader_next(CCBufReader *r, size_t 
     r->pos = 0;
     r->len = got;
     if (feof(r->file->handle)) r->eof = 1;
-    CCSlice slice = cc_slice_from_parts(r->buf, got, CC_SLICE_ID_NONE, r->cap);
+    CCSlice slice = cc_slice_from_parts(r->buf, got, CC_SLICE_ID_UNTRACKED, r->cap);
     return cc_ok_CCResultOptSliceIoError(cc_some_CCOptional_CCSlice(slice));
 }
 

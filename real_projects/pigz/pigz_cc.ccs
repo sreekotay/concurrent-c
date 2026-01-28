@@ -141,7 +141,7 @@ void write_gzip_header(CCFile* out) {
         0x00,                    /* Extra flags */
         0x03                     /* OS = Unix */
     };
-    CCSlice hdr = cc_slice_from_parts(header, 10, CC_SLICE_ID_NONE, 10);
+    CCSlice hdr = cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10);
     cc_file_write(out, hdr);
 }
 
@@ -155,7 +155,7 @@ void write_gzip_trailer(CCFile* out, unsigned long crc, size_t ulen) {
     trailer[5] = (ulen >> 8) & 0xff;
     trailer[6] = (ulen >> 16) & 0xff;
     trailer[7] = (ulen >> 24) & 0xff;
-    CCSlice trl = cc_slice_from_parts(trailer, 8, CC_SLICE_ID_NONE, 8);
+    CCSlice trl = cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8);
     cc_file_write(out, trl);
 }
 
