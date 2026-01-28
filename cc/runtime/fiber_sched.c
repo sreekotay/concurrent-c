@@ -1297,15 +1297,27 @@ void cc__fiber_unpark(void* fiber_ptr) {
         return;
     }
 
-    /* Re-enqueue */
-    while (fq_push(&g_sched.run_queue, f) != 0) {
-        sched_yield();
+    /* Re-enqueue: prefer local queue for better cache locality in ping-pong patterns */
+    int pushed_local = 0;
+    if (tls_worker_id >= 0) {
+        if (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
+            pushed_local = 1;
+        }
     }
     
-    /* Wake a worker if any are sleeping - unparked fibers need immediate attention */
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    if (sleeping > 0) {
-        wake_primitive_wake_one(&g_sched.wake_prim);
+    if (!pushed_local) {
+        while (fq_push(&g_sched.run_queue, f) != 0) {
+            sched_yield();
+        }
+    }
+    
+    /* Wake a worker if any are sleeping - unparked fibers need immediate attention.
+     * Only needed if we pushed to global queue (local queue is processed by owner). */
+    if (!pushed_local) {
+        size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+        if (sleeping > 0) {
+            wake_primitive_wake_one(&g_sched.wake_prim);
+        }
     }
 }
 

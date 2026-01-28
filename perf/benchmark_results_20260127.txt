@@ -1,0 +1,20 @@
+Concurrent-C vs Go Performance Comparison
+==========================================
+
+Performance Comparison: Concurrent-C vs Go
+==========================================
+Benchmark            Concurrent-C       Go                 C/Go    
+------------------------------------------------------------------------------------------
+Running spawn_nursery...
+spawn_nursery        1207832 spawns/sec 3258915 spawns/sec 0.37    
+Running spawn_sequential...
+spawn_sequential     16103060 spawns/sec 4150790 spawns/sec 3.87    
+Running channel_throughput...
+  single-thread      91911765 ops/sec   106945170 ops/sec  0.85    
+  buffered           90579710 ops/sec   77967070 ops/sec   1.16    
+  unbuffered         27624309 ops/sec   17666595 ops/sec   1.56    
+
+✓ Comparison completed
+
+Ratio: Concurrent-C performance relative to Go (higher = better)
+Note: Comparisons use primary metric from each benchmark

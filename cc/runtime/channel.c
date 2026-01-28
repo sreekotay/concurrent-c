@@ -1701,6 +1701,26 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
 
 int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const struct timespec* abs_deadline) {
     if (!ch || !value || value_size == 0) return EINVAL;
+    
+    /* Lock-free fast path for buffered channels */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+        if (ch->closed) return EPIPE;
+        int rc = cc_chan_try_enqueue_lockfree(ch, value);
+        if (rc == 0) {
+            /* Wake any recv waiters */
+            if (ch->recv_waiters_head || ch->recv_cond_waiters > 0) {
+                pthread_mutex_lock(&ch->mu);
+                cc__chan_wake_one_recv_waiter(ch);
+                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+            }
+            cc__chan_broadcast_activity();
+            return 0;
+        }
+        /* Lock-free failed (queue full), fall through to blocking path */
+    }
+    
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -1711,6 +1731,53 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
         wake_batch_flush();
         return err;
     }
+    
+    /* For lock-free channels, poll while waiting */
+    if (ch->use_lockfree) {
+        while (!ch->closed) {
+            pthread_mutex_unlock(&ch->mu);
+            int rc = cc_chan_try_enqueue_lockfree(ch, value);
+            if (rc == 0) {
+                pthread_mutex_lock(&ch->mu);
+                cc__chan_wake_one_recv_waiter(ch);
+                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                cc__chan_broadcast_activity();
+                return 0;
+            }
+            pthread_mutex_lock(&ch->mu);
+            if (ch->closed) break;
+            
+            /* Timed wait - wake periodically to check lock-free queue */
+            struct timespec poll_deadline;
+            clock_gettime(CLOCK_REALTIME, &poll_deadline);
+            poll_deadline.tv_nsec += 10000000; /* 10ms */
+            if (poll_deadline.tv_nsec >= 1000000000) {
+                poll_deadline.tv_nsec -= 1000000000;
+                poll_deadline.tv_sec++;
+            }
+            const struct timespec* wait_deadline = abs_deadline;
+            if (abs_deadline && (poll_deadline.tv_sec < abs_deadline->tv_sec ||
+                (poll_deadline.tv_sec == abs_deadline->tv_sec && poll_deadline.tv_nsec < abs_deadline->tv_nsec))) {
+                wait_deadline = &poll_deadline;
+            }
+            
+            err = pthread_cond_timedwait(&ch->not_full, &ch->mu, wait_deadline ? wait_deadline : &poll_deadline);
+            if (err == ETIMEDOUT && abs_deadline) {
+                struct timespec now;
+                clock_gettime(CLOCK_REALTIME, &now);
+                if (now.tv_sec > abs_deadline->tv_sec ||
+                    (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                    pthread_mutex_unlock(&ch->mu);
+                    return ETIMEDOUT;
+                }
+            }
+        }
+        pthread_mutex_unlock(&ch->mu);
+        return EPIPE;
+    }
+    
     if (ch->count == ch->cap) {
         err = cc_chan_handle_full_send(ch, value, abs_deadline);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -1722,6 +1789,35 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
 
 int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const struct timespec* abs_deadline) {
     if (!ch || !out_value || value_size == 0) return EINVAL;
+    
+    /* Lock-free fast path for buffered channels - try dequeue first */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+        int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
+        if (rc == 0) {
+            /* Wake any send waiters */
+            if (ch->send_waiters_recv_head || ch->send_cond_waiters > 0) {
+                pthread_mutex_lock(&ch->mu);
+                cc__chan_wake_one_send_waiter_recv(ch);
+                if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+            }
+            cc__chan_broadcast_activity();
+            return 0;
+        }
+        /* Check if closed and empty */
+        if (ch->closed) {
+            pthread_mutex_lock(&ch->mu);
+            if (ch->closed && cc_chan_try_dequeue_lockfree(ch, out_value) != 0) {
+                pthread_mutex_unlock(&ch->mu);
+                return EPIPE;
+            }
+            pthread_mutex_unlock(&ch->mu);
+            return 0;
+        }
+        /* Lock-free failed, fall through to timed wait with polling */
+    }
+    
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
@@ -1731,6 +1827,58 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
         wake_batch_flush();
         return err;
     }
+    
+    /* For lock-free channels, poll the lock-free queue while waiting */
+    if (ch->use_lockfree) {
+        while (!ch->closed) {
+            pthread_mutex_unlock(&ch->mu);
+            int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
+            if (rc == 0) {
+                pthread_mutex_lock(&ch->mu);
+                cc__chan_wake_one_send_waiter_recv(ch);
+                if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                cc__chan_broadcast_activity();
+                return 0;
+            }
+            pthread_mutex_lock(&ch->mu);
+            if (ch->closed) break;
+            
+            /* Timed wait - wake periodically to check lock-free queue */
+            struct timespec poll_deadline;
+            clock_gettime(CLOCK_REALTIME, &poll_deadline);
+            poll_deadline.tv_nsec += 10000000; /* 10ms */
+            if (poll_deadline.tv_nsec >= 1000000000) {
+                poll_deadline.tv_nsec -= 1000000000;
+                poll_deadline.tv_sec++;
+            }
+            /* Use earlier of poll deadline or caller deadline */
+            const struct timespec* wait_deadline = abs_deadline;
+            if (abs_deadline && (poll_deadline.tv_sec < abs_deadline->tv_sec ||
+                (poll_deadline.tv_sec == abs_deadline->tv_sec && poll_deadline.tv_nsec < abs_deadline->tv_nsec))) {
+                wait_deadline = &poll_deadline;
+            }
+            
+            err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, wait_deadline ? wait_deadline : &poll_deadline);
+            if (err == ETIMEDOUT) {
+                /* Check if caller deadline expired */
+                if (abs_deadline) {
+                    struct timespec now;
+                    clock_gettime(CLOCK_REALTIME, &now);
+                    if (now.tv_sec > abs_deadline->tv_sec ||
+                        (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                        pthread_mutex_unlock(&ch->mu);
+                        return ETIMEDOUT;
+                    }
+                }
+                /* Poll deadline expired, loop to check lock-free queue again */
+            }
+        }
+        pthread_mutex_unlock(&ch->mu);
+        return ch->closed ? EPIPE : ETIMEDOUT;
+    }
+    
     err = cc_chan_wait_empty(ch, abs_deadline);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     cc_chan_dequeue(ch, out_value);
