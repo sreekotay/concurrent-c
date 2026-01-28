@@ -377,7 +377,7 @@ static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end) {
         }
 
         while (p < len && isspace((unsigned char)s[p])) p++;
-        if (p >= len || !isalpha((unsigned char)s[p]) && s[p] != '_') break;
+        if (p >= len || (!isalpha((unsigned char)s[p]) && s[p] != '_')) break;
         while (p < len && (isalnum((unsigned char)s[p]) || s[p] == '_')) p++;
         while (p < len && isspace((unsigned char)s[p])) p++;
         if (p >= len || s[p] != '(') break;

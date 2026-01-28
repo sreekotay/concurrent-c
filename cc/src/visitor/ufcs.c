@@ -60,35 +60,6 @@ static int is_addr_of_ident(const char* s) {
     return is_ident_only(s);
 }
 
-static const char* scan_receiver_start_left(const char* base, const char* sep) {
-    if (!base || !sep || sep <= base) return base;
-    const char* r_end = sep;
-    while (r_end > base && isspace((unsigned char)r_end[-1])) r_end--;
-    if (r_end <= base) return base;
-
-    int par = 0, br = 0, brc = 0;
-    const char* r = r_end;
-    while (r > base) {
-        char c = r[-1];
-        if (c == ')') { par++; r--; continue; }
-        if (c == ']') { br++; r--; continue; }
-        if (c == '}') { brc++; r--; continue; }
-        if (c == '(' && par > 0) { par--; r--; continue; }
-        if (c == '[' && br > 0) { br--; r--; continue; }
-        if (c == '{' && brc > 0) { brc--; r--; continue; }
-        if (par || br || brc) { r--; continue; }
-        if (c == ',' || c == ';' || c == '=' || c == '\n' ||
-            c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
-            c == '&' || c == '|' || c == '^' || c == '!' || c == '~' ||
-            c == '<' || c == '>' || c == '?' || c == ':' ) {
-            break;
-        }
-        r--;
-    }
-    while (r < r_end && isspace((unsigned char)*r)) r++;
-    return r;
-}
-
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
 
 static int emit_desugared_call(char* out,
