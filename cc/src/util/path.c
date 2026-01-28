@@ -99,11 +99,9 @@ const char* cc_path_rel_to_repo(const char* path, char* out, size_t out_cap) {
     }
 
     if (g_root[0] && cc__starts_with_path(absbuf, g_root)) {
-        size_t rn = strlen(g_root);
-        const char* rel = absbuf + rn;
-        if (*rel == '/') rel++;
-        if (!*rel) rel = ".";
-        strncpy(out, rel, out_cap - 1);
+        /* Use absolute path for #line directives so TCC error reporting works correctly
+           regardless of the temp file's directory. */
+        strncpy(out, absbuf, out_cap - 1);
         out[out_cap - 1] = 0;
         return out;
     }

@@ -1,0 +1,431 @@
+/*
+ * pigz_cc.ccs -- Parallel gzip compression in idiomatic Concurrent-C
+ *
+ * Architecture:
+ *   Reader -> [Block Channel] -> Workers (N) -> [Result Channel] -> Writer
+ *
+ * CC Patterns Used:
+ *   - @nursery + spawn() for structured concurrency
+ *   - Channels for block pipeline (no shared mutable state)
+ *   - @arena blocks for scoped memory
+ *   - @defer for cleanup
+ *   - CC stdlib CCFile API
+ */
+
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include "zlib_wrapper.h"
+
+/* ============================================================================
+ * Configuration
+ * ============================================================================ */
+
+#define BLOCK_SIZE (128 * 1024)   /* 128KB input blocks */
+#define DICT_SIZE  32768          /* 32KB sliding dictionary */
+#define MAX_WORKERS 16
+
+/* ============================================================================
+ * Data Types
+ * ============================================================================ */
+
+/* Input block for compression */
+typedef struct {
+    long seq;                     /* Sequence number for ordering */
+    CCSlice data;                 /* Input data slice (arena-backed) */
+    CCSlice dict;                 /* Dictionary from previous block */
+    int last;                     /* True if this is the last block */
+} Block;
+
+/* Compressed result */
+typedef struct {
+    long seq;                     /* Sequence number for ordering */
+    CCSlice data;                 /* Compressed data slice (arena-backed) */
+    unsigned long crc;            /* CRC-32 of uncompressed data */
+    size_t ulen;                  /* Uncompressed length (for trailer) */
+    int last;                     /* True if this is the last block */
+} Result;
+
+/* Global statistics (atomic for thread safety) */
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+
+/* Writer output state (written only by writer task) */
+unsigned long g_total_crc = 0;
+size_t g_total_ulen = 0;
+
+/* Output file handle (global for writer access) */
+CCFile g_out_file;
+
+/* ============================================================================
+ * Compression Worker
+ * ============================================================================ */
+
+/*
+ * Compress a single block using zlib deflate.
+ * Allocates result in the provided arena.
+ */
+Result compress_block(Block* blk, int level, CCArena* arena) {
+    Result res = {0};
+    res.seq = blk->seq;
+    res.last = blk->last;
+    res.ulen = blk->data.len;
+    
+    /* Calculate CRC of input */
+    res.crc = zw_crc32(0UL, (const unsigned char*)blk->data.ptr, blk->data.len);
+    
+    /* Allocate output buffer in arena (worst case: input + overhead) */
+    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+    unsigned char* out_buf = (unsigned char*)cc_arena_alloc(arena, max_out, 1);
+    if (!out_buf) {
+        fprintf(stderr, "pigz_cc: arena exhausted\n");
+        exit(1);
+    }
+    
+    /* Compress using wrapper */
+    size_t compressed_len = zw_deflate_block(
+        (const unsigned char*)blk->data.ptr, blk->data.len,
+        out_buf, max_out,
+        (const unsigned char*)blk->dict.ptr, blk->dict.len,
+        level, blk->last
+    );
+    
+    if (compressed_len == 0 && blk->data.len > 0) {
+        fprintf(stderr, "pigz_cc: deflate failed\n");
+        exit(1);
+    }
+    
+    /* Create result slice pointing to arena memory */
+    res.data = cc_slice_from_parts(out_buf, compressed_len, CC_SLICE_ID_NONE, compressed_len);
+    
+    /* Update global statistics */
+    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+    cc_atomic_fetch_add(&g_bytes_out, compressed_len);
+    cc_atomic_fetch_add(&g_blocks_done, 1);
+    
+    return res;
+}
+
+/* ============================================================================
+ * Gzip Header/Trailer
+ * ============================================================================ */
+
+void write_gzip_header(CCFile* out) {
+    unsigned char header[10] = {
+        0x1f, 0x8b,              /* Magic */
+        0x08,                    /* Deflate */
+        0x00,                    /* Flags */
+        0, 0, 0, 0,              /* Mtime (0 = not set) */
+        0x00,                    /* Extra flags */
+        0x03                     /* OS = Unix */
+    };
+    CCSlice hdr = cc_slice_from_parts(header, 10, CC_SLICE_ID_NONE, 10);
+    cc_file_write(out, hdr);
+}
+
+void write_gzip_trailer(CCFile* out, unsigned long crc, size_t ulen) {
+    unsigned char trailer[8];
+    trailer[0] = crc & 0xff;
+    trailer[1] = (crc >> 8) & 0xff;
+    trailer[2] = (crc >> 16) & 0xff;
+    trailer[3] = (crc >> 24) & 0xff;
+    trailer[4] = ulen & 0xff;
+    trailer[5] = (ulen >> 8) & 0xff;
+    trailer[6] = (ulen >> 16) & 0xff;
+    trailer[7] = (ulen >> 24) & 0xff;
+    CCSlice trl = cc_slice_from_parts(trailer, 8, CC_SLICE_ID_NONE, 8);
+    cc_file_write(out, trl);
+}
+
+/* CRC-32 combination for parallel computation */
+unsigned long crc32_combine_cc(unsigned long crc1, unsigned long crc2, size_t len2) {
+    return zw_crc32_combine(crc1, crc2, len2);
+}
+
+/* ============================================================================
+ * Main Compression Pipeline
+ * ============================================================================ */
+
+int compress_file(const char* in_path, const char* out_path, int num_workers, int level) {
+    /* Create main arena for the compression operation */
+    CCArena main_arena = cc_heap_arena(64 * 1024 * 1024);
+    @defer cc_heap_arena_free(&main_arena);
+    
+    /* Open files using CC stdlib */
+    CCFile in_file;
+    if (cc_file_open(&in_file, in_path, "rb") != 0) {
+        fprintf(stderr, "pigz_cc: cannot open input: %s\n", in_path);
+        return 1;
+    }
+    @defer cc_file_close(&in_file);
+    
+    if (cc_file_open(&g_out_file, out_path, "wb") != 0) {
+        fprintf(stderr, "pigz_cc: cannot open output: %s\n", out_path);
+        return 1;
+    }
+    @defer cc_file_close(&g_out_file);
+    
+    /* Channel types for pipeline */
+    Block[~4 >] blocks_tx;
+    Block[~4 <] blocks_rx;
+    Result[~16 >] results_tx;
+    Result[~16 <] results_rx;
+    
+    /* Create channels */
+    CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
+    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
+    @defer cc_chan_free(blocks_ch);
+    @defer cc_chan_free(results_ch);
+    
+    /* Write gzip header */
+    write_gzip_header(&g_out_file);
+    
+    /* Reset global state */
+    g_total_crc = zw_crc32(0UL, NULL, 0);
+    g_total_ulen = 0;
+    
+    /*
+     * Pipeline using nested nurseries:
+     *
+     *   @nursery (outer) {
+     *       spawn(writer);
+     *       @nursery closing(results_tx) {
+     *           spawn(workers...);
+     *           @nursery closing(blocks_tx) {
+     *               spawn(reader);
+     *           }
+     *       }
+     *   }
+     */
+    
+    @nursery {
+        /* Writer: receives results and writes in sequence order */
+        spawn(() => {
+            Result *pending = NULL;
+            int pending_count = 0;
+            int pending_cap = 0;
+            long next_seq = 0;
+            
+            Result r;
+            while (chan_recv(results_rx, &r) == 0) {
+                /* Buffer out-of-order results */
+                if (r.seq != next_seq) {
+                    if (pending_count >= pending_cap) {
+                        pending_cap = pending_cap ? pending_cap * 2 : 16;
+                        pending = (Result*)realloc(pending, pending_cap * sizeof(Result));
+                    }
+                    pending[pending_count++] = r;
+                    continue;
+                }
+                
+                /* Write this result */
+                cc_file_write(&g_out_file, r.data);
+                g_total_crc = crc32_combine_cc(g_total_crc, r.crc, r.ulen);
+                g_total_ulen += r.ulen;
+                next_seq++;
+                
+                /* Check pending for next in sequence */
+                int found;
+                do {
+                    found = 0;
+                    for (int i = 0; i < pending_count; i++) {
+                        if (pending[i].seq == next_seq) {
+                            cc_file_write(&g_out_file, pending[i].data);
+                            g_total_crc = crc32_combine_cc(g_total_crc, pending[i].crc, pending[i].ulen);
+                            g_total_ulen += pending[i].ulen;
+                            next_seq++;
+                            pending[i] = pending[--pending_count];
+                            found = 1;
+                            break;
+                        }
+                    }
+                } while (found);
+            }
+            
+            free(pending);
+        });
+        
+        /* Workers + Reader in nested nurseries */
+        @nursery closing(results_tx) {
+            /* Spawn compression workers - each has its own arena */
+            for (int w = 0; w < num_workers; w++) {
+                spawn([level]() => {  /* Can capture function params directly! */
+                    /* Per-worker arena for compression buffers */
+                    CCArena worker_arena = cc_heap_arena(4 * 1024 * 1024);
+                    
+                    Block blk;
+                    while (chan_recv(blocks_rx, &blk) == 0) {
+                        Result res = compress_block(&blk, level, &worker_arena);
+                        chan_send(results_tx, res);
+                        
+                        /* Reset worker arena after each block */
+                        cc_arena_reset(&worker_arena);
+                    }
+                    
+                    /* Manual cleanup (can't use @defer inside closures) */
+                    cc_heap_arena_free(&worker_arena);
+                });
+            }
+            
+            /* Reader: produces blocks */
+            @nursery closing(blocks_tx) {
+                void* in_ptr = (void*)&in_file;
+                void* arena_ptr = (void*)&main_arena;
+                spawn([in_ptr, arena_ptr]() => {
+                    CCFile* in_f = (CCFile*)in_ptr;
+                    CCArena* arena = (CCArena*)arena_ptr;
+                    long seq = 0;
+                    CCSlice prev_data = cc_slice_empty();
+                    
+                    while (1) {
+                        /* Read into arena */
+                        CCResultOptSliceIoError read_result = cc_file_read(in_f, arena, BLOCK_SIZE);
+                        
+                        /* Check for error */
+                        if (read_result.is_err) {
+                            fprintf(stderr, "pigz_cc: read error\n");
+                            break;
+                        }
+                        
+                        /* Check for EOF */
+                        CCOptional_CCSlice data_opt = read_result.ok;
+                        if (!data_opt.has) {
+                            break;  /* EOF */
+                        }
+                        CCSlice data = data_opt.u.value;
+                        
+                        if (data.len == 0) {
+                            break;  /* EOF */
+                        }
+                        
+                        /* Create block */
+                        Block blk = {0};
+                        blk.seq = seq++;
+                        blk.data = data;
+                        blk.last = (data.len < BLOCK_SIZE);
+                        
+                        /* Set dictionary from previous block */
+                        if (prev_data.len > 0) {
+                            size_t dict_len = prev_data.len < DICT_SIZE ? prev_data.len : DICT_SIZE;
+                            size_t dict_start = prev_data.len - dict_len;
+                            blk.dict = cc_slice_sub(prev_data, dict_start, prev_data.len);
+                        }
+                        
+                        /* Send block to workers */
+                        chan_send(blocks_tx, blk);
+                        
+                        /* Keep reference for next dictionary */
+                        prev_data = data;
+                        
+                        if (blk.last) {
+                            break;
+                        }
+                    }
+                });
+            }
+            /* blocks_tx closed -> workers drain and exit */
+        }
+        /* results_tx closed -> writer drains and exits */
+    }
+    /* All tasks complete here */
+    
+    /* Write gzip trailer with combined CRC and length */
+    write_gzip_trailer(&g_out_file, g_total_crc, g_total_ulen);
+    
+    /* Sync to disk */
+    cc_file_sync(&g_out_file);
+    
+    return 0;
+}
+
+/* ============================================================================
+ * Command Line Interface
+ * ============================================================================ */
+
+void usage(const char *prog) {
+    fprintf(stderr, "Usage: %s [options] [file]\n", prog);
+    fprintf(stderr, "  -c          Write to stdout\n");
+    fprintf(stderr, "  -k          Keep original file\n");
+    fprintf(stderr, "  -p N        Use N compression threads (default: 4)\n");
+    fprintf(stderr, "  -1..-9      Compression level (default: 6)\n");
+    fprintf(stderr, "  -h          Show this help\n");
+}
+
+int main(int argc, char *argv[]) {
+    int to_stdout = 0;
+    int keep = 0;
+    int num_workers = 4;
+    int level = 6;
+    const char *input_file = NULL;
+    
+    /* Parse arguments */
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            if (strcmp(argv[i], "-c") == 0) {
+                to_stdout = 1;
+            } else if (strcmp(argv[i], "-k") == 0) {
+                keep = 1;
+            } else if (strcmp(argv[i], "-h") == 0) {
+                usage(argv[0]);
+                return 0;
+            } else if (strncmp(argv[i], "-p", 2) == 0) {
+                if (argv[i][2]) {
+                    num_workers = atoi(&argv[i][2]);
+                } else if (i + 1 < argc) {
+                    num_workers = atoi(argv[++i]);
+                }
+                if (num_workers < 1) num_workers = 1;
+                if (num_workers > MAX_WORKERS) num_workers = MAX_WORKERS;
+            } else if (argv[i][1] >= '1' && argv[i][1] <= '9') {
+                level = argv[i][1] - '0';
+            } else {
+                fprintf(stderr, "Unknown option: %s\n", argv[i]);
+                usage(argv[0]);
+                return 1;
+            }
+        } else {
+            input_file = argv[i];
+        }
+    }
+    
+    if (!input_file) {
+        fprintf(stderr, "pigz_cc: no input file specified\n");
+        usage(argv[0]);
+        return 1;
+    }
+    
+    /* Build output filename */
+    char output_file[4096];
+    if (to_stdout) {
+        /* TODO: implement stdout mode with raw fd */
+        fprintf(stderr, "pigz_cc: -c not implemented yet\n");
+        return 1;
+    } else {
+        snprintf(output_file, sizeof(output_file), "%s.gz", input_file);
+    }
+    
+    /* Compress */
+    int ret = compress_file(input_file, output_file, num_workers, level);
+    
+    /* Delete original if requested */
+    if (ret == 0 && !keep && !to_stdout) {
+        unlink(input_file);
+    }
+    
+    /* Print statistics */
+    long bytes_in = cc_atomic_load(&g_bytes_in);
+    long bytes_out = cc_atomic_load(&g_bytes_out);
+    int blocks = cc_atomic_load(&g_blocks_done);
+    fprintf(stderr, "%s: %ld -> %ld bytes (%.1f%%), %d blocks, %d workers\n",
+            input_file,
+            bytes_in, bytes_out,
+            bytes_in > 0 ? 100.0 * (1.0 - (double)bytes_out / bytes_in) : 0.0,
+            blocks, num_workers);
+    
+    return ret;
+}
