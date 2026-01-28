@@ -102,7 +102,12 @@ spawn (13) ──must be inside──▶ nursery (14)
 
 4. **Extract channel code** - ✓ DONE
    - `pass_channel_syntax.h/.c` contains channel syntax functions
-   - ~625 lines extracted from `visit_codegen.c`
+   - ~606 lines extracted from `visit_codegen.c`
+
+5. **Extract type syntax code** - ✓ DONE
+   - `pass_type_syntax.h/.c` contains slice/optional/result type syntax
+   - ~815 lines extracted from `visit_codegen.c`
+   - `visit_codegen.c` reduced from 2254 to 830 lines (63% reduction)
 
 ## Adding a New Pass
 
