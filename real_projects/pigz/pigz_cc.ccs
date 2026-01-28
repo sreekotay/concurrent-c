@@ -68,18 +68,27 @@ CCFile g_out_file;
 
 /*
  * Compress a single block using zlib deflate.
- * Allocates result in the provided arena.
+ * 
+ * PROVENANCE NOTE: The output slice uses malloc() rather than arena because:
+ * - Worker sends Result through channel, then processes next block
+ * - Writer receives Result asynchronously, may not consume it immediately
+ * - If we used arena + reset, Result.data would be a dangling pointer
+ * 
+ * The slice is marked as transferable (can cross channel) but NOT unique
+ * (writer needs to explicitly free after use - not automatic).
  */
+static cc_atomic_u64 g_heap_alloc_counter = 1;
+
 Result compress_block(Block* blk, int level) {
     Result res = {0};
     res.seq = blk->seq;
     res.last = blk->last;
     res.ulen = blk->data.len;
     
-    /* Calculate CRC of input */
+    /* Calculate CRC of input (input slice has arena provenance - safe to read) */
     res.crc = zw_crc32(0UL, (const unsigned char*)blk->data.ptr, blk->data.len);
     
-    /* Allocate output buffer with malloc (must outlive until writer consumes it) */
+    /* Allocate output buffer with malloc - must outlive until writer consumes */
     size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
     unsigned char* out_buf = (unsigned char*)malloc(max_out);
     if (!out_buf) {
@@ -101,8 +110,15 @@ Result compress_block(Block* blk, int level) {
         exit(1);
     }
     
-    /* Create result slice pointing to malloc'd memory */
-    res.data = cc_slice_from_parts(out_buf, compressed_len, CC_SLICE_ID_NONE, compressed_len);
+    /* Create heap-owned slice with proper provenance:
+     * - alloc_id: unique counter (heap allocation tracking)
+     * - unique: false (not move-only - we don't have RAII destructor)
+     * - transferable: true (can send through channel)
+     * - subslice: false (this is the full allocation)
+     */
+    uint64_t alloc_id = cc_atomic_fetch_add(&g_heap_alloc_counter, 1);
+    uint64_t slice_id = cc_slice_make_id(alloc_id, false, true, false);
+    res.data = cc_slice_from_parts(out_buf, compressed_len, slice_id, compressed_len);
     
     /* Update global statistics */
     cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
