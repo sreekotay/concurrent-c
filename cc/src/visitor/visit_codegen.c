@@ -1544,16 +1544,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
 
-    /* Rewrite std_out.write(...) and std_err.write(...) synthetic receivers */
-    if (src_ufcs && src_ufcs_len) {
-        char* rewritten = cc_rewrite_std_io_ufcs(src_ufcs, src_ufcs_len);
-        if (rewritten) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = strlen(rewritten);
-        }
-    }
-
     /* Rewrite generic container syntax: Vec<T> -> Vec_T, vec_new<T>() -> Vec_T_init() */
     if (src_ufcs && src_ufcs_len) {
         char* rewritten = cc_rewrite_generic_containers(src_ufcs, src_ufcs_len, ctx->input_path);

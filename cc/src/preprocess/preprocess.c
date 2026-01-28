@@ -1168,126 +1168,6 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
    
    This relies on the type registry being populated with var->type mappings
    from the generic container lowering pass. */
-
-/* Rewrite synthetic UFCS receivers std_out and std_err before TCC sees them.
-   std_out.write("text") -> cc_std_out_write(cc_slice_from_buffer("text", sizeof("text") - 1))
-   std_out.write(s)      -> cc_std_out_write_string(&s)
-   std_err.write(...)    -> cc_std_err_write(...) */
-char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    size_t last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    int changed = 0;
-    
-    while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
-        /* Look for std_out or std_err */
-        int is_out = 0, is_err = 0;
-        if (i + 7 <= n && strncmp(src + i, "std_out", 7) == 0 && (i + 7 >= n || !cc_is_ident_char(src[i + 7]))) {
-            is_out = 1;
-        } else if (i + 7 <= n && strncmp(src + i, "std_err", 7) == 0 && (i + 7 >= n || !cc_is_ident_char(src[i + 7]))) {
-            is_err = 1;
-        }
-        
-        if ((is_out || is_err) && i > 0 && cc_is_ident_char(src[i - 1])) {
-            is_out = is_err = 0; /* Part of larger identifier */
-        }
-        
-        if (is_out || is_err) {
-            size_t recv_end = i + 7;
-            size_t j = cc_skip_ws_and_comments(src, n, recv_end);
-            if (j < n && src[j] == '.') {
-                j = cc_skip_ws_and_comments(src, n, j + 1);
-                /* Check for "write" method */
-                if (j + 5 <= n && strncmp(src + j, "write", 5) == 0 && (j + 5 >= n || !cc_is_ident_char(src[j + 5]))) {
-                    size_t method_end = j + 5;
-                    size_t k = cc_skip_ws_and_comments(src, n, method_end);
-                    if (k < n && src[k] == '(') {
-                        /* Found std_out.write( or std_err.write( */
-                        size_t paren_end = 0;
-                        if (cc_find_matching_paren(src, n, k, &paren_end)) {
-                            /* Extract argument - paren_end points AT the ')' */
-                            size_t arg_start = k + 1;
-                            size_t arg_end = paren_end;  /* exclusive end (AT the closing paren) */
-                            while (arg_start < arg_end && isspace((unsigned char)src[arg_start])) arg_start++;
-                            while (arg_end > arg_start && isspace((unsigned char)src[arg_end - 1])) arg_end--;
-                            
-                            char arg[512];
-                            size_t arg_len = arg_end - arg_start;
-                            if (arg_len >= sizeof(arg)) arg_len = sizeof(arg) - 1;
-                            memcpy(arg, src + arg_start, arg_len);
-                            arg[arg_len] = '\0';
-                            
-                            /* Emit everything before this pattern */
-                            if (i > last_emit) {
-                                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-                            }
-                            
-                            /* Generate replacement */
-                            const char* prefix = is_out ? "cc_std_out" : "cc_std_err";
-                            char repl[1024];
-                            if (arg[0] == '"') {
-                                /* String literal: wrap in slice */
-                                snprintf(repl, sizeof(repl), "%s_write(cc_slice_from_buffer(%s, sizeof(%s) - 1))", prefix, arg, arg);
-                            } else if (cc_is_ident_start(arg[0])) {
-                                /* Identifier: assume String, pass by reference */
-                                int is_pure_ident = 1;
-                                for (size_t x = 0; x < arg_len; x++) {
-                                    if (!cc_is_ident_char(arg[x])) { is_pure_ident = 0; break; }
-                                }
-                                if (is_pure_ident) {
-                                    snprintf(repl, sizeof(repl), "%s_write_string(&%s)", prefix, arg);
-                                } else {
-                                    /* Complex expression, assume CCSlice */
-                                    snprintf(repl, sizeof(repl), "%s_write(%s)", prefix, arg);
-                                }
-                            } else {
-                                /* Other expression, pass as-is */
-                                snprintf(repl, sizeof(repl), "%s_write(%s)", prefix, arg);
-                            }
-                            
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, repl);
-                            last_emit = paren_end + 1;  /* skip past closing ')' */
-                            i = paren_end + 1;
-                            changed = 1;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        
-        i++;
-    }
-    
-    if (!changed) {
-        free(out);
-        return NULL;
-    }
-    
-    /* Emit remaining */
-    if (last_emit < n) {
-        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    }
-    return out;
-}
-
 char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path) {
     (void)input_path;
     if (!src || n == 0) return NULL;
@@ -2660,15 +2540,10 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur3g = rewritten_generic ? rewritten_generic : cur3;
     size_t cur3g_n = rewritten_generic ? strlen(rewritten_generic) : cur3_n;
 
-    /* Rewrite std_out/std_err UFCS: std_out.write(...) -> cc_std_out_write(...) */
-    char* rewritten_stdio = cc_rewrite_std_io_ufcs(cur3g, cur3g_n);
-    const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3g;
-    size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3g_n;
-
     /* Rewrite container UFCS: v.push(x) -> Vec_T_push(&v, x) */
-    char* rewritten_ufcs = cc_rewrite_ufcs_container_calls(cur3s, cur3s_n, input_path);
-    const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3s;
-    size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3s_n;
+    char* rewritten_ufcs = cc_rewrite_ufcs_container_calls(cur3g, cur3g_n, input_path);
+    const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3g;
+    size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3g_n;
 
     /* Rewrite T? -> CCOptional_T */
     char* rewritten_opt = cc__rewrite_optional_types(cur3u, cur3u_n, input_path);
@@ -2699,7 +2574,6 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_infer); free(rewritten_opt);
-        free(rewritten_ufcs); free(rewritten_stdio);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
         return -1;
@@ -2783,8 +2657,6 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_res);
     free(rewritten_infer);
     free(rewritten_opt);
-    free(rewritten_ufcs);
-    free(rewritten_stdio);
     free(rewritten_generic);
     free(rewritten_chan);
     free(rewritten_slice);
