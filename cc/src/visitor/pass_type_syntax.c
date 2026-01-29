@@ -188,12 +188,146 @@ static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
     return i;
 }
 
-/* Rewrite optional types: T? -> CCOptional_T */
+/* Collection of optional types for CC_DECL_OPTIONAL emission (extern in header) */
+CCCodegenOptionalType cc__cg_optional_types[64];
+size_t cc__cg_optional_type_count = 0;
+
+/* Built-in optional types that are already declared in cc_optional.cch */
+static const char* cc__builtin_optional_types[] = {
+    "int", "bool", "size_t", "intptr_t", "char", "float", "double",
+    "voidptr", "charptr", "intptr", "CCSlice", NULL
+};
+
+static int cc__is_builtin_optional_type(const char* mangled) {
+    for (int i = 0; cc__builtin_optional_types[i]; i++) {
+        if (strcmp(mangled, cc__builtin_optional_types[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static void cc__cg_add_optional_type(const char* mangled, const char* raw, size_t raw_len) {
+    /* Skip built-in optional types (already declared in cc_optional.cch) */
+    if (cc__is_builtin_optional_type(mangled)) return;
+    
+    /* Check for duplicates */
+    for (size_t i = 0; i < cc__cg_optional_type_count; i++) {
+        if (strcmp(cc__cg_optional_types[i].mangled_type, mangled) == 0) {
+            return; /* Already have this type */
+        }
+    }
+    if (cc__cg_optional_type_count >= sizeof(cc__cg_optional_types)/sizeof(cc__cg_optional_types[0])) return;
+    CCCodegenOptionalType* p = &cc__cg_optional_types[cc__cg_optional_type_count++];
+    strncpy(p->mangled_type, mangled, sizeof(p->mangled_type) - 1);
+    p->mangled_type[sizeof(p->mangled_type) - 1] = '\0';
+    if (raw_len >= sizeof(p->raw_type)) raw_len = sizeof(p->raw_type) - 1;
+    memcpy(p->raw_type, raw, raw_len);
+    p->raw_type[raw_len] = '\0';
+}
+
+/* Scan for optional type patterns and collect types.
+   Handles:
+   - __CC_OPTIONAL(T) - from preprocessor macro approach
+   - CCOptional_T - legacy or direct usage */
+static void cc__scan_for_existing_optional_types(const char* src, size_t n) {
+    /* Reset collection */
+    cc__cg_optional_type_count = 0;
+    
+    const char* macro_prefix = "__CC_OPTIONAL(";
+    size_t macro_prefix_len = strlen(macro_prefix);
+    const char* struct_prefix = "CCOptional_";
+    size_t struct_prefix_len = strlen(struct_prefix);
+    
+    size_t i = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for __CC_OPTIONAL(T) macro pattern */
+        if (i + macro_prefix_len < n && strncmp(src + i, macro_prefix, macro_prefix_len) == 0) {
+            size_t j = i + macro_prefix_len;
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            
+            /* Parse type (T) */
+            size_t type_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t type_end = j;
+            
+            /* Skip whitespace to closing paren */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != ')') { i++; continue; }
+            
+            if (type_end > type_start) {
+                char mangled_type[128];
+                size_t type_len = type_end - type_start;
+                
+                if (type_len < sizeof(mangled_type)) {
+                    memcpy(mangled_type, src + type_start, type_len);
+                    mangled_type[type_len] = '\0';
+                    
+                    cc__cg_add_optional_type(mangled_type, src + type_start, type_len);
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+        
+        /* Look for CCOptional_T struct pattern (legacy) */
+        if (i + struct_prefix_len < n && strncmp(src + i, struct_prefix, struct_prefix_len) == 0) {
+            /* Make sure this isn't part of a longer identifier */
+            if (i > 0 && cc__is_ident_char_local(src[i-1])) {
+                i++;
+                continue;
+            }
+            
+            size_t j = i + struct_prefix_len;
+            
+            /* Find the type (rest of identifier) */
+            size_t type_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t type_end = j;
+            
+            if (type_end > type_start) {
+                char mangled_type[128];
+                size_t type_len = type_end - type_start;
+                
+                if (type_len < sizeof(mangled_type)) {
+                    memcpy(mangled_type, src + type_start, type_len);
+                    mangled_type[type_len] = '\0';
+                    
+                    cc__cg_add_optional_type(mangled_type, src + type_start, type_len);
+                }
+            }
+            i = j;
+            continue;
+        }
+        
+        i++;
+    }
+}
+
+/* Rewrite optional types: T? -> __CC_OPTIONAL(T), also collect types for declaration emission */
 char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     (void)ctx;
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
+    
+    /* First, scan for any existing __CC_OPTIONAL(T) or CCOptional_T patterns (preprocessor may have already rewritten) */
+    cc__scan_for_existing_optional_types(src, n);
     
     size_t i = 0;
     size_t last_emit = 0;
@@ -226,9 +360,13 @@ char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, 
                         cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
                         
                         if (mangled[0]) {
+                            /* Collect this optional type for declaration */
+                            cc__cg_add_optional_type(mangled, src + ty_start, ty_len);
+                            
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCOptional_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "__CC_OPTIONAL(");
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
                             last_emit = i + 1; /* skip past '?' */
                         }
                     }
@@ -818,11 +956,25 @@ char* cc__rewrite_optional_unwrap_text(const CCVisitorCtx* ctx, const char* src,
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for CCOptional_ type declarations */
-        if (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0) {
+        /* Look for CCOptional_ or __CC_OPTIONAL(T) type declarations */
+        int is_cc_optional = (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0);
+        int is_macro_optional = (c == '_' && i + 14 < n && strncmp(src + i, "__CC_OPTIONAL(", 14) == 0);
+        
+        if (is_cc_optional || is_macro_optional) {
             /* Skip to end of type name */
-            i += 11;
-            while (i < n && cc__is_ident_char_local(src[i])) i++;
+            if (is_cc_optional) {
+                i += 11;
+                while (i < n && cc__is_ident_char_local(src[i])) i++;
+            } else {
+                /* __CC_OPTIONAL(T) - skip to closing paren */
+                i += 14;
+                int paren_depth = 1;
+                while (i < n && paren_depth > 0) {
+                    if (src[i] == '(') paren_depth++;
+                    else if (src[i] == ')') paren_depth--;
+                    i++;
+                }
+            }
             /* Skip whitespace */
             while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n')) i++;
             /* Check for variable name (not function) */

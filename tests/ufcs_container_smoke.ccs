@@ -12,14 +12,14 @@ int main(void) {
     v.push(20);
     v.push(30);
     
-    CCOptional_int val = v.get(1);
-    if (!val.has || val.u.value != 20) {
+    int? val = v.get(1);
+    if (!val.has || *val != 20) {
         printf("FAIL: get(1) expected 20\n");
         return 1;
     }
     
-    CCOptional_int popped = v.pop();
-    if (!popped.has || popped.u.value != 30) {
+    int? popped = v.pop();
+    if (!popped.has || *popped != 30) {
         printf("FAIL: pop() expected 30\n");
         return 1;
     }

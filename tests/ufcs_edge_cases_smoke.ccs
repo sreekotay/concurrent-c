@@ -34,15 +34,15 @@ int main(void) {
         vp->push(20);      // Pointer receiver - must become Vec_int_push(vp, 20)
         vp->push(30);
         
-        // Verify Vec contents using UFCS .get() which returns CCOptional_int
-        CCOptional_int v0 = c.items.get(0);
-        CCOptional_int v1 = c.items.get(1);
-        CCOptional_int v2 = c.items.get(2);
+        // Verify Vec contents using UFCS .get() which returns optional
+        int? v0 = c.items.get(0);
+        int? v1 = c.items.get(1);
+        int? v2 = c.items.get(2);
         
         if (c.items.len() == 3 &&
-            v0.has && v0.u.value == 10 &&
-            v1.has && v1.u.value == 20 &&
-            v2.has && v2.u.value == 30) {
+            v0.has && *v0 == 10 &&
+            v1.has && *v1 == 20 &&
+            v2.has && *v2 == 30) {
             std_out.write("case3:ok\n");
         } else {
             std_out.write("case3:FAIL\n");

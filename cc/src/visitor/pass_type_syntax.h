@@ -52,4 +52,13 @@ typedef struct {
 extern CCCodegenResultTypePair cc__cg_result_types[64];
 extern size_t cc__cg_result_type_count;
 
+/* Optional type registry - used by codegen to emit CC_DECL_OPTIONAL declarations */
+typedef struct {
+    char mangled_type[128];  /* e.g., "Point" */
+    char raw_type[128];      /* e.g., "Point" (original type name) */
+} CCCodegenOptionalType;
+
+extern CCCodegenOptionalType cc__cg_optional_types[64];
+extern size_t cc__cg_optional_type_count;
+
 #endif /* CC_PASS_TYPE_SYNTAX_H */

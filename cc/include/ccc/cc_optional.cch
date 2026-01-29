@@ -27,6 +27,8 @@ typedef int bool;
 #endif
 #endif
 
+#include <stdint.h>
+
 /* Define an Optional-like struct and constructors.
  * Usage: CC_DECL_OPTIONAL(CCOptional_int, int)
  */
@@ -46,6 +48,146 @@ typedef int bool;
         o.has = false;                                                          \
         return o;                                                               \
     }
+
+/*
+ * TCC PARSER MODE: Optional types use a generic placeholder during parsing.
+ *
+ * The CC preprocessor rewrites T? to __CC_OPTIONAL(T_mangled).
+ * In parser mode, this macro expands to __CCOptionalGeneric.
+ * In codegen, it's rewritten to CCOptional_T with proper declarations.
+ */
+#ifdef CC_PARSER_MODE
+
+/* Generic struct with common field names for parser-mode optional values.
+   This allows code like opt.u.value.x or opt.u.value.len to parse correctly.
+   The actual types don't matter during parsing - they're validated at codegen. */
+typedef struct __CCOptionalGenericValue {
+    /* Common coordinate/geometry fields */
+    long x, y, z, w;
+    /* Common color fields */
+    float r, g, b, a;
+    /* Common data structure fields */
+    void* ptr;
+    void* data;
+    size_t len;
+    size_t size;
+    size_t count;
+    size_t capacity;
+    /* Common name/string fields */
+    char* name;
+    char* str;
+    const char* message;
+    /* Common numeric fields */
+    int id;
+    int type;
+    int kind;
+    int index;
+    int status;
+    int code;
+    int flags;
+    int fd;
+    int err;
+    int result;
+    /* Common scalar conversions (allow .x on scalars via union trick) */
+    intptr_t _scalar;
+} __CCOptionalGenericValue;
+
+/* Generic optional placeholder struct - used for ALL optional types during parsing.
+   Field names match the real CC_DECL_OPTIONAL layout so user code compiles.
+   Uses named union 'u' matching the real struct layout. */
+typedef struct __CCOptionalGeneric {
+    bool has;
+    union {
+        __CCOptionalGenericValue value;   /* Struct with common field names */
+        intptr_t _scalar;                  /* For scalar types */
+    } u;
+} __CCOptionalGeneric;
+
+/* THE KEY MACRO: In parser mode, all optional types resolve to generic.
+   Usage: __CC_OPTIONAL(int) expands to __CCOptionalGeneric
+   Codegen rewrites this to CCOptional_int */
+#define __CC_OPTIONAL(T) __CCOptionalGeneric
+
+/* Generic some/none constructors - parser mode doesn't actually run,
+   so these just return a zeroed struct for type checking. */
+static inline __CCOptionalGeneric __cc_optional_generic_some(void) {
+    __CCOptionalGeneric o = {0};
+    o.has = 1;
+    return o;
+}
+static inline __CCOptionalGeneric __cc_optional_generic_none(void) {
+    __CCOptionalGeneric o = {0};
+    o.has = 0;
+    return o;
+}
+
+/* Macro-based some/none that accept any type - parser mode just validates types.
+   The value is unused but the expression is type-checked.
+   Using variadic macro (...) for the value to handle compound literals with commas. */
+#define __CC_OPTIONAL_SOME(T, ...) ((void)(__VA_ARGS__), __cc_optional_generic_some())
+#define __CC_OPTIONAL_NONE(T) __cc_optional_generic_none()
+
+/* Helper macro to assign values to optionals - uses _scalar in parser mode.
+   This allows vec/map macros to work correctly with the generic struct. */
+#define CC_OPT_SET_VALUE(opt, val) ((opt).u._scalar = (intptr_t)(val))
+
+/*
+ * Simplified optional constructors for parser mode.
+ * cc_some(value) and cc_none() can be inferred from context.
+ * The compiler rewrites them to typed versions based on enclosing return type.
+ */
+#define cc_some(v) ((void)(v), __cc_optional_generic_some())
+#define cc_none() __cc_optional_generic_none()
+
+/* Generic function-call forms that work for any type in parser mode */
+#define cc_some_for(T, v) ((void)(v), __cc_optional_generic_some())
+#define cc_none_for(T) __cc_optional_generic_none()
+
+/* Parser-mode: common optional types are aliases to __CCOptionalGeneric */
+typedef __CCOptionalGeneric CCOptional_int;
+typedef __CCOptionalGeneric CCOptional_bool;
+typedef __CCOptionalGeneric CCOptional_size_t;
+typedef __CCOptionalGeneric CCOptional_intptr_t;
+typedef __CCOptionalGeneric CCOptional_char;
+typedef __CCOptionalGeneric CCOptional_float;
+typedef __CCOptionalGeneric CCOptional_double;
+typedef __CCOptionalGeneric CCOptional_voidptr;
+typedef __CCOptionalGeneric CCOptional_charptr;
+typedef __CCOptionalGeneric CCOptional_intptr;
+typedef __CCOptionalGeneric CCOptional_CCSlice;
+
+/* Parser-mode constructors for common types */
+#define cc_some_CCOptional_int(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_int() __cc_optional_generic_none()
+#define cc_some_CCOptional_bool(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_bool() __cc_optional_generic_none()
+#define cc_some_CCOptional_size_t(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_size_t() __cc_optional_generic_none()
+#define cc_some_CCOptional_intptr_t(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_intptr_t() __cc_optional_generic_none()
+#define cc_some_CCOptional_char(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_char() __cc_optional_generic_none()
+#define cc_some_CCOptional_float(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_float() __cc_optional_generic_none()
+#define cc_some_CCOptional_double(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_double() __cc_optional_generic_none()
+#define cc_some_CCOptional_voidptr(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_voidptr() __cc_optional_generic_none()
+#define cc_some_CCOptional_charptr(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_charptr() __cc_optional_generic_none()
+#define cc_some_CCOptional_intptr(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_intptr() __cc_optional_generic_none()
+#define cc_some_CCOptional_CCSlice(v) __cc_optional_generic_some()
+#define cc_none_CCOptional_CCSlice() __cc_optional_generic_none()
+
+#else /* !CC_PARSER_MODE - real compilation */
+
+/* In real compilation, __CC_OPTIONAL expands to the actual type name.
+   The codegen pass ensures CC_DECL_OPTIONAL is emitted for each type. */
+#define __CC_OPTIONAL(T) CCOptional_##T
+
+/* Helper macro to assign values to optionals - uses .value in real mode. */
+#define CC_OPT_SET_VALUE(opt, val) ((opt).u.value = (val))
 
 /* Convenience: check presence with if (x) syntax via macro.
  * Note: This only works if x is an optional struct with .has field.
@@ -72,6 +214,17 @@ typedef struct CCSlice_fwd CCSlice;
 #endif
 CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 
+/*
+ * Simplified optional constructors for real mode.
+ * cc_some(value) and cc_none() - the compiler rewrites them to typed versions.
+ * These are placeholder definitions; the codegen pass rewrites based on context.
+ *
+ * Note: In real mode, these get rewritten by codegen to cc_some_CCOptional_T(v)
+ * based on the enclosing function's return type or the assignment target type.
+ */
+
+#endif /* !CC_PARSER_MODE */
+
 /* ============================================================================
  * Unwrap helper for optional types.
  * cc_unwrap_opt(opt) - returns value or aborts if none.
@@ -81,10 +234,20 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 #include <stdlib.h>
 
 #ifdef CC_PARSER_MODE
-/* For TCC parsing: cc_unwrap_opt(x) just yields x.u.value (parsable). */
-#define cc_unwrap_opt(opt) (opt).u.value
-#define cc_opt_value(opt) (opt).u.value
+/* For TCC parsing: cc_unwrap_opt(x) returns ._scalar for scalar assignment.
+   Direct struct field access like opt.u.value.x uses .u.value which has common fields. */
+#define cc_unwrap_opt(opt) (opt).u._scalar
+#define cc_opt_value(opt) (opt).u._scalar
 #else
+/* Real mode cc_some/cc_none - these are placeholder definitions.
+   The codegen pass rewrites cc_some(v) and cc_none() to typed versions
+   based on the enclosing function's return type.
+   Using compound literal with intptr_t cast as fallback. */
+#define cc_some(v) ({ \
+    __auto_type __cc_some_v = (v); \
+    (CCOptional_int){ .has = true, .u.value = (int)(intptr_t)&__cc_some_v }; \
+})
+#define cc_none() ((CCOptional_int){ .has = false })
 #define cc_unwrap_opt(opt) ({                                                   \
     __auto_type __cc_opt_tmp = (opt);                                           \
     if (!__cc_opt_tmp.has) {                                                    \

@@ -771,6 +771,87 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
             }
         }
+        /* Insert optional type declarations for custom types.
+           Each CC_DECL_OPTIONAL is inserted right before the first use of that specific
+           optional type, to ensure the underlying type is defined by then. */
+        if (cc__cg_optional_type_count > 0) {
+            /* Sort types by their first usage position (descending) so we can insert
+               from end to start without invalidating positions */
+            size_t type_positions[64];
+            for (size_t oi = 0; oi < cc__cg_optional_type_count; oi++) {
+                CCCodegenOptionalType* p = &cc__cg_optional_types[oi];
+                char pattern1[256], pattern2[256];
+                snprintf(pattern1, sizeof(pattern1), "CCOptional_%s", p->mangled_type);
+                snprintf(pattern2, sizeof(pattern2), "__CC_OPTIONAL(%s)", p->mangled_type);
+                const char* found1 = strstr(src_ufcs, pattern1);
+                const char* found2 = strstr(src_ufcs, pattern2);
+                size_t pos = src_ufcs_len;
+                if (found1 && (size_t)(found1 - src_ufcs) < pos) {
+                    pos = (size_t)(found1 - src_ufcs);
+                }
+                if (found2 && (size_t)(found2 - src_ufcs) < pos) {
+                    pos = (size_t)(found2 - src_ufcs);
+                }
+                /* Back up to start of line/function */
+                if (pos < src_ufcs_len) {
+                    size_t search_pos = pos;
+                    while (search_pos > 0) {
+                        size_t line_start = search_pos;
+                        while (line_start > 0 && src_ufcs[line_start - 1] != '\n') line_start--;
+                        const char* line = src_ufcs + line_start;
+                        while (*line == ' ' || *line == '\t') line++;
+                        if ((strncmp(line, "int ", 4) == 0 || strncmp(line, "void ", 5) == 0 ||
+                             strncmp(line, "static ", 7) == 0 || strncmp(line, "CCOptional_", 11) == 0 ||
+                             strncmp(line, "__CC_OPTIONAL", 13) == 0 || strncmp(line, "typedef ", 8) == 0) &&
+                            strchr(line, '(') != NULL) {
+                            pos = line_start;
+                            break;
+                        }
+                        if (line_start == 0) break;
+                        search_pos = line_start - 1;
+                    }
+                }
+                type_positions[oi] = pos;
+            }
+            
+            /* Sort indices by position descending (bubble sort is fine for small N) */
+            size_t sorted_indices[64];
+            for (size_t i = 0; i < cc__cg_optional_type_count; i++) sorted_indices[i] = i;
+            for (size_t i = 0; i < cc__cg_optional_type_count; i++) {
+                for (size_t j = i + 1; j < cc__cg_optional_type_count; j++) {
+                    if (type_positions[sorted_indices[j]] > type_positions[sorted_indices[i]]) {
+                        size_t tmp = sorted_indices[i];
+                        sorted_indices[i] = sorted_indices[j];
+                        sorted_indices[j] = tmp;
+                    }
+                }
+            }
+            
+            /* Insert each declaration at its position (from end to start) */
+            for (size_t si = 0; si < cc__cg_optional_type_count; si++) {
+                size_t oi = sorted_indices[si];
+                size_t insert_offset = type_positions[oi];
+                if (insert_offset >= src_ufcs_len) continue;
+                
+                CCCodegenOptionalType* p = &cc__cg_optional_types[oi];
+                char decl[512];
+                snprintf(decl, sizeof(decl), 
+                    "/* CC optional for %s */\nCC_DECL_OPTIONAL(CCOptional_%s, %s)\n",
+                    p->raw_type, p->mangled_type, p->raw_type);
+                
+                /* Build new source: prefix + decl + suffix */
+                char* new_src = NULL;
+                size_t new_len = 0, new_cap = 0;
+                cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, insert_offset);
+                cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, decl);
+                cc__sb_append_local(&new_src, &new_len, &new_cap, 
+                                    src_ufcs + insert_offset, src_ufcs_len - insert_offset);
+                
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = new_src;
+                src_ufcs_len = new_len;
+            }
+        }
         /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on enclosing function return type */
         {
             char* rew_infer = cc__rewrite_inferred_result_constructors(src_ufcs, src_ufcs_len);

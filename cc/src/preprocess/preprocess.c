@@ -880,9 +880,10 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
                         if (mangled[0]) {
                             /* Emit everything up to ty_start */
                             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            /* Emit CCOptional_T */
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCOptional_");
+                            /* Emit __CC_OPTIONAL(T) - macro handles parser vs real mode */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_OPTIONAL(");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                             last_emit = i + 1; /* skip past '?' */
                         }
                     }
@@ -893,6 +894,135 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
         i++; col++;
     }
     
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite optional constructors for parser mode:
+   - `cc_some_CCOptional_T(v)` -> `__CC_OPTIONAL_SOME(T, v)`
+   - `cc_none_CCOptional_T()` -> `__CC_OPTIONAL_NONE(T)`
+   This allows custom types to work during TCC parsing. */
+static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Check for cc_some_CCOptional_ or cc_none_CCOptional_ patterns */
+        const char* some_prefix = "cc_some_CCOptional_";
+        const char* none_prefix = "cc_none_CCOptional_";
+        size_t some_len = 19;  /* strlen("cc_some_CCOptional_") */
+        size_t none_len = 19;  /* strlen("cc_none_CCOptional_") */
+        
+        int is_some = (i + some_len < n && strncmp(src + i, some_prefix, some_len) == 0);
+        int is_none = (i + none_len < n && strncmp(src + i, none_prefix, none_len) == 0);
+        
+        if (is_some || is_none) {
+            /* Make sure this isn't part of a longer identifier */
+            if (i > 0 && cc_is_ident_char(src[i - 1])) {
+                i++;
+                continue;
+            }
+            
+            size_t prefix_len = is_some ? some_len : none_len;
+            size_t j = i + prefix_len;
+            
+            /* Extract the type name (identifier after prefix) */
+            size_t type_start = j;
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            size_t type_end = j;
+            
+            /* Skip whitespace to find '(' */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != '(') {
+                i++;
+                continue;
+            }
+            
+            size_t paren_open = j;
+            j++;  /* skip '(' */
+            
+            /* Find matching ')' */
+            int paren_depth = 1;
+            size_t arg_start = j;
+            int in_s = 0, in_c = 0;
+            while (j < n && paren_depth > 0) {
+                char ch = src[j];
+                if (in_s) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
+                if (in_c) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                if (ch == '"') { in_s = 1; j++; continue; }
+                if (ch == '\'') { in_c = 1; j++; continue; }
+                if (ch == '(') paren_depth++;
+                else if (ch == ')') paren_depth--;
+                j++;
+            }
+            
+            if (paren_depth != 0) {
+                i++;
+                continue;
+            }
+            
+            size_t paren_close = j - 1;  /* position of ')' */
+            size_t arg_end = paren_close;
+            
+            /* Extract type name */
+            size_t type_len = type_end - type_start;
+            if (type_len == 0 || type_len >= 256) {
+                i++;
+                continue;
+            }
+            
+            char type_name[256];
+            memcpy(type_name, src + type_start, type_len);
+            type_name[type_len] = '\0';
+            
+            /* Emit everything up to this pattern */
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            
+            if (is_some) {
+                /* cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v) */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_OPTIONAL_SOME(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                /* Copy the argument */
+                cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_end - arg_start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+            } else {
+                /* cc_none_CCOptional_T() -> __CC_OPTIONAL_NONE(T) */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_OPTIONAL_NONE(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+            }
+            
+            last_emit = j;  /* skip past ')' */
+            i = j;
+            continue;
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL;  /* No rewrites done */
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }
@@ -1871,11 +2001,25 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for CCOptional_ type declarations */
-        if (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0) {
+        /* Look for CCOptional_ or __CC_OPTIONAL(T) type declarations */
+        int is_cc_optional = (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0);
+        int is_macro_optional = (c == '_' && i + 14 < n && strncmp(src + i, "__CC_OPTIONAL(", 14) == 0);
+        
+        if (is_cc_optional || is_macro_optional) {
             /* Skip to end of type name */
-            i += 11;
-            while (i < n && cc_is_ident_char(src[i])) i++;
+            if (is_cc_optional) {
+                i += 11;
+                while (i < n && cc_is_ident_char(src[i])) i++;
+            } else {
+                /* __CC_OPTIONAL(T) - skip to closing paren */
+                i += 14;
+                int paren_depth = 1;
+                while (i < n && paren_depth > 0) {
+                    if (src[i] == '(') paren_depth++;
+                    else if (src[i] == ')') paren_depth--;
+                    i++;
+                }
+            }
             /* Skip whitespace */
             while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n')) i++;
             /* Check for variable name (not function) */
@@ -2778,19 +2922,25 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3u;
     size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3u_n;
 
-    /* Rewrite T? -> CCOptional_T */
+    /* Rewrite T? -> __CC_OPTIONAL(T) */
     char* rewritten_opt = cc__rewrite_optional_types(cur3s, cur3s_n, input_path);
     const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
     size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
+
+    /* Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v)
+       and cc_none_CCOptional_T() -> __CC_OPTIONAL_NONE(T) for parser mode */
+    char* rewritten_opt_ctor = cc__rewrite_optional_constructors(cur4, cur4_n);
+    const char* cur4c = rewritten_opt_ctor ? rewritten_opt_ctor : cur4;
+    size_t cur4c_n = rewritten_opt_ctor ? strlen(rewritten_opt_ctor) : cur4_n;
 
     /* NOTE: cc_ok(v)/cc_err(e) inference moved to codegen pass (pass_type_syntax.c)
        so that the simpler macro definitions work during TCC parsing.
        The codegen pass rewrites cc_ok(v) -> cc_ok_CCResult_T_E(v) after parsing. */
 
     /* Rewrite T!E -> __CC_RESULT(T, E) */
-    char* rewritten_res = cc__rewrite_result_types(cur4, cur4_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4_n;
+    char* rewritten_res = cc__rewrite_result_types(cur4c, cur4c_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4c;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
 
     /* Rewrite try expr -> cc_try(expr) */
     char* rewritten_try = cc__rewrite_try_exprs(cur5, cur5_n);
@@ -2805,7 +2955,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_opt);
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
         free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
@@ -2888,6 +3038,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_res);
+    free(rewritten_opt_ctor);
     free(rewritten_opt);
     free(rewritten_stdio);
     free(rewritten_ufcs);

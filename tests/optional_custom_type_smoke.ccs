@@ -1,0 +1,87 @@
+// Test: Custom struct type with optional syntax T?
+// This verifies that user-defined types work with the optional type system.
+#include <stdio.h>
+#include <ccc/cc_runtime.cch>
+
+// Define a custom struct
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+// Function returning optional custom type
+Point? find_point(int ok) {
+    if (ok) {
+        Point p = {42, 17};
+        return cc_some_CCOptional_Point(p);
+    }
+    return cc_none_CCOptional_Point();
+}
+
+// Another custom type to test multiple custom optionals
+typedef struct {
+    float r;
+    float g;
+    float b;
+} Color;
+
+Color? find_color(int ok) {
+    if (ok) {
+        Color c = {1.0f, 0.5f, 0.0f};
+        return cc_some_CCOptional_Color(c);
+    }
+    return cc_none_CCOptional_Color();
+}
+
+int main(void) {
+    // Test 1: Optional custom type - none case
+    Point? p1 = find_point(0);
+    if (p1.has) {
+        printf("FAIL: p1 should be none\n");
+        return 1;
+    }
+    printf("OK: p1 is none as expected\n");
+
+    // Test 2: Optional custom type - some case
+    Point? p2 = find_point(1);
+    if (!p2.has) {
+        printf("FAIL: p2 should have value\n");
+        return 1;
+    }
+    if (p2.u.value.x != 42 || p2.u.value.y != 17) {
+        printf("FAIL: p2 should be (42, 17), got (%d, %d)\n", p2.u.value.x, p2.u.value.y);
+        return 1;
+    }
+    printf("OK: p2 has correct value (42, 17)\n");
+
+    // Test 3: Another custom type - none case
+    Color? c1 = find_color(0);
+    if (c1.has) {
+        printf("FAIL: c1 should be none\n");
+        return 1;
+    }
+    printf("OK: c1 is none as expected\n");
+
+    // Test 4: Another custom type - some case
+    Color? c2 = find_color(1);
+    if (!c2.has) {
+        printf("FAIL: c2 should have value\n");
+        return 1;
+    }
+    if (c2.u.value.r != 1.0f || c2.u.value.g != 0.5f || c2.u.value.b != 0.0f) {
+        printf("FAIL: c2 should be (1.0, 0.5, 0.0)\n");
+        return 1;
+    }
+    printf("OK: c2 has correct value (1.0, 0.5, 0.0)\n");
+
+    // Test 5: Direct construction
+    Point? p3 = cc_some_CCOptional_Point((Point){100, 200});
+    if (!p3.has || p3.u.value.x != 100) {
+        printf("FAIL: p3 direct construction failed\n");
+        return 1;
+    }
+    printf("OK: p3 direct construction works\n");
+
+    printf("ALL TESTS PASSED\n");
+    return 0;
+}

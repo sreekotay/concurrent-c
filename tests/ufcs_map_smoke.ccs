@@ -12,8 +12,8 @@ int main(void) {
     m.insert(2, 200);
     m.insert(3, 300);
     
-    CCOptional_int val = m.get(2);
-    if (!val.has || val.u.value != 200) {
+    int? val = m.get(2);
+    if (!val.has || *val != 200) {
         printf("FAIL: get(2) expected 200\n");
         return 1;
     }
@@ -26,7 +26,7 @@ int main(void) {
     }
     
     /* Verify removed */
-    CCOptional_int after = m.get(2);
+    int? after = m.get(2);
     if (after.has) {
         printf("FAIL: get(2) should be None after remove\n");
         return 1;

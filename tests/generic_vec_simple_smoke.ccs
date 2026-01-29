@@ -24,12 +24,12 @@ int main(void) {
     }
     
     /* Test optional-returning get with explicit call */
-    CCOptional_int val = Vec_int_get(&v, 0);
+    int? val = Vec_int_get(&v, 0);
     if (!val.has) {
         fprintf(stderr, "FAIL: get returned None\n");
         return 3;
     }
-    if (val.u.value != 10) {
+    if (*val != 10) {
         fprintf(stderr, "FAIL: expected 10\n");
         return 4;
     }

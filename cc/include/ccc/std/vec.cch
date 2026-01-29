@@ -102,7 +102,7 @@
         if (!v || v->len == 0) return result;                                     \
         v->len--;                                                                 \
         result.has = 1;                                                           \
-        result.u.value = v->data[v->len];                                         \
+        CC_OPT_SET_VALUE(result, v->data[v->len]);                                \
         return result;                                                            \
     }                                                                             \
                                                                                   \
@@ -111,7 +111,7 @@
         OptT result = {0};                                                        \
         if (!v || i >= v->len) return result;                                     \
         result.has = 1;                                                           \
-        result.u.value = v->data[i];                                              \
+        CC_OPT_SET_VALUE(result, v->data[i]);                                     \
         return result;                                                            \
     }                                                                             \
                                                                                   \
@@ -198,14 +198,14 @@
         if (!v || v->len == 0) return result;                                     \
         v->len--;                                                                 \
         result.has = 1;                                                           \
-        result.u.value = v->data[v->len];                                         \
+        CC_OPT_SET_VALUE(result, v->data[v->len]);                                \
         return result;                                                            \
     }                                                                             \
     static inline OptT Name##_get(Name *v, size_t i) {                            \
         OptT result = {0};                                                        \
         if (!v || i >= v->len) return result;                                     \
         result.has = 1;                                                           \
-        result.u.value = v->data[i];                                              \
+        CC_OPT_SET_VALUE(result, v->data[i]);                                     \
         return result;                                                            \
     }                                                                             \
     static inline T* Name##_get_ptr(Name *v, size_t i) {                          \

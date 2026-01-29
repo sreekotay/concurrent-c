@@ -21,8 +21,10 @@ int main(void) {
         printf("FAIL: x should have value\n");
         return 1;
     }
-    if (x.u.value != 42) {
-        printf("FAIL: x.u.value should be 42, got %d\n", x.u.value);
+    // Use cc_unwrap_opt for scalar access (compatible with parser mode)
+    int val = *x;  // unwrap syntax
+    if (val != 42) {
+        printf("FAIL: value should be 42, got %d\n", val);
         return 1;
     }
     
