@@ -1,0 +1,6 @@
+slice len: 42
+opt.has: 0
+opt.u.value.len: 100
+data.len: 100
+inner.len: 100
+All optional slice tests passed!

@@ -1,0 +1,86 @@
+// Test: @defer(err) and @defer(ok) - conditional defer
+#include <stdio.h>
+
+int g_err_cleanup_ran = 0;
+int g_ok_cleanup_ran = 0;
+int g_always_cleanup_ran = 0;
+
+void err_cleanup(void) {
+    g_err_cleanup_ran = 1;
+    printf("err cleanup ran\n");
+}
+
+void ok_cleanup(void) {
+    g_ok_cleanup_ran = 1;
+    printf("ok cleanup ran\n");
+}
+
+void always_cleanup(void) {
+    g_always_cleanup_ran = 1;
+    printf("always cleanup ran\n");
+}
+
+int!CCError succeed_with_defers(void) {
+    @defer always_cleanup();
+    @defer(err) err_cleanup();
+    @defer(ok) ok_cleanup();
+    
+    return cc_ok(42);
+}
+
+int!CCError fail_with_defers(void) {
+    @defer always_cleanup();
+    @defer(err) err_cleanup();
+    @defer(ok) ok_cleanup();
+    
+    return cc_err(CC_ERR_NOT_FOUND, "intentional failure");
+}
+
+int main(void) {
+    // Test 1: Success path - @defer(ok) should run, @defer(err) should NOT run
+    printf("=== Test 1: Success path ===\n");
+    g_err_cleanup_ran = 0;
+    g_ok_cleanup_ran = 0;
+    g_always_cleanup_ran = 0;
+    
+    int!CCError r1 = succeed_with_defers();
+    
+    if (!g_always_cleanup_ran) {
+        printf("ERROR: @defer should have run\n");
+        return 1;
+    }
+    if (!g_ok_cleanup_ran) {
+        printf("ERROR: @defer(ok) should have run on success\n");
+        return 1;
+    }
+    if (g_err_cleanup_ran) {
+        printf("ERROR: @defer(err) should NOT have run on success\n");
+        return 1;
+    }
+    printf("Test 1 passed\n\n");
+    
+    // Test 2: Error path - @defer(err) should run, @defer(ok) should NOT run
+    printf("=== Test 2: Error path ===\n");
+    g_err_cleanup_ran = 0;
+    g_ok_cleanup_ran = 0;
+    g_always_cleanup_ran = 0;
+    
+    int!CCError r2 = fail_with_defers();
+    
+    if (!g_always_cleanup_ran) {
+        printf("ERROR: @defer should have run\n");
+        return 1;
+    }
+    if (!g_err_cleanup_ran) {
+        printf("ERROR: @defer(err) should have run on error\n");
+        return 1;
+    }
+    if (g_ok_cleanup_ran) {
+        printf("ERROR: @defer(ok) should NOT have run on error\n");
+        return 1;
+    }
+    printf("Test 2 passed\n\n");
+    
+    printf("All conditional defer tests passed!\n");
+    return 0;
+}

@@ -93,7 +93,16 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
  *   r.u.error  - the error value (when ok is false)
  *
  * Uses named union 'u' for TCC compatibility.
+ *
+ * UFCS methods (via Type_method pattern):
+ *   r.unwrap()    - returns value or aborts if error
+ *   r.is_ok()     - returns true if success
+ *   r.is_err()    - returns true if error
+ *   r.unwrap_or(default) - returns value or default if error
  */
+#include <stdio.h>
+#include <stdlib.h>
+
 #define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                                  \
     typedef struct name {                                                           \
         bool ok;                                                                    \
@@ -110,6 +119,23 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
         r.ok = false;                                                               \
         r.u.error = e;                                                              \
         return r;                                                                   \
+    }                                                                               \
+    /* UFCS method: r.unwrap() -> name##_unwrap(r) */                               \
+    static inline OkType name##_unwrap(name r) {                                    \
+        if (!r.ok) {                                                                \
+            fprintf(stderr, "CC: unwrap failed on %s at %s:%d\n",                   \
+                    #name, __FILE__, __LINE__);                                     \
+            abort();                                                                \
+        }                                                                           \
+        return r.u.value;                                                           \
+    }                                                                               \
+    /* UFCS method: r.is_ok() -> name##_is_ok(r) */                                 \
+    static inline bool name##_is_ok(name r) { return r.ok; }                        \
+    /* UFCS method: r.is_err() -> name##_is_err(r) */                               \
+    static inline bool name##_is_err(name r) { return !r.ok; }                      \
+    /* UFCS method: r.unwrap_or(default) -> name##_unwrap_or(r, default) */         \
+    static inline OkType name##_unwrap_or(name r, OkType def) {                     \
+        return r.ok ? r.u.value : def;                                              \
     }
 
 /* Generic cc_ok / cc_err macros for results */
@@ -148,6 +174,16 @@ static inline CCResult_void_CCError cc_err_CCResult_void_CCError(CCError e) {
     r.u.error = e;
     return r;
 }
+/* UFCS methods for void result */
+static inline void CCResult_void_CCError_unwrap(CCResult_void_CCError r) {
+    if (!r.ok) {
+        fprintf(stderr, "CC: unwrap failed on CCResult_void_CCError at %s:%d\n",
+                __FILE__, __LINE__);
+        abort();
+    }
+}
+static inline bool CCResult_void_CCError_is_ok(CCResult_void_CCError r) { return r.ok; }
+static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { return !r.ok; }
 #endif
 
 /* cc_try macro: unwrap T!E or return error.
@@ -205,6 +241,23 @@ static inline __CCResultGeneric __cc_result_generic_err(void) {
     __CCResultGeneric r = {0};
     r.ok = 0;
     return r;
+}
+
+/* Generic UFCS methods for parser mode - code compiles but doesn't run.
+   These handle r.unwrap(), r.is_ok(), r.is_err(), r.unwrap_or(default) via UFCS. */
+static inline intptr_t __CCResultGeneric_unwrap(__CCResultGeneric r) {
+    (void)r;
+    return 0;
+}
+static inline bool __CCResultGeneric_is_ok(__CCResultGeneric r) {
+    return r.ok;
+}
+static inline bool __CCResultGeneric_is_err(__CCResultGeneric r) {
+    return !r.ok;
+}
+static inline intptr_t __CCResultGeneric_unwrap_or(__CCResultGeneric r, intptr_t def) {
+    (void)r; (void)def;
+    return 0;
 }
 
 /* Macro-based ok/err that accept any type - parser mode just validates types.
@@ -272,5 +325,75 @@ typedef __CCResultGeneric CCResult_void_CCError;
  *       return cc_err(cc_error(CC_ERR_NOT_FOUND, "not found"));
  *   }
  */
+
+/*
+ * Result value accessors - for extracting values from results.
+ *
+ * cc_is_ok(res)        - Check if result is ok (same as res.ok)
+ * cc_is_err(res)       - Check if result is error
+ * cc_unwrap(res)       - Get value, abort if error (for primitives)
+ * cc_unwrap_as(res, T) - Get value cast to type T (for struct values)
+ * cc_unwrap_err(res)   - Get error value
+ *
+ * The _as variants are needed when the value is a struct and you want
+ * to access its fields:
+ *
+ *   MyData!MyError res = get_data();
+ *   if (cc_is_ok(res)) {
+ *       MyData d = cc_unwrap_as(res, MyData);
+ *       use(d.x, d.y);
+ *   }
+ *
+ * Or use the if @try pattern:
+ *   if @try (MyData d = res) {
+ *       use(d.x, d.y);
+ *   }
+ */
+#define cc_is_ok(res) ((res).ok)
+#define cc_is_err(res) (!(res).ok)
+
+/* cc_unwrap - get value from result, abort if error.
+   For struct values, use cc_unwrap_as(res, Type) to cast to correct type.
+   For struct errors, use cc_unwrap_err_as(res, Type). */
+#ifdef CC_PARSER_MODE
+#define cc_unwrap(res) ((res).u.value)
+#define cc_unwrap_as(res, T) (*(T*)(void*)&(res).u.value)
+#define cc_unwrap_err(res) ((res).u.error)
+#define cc_unwrap_err_as(res, T) (*(T*)(void*)&(res).u.error)
+#else
+/* Real mode - actual unwrap with abort on error */
+#define cc_unwrap(res) ({ \
+    __typeof__(res) __r = (res); \
+    if (!__r.ok) { \
+        fprintf(stderr, "cc_unwrap called on error result\n"); \
+        abort(); \
+    } \
+    __r.u.value; \
+})
+#define cc_unwrap_as(res, T) ({ \
+    __typeof__(res) __r = (res); \
+    if (!__r.ok) { \
+        fprintf(stderr, "cc_unwrap_as called on error result\n"); \
+        abort(); \
+    } \
+    *(T*)(void*)&__r.u.value; \
+})
+#define cc_unwrap_err(res) ({ \
+    __typeof__(res) __r = (res); \
+    if (__r.ok) { \
+        fprintf(stderr, "cc_unwrap_err called on ok result\n"); \
+        abort(); \
+    } \
+    __r.u.error; \
+})
+#define cc_unwrap_err_as(res, T) ({ \
+    __typeof__(res) __r = (res); \
+    if (__r.ok) { \
+        fprintf(stderr, "cc_unwrap_err_as called on ok result\n"); \
+        abort(); \
+    } \
+    *(T*)(void*)&__r.u.error; \
+})
+#endif
 
 #endif /* CC_RESULT_H */

@@ -20,7 +20,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sched.h>
-#include "zlib_wrapper.h"
+#include <zlib.h>
 
 /* ============================================================================
  * Configuration
@@ -94,8 +94,8 @@ Result* compress_block(Block* blk, int level) {
     res->last = blk->last;
     res->ulen = blk->data.len;
     
-    /* Calculate CRC of input (input slice has arena provenance - safe to read) */
-    res->crc = zw_crc32(0UL, (const unsigned char*)blk->data.ptr, blk->data.len);
+    /* Calculate CRC of input using zlib directly */
+    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
     
     /* Allocate output buffer with malloc - must outlive until writer consumes */
     size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
@@ -106,20 +106,61 @@ Result* compress_block(Block* blk, int level) {
         exit(1);
     }
     
-    /* Compress using wrapper */
-    size_t compressed_len = zw_deflate_block(
-        (const unsigned char*)blk->data.ptr, blk->data.len,
-        out_buf, max_out,
-        (const unsigned char*)blk->dict.ptr, blk->dict.len,
-        level, blk->last
-    );
+    /* Write gzip header (10 bytes) */
+    unsigned char header[10] = {
+        0x1f, 0x8b,  /* Magic */
+        0x08,        /* Deflate method */
+        0x00,        /* Flags (none) */
+        0, 0, 0, 0,  /* Mtime (not set) */
+        0x00,        /* Extra flags */
+        0x03         /* OS = Unix */
+    };
+    memcpy(out_buf, header, 10);
+    size_t pos = 10;
+
+    /* Compress with zlib (raw deflate, -15 window bits) */
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
     
-    if (compressed_len == 0 && blk->data.len > 0) {
+    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+    if (ret != Z_OK) {
+        free(out_buf);
+        free(res);
+        fprintf(stderr, "pigz_cc: deflateInit2 failed\n");
+        exit(1);
+    }
+    
+    strm.next_in = (Bytef*)blk->data.ptr;
+    strm.avail_in = (uInt)blk->data.len;
+    strm.next_out = out_buf + pos;
+    strm.avail_out = (uInt)(max_out - pos - 8);  /* Reserve space for trailer */
+    
+    ret = deflate(&strm, Z_FINISH);
+    size_t deflate_len = strm.total_out;
+    deflateEnd(&strm);
+    
+    if (ret != Z_STREAM_END) {
         free(out_buf);
         free(res);
         fprintf(stderr, "pigz_cc: deflate failed\n");
         exit(1);
     }
+    
+    pos += deflate_len;
+    
+    /* Write gzip trailer: CRC32 (4 bytes) + original size mod 2^32 (4 bytes) */
+    unsigned long crc_val = res->crc;
+    size_t in_len = blk->data.len;
+    out_buf[pos++] = crc_val & 0xff;
+    out_buf[pos++] = (crc_val >> 8) & 0xff;
+    out_buf[pos++] = (crc_val >> 16) & 0xff;
+    out_buf[pos++] = (crc_val >> 24) & 0xff;
+    out_buf[pos++] = in_len & 0xff;
+    out_buf[pos++] = (in_len >> 8) & 0xff;
+    out_buf[pos++] = (in_len >> 16) & 0xff;
+    out_buf[pos++] = (in_len >> 24) & 0xff;
+    
+    size_t compressed_len = pos;
     
     /* Create heap-owned slice with proper provenance:
      * - alloc_id: unique counter (heap allocation tracking)
@@ -172,7 +213,7 @@ void write_gzip_trailer(CCFile* out, unsigned long crc, size_t ulen) {
 
 /* CRC-32 combination for parallel computation */
 unsigned long crc32_combine_cc(unsigned long crc1, unsigned long crc2, size_t len2) {
-    return zw_crc32_combine(crc1, crc2, len2);
+    return crc32_combine(crc1, crc2, (z_off_t)len2);
 }
 
 /* ============================================================================

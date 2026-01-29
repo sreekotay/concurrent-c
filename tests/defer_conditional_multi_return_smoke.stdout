@@ -1,0 +1,16 @@
+Testing path 1:
+cleanup called, resource=42, count=1
+  error code=1
+  cleanup_count=1 (expected 1)
+Testing path 2:
+cleanup called, resource=100, count=1
+  error code=2
+  cleanup_count=1 (expected 1)
+Testing path 3:
+cleanup called, resource=200, count=1
+  error code=3
+  cleanup_count=1 (expected 1)
+Testing success path:
+  value=200
+  cleanup_count=0 (expected 0 - defer(err) shouldn't run on success)
+all tests passed

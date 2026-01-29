@@ -25,6 +25,8 @@ Concurrent-C adds ~40 new language constructs. Here's a quick overview:
 | `catch` | Handle errors from try blocks or catch expressions | `try { op(); } catch (Error e) { }` |
 | `spawn` | Create a new task (only valid inside `@nursery`) | `spawn (worker_task());` |
 | `defer` | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();` |
+| `defer(err)` | Cleanup only if returning error (with `@defer(err)`) | `@defer(err) free(ptr);` |
+| `defer(ok)` | Cleanup only if returning success (with `@defer(ok)`) | `@defer(ok) commit();` |
 | `unsafe` | Disable safety checks in a block (e.g., for raw pointer casts) | `unsafe { ptr_cast(); }` |
 | `comptime` | Mark code for compile-time evaluation (with `@comptime if`) | `@comptime if (DEBUG) { }` |
 
@@ -71,8 +73,8 @@ These are only reserved in specific contexts, so they can be used as identifiers
 |------|---------|---------|
 | `await expr` | Suspend until task completes, unwrap result | `int result = await fetch();` |
 | `try expr` | Unwrap Result, propagate error if present | `File f = try open(path);` |
+| `if @try (T x = expr)` | Bind and unwrap result in conditional | `if @try (int x = parse(s)) { use(x); }` |
 | `spawn (expr)` | Create new task (only valid in `@nursery`) | `spawn (handler(req));` |
-| `result` conditional | Bind and unwrap in conditional (implicit try) | `if (try int x = parse(s)) { use(x); }` |
 
 ### Block Forms (2)
 
@@ -99,6 +101,17 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 | `cc_cancel()` | Cancel current task or nursery | `if (timeout) cc_cancel();` |
 | `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }` |
 | `cc_is_cancelled()` | Check if current task is cancelled | `if (cc_is_cancelled()) return;` |
+
+### Result Methods (UFCS)
+
+Result types (`T!E`) support these methods via UFCS:
+
+| Method | Purpose | Example |
+|--------|---------|---------|
+| `r.is_ok()` | Check if success | `if (r.is_ok()) { ... }` |
+| `r.is_err()` | Check if error | `if (r.is_err()) handle(r.u.error);` |
+| `r.unwrap()` | Get value or abort | `int v = r.unwrap();` |
+| `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);` |
 
 **C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. Short aliases (`String`, `Arena`, etc.) are only available when the user opts in via `#include <ccc/std/prelude.cch>` and defining `CC_ENABLE_SHORT_NAMES` before inclusion. Default is prefixed-only.
 
@@ -742,6 +755,39 @@ Surface syntax `x.value` maps to `x.u.value`; `x.error` maps to `x.u.error`.
 - If `ok == false` and `E` has a destructor, drop `u.error`
 - If the value was moved out via `try` or pattern match, no destructor runs for that arm
 
+**Result methods (UFCS):**
+
+Result types support the following methods via UFCS (Uniform Function Call Syntax):
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `r.is_ok()` | `bool` | Returns `true` if result is success |
+| `r.is_err()` | `bool` | Returns `true` if result is error |
+| `r.unwrap()` | `T` | Returns value if success, **aborts** if error |
+| `r.unwrap_or(default)` | `T` | Returns value if success, `default` if error |
+
+```c
+int!CCError parse(char[:] s);
+
+int!CCError r = parse("42");
+
+// Method-style access (UFCS)
+if (r.is_ok()) {
+    int v = r.unwrap();      // safe after is_ok() check
+    use(v);
+}
+
+// Or use unwrap_or for default value
+int v = r.unwrap_or(0);      // returns 0 on error
+
+// Direct field access still available
+if (r.ok) use(r.u.value);
+```
+
+**Lowering:** `r.unwrap()` → `CCResult_T_E_unwrap(r)`, etc.
+
+**Rule (unwrap panic):** Calling `.unwrap()` on an error result prints an error message and aborts. Use `.unwrap_or(default)` or check `.is_ok()` first if error is possible.
+
 ---
 
 ### 2.3 Type Precedence
@@ -1334,6 +1380,40 @@ arena_free(&a);  // BUG: thread may still be using s
 ```c
 Arena scratch = arena(kilobytes(64));
 @defer arena_free(&scratch);
+```
+
+**Conditional defer (error/success):**
+
+`@defer(err) stmt;` runs only if the function returns an error result.
+`@defer(ok) stmt;` runs only if the function returns a success result.
+
+These are useful for ownership transfer patterns where cleanup should only happen on error:
+
+```c
+Result*!IoError compress_block(Block* blk) {
+    Arena res_arena = cc_heap_arena(blk->data.len + 4096);
+    @defer(err) cc_heap_arena_free(&res_arena);  // cleanup on error only
+    
+    Result* res = cc_arena_alloc(&res_arena, sizeof(Result));
+    if (!res) return cc_err(CC_ERR_OUT_OF_MEMORY, "alloc failed");
+    
+    // ... fill in res ...
+    
+    return cc_ok(res);  // success: caller owns arena, no cleanup
+}
+```
+
+**Rule:** `@defer(err)` and `@defer(ok)` are only valid in functions returning a result type (`T!E`). Using them in a function returning a non-result type is a compile error.
+
+**Lowering:**
+
+```c
+// @defer(err) STMT;
+// lowers to (conceptual):
+@defer { if (__cc_returning_error) { STMT; } }
+
+// where __cc_returning_error is set by the return statement
+// before running defers when the return value is a result with .ok == false
 ```
 
 **Named defer:**
@@ -3061,7 +3141,7 @@ if (!x) {
 
 // With error values
 int!Error[~ <]? x = await recv(&error_rx);
-if (try int val = *x) {
+if @try (int val = *x) {
     process(val);
 } else if (is_none(*x)) {
     // Channel closed
@@ -3334,7 +3414,7 @@ Task<T!Cancelled> with_timeout_cancellable<T>(Task<T!Cancelled> t, Duration d);
     while (true) {
         int!Cancelled? x = await ch.recv_cancellable();
         
-        if (try err = x) {
+        if @try (err = x) {
             if (err == Cancelled) return cc_ok(void);  // task was cancelled
             return cc_err(void, err);
         }
@@ -4063,10 +4143,10 @@ enum IoError {
 ```c
 @async void process_with_backoff() {
     File! f = file_open(&arena, path, "r");
-    if (try File file = f) {
+    if @try (File file = f) {
         int retry_count = 0;
         while (char[:]? !IoError line_result = file.read_line(&arena)) {
-            if (try char[:]? line_opt = line_result) {
+            if @try (char[:]? line_opt = line_result) {
                 if (!line_opt) break;  // EOF (Ok(None))
                 char[:] line = *line_opt;
                 
@@ -4609,6 +4689,60 @@ int!IoError parse_file(char[:] path) {
 ```
 
 **Rule:** `try` is valid when the enclosing function returns `U!E` with a compatible error type.
+
+**Try-binding in conditionals:**
+
+`if @try (T x = expr)` unwraps a result and binds the value in the then-branch:
+
+```c
+int!CCError res = parse_int(s);
+if @try (int x = res) {
+    // x is the unwrapped value (int)
+    printf("parsed: %d\n", x);
+} else {
+    // res was an error - can access res.u.error here
+    printf("parse failed\n");
+}
+```
+
+This is syntactic sugar for:
+
+```c
+{
+    __typeof__(res) __tmp = (res);
+    if (__tmp.ok) {
+        int x = __tmp.u.value;
+        { /* then-branch */ }
+    } else {
+        { /* else-branch */ }
+    }
+}
+```
+
+**Rule:** `if @try (T x = expr)` is distinct from `try expr` in a condition. The latter is disallowed because `try expr` either succeeds (yielding a value that may not be boolean-testable) or returns from the function (making the else-branch unreachable).
+
+**Rule:** The variable `x` is only in scope within the then-branch. In the else-branch, the original result expression can be accessed if it was bound to a variable.
+
+**Use case:** Handling results inline without separate declaration and check:
+
+```c
+// Instead of:
+Result*!IoError res_val = compress_block(blk, level);
+if (res_val.is_ok()) {
+    Result* res = res_val.unwrap();
+    chan_send(results_tx, res);
+} else {
+    fprintf(stderr, "error\n");
+}
+
+// Write:
+Result*!IoError res_val = compress_block(blk, level);
+if @try (Result* res = res_val) {
+    chan_send(results_tx, res);
+} else {
+    fprintf(stderr, "error\n");
+}
+```
 
 ---
 
@@ -6780,7 +6914,7 @@ Desugars to:
     while (true) {
         char[:]?!IoError next_result = await iter.next(arena);
         
-        if (try char[:] chunk = next_result) {
+        if @try (char[:] chunk = next_result) {
             // Chunk is valid here; process it
             process(chunk);
             // No re-evaluation of condition; straight back to await

@@ -9,6 +9,7 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
+#include "visitor/pass_type_syntax.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
 #error "CC_TCC_EXT_AVAILABLE is required (patched TCC stub-AST required)."
@@ -1848,7 +1849,10 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (lowered_body && lowered_body[0] == '{') {
             char* lowered2 = cc__lower_nursery_spawn_in_body_text(d->id, lowered_body);
             if (!lowered2) lowered2 = strdup(lowered_body);
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered2 ? lowered2 : lowered_body);
+            /* Rewrite T!E result types in closure body */
+            char* lowered3 = cc__rewrite_result_types_text(ctx, lowered2, strlen(lowered2));
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered3 ? lowered3 : lowered2);
+            free(lowered3);
             free(lowered2);
         } else {
             cc__append_fmt(&defs, &defs_len, &defs_cap, "  (void)(%s);\n", lowered_body ? lowered_body : "0");

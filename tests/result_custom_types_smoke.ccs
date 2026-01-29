@@ -1,0 +1,55 @@
+// Test: Result types with custom structs using accessor macros
+// Verifies cc_unwrap_as() works for struct value types
+
+#include <stdio.h>
+
+// Custom struct types
+typedef struct {
+    int x;
+    int y;
+} MyData;
+
+typedef struct {
+    int code;
+    const char* msg;
+} MyError;
+
+// Function returning custom result type
+MyData!MyError create_data(int succeed) {
+    if (succeed) {
+        MyData d = {10, 20};
+        return cc_ok(d);
+    } else {
+        MyError e = {42, "failed"};
+        return cc_err(e);
+    }
+}
+
+
+int main(void) {
+    // Test 1: success case with cc_unwrap_as
+    MyData!MyError res1 = create_data(1);
+    if (cc_is_ok(res1)) {
+        MyData d = cc_unwrap_as(res1, MyData);
+        printf("ok: x=%d y=%d\n", d.x, d.y);
+    }
+    
+    // Test 2: error case with cc_unwrap_err_as
+    MyData!MyError res2 = create_data(0);
+    if (cc_is_err(res2)) {
+        MyError e = cc_unwrap_err_as(res2, MyError);
+        printf("err: code=%d\n", e.code);
+    }
+    
+    // Test 3: standard pattern with cc_is_ok + cc_unwrap_as
+    MyData!MyError res3 = create_data(1);
+    if (cc_is_ok(res3)) {
+        MyData data = cc_unwrap_as(res3, MyData);
+        printf("unwrap: x=%d y=%d\n", data.x, data.y);
+    } else {
+        printf("unwrap: error\n");
+    }
+    
+    printf("all tests passed\n");
+    return 0;
+}

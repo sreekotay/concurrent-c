@@ -1,0 +1,11 @@
+=== Test 1: Success path ===
+ok cleanup ran
+always cleanup ran
+Test 1 passed
+
+=== Test 2: Error path ===
+err cleanup ran
+always cleanup ran
+Test 2 passed
+
+All conditional defer tests passed!

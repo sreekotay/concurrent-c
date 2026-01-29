@@ -1,0 +1,4 @@
+ok: x=10 y=20
+err: code=42
+unwrap: x=10 y=20
+all tests passed

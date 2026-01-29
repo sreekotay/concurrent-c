@@ -29,6 +29,11 @@ if [ ! -f ./pigz_cc ]; then
     exit 1
 fi
 
+if [ ! -f ./pigz_idiomatic ]; then
+    echo "Warning: ./pigz_idiomatic not found, skipping idiomatic benchmark."
+    SKIP_IDIOMATIC=1
+fi
+
 # Generate test data
 echo "Generating ${DATA_SIZE_MB}MB test data..."
 dd if=/dev/urandom of=bench_input.bin bs=1M count=$DATA_SIZE_MB 2>/dev/null
@@ -67,6 +72,9 @@ run_benchmark() {
 # Run benchmarks
 run_benchmark "Original pigz (pthread)" "./pigz -k -p $WORKERS"
 run_benchmark "CC pigz (Concurrent-C)"  "./pigz_cc -k -p $WORKERS"
+if [ -z "$SKIP_IDIOMATIC" ]; then
+    run_benchmark "CC pigz Idiomatic (T!E)" "./pigz_idiomatic"
+fi
 
 # Verify correctness
 echo "=== Correctness Check ==="
@@ -90,10 +98,28 @@ else
     echo "CC:       FAIL"
 fi
 
+if [ -z "$SKIP_IDIOMATIC" ]; then
+    ./pigz_idiomatic bench_verify.bin
+    mv bench_verify.bin.gz idiomatic.gz
+    gunzip -c idiomatic.gz > idiomatic_decomp.bin
+    if cmp -s bench_verify.bin idiomatic_decomp.bin; then
+        echo "Idiomatic: PASS (decompresses correctly)"
+    else
+        echo "Idiomatic: FAIL"
+    fi
+    rm -f idiomatic.gz idiomatic_decomp.bin
+fi
+
 echo ""
 echo "Compressed sizes:"
 echo "  Original: $(wc -c < orig.gz) bytes"
 echo "  CC:       $(wc -c < cc.gz) bytes"
+if [ -z "$SKIP_IDIOMATIC" ]; then
+    cp bench_input.bin bench_verify.bin
+    ./pigz_idiomatic bench_verify.bin
+    echo "  Idiomatic: $(wc -c < bench_verify.bin.gz) bytes"
+    rm -f bench_verify.bin.gz
+fi
 
 # Cleanup
 rm -f bench_input.bin bench_verify.bin bench_test.bin

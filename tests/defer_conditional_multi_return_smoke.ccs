@@ -1,0 +1,118 @@
+// Test: @defer(err) must run on ALL error returns, not just the first
+// This was a real bug where the defer list was cleared after the first return
+
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    int code;
+} MyError;
+
+typedef struct {
+    int value;
+} MyData;
+
+// Track cleanup calls
+static int cleanup_count = 0;
+
+void do_cleanup(int* resource) {
+    cleanup_count++;
+    printf("cleanup called, resource=%d, count=%d\n", *resource, cleanup_count);
+    *resource = -1; // Mark as cleaned
+}
+
+// Function with multiple error return paths
+// @defer(err) should run on ALL error returns
+MyData!MyError multi_return_func(int path) {
+    int resource = 42;
+    @defer(err) do_cleanup(&resource);
+    
+    // Early return 1
+    if (path == 1) {
+        MyError e = {1};
+        return cc_err(e);
+    }
+    
+    // Some work...
+    resource = 100;
+    
+    // Early return 2 (must also trigger @defer(err))
+    if (path == 2) {
+        MyError e = {2};
+        return cc_err(e);
+    }
+    
+    // More work...
+    resource = 200;
+    
+    // Early return 3 (must also trigger @defer(err))
+    if (path == 3) {
+        MyError e = {3};
+        return cc_err(e);
+    }
+    
+    // Success path - @defer(err) should NOT run
+    MyData d = {resource};
+    return cc_ok(d);
+}
+
+int main(void) {
+    cleanup_count = 0;
+    
+    // Test path 1 - first error return
+    printf("Testing path 1:\n");
+    MyData!MyError r1 = multi_return_func(1);
+    if (cc_is_err(r1)) {
+        MyError e = cc_unwrap_err_as(r1, MyError);
+        printf("  error code=%d\n", e.code);
+    }
+    printf("  cleanup_count=%d (expected 1)\n", cleanup_count);
+    if (cleanup_count != 1) {
+        printf("FAIL: cleanup not called on path 1\n");
+        return 1;
+    }
+    
+    // Test path 2 - second error return (this was the bug!)
+    printf("Testing path 2:\n");
+    cleanup_count = 0;
+    MyData!MyError r2 = multi_return_func(2);
+    if (cc_is_err(r2)) {
+        MyError e = cc_unwrap_err_as(r2, MyError);
+        printf("  error code=%d\n", e.code);
+    }
+    printf("  cleanup_count=%d (expected 1)\n", cleanup_count);
+    if (cleanup_count != 1) {
+        printf("FAIL: cleanup not called on path 2 (defer cleared after first return bug!)\n");
+        return 1;
+    }
+    
+    // Test path 3 - third error return
+    printf("Testing path 3:\n");
+    cleanup_count = 0;
+    MyData!MyError r3 = multi_return_func(3);
+    if (cc_is_err(r3)) {
+        MyError e = cc_unwrap_err_as(r3, MyError);
+        printf("  error code=%d\n", e.code);
+    }
+    printf("  cleanup_count=%d (expected 1)\n", cleanup_count);
+    if (cleanup_count != 1) {
+        printf("FAIL: cleanup not called on path 3\n");
+        return 1;
+    }
+    
+    // Test path 0 - success path, @defer(err) should NOT run
+    printf("Testing success path:\n");
+    cleanup_count = 0;
+    MyData!MyError r0 = multi_return_func(0);
+    if (cc_is_ok(r0)) {
+        printf("  value=%d\n", cc_unwrap_as(r0, MyData).value);
+    }
+    printf("  cleanup_count=%d (expected 0 - defer(err) shouldn't run on success)\n", cleanup_count);
+    if (cleanup_count != 0) {
+        printf("FAIL: cleanup was called on success path\n");
+        return 1;
+    }
+    
+    printf("all tests passed\n");
+    return 0;
+}

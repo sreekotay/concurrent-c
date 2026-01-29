@@ -1,0 +1,6 @@
+r1 is ok: 42
+r2 is err: not found
+unwrap: 100
+unwrap_or success: 200
+unwrap_or error: -1
+All result UFCS tests passed!

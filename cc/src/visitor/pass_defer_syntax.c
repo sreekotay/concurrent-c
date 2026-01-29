@@ -8,9 +8,16 @@
 #include "util/text.h"
 #include "visitor/edit_buffer.h"
 
+typedef enum {
+    DEFER_ALWAYS = 0,  /* @defer - always runs */
+    DEFER_ON_ERR,      /* @defer(err) - only on error return */
+    DEFER_ON_OK        /* @defer(ok) - only on success return */
+} CCDeferCondition;
+
 typedef struct {
     int line_no;
     char* stmt; /* includes trailing ';' */
+    CCDeferCondition cond;
 } CCDeferStmt;
 
 static void cc__free_defer_list(CCDeferStmt* xs, int n) {
@@ -226,26 +233,78 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             }
 
             int is_if_ctl = cc__is_if_controlled_return(in_src, in_len, i);
+            
+            /* Check if we have any conditional defers */
+            int has_conditional = 0;
+            for (int d = depth; d >= 0 && !has_conditional; d--) {
+                int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                for (int k = 0; k < defer_counts[dd]; k++) {
+                    if (defers[dd][k].cond != DEFER_ALWAYS) {
+                        has_conditional = 1;
+                        break;
+                    }
+                }
+            }
+            
+            /* Extract return expression (between 'return' and ';') */
+            size_t ret_kw_end = i + 6; /* strlen("return") */
+            while (ret_kw_end < stmt_end && (in_src[ret_kw_end] == ' ' || in_src[ret_kw_end] == '\t')) ret_kw_end++;
+            size_t expr_start = ret_kw_end;
+            size_t expr_end = stmt_end - 1; /* exclude ';' */
+            while (expr_end > expr_start && (in_src[expr_end - 1] == ' ' || in_src[expr_end - 1] == '\t' || in_src[expr_end - 1] == '\n')) expr_end--;
+            int has_expr = (expr_end > expr_start);
+            
             if (is_if_ctl) {
                 cc__append_str(&out, &outl, &outc, "{\n");
             }
-
-            for (int d = depth; d >= 0; d--) {
-                int dd = d;
-                if (dd < 0) dd = 0;
-                if (dd >= 256) dd = 255;
-                for (int k = defer_counts[dd] - 1; k >= 0; k--) {
-                    cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
-                    cc__append_n(&out, &outl, &outc, "\n", 1);
+            
+            if (has_conditional && has_expr) {
+                /* Emit: { __typeof__(expr) __cc_ret = (expr); bool __cc_ret_err = !__cc_ret.ok; ... } */
+                cc__append_str(&out, &outl, &outc, "{ __typeof__(");
+                cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
+                cc__append_str(&out, &outl, &outc, ") __cc_ret = (");
+                cc__append_n(&out, &outl, &outc, in_src + expr_start, expr_end - expr_start);
+                cc__append_str(&out, &outl, &outc, "); int __cc_ret_err = !__cc_ret.ok;\n");
+                
+                /* Emit defers with conditions.
+                   NOTE: We do NOT clear the defer lists here - they need to remain
+                   active for subsequent return statements in the same scope.
+                   The defers are only cleared at scope exit ('}') for DEFER_ALWAYS. */
+                for (int d = depth; d >= 0; d--) {
+                    int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                    for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                        if (defers[dd][k].cond == DEFER_ALWAYS) {
+                            cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                            cc__append_n(&out, &outl, &outc, "\n", 1);
+                        } else if (defers[dd][k].cond == DEFER_ON_ERR) {
+                            cc__append_str(&out, &outl, &outc, "if (__cc_ret_err) { ");
+                            cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                            cc__append_str(&out, &outl, &outc, " }\n");
+                        } else if (defers[dd][k].cond == DEFER_ON_OK) {
+                            cc__append_str(&out, &outl, &outc, "if (!__cc_ret_err) { ");
+                            cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                            cc__append_str(&out, &outl, &outc, " }\n");
+                        }
+                    }
+                    /* Don't clear defers here - they apply to all returns in this scope */
                 }
-                /* clear: return exits, but avoids accidental duplicates if source continues */
-                cc__free_defer_list(defers[dd], defer_counts[dd]);
-                defers[dd] = NULL;
-                defer_counts[dd] = 0;
-                defer_caps[dd] = 0;
+                cc__append_str(&out, &outl, &outc, "return __cc_ret; }");
+            } else {
+                /* No conditional defers or no expression - use original logic.
+                   Still emit DEFER_ALWAYS defers at every return, but don't clear the list
+                   so that subsequent returns also get the defers. */
+                for (int d = depth; d >= 0; d--) {
+                    int dd = (d < 0) ? 0 : (d >= 256 ? 255 : d);
+                    for (int k = defer_counts[dd] - 1; k >= 0; k--) {
+                        cc__append_str(&out, &outl, &outc, defers[dd][k].stmt);
+                        cc__append_n(&out, &outl, &outc, "\n", 1);
+                    }
+                    /* Don't clear defers here - they apply to all returns in this scope */
+                }
+                cc__ensure_line_start(&out, &outl, &outc);
+                cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
             }
-            cc__ensure_line_start(&out, &outl, &outc);
-            cc__append_n(&out, &outl, &outc, in_src + i, stmt_end - i);
+            
             if (is_if_ctl) {
                 cc__append_str(&out, &outl, &outc, "\n}");
             }
@@ -259,13 +318,39 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             continue;
         }
 
-        /* `@defer ...;` */
+        /* `@defer ...;` or `@defer(err) ...;` or `@defer(ok) ...;` */
         if (cc__token_is(in_src, in_len, i, "@defer")) {
             int defer_line = line_no;
             int defer_depth = depth;
+            CCDeferCondition cond = DEFER_ALWAYS;
 
             size_t j = i + 6;
             while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t')) j++;
+
+            /* Check for (err) or (ok) condition */
+            if (j < in_len && in_src[j] == '(') {
+                size_t paren_start = j;
+                j++;
+                while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t')) j++;
+                if (j + 3 <= in_len && strncmp(in_src + j, "err", 3) == 0 && 
+                    (j + 3 >= in_len || !cc__is_ident_char(in_src[j + 3]))) {
+                    cond = DEFER_ON_ERR;
+                    j += 3;
+                } else if (j + 2 <= in_len && strncmp(in_src + j, "ok", 2) == 0 &&
+                           (j + 2 >= in_len || !cc__is_ident_char(in_src[j + 2]))) {
+                    cond = DEFER_ON_OK;
+                    j += 2;
+                }
+                while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t')) j++;
+                if (j < in_len && in_src[j] == ')') {
+                    j++;
+                } else {
+                    /* Not a valid condition, reset */
+                    j = paren_start;
+                    cond = DEFER_ALWAYS;
+                }
+                while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t')) j++;
+            }
 
             /* Optional name: identifier ':' */
             size_t name_start = j;
@@ -320,7 +405,7 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                 defers[defer_depth] = nb;
                 defer_caps[defer_depth] = nc;
             }
-            defers[defer_depth][defer_counts[defer_depth]++] = (CCDeferStmt){ .line_no = defer_line, .stmt = stmt };
+            defers[defer_depth][defer_counts[defer_depth]++] = (CCDeferStmt){ .line_no = defer_line, .stmt = stmt, .cond = cond };
 
             cc__append_str(&out, &outl, &outc, "/* @defer recorded */");
             changed = 1;
@@ -334,17 +419,22 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
         }
 
         if (ch == '}') {
-            /* Emit defers for this scope before the brace. */
+            /* Emit defers for this scope before the brace.
+               Only emit DEFER_ALWAYS defers at }; conditional defers only run at return. */
             int d = depth;
             if (d < 0) d = 0;
             if (d >= 256) d = 255;
             if (defer_counts[d] > 0) {
                 for (int k = defer_counts[d] - 1; k >= 0; k--) {
-                    cc__append_str(&out, &outl, &outc, defers[d][k].stmt);
-                    if (defers[d][k].stmt[0] != 0) {
-                        size_t sl = strlen(defers[d][k].stmt);
-                        if (sl == 0 || defers[d][k].stmt[sl - 1] != '\n') cc__append_str(&out, &outl, &outc, "\n");
+                    if (defers[d][k].cond == DEFER_ALWAYS) {
+                        cc__append_str(&out, &outl, &outc, defers[d][k].stmt);
+                        if (defers[d][k].stmt[0] != 0) {
+                            size_t sl = strlen(defers[d][k].stmt);
+                            if (sl == 0 || defers[d][k].stmt[sl - 1] != '\n') cc__append_str(&out, &outl, &outc, "\n");
+                        }
                     }
+                    /* Note: conditional defers are NOT emitted at } - only at return.
+                       We still free them to avoid leaks. */
                     free(defers[d][k].stmt);
                     defers[d][k].stmt = NULL;
                 }

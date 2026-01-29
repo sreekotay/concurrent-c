@@ -1347,15 +1347,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     return out;
 }
 
-/* Rewrite UFCS method calls on container variables:
-   v.push(x)    -> Vec_int_push(&v, x)
-   v.pop()      -> Vec_int_pop(&v)
-   v.get(i)     -> Vec_int_get(&v, i)
-   m.insert(k,v)-> Map_K_V_insert(&m, k, v)
-   m.get(k)     -> Map_K_V_get(&m, k)
+/* Generic UFCS rewrite for typed variables:
+   v.push(x)    -> Vec_int_push(&v, x)      (Vec methods take pointer)
+   m.get(k)     -> Map_K_V_get(m, k)        (Map by value)
+   r.unwrap()   -> CCResult_T_E_unwrap(r)   (Result by value)
+   r.is_ok()    -> CCResult_T_E_is_ok(r)
    
-   This relies on the type registry being populated with var->type mappings
-   from the generic container lowering pass. */
+   Any type registered in the type registry gets UFCS support.
+   The type registry is populated during type lowering passes
+   (Vec<T>, Map<K,V>, T!E, T?, etc.). */
 char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path) {
     (void)input_path;
     if (!src || n == 0) return NULL;
@@ -1422,13 +1422,15 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
                         var_name[ident_len] = 0;
                         
                         const char* type_name = cc_type_registry_lookup_var(reg, var_name);
-                        if (type_name && (strncmp(type_name, "Vec_", 4) == 0 || 
-                                          strncmp(type_name, "Map_", 4) == 0)) {
-                            /* Container UFCS call - rewrite var.method(...) to Type_method(&var, ...).
-                               For pointer receivers (->), don't add & since it's already a pointer.
-                               Handle chained access like obj.field or ptr->field by scanning back
-                               to find the full receiver expression. 
+                        if (type_name) {
+                            /* Generic UFCS: rewrite var.method(...) to Type_method(...).
+                               Receiver passing convention based on type:
+                               - Vec with . : pass &var (needs pointer)
+                               - All others (Map, Result, etc.): pass by value or as-is
+                               - Pointer receivers (->): pass as-is
+                               Handle chained access like obj.field or ptr->field by scanning back.
                                Limitation: doesn't handle (expr).field, arr[i].field, or func().field. */
+                            int is_vec = strncmp(type_name, "Vec_", 4) == 0;
                             size_t recv_start = cc_scan_back_for_member_access(src, ident_start, last_emit);
                             
                             char full_recv[256];
@@ -1448,16 +1450,18 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
                                     /* Emit everything up to recv_start (not ident_start) */
                                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
                                     
-                                    /* Emit: Type_method(&recv, args) for Vec with '.', 
-                                             Type_method(recv, args) for Map or pointer receivers */
+                                    /* Emit: Type_method(...) with appropriate receiver handling */
                                     cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
                                     cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
                                     cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
-                                    /* Map types are already pointers, Vec with -> is pointer, Vec with . needs & */
-                                    if (strncmp(type_name, "Map_", 4) == 0 || is_arrow) {
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                                    } else {
+                                    
+                                    /* Receiver handling:
+                                       - Vec with . needs & (methods take pointer)
+                                       - Everything else: pass by value (arrow already pointer) */
+                                    if (is_vec && !is_arrow) {
                                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
+                                    } else {
+                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                                     }
                                     cc_sb_append_cstr(&out, &out_len, &out_cap, full_recv);
                                     
@@ -1799,13 +1803,40 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                                 
                                 /* Emit everything up to ty_start */
                                 cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                                /* Emit __CC_RESULT(T, E) - macro handles parser vs real mode */
+                                /* Emit __CC_RESULT(T, E) macro - parser mode uses generic,
+                                   codegen phase emits real type declarations and rewrites. */
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT(");
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                                 last_emit = err_end;
+                                
+                                /* Register result-typed variable for UFCS.
+                                   Look for variable name after the type (skip ws and *). */
+                                CCTypeRegistry* reg = cc_type_registry_get_global();
+                                if (reg) {
+                                    size_t v = cc_skip_ws_and_comments(src, n, err_end);
+                                    /* Skip pointer modifiers */
+                                    while (v < n && src[v] == '*') v++;
+                                    v = cc_skip_ws_and_comments(src, n, v);
+                                    if (v < n && cc_is_ident_start(src[v])) {
+                                        size_t var_start = v;
+                                        while (v < n && cc_is_ident_char(src[v])) v++;
+                                        char var_name[128];
+                                        char type_name[256];
+                                        size_t vn_len = v - var_start;
+                                        if (vn_len < sizeof(var_name)) {
+                                            memcpy(var_name, src + var_start, vn_len);
+                                            var_name[vn_len] = 0;
+                                            /* Type name is CCResult_T_E */
+                                            snprintf(type_name, sizeof(type_name), "CCResult_%s_%s",
+                                                     mangled_ok, mangled_err);
+                                            cc_type_registry_add_var(reg, var_name, type_name);
+                                        }
+                                    }
+                                }
+                                
                                 i = err_end;
                                 continue;
                             }
@@ -1902,6 +1933,188 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
         i++; col++;
     }
 
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Simple pass: convert `if @try (` to `if (try ` so the main rewriter handles both syntaxes */
+static char* cc__normalize_if_try_syntax(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    
+    while (i + 9 < n) {  /* "if @try (" is 9 chars minimum */
+        /* Look for "if" followed by whitespace, "@try", whitespace, "(" */
+        if (src[i] == 'i' && src[i+1] == 'f' && 
+            (i == 0 || !cc_is_ident_char(src[i-1])) &&
+            (src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\n')) {
+            size_t j = i + 2;
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+            if (j + 4 < n && src[j] == '@' && src[j+1] == 't' && src[j+2] == 'r' && src[j+3] == 'y') {
+                size_t k = j + 4;
+                while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n')) k++;
+                if (k < n && src[k] == '(') {
+                    /* Found "if @try (" - convert to "if (try " */
+                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "if (try ");
+                    last_emit = k + 1;  /* Skip past the '(' */
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+/* Rewrite if (try T x = expr) { ... } else { ... } to expanded form */
+static char* cc__rewrite_try_binding(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Detect if (try ...) */
+        if (c == 'i' && c2 == 'f') {
+            int ws = (i == 0) || !cc_is_ident_char(src[i-1]);
+            int we = (i+2 >= n) || !cc_is_ident_char(src[i+2]);
+            if (ws && we) {
+                size_t if_start = i, j = i + 2;
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                if (j < n && src[j] == '(') {
+                    j++;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                    /* Check for 'try' */
+                    if (j+3 <= n && src[j] == 't' && src[j+1] == 'r' && src[j+2] == 'y' &&
+                        (j+3 >= n || !cc_is_ident_char(src[j+3]))) {
+                        size_t after_try = j + 3;
+                        while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t' || src[after_try] == '\n')) after_try++;
+                        
+                        /* Find closing ')' */
+                        size_t cond_end = after_try;
+                        int paren = 1, in_s = 0, in_c = 0;
+                        while (cond_end < n && paren > 0) {
+                            char ec = src[cond_end];
+                            if (in_s) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '"') in_s = 0; cond_end++; continue; }
+                            if (in_c) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '\'') in_c = 0; cond_end++; continue; }
+                            if (ec == '"') { in_s = 1; cond_end++; continue; }
+                            if (ec == '\'') { in_c = 1; cond_end++; continue; }
+                            if (ec == '(') paren++;
+                            else if (ec == ')') { paren--; if (paren == 0) break; }
+                            cond_end++;
+                        }
+                        if (paren != 0) { i++; continue; }
+                        
+                        /* Find '=' */
+                        size_t eq = after_try;
+                        while (eq < cond_end && src[eq] != '=') eq++;
+                        if (eq >= cond_end) { i++; continue; }
+                        
+                        /* Type and var: after_try to eq, var is last ident */
+                        size_t tv_end = eq;
+                        while (tv_end > after_try && (src[tv_end-1] == ' ' || src[tv_end-1] == '\t' || src[tv_end-1] == '\n')) tv_end--;
+                        size_t var_end = tv_end, var_start = var_end;
+                        while (var_start > after_try && cc_is_ident_char(src[var_start-1])) var_start--;
+                        if (var_start >= var_end) { i++; continue; }
+                        
+                        size_t type_end = var_start;
+                        while (type_end > after_try && (src[type_end-1] == ' ' || src[type_end-1] == '\t' || src[type_end-1] == '\n')) type_end--;
+                        size_t type_start = after_try;
+                        while (type_start < type_end && (src[type_start] == ' ' || src[type_start] == '\t' || src[type_start] == '\n')) type_start++;
+                        if (type_start >= type_end) { i++; continue; }
+                        
+                        /* Expr: eq+1 to cond_end */
+                        size_t expr_start = eq + 1;
+                        while (expr_start < cond_end && (src[expr_start] == ' ' || src[expr_start] == '\t' || src[expr_start] == '\n')) expr_start++;
+                        size_t expr_end = cond_end;
+                        while (expr_end > expr_start && (src[expr_end-1] == ' ' || src[expr_end-1] == '\t' || src[expr_end-1] == '\n')) expr_end--;
+                        if (expr_start >= expr_end) { i++; continue; }
+                        
+                        /* Find then-block */
+                        size_t k = cond_end + 1;
+                        while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n')) k++;
+                        if (k >= n || src[k] != '{') { i++; continue; }
+                        
+                        size_t then_start = k;
+                        int brace = 1; k++; in_s = 0; in_c = 0;
+                        while (k < n && brace > 0) {
+                            char ec = src[k];
+                            if (in_s) { if (ec == '\\' && k+1 < n) k++; else if (ec == '"') in_s = 0; k++; continue; }
+                            if (in_c) { if (ec == '\\' && k+1 < n) k++; else if (ec == '\'') in_c = 0; k++; continue; }
+                            if (ec == '"') { in_s = 1; k++; continue; }
+                            if (ec == '\'') { in_c = 1; k++; continue; }
+                            if (ec == '{') brace++; else if (ec == '}') brace--;
+                            k++;
+                        }
+                        size_t then_end = k;
+                        
+                        /* Check for else */
+                        size_t else_start = 0, else_end = 0, m = k;
+                        while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
+                        if (m+4 <= n && src[m] == 'e' && src[m+1] == 'l' && src[m+2] == 's' && src[m+3] == 'e' &&
+                            (m+4 >= n || !cc_is_ident_char(src[m+4]))) {
+                            m += 4;
+                            while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
+                            if (m < n && src[m] == '{') {
+                                else_start = m; brace = 1; m++; in_s = 0; in_c = 0;
+                                while (m < n && brace > 0) {
+                                    char ec = src[m];
+                                    if (in_s) { if (ec == '\\' && m+1 < n) m++; else if (ec == '"') in_s = 0; m++; continue; }
+                                    if (in_c) { if (ec == '\\' && m+1 < n) m++; else if (ec == '\'') in_c = 0; m++; continue; }
+                                    if (ec == '"') { in_s = 1; m++; continue; }
+                                    if (ec == '\'') { in_c = 1; m++; continue; }
+                                    if (ec == '{') brace++; else if (ec == '}') brace--;
+                                    m++;
+                                }
+                                else_end = m;
+                            }
+                        }
+                        
+                        /* Emit expansion */
+                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, if_start - last_emit);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "{ __typeof__(");
+                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_try_bind = (");
+                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "); if (__cc_try_bind.ok) { ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + type_start, type_end - type_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + var_start, var_end - var_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " = __cc_try_bind.u.value; ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + then_start + 1, then_end - then_start - 2);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                        if (else_end > else_start) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, " else ");
+                            cc_sb_append(&out, &out_len, &out_cap, src + else_start, else_end - else_start);
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                        
+                        last_emit = (else_end > 0) ? else_end : then_end;
+                        i = last_emit;
+                        continue;
+                    }
+                }
+            }
+        }
+        i++;
+    }
+    if (last_emit == 0) return NULL;
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     return out;
 }
@@ -2969,10 +3182,20 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur5 = rewritten_res ? rewritten_res : cur4c;
     size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
 
+    /* Normalize `if @try (` to `if (try ` so both syntaxes work */
+    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5, cur5_n);
+    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5;
+    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5_n;
+
+    /* Rewrite if (try T x = expr) -> expanded form (must come before try expr rewrite) */
+    char* rewritten_try_bind = cc__rewrite_try_binding(cur5a, cur5a_n);
+    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5;
+    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5_n;
+
     /* Rewrite try expr -> cc_try(expr) */
-    char* rewritten_try = cc__rewrite_try_exprs(cur5, cur5_n);
-    const char* cur6 = rewritten_try ? rewritten_try : cur5;
-    size_t cur6_n = rewritten_try ? strlen(rewritten_try) : cur5_n;
+    char* rewritten_try = cc__rewrite_try_exprs(cur5b, cur5b_n);
+    const char* cur6 = rewritten_try ? rewritten_try : cur5b;
+    size_t cur6_n = rewritten_try ? strlen(rewritten_try) : cur5b_n;
 
     /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
     char* rewritten_unwrap = cc__rewrite_optional_unwrap(cur6, cur6_n);
@@ -2982,7 +3205,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
         free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
@@ -3066,14 +3289,27 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
         }
     }
 
+    /* If result types are used, include cc_result.cch with CC_PARSER_MODE
+       so that __CC_RESULT(T, E) expands to __CCResultGeneric for TCC parsing. */
+    if (cc__result_type_count > 0) {
+        fprintf(out, "/* --- CC result type support --- */\n");
+        fprintf(out, "#ifndef CC_PARSER_MODE\n");
+        fprintf(out, "#define CC_PARSER_MODE 1\n");
+        fprintf(out, "#endif\n");
+        fprintf(out, "#include <ccc/cc_result.cch>\n");
+        fprintf(out, "/* --- end result support --- */\n\n");
+    }
+
     char rel[1024];
     fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
     fputs(use, out);
 
+    free(rewritten_if_try_norm);
     free(rewritten_link);
     free(rewritten_conc);
     free(rewritten_unwrap);
     free(rewritten_try);
+    free(rewritten_try_bind);
     free(rewritten_res);
     free(rewritten_opt_ctor);
     free(rewritten_opt);

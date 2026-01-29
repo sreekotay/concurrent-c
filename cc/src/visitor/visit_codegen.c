@@ -61,6 +61,158 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
 /* UFCS span rewrite lives in pass_ufcs.c now (cc__rewrite_ufcs_spans_with_nodes). */
 
+/* Rewrite `if @try (T x = expr) { ... } else { ... }` into expanded form:
+   { __typeof__(expr) __cc_try_bind = (expr);
+     if (__cc_try_bind.ok) { T x = __cc_try_bind.u.value; ... }
+     else { ... } }
+*/
+static char* cc__rewrite_if_try_syntax(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i], c2 = (i+1 < n) ? src[i+1] : 0;
+        /* Skip comments and strings */
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i+1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for `if @try (` */
+        if (c == 'i' && c2 == 'f') {
+            int ws = (i == 0) || !cc_is_ident_char(src[i-1]);
+            int we = (i+2 >= n) || !cc_is_ident_char(src[i+2]);
+            if (ws && we) {
+                size_t if_start = i, j = i + 2;
+                /* Skip whitespace after 'if' */
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                /* Check for '@try' */
+                if (j+4 <= n && src[j] == '@' && src[j+1] == 't' && src[j+2] == 'r' && src[j+3] == 'y' &&
+                    (j+4 >= n || !cc_is_ident_char(src[j+4]))) {
+                    size_t after_try = j + 4;
+                    while (after_try < n && (src[after_try] == ' ' || src[after_try] == '\t' || src[after_try] == '\n')) after_try++;
+                    /* Expect '(' */
+                    if (after_try < n && src[after_try] == '(') {
+                        size_t cond_start = after_try + 1;
+                        /* Find matching ')' */
+                        size_t cond_end = cond_start;
+                        int paren = 1, in_s = 0, in_c = 0;
+                        while (cond_end < n && paren > 0) {
+                            char ec = src[cond_end];
+                            if (in_s) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '"') in_s = 0; cond_end++; continue; }
+                            if (in_c) { if (ec == '\\' && cond_end+1 < n) cond_end++; else if (ec == '\'') in_c = 0; cond_end++; continue; }
+                            if (ec == '"') { in_s = 1; cond_end++; continue; }
+                            if (ec == '\'') { in_c = 1; cond_end++; continue; }
+                            if (ec == '(') paren++;
+                            else if (ec == ')') { paren--; if (paren == 0) break; }
+                            cond_end++;
+                        }
+                        if (paren != 0) { i++; continue; }
+                        
+                        /* Parse T x = expr from cond_start to cond_end */
+                        size_t eq = cond_start;
+                        while (eq < cond_end && src[eq] != '=') eq++;
+                        if (eq >= cond_end) { i++; continue; }
+                        
+                        /* Type and var before '=' */
+                        size_t tv_end = eq;
+                        while (tv_end > cond_start && (src[tv_end-1] == ' ' || src[tv_end-1] == '\t')) tv_end--;
+                        size_t var_end = tv_end, var_start = var_end;
+                        while (var_start > cond_start && cc_is_ident_char(src[var_start-1])) var_start--;
+                        if (var_start >= var_end) { i++; continue; }
+                        
+                        size_t type_end = var_start;
+                        while (type_end > cond_start && (src[type_end-1] == ' ' || src[type_end-1] == '\t')) type_end--;
+                        size_t type_start = cond_start;
+                        while (type_start < type_end && (src[type_start] == ' ' || src[type_start] == '\t')) type_start++;
+                        if (type_start >= type_end) { i++; continue; }
+                        
+                        /* Expr after '=' */
+                        size_t expr_start = eq + 1;
+                        while (expr_start < cond_end && (src[expr_start] == ' ' || src[expr_start] == '\t')) expr_start++;
+                        size_t expr_end = cond_end;
+                        while (expr_end > expr_start && (src[expr_end-1] == ' ' || src[expr_end-1] == '\t')) expr_end--;
+                        if (expr_start >= expr_end) { i++; continue; }
+                        
+                        /* Find then-block */
+                        size_t k = cond_end + 1; /* skip ')' */
+                        while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n')) k++;
+                        if (k >= n || src[k] != '{') { i++; continue; }
+                        
+                        size_t then_start = k;
+                        int brace = 1; k++; in_s = 0; in_c = 0;
+                        while (k < n && brace > 0) {
+                            char ec = src[k];
+                            if (in_s) { if (ec == '\\' && k+1 < n) k++; else if (ec == '"') in_s = 0; k++; continue; }
+                            if (in_c) { if (ec == '\\' && k+1 < n) k++; else if (ec == '\'') in_c = 0; k++; continue; }
+                            if (ec == '"') { in_s = 1; k++; continue; }
+                            if (ec == '\'') { in_c = 1; k++; continue; }
+                            if (ec == '{') brace++; else if (ec == '}') brace--;
+                            k++;
+                        }
+                        size_t then_end = k;
+                        
+                        /* Check for else */
+                        size_t else_start = 0, else_end = 0, m = k;
+                        while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
+                        if (m+4 <= n && src[m] == 'e' && src[m+1] == 'l' && src[m+2] == 's' && src[m+3] == 'e' &&
+                            (m+4 >= n || !cc_is_ident_char(src[m+4]))) {
+                            m += 4;
+                            while (m < n && (src[m] == ' ' || src[m] == '\t' || src[m] == '\n')) m++;
+                            if (m < n && src[m] == '{') {
+                                else_start = m; brace = 1; m++; in_s = 0; in_c = 0;
+                                while (m < n && brace > 0) {
+                                    char ec = src[m];
+                                    if (in_s) { if (ec == '\\' && m+1 < n) m++; else if (ec == '"') in_s = 0; m++; continue; }
+                                    if (in_c) { if (ec == '\\' && m+1 < n) m++; else if (ec == '\'') in_c = 0; m++; continue; }
+                                    if (ec == '"') { in_s = 1; m++; continue; }
+                                    if (ec == '\'') { in_c = 1; m++; continue; }
+                                    if (ec == '{') brace++; else if (ec == '}') brace--;
+                                    m++;
+                                }
+                                else_end = m;
+                            }
+                        }
+                        
+                        /* Emit expansion */
+                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, if_start - last_emit);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "{ __typeof__(");
+                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, ") __cc_try_bind = (");
+                        cc_sb_append(&out, &out_len, &out_cap, src + expr_start, expr_end - expr_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "); if (__cc_try_bind.ok) { ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + type_start, type_end - type_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + var_start, var_end - var_start);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " = __cc_try_bind.u.value; ");
+                        cc_sb_append(&out, &out_len, &out_cap, src + then_start + 1, then_end - then_start - 2);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                        if (else_end > else_start) {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, " else ");
+                            cc_sb_append(&out, &out_len, &out_cap, src + else_start, else_end - else_start);
+                        }
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                        
+                        last_emit = (else_end > 0) ? else_end : then_end;
+                        i = last_emit;
+                        continue;
+                    }
+                }
+            }
+        }
+        i++;
+    }
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
 
 int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* output_path) {
     if (!ctx || !ctx->symbols || !output_path) return EINVAL;
@@ -111,7 +263,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     /* For final codegen we read the original source and lower UFCS/@arena here.
-       The preprocessor's temp file exists only to make TCC parsing succeed. */
+       The preprocessor's temp file exists only to make TCC parsing succeed.
+       Note: text-based rewrites like `if @try` run on original source early in this function. */
     /* Read original source once; we may rewrite UFCS spans before @arena lowering. */
     char* src_all = NULL;
     size_t src_len = 0;
@@ -121,6 +274,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
+
+    /* Rewrite `if @try (T x = expr) { ... }` into expanded form */
+    if (src_ufcs && src_ufcs_len) {
+        char* rewritten = cc__rewrite_if_try_syntax(src_ufcs, src_ufcs_len);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
 
     /* Rewrite generic container syntax: Vec<T> -> Vec_T, vec_new<T>() -> Vec_T_init() */
     if (src_ufcs && src_ufcs_len) {

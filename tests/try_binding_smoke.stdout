@@ -1,0 +1,5 @@
+success: x = 42
+error case handled correctly
+inline success: z = 100
+inline error handled
+All try binding tests passed!

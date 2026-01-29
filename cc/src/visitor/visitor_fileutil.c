@@ -50,6 +50,7 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
         "#include <ccc/cc_nursery.cch>\n"
         "#include <ccc/cc_arena.cch>\n"
         "#include <ccc/cc_result.cch>\n"
+        "#include <ccc/cc_optional.cch>\n"
         "/* Minimal std/prelude declarations used by @arena lowering */\n"
         "static inline size_t kilobytes(size_t n);\n"
         "static inline size_t megabytes(size_t n);\n"

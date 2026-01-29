@@ -154,7 +154,17 @@ typedef __CCOptionalGeneric CCOptional_double;
 typedef __CCOptionalGeneric CCOptional_voidptr;
 typedef __CCOptionalGeneric CCOptional_charptr;
 typedef __CCOptionalGeneric CCOptional_intptr;
-typedef __CCOptionalGeneric CCOptional_CCSlice;
+
+/* CCSlice optional needs proper type for .u.value to work in parser mode.
+   Forward declare CCSlice if not already defined. */
+#ifndef CC_SLICE_H
+struct CCSlice_fwd { void *ptr; size_t len; uint64_t id; size_t alen; };
+typedef struct CCSlice_fwd CCSlice;
+#endif
+typedef struct {
+    bool has;
+    union { CCSlice value; } u;
+} CCOptional_CCSlice;
 
 /* Parser-mode constructors for common types */
 #define cc_some_CCOptional_int(v) __cc_optional_generic_some()

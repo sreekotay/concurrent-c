@@ -507,10 +507,31 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             
             j++; /* skip '_' */
             
-            /* Find the error type (rest of identifier) */
+            /* Find the error type - but stop at UFCS method suffixes.
+               Methods like _unwrap, _is_ok, _is_err, _unwrap_or should not be
+               part of the error type. Look for underscore followed by known method. */
             size_t err_start = j;
             while (j < n && cc__is_ident_char_local(src[j])) j++;
             size_t err_end = j;
+            
+            /* Check if this looks like a method call (CCResult_T_E_method).
+               If so, trim off the method suffix by scanning backwards for underscore
+               followed by known method names. */
+            static const char* methods[] = {"_unwrap_or", "_unwrap", "_is_ok", "_is_err", NULL};
+            for (int m = 0; methods[m]; m++) {
+                size_t mlen = strlen(methods[m]);
+                if (err_end - err_start > mlen) {
+                    /* Check if error type ends with this method suffix */
+                    const char* candidate = src + err_end - mlen;
+                    if (strncmp(candidate, methods[m], mlen) == 0) {
+                        /* Found method suffix - this is a method call, not a type.
+                           Trim the error type to exclude the method. */
+                        err_end -= mlen;
+                        j = err_end;
+                        break;
+                    }
+                }
+            }
             
             if (ok_end > ok_start && err_end > err_start) {
                 char ok_type[128], err_type[128];

@@ -1,0 +1,40 @@
+// Test: CCOptional_CCSlice usage - ensure .u.value access works
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    // Test 1: Basic CCSlice usage
+    CCSlice s = {0};
+    s.len = 42;
+    printf("slice len: %zu\n", s.len);
+    
+    // Test 2: CCOptional_CCSlice declaration and field access
+    CCOptional_CCSlice opt;
+    opt.has = 0;
+    printf("opt.has: %d\n", opt.has);
+    
+    // Test 3: Access .u.value fields directly (this works)
+    opt.has = 1;
+    opt.u.value.ptr = (void*)0x1234;
+    opt.u.value.len = 100;
+    printf("opt.u.value.len: %zu\n", opt.u.value.len);
+    
+    // Test 4: THE FAILING CASE - assign .u.value to CCSlice variable
+    // This triggers: error: '{' expected (got ';')
+    CCSlice data = opt.u.value;
+    printf("data.len: %zu\n", data.len);
+    
+    if (data.len != 100) {
+        printf("ERROR: expected len 100, got %zu\n", data.len);
+        return 1;
+    }
+    
+    // Test 5: Use in conditional (common pattern)
+    if (opt.has) {
+        CCSlice inner = opt.u.value;
+        printf("inner.len: %zu\n", inner.len);
+    }
+    
+    printf("All optional slice tests passed!\n");
+    return 0;
+}

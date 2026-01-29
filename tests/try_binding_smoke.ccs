@@ -1,0 +1,53 @@
+// Test: if @try (T x = expr) - try binding in conditionals
+#include <stdio.h>
+
+int!CCError succeed(int v) {
+    return cc_ok(v);
+}
+
+int!CCError fail_it(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "not found");
+}
+
+int main(void) {
+    // Test 1: try binding on success
+    int!CCError r1 = succeed(42);
+    if @try (int x = r1) {
+        printf("success: x = %d\n", x);
+        if (x != 42) {
+            printf("ERROR: expected 42, got %d\n", x);
+            return 1;
+        }
+    } else {
+        printf("ERROR: should not reach else branch\n");
+        return 1;
+    }
+    
+    // Test 2: try binding on error
+    int!CCError r2 = fail_it();
+    if @try (int y = r2) {
+        printf("ERROR: should not reach then branch\n");
+        return 1;
+    } else {
+        printf("error case handled correctly\n");
+    }
+    
+    // Test 3: inline result expression
+    if @try (int z = succeed(100)) {
+        printf("inline success: z = %d\n", z);
+        if (z != 100) {
+            printf("ERROR: expected 100\n");
+            return 1;
+        }
+    }
+    
+    if @try (int w = fail_it()) {
+        printf("ERROR: inline fail should not succeed\n");
+        return 1;
+    } else {
+        printf("inline error handled\n");
+    }
+    
+    printf("All try binding tests passed!\n");
+    return 0;
+}

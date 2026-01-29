@@ -1,0 +1,304 @@
+/*
+ * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
+ *
+ * This version demonstrates:
+ * - Result types (T!E) for error propagation
+ * - @defer for guaranteed cleanup
+ * - @defer(err) for error-only cleanup  
+ * - cc_is_ok/cc_unwrap for ergonomic error handling
+ * - Arena-backed transfers
+ */
+
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <zlib.h>
+
+/* ============================================================================
+ * Configuration
+ * ============================================================================ */
+
+#define BLOCK_SIZE (128 * 1024)
+#define MAX_WORKERS 16
+
+/* ============================================================================
+ * Data Types
+ * ============================================================================ */
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    int last;
+    CCArena arena; // Owns the data
+} Block;
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    unsigned long crc;
+    size_t ulen;
+    int last;
+    CCArena arena; // Owns the compressed data
+} CompressedResult;
+
+/* Global statistics */
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+
+/* ============================================================================
+ * Compression Worker
+ * ============================================================================ */
+
+/*
+ * Compress a single block. 
+ * Returns a CompressedResult*!IoError to demonstrate idiomatic error propagation.
+ */
+CompressedResult*!IoError compress_block(Block* blk, int level) {
+    // Create a fresh arena for the result. 
+    // This arena will be transferred to the writer.
+    // Arena needs space for: CompressedResult struct + compressed output (up to ~112.5% of input + overhead)
+    CCArena res_arena = cc_heap_arena(blk->data.len + (blk->data.len >> 3) + 8192);
+    
+    // If we return an error, we must free the arena.
+    // If we return successfully, the caller (writer) now owns it.
+    @defer(err) cc_heap_arena_free(&res_arena);
+
+    CompressedResult* res = (CompressedResult*)cc_arena_alloc(&res_arena, sizeof(CompressedResult), _Alignof(CompressedResult));
+    if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
+    
+    res->seq = blk->seq;
+    res->last = blk->last;
+    res->ulen = blk->data.len;
+    res->arena = res_arena;
+
+    // Calculate CRC using zlib directly
+    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+
+    // Allocate output buffer in the result arena
+    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+    unsigned char* out_buf = (unsigned char*)cc_arena_alloc(&res_arena, max_out, 1);
+    if (!out_buf) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
+
+    // Write gzip header (10 bytes)
+    unsigned char header[10] = {
+        0x1f, 0x8b,  // Magic
+        0x08,        // Deflate method
+        0x00,        // Flags (none)
+        0, 0, 0, 0,  // Mtime (not set)
+        0x00,        // Extra flags
+        0x03         // OS = Unix
+    };
+    memcpy(out_buf, header, 10);
+    size_t pos = 10;
+
+    // Compress with zlib (raw deflate, -15 window bits)
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    
+    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+    if (ret != Z_OK) return cc_err(io_error(CC_IO_OTHER));
+    
+    strm.next_in = (Bytef*)blk->data.ptr;
+    strm.avail_in = (uInt)blk->data.len;
+    strm.next_out = out_buf + pos;
+    strm.avail_out = (uInt)(max_out - pos - 8);  // Reserve space for trailer
+    
+    ret = deflate(&strm, Z_FINISH);
+    size_t deflate_len = strm.total_out;
+    deflateEnd(&strm);
+    
+    if (ret != Z_STREAM_END) {
+        return cc_err(io_error(CC_IO_OTHER));
+    }
+    
+    pos += deflate_len;
+    
+    // Write gzip trailer: CRC32 (4 bytes) + original size mod 2^32 (4 bytes)
+    unsigned long crc = res->crc;
+    size_t in_len = blk->data.len;
+    out_buf[pos++] = crc & 0xff;
+    out_buf[pos++] = (crc >> 8) & 0xff;
+    out_buf[pos++] = (crc >> 16) & 0xff;
+    out_buf[pos++] = (crc >> 24) & 0xff;
+    out_buf[pos++] = in_len & 0xff;
+    out_buf[pos++] = (in_len >> 8) & 0xff;
+    out_buf[pos++] = (in_len >> 16) & 0xff;
+    out_buf[pos++] = (in_len >> 24) & 0xff;
+
+    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+
+    // Update statistics
+    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+    cc_atomic_fetch_add(&g_bytes_out, pos);
+    cc_atomic_fetch_add(&g_blocks_done, 1);
+
+    return cc_ok(res);
+}
+
+/* ============================================================================
+ * Main Compression Pipeline
+ * ============================================================================ */
+
+int compress_file(const char* in_path, const char* out_path, int num_workers, int level) {
+    CCArena main_arena = cc_heap_arena(1024 * 1024);
+    @defer cc_heap_arena_free(&main_arena);
+
+    // Open input file
+    FILE* in_file = fopen(in_path, "rb");
+    if (!in_file) {
+        fprintf(stderr, "Failed to open input: %s\n", in_path);
+        return 1;
+    }
+    @defer fclose(in_file);
+
+    // Open output file
+    FILE* out_file = fopen(out_path, "wb");
+    if (!out_file) {
+        fprintf(stderr, "Failed to open output: %s\n", out_path);
+        return 1;
+    }
+    @defer fclose(out_file);
+
+    // Channels for pipeline
+    Block*[~64 >] blocks_tx;
+    Block*[~64 <] blocks_rx;
+    CompressedResult*[~64 >] results_tx;
+    CompressedResult*[~64 <] results_rx;
+
+    CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
+    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
+    @defer cc_chan_free(blocks_ch);
+    @defer cc_chan_free(results_ch);
+
+    @nursery {
+        /* Writer Task - must write blocks in sequence order */
+        spawn(() => {
+            long next_seq = 0;
+            CompressedResult* pending[MAX_WORKERS * 2];
+            int pending_count = 0;
+            
+            CompressedResult* r;
+            while (chan_recv(results_rx, &r) == 0) {
+                // Buffer if out of order
+                if (r->seq != next_seq) {
+                    pending[pending_count++] = r;
+                    continue;
+                }
+                
+                // Write this block
+                fwrite(r->data.ptr, 1, r->data.len, out_file);
+                cc_heap_arena_free(&r->arena);
+                next_seq++;
+                
+                // Check pending for next blocks
+                int wrote;
+                do {
+                    wrote = 0;
+                    for (int i = 0; i < pending_count; i++) {
+                        if (pending[i]->seq == next_seq) {
+                            fwrite(pending[i]->data.ptr, 1, pending[i]->data.len, out_file);
+                            cc_heap_arena_free(&pending[i]->arena);
+                            next_seq++;
+                            // Remove from pending
+                            pending[i] = pending[--pending_count];
+                            wrote = 1;
+                            break;
+                        }
+                    }
+                } while (wrote && pending_count > 0);
+            }
+        });
+
+        @nursery closing(results_tx) {
+            /* Compression Workers */
+            for (int w = 0; w < num_workers; w++) {
+                spawn([level]() => {
+                    Block* blk;
+                    while (chan_recv(blocks_rx, &blk) == 0) {
+                        // Compress the block
+                        CompressedResult*!IoError res_val = compress_block(blk, level);
+                        
+                        // Standard pattern: cc_is_ok + cc_unwrap
+                        if (cc_is_ok(res_val)) {
+                            CompressedResult* res = cc_unwrap(res_val);
+                            chan_send(results_tx, res);
+                        } else {
+                            fprintf(stderr, "Worker compression error\n");
+                        }
+                        
+                        // Cleanup input block
+                        cc_heap_arena_free(&blk->arena);
+                        free(blk);
+                    }
+                });
+            }
+
+            /* Reader Task */
+            @nursery closing(blocks_tx) {
+                spawn(() => {
+                    long seq = 0;
+                    while (1) {
+                        CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + 1024);
+                        
+                        // Read a block
+                        unsigned char* buf = (unsigned char*)cc_arena_alloc(&blk_arena, BLOCK_SIZE, 1);
+                        if (!buf) {
+                            cc_heap_arena_free(&blk_arena);
+                            break;
+                        }
+                        
+                        size_t n = fread(buf, 1, BLOCK_SIZE, in_file);
+                        if (n == 0) {
+                            cc_heap_arena_free(&blk_arena);
+                            break; // EOF or error
+                        }
+                        
+                        Block* blk = (Block*)malloc(sizeof(Block));
+                        if (!blk) {
+                            cc_heap_arena_free(&blk_arena);
+                            break;
+                        }
+                        
+                        blk->seq = seq++;
+                        blk->data = cc_slice_from_parts(buf, n, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE);
+                        blk->arena = blk_arena;
+                        blk->last = (n < BLOCK_SIZE); // Simple EOF check
+                        
+                        chan_send(blocks_tx, blk);
+                        if (blk->last) break;
+                    }
+                });
+            }
+        }
+    }
+
+    fflush(out_file);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        return 1;
+    }
+    
+    char out_name[4096];
+    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+    
+    int ret = compress_file(argv[1], out_name, 4, 6);
+    
+    if (ret == 0) {
+        printf("Compressed %s to %s\n", argv[1], out_name);
+        printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
+               (long long)cc_atomic_load(&g_bytes_in),
+               (long long)cc_atomic_load(&g_bytes_out),
+               cc_atomic_load(&g_blocks_done));
+    }
+    
+    return ret;
+}
