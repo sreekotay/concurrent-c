@@ -197,6 +197,23 @@ static int run_cmd_redirect_timeout(const char* cmd,
     }
 }
 
+/* Track failed test names for summary */
+static char** g_failed_names = NULL;
+static int g_failed_count = 0;
+static int g_failed_cap = 0;
+
+static void add_failed_name(const char* name) {
+    if (!name) return;
+    if (g_failed_count >= g_failed_cap) {
+        int nc = g_failed_cap ? g_failed_cap * 2 : 32;
+        char** nn = (char**)realloc(g_failed_names, (size_t)nc * sizeof(char*));
+        if (!nn) return;
+        g_failed_names = nn;
+        g_failed_cap = nc;
+    }
+    g_failed_names[g_failed_count++] = strdup(name);
+}
+
 static void pid_pop(pid_t* pids_local, char** names_local, int* io_running, int* io_failed) {
     if (!pids_local || !names_local || !io_running || *io_running <= 0) return;
     int st = 0;
@@ -208,7 +225,10 @@ static void pid_pop(pid_t* pids_local, char** names_local, int* io_running, int*
     }
     if (idx >= 0) {
         int rc = wexitstatus_simple(st);
-        if (rc != 0) (*io_failed)++;
+        if (rc != 0) {
+            (*io_failed)++;
+            add_failed_name(names_local[idx]);
+        }
         free(names_local[idx]);
         // Swap last into idx.
         int last = *io_running - 1;
@@ -505,8 +525,10 @@ int main(int argc, char** argv) {
 
         ran++;
         if (jobs <= 1) {
-            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache, build_timeout_sec, run_timeout_sec) != 0)
+            if (run_one_test(stem, path, compile_fail, verbose, "out", "bin", use_cache, build_timeout_sec, run_timeout_sec) != 0) {
                 failed++;
+                add_failed_name(stem);
+            }
             continue;
         }
 
@@ -560,6 +582,16 @@ int main(int argc, char** argv) {
     }
     if (failed) {
         fprintf(stderr, "cc_test: %d/%d failed\n", failed, ran);
+        if (g_failed_count > 0) {
+            fprintf(stderr, "\nFailed tests:\n");
+            for (int i = 0; i < g_failed_count; ++i) {
+                if (g_failed_names[i]) {
+                    fprintf(stderr, "  - %s\n", g_failed_names[i]);
+                    free(g_failed_names[i]);
+                }
+            }
+            free(g_failed_names);
+        }
         return 1;
     }
     fprintf(stderr, "cc_test: %d passed\n", ran);

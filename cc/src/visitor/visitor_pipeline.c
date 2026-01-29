@@ -212,6 +212,9 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
                 fprintf(out, "/* --- CC generic container declarations --- */\n");
                 fprintf(out, "#include <ccc/std/vec.cch>\n");
                 fprintf(out, "#include <ccc/std/map.cch>\n");
+                /* Vec/Map/Optional declarations must be skipped in parser mode where they're
+                   already typedef'd to generic placeholders in the headers */
+                fprintf(out, "#ifndef CC_PARSER_MODE\n");
                 
                 /* Emit optional type declarations */
                 for (size_t i = 0; i < n_opt; i++) {
@@ -225,16 +228,23 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (inst && inst->type1 && inst->mangled_name) {
+                        /* Extract mangled element name from Vec_xxx */
+                        const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                        
+                        /* Skip Vec_char - it's predeclared in string.cch */
+                        if (strcmp(mangled_elem, "char") == 0) {
+                            continue;
+                        }
+                        
                         /* Check if type is complex (pointer, struct) - needs FULL macro */
                         int is_complex = (strchr(inst->type1, '*') != NULL || 
                                           strncmp(inst->type1, "struct ", 7) == 0 ||
                                           strncmp(inst->type1, "union ", 6) == 0);
                         if (is_complex) {
-                            const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
-                            int is_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
-                                                  strcmp(mangled_elem, "intptr") == 0 ||
-                                                  strcmp(mangled_elem, "voidptr") == 0);
-                            if (!is_predeclared) {
+                            int opt_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
+                                                   strcmp(mangled_elem, "intptr") == 0 ||
+                                                   strcmp(mangled_elem, "voidptr") == 0);
+                            if (!opt_predeclared) {
                                 fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
                             }
                             fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
@@ -264,6 +274,7 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
                     }
                 }
                 
+                fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
                 fprintf(out, "/* --- end container declarations --- */\n\n");
             }
         }

@@ -5,10 +5,11 @@
  * HTTP client built on libcurl.
  * All responses are arena-allocated.
  *
- * @link("curl") - auto-links libcurl when this header is used
+ * Note: Requires libcurl. Add @link("curl") to your source file.
  */
 #ifndef CC_STD_HTTP_H
 #define CC_STD_HTTP_H
+
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
@@ -190,15 +191,12 @@ typedef CCParsedUrl ParsedUrl;
 #endif /* CC_ENABLE_SHORT_NAMES */
 
 /* ============================================================================
- * Implementation (header-only when CC_ENABLE_HTTP defined)
- * ============================================================================
- * 
- * HTTP support requires libcurl, which is an external dependency.
- * The implementation compiles with user code (not in base runtime).
- */
-#if defined(CC_ENABLE_HTTP) && !defined(CC_HTTP_IMPL_INCLUDED)
+ * Implementation (header-only)
+ * ============================================================================ */
+#ifndef CC_HTTP_IMPL_INCLUDED
 #define CC_HTTP_IMPL_INCLUDED 1
-#include "../../runtime/http.c"
+/* Path from cc/include/ccc/std/ to cc/runtime/ is ../../../../cc/runtime/ */
+#include "../../../../cc/runtime/http.c"
 #endif
 
 #endif /* CC_STD_HTTP_H */

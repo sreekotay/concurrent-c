@@ -44,6 +44,112 @@ typedef int bool;
 #include <ccc/cc_optional.cch>
 
 /*
+ * TCC PARSER MODE: Map types use a generic placeholder during parsing.
+ *
+ * The CC preprocessor rewrites Map<K,V> to __CC_MAP(K_mangled, V_mangled)*.
+ * In parser mode, this macro expands to __CCMapGeneric.
+ * In codegen, it's rewritten to Map_K_V with proper declarations emitted.
+ */
+#ifdef CC_PARSER_MODE
+
+/* Generic Map placeholder struct for parser mode - any key/value types.
+   Simplified struct that just needs to compile for type checking. */
+typedef struct __CCMapGeneric {
+    size_t count;    /* Number of entries */
+    void *keys;      /* Key storage */
+    void *vals;      /* Value storage */
+    void *arena;     /* CCArena* */
+} __CCMapGeneric;
+
+/* THE KEY MACRO: In parser mode, all Map types resolve to generic.
+   Usage: __CC_MAP(int, int) expands to __CCMapGeneric
+   Codegen rewrites this to Map_int_int */
+#define __CC_MAP(K, V) __CCMapGeneric
+
+/* Generic constructor - parser mode doesn't actually run,
+   so just return a pointer to NULL-like value. Uses a static to have an address. */
+static __CCMapGeneric __cc_map_generic_dummy = {0, NULL, NULL, NULL};
+static inline __CCMapGeneric* __cc_map_generic_init(void *arena) {
+    (void)arena;
+    return &__cc_map_generic_dummy;
+}
+
+/* Macro-based init that accepts any key/value types - parser mode just validates types. */
+#define __CC_MAP_INIT(K, V, arena) __cc_map_generic_init((void*)(arena))
+
+/* Parser-mode method stubs - just need to type-check, not actually run */
+static inline int __cc_map_generic_insert(__CCMapGeneric *m, ...) { 
+    (void)m; 
+    return 0; 
+}
+static inline int __cc_map_generic_put(__CCMapGeneric *m, ...) { 
+    (void)m; 
+    return 0; 
+}
+static inline __CCOptionalGeneric __cc_map_generic_get(__CCMapGeneric *m, ...) { 
+    (void)m; 
+    __CCOptionalGeneric result = {0};
+    return result; 
+}
+static inline void* __cc_map_generic_get_ptr(__CCMapGeneric *m, ...) { 
+    (void)m; 
+    return NULL; 
+}
+static inline int __cc_map_generic_remove(__CCMapGeneric *m, ...) { 
+    (void)m; 
+    return 0; 
+}
+static inline int __cc_map_generic_del(__CCMapGeneric *m, ...) { 
+    (void)m; 
+    return 0; 
+}
+static inline size_t __cc_map_generic_len(const __CCMapGeneric *m) { 
+    return m ? m->count : 0; 
+}
+static inline void __cc_map_generic_clear(__CCMapGeneric *m) { 
+    (void)m; 
+}
+static inline void __cc_map_generic_destroy(__CCMapGeneric *m) { 
+    (void)m; 
+}
+
+/* Parser-mode: common Map types are aliases to __CCMapGeneric */
+typedef __CCMapGeneric Map_int_int;
+typedef __CCMapGeneric Map_int_voidptr;
+typedef __CCMapGeneric Map_int_charptr;
+typedef __CCMapGeneric Map_uint64_t_int;
+typedef __CCMapGeneric Map_uint64_t_voidptr;
+
+/* Parser-mode: function aliases for common Map types.
+   Maps Map_K_V_method to generic stubs so direct function calls compile. */
+#define Map_int_int_init(a)       __cc_map_generic_init((void*)(a))
+#define Map_int_int_insert(m, k, v) __cc_map_generic_insert((m), (k), (v))
+#define Map_int_int_put(m, k, v, r) __cc_map_generic_put((m), (k), (v), (r))
+#define Map_int_int_get(m, k)     __cc_map_generic_get((m), (k))
+#define Map_int_int_get_ptr(m, k) __cc_map_generic_get_ptr((m), (k))
+#define Map_int_int_remove(m, k)  __cc_map_generic_remove((m), (k))
+#define Map_int_int_del(m, k)     __cc_map_generic_del((m), (k))
+#define Map_int_int_len(m)        __cc_map_generic_len((m))
+#define Map_int_int_clear(m)      __cc_map_generic_clear((m))
+#define Map_int_int_destroy(m)    __cc_map_generic_destroy((m))
+
+#define Map_uint64_t_int_init(a)       __cc_map_generic_init((void*)(a))
+#define Map_uint64_t_int_insert(m, k, v) __cc_map_generic_insert((m), (k), (v))
+#define Map_uint64_t_int_get(m, k)     __cc_map_generic_get((m), (k))
+#define Map_uint64_t_int_len(m)        __cc_map_generic_len((m))
+
+#else /* !CC_PARSER_MODE - real compilation */
+
+/* In real compilation, __CC_MAP expands to the actual type name.
+   The codegen pass ensures CC_MAP_DECL_ARENA is emitted for each type. */
+#define __CC_MAP(K, V) Map_##K##_##V
+
+/* In real mode, init calls the generated type-specific function */
+#define __CC_MAP_INIT(K, V, arena) Map_##K##_##V##_init((arena))
+
+#endif /* CC_PARSER_MODE */
+
+/*
  * Arena-backed allocator hooks for khashl.
  * - Kmalloc/Kcalloc: allocate from arena
  * - Krealloc: allocate new + copy (old stays in arena until reset)

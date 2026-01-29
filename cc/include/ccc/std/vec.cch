@@ -20,12 +20,160 @@
 #include <stddef.h>
 #include <string.h>
 #include <ccc/cc_runtime.cch>
-#include <ccc/cc_optional.cch>
+#include <ccc/cc_optional.cch>  /* Must be before parser mode block for __CCOptionalGeneric */
 
 /* Default initial capacity - skip tiny allocations */
 #ifndef CC_VEC_INITIAL_CAP
 #define CC_VEC_INITIAL_CAP 8
 #endif
+
+/*
+ * TCC PARSER MODE: Vec types use a generic placeholder during parsing.
+ *
+ * The CC preprocessor rewrites Vec<T> to __CC_VEC(T_mangled).
+ * In parser mode, this macro expands to __CCVecGeneric.
+ * In codegen, it's rewritten to Vec_T with proper declarations emitted.
+ */
+#ifdef CC_PARSER_MODE
+
+/* Generic Vec placeholder struct for parser mode - any element type.
+   Field names match real Vec layout so field access compiles. */
+typedef struct __CCVecGeneric {
+    size_t len;
+    size_t cap;
+    void *data;
+    void *arena;  /* CCArena* */
+} __CCVecGeneric;
+
+/* THE KEY MACRO: In parser mode, all Vec types resolve to generic.
+   Usage: __CC_VEC(int) expands to __CCVecGeneric
+   Codegen rewrites this to Vec_int */
+#define __CC_VEC(T) __CCVecGeneric
+
+/* Generic constructor - parser mode doesn't actually run,
+   so just return a zeroed struct for type checking. */
+static inline __CCVecGeneric __cc_vec_generic_init(void *arena) {
+    __CCVecGeneric v = {0, 0, NULL, arena};
+    return v;
+}
+
+/* Macro-based init that accepts any type - parser mode just validates types. */
+#define __CC_VEC_INIT(T, arena) __cc_vec_generic_init((void*)(arena))
+
+/* Parser-mode method stubs - just need to type-check, not actually run.
+   get() and pop() return __CCOptionalGeneric to match real Vec_T_get/pop signatures. */
+static inline int __cc_vec_generic_push(__CCVecGeneric *v, ...) { 
+    (void)v; 
+    return 0; 
+}
+static inline __CCOptionalGeneric __cc_vec_generic_get(__CCVecGeneric *v, size_t i) { 
+    (void)v; (void)i; 
+    __CCOptionalGeneric result = {0};
+    return result; 
+}
+static inline void* __cc_vec_generic_get_ptr(__CCVecGeneric *v, size_t i) { 
+    (void)v; (void)i; 
+    return NULL; 
+}
+static inline __CCOptionalGeneric __cc_vec_generic_pop(__CCVecGeneric *v) { 
+    (void)v; 
+    __CCOptionalGeneric result = {0};
+    return result; 
+}
+static inline void* __cc_vec_generic_at_grow(__CCVecGeneric *v, size_t i) { 
+    (void)v; (void)i; 
+    return NULL; 
+}
+static inline void* __cc_vec_generic_push_ptr(__CCVecGeneric *v) { 
+    (void)v; 
+    return NULL; 
+}
+static inline int __cc_vec_generic_reserve(__CCVecGeneric *v, size_t n) { 
+    (void)v; (void)n; 
+    return 0; 
+}
+static inline void __cc_vec_generic_clear(__CCVecGeneric *v) { 
+    (void)v; 
+}
+static inline size_t __cc_vec_generic_len(const __CCVecGeneric *v) { 
+    return v ? v->len : 0; 
+}
+static inline size_t __cc_vec_generic_cap(const __CCVecGeneric *v) { 
+    return v ? v->cap : 0; 
+}
+static inline void* __cc_vec_generic_begin(__CCVecGeneric *v) { 
+    return v ? v->data : NULL; 
+}
+static inline void* __cc_vec_generic_end(__CCVecGeneric *v) { 
+    return v ? (char*)v->data + v->len : NULL; 
+}
+static inline void* __cc_vec_generic_data(__CCVecGeneric *v) { 
+    return v ? v->data : NULL; 
+}
+
+/* Parser-mode: common Vec types are aliases to __CCVecGeneric */
+typedef __CCVecGeneric Vec_int;
+typedef __CCVecGeneric Vec_char;
+typedef __CCVecGeneric Vec_size_t;
+typedef __CCVecGeneric Vec_float;
+typedef __CCVecGeneric Vec_double;
+typedef __CCVecGeneric Vec_voidptr;
+typedef __CCVecGeneric Vec_charptr;
+typedef __CCVecGeneric Vec_intptr;
+
+/* Parser-mode: function aliases for common Vec types.
+   Maps Vec_T_method to generic stubs so direct function calls compile.
+   Uses macros since we can't do function aliasing in C. */
+#define Vec_int_init(a, c)     __cc_vec_generic_init((void*)(a))
+#define Vec_int_push(v, x)     __cc_vec_generic_push((v), (x))
+#define Vec_int_pop(v)         __cc_vec_generic_pop((v))
+#define Vec_int_get(v, i)      __cc_vec_generic_get((v), (i))
+#define Vec_int_get_ptr(v, i)  __cc_vec_generic_get_ptr((v), (i))
+#define Vec_int_at_grow(v, i)  __cc_vec_generic_at_grow((v), (i))
+#define Vec_int_push_ptr(v)    __cc_vec_generic_push_ptr((v))
+#define Vec_int_reserve(v, n)  __cc_vec_generic_reserve((v), (n))
+#define Vec_int_clear(v)       __cc_vec_generic_clear((v))
+#define Vec_int_len(v)         __cc_vec_generic_len((v))
+#define Vec_int_cap(v)         __cc_vec_generic_cap((v))
+#define Vec_int_begin(v)       __cc_vec_generic_begin((v))
+#define Vec_int_end(v)         __cc_vec_generic_end((v))
+#define Vec_int_data(v)        __cc_vec_generic_data((v))
+
+#define Vec_char_init(a, c)    __cc_vec_generic_init((void*)(a))
+#define Vec_char_push(v, x)    __cc_vec_generic_push((v), (x))
+#define Vec_char_pop(v)        __cc_vec_generic_pop((v))
+#define Vec_char_get(v, i)     __cc_vec_generic_get((v), (i))
+#define Vec_char_get_ptr(v, i) __cc_vec_generic_get_ptr((v), (i))
+#define Vec_char_len(v)        __cc_vec_generic_len((v))
+#define Vec_char_data(v)       __cc_vec_generic_data((v))
+
+#define Vec_size_t_init(a, c)  __cc_vec_generic_init((void*)(a))
+#define Vec_size_t_push(v, x)  __cc_vec_generic_push((v), (x))
+#define Vec_size_t_get(v, i)   __cc_vec_generic_get((v), (i))
+#define Vec_size_t_len(v)      __cc_vec_generic_len((v))
+
+#else /* !CC_PARSER_MODE - real compilation */
+
+/* In real compilation, __CC_VEC expands to the actual type name.
+   The codegen pass ensures CC_VEC_DECL_ARENA is emitted for each type. */
+#define __CC_VEC(T) Vec_##T
+
+/* In real mode, init calls the generated type-specific function */
+#define __CC_VEC_INIT(T, arena) Vec_##T##_init((arena), CC_VEC_INITIAL_CAP)
+
+#endif /* CC_PARSER_MODE */
+
+/*
+ * CC_VEC_DECLARE_GUARDED(T, Name)
+ *
+ * Helper macro that wraps CC_VEC_DECL_ARENA with a guard to prevent
+ * duplicate declarations. Uses __CC_VEC_##Name##_DECLARED as the guard.
+ */
+#define CC_VEC_DECLARE_GUARDED(T, Name) \
+    CC_VEC_DECLARE_GUARDED_FULL(T, Name, CCOptional_##T)
+
+#define CC_VEC_DECLARE_GUARDED_FULL(T, Name, OptT) \
+    CC_VEC_DECL_ARENA_FULL(T, Name, OptT)
 
 /*
  * CC_VEC_DECL_ARENA_FULL(T, Name, OptT)

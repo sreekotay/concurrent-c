@@ -28,7 +28,9 @@ int main(void) {
     for (int batch = 0; batch < ITERATIONS / 1000; batch++) {
         @nursery {
             for (int i = 0; i < 1000; i++) {
-                spawn(increment_global);
+                spawn(() => {
+                    increment_global();
+                });
             }
         }
     }

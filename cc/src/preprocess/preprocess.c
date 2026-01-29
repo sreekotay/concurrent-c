@@ -1094,10 +1094,10 @@ static int cc__find_matching_angle(const char* b, size_t bl, size_t langle, size
 }
 
 /* Rewrite generic container syntax:
-   - Vec<T> -> Vec_T
-   - Map<K, V> -> Map_K_V  
-   - vec_new<T>(...) -> Vec_T_init(...)
-   - map_new<K, V>(...) -> Map_K_V_init(...)
+   - Vec<T> -> __CC_VEC(T_mangled)  (parser-safe macro)
+   - Map<K, V> -> __CC_MAP(K_mangled, V_mangled)*  (parser-safe macro)
+   - vec_new<T>(...) -> __CC_VEC_INIT(T_mangled, ...)
+   - map_new<K, V>(...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
    Also tracks variable declarations for UFCS resolution. */
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
     (void)input_path;
@@ -1253,10 +1253,20 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, kw_start - last_emit);
             
             if (is_vec_type || is_map_type) {
-                /* Emit mangled type name - Map uses pointers (khashl returns ptr from init) */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                if (is_map_type) {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "*");
+                /* Emit parser-safe macro call instead of bare type name.
+                   In parser mode: __CC_VEC(T) -> __CCVecGeneric
+                   In real mode:   __CC_VEC(T) -> Vec_T */
+                if (is_vec_type) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                } else {
+                    /* Map uses pointers (khashl returns ptr from init) */
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")*");
                 }
                 last_emit = angle_end + 1;
                 
@@ -1281,30 +1291,47 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     }
                 }
             } else {
-                /* vec_new<T>(...) or map_new<K,V>(...) -> TypeName_init(..., default_cap) */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "_init");
-                
-                /* Find the opening paren and add default capacity after the arena arg */
+                /* vec_new<T>(...) or map_new<K,V>(...) -> __CC_VEC_INIT/__CC_MAP_INIT macro */
+                /* Find the opening paren and extract args */
                 size_t j = cc_skip_ws_and_comments(src, n, angle_end + 1);
                 if (j < n && src[j] == '(') {
                     /* Find the closing paren */
                     size_t paren_end = 0;
                     if (cc_find_matching_paren(src, n, j, &paren_end)) {
-                        /* Emit opening paren */
-                        cc_sb_append(&out, &out_len, &out_cap, src + angle_end + 1, j - angle_end);
-                        /* Emit the arena argument */
-                        cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
-                        /* Add default capacity for vec, nothing extra for map */
+                        /* Emit macro call with type param first, then original args */
                         if (is_vec_new) {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", CC_VEC_INITIAL_CAP)");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC_INIT(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            /* Emit the arena argument(s) */
+                            cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                         } else {
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP_INIT(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            /* Emit the arena argument */
+                            cc_sb_append(&out, &out_len, &out_cap, src + j + 1, paren_end - j - 1);
                             cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                         }
                         last_emit = paren_end + 1;
                         i = paren_end + 1;
                         continue;
                     }
+                }
+                /* Fallback if no paren found */
+                if (is_vec_new) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC_INIT(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL)");
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_MAP_INIT(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, key_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL)");
                 }
                 last_emit = angle_end + 1;
             }
@@ -2977,23 +3004,32 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             fprintf(out, "/* --- CC generic container declarations --- */\n");
             fprintf(out, "#include <ccc/std/vec.cch>\n");
             fprintf(out, "#include <ccc/std/map.cch>\n");
+            /* Vec/Map declarations must be skipped in parser mode where they're
+               already typedef'd to generic placeholders in vec.cch/map.cch */
+            fprintf(out, "#ifndef CC_PARSER_MODE\n");
             
             /* Emit Vec declarations */
             for (size_t i = 0; i < n_vec; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                 if (inst && inst->type1 && inst->mangled_name) {
+                    /* Extract mangled element name from Vec_xxx */
+                    const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                    
+                    /* Skip Vec_char - it's predeclared in string.cch */
+                    if (strcmp(mangled_elem, "char") == 0) {
+                        continue;
+                    }
+                    
                     /* Check if type is complex (pointer, struct) - needs FULL macro with explicit optional */
                     int is_complex = (strchr(inst->type1, '*') != NULL || 
                                       strncmp(inst->type1, "struct ", 7) == 0 ||
                                       strncmp(inst->type1, "union ", 6) == 0);
                     if (is_complex) {
-                        /* Extract mangled element name from Vec_xxx */
-                        const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
                         /* Check if this optional is already pre-declared in cc_optional.cch */
-                        int is_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
-                                              strcmp(mangled_elem, "intptr") == 0 ||
-                                              strcmp(mangled_elem, "voidptr") == 0);
-                        if (!is_predeclared) {
+                        int opt_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
+                                               strcmp(mangled_elem, "intptr") == 0 ||
+                                               strcmp(mangled_elem, "voidptr") == 0);
+                        if (!opt_predeclared) {
                             /* Emit optional type declaration first */
                             fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
                         }
@@ -3025,6 +3061,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                 }
             }
             
+            fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
             fprintf(out, "/* --- end container declarations --- */\n\n");
         }
     }

@@ -8,9 +8,11 @@
 
 #define ITERATIONS 100000
 
-extern fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
-extern int cc_fiber_join(fiber_task* t, void** out_result);
-extern void cc_fiber_task_free(fiber_task* t);
+/* Forward declare internal fiber type */
+struct fiber_task;
+extern struct fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
+extern int cc_fiber_join(struct fiber_task* t, void** out_result);
+extern void cc_fiber_task_free(struct fiber_task* t);
 
 static cc_atomic_int global_counter = 0;
 
@@ -32,7 +34,7 @@ int main(void) {
     double start = time_now_ms();
 
     for (int i = 0; i < ITERATIONS; i++) {
-        fiber_task* t = cc_fiber_spawn(increment_task, NULL);
+        struct fiber_task* t = cc_fiber_spawn(increment_task, NULL);
         if (t) {
             cc_fiber_join(t, NULL);
             cc_fiber_task_free(t);

@@ -1,0 +1,53 @@
+/* Smoke test for Vec<T> - verifies parser-safe generic container implementation.
+   Note: Custom struct types with Vec<T> require manual CC_VEC_DECL_ARENA_FULL 
+   before first use because the codegen emits declarations at file start. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_heap_arena(kilobytes(4));
+    
+    /* Test Vec<int> - primitive type */
+    Vec<int> nums = vec_new<int>(&arena);
+    nums.push(42);
+    nums.push(100);
+    
+    if (nums.len() != 2) {
+        printf("FAIL: Vec<int> expected len 2, got %zu\n", nums.len());
+        cc_heap_arena_free(&arena);
+        return 1;
+    }
+    
+    int? maybe_val = nums.get(0);
+    if (!maybe_val.has || *maybe_val != 42) {
+        printf("FAIL: Vec<int>.get(0) failed\n");
+        cc_heap_arena_free(&arena);
+        return 1;
+    }
+    
+    /* Test pointer access */
+    int* ptr = nums.get_ptr(1);
+    if (!ptr || *ptr != 100) {
+        printf("FAIL: Vec<int>.get_ptr(1) failed\n");
+        cc_heap_arena_free(&arena);
+        return 1;
+    }
+    
+    /* Test pop */
+    int? popped = nums.pop();
+    if (!popped.has || *popped != 100) {
+        printf("FAIL: Vec<int>.pop() failed\n");
+        cc_heap_arena_free(&arena);
+        return 1;
+    }
+    
+    if (nums.len() != 1) {
+        printf("FAIL: after pop expected len 1\n");
+        cc_heap_arena_free(&arena);
+        return 1;
+    }
+    
+    printf("OK: Vec<T> works\n");
+    cc_heap_arena_free(&arena);
+    return 0;
+}

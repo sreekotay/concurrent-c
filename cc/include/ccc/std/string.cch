@@ -35,7 +35,11 @@ typedef int bool;
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/vec.cch>
 
+/* In parser mode, Vec_char is already typedef'd to __CCVecGeneric in vec.cch.
+   Only emit the real declaration in non-parser (codegen) mode. */
+#ifndef CC_PARSER_MODE
 CC_VEC_DECL_ARENA(char, Vec_char)
+#endif
 
 typedef Vec_char CCString;
 

@@ -35,9 +35,5 @@
 #include "tls.c"
 #endif
 
-/* HTTP support is linked separately - not part of base runtime.
- * User projects that need HTTP must:
- *   1. Add CC_TARGET_LIBS for curl
- *   2. Add CC_TARGET_DEFINE CC_ENABLE_HTTP=1
- * The http.c file compiles as part of their build when http.cch is included.
- */
+/* HTTP support is header-only - included from http.cch when user code needs it.
+ * User must add @link("curl") to their source file to link libcurl. */
