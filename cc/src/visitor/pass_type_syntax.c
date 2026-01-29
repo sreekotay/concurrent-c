@@ -798,14 +798,19 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         j++;
                     }
                     
-                    /* Shorthand: cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(...)) */
+                    /* Shorthand error constructors - detect error type and wrap appropriately */
                     size_t crt_len = strlen(current_result_type);
                     int is_default_err = (crt_len >= 8 &&
                                           strcmp(current_result_type + crt_len - 8, "_CCError") == 0);
-                    if (is_err && is_default_err && depth == 0) {
+                    int is_io_err = (crt_len >= 10 &&
+                                    strcmp(current_result_type + crt_len - 10, "_CCIoError") == 0);
+                    
+                    if (is_err && depth == 0) {
                         size_t k = args_start;
                         while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
-                        if (k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                        
+                        /* cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") -> cc_err_...(cc_error(...)) */
+                        if (is_default_err && k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
@@ -814,6 +819,19 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                             if (comma_count == 0) {
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, ", NULL");
                             }
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "))");
+                            last_emit = j + 1;
+                            i = j + 1;
+                            continue;
+                        }
+                        
+                        /* cc_err(CC_IO_*) -> cc_err_...(io_error(CC_IO_*)) */
+                        if (is_io_err && k + 6 < j && memcmp(src + k, "CC_IO_", 6) == 0) {
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(io_error(");
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "))");
                             last_emit = j + 1;
                             i = j + 1;

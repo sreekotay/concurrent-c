@@ -68,7 +68,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
     
     @arena(res_arena, arena_size) {
         CompressedResult* res = (CompressedResult*)cc_arena_alloc(res_arena, sizeof(CompressedResult), _Alignof(CompressedResult));
-        if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
+        if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
         
         res->seq = blk->seq;
         res->last = blk->last;
@@ -80,7 +80,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
         // Allocate output buffer in the result arena
         size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
         unsigned char* out_buf = (unsigned char*)cc_arena_alloc(res_arena, max_out, 1);
-        if (!out_buf) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
+        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
         // Write gzip header (10 bytes)
         unsigned char header[10] = {
@@ -99,7 +99,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
         memset(&strm, 0, sizeof(strm));
         
         int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-        if (ret != Z_OK) return cc_err(io_error(CC_IO_OTHER));
+        if (ret != Z_OK) return cc_err(CC_IO_OTHER);
         
         strm.next_in = (Bytef*)blk->data.ptr;
         strm.avail_in = (uInt)blk->data.len;
@@ -111,7 +111,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
         deflateEnd(&strm);
         
         if (ret != Z_STREAM_END) {
-            return cc_err(io_error(CC_IO_OTHER));
+            return cc_err(CC_IO_OTHER);
         }
         
         pos += deflate_len;
@@ -142,7 +142,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
     }
     
     // Unreachable - all paths return from inside @arena block
-    return cc_err(io_error(CC_IO_OTHER));
+    return cc_err(CC_IO_OTHER);
 }
 
 /* ============================================================================
