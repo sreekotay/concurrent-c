@@ -531,6 +531,51 @@ static inline fiber_task* lq_steal(local_queue* q) {
     return f;
 }
 
+/* Batch work stealing: steal up to half the victim's queue.
+ * This amortizes the cost of coordinating the steal across multiple tasks.
+ * Returns number of tasks stolen (stored in out_tasks array). */
+static inline size_t lq_steal_batch(local_queue* q, fiber_task** out_tasks, size_t max_steal) {
+    size_t stolen = 0;
+    
+    /* Read queue bounds - we'll try to steal up to half */
+    size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    
+    if (head >= tail) return 0;  /* Empty */
+    
+    size_t available = tail - head;
+    size_t to_steal = available / 2;  /* Steal half */
+    if (to_steal == 0) to_steal = 1;  /* At least try to steal one */
+    if (to_steal > max_steal) to_steal = max_steal;
+    
+    /* Steal tasks one by one using atomic exchange.
+     * This is safe because we only advance head after successfully claiming a slot. */
+    for (size_t i = 0; i < to_steal; i++) {
+        head = atomic_load_explicit(&q->head, memory_order_acquire);
+        tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+        
+        if (head >= tail) break;  /* Queue became empty */
+        
+        size_t idx = head % LOCAL_QUEUE_SIZE;
+        
+        /* Atomically claim slot */
+        fiber_task* f = atomic_exchange_explicit(&q->slots[idx], NULL, memory_order_acquire);
+        if (!f) {
+            /* Lost race - try to help advance head and continue */
+            atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
+                                                   memory_order_release, memory_order_relaxed);
+            continue;
+        }
+        
+        /* Got a task - try to advance head */
+        atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
+                                               memory_order_release, memory_order_relaxed);
+        out_tasks[stolen++] = f;
+    }
+    
+    return stolen;
+}
+
 /* Dump scheduler state for debugging hangs */
 void cc_fiber_dump_state(const char* reason) {
     fprintf(stderr, "\n=== FIBER SCHEDULER STATE: %s ===\n", reason ? reason : "");
@@ -754,12 +799,27 @@ static void fiber_resume(fiber_task* f) {
 }
 
 #define WORKER_BATCH_SIZE 16
+#define STEAL_BATCH_SIZE (LOCAL_QUEUE_SIZE / 2)  /* Steal up to half the victim's queue */
+
+/* Simple xorshift64 PRNG for randomized victim selection */
+static inline uint64_t xorshift64(uint64_t* state) {
+    uint64_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
 
 static void* worker_main(void* arg) {
     int worker_id = (int)(size_t)arg;
     tls_worker_id = worker_id;
     local_queue* my_queue = &g_sched.local_queues[worker_id];
     fiber_task* batch[WORKER_BATCH_SIZE];
+    fiber_task* steal_buf[STEAL_BATCH_SIZE];
+    
+    /* Per-worker PRNG state for randomized stealing */
+    uint64_t rng_state = (uint64_t)worker_id * 0x9E3779B97F4A7C15ULL + rdtsc();
     
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
         /* Priority 1: Pop from local queue (no contention) */
@@ -777,14 +837,33 @@ static void* worker_main(void* arg) {
             batch[count++] = f;
         }
         
-        /* Priority 3: Steal from other workers (randomized start to avoid thundering herd) */
-        if (count == 0) {
-            size_t start = (size_t)worker_id;  /* Start from different positions */
-            for (size_t j = 0; j < g_sched.num_workers && count < WORKER_BATCH_SIZE; j++) {
-                size_t i = (start + j + 1) % g_sched.num_workers;
-                if ((int)i == worker_id) continue;
-                fiber_task* f = lq_steal(&g_sched.local_queues[i]);
-                if (f) batch[count++] = f;
+        /* Priority 3: Batch steal from other workers with randomized victim selection */
+        if (count == 0 && g_sched.num_workers > 1) {
+            /* Randomize starting victim to avoid thundering herd */
+            size_t start = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
+            
+            for (size_t j = 0; j < g_sched.num_workers; j++) {
+                size_t victim = (start + j) % g_sched.num_workers;
+                if ((int)victim == worker_id) continue;
+                
+                /* Batch steal: take up to half the victim's queue */
+                size_t stolen = lq_steal_batch(&g_sched.local_queues[victim], 
+                                               steal_buf, STEAL_BATCH_SIZE);
+                if (stolen > 0) {
+                    /* Execute first task immediately, put rest in batch or local queue */
+                    batch[count++] = steal_buf[0];
+                    for (size_t s = 1; s < stolen && count < WORKER_BATCH_SIZE; s++) {
+                        batch[count++] = steal_buf[s];
+                    }
+                    /* Any remaining stolen tasks go to our local queue */
+                    for (size_t s = count; s < stolen; s++) {
+                        if (lq_push(my_queue, steal_buf[s]) != 0) {
+                            /* Local queue full, put overflow in global */
+                            fq_push(&g_sched.run_queue, steal_buf[s]);
+                        }
+                    }
+                    break;  /* Got work, stop stealing */
+                }
             }
         }
         
@@ -806,6 +885,13 @@ static void* worker_main(void* arg) {
         for (int spin = 0; spin < SPIN_FAST_ITERS; spin++) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = fq_pop(&g_sched.run_queue);
+            /* Try to steal every 16 spins */
+            if (!f && (spin & 15) == 15 && g_sched.num_workers > 1) {
+                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
+                if ((int)victim != worker_id) {
+                    f = lq_steal(&g_sched.local_queues[victim]);
+                }
+            }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 tls_current_fiber = f;
@@ -816,11 +902,18 @@ static void* worker_main(void* arg) {
             cpu_pause();
         }
         
-        /* Yield a few times before sleeping */
+        /* Yield a few times before sleeping, with steal attempts */
         for (int y = 0; y < SPIN_YIELD_ITERS; y++) {
             sched_yield();
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = fq_pop(&g_sched.run_queue);
+            /* Try to steal every 4 yields */
+            if (!f && (y & 3) == 3 && g_sched.num_workers > 1) {
+                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
+                if ((int)victim != worker_id) {
+                    f = lq_steal(&g_sched.local_queues[victim]);
+                }
+            }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 tls_current_fiber = f;
@@ -831,6 +924,22 @@ static void* worker_main(void* arg) {
         }
         
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
+        
+        /* One last steal attempt before sleeping */
+        if (g_sched.num_workers > 1) {
+            for (size_t j = 0; j < g_sched.num_workers; j++) {
+                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
+                if ((int)victim != worker_id) {
+                    fiber_task* f = lq_steal(&g_sched.local_queues[victim]);
+                    if (f) {
+                        tls_current_fiber = f;
+                        fiber_resume(f);
+                        tls_current_fiber = NULL;
+                        goto next_iteration;
+                    }
+                }
+            }
+        }
         
         /* Sleep using fast wake primitive (futex/ulock instead of condvar) */
         /* Note: we check queue emptiness, not pending count, because parked fibers
@@ -847,6 +956,15 @@ static void* worker_main(void* arg) {
         while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
             /* Check if there's runnable work */
             if (lq_peek(my_queue) || fq_peek(&g_sched.run_queue)) break;
+            /* Check for stealable work in other queues */
+            int found_stealable = 0;
+            for (size_t i = 0; i < g_sched.num_workers; i++) {
+                if ((int)i != worker_id && lq_peek(&g_sched.local_queues[i])) {
+                    found_stealable = 1;
+                    break;
+                }
+            }
+            if (found_stealable) break;
             /* Use timed wait to periodically check for deadlock */
             wake_primitive_wait_timeout(&g_sched.wake_prim, wake_val, 500);
             wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
@@ -1297,18 +1415,32 @@ void cc__fiber_unpark(void* fiber_ptr) {
         return;
     }
 
-    /* Re-enqueue to GLOBAL queue for fair work distribution.
-     * Previously used local queue for cache locality, but this caused all unparked
-     * fibers to accumulate on a single thread (the unparker), defeating parallelism.
-     * Global queue ensures other workers can steal the unparked fiber. */
-    while (fq_push(&g_sched.run_queue, f) != 0) {
-        sched_yield();
+    /* Re-enqueue to LOCAL queue if we're in a worker thread.
+     * This provides better cache locality for ping-pong patterns where
+     * the unparker is likely to be the fiber that will process the response.
+     * Work stealing naturally redistributes work if one queue gets overloaded. */
+    int pushed_local = 0;
+    if (tls_worker_id >= 0) {
+        if (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
+            pushed_local = 1;
+        }
     }
     
-    /* Wake ALL sleeping workers - unparked fibers need to be distributed.
-     * Using wake_all instead of wake_one because multiple fibers may be unparked
-     * and we want all available workers to compete for them. */
-    wake_primitive_wake_all(&g_sched.wake_prim);
+    /* Fallback to global queue if not in worker context or local queue is full */
+    if (!pushed_local) {
+        while (fq_push(&g_sched.run_queue, f) != 0) {
+            sched_yield();
+        }
+    }
+    
+    /* Wake ONE sleeping worker - work stealing will naturally distribute load.
+     * Using wake_one instead of wake_all reduces wake overhead and avoids
+     * thundering herd. If more workers are needed, they'll wake when they
+     * find stealable work in other queues. */
+    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+    if (sleeping > 0) {
+        wake_primitive_wake_one(&g_sched.wake_prim);
+    }
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {
