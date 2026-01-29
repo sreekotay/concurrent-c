@@ -67,7 +67,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
     @arena(res_arena, arena_size) {
-        CompressedResult* res = (CompressedResult*)cc_arena_alloc(res_arena, sizeof(CompressedResult), _Alignof(CompressedResult));
+        CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
         if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
         
         res->seq = blk->seq;
@@ -79,7 +79,7 @@ CompressedResult*!IoError compress_block(Block* blk, int level) {
 
         // Allocate output buffer in the result arena
         size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-        unsigned char* out_buf = (unsigned char*)cc_arena_alloc(res_arena, max_out, 1);
+        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
         if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
         // Write gzip header (10 bytes)

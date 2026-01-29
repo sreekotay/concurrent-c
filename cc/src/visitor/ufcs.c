@@ -250,6 +250,21 @@ static int emit_desugared_call(char* out,
         return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq(%s, %s)", recv, args_rewritten)
                            : snprintf(out, cap, "CCSlice_eq(&%s, %s)", recv, args_rewritten);
     }
+    
+    /* Arena UFCS methods: arena.detach(), arena.reset(), arena.remaining() */
+    if (strcmp(method, "detach") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_arena_detach(%s)", recv)
+                           : snprintf(out, cap, "cc_arena_detach(&%s)", recv);
+    }
+    if (strcmp(method, "reset") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_arena_reset(%s)", recv)
+                           : snprintf(out, cap, "cc_arena_reset(&%s)", recv);
+    }
+    if (strcmp(method, "remaining") == 0) {
+        return recv_is_ptr ? snprintf(out, cap, "cc_arena_remaining(%s)", recv)
+                           : snprintf(out, cap, "cc_arena_remaining(&%s)", recv);
+    }
+    
     if (strcmp(recv, "std_out") == 0 && strcmp(method, "write") == 0) {
         /* Overload selection lives in the compiler:
            - String: cc_std_out_write_string(&s) (or pass-through if already &s)
