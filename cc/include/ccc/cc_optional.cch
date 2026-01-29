@@ -290,7 +290,9 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 
 /* Convenience macros for type names */
 #define CCOpt(T) CCOptional_##T
+#define CCOptPtr(T) CCOptional_##T##ptr
 #define CCRes(T, E) CCResult_##T##_##E
+#define CCResPtr(T, E) CCResult_##T##ptr_##E
 #define CCOptRes(T, E) CCOptional_CCResult_##T##_##E
 #define CCResOpt(T, E) CCResult_CCOptional_##T##_##E
 
