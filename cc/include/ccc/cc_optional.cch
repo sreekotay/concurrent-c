@@ -250,10 +250,9 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 #include <stdlib.h>
 
 #ifdef CC_PARSER_MODE
-/* For TCC parsing: cc_unwrap_opt(x) returns ._scalar for scalar assignment.
-   Direct struct field access like opt.u.value.x uses .u.value which has common fields. */
-#define cc_unwrap_opt(opt) (opt).u._scalar
-#define cc_opt_value(opt) (opt).u._scalar
+/* For TCC parsing: cc_unwrap_opt(x) returns .u.value */
+#define cc_unwrap_opt(opt) (opt).u.value
+#define cc_opt_value(opt) (opt).u.value
 #else
 /* Real mode cc_some/cc_none - these are placeholder definitions.
    The codegen pass rewrites cc_some(v) and cc_none() to typed versions
@@ -280,5 +279,18 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 
 /* Unchecked access (use with care after .has check) */
 #define cc_opt_value_unchecked(opt) ((opt).u.value)
+
+/* Check helpers - use these instead of raw .has access */
+#define cc_is_some(opt) ((opt).has)
+#define cc_is_none(opt) (!(opt).has)
+
+/* Get value or default (no abort) */
+#define cc_unwrap_or(opt, default_val) ((opt).has ? (opt).u.value : (default_val))
+
+/* Convenience macros for type names */
+#define cc_opt(T) CCOptional_##T
+#define cc_res(T, E) CCResult_##T##_##E
+#define cc_opt_res(T, E) CCOptional_CCResult_##T##_##E
+#define cc_res_opt(T, E) CCResult_CCOptional_##T##_##E
 
 #endif /* CC_OPTIONAL_H */

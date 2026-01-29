@@ -246,20 +246,17 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                         
                         // Read returns Ok(Some(slice)), Ok(None) on EOF, Err on I/O error
-                        CCResult_CCOptional_CCSlice_CCIoError read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
+                        cc_res_opt(CCSlice, CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
                         if (cc_is_err(read_res)) {
                             fprintf(stderr, "Read error: %s\n", cc_io_error_str(cc_unwrap_err(read_res)));
                             cc_heap_arena_free(&blk_arena);
                             break;
                         }
-                        
-                        CCOptional_CCSlice opt_data = cc_unwrap(read_res);
-                        if (!opt_data.has) {
+                        CCSlice data = cc_unwrap_or(cc_unwrap(read_res), cc_slice_empty());
+                        if (data.len == 0) {
                             cc_heap_arena_free(&blk_arena);
                             break;  // EOF
                         }
-                        
-                        CCSlice data = cc_opt_value_unchecked(opt_data);
                         
                         // Block struct also lives in the arena
                         Block* blk = arena_alloc1(Block, &blk_arena);
