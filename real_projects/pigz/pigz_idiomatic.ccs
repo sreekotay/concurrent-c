@@ -24,7 +24,9 @@
 #define BLOCK_SIZE (128 * 1024)
 #define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
 #define MAX_WORKERS 16
-#define REORDER_CAP 1024  // Must be > max blocks in flight
+#define CHAN_CAP 64
+// Reorder buffer must hold: channel capacity + workers (each may hold 1 block)
+#define REORDER_CAP (CHAN_CAP + MAX_WORKERS)
 
 /* ============================================================================
  * Data Types
@@ -50,6 +52,9 @@ typedef struct {
 cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
+
+/* Global error flag - when set, all tasks should exit ASAP */
+cc_atomic_int g_pipeline_error = 0;
 
 /* ============================================================================
  * Compression Worker
@@ -165,11 +170,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
     @defer cc_file_close(&out_file);
 
-    // Channels for pipeline
-    Block*[~64 >] blocks_tx;
-    Block*[~64 <] blocks_rx;
-    CompressedResult*[~64 >] results_tx;
-    CompressedResult*[~64 <] results_rx;
+    // Reset error flag
+    cc_atomic_store(&g_pipeline_error, 0);
+    
+    // Channels for pipeline (capacity matches REORDER_CAP calculation)
+    Block*[~CHAN_CAP >] blocks_tx;
+    Block*[~CHAN_CAP <] blocks_rx;
+    CompressedResult*[~CHAN_CAP >] results_tx;
+    CompressedResult*[~CHAN_CAP <] results_rx;
 
     CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
     CCChan* results_ch = channel_pair(&results_tx, &results_rx);
@@ -186,22 +194,24 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             long next_seq = 0;
             CompressedResult* pending[REORDER_CAP];
             memset(pending, 0, sizeof(pending));
-            bool write_error = false;
+            bool write_failed = false;
             
             CompressedResult* r;
-            while (chan_recv(results_rx, &r) == 0) {
+            while (!write_failed && chan_recv(results_rx, &r) == 0) {
                 // Insert using modular indexing
                 size_t slot = (size_t)(r->seq % REORDER_CAP);
+                
+                // Collision is a logic bug in pipeline sizing - abort immediately
                 if (pending[slot] != NULL) {
-                    fprintf(stderr, "Error: reorder slot collision (seq=%ld, existing=%ld)\n", 
-                            r->seq, pending[slot]->seq);
-                    cc_heap_arena_free(&r->arena);
-                    continue;
+                    fprintf(stderr, "FATAL: Reorder buffer collision at seq %ld (slot %zu holds seq %ld)\n", 
+                            r->seq, slot, pending[slot]->seq);
+                    fprintf(stderr, "This indicates REORDER_CAP (%d) is too small for the pipeline.\n", REORDER_CAP);
+                    abort();
                 }
                 pending[slot] = r;
                 
                 // Drain all consecutive blocks starting from next_seq
-                while (!write_error && pending[next_seq % REORDER_CAP] != NULL) {
+                while (!write_failed && pending[next_seq % REORDER_CAP] != NULL) {
                     slot = (size_t)(next_seq % REORDER_CAP);
                     r = pending[slot];
                     pending[slot] = NULL;
@@ -210,20 +220,32 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     if (cc_is_err(wr)) {
                         fprintf(stderr, "Error: write failed at block %ld: %s\n", 
                                 r->seq, cc_io_error_str(cc_unwrap_err(wr)));
-                        write_error = true;
+                        // Signal all tasks to exit
+                        cc_atomic_store(&g_pipeline_error, 1);
+                        write_failed = true;
                     }
                     cc_heap_arena_free(&r->arena);
                     next_seq++;
                 }
+            }
+            // Cleanup any remaining pending blocks
+            for (int i = 0; i < REORDER_CAP; i++) {
+                if (pending[i]) cc_heap_arena_free(&pending[i]->arena);
             }
         });
 
         @nursery closing(results_tx) {
             /* Compression Workers */
             for (int w = 0; w < num_workers; w++) {
-                spawn([level]() => {
+                spawn([level, results_tx]() => {
                     Block* blk;
                     while (chan_recv(blocks_rx, &blk) == 0) {
+                        // Check if pipeline is shutting down due to error
+                        if (cc_atomic_load(&g_pipeline_error)) {
+                            cc_heap_arena_free(&blk->arena);
+                            continue;  // Drain channel but don't process
+                        }
+                        
                         // Compress and send result; on error, log and continue
                         if @try (CompressedResult* res = compress_block(blk, level)) {
                             chan_send(results_tx, res);
@@ -242,36 +264,45 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             @nursery closing(blocks_tx) {
                 spawn([in_ptr]() => {
                     long seq = 0;
-                    while (1) {
+                    bool hit_eof = false;
+                    
+                    while (!hit_eof) {
+                        // Check if pipeline is shutting down due to error
+                        if (cc_atomic_load(&g_pipeline_error)) break;
+                        
                         CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                         
                         // Read returns Ok(slice) or Err; empty slice on EOF
                         CCRes(CCSlice, CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
                         if (cc_is_err(read_res)) {
                             fprintf(stderr, "Read error: %s\n", cc_io_error_str(cc_unwrap_err(read_res)));
+                            cc_atomic_store(&g_pipeline_error, 1);
                             cc_heap_arena_free(&blk_arena);
                             break;
                         }
                         CCSlice data = cc_unwrap(read_res);
                         if (data.len == 0) {
                             cc_heap_arena_free(&blk_arena);
-                            break;  // EOF
+                            break;  // EOF with no data
                         }
                         
                         // Block struct also lives in the arena
                         Block* blk = arena_alloc1(Block, &blk_arena);
                         if (!blk) {
+                            cc_atomic_store(&g_pipeline_error, 1);
                             cc_heap_arena_free(&blk_arena);
                             break;
                         }
                         
                         blk->seq = seq++;
                         blk->data = data;
+                        // Short read means EOF - this is the last block
+                        // Full read: may or may not be last; is_last=false here, writer knows by channel close
                         blk->is_last = (data.len < BLOCK_SIZE);
+                        hit_eof = blk->is_last;
                         blk->arena = blk_arena;  // Transfer ownership to Block
                         
                         chan_send(blocks_tx, blk);
-                        if (blk->is_last) break;
                     }
                 });
             }
@@ -279,6 +310,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
 
     cc_file_sync(&out_file);
+    
+    // Check if pipeline encountered an error
+    if (cc_atomic_load(&g_pipeline_error)) {
+        return 1;
+    }
     return 0;
 }
 
