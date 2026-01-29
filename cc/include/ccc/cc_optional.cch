@@ -1,20 +1,31 @@
 /*
- * Generic Optional helpers for generated C.
+ * Generic Optional and Result helpers for generated C.
  *
- * IDIOMATIC USAGE:
- *   CCOptional_int opt = cc_some_CCOptional_int(42);
- *   
- *   // Check and unwrap (aborts if none):
- *   int val = cc_unwrap_opt(opt);
- *   
- *   // Check first, then access:
- *   if (opt.has) {
- *       int val = cc_opt_value_unchecked(opt);
- *   }
+ * TYPE MACROS:
+ *   CCOpt(T)           - CCOptional_T
+ *   CCOptPtr(T)        - CCOptional_Tptr
+ *   CCRes(T, E)        - CCResult_T_E
+ *   CCResPtr(T, E)     - CCResult_Tptr_E
+ *   CCOptRes(T, E)     - CCOptional_CCResult_T_E
+ *   CCResOpt(T, E)     - CCResult_CCOptional_T_E
  *
- * AVOID: Direct field access like opt.u.value
+ * OPTIONAL HELPERS:
+ *   cc_is_some(opt)         - true if has value
+ *   cc_is_none(opt)         - true if empty
+ *   cc_unwrap_opt(opt)      - get value (aborts if none)
+ *   cc_unwrap_or(opt, def)  - get value or default
  *
- * Layout: struct { bool has; union { T value; } u; }
+ * RESULT HELPERS (in cc_result.cch):
+ *   cc_is_ok(res)           - true if success
+ *   cc_is_err(res)          - true if error
+ *   cc_unwrap(res)          - get value (aborts if error)
+ *   cc_unwrap_err(res)      - get error (aborts if ok)
+ *
+ * IDIOMATIC PATTERN:
+ *   CCRes(CCSlice, CCIoError) res = cc_file_read(...);
+ *   if (cc_is_err(res)) { handle error; return; }
+ *   CCSlice data = cc_unwrap(res);
+ *   if (data.len == 0) { handle EOF; }
  */
 #ifndef CC_OPTIONAL_H
 #define CC_OPTIONAL_H

@@ -1,28 +1,23 @@
 /*
  * Generic Result helpers for generated C.
  *
+ * TYPE MACROS (defined in cc_optional.cch):
+ *   CCRes(T, E)        - CCResult_T_E
+ *   CCResPtr(T, E)     - CCResult_Tptr_E
+ *
  * IDIOMATIC USAGE:
- *   CCResult_int_CCIoError res = some_fallible_op();
- *   
- *   // Check and handle error:
+ *   CCRes(CCSlice, CCIoError) res = cc_file_read(...);
  *   if (cc_is_err(res)) {
  *       CCIoError err = cc_unwrap_err(res);
  *       handle_error(err);
  *       return;
  *   }
- *   int val = cc_unwrap(res);
- *   
- *   // Or use if @try syntax in .ccs files:
- *   if @try (int val = some_fallible_op()) {
- *       use(val);
- *   } else {
- *       // error path
- *   }
+ *   CCSlice data = cc_unwrap(res);
  *
  * HELPERS:
- *   cc_is_ok(res)    - true if success
- *   cc_is_err(res)   - true if error
- *   cc_unwrap(res)   - get value (aborts if error)
+ *   cc_is_ok(res)      - true if success
+ *   cc_is_err(res)     - true if error
+ *   cc_unwrap(res)     - get value (aborts if error)
  *   cc_unwrap_err(res) - get error (aborts if ok)
  *
  * AVOID: Direct field access like res.u.value or res.u.error
