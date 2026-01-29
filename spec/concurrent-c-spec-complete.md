@@ -686,6 +686,44 @@ Surface syntax `*x` maps to `x.u.value` in lowered code.
 - After `*x` (successful unwrap) on move-only `T`, `x` is proven null
 - Functions returning `T?` are assumed to potentially return null
 
+**Macro helpers:**
+
+For generated C code, these macros provide direct access:
+
+| Macro | Returns | Description |
+|-------|---------|-------------|
+| `cc_is_some(opt)` | `bool` | True if has value |
+| `cc_is_none(opt)` | `bool` | True if empty |
+| `cc_unwrap_opt(opt)` | `T` | Get value (aborts if none) |
+| `cc_unwrap_or(opt, default)` | `T` | Get value or default |
+
+**Type macros:**
+
+| Macro | Expands To | Description |
+|-------|------------|-------------|
+| `CCOpt(T)` | `CCOptional_T` | Optional type name |
+| `CCOptPtr(T)` | `CCOptional_Tptr` | Optional pointer |
+| `CCOptRes(T, E)` | `CCOptional_CCResult_T_E` | Optional containing Result |
+
+```c
+int? maybe = find(arr, key);
+
+// Compiler-proven access
+if (maybe) {
+    int v = *maybe;  // safe
+}
+
+// Macro-style access (for generated C code)
+CCOpt(int) maybe_val = find(arr, key);
+if (cc_is_some(maybe_val)) {
+    int v = cc_unwrap_opt(maybe_val);
+    use(v);
+}
+
+// Or use default
+int v = cc_unwrap_or(maybe_val, 0);
+```
+
 `T?` is **not** error handling. Use `T!>(E)` for errors.
 
 ---
@@ -768,6 +806,25 @@ Result types support the following methods via UFCS (Uniform Function Call Synta
 | `r.unwrap()` | `T` | Returns value if success, **aborts** if error |
 | `r.unwrap_or(default)` | `T` | Returns value if success, `default` if error |
 
+**Macro helpers:**
+
+For generated C code, these macros provide direct access without UFCS lowering:
+
+| Macro | Returns | Description |
+|-------|---------|-------------|
+| `cc_is_ok(res)` | `bool` | True if result is success |
+| `cc_is_err(res)` | `bool` | True if result is error |
+| `cc_unwrap(res)` | `T` | Get value (aborts if error) |
+| `cc_unwrap_err(res)` | `E` | Get error (aborts if ok) |
+
+**Type macros:**
+
+| Macro | Expands To | Description |
+|-------|------------|-------------|
+| `CCRes(T, E)` | `CCResult_T_E` | Result type name |
+| `CCResPtr(T, E)` | `CCResult_Tptr_E` | Result of pointer |
+| `CCResOpt(T, E)` | `CCResult_CCOptional_T_E` | Result containing Optional |
+
 ```c
 int!>(CCError) parse(char[:] s);
 
@@ -784,6 +841,15 @@ int v = r.unwrap_or(0);      // returns 0 on error
 
 // Direct field access still available
 if (r.ok) use(r.u.value);
+
+// Macro-style access (for generated C code)
+CCRes(int, CCError) res = parse("42");
+if (cc_is_err(res)) {
+    CCError err = cc_unwrap_err(res);
+    handle_error(err);
+    return;
+}
+int value = cc_unwrap(res);
 ```
 
 **Lowering:** `r.unwrap()` → `CCResult_T_E_unwrap(r)`, etc.

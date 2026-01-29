@@ -63,15 +63,77 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 | Syntax | Parses as | Meaning |
 |--------|-----------|---------|
 | `char[:]?` | `(char[:])?` | optional slice (e.g., `find()` return) |
-| `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read_all()` return) |
-| `char[:]?!IoError` | `((char[:])?)!IoError` | result whose ok-value is optional (e.g., streaming `read()`) |
+| `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read()` return) |
 | `T*!IoError` | `((T)*)!IoError` | result of pointer (e.g., `cc_dir_open()` return) |
 | `T!>(E)?` | `((T)!>(E))?` | optional result (e.g., `recv()` on error channel) |
 
 **Key distinction:**
-- `T?!E` — "operation may fail; if it succeeds, value may be absent" (streaming read: error, EOF, or data)
+- `T!E` — "operation may fail" (e.g., file read: error or data, empty slice means EOF)
 - `T!>(E)?` — "value may be absent; if present, it's a result" (channel recv: closed, or ok/err)
 - `T*!E` — "operation may fail; if it succeeds, returns a pointer" (common for allocation/lookup)
+
+### Type Macros
+
+Convenience macros for constructing Optional and Result type names in C:
+
+| Macro | Expands To | Example |
+|-------|------------|---------|
+| `CCOpt(T)` | `CCOptional_T` | `CCOpt(int)` → `CCOptional_int` |
+| `CCOptPtr(T)` | `CCOptional_Tptr` | `CCOptPtr(char)` → `CCOptional_charptr` |
+| `CCRes(T, E)` | `CCResult_T_E` | `CCRes(int, CCError)` → `CCResult_int_CCError` |
+| `CCResPtr(T, E)` | `CCResult_Tptr_E` | `CCResPtr(char, CCIoError)` → `CCResult_charptr_CCIoError` |
+| `CCOptRes(T, E)` | `CCOptional_CCResult_T_E` | Optional containing a Result |
+| `CCResOpt(T, E)` | `CCResult_CCOptional_T_E` | Result containing an Optional |
+
+### Result Helpers
+
+Macros for working with `T!>(E)` Result types:
+
+| Helper | Returns | Description |
+|--------|---------|-------------|
+| `cc_is_ok(res)` | `bool` | True if result is success |
+| `cc_is_err(res)` | `bool` | True if result is error |
+| `cc_unwrap(res)` | `T` | Get value (aborts if error) |
+| `cc_unwrap_err(res)` | `E` | Get error (aborts if ok) |
+
+**Idiomatic pattern:**
+
+```c
+CCRes(CCSlice, CCIoError) res = cc_file_read(file, arena, n);
+if (cc_is_err(res)) {
+    CCIoError err = cc_unwrap_err(res);
+    handle_error(err);
+    return;
+}
+CCSlice data = cc_unwrap(res);
+if (data.len == 0) {
+    // EOF
+}
+```
+
+### Optional Helpers
+
+Macros for working with `T?` Optional types:
+
+| Helper | Returns | Description |
+|--------|---------|-------------|
+| `cc_is_some(opt)` | `bool` | True if has value |
+| `cc_is_none(opt)` | `bool` | True if empty |
+| `cc_unwrap_opt(opt)` | `T` | Get value (aborts if none) |
+| `cc_unwrap_or(opt, default)` | `T` | Get value or default |
+
+**Example:**
+
+```c
+CCOpt(int) maybe_val = find_value(key);
+if (cc_is_some(maybe_val)) {
+    int val = cc_unwrap_opt(maybe_val);
+    use(val);
+}
+
+// Or use default
+int val = cc_unwrap_or(maybe_val, 0);
+```
 
 ---
 
@@ -357,9 +419,8 @@ enum ParseError {
     Truncated,
 };
 
-// Note: EOF is not an error. Streaming APIs return Ok(None) at end-of-stream.
-// EOF represents stream exhaustion, not failure; it is modeled as an Option to allow
-// uniform while (try ...) streaming patterns without treating normal termination as exceptional.
+// Note: EOF is not an error. Streaming APIs return an empty slice (len == 0) at end-of-stream.
+// EOF represents stream exhaustion, not failure; check data.len == 0 to detect EOF.
 ```
 
 ---
@@ -376,13 +437,14 @@ File! file_open(Arena* a, char[:] path, char[:] mode);  // "r", "w", "a"
 
 // UFCS Methods
 
-// Streaming read: Ok(None) means EOF (normal termination), Err means actual failure.
+// Streaming read: returns slice with data, empty slice on EOF.
 // Reads up to n bytes; returns slice of actual bytes read.
-char[:]?!IoError File.read(Arena* a, size_t n);
+// EOF: returns Ok with empty slice (len == 0).
+char[:]!IoError File.read(Arena* a, size_t n);
 
 // Read one line into arena (line ending handling: accepts \n and \r\n).
-// Ok(None) means EOF with no more data.
-char[:]?!IoError File.read_line(Arena* a);
+// EOF: returns Ok with empty slice (len == 0).
+char[:]!IoError File.read_line(Arena* a);
 
 // Read entire file into arena. Returns empty slice for empty files.
 // This is NOT a streaming API — use read() or read_line() for streaming.
@@ -402,21 +464,21 @@ void   !IoError File.sync();
 void            File.close();
 
 // Async variants (same signatures, just async)
-@async char[:]?!IoError File.read_async(Arena* a, size_t n);
-@async char[:]?!IoError File.read_line_async(Arena* a);
-@async char[:]!IoError  File.read_all_async(Arena* a);
-@async size_t!IoError   File.write_async(char[:] data);
+@async char[:]!IoError File.read_async(Arena* a, size_t n);
+@async char[:]!IoError File.read_line_async(Arena* a);
+@async char[:]!IoError File.read_all_async(Arena* a);
+@async size_t!IoError  File.write_async(char[:] data);
 ```
 
 **EOF Semantics (Unified):**
 
 | Method | Return Type | EOF Behavior |
 |--------|-------------|--------------|
-| `read()` | `char[:]?!IoError` | `Ok(None)` = EOF |
-| `read_line()` | `char[:]?!IoError` | `Ok(None)` = EOF |
+| `read()` | `char[:]!IoError` | Empty slice (`len == 0`) = EOF |
+| `read_line()` | `char[:]!IoError` | Empty slice (`len == 0`) = EOF |
 | `read_all()` | `char[:]!IoError` | N/A (reads entire file; empty slice for empty file) |
 
-**Rule:** All streaming reads (`read()`, `read_line()`) return `Ok(None)` at EOF. Non-streaming reads (`read_all()`) return the full content (empty slice if file is empty).
+**Rule:** All streaming reads (`read()`, `read_line()`) return an empty slice on EOF. This simplifies the API — no need for nested Optional inside Result. Check `data.len == 0` to detect EOF.
 
 **Examples:**
 
@@ -433,16 +495,18 @@ if (try File file = f) {
     printf("Error: %d\n", err);
 }
 
-// Read lines (EOF is Ok(None))
+// Read lines (empty slice = EOF)
 File! f = file_open(&arena, "input.txt", "r");
 if (try File file = f) {
-    while (char[:]?!IoError line_result = file.read_line(&arena)) {
-        if (try char[:]? line_opt = line_result) {
-            if (!line_opt) break;  // EOF (Ok(None))
-            char[:] line = *line_opt;
-            printf("Line: %.*s\n", (int)line.len, line.ptr);
+    while (true) {
+        char[:]!IoError line_result = file.read_line(&arena);
+        if (cc_is_err(line_result)) {
+            // Handle error
+            break;
         }
-        // If we get here with error already thrown, outer catch handles it
+        char[:] line = cc_unwrap(line_result);
+        if (line.len == 0) break;  // EOF (empty slice)
+        printf("Line: %.*s\n", (int)line.len, line.ptr);
     }
     file.close();
 }
@@ -1142,21 +1206,25 @@ Runtime.set_blocking_pool(
     File! f = file_open(&arena, path, "r");
     if (try File file = f) {
         int retry_count = 0;
-        while (char[:]?!IoError line_result = file.read_line(&arena)) {
-            if (line_result is Busy) {
-                if (retry_count++ > 3) {
-                    return cc_err(IoError::Busy);
+        while (true) {
+            char[:]!IoError line_result = file.read_line(&arena);
+            if (cc_is_err(line_result)) {
+                CCIoError err = cc_unwrap_err(line_result);
+                if (err.kind == CC_IO_BUSY) {
+                    if (retry_count++ > 3) {
+                        return cc_err(IoError::Busy);
+                    }
+                    await sleep(milliseconds(10 * retry_count));
+                    continue;
                 }
-                await sleep(milliseconds(10 * retry_count));
-                continue;
+                // Other error, propagate
+                return cc_err(err);
             }
             retry_count = 0;
             
-            if (try char[:] line = line_result) {
-                process(line);
-            } else {
-                break; // EOF
-            }
+            char[:] line = cc_unwrap(line_result);
+            if (line.len == 0) break;  // EOF (empty slice)
+            process(line);
         }
         file.close();
     }
@@ -1788,18 +1856,18 @@ void process_csv(char* filename) {
     
     File! f = file_open(&arena, filename, "r");
     if (try File file = f) {
-        while (char[:]?!IoError line_result = file.read_line(&arena)) {
-            if (try char[:]? line_opt = line_result) {
-                if (!line_opt) break;  // EOF (Ok(None))
-                char[:] line = *line_opt;
-                
-                // UFCS: trim and split naturally
-                StringSplitIter it = line.trim().split(",");
-                while (char[:]? field = it.next()) {
-                    std_out.write("Field: ");
-                    std_out.write(field.trim());
-                    std_out.write("\n");
-                }
+        while (true) {
+            char[:]!IoError line_result = file.read_line(&arena);
+            if (cc_is_err(line_result)) break;  // Error
+            char[:] line = cc_unwrap(line_result);
+            if (line.len == 0) break;  // EOF (empty slice)
+            
+            // UFCS: trim and split naturally
+            StringSplitIter it = line.trim().split(",");
+            while (char[:]? field = it.next()) {
+                std_out.write("Field: ");
+                std_out.write(field.trim());
+                std_out.write("\n");
             }
         }
         file.close();
@@ -1825,24 +1893,24 @@ void process_csv(char* filename) {
     Map<int, int> status_counts = map_new<int, int>(&arena);
     
     // Process line by line (UFCS throughout)
-    while (char[:]?!IoError line_result = file.read_line(&arena)) {
-        if (try char[:]? line_opt = line_result) {
-            if (!line_opt) break;  // EOF (Ok(None))
-            char[:] line = *line_opt;
-            
-            // Skip comments
-            if (line.starts_with("#")) continue;
-            
-            // Parse fields
-            StringSplitIter fields = line.split(" ");
-            if (char[:]? status_str = fields.next()) {
-                i64! status = status_str.parse_i64();
-                if (try i64 code = status) {
-                    // Update count
-                    int? count = status_counts.get((int)code);
-                    int new_count = (count ? *count : 0) + 1;
-                    status_counts.insert((int)code, new_count);
-                }
+    while (true) {
+        char[:]!IoError line_result = file.read_line(&arena);
+        if (cc_is_err(line_result)) break;  // Error
+        char[:] line = cc_unwrap(line_result);
+        if (line.len == 0) break;  // EOF (empty slice)
+        
+        // Skip comments
+        if (line.starts_with("#")) continue;
+        
+        // Parse fields
+        StringSplitIter fields = line.split(" ");
+        if (char[:]? status_str = fields.next()) {
+            i64! status = status_str.parse_i64();
+            if (try i64 code = status) {
+                // Update count
+                int? count = status_counts.get((int)code);
+                int new_count = (count ? *count : 0) + 1;
+                status_counts.insert((int)code, new_count);
             }
         }
     }
