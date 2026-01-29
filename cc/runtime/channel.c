@@ -154,6 +154,27 @@ static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uin
 }
 
 /* ============================================================================
+ * Fast Thread-Local Random for Fair Wake Selection
+ * ============================================================================ */
+
+static __thread uint32_t tls_rand_state = 0;
+
+static inline uint32_t fast_rand(void) {
+    uint32_t x = tls_rand_state;
+    if (x == 0) {
+        /* Seed with thread ID and time */
+        x = (uint32_t)(uintptr_t)pthread_self() ^ (uint32_t)time(NULL);
+        if (x == 0) x = 1;
+    }
+    /* xorshift32 */
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    tls_rand_state = x;
+    return x;
+}
+
+/* ============================================================================
  * Batch Wake Operations
  * ============================================================================ */
 
@@ -319,12 +340,8 @@ struct CCChan {
     pthread_cond_t not_empty;
     pthread_cond_t not_full;
     /* Fiber wait queues for fiber-aware blocking */
-    /* send_waiters_recv_*: sender waiting for receiver presence (rv_recv_waiters > 0) */
-    cc__fiber_wait_node* send_waiters_recv_head;
-    cc__fiber_wait_node* send_waiters_recv_tail;
-    /* send_waiters_consume_*: sender waiting for receiver to consume (rv_has_value == 0) */
-    cc__fiber_wait_node* send_waiters_consume_head;
-    cc__fiber_wait_node* send_waiters_consume_tail;
+    cc__fiber_wait_node* send_waiters_head;
+    cc__fiber_wait_node* send_waiters_tail;
     cc__fiber_wait_node* recv_waiters_head;
     cc__fiber_wait_node* recv_waiters_tail;
     
@@ -334,6 +351,7 @@ struct CCChan {
     struct lfds711_queue_bmm_state lfqueue_state;   /* liblfds queue state */
     struct lfds711_queue_bmm_element *lfqueue_elements; /* Pre-allocated element array */
     _Atomic int lfqueue_count;                      /* Approximate count for fast full/empty check */
+    _Atomic size_t slot_counter;                    /* Per-channel slot counter for large elements */
     _Atomic int recv_fairness_ctr;                  /* For yield-every-N fairness */
 };
 
@@ -358,15 +376,10 @@ static void cc__chan_add_waiter(cc__fiber_wait_node** head, cc__fiber_wait_node*
     *tail = node;
 }
 
-/* Add a fiber to send waiters queues (must hold ch->mu) */
-static void cc__chan_add_send_waiter_recv(CCChan* ch, cc__fiber_wait_node* node) {
+/* Add a fiber to send waiters queue (must hold ch->mu) */
+static void cc__chan_add_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
-    cc__chan_add_waiter(&ch->send_waiters_recv_head, &ch->send_waiters_recv_tail, node);
-}
-
-static void cc__chan_add_send_waiter_consume(CCChan* ch, cc__fiber_wait_node* node) {
-    if (!ch || !node) return;
-    cc__chan_add_waiter(&ch->send_waiters_consume_head, &ch->send_waiters_consume_tail, node);
+    cc__chan_add_waiter(&ch->send_waiters_head, &ch->send_waiters_tail, node);
 }
 
 /* Add a fiber to recv waiters queue (must hold ch->mu) */
@@ -391,14 +404,9 @@ static void cc__chan_remove_waiter_list(cc__fiber_wait_node** head, cc__fiber_wa
     node->prev = node->next = NULL;
 }
 
-static void cc__chan_remove_send_waiter_recv(CCChan* ch, cc__fiber_wait_node* node) {
+static void cc__chan_remove_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
-    cc__chan_remove_waiter_list(&ch->send_waiters_recv_head, &ch->send_waiters_recv_tail, node);
-}
-
-static void cc__chan_remove_send_waiter_consume(CCChan* ch, cc__fiber_wait_node* node) {
-    if (!ch || !node) return;
-    cc__chan_remove_waiter_list(&ch->send_waiters_consume_head, &ch->send_waiters_consume_tail, node);
+    cc__chan_remove_waiter_list(&ch->send_waiters_head, &ch->send_waiters_tail, node);
 }
 
 static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
@@ -407,66 +415,99 @@ static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
 }
 
 /* Wake one send waiter (must hold ch->mu) - uses batch */
-static void cc__chan_wake_one_send_waiter_recv(CCChan* ch) {
-    if (!ch || !ch->send_waiters_recv_head) return;
-    cc__fiber_wait_node* node = ch->send_waiters_recv_head;
-    ch->send_waiters_recv_head = node->next;
-    if (ch->send_waiters_recv_head) {
-        ch->send_waiters_recv_head->prev = NULL;
+static void cc__chan_wake_one_send_waiter(CCChan* ch) {
+    if (!ch || !ch->send_waiters_head) return;
+    cc__fiber_wait_node* node = ch->send_waiters_head;
+    ch->send_waiters_head = node->next;
+    if (ch->send_waiters_head) {
+        ch->send_waiters_head->prev = NULL;
     } else {
-        ch->send_waiters_recv_tail = NULL;
+        ch->send_waiters_tail = NULL;
     }
     atomic_store_explicit(&node->notified, 1, memory_order_release);
     wake_batch_add(node->fiber);
 }
 
-static void cc__chan_wake_one_send_waiter_consume(CCChan* ch) {
-    if (!ch || !ch->send_waiters_consume_head) return;
-    cc__fiber_wait_node* node = ch->send_waiters_consume_head;
-    ch->send_waiters_consume_head = node->next;
-    if (ch->send_waiters_consume_head) {
-        ch->send_waiters_consume_head->prev = NULL;
-    } else {
-        ch->send_waiters_consume_tail = NULL;
-    }
-    atomic_store_explicit(&node->notified, 1, memory_order_release);
-    wake_batch_add(node->fiber);
-}
-
-/* Wake one recv waiter (must hold ch->mu) - uses batch */
+/* Wake one recv waiter (must hold ch->mu) - uses batch.
+ * This REMOVES the waiter from the queue and sets notified=1 to signal
+ * "data was delivered directly to you". Only use for direct handoff completion.
+ * Uses randomized selection for fairness among multiple waiters. */
 static void cc__chan_wake_one_recv_waiter(CCChan* ch) {
     if (!ch || !ch->recv_waiters_head) return;
-    cc__fiber_wait_node* node = ch->recv_waiters_head;
-    ch->recv_waiters_head = node->next;
-    if (ch->recv_waiters_head) {
-        ch->recv_waiters_head->prev = NULL;
-    } else {
-        ch->recv_waiters_tail = NULL;
+    
+    /* Count waiters and pick random one for fairness */
+    int count = 0;
+    for (cc__fiber_wait_node* n = ch->recv_waiters_head; n; n = n->next) {
+        count++;
     }
+    
+    int pick = (count > 1) ? (int)(fast_rand() % (uint32_t)count) : 0;
+    
+    cc__fiber_wait_node* node = ch->recv_waiters_head;
+    for (int i = 0; i < pick; i++) {
+        node = node->next;
+    }
+    
+    /* Remove selected node from queue */
+    if (node->prev) {
+        node->prev->next = node->next;
+    } else {
+        ch->recv_waiters_head = node->next;
+    }
+    if (node->next) {
+        node->next->prev = node->prev;
+    } else {
+        ch->recv_waiters_tail = node->prev;
+    }
+    node->prev = node->next = NULL;
+    
     atomic_store_explicit(&node->notified, 1, memory_order_release);
     wake_batch_add(node->fiber);
 }
 
-/* Pop a send waiter (must hold ch->mu). Uses send_waiters_recv list. */
+/* Signal a recv waiter to wake and try the buffer (must hold ch->mu).
+ * Does NOT set notified - the waiter remains in the queue and should check
+ * the buffer. Uses randomized selection for fairness. */
+static void cc__chan_signal_recv_waiter(CCChan* ch) {
+    if (!ch || !ch->recv_waiters_head) return;
+    
+    /* Count waiters and pick random one for fairness */
+    int count = 0;
+    for (cc__fiber_wait_node* n = ch->recv_waiters_head; n; n = n->next) {
+        count++;
+    }
+    
+    int pick = (count > 1) ? (int)(fast_rand() % (uint32_t)count) : 0;
+    
+    cc__fiber_wait_node* node = ch->recv_waiters_head;
+    for (int i = 0; i < pick; i++) {
+        node = node->next;
+    }
+    
+    /* Just wake the fiber - it will try the buffer */
+    wake_batch_add(node->fiber);
+}
+
+/* Pop a send waiter (must hold ch->mu). */
 static cc__fiber_wait_node* cc__chan_pop_send_waiter(CCChan* ch) {
     if (!ch) return NULL;
-    while (ch->send_waiters_recv_head) {
-        cc__fiber_wait_node* node = ch->send_waiters_recv_head;
+    while (ch->send_waiters_head) {
+        cc__fiber_wait_node* node = ch->send_waiters_head;
         if (atomic_load_explicit(&node->notified, memory_order_acquire) == 2) {
-            ch->send_waiters_recv_head = node->next;
-            if (ch->send_waiters_recv_head) {
-                ch->send_waiters_recv_head->prev = NULL;
+            ch->send_waiters_head = node->next;
+            if (ch->send_waiters_head) {
+                ch->send_waiters_head->prev = NULL;
             } else {
-                ch->send_waiters_recv_tail = NULL;
+                ch->send_waiters_tail = NULL;
             }
             node->next = node->prev = NULL;
             continue;
         }
-        ch->send_waiters_recv_head = node->next;
-        if (ch->send_waiters_recv_head) {
-            ch->send_waiters_recv_head->prev = NULL;
+        ch->send_waiters_head = node->next;
+        if (ch->send_waiters_head) {
+            ch->send_waiters_head->prev = NULL;
         } else {
-            ch->send_waiters_recv_tail = NULL;
+            ch->send_waiters_tail = NULL;
         }
         node->next = node->prev = NULL;
         return node;
@@ -516,27 +557,14 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
 }
 
 /* Wake one send waiter for close (notified=3 means "woken by close") */
-static void cc__chan_wake_one_send_waiter_recv_close(CCChan* ch) {
-    if (!ch || !ch->send_waiters_recv_head) return;
-    cc__fiber_wait_node* node = ch->send_waiters_recv_head;
-    ch->send_waiters_recv_head = node->next;
-    if (ch->send_waiters_recv_head) {
-        ch->send_waiters_recv_head->prev = NULL;
+static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
+    if (!ch || !ch->send_waiters_head) return;
+    cc__fiber_wait_node* node = ch->send_waiters_head;
+    ch->send_waiters_head = node->next;
+    if (ch->send_waiters_head) {
+        ch->send_waiters_head->prev = NULL;
     } else {
-        ch->send_waiters_recv_tail = NULL;
-    }
-    atomic_store_explicit(&node->notified, 3, memory_order_release);  /* 3 = close */
-    wake_batch_add(node->fiber);
-}
-
-static void cc__chan_wake_one_send_waiter_consume_close(CCChan* ch) {
-    if (!ch || !ch->send_waiters_consume_head) return;
-    cc__fiber_wait_node* node = ch->send_waiters_consume_head;
-    ch->send_waiters_consume_head = node->next;
-    if (ch->send_waiters_consume_head) {
-        ch->send_waiters_consume_head->prev = NULL;
-    } else {
-        ch->send_waiters_consume_tail = NULL;
+        ch->send_waiters_tail = NULL;
     }
     atomic_store_explicit(&node->notified, 3, memory_order_release);  /* 3 = close */
     wake_batch_add(node->fiber);
@@ -546,11 +574,8 @@ static void cc__chan_wake_one_send_waiter_consume_close(CCChan* ch) {
 static void cc__chan_wake_all_waiters(CCChan* ch) {
     if (!ch) return;
     /* Wake all send waiters with close signal */
-    while (ch->send_waiters_recv_head) {
-        cc__chan_wake_one_send_waiter_recv_close(ch);
-    }
-    while (ch->send_waiters_consume_head) {
-        cc__chan_wake_one_send_waiter_consume_close(ch);
+    while (ch->send_waiters_head) {
+        cc__chan_wake_one_send_waiter_close(ch);
     }
     /* Wake all recv waiters with close signal */
     while (ch->recv_waiters_head) {
@@ -636,6 +661,7 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
     ch->lfqueue_cap = 0;
     ch->lfqueue_elements = NULL;
     atomic_store(&ch->lfqueue_count, 0);
+    atomic_store(&ch->slot_counter, 0);
     atomic_store(&ch->recv_fairness_ctr, 0);
     
     if (cap > 1) {  /* Only use lock-free for cap > 1 (liblfds needs at least 2) */
@@ -739,62 +765,23 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
 
     /* Unbuffered rendezvous: sender must wait for a receiver and for slot to be free. */
     if (ch->cap == 0) {
-        
-
         if (fiber && !deadline) {
             /* Fiber-aware blocking: park the fiber instead of condvar wait */
-            while (!ch->closed) {
-                /* If no receiver is waiting (fiber queue empty), wait for receiver presence. */
-                if (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head) {
-                    cc__fiber_wait_node node = {0};
-                    node.fiber = fiber;
-                    atomic_store(&node.notified, 0);
-                    cc__chan_add_send_waiter_recv(ch, &node);
+            while (!ch->closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
+                cc__fiber_wait_node node = {0};
+                node.fiber = fiber;
+                atomic_store(&node.notified, 0);
+                cc__chan_add_send_waiter(ch, &node);
 
-                    /* Re-check condition after adding to list */
-                    if (ch->rv_recv_waiters > 0 || ch->recv_waiters_head) {
-                        cc__chan_remove_send_waiter_recv(ch, &node);
-                        continue;
-                    }
-
-                    pthread_mutex_unlock(&ch->mu);
-                    if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                        CC_FIBER_PARK("chan_send: waiting for receiver (rendezvous)");
-                    }
-                    pthread_mutex_lock(&ch->mu);
-
-                    if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                        cc__chan_remove_send_waiter_recv(ch, &node);
-                    }
-                    continue;
+                pthread_mutex_unlock(&ch->mu);
+                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
+                    CC_FIBER_PARK("chan_send: waiting for receiver (rendezvous)");
                 }
+                pthread_mutex_lock(&ch->mu);
 
-                /* If slot is full, wait for consumption. */
-                if (ch->rv_has_value) {
-                    cc__fiber_wait_node node = {0};
-                    node.fiber = fiber;
-                    atomic_store(&node.notified, 0);
-                    cc__chan_add_send_waiter_consume(ch, &node);
-
-                    /* Re-check condition after adding to list */
-                    if (!ch->rv_has_value) {
-                        cc__chan_remove_send_waiter_consume(ch, &node);
-                        continue;
-                    }
-
-                    pthread_mutex_unlock(&ch->mu);
-                    if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                        CC_FIBER_PARK("chan_send: waiting for value consumption");
-                    }
-                    pthread_mutex_lock(&ch->mu);
-
-                    if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                        cc__chan_remove_send_waiter_consume(ch, &node);
-                    }
-                    continue;
+                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
+                    cc__chan_remove_send_waiter(ch, &node);
                 }
-
-                break;  /* Receiver present and slot empty */
             }
         } else {
             /* Traditional condvar blocking */
@@ -814,22 +801,20 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     }
 
     /* Buffered channel */
-    
-
     if (fiber && !deadline) {
         /* Fiber-aware blocking */
         while (!ch->closed && ch->count == ch->cap) {
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
             atomic_store(&node.notified, 0);
-            cc__chan_add_send_waiter_recv(ch, &node);
+            cc__chan_add_send_waiter(ch, &node);
 
             pthread_mutex_unlock(&ch->mu);
             CC_FIBER_PARK("chan_send: waiting for space");
             pthread_mutex_lock(&ch->mu);
 
             if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                cc__chan_remove_send_waiter_recv(ch, &node);
+                cc__chan_remove_send_waiter(ch, &node);
             }
         }
     } else {
@@ -859,8 +844,8 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     if (ch->cap == 0) {
         ch->rv_recv_waiters++;
         /* Wake exactly ONE sender - prefer fiber waiters, else signal one condvar waiter */
-        if (ch->send_waiters_recv_head) {
-            cc__chan_wake_one_send_waiter_recv(ch);
+        if (ch->send_waiters_head) {
+            cc__chan_wake_one_send_waiter(ch);
         } else if (ch->send_cond_waiters > 0) {
             pthread_cond_signal(&ch->not_full);
         }
@@ -1012,7 +997,7 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
         channel_store_slot(ch->buf, value, ch->elem_size);
         ch->rv_has_value = 1;
         pthread_cond_signal(&ch->not_empty);
-        cc__chan_wake_one_recv_waiter(ch);
+        cc__chan_signal_recv_waiter(ch);
         cc__chan_broadcast_activity();
         return;
     }
@@ -1022,7 +1007,7 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->count++;
     if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
-    cc__chan_wake_one_recv_waiter(ch);
+    cc__chan_signal_recv_waiter(ch);
     cc__chan_broadcast_activity();
 }
 
@@ -1031,8 +1016,8 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
         /* Unbuffered rendezvous: wake one sender waiting for consumption. */
         channel_load_slot(ch->buf, out_value, ch->elem_size);
         ch->rv_has_value = 0;
-        if (ch->send_waiters_consume_head) {
-            cc__chan_wake_one_send_waiter_consume(ch);
+        if (ch->send_waiters_head) {
+            cc__chan_wake_one_send_waiter(ch);
             wake_batch_flush();
         }
         /* Also signal condvar waiters */
@@ -1048,7 +1033,7 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
     ch->head = (ch->head + 1) % ch->cap;
     ch->count--;
     if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
-    cc__chan_wake_one_send_waiter_recv(ch);
+    cc__chan_wake_one_send_waiter(ch);
     cc__chan_broadcast_activity();
 }
 
@@ -1069,24 +1054,18 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
 static _Atomic size_t g_lockfree_slot_counter = 0;
 
 /* Try lock-free enqueue. Returns 0 on success, EAGAIN if full.
- * Must NOT hold ch->mu when calling this. */
+ * Must NOT hold ch->mu when calling this.
+ * ONLY valid for small elements (elem_size <= sizeof(void*)). */
 static int cc_chan_try_enqueue_lockfree(CCChan* ch, const void* value) {
     if (!ch->use_lockfree || ch->cap == 0 || !ch->buf) return EAGAIN;
-    
-    void *queue_val;
-    
-    if (ch->elem_size <= sizeof(void*)) {
-        /* Small element: store directly in pointer (zero-copy for ints, pointers, etc.) */
-        queue_val = NULL;
-        memcpy(&queue_val, value, ch->elem_size);
-    } else {
-        /* Large element: copy to buffer slot, enqueue buffer pointer.
-         * Use atomic increment to get unique slot (wraps around). */
-        size_t slot = atomic_fetch_add_explicit(&g_lockfree_slot_counter, 1, memory_order_relaxed) % ch->lfqueue_cap;
-        void *buf_slot = (uint8_t*)ch->buf + slot * ch->elem_size;
-        channel_store_slot(buf_slot, value, ch->elem_size);
-        queue_val = buf_slot;
+    if (ch->elem_size > sizeof(void*)) {
+        fprintf(stderr, "BUG: cc_chan_try_enqueue_lockfree called with large element (size=%zu)\n", ch->elem_size);
+        return EAGAIN;
     }
+    
+    /* Small element: store directly in pointer (zero-copy for ints, pointers, etc.) */
+    void *queue_val = NULL;
+    memcpy(&queue_val, value, ch->elem_size);
     
     /* Try to enqueue - liblfds returns 1 on success, 0 if full */
     int ok = lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
@@ -1094,9 +1073,14 @@ static int cc_chan_try_enqueue_lockfree(CCChan* ch, const void* value) {
 }
 
 /* Try lock-free dequeue. Returns 0 on success, EAGAIN if empty.
- * Must NOT hold ch->mu when calling this. */
+ * Must NOT hold ch->mu when calling this.
+ * ONLY valid for small elements (elem_size <= sizeof(void*)). */
 static int cc_chan_try_dequeue_lockfree(CCChan* ch, void* out_value) {
     if (!ch->use_lockfree || ch->cap == 0 || !ch->buf) return EAGAIN;
+    if (ch->elem_size > sizeof(void*)) {
+        fprintf(stderr, "BUG: cc_chan_try_dequeue_lockfree called with large element (size=%zu)\n", ch->elem_size);
+        return EAGAIN;
+    }
     
     void *key, *val;
     
@@ -1104,13 +1088,8 @@ static int cc_chan_try_dequeue_lockfree(CCChan* ch, void* out_value) {
     int ok = lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val);
     if (!ok) return EAGAIN;
     
-    if (ch->elem_size <= sizeof(void*)) {
-        /* Small element: stored directly in pointer */
-        memcpy(out_value, &val, ch->elem_size);
-    } else {
-        /* Large element: pointer to buffer slot */
-        channel_load_slot(val, out_value, ch->elem_size);
-    }
+    /* Small element: stored directly in pointer */
+    memcpy(out_value, &val, ch->elem_size);
     
     return 0;
 }
@@ -1147,7 +1126,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         node.fiber = (fiber && !deadline) ? fiber : NULL;
         node.data = (void*)value;
         atomic_store(&node.notified, 0);
-        cc__chan_add_send_waiter_recv(ch, &node);
+        cc__chan_add_send_waiter(ch, &node);
 
         while (!ch->closed && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
             if (fiber && !deadline) {
@@ -1180,12 +1159,12 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
 
         if (deadline && err == ETIMEDOUT) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
-            cc__chan_remove_send_waiter_recv(ch, &node);  /* Remove from queue before returning */
+            cc__chan_remove_send_waiter(ch, &node);  /* Remove from queue before returning */
             return ETIMEDOUT;
         }
         if (ch->closed) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
-            cc__chan_remove_send_waiter_recv(ch, &node);  /* Remove from queue before returning */
+            cc__chan_remove_send_waiter(ch, &node);  /* Remove from queue before returning */
             return EPIPE;
         }
     }
@@ -1290,24 +1269,53 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     uint64_t t_enqueue = 0;
     uint64_t t_wake = 0;
     
-    /* Lock-free fast path for buffered channels */
-    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+    /* Lock-free fast path for buffered channels with small elements.
+     * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        ch->elem_size <= sizeof(void*)) {
         /* Check closed flag (relaxed read is fine, we'll verify under lock if needed) */
         if (ch->closed) return EPIPE;
         
-        /* Try lock-free enqueue */
+        /* Direct handoff: if receivers waiting, give item directly to one.
+         * This must be done under lock to coordinate with the fair queue. */
+        if (ch->recv_waiters_head != NULL) {
+            cc_chan_lock(ch);
+            if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+            cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
+            if (rnode) {
+                /* Direct handoff to waiting receiver */
+                channel_store_slot(rnode->data, value, ch->elem_size);
+                atomic_store_explicit(&rnode->notified, 1, memory_order_release);
+                if (rnode->fiber) {
+                    wake_batch_add(rnode->fiber);
+                } else {
+                    pthread_cond_signal(&ch->not_empty);
+                }
+                /* Signal the next head to try the buffer */
+                cc__chan_signal_recv_waiter(ch);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                if (timing) {
+                    uint64_t done = channel_rdtsc();
+                    channel_timing_record_send(t0, t0, done, done, done);
+                }
+                cc__chan_broadcast_activity();
+                return 0;
+            }
+            pthread_mutex_unlock(&ch->mu);
+        }
+        
+        /* No waiters - try lock-free enqueue to buffer */
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
             if (timing) {
                 uint64_t done = channel_rdtsc();
                 channel_timing_record_send(t0, t0, done, done, done);
             }
-            /* Wake any waiters - check atomically to avoid lock */
-            int had_waiter = ch->recv_waiters_head != NULL;
-            if (had_waiter || ch->recv_cond_waiters > 0) {
+            /* Signal any waiters that might have joined the queue */
+            if (ch->recv_waiters_head != NULL) {
                 cc_chan_lock(ch);
-                cc__chan_wake_one_recv_waiter(ch);
-                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                cc__chan_signal_recv_waiter(ch);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
@@ -1340,7 +1348,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     }
     
     /* Buffered channel - try lock-free again under mutex (for initial setup case) */
-    if (ch->use_lockfree) {
+    if (ch->use_lockfree && ch->elem_size <= sizeof(void*)) {
         pthread_mutex_unlock(&ch->mu);
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
@@ -1349,7 +1357,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 channel_timing_record_send(t0, t_lock, done, done, done);
             }
             cc_chan_lock(ch);
-            cc__chan_wake_one_recv_waiter(ch);
+            cc__chan_signal_recv_waiter(ch);
             if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
             pthread_mutex_unlock(&ch->mu);
             wake_batch_flush();
@@ -1360,8 +1368,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         cc_chan_lock(ch);
     }
     
-    /* Mutex-based blocking path */
-    if (ch->use_lockfree) {
+    /* Mutex-based blocking path for lock-free channels with small elements */
+    if (ch->use_lockfree && ch->elem_size <= sizeof(void*)) {
         /* For lock-free channels, wait using count approximation */
         
         cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
@@ -1374,7 +1382,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 
                 if (timing) t_enqueue = channel_rdtsc();
                 cc_chan_lock(ch);
-                cc__chan_wake_one_recv_waiter(ch);
+                cc__chan_signal_recv_waiter(ch);
                 if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 if (timing) t_wake = channel_rdtsc();
@@ -1393,12 +1401,12 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
-                cc__chan_add_send_waiter_recv(ch, &node);
+                cc__chan_add_send_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
                 CC_FIBER_PARK("chan_send: buffer full, waiting for space");
                 pthread_mutex_lock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    cc__chan_remove_send_waiter_recv(ch, &node);
+                    cc__chan_remove_send_waiter(ch, &node);
                 }
             } else {
                 ch->send_cond_waiters++;
@@ -1440,44 +1448,36 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     uint64_t t_dequeue = 0;
     uint64_t t_wake = 0;
     
-    /* Lock-free fast path for buffered channels */
-    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
-        /* Try lock-free dequeue */
+    /* Lock-free fast path for buffered channels with small elements.
+     * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        ch->elem_size <= sizeof(void*)) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
             if (timing) {
                 uint64_t done = channel_rdtsc();
                 channel_timing_record_recv(t0, t0, done, done, done);
             }
-            /* Wake any waiters */
-            if (ch->send_waiters_recv_head || ch->send_cond_waiters > 0) {
+            if (ch->send_waiters_head || ch->send_cond_waiters > 0) {
                 cc_chan_lock(ch);
-                cc__chan_wake_one_send_waiter_recv(ch);
+                cc__chan_wake_one_send_waiter(ch);
                 if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
             cc__chan_broadcast_activity();
-            /* Fairness: yield every 8th recv for MPMC patterns */
-            if (cc__fiber_in_context() && ch->cap > 2) {
-                if ((atomic_fetch_add(&ch->recv_fairness_ctr, 1) & 7) == 7) {
-                    cc__fiber_yield();
-                }
-            }
             return 0;
         }
-        /* Check if closed and empty */
         if (ch->closed) {
-            /* Double-check with lock */
             cc_chan_lock(ch);
             if (ch->closed && cc_chan_try_dequeue_lockfree(ch, out_value) != 0) {
                 pthread_mutex_unlock(&ch->mu);
                 return EPIPE;
             }
             pthread_mutex_unlock(&ch->mu);
-            return 0;  /* Got a value during the race */
+            return 0;
         }
-        /* Lock-free dequeue failed (queue empty), fall through to blocking path */
+        /* Fall through to blocking path */
     }
     
     /* Standard mutex path */
@@ -1499,8 +1499,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         return err;
     }
 
-    /* Buffered or initial setup - use existing wait logic */
-    if (!ch->use_lockfree) {
+    /* Buffered or initial setup - use existing wait logic.
+     * Large elements (> sizeof(void*)) always use mutex path to avoid slot wrap-around race. */
+    if (!ch->use_lockfree || ch->elem_size > sizeof(void*)) {
         err = cc_chan_wait_empty(ch, NULL);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
         cc_chan_dequeue(ch, out_value);
@@ -1515,9 +1516,26 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         return 0;
     }
     
-    /* Lock-free buffered channel - blocking wait for data */
+    /* Lock-free buffered channel with small elements - blocking wait for data */
     
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
+    
+    /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
+       is a common deadlock foot-gun (recv-until-close inside the nursery). */
+    if (!ch->closed && ch->autoclose_owner && cc__tls_current_nursery &&
+        ch->autoclose_owner == cc__tls_current_nursery) {
+        const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
+        if (g && g[0] == '1') {
+            if (!ch->warned_autoclose_block) {
+                ch->warned_autoclose_block = 1;
+                fprintf(stderr,
+                        "CC: runtime guard: blocking cc_chan_recv() on a `closing(...)` channel from inside the same nursery "
+                        "may deadlock (use a sentinel/explicit close, or drain outside the nursery)\n");
+            }
+            pthread_mutex_unlock(&ch->mu);
+            return EDEADLK;
+        }
+    }
     
     while (!ch->closed) {
         /* Try lock-free dequeue */
@@ -1527,7 +1545,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             
             if (timing) t_dequeue = channel_rdtsc();
             cc_chan_lock(ch);
-            cc__chan_wake_one_send_waiter_recv(ch);
+            cc__chan_wake_one_send_waiter(ch);
             if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
             pthread_mutex_unlock(&ch->mu);
             if (timing) t_wake = channel_rdtsc();
@@ -1545,12 +1563,23 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         if (fiber) {
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
+            node.data = out_value;  /* For direct handoff */
             atomic_store(&node.notified, 0);
             cc__chan_add_recv_waiter(ch, &node);
             pthread_mutex_unlock(&ch->mu);
             CC_FIBER_PARK("chan_recv: buffer empty, waiting for data");
             pthread_mutex_lock(&ch->mu);
-            if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
+            int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
+            if (notified == 1) {
+                /* Sender did direct handoff - data is already in out_value */
+                pthread_mutex_unlock(&ch->mu);
+                if (timing) {
+                    uint64_t done = channel_rdtsc();
+                    channel_timing_record_recv(t0, t_lock, done, done, done);
+                }
+                return 0;
+            }
+            if (notified != 1) {
                 cc__chan_remove_recv_waiter(ch, &node);
             }
         } else {
@@ -1578,15 +1607,17 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
 int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     if (!ch || !value || value_size == 0) return EINVAL;
     
-    /* Lock-free fast path for buffered channels */
-    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+    /* Lock-free fast path for buffered channels with small elements.
+     * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        ch->elem_size <= sizeof(void*)) {
         if (ch->closed) return EPIPE;
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
-            /* Wake any waiters */
+            /* Signal any waiters */
             if (ch->recv_waiters_head || ch->recv_cond_waiters > 0) {
                 cc_chan_lock(ch);
-                cc__chan_wake_one_recv_waiter(ch);
+                cc__chan_signal_recv_waiter(ch);
                 if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
@@ -1625,13 +1656,13 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         return 0;
     }
     
-    /* Buffered non-lock-free: try lock-free first, then fall back */
-    if (ch->use_lockfree) {
+    /* Buffered with lock-free small elements: try lock-free first */
+    if (ch->use_lockfree && ch->elem_size <= sizeof(void*)) {
         pthread_mutex_unlock(&ch->mu);
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
             cc_chan_lock(ch);
-            cc__chan_wake_one_recv_waiter(ch);
+            cc__chan_signal_recv_waiter(ch);
             if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
             pthread_mutex_unlock(&ch->mu);
             wake_batch_flush();
@@ -1653,14 +1684,16 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
 int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (!ch || !out_value || value_size == 0) return EINVAL;
     
-    /* Lock-free fast path for buffered channels */
-    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+    /* Lock-free fast path for buffered channels with small elements.
+     * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        ch->elem_size <= sizeof(void*)) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
             /* Wake any waiters */
-            if (ch->send_waiters_recv_head || ch->send_cond_waiters > 0) {
+            if (ch->send_waiters_head || ch->send_cond_waiters > 0) {
                 cc_chan_lock(ch);
-                cc__chan_wake_one_send_waiter_recv(ch);
+                cc__chan_wake_one_send_waiter(ch);
                 if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
@@ -1699,7 +1732,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
             cc_chan_lock(ch);
-            cc__chan_wake_one_send_waiter_recv(ch);
+            cc__chan_wake_one_send_waiter(ch);
             if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
             pthread_mutex_unlock(&ch->mu);
             wake_batch_flush();
@@ -1718,15 +1751,17 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
 int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const struct timespec* abs_deadline) {
     if (!ch || !value || value_size == 0) return EINVAL;
     
-    /* Lock-free fast path for buffered channels */
-    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+    /* Lock-free fast path for buffered channels with small elements.
+     * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        ch->elem_size <= sizeof(void*)) {
         if (ch->closed) return EPIPE;
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
-            /* Wake any recv waiters */
+            /* Signal any recv waiters */
             if (ch->recv_waiters_head || ch->recv_cond_waiters > 0) {
                 pthread_mutex_lock(&ch->mu);
-                cc__chan_wake_one_recv_waiter(ch);
+                cc__chan_signal_recv_waiter(ch);
                 if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
@@ -1755,7 +1790,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
             int rc = cc_chan_try_enqueue_lockfree(ch, value);
             if (rc == 0) {
                 pthread_mutex_lock(&ch->mu);
-                cc__chan_wake_one_recv_waiter(ch);
+                cc__chan_signal_recv_waiter(ch);
                 if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
@@ -1806,14 +1841,16 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
 int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const struct timespec* abs_deadline) {
     if (!ch || !out_value || value_size == 0) return EINVAL;
     
-    /* Lock-free fast path for buffered channels - try dequeue first */
-    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf) {
+    /* Lock-free fast path for buffered channels with small elements.
+     * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
+    if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
+        ch->elem_size <= sizeof(void*)) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
             /* Wake any send waiters */
-            if (ch->send_waiters_recv_head || ch->send_cond_waiters > 0) {
+            if (ch->send_waiters_head || ch->send_cond_waiters > 0) {
                 pthread_mutex_lock(&ch->mu);
-                cc__chan_wake_one_send_waiter_recv(ch);
+                cc__chan_wake_one_send_waiter(ch);
                 if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
@@ -1851,7 +1888,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
             if (rc == 0) {
                 pthread_mutex_lock(&ch->mu);
-                cc__chan_wake_one_send_waiter_recv(ch);
+                cc__chan_wake_one_send_waiter(ch);
                 if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
