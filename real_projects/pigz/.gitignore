@@ -1,0 +1,22 @@
+# Downloaded by setup.sh (original pigz source)
+pigz.c
+yarn.c
+yarn.h
+try.c
+try.h
+
+# Binaries
+pigz
+pigz_cc
+pigz_idiomatic
+pigz_debug
+
+# Test/benchmark artifacts
+*.bin
+*.bin.gz
+*_decomp.bin
+bench_*
+gunzip_err.txt
+
+# Third-party
+zopfli/
