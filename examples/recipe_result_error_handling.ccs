@@ -14,7 +14,7 @@
 /* Simulated I/O operation that can fail. */
 int!CCError read_config_value(const char* key) {
     if (!key || key[0] == '\0') {
-        return cc_err(CC_ERR_INVALID_ARG, "empty key");
+        return cc_err(cc_error(CC_ERR_INVALID_ARG, "empty key"));
     }
     if (strcmp(key, "timeout") == 0) {
         return cc_ok(30);
@@ -22,7 +22,7 @@ int!CCError read_config_value(const char* key) {
     if (strcmp(key, "max_retries") == 0) {
         return cc_ok(3);
     }
-    return cc_err(CC_ERR_NOT_FOUND, "key not found");
+    return cc_err(cc_error(CC_ERR_NOT_FOUND, "key not found"));
 }
 
 /* Function that uses try to propagate errors. */
