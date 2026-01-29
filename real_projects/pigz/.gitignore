@@ -1,11 +1,8 @@
 # Downloaded by setup.sh (original pigz source)
 pigz_c/
 
-# Binaries
-pigz
-pigz_cc
-pigz_idiomatic
-pigz_debug
+# Built binaries
+out/
 
 # Test/benchmark artifacts
 *.bin
@@ -13,6 +10,7 @@ pigz_debug
 *_decomp.bin
 bench_*
 gunzip_err.txt
+*.gz
 
 # Third-party
 zopfli/
