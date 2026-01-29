@@ -154,27 +154,6 @@ static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uin
 }
 
 /* ============================================================================
- * Fast Thread-Local Random for Fair Wake Selection
- * ============================================================================ */
-
-static __thread uint32_t tls_rand_state = 0;
-
-static inline uint32_t fast_rand(void) {
-    uint32_t x = tls_rand_state;
-    if (x == 0) {
-        /* Seed with thread ID and time */
-        x = (uint32_t)(uintptr_t)pthread_self() ^ (uint32_t)time(NULL);
-        if (x == 0) x = 1;
-    }
-    /* xorshift32 */
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    tls_rand_state = x;
-    return x;
-}
-
-/* ============================================================================
  * Batch Wake Operations
  * ============================================================================ */
 
@@ -330,9 +309,6 @@ struct CCChan {
     int rv_has_value;
     int rv_recv_waiters;
     
-    /* Condvar waiter counts for signaling optimization */
-    int send_cond_waiters;     /* threads blocked waiting to send (buffer full) */
-    int recv_cond_waiters;     /* threads blocked waiting to recv (buffer empty) */
     /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
     CCNursery* autoclose_owner;
     int warned_autoclose_block;
@@ -428,64 +404,13 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
     wake_batch_add(node->fiber);
 }
 
-/* Wake one recv waiter (must hold ch->mu) - uses batch.
- * This REMOVES the waiter from the queue and sets notified=1 to signal
- * "data was delivered directly to you". Only use for direct handoff completion.
- * Uses randomized selection for fairness among multiple waiters. */
-static void cc__chan_wake_one_recv_waiter(CCChan* ch) {
-    if (!ch || !ch->recv_waiters_head) return;
-    
-    /* Count waiters and pick random one for fairness */
-    int count = 0;
-    for (cc__fiber_wait_node* n = ch->recv_waiters_head; n; n = n->next) {
-        count++;
-    }
-    
-    int pick = (count > 1) ? (int)(fast_rand() % (uint32_t)count) : 0;
-    
-    cc__fiber_wait_node* node = ch->recv_waiters_head;
-    for (int i = 0; i < pick; i++) {
-        node = node->next;
-    }
-    
-    /* Remove selected node from queue */
-    if (node->prev) {
-        node->prev->next = node->next;
-    } else {
-        ch->recv_waiters_head = node->next;
-    }
-    if (node->next) {
-        node->next->prev = node->prev;
-    } else {
-        ch->recv_waiters_tail = node->prev;
-    }
-    node->prev = node->next = NULL;
-    
-    atomic_store_explicit(&node->notified, 1, memory_order_release);
-    wake_batch_add(node->fiber);
-}
-
 /* Signal a recv waiter to wake and try the buffer (must hold ch->mu).
  * Does NOT set notified - the waiter remains in the queue and should check
- * the buffer. Uses randomized selection for fairness. */
+ * the buffer. Uses simple FIFO - work stealing provides natural load balancing. */
 static void cc__chan_signal_recv_waiter(CCChan* ch) {
     if (!ch || !ch->recv_waiters_head) return;
-    
-    /* Count waiters and pick random one for fairness */
-    int count = 0;
-    for (cc__fiber_wait_node* n = ch->recv_waiters_head; n; n = n->next) {
-        count++;
-    }
-    
-    int pick = (count > 1) ? (int)(fast_rand() % (uint32_t)count) : 0;
-    
-    cc__fiber_wait_node* node = ch->recv_waiters_head;
-    for (int i = 0; i < pick; i++) {
-        node = node->next;
-    }
-    
-    /* Just wake the fiber - it will try the buffer */
-    wake_batch_add(node->fiber);
+    /* Just wake the head fiber - it will try the buffer */
+    wake_batch_add(ch->recv_waiters_head->fiber);
 }
 
 /* Pop a send waiter (must hold ch->mu). */
@@ -785,16 +710,14 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             }
         } else {
             /* Traditional condvar blocking */
-            ch->send_cond_waiters++;
             while (!ch->closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
-                    if (err == ETIMEDOUT) { ch->send_cond_waiters--; return ETIMEDOUT; }
+                    if (err == ETIMEDOUT) { return ETIMEDOUT; }
                 } else {
                     pthread_cond_wait(&ch->not_full, &ch->mu);
                 }
             }
-            ch->send_cond_waiters--;
         }
         
         return ch->closed ? EPIPE : 0;
@@ -819,16 +742,14 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         }
     } else {
         /* Traditional condvar blocking */
-        ch->send_cond_waiters++;
         while (!ch->closed && ch->count == ch->cap && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
-                if (err == ETIMEDOUT) { ch->send_cond_waiters--; return ETIMEDOUT; }
+                if (err == ETIMEDOUT) { return ETIMEDOUT; }
             } else {
                 pthread_cond_wait(&ch->not_full, &ch->mu);
             }
         }
-        ch->send_cond_waiters--;
     }
     
     return ch->closed ? EPIPE : 0;
@@ -843,10 +764,10 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     /* Unbuffered rendezvous: receiver waits for a sender to place a value. */
     if (ch->cap == 0) {
         ch->rv_recv_waiters++;
-        /* Wake exactly ONE sender - prefer fiber waiters, else signal one condvar waiter */
+        /* Wake exactly ONE sender - prefer fiber waiters, else signal condvar */
         if (ch->send_waiters_head) {
             cc__chan_wake_one_send_waiter(ch);
-        } else if (ch->send_cond_waiters > 0) {
+        } else {
             pthread_cond_signal(&ch->not_full);
         }
         wake_batch_flush();  /* Flush wakes immediately for rendezvous */
@@ -876,16 +797,14 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             }
         } else {
             /* Spinlock-condvar blocking (spin then sleep) */
-            ch->recv_cond_waiters++;
             while (!ch->closed && !ch->rv_has_value && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
-                    if (err == ETIMEDOUT) { ch->recv_cond_waiters--; ch->rv_recv_waiters--; return ETIMEDOUT; }
+                    if (err == ETIMEDOUT) { ch->rv_recv_waiters--; return ETIMEDOUT; }
                 } else {
                     pthread_cond_wait(&ch->not_empty, &ch->mu);
                 }
             }
-            ch->recv_cond_waiters--;
         }
         
         /* NOTE: Don't decrement rv_recv_waiters here! The caller will call dequeue,
@@ -935,16 +854,14 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         }
     } else {
         /* Spinlock-condvar blocking (spin then sleep) */
-        ch->recv_cond_waiters++;
         while (!ch->closed && ch->count == 0 && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
-                if (err == ETIMEDOUT) { ch->recv_cond_waiters--; return ETIMEDOUT; }
+                if (err == ETIMEDOUT) { return ETIMEDOUT; }
             } else {
                 pthread_cond_wait(&ch->not_empty, &ch->mu);
             }
         }
-        ch->recv_cond_waiters--;
     }
     
     if (ch->closed && ch->count == 0) return EPIPE;
@@ -1001,12 +918,12 @@ static void cc_chan_enqueue(CCChan* ch, const void* value) {
         cc__chan_broadcast_activity();
         return;
     }
-    /* Buffered: only signal when waiters exist */
+    /* Buffered: signal waiters */
     void *slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
     channel_store_slot(slot, value, ch->elem_size);
     ch->tail = (ch->tail + 1) % ch->cap;
     ch->count++;
-    if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+    pthread_cond_signal(&ch->not_empty);
     cc__chan_signal_recv_waiter(ch);
     cc__chan_broadcast_activity();
 }
@@ -1021,18 +938,16 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
             wake_batch_flush();
         }
         /* Also signal condvar waiters */
-        if (ch->send_cond_waiters > 0) {
-            pthread_cond_broadcast(&ch->not_full);
-        }
+        pthread_cond_broadcast(&ch->not_full);
         cc__chan_broadcast_activity();
         return;
     }
-    /* Buffered: only signal when waiters exist */
+    /* Buffered: signal waiters */
     void *slot = (uint8_t*)ch->buf + ch->head * ch->elem_size;
     channel_load_slot(slot, out_value, ch->elem_size);
     ch->head = (ch->head + 1) % ch->cap;
     ch->count--;
-    if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+    pthread_cond_signal(&ch->not_full);
     cc__chan_wake_one_send_waiter(ch);
     cc__chan_broadcast_activity();
 }
@@ -1049,9 +964,6 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
  * No separate count tracking - liblfds handles full/empty detection internally
  * via sequence numbers.
  */
-
-/* Thread-local slot index for large element writes (rotates through buffer) */
-static _Atomic size_t g_lockfree_slot_counter = 0;
 
 /* Try lock-free enqueue. Returns 0 on success, EAGAIN if full.
  * Must NOT hold ch->mu when calling this.
@@ -1358,7 +1270,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             }
             cc_chan_lock(ch);
             cc__chan_signal_recv_waiter(ch);
-            if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+            pthread_cond_signal(&ch->not_empty);
             pthread_mutex_unlock(&ch->mu);
             wake_batch_flush();
             cc__chan_broadcast_activity();
@@ -1383,7 +1295,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 if (timing) t_enqueue = channel_rdtsc();
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
-                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 if (timing) t_wake = channel_rdtsc();
                 wake_batch_flush();
@@ -1409,9 +1321,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     cc__chan_remove_send_waiter(ch, &node);
                 }
             } else {
-                ch->send_cond_waiters++;
                 pthread_cond_wait(&ch->not_full, &ch->mu);
-                ch->send_cond_waiters--;
             }
         }
         
@@ -1458,10 +1368,10 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 uint64_t done = channel_rdtsc();
                 channel_timing_record_recv(t0, t0, done, done, done);
             }
-            if (ch->send_waiters_head || ch->send_cond_waiters > 0) {
+            if (ch->send_waiters_head) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
-                if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+                pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
@@ -1546,7 +1456,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             if (timing) t_dequeue = channel_rdtsc();
             cc_chan_lock(ch);
             cc__chan_wake_one_send_waiter(ch);
-            if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+            pthread_cond_signal(&ch->not_full);
             pthread_mutex_unlock(&ch->mu);
             if (timing) t_wake = channel_rdtsc();
             wake_batch_flush();
@@ -1583,9 +1493,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 cc__chan_remove_recv_waiter(ch, &node);
             }
         } else {
-            ch->recv_cond_waiters++;
             pthread_cond_wait(&ch->not_empty, &ch->mu);
-            ch->recv_cond_waiters--;
         }
     }
     
@@ -1615,10 +1523,10 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
             /* Signal any waiters */
-            if (ch->recv_waiters_head || ch->recv_cond_waiters > 0) {
+            if (ch->recv_waiters_head) {
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
-                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
@@ -1663,7 +1571,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         if (rc == 0) {
             cc_chan_lock(ch);
             cc__chan_signal_recv_waiter(ch);
-            if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+            pthread_cond_signal(&ch->not_empty);
             pthread_mutex_unlock(&ch->mu);
             wake_batch_flush();
             cc__chan_broadcast_activity();
@@ -1691,10 +1599,10 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
             /* Wake any waiters */
-            if (ch->send_waiters_head || ch->send_cond_waiters > 0) {
+            if (ch->send_waiters_head) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
-                if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+                pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
@@ -1733,7 +1641,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         if (rc == 0) {
             cc_chan_lock(ch);
             cc__chan_wake_one_send_waiter(ch);
-            if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+            pthread_cond_signal(&ch->not_full);
             pthread_mutex_unlock(&ch->mu);
             wake_batch_flush();
             cc__chan_broadcast_activity();
@@ -1759,10 +1667,10 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
             /* Signal any recv waiters */
-            if (ch->recv_waiters_head || ch->recv_cond_waiters > 0) {
+            if (ch->recv_waiters_head) {
                 pthread_mutex_lock(&ch->mu);
                 cc__chan_signal_recv_waiter(ch);
-                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
@@ -1791,7 +1699,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
             if (rc == 0) {
                 pthread_mutex_lock(&ch->mu);
                 cc__chan_signal_recv_waiter(ch);
-                if (ch->recv_cond_waiters > 0) pthread_cond_signal(&ch->not_empty);
+                pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
                 cc__chan_broadcast_activity();
@@ -1848,10 +1756,10 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
             /* Wake any send waiters */
-            if (ch->send_waiters_head || ch->send_cond_waiters > 0) {
+            if (ch->send_waiters_head) {
                 pthread_mutex_lock(&ch->mu);
                 cc__chan_wake_one_send_waiter(ch);
-                if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+                pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             }
@@ -1889,7 +1797,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             if (rc == 0) {
                 pthread_mutex_lock(&ch->mu);
                 cc__chan_wake_one_send_waiter(ch);
-                if (ch->send_cond_waiters > 0) pthread_cond_signal(&ch->not_full);
+                pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
                 cc__chan_broadcast_activity();
