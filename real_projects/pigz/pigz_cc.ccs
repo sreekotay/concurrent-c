@@ -40,6 +40,7 @@ typedef struct {
     CCSlice data;                 /* Input data slice (arena-backed) */
     CCSlice dict;                 /* Dictionary from previous block */
     int last;                     /* True if this is the last block */
+    CCArena arena;                /* Arena owning the data and dict */
 } Block;
 
 /* Compressed result */
@@ -281,6 +282,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     while (chan_recv(blocks_rx, &blk) == 0) {
                         Result res = compress_block(&blk, level);
                         chan_send(results_tx, res);
+                        cc_heap_arena_free(&blk.arena);
                     }
                 });
             }
@@ -288,30 +290,33 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             /* Reader: produces blocks */
             @nursery closing(blocks_tx) {
                 void* in_ptr = (void*)&in_file;
-                void* arena_ptr = (void*)&main_arena;
-                spawn([in_ptr, arena_ptr]() => {
+                spawn([in_ptr]() => {
                     CCFile* in_f = (CCFile*)in_ptr;
-                    CCArena* arena = (CCArena*)arena_ptr;
                     long seq = 0;
-                    CCSlice prev_data = cc_slice_empty();
                     
                     while (1) {
-                        /* Read into arena */
-                        CCResultOptSliceIoError read_result = cc_file_read(in_f, arena, BLOCK_SIZE);
+                        /* Create a fresh arena for this block (idiomatic transfer) */
+                        CCArena arena = cc_heap_arena(BLOCK_SIZE + 1024);
+                        
+                        /* Read into the fresh arena */
+                        CCResultOptSliceIoError read_result = cc_file_read(in_f, &arena, BLOCK_SIZE);
                         
                         /* Check for error */
                         if (read_result.is_err) {
+                            cc_heap_arena_free(&arena);
                             break;
                         }
                         
                         /* Check for EOF */
                         CCOptional_CCSlice data_opt = read_result.ok;
                         if (!data_opt.has) {
+                            cc_heap_arena_free(&arena);
                             break;  /* EOF */
                         }
                         CCSlice data = data_opt.u.value;
                         
                         if (data.len == 0) {
+                            cc_heap_arena_free(&arena);
                             break;  /* EOF */
                         }
                         
@@ -319,9 +324,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         Block blk = {0};
                         blk.seq = seq++;
                         blk.data = data;
+                        blk.arena = arena;
                         
                         /* Check if this is the last block by peeking */
-                        CCResultOptSliceIoError peek = cc_file_read(in_f, arena, 1);
+                        CCResultOptSliceIoError peek = cc_file_read(in_f, &arena, 1);
                         if (peek.is_err || !peek.ok.has) {
                             blk.last = 1;
                         } else {
@@ -329,12 +335,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             fseek(in_f->handle, -1, SEEK_CUR);
                         }
                         
-                        /* Send block to workers */
+                        /* Send block to workers - ownership of arena transfers */
                         chan_send(blocks_tx, blk);
-                        
-                        /* Reset arena for next block to avoid exhaustion. */
-                        cc_arena_reset(arena);
-                        prev_data = cc_slice_empty();
                         
                         if (blk.last) {
                             break;
