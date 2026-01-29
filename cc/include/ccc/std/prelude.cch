@@ -14,6 +14,7 @@
 
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
+#include <ccc/cc_result.cch>
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_exec.cch>
 #include "string.cch"
@@ -26,10 +27,49 @@
 #include "future.cch"
 
 #ifdef CC_ENABLE_SHORT_NAMES
+/* Core types */
 typedef CCArena Arena;
 typedef CCString String;
 typedef CCFile File;
 typedef CCSlice Slice;
+
+/* Error types */
+typedef CCIoError IoError;
+typedef CCIoErrorKind IoErrorKind;
+typedef CCError Error;
+typedef CCErrorKind ErrorKind;
+
+/* IoError kind constants (IoError::PermissionDenied style in spec) */
+#define IoError_PermissionDenied  CC_IO_PERMISSION_DENIED
+#define IoError_FileNotFound      CC_IO_FILE_NOT_FOUND
+#define IoError_InvalidArgument   CC_IO_INVALID_ARGUMENT
+#define IoError_Interrupted       CC_IO_INTERRUPTED
+#define IoError_OutOfMemory       CC_IO_OUT_OF_MEMORY
+#define IoError_Busy              CC_IO_BUSY
+#define IoError_ConnectionClosed  CC_IO_CONNECTION_CLOSED
+#define IoError_Other             CC_IO_OTHER
+
+/* IoError constructors (for cc_err() usage) */
+#define io_error(kind)         ((CCIoError){(kind), 0})
+#define io_error_os(kind, os)  ((CCIoError){(kind), (os)})
+
+/* Generic Error kind constants */
+#define Error_None          CC_ERR_NONE
+#define Error_Io            CC_ERR_IO
+#define Error_Parse         CC_ERR_PARSE
+#define Error_Timeout       CC_ERR_TIMEOUT
+#define Error_Cancelled     CC_ERR_CANCELLED
+#define Error_InvalidArg    CC_ERR_INVALID_ARG
+#define Error_OutOfMemory   CC_ERR_OUT_OF_MEMORY
+#define Error_NotFound      CC_ERR_NOT_FOUND
+#define Error_Permission    CC_ERR_PERMISSION
+#define Error_AlreadyExists CC_ERR_ALREADY_EXISTS
+#define Error_WouldBlock    CC_ERR_WOULD_BLOCK
+#define Error_Closed        CC_ERR_CLOSED
+#define Error_Overflow      CC_ERR_OVERFLOW
+#define Error_Underflow     CC_ERR_UNDERFLOW
+
+/* Collection macros */
 #define ChanPtr(T, Name) CC_DECL_TYPED_CHAN_PTR(T, Name)
 #define ChanVal(T, Name) CC_DECL_TYPED_CHAN_VAL(T, Name)
 #define Chan(T, Name) CC_DECL_TYPED_CHAN_PTR(T, Name)

@@ -9,7 +9,7 @@ int!CCError make_ok(void) {
 }
 
 int!CCError make_err(void) {
-    return cc_err(CC_ERR_NOT_FOUND, "not found");
+    return cc_err(cc_error(CC_ERR_NOT_FOUND, "not found"));
 }
 
 int main(void) {
@@ -27,7 +27,7 @@ int main(void) {
         return 1;
     }
     
-    // Initialize to error - shorthand error form
+    // Initialize to error
     r = make_err();
     if (r.ok) {
         printf("FAIL: r should be error\n");

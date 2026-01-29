@@ -748,22 +748,41 @@ Surface syntax `x.value` maps to `x.u.value`; `x.error` maps to `x.u.error`.
 
 Type modifiers bind with the following precedence (tightest first):
 
-1. `?` (optional)
-2. `!E` (result)
-3. `[n]` `[:]` `[~n]` (array / slice / channel)
-4. `*` (pointer)
+1. `*` (pointer)
+2. `?` (optional)
+3. `!E` (result)
+4. `[n]` `[:]` `[~n]` (array / slice / channel)
+
+**Rationale:** Pointer binds tightest because "result of pointer" (`T*!E` → `(T*)!E`) is far more common than "pointer to result" (`(T!E)*`). Functions returning pointer-or-error are ubiquitous in systems code.
 
 **Examples:**
 
 | Syntax | Parses as | Meaning |
 |--------|-----------|---------|
 | `int?` | `(int)?` | optional int |
+| `int*` | `(int)*` | pointer to int |
+| `int*?` | `((int)*)?` | optional pointer |
+| `int*!E` | `((int)*)!E` | result of pointer (success=pointer, error=E) |
 | `int!E` | `(int)!E` | result of int or E |
 | `int?!E` | `((int)?)!E` | result whose ok-value is optional |
 | `int!E?` | `((int)!E)?` | optional result (e.g., recv from error channel) |
 | `int!E[~]` | `((int)!E)[~]` | channel of results |
-| `int!E[~]*` | `(((int)!E)[~])*` | pointer to (channel of results) |
+| `int*!E[~]` | `(((int)*)!E)[~]` | channel of (result of pointer) |
 | `int[:]*` | `((int)[:])*` | pointer to slice |
+| `int*[:]` | `((int)*)[:]` | slice of pointers |
+
+**Common patterns:**
+
+```c
+// Function returning pointer or error — the common case
+Node*!IoError find_node(int id);      // (Node*)!IoError
+
+// Function returning optional pointer (null = not found, no error)
+Node*? lookup(int id);                // (Node*)?
+
+// Channel carrying results
+int!Error[~10 >] results_tx;          // sender for channel of results
+```
 
 **Note:** For a channel `ch : (T!E)[~]`, `ch.recv()` returns `(T!E)?` (i.e., `T!E?`), where `null` means "closed+drained" and `err(e)` is an application-level error value.
 

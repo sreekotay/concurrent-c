@@ -39,7 +39,8 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
 #endif
     if (fd < 0) return NULL;
     /* Prelude for reparse: must provide CC runtime types used by intermediate rewrites
-       (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers. */
+       (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers.
+       cc_result.cch provides __CC_RESULT macro which handles parser-mode fallback. */
     const char* prelude =
         "#define CC_PARSER_MODE 1\n"
         "#include <stdlib.h>\n"
@@ -48,15 +49,14 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
         "#include <ccc/cc_closure.cch>\n"
         "#include <ccc/cc_nursery.cch>\n"
         "#include <ccc/cc_arena.cch>\n"
-        "/* Minimal std/prelude declarations used by @arena lowering (avoid including the full prelude\n"
-        "   here because user code may define CC_ENABLE_SHORT_NAMES before including it). */\n"
+        "#include <ccc/cc_result.cch>\n"
+        "/* Minimal std/prelude declarations used by @arena lowering */\n"
         "static inline size_t kilobytes(size_t n);\n"
         "static inline size_t megabytes(size_t n);\n"
         "static inline CCArena cc_heap_arena(size_t bytes);\n"
         "static inline void cc_heap_arena_free(CCArena* a);\n"
         "#include <ccc/cc_slice.cch>\n"
         "#include <ccc/std/task_intptr.cch>\n"
-        "/* Async channel task functions needed for UFCS rewrites in @async context. */\n"
         "typedef struct CCChan CCChan;\n"
         "CCTaskIntptr cc_chan_send_task(CCChan* ch, const void* value, size_t value_size);\n"
         "CCTaskIntptr cc_chan_recv_task(CCChan* ch, void* out_value, size_t value_size);\n"

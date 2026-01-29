@@ -1,0 +1,43 @@
+// Test: Result type syntax with CCIoError (custom error type)
+// Verifies int!CCIoError works correctly
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_io.cch>
+#include <stdio.h>
+
+// Function returning int!CCIoError
+int!CCIoError get_value_or_error(int succeed) {
+    if (succeed) {
+        return cc_ok(42);
+    } else {
+        CCIoError e = {CC_IO_FILE_NOT_FOUND, 0};
+        return cc_err(e);
+    }
+}
+
+int main(void) {
+    // Test ok case
+    int!CCIoError res1 = get_value_or_error(1);
+    if (!res1.ok) {
+        printf("FAIL: res1 should be ok\n");
+        return 1;
+    }
+    if ((int)res1.u.value != 42) {
+        printf("FAIL: res1.u.value should be 42, got %d\n", (int)res1.u.value);
+        return 1;
+    }
+    
+    // Test error case
+    int!CCIoError res2 = get_value_or_error(0);
+    if (res2.ok) {
+        printf("FAIL: res2 should be error\n");
+        return 1;
+    }
+    if (res2.u.error.kind != CC_IO_FILE_NOT_FOUND) {
+        printf("FAIL: res2.u.error.kind should be CC_IO_FILE_NOT_FOUND\n");
+        return 1;
+    }
+    
+    printf("OK: result_ioerror_smoke passed\n");
+    return 0;
+}

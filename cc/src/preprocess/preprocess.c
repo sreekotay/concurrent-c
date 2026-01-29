@@ -768,6 +768,34 @@ static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* ou
    - Replaces spaces with underscores
    - Replaces '*' with 'ptr'
    - Replaces '[' and ']' with '_' */
+/* Short name to CC-prefixed name mappings for stdlib types.
+   When CC_ENABLE_SHORT_NAMES is used, source code can write "IoError" but
+   the generated C code needs "CCIoError" for result type declarations. */
+static const struct { const char* short_name; const char* cc_name; } cc__preproc_type_aliases[] = {
+    { "IoError",     "CCIoError" },
+    { "IoErrorKind", "CCIoErrorKind" },
+    { "Error",       "CCError" },
+    { "ErrorKind",   "CCErrorKind" },
+    { "NetError",    "CCNetError" },
+    { "Arena",       "CCArena" },
+    { "File",        "CCFile" },
+    { "String",      "CCString" },
+    { "Slice",       "CCSlice" },
+    { NULL, NULL }
+};
+
+/* Normalize a mangled type name: map short aliases to CC-prefixed names */
+static void cc__normalize_type_alias(char* name) {
+    if (!name || !name[0]) return;
+    for (int i = 0; cc__preproc_type_aliases[i].short_name; i++) {
+        if (strcmp(name, cc__preproc_type_aliases[i].short_name) == 0) {
+            /* Safe because CC names are always longer or equal */
+            strcpy(name, cc__preproc_type_aliases[i].cc_name);
+            return;
+        }
+    }
+}
+
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
     if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
     
@@ -794,6 +822,9 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
     /* Remove trailing underscore */
     while (j > 0 && out[j - 1] == '_') j--;
     out[j] = 0;
+    
+    /* Normalize short names to CC-prefixed names */
+    cc__normalize_type_alias(out);
 }
 
 /* Rewrite optional types:
@@ -1540,7 +1571,7 @@ static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, 
 }
 
 /* Rewrite result types:
-   - `T!E` -> `CCResult_T_E`
+   - `T!E` -> `__CC_RESULT(T_mangled, E_mangled)`
    The '!' must immediately follow a type name (no space).
    We detect: identifier!identifier patterns.
    Also collects unique (T, E) pairs for later emission of CC_DECL_RESULT_SPEC calls. */
@@ -1582,8 +1613,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
             /* Check what precedes the '!' */
             if (i > 0) {
                 char prev = src[i - 1];
-                /* Valid type-ending chars: identifier char, ')', ']', '>' */
-                if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
+                /* Valid type-ending chars: identifier char, ')', ']', '>', '*' (for pointers) */
+                if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
                     /* Check what follows the '!' - must be an identifier (error type) */
                     size_t j = i + 1;
                     while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
@@ -1611,11 +1642,12 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                                 
                                 /* Emit everything up to ty_start */
                                 cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                                /* Emit CCResult_T_E */
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, "CCResult_");
+                                /* Emit __CC_RESULT(T, E) - macro handles parser vs real mode */
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT(");
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                                 last_emit = err_end;
                                 i = err_end;
                                 continue;
@@ -1631,15 +1663,10 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     
-    /* Result type declarations are NOT emitted by the preprocessor.
-       Instead, they are handled by the visitor/codegen pass which runs after TCC parsing.
-       TCC parses using CC_PARSER_MODE which provides placeholder types.
-       The visitor then emits proper CC_DECL_RESULT_SPEC macros in the generated C.
-       
-       This avoids forward declaration ordering issues where the error type may not
-       be defined yet at the point where we'd need to emit the CC_DECL_RESULT_SPEC. */
-    (void)cc__result_type_count; /* Result types collected but not emitted here */
-    
+    /* Result types are collected for codegen to emit CC_DECL_RESULT_SPEC declarations.
+       Parser mode uses the __CC_RESULT(T, E) macro which expands to __CCResultGeneric,
+       so no explicit typedefs needed here - the macro in cc_result.cch handles it. */
+    (void)cc__result_type_count;
     (void)input_path;
     return out;
 }
@@ -2756,15 +2783,14 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
     size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
 
-    /* Infer cc_ok(v)/cc_err(e) types from function signatures BEFORE result type rewrite */
-    char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4, cur4_n);
-    const char* cur4b = rewritten_infer ? rewritten_infer : cur4;
-    size_t cur4b_n = rewritten_infer ? strlen(rewritten_infer) : cur4_n;
+    /* NOTE: cc_ok(v)/cc_err(e) inference moved to codegen pass (pass_type_syntax.c)
+       so that the simpler macro definitions work during TCC parsing.
+       The codegen pass rewrites cc_ok(v) -> cc_ok_CCResult_T_E(v) after parsing. */
 
-    /* Rewrite T!E -> CCResult_T_E */
-    char* rewritten_res = cc__rewrite_result_types(cur4b, cur4b_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4b;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4b_n;
+    /* Rewrite T!E -> __CC_RESULT(T, E) */
+    char* rewritten_res = cc__rewrite_result_types(cur4, cur4_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4_n;
 
     /* Rewrite try expr -> cc_try(expr) */
     char* rewritten_try = cc__rewrite_try_exprs(cur5, cur5_n);
@@ -2779,7 +2805,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
     if (rewritten_conc == (char*)-1) {
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_infer); free(rewritten_opt);
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_res); free(rewritten_opt);
         free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
@@ -2862,7 +2888,6 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_res);
-    free(rewritten_infer);
     free(rewritten_opt);
     free(rewritten_stdio);
     free(rewritten_ufcs);

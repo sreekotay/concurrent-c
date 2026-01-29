@@ -6,7 +6,7 @@
 
 int!CCError maybe_fail(int x) {
     if (x < 0) {
-        return cc_err(CC_ERR_INVALID_ARG, "negative");
+        return cc_err(cc_error(CC_ERR_INVALID_ARG, "negative"));
     }
     return cc_ok(x);
 }

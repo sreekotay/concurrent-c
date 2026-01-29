@@ -51,9 +51,10 @@ split(&s, ",");
 
 Type modifiers bind with this precedence (tightest first):
 
-1. `?` (optional)
-2. `!E` (result)
-3. `[:]` (slice)
+1. `*` (pointer)
+2. `?` (optional)
+3. `!E` (result)
+4. `[:]` (slice)
 
 See **§2.3 Type Precedence** in the main language spec for complete rules.
 
@@ -64,11 +65,13 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 | `char[:]?` | `(char[:])?` | optional slice (e.g., `find()` return) |
 | `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read_all()` return) |
 | `char[:]?!IoError` | `((char[:])?)!IoError` | result whose ok-value is optional (e.g., streaming `read()`) |
+| `T*!IoError` | `((T)*)!IoError` | result of pointer (e.g., `cc_dir_open()` return) |
 | `T!E?` | `((T)!E)?` | optional result (e.g., `recv()` on error channel) |
 
 **Key distinction:**
 - `T?!E` — "operation may fail; if it succeeds, value may be absent" (streaming read: error, EOF, or data)
 - `T!E?` — "value may be absent; if present, it's a result" (channel recv: closed, or ok/err)
+- `T*!E` — "operation may fail; if it succeeds, returns a pointer" (common for allocation/lookup)
 
 ---
 

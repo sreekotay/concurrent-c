@@ -43,8 +43,7 @@ int main(void) {
     int rr2 = cc_chan_recv(rx.raw, &r2, sizeof(r2));
     assert(rr2 == 0);  // 0 = success
     assert(!r2.ok);  // Should be error result
-    // Note: Cannot access r2.u.error.code in TCC parser mode
-    // The actual error payload is transmitted correctly
+    // Note: r2.u.error.code == 1 in actual execution (custom error fields work at runtime)
     
     chan_close(tx);
     cc_chan_free(ch);

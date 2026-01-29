@@ -87,10 +87,12 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
     }
 
 /*
- * SPEC-ALIGNED LAYOUT: CC_DECL_RESULT_SPEC
- * Used by compiler-lowered T!E syntax
- * Access pattern: r.ok, r.u.value, r.u.error
- * Matches spec: struct { bool ok; union { T value; E error; } u; }
+ * Result type layout:
+ *   r.ok       - true if success
+ *   r.u.value  - the success value (when ok is true)
+ *   r.u.error  - the error value (when ok is false)
+ *
+ * Uses named union 'u' for TCC compatibility.
  */
 #define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                                  \
     typedef struct name {                                                           \
@@ -110,7 +112,7 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
         return r;                                                                   \
     }
 
-/* Generic cc_ok / cc_err macros for spec-aligned results */
+/* Generic cc_ok / cc_err macros for results */
 #define cc_ok_into(result_var, val) do {          \
     (result_var).ok = true;                       \
     (result_var).u.value = (val);                 \
@@ -121,7 +123,9 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
     (result_var).u.error = (err);                 \
 } while(0)
 
-/* Common spec-aligned result types - pre-declared for convenience */
+/* Common result types - defined in non-parser mode only.
+   Parser mode uses typedefs to __CCResultGeneric (defined later in this file). */
+#ifndef CC_PARSER_MODE
 CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
 CC_DECL_RESULT_SPEC(CCResult_bool_CCError, bool, CCError)
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCError, size_t, CCError)
@@ -144,6 +148,7 @@ static inline CCResult_void_CCError cc_err_CCResult_void_CCError(CCError e) {
     r.u.error = e;
     return r;
 }
+#endif
 
 /* cc_try macro: unwrap T!E or return error.
    Must be used in a function that returns the same result type.
@@ -157,80 +162,111 @@ static inline CCResult_void_CCError cc_err_CCResult_void_CCError(CCError e) {
 #endif
 
 /*
- * TCC PARSER MODE: Any unknown CCResult_*_* type is treated as a generic placeholder.
- * TCC uses this during parsing; the codegen pass emits proper type definitions.
+ * TCC PARSER MODE: Result types use a generic placeholder during parsing.
+ * 
+ * The CC preprocessor rewrites T!E to __CC_RESULT(T_mangled, E_mangled).
+ * In parser mode, this macro expands to __CCResultGeneric.
+ * In codegen, it's rewritten to CCResult_T_E with proper declarations.
  */
 #ifdef CC_PARSER_MODE
-/* Generic result placeholder struct - used for all unknown CCResult_T_E types */
+
+/* Generic error struct for parser mode - has common fields so code compiles */
+typedef struct __CCGenericError {
+    int kind;
+    int os_errno;
+    const char* message;
+    char __pad[48];
+} __CCGenericError;
+
+/* Generic result placeholder struct - used for ALL result types during parsing.
+   Field names match the real CC_DECL_RESULT_SPEC layout so user code compiles.
+   Uses named union 'u' matching the real struct layout. */
 typedef struct __CCResultGeneric {
     bool ok;
-    union { long long value; long long error; } u;
+    union {
+        intptr_t value;             /* intptr_t holds both ints and pointers */
+        __CCGenericError error;     /* has .kind, .os_errno, .message */
+    } u;
 } __CCResultGeneric;
 
-/* Common user-defined result type patterns - map to generic during parsing */
-typedef __CCResultGeneric CCResult_int_ParseError;
-typedef __CCResultGeneric CCResult_int_MyError;
-typedef __CCResultGeneric CCResult_int_Error;
-typedef __CCResultGeneric CCResult_bool_ParseError;
+/* THE KEY MACRO: In parser mode, all result types resolve to generic.
+   Usage: __CC_RESULT(int, CCIoError) expands to __CCResultGeneric
+   Codegen rewrites this to CCResult_int_CCIoError */
+#define __CC_RESULT(T, E) __CCResultGeneric
 
-/* Dummy ok/err constructors for any result type during parsing */
-static inline __CCResultGeneric __cc_result_generic_ok(long long v) {
-    __CCResultGeneric r;
+/* Generic ok/err constructors - parser mode doesn't actually run,
+   so these just return a zeroed struct for type checking. */
+static inline __CCResultGeneric __cc_result_generic_ok(void) {
+    __CCResultGeneric r = {0};
     r.ok = 1;
-    r.u.value = v;
     return r;
 }
-static inline __CCResultGeneric __cc_result_generic_err(long long e) {
-    __CCResultGeneric r;
+static inline __CCResultGeneric __cc_result_generic_err(void) {
+    __CCResultGeneric r = {0};
     r.ok = 0;
-    r.u.error = e;
     return r;
 }
-#define cc_ok_CCResult_int_ParseError(v) __cc_result_generic_ok((long long)(v))
-#define cc_err_CCResult_int_ParseError(e) __cc_result_generic_err(0)
-#define cc_ok_CCResult_int_MyError(v) __cc_result_generic_ok((long long)(v))
-#define cc_err_CCResult_int_MyError(e) __cc_result_generic_err(0)
-#define cc_ok_CCResult_int_Error(v) __cc_result_generic_ok((long long)(v))
-#define cc_err_CCResult_int_Error(e) __cc_result_generic_err(0)
 
-/* Dummy cc_try for TCC parsing - just returns the expression */
-#define cc_try(expr) ((expr).u.value)
+/* Macro-based ok/err that accept any type - parser mode just validates types.
+   The value/error is unused but the expression is type-checked. */
+#define __CC_RESULT_OK(T, E, v) ((void)(v), __cc_result_generic_ok())
+#define __CC_RESULT_ERR(T, E, e) ((void)(e), __cc_result_generic_err())
+
+/* Dummy cc_try for TCC parsing - just returns 0 as placeholder */
+#define cc_try(expr) ((void)(expr), 0)
+
+/*
+ * Simplified result constructors for parser mode.
+ * cc_ok(value) and cc_err(error) are inferred from context.
+ * The compiler rewrites them to typed versions based on enclosing function.
+ */
+#define cc_ok(v) ((void)(v), __cc_result_generic_ok())
+#define cc_err(e) ((void)(e), __cc_result_generic_err())
+
+/* Parser-mode: common result types are aliases to __CCResultGeneric */
+typedef __CCResultGeneric CCResult_int_CCError;
+typedef __CCResultGeneric CCResult_bool_CCError;
+typedef __CCResultGeneric CCResult_size_t_CCError;
+typedef __CCResultGeneric CCResult_voidptr_CCError;
+typedef __CCResultGeneric CCResult_charptr_CCError;
+typedef __CCResultGeneric CCResult_void_CCError;
+#define cc_ok_CCResult_int_CCError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_int_CCError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_bool_CCError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_bool_CCError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_void_CCError() __cc_result_generic_ok()
+#define cc_err_CCResult_void_CCError(e) __cc_result_generic_err()
+
+#else /* !CC_PARSER_MODE - real compilation */
+
+/* In real compilation, __CC_RESULT expands to the actual type name.
+   The codegen pass ensures CC_DECL_RESULT_SPEC is emitted for each type. */
+#define __CC_RESULT(T, E) CCResult_##T##_##E
+
+/* Real ok/err constructors use the generated type-specific functions.
+   These are placeholder definitions - the compiler rewrites cc_ok(v)/cc_err(e)
+   to cc_ok_CCResult_T_E(v) based on the enclosing function's return type. */
+#define __CC_RESULT_OK(T, E, v) cc_ok_CCResult_##T##_##E(v)
+#define __CC_RESULT_ERR(T, E, e) cc_err_CCResult_##T##_##E(e)
+
 #endif /* CC_PARSER_MODE */
 
 /*
- * Generic result constructors.
+ * Result constructors - simplified API.
  *
- * cc_ok(T, v)        - For T!CCError (default error type)
- * cc_ok(T, E, v)     - For T!E (custom error type)
- * cc_ok(void)        - For void!CCError
+ * cc_ok(value)  - Return success, type inferred from function return type
+ * cc_err(error) - Return error, type inferred from function return type
  *
- * cc_err(T, e)       - For T!CCError
- * cc_err(T, E, e)    - For T!E
+ * The compiler automatically rewrites these based on the enclosing function's
+ * return type. For example, in a function returning int!CCIoError:
+ *   cc_ok(42)  -> cc_ok_CCResult_int_CCIoError(42)
+ *   cc_err(e)  -> cc_err_CCResult_int_CCIoError(e)
  *
- * Examples:
- *   return cc_ok(int, 42);                              // int!CCError
- *   return cc_err(int, cc_error(CC_ERR_NOT_FOUND, "")); // int!CCError
- *   return cc_ok(int, MyError, 42);                     // int!MyError
- *   return cc_err(int, MyError, MyError_NotFound);      // int!MyError
+ * Example:
+ *   int!CCError read_value(void) {
+ *       if (success) return cc_ok(42);
+ *       return cc_err(cc_error(CC_ERR_NOT_FOUND, "not found"));
+ *   }
  */
-
-/* Argument counting machinery for macro overloading */
-#define __CC_ARG_N(_1,_2,_3,_4,N,...) N
-#define __CC_NARGS(...) __CC_ARG_N(__VA_ARGS__,4,3,2,1,0)
-
-/* cc_ok: 1 arg = void!CCError, 2 args = T!CCError, 3 args = T!E */
-#define __CC_OK_1(T)        cc_ok_CCResult_##T##_CCError()
-#define __CC_OK_2(T, v)     cc_ok_CCResult_##T##_CCError(v)
-#define __CC_OK_3(T, E, v)  cc_ok_CCResult_##T##_##E(v)
-#define __CC_OK_DISPATCH(N) __CC_OK_##N
-#define __CC_OK_EXPAND(N)   __CC_OK_DISPATCH(N)
-#define cc_ok(...) __CC_OK_EXPAND(__CC_NARGS(__VA_ARGS__))(__VA_ARGS__)
-
-/* cc_err: 2 args = T!CCError, 3 args = T!E */
-#define __CC_ERR_2(T, e)    cc_err_CCResult_##T##_CCError(e)
-#define __CC_ERR_3(T, E, e) cc_err_CCResult_##T##_##E(e)
-#define __CC_ERR_DISPATCH(N) __CC_ERR_##N
-#define __CC_ERR_EXPAND(N)   __CC_ERR_DISPATCH(N)
-#define cc_err(...) __CC_ERR_EXPAND(__CC_NARGS(__VA_ARGS__))(__VA_ARGS__)
 
 #endif /* CC_RESULT_H */

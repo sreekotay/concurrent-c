@@ -116,6 +116,34 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
     return out;
 }
 
+/* Short name to CC-prefixed name mappings for stdlib types.
+   When CC_ENABLE_SHORT_NAMES is used, source code can write "IoError" but
+   the generated C code needs "CCIoError" for result type declarations. */
+static const struct { const char* short_name; const char* cc_name; } cc__type_aliases[] = {
+    { "IoError",     "CCIoError" },
+    { "IoErrorKind", "CCIoErrorKind" },
+    { "Error",       "CCError" },
+    { "ErrorKind",   "CCErrorKind" },
+    { "NetError",    "CCNetError" },
+    { "Arena",       "CCArena" },
+    { "File",        "CCFile" },
+    { "String",      "CCString" },
+    { "Slice",       "CCSlice" },
+    { NULL, NULL }
+};
+
+/* Normalize a mangled type name: map short aliases to CC-prefixed names */
+static void cc__normalize_type_name(char* name) {
+    if (!name || !name[0]) return;
+    for (int i = 0; cc__type_aliases[i].short_name; i++) {
+        if (strcmp(name, cc__type_aliases[i].short_name) == 0) {
+            /* Safe because CC names are always longer or equal */
+            strcpy(name, cc__type_aliases[i].cc_name);
+            return;
+        }
+    }
+}
+
 /* Mangle a type name for use in CCOptional_T or CCResult_T_E. */
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
     if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
@@ -143,6 +171,9 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
     /* Remove trailing underscore */
     while (j > 0 && out[j - 1] == '_') j--;
     out[j] = 0;
+    
+    /* Normalize short names to CC-prefixed names */
+    cc__normalize_type_name(out);
 }
 
 /* Scan back from position `from` to find the start of a type token (delimited by ; { } , ( ) newline). */
@@ -242,14 +273,18 @@ static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* er
     p->mangled_err[sizeof(p->mangled_err) - 1] = '\0';
 }
 
-/* Scan for already-lowered CCResult_T_E patterns and collect type pairs.
-   This handles the case where the preprocessor already rewrote T!E -> CCResult_T_E */
+/* Scan for result type patterns and collect type pairs.
+   Handles both formats:
+   - __CC_RESULT(T, E) - from preprocessor macro approach
+   - CCResult_T_E - legacy or direct usage */
 static void cc__scan_for_existing_result_types(const char* src, size_t n) {
     /* Reset collection */
     cc__cg_result_type_count = 0;
     
-    const char* prefix = "CCResult_";
-    size_t prefix_len = strlen(prefix);
+    const char* macro_prefix = "__CC_RESULT(";
+    size_t macro_prefix_len = strlen(macro_prefix);
+    const char* struct_prefix = "CCResult_";
+    size_t struct_prefix_len = strlen(struct_prefix);
     
     size_t i = 0;
     int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
@@ -268,16 +303,63 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for CCResult_ prefix */
-        if (i + prefix_len < n && strncmp(src + i, prefix, prefix_len) == 0) {
-            /* Make sure this isn't part of a longer identifier (check char before) */
+        /* Look for __CC_RESULT(T, E) macro pattern */
+        if (i + macro_prefix_len < n && strncmp(src + i, macro_prefix, macro_prefix_len) == 0) {
+            size_t j = i + macro_prefix_len;
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            
+            /* Parse first type (T) */
+            size_t ok_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t ok_end = j;
+            
+            /* Skip whitespace and comma */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != ',') { i++; continue; }
+            j++; /* skip comma */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            
+            /* Parse second type (E) */
+            size_t err_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t err_end = j;
+            
+            /* Skip to closing paren */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != ')') { i++; continue; }
+            
+            if (ok_end > ok_start && err_end > err_start) {
+                char ok_type[128], err_type[128];
+                size_t ok_len = ok_end - ok_start;
+                size_t err_len = err_end - err_start;
+                
+                if (ok_len < sizeof(ok_type) && err_len < sizeof(err_type)) {
+                    memcpy(ok_type, src + ok_start, ok_len);
+                    ok_type[ok_len] = '\0';
+                    memcpy(err_type, src + err_start, err_len);
+                    err_type[err_len] = '\0';
+                    
+                    /* Skip built-in result types */
+                    if (strcmp(err_type, "CCError") != 0) {
+                        cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
+                    }
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+        
+        /* Look for CCResult_T_E struct pattern (legacy) */
+        if (i + struct_prefix_len < n && strncmp(src + i, struct_prefix, struct_prefix_len) == 0) {
+            /* Make sure this isn't part of a longer identifier */
             if (i > 0 && cc__is_ident_char_local(src[i-1])) {
                 i++;
                 continue;
             }
             
-            /* Parse: CCResult_OkType_ErrType */
-            size_t j = i + prefix_len;
+            size_t j = i + struct_prefix_len;
             
             /* Find the ok type (everything until next '_') */
             size_t ok_start = j;
@@ -293,9 +375,7 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             size_t err_end = j;
             
             if (ok_end > ok_start && err_end > err_start) {
-                /* Extract type names */
-                char ok_type[128];
-                char err_type[128];
+                char ok_type[128], err_type[128];
                 size_t ok_len = ok_end - ok_start;
                 size_t err_len = err_end - err_start;
                 
@@ -305,13 +385,12 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
                     memcpy(err_type, src + err_start, err_len);
                     err_type[err_len] = '\0';
                     
-                    /* Skip built-in result types (those are already declared in cc_result.cch) */
+                    /* Skip built-in result types */
                     if (strcmp(err_type, "CCError") != 0) {
                         cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
                     }
                 }
             }
-            
             i = j;
             continue;
         }
@@ -352,8 +431,8 @@ char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, si
         if (c == '!' && c2 != '=') {
             if (i > 0) {
                 char prev = src[i - 1];
-                /* Valid type-ending chars: identifier char, ')', ']', '>' */
-                if (cc__is_ident_char_local(prev) || prev == ')' || prev == ']' || prev == '>') {
+                /* Valid type-ending chars: identifier char, ')', ']', '>', '*' (for pointers) */
+                if (cc__is_ident_char_local(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
                     /* Check what follows the '!' - must be an identifier (error type) */
                     size_t j = i + 1;
                     while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
@@ -451,51 +530,81 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             continue;
         }
         
-        /* Detect function definition with CCResult_T_E return type */
-        if (c == 'C' && i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0 && fn_brace_depth < 0) {
-            /* Found CCResult_ - extract the full type name */
-            size_t type_start = i;
-            size_t j = i + 9;
-            /* Read T part */
-            while (j < n && (cc__is_ident_char_local(src[j]))) j++;
-            if (j < n && src[j] == '_') {
-                j++;
-                /* Read E part */
-                while (j < n && cc__is_ident_char_local(src[j])) j++;
-            }
-            size_t type_end = j;
+        /* Detect function definition with result return type.
+           Handles both: __CC_RESULT(T, E) and CCResult_T_E */
+        if (fn_brace_depth < 0) {
+            char detected_type[256] = {0};
+            size_t j = i;
             
-            /* Check if this is a function definition (followed by identifier + '(' + ')' + '{') */
-            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r' || src[j] == '*')) j++;
-            if (j < n && cc__is_ident_start_local2(src[j])) {
-                /* Skip function name */
-                while (j < n && cc__is_ident_char_local(src[j])) j++;
+            /* Check for __CC_RESULT(T, E) pattern */
+            if (c == '_' && i + 12 < n && memcmp(src + i, "__CC_RESULT(", 12) == 0) {
+                j = i + 12;
                 while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-                if (j < n && src[j] == '(') {
-                    /* Skip params */
-                    int pdepth = 1;
+                size_t t_start = j;
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                size_t t_end = j;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (j < n && src[j] == ',') {
                     j++;
-                    while (j < n && pdepth > 0) {
-                        if (src[j] == '(') pdepth++;
-                        else if (src[j] == ')') pdepth--;
-                        else if (src[j] == '"') { j++; while (j < n && src[j] != '"') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
-                        else if (src[j] == '\'') { j++; while (j < n && src[j] != '\'') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
-                        j++;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    size_t e_start = j;
+                    while (j < n && cc__is_ident_char_local(src[j])) j++;
+                    size_t e_end = j;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && src[j] == ')' && t_end > t_start && e_end > e_start) {
+                        j++; /* skip ')' */
+                        /* Build CCResult_T_E from the macro args */
+                        snprintf(detected_type, sizeof(detected_type), "CCResult_%.*s_%.*s",
+                                 (int)(t_end - t_start), src + t_start,
+                                 (int)(e_end - e_start), src + e_start);
                     }
-                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
-                    if (j < n && src[j] == '{') {
-                        /* This is a function definition! Save the result type */
-                        size_t tlen = type_end - type_start;
-                        if (tlen < sizeof(current_result_type) - 1) {
-                            memcpy(current_result_type, src + type_start, tlen);
-                            current_result_type[tlen] = 0;
+                }
+            }
+            /* Check for CCResult_T_E pattern (legacy) */
+            else if (c == 'C' && i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0) {
+                size_t type_start = i;
+                j = i + 9;
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                if (j < n && src[j] == '_') {
+                    j++;
+                    while (j < n && cc__is_ident_char_local(src[j])) j++;
+                }
+                size_t tlen = j - type_start;
+                if (tlen < sizeof(detected_type) - 1) {
+                    memcpy(detected_type, src + type_start, tlen);
+                    detected_type[tlen] = 0;
+                }
+            }
+            
+            /* If we detected a result type, check if this is a function definition */
+            if (detected_type[0]) {
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r' || src[j] == '*')) j++;
+                if (j < n && cc__is_ident_start_local2(src[j])) {
+                    /* Skip function name */
+                    while (j < n && cc__is_ident_char_local(src[j])) j++;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && src[j] == '(') {
+                        /* Skip params */
+                        int pdepth = 1;
+                        j++;
+                        while (j < n && pdepth > 0) {
+                            if (src[j] == '(') pdepth++;
+                            else if (src[j] == ')') pdepth--;
+                            else if (src[j] == '"') { j++; while (j < n && src[j] != '"') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
+                            else if (src[j] == '\'') { j++; while (j < n && src[j] != '\'') { if (src[j] == '\\' && j+1 < n) j++; j++; } }
+                            j++;
+                        }
+                        while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                        if (j < n && src[j] == '{') {
+                            /* This is a function definition! Save the result type */
+                            strcpy(current_result_type, detected_type);
                             fn_brace_depth = brace_depth;  /* Will increment when we hit the '{' */
                         }
                     }
                 }
+                i++;
+                continue;
             }
-            i++;
-            continue;
         }
         
         /* Detect cc_ok(...) or cc_err(...) when inside a result-returning function */
