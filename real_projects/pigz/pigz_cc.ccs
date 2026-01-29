@@ -301,7 +301,6 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         
                         /* Check for error */
                         if (read_result.is_err) {
-                            fprintf(stderr, "pigz_cc: read error\n");
                             break;
                         }
                         
@@ -320,20 +319,22 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         Block blk = {0};
                         blk.seq = seq++;
                         blk.data = data;
-                        blk.last = (data.len < BLOCK_SIZE);
                         
-                        /* Set dictionary from previous block */
-                        if (prev_data.len > 0) {
-                            size_t dict_len = prev_data.len < DICT_SIZE ? prev_data.len : DICT_SIZE;
-                            size_t dict_start = prev_data.len - dict_len;
-                            blk.dict = cc_slice_sub(prev_data, dict_start, prev_data.len);
+                        /* Check if this is the last block by peeking */
+                        CCResultOptSliceIoError peek = cc_file_read(in_f, arena, 1);
+                        if (peek.is_err || !peek.ok.has) {
+                            blk.last = 1;
+                        } else {
+                            blk.last = 0;
+                            fseek(in_f->handle, -1, SEEK_CUR);
                         }
                         
                         /* Send block to workers */
                         chan_send(blocks_tx, blk);
                         
-                        /* Keep reference for next dictionary */
-                        prev_data = data;
+                        /* Reset arena for next block to avoid exhaustion. */
+                        cc_arena_reset(arena);
+                        prev_data = cc_slice_empty();
                         
                         if (blk.last) {
                             break;
@@ -414,9 +415,8 @@ int main(int argc, char *argv[]) {
     /* Build output filename */
     char output_file[4096];
     if (to_stdout) {
-        /* TODO: implement stdout mode with raw fd */
-        fprintf(stderr, "pigz_cc: -c not implemented yet\n");
-        return 1;
+        /* Use /dev/stdout for stdout mode */
+        snprintf(output_file, sizeof(output_file), "/dev/stdout");
     } else {
         snprintf(output_file, sizeof(output_file), "%s.gz", input_file);
     }
