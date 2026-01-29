@@ -16,7 +16,7 @@ int!CCError make_ok_result(void) {
 }
 
 int!CCError make_err_result(void) {
-    return cc_err(cc_error(CC_ERR_PARSE, "bad input"));
+    return cc_err(CC_ERR_PARSE, "bad input");
 }
 
 int main(void) {

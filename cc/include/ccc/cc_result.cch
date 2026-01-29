@@ -219,9 +219,13 @@ static inline __CCResultGeneric __cc_result_generic_err(void) {
  * Simplified result constructors for parser mode.
  * cc_ok(value) and cc_err(error) are inferred from context.
  * The compiler rewrites them to typed versions based on enclosing function.
+ *
+ * cc_err supports two forms (handled by compiler rewrite):
+ *   cc_err(error_value)      - use error value directly
+ *   cc_err(KIND, "message")  - shorthand, compiler wraps in cc_error()
  */
 #define cc_ok(v) ((void)(v), __cc_result_generic_ok())
-#define cc_err(e) ((void)(e), __cc_result_generic_err())
+#define cc_err(...) ((void)0, __cc_result_generic_err())
 
 /* Parser-mode: common result types are aliases to __CCResultGeneric */
 typedef __CCResultGeneric CCResult_int_CCError;

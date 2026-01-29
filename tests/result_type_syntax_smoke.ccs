@@ -9,7 +9,7 @@ int!CCError make_ok(void) {
 }
 
 int!CCError make_err(void) {
-    return cc_err(cc_error(CC_ERR_NOT_FOUND, "not found"));
+    return cc_err(CC_ERR_NOT_FOUND, "not found");
 }
 
 int main(void) {

@@ -17,14 +17,14 @@ int!CCError require_positive(int x) {
     if (x > 0) {
         return cc_ok(x);
     }
-    return cc_err(cc_error(CC_ERR_INVALID_ARG, "must be positive"));
+    return cc_err(CC_ERR_INVALID_ARG, "must be positive");
 }
 
 /* Pattern: Optional input, Result output */
 int!CCError process_if_found(int x) {
     int? maybe = find_positive(x);
     if (!maybe.has) {
-        return cc_err(cc_error(CC_ERR_NOT_FOUND, "no positive value"));
+        return cc_err(CC_ERR_NOT_FOUND, "no positive value");
     }
     return cc_ok(*maybe * 2);
 }
