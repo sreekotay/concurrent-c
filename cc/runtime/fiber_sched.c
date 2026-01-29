@@ -1297,28 +1297,18 @@ void cc__fiber_unpark(void* fiber_ptr) {
         return;
     }
 
-    /* Re-enqueue: prefer local queue for better cache locality in ping-pong patterns */
-    int pushed_local = 0;
-    if (tls_worker_id >= 0) {
-        if (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
-            pushed_local = 1;
-        }
+    /* Re-enqueue to GLOBAL queue for fair work distribution.
+     * Previously used local queue for cache locality, but this caused all unparked
+     * fibers to accumulate on a single thread (the unparker), defeating parallelism.
+     * Global queue ensures other workers can steal the unparked fiber. */
+    while (fq_push(&g_sched.run_queue, f) != 0) {
+        sched_yield();
     }
     
-    if (!pushed_local) {
-        while (fq_push(&g_sched.run_queue, f) != 0) {
-            sched_yield();
-        }
-    }
-    
-    /* Wake a worker if any are sleeping - unparked fibers need immediate attention.
-     * Only needed if we pushed to global queue (local queue is processed by owner). */
-    if (!pushed_local) {
-        size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-        if (sleeping > 0) {
-            wake_primitive_wake_one(&g_sched.wake_prim);
-        }
-    }
+    /* Wake ALL sleeping workers - unparked fibers need to be distributed.
+     * Using wake_all instead of wake_one because multiple fibers may be unparked
+     * and we want all available workers to compete for them. */
+    wake_primitive_wake_all(&g_sched.wake_prim);
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {

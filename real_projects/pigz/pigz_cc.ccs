@@ -81,19 +81,27 @@ CCFile g_out_file;
  */
 static cc_atomic_u64 g_heap_alloc_counter = 1;
 
-Result compress_block(Block* blk, int level) {
-    Result res = {0};
-    res.seq = blk->seq;
-    res.last = blk->last;
-    res.ulen = blk->data.len;
+Result* compress_block(Block* blk, int level) {
+    
+    /* Allocate Result on heap - will be freed by writer after consumption */
+    Result* res = (Result*)malloc(sizeof(Result));
+    if (!res) {
+        fprintf(stderr, "pigz_cc: malloc failed for Result\n");
+        exit(1);
+    }
+    memset(res, 0, sizeof(Result));
+    res->seq = blk->seq;
+    res->last = blk->last;
+    res->ulen = blk->data.len;
     
     /* Calculate CRC of input (input slice has arena provenance - safe to read) */
-    res.crc = zw_crc32(0UL, (const unsigned char*)blk->data.ptr, blk->data.len);
+    res->crc = zw_crc32(0UL, (const unsigned char*)blk->data.ptr, blk->data.len);
     
     /* Allocate output buffer with malloc - must outlive until writer consumes */
     size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
     unsigned char* out_buf = (unsigned char*)malloc(max_out);
     if (!out_buf) {
+        free(res);
         fprintf(stderr, "pigz_cc: malloc failed\n");
         exit(1);
     }
@@ -108,6 +116,7 @@ Result compress_block(Block* blk, int level) {
     
     if (compressed_len == 0 && blk->data.len > 0) {
         free(out_buf);
+        free(res);
         fprintf(stderr, "pigz_cc: deflate failed\n");
         exit(1);
     }
@@ -120,7 +129,7 @@ Result compress_block(Block* blk, int level) {
      */
     uint64_t alloc_id = cc_atomic_fetch_add(&g_heap_alloc_counter, 1);
     uint64_t slice_id = cc_slice_make_id(alloc_id, false, true, false);
-    res.data = cc_slice_from_parts(out_buf, compressed_len, slice_id, compressed_len);
+    res->data = cc_slice_from_parts(out_buf, compressed_len, slice_id, compressed_len);
     
     /* Update global statistics */
     cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
@@ -189,12 +198,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
     @defer cc_file_close(&g_out_file);
     
-    /* Channel types for pipeline */
-    /* Channel buffers - larger now that scheduler yields for fairness */
-    Block[~8 >] blocks_tx;
-    Block[~8 <] blocks_rx;
-    Result[~16 >] results_tx;
-    Result[~16 <] results_rx;
+    /* Channel types for pipeline - use pointers for lock-free fast path (8 bytes) 
+     * Larger buffers reduce contention with multiple workers */
+    Block*[~64 >] blocks_tx;
+    Block*[~64 <] blocks_rx;
+    Result*[~64 >] results_tx;
+    Result*[~64 <] results_rx;
     
     /* Create channels */
     CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
@@ -227,28 +236,29 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     @nursery {
         /* Writer: receives results and writes in sequence order */
         spawn(() => {
-            Result *pending = NULL;
+            Result **pending = NULL;
             int pending_count = 0;
             int pending_cap = 0;
             long next_seq = 0;
             
-            Result r;
+            Result* r;
             while (chan_recv(results_rx, &r) == 0) {
                 /* Buffer out-of-order results */
-                if (r.seq != next_seq) {
+                if (r->seq != next_seq) {
                     if (pending_count >= pending_cap) {
                         pending_cap = pending_cap ? pending_cap * 2 : 16;
-                        pending = (Result*)realloc(pending, pending_cap * sizeof(Result));
+                        pending = (Result**)realloc(pending, pending_cap * sizeof(Result*));
                     }
                     pending[pending_count++] = r;
                     continue;
                 }
                 
-                /* Write this result and free the buffer */
-                cc_file_write(&g_out_file, r.data);
-                free((void*)r.data.ptr);
-                g_total_crc = crc32_combine_cc(g_total_crc, r.crc, r.ulen);
-                g_total_ulen += r.ulen;
+                /* Write this result and free the buffer + Result struct */
+                cc_file_write(&g_out_file, r->data);
+                free((void*)r->data.ptr);
+                g_total_crc = crc32_combine_cc(g_total_crc, r->crc, r->ulen);
+                g_total_ulen += r->ulen;
+                free(r);
                 next_seq++;
                 
                 /* Check pending for next in sequence */
@@ -256,11 +266,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 do {
                     found = 0;
                     for (int i = 0; i < pending_count; i++) {
-                        if (pending[i].seq == next_seq) {
-                            cc_file_write(&g_out_file, pending[i].data);
-                            free((void*)pending[i].data.ptr);
-                            g_total_crc = crc32_combine_cc(g_total_crc, pending[i].crc, pending[i].ulen);
-                            g_total_ulen += pending[i].ulen;
+                        if (pending[i]->seq == next_seq) {
+                            cc_file_write(&g_out_file, pending[i]->data);
+                            free((void*)pending[i]->data.ptr);
+                            g_total_crc = crc32_combine_cc(g_total_crc, pending[i]->crc, pending[i]->ulen);
+                            g_total_ulen += pending[i]->ulen;
+                            free(pending[i]);
                             next_seq++;
                             pending[i] = pending[--pending_count];
                             found = 1;
@@ -278,11 +289,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             /* Spawn compression workers */
             for (int w = 0; w < num_workers; w++) {
                 spawn([level]() => {
-                    Block blk;
+                    Block* blk;
                     while (chan_recv(blocks_rx, &blk) == 0) {
-                        Result res = compress_block(&blk, level);
+                        Result* res = compress_block(blk, level);
                         chan_send(results_tx, res);
-                        cc_heap_arena_free(&blk.arena);
+                        cc_heap_arena_free(&blk->arena);
+                        free(blk);
                     }
                 });
             }
@@ -320,25 +332,31 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             break;  /* EOF */
                         }
                         
-                        /* Create block */
-                        Block blk = {0};
-                        blk.seq = seq++;
-                        blk.data = data;
-                        blk.arena = arena;
+                        /* Allocate Block on heap for lock-free channel send */
+                        Block* blk = (Block*)malloc(sizeof(Block));
+                        if (!blk) {
+                            cc_heap_arena_free(&arena);
+                            fprintf(stderr, "pigz_cc: malloc failed for Block\n");
+                            break;
+                        }
+                        memset(blk, 0, sizeof(Block));
+                        blk->seq = seq++;
+                        blk->data = data;
+                        blk->arena = arena;
                         
                         /* Check if this is the last block by peeking */
                         CCResultOptSliceIoError peek = cc_file_read(in_f, &arena, 1);
                         if (peek.is_err || !peek.ok.has) {
-                            blk.last = 1;
+                            blk->last = 1;
                         } else {
-                            blk.last = 0;
+                            blk->last = 0;
                             fseek(in_f->handle, -1, SEEK_CUR);
                         }
                         
-                        /* Send block to workers - ownership of arena transfers */
+                        /* Send block pointer to workers - ownership transfers */
                         chan_send(blocks_tx, blk);
                         
-                        if (blk.last) {
+                        if (blk->last) {
                             break;
                         }
                     }
