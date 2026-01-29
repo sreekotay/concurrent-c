@@ -1,0 +1,149 @@
+/*
+ * MPMC Worker Pool Benchmark
+ * 
+ * Mimics pigz pattern:
+ *   Producer -> [buffered channel] -> N Workers (each does work)
+ * 
+ * Measures:
+ *   - Work distribution across workers
+ *   - Total throughput
+ *   - CPU utilization (via wall time vs work done)
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define NUM_WORKERS 4
+#define NUM_ITEMS 1000
+#define WORK_ITERATIONS 10000  /* Simulate ~0.1ms of work per item */
+
+typedef struct {
+    int id;
+    int data[64];  /* Make it a decent size like pigz blocks */
+} WorkItem;
+
+/* Per-worker stats */
+static cc_atomic_int worker_counts[NUM_WORKERS];
+
+/* Simulate CPU-bound work (like compression) */
+static int do_work(WorkItem* item) {
+    volatile int sum = 0;
+    for (int i = 0; i < WORK_ITERATIONS; i++) {
+        sum += item->data[i % 64];
+        sum ^= (sum >> 3);
+    }
+    return sum;
+}
+
+static double time_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+int main(int argc, char** argv) {
+    int buffer_size = 8;  /* Default like pigz */
+    if (argc > 1) buffer_size = atoi(argv[1]);
+    
+    printf("MPMC Worker Pool Benchmark\n");
+    printf("==========================\n");
+    printf("Workers: %d, Items: %d, Buffer: %d\n", NUM_WORKERS, NUM_ITEMS, buffer_size);
+    printf("Work per item: %d iterations\n\n", WORK_ITERATIONS);
+    
+    /* Reset counters */
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        cc_atomic_store(&worker_counts[i], 0);
+    }
+    
+    double t0 = time_ms();
+    
+    /* Create work channel */
+    WorkItem[~buffer_size >] work_tx;
+    WorkItem[~buffer_size <] work_rx;
+    channel_pair(&work_tx, &work_rx);
+    
+    @nursery {
+        /* Spawn workers - unroll since capture from loop var not supported */
+        int w0 = 0; spawn([w0]() => {
+            WorkItem item;
+            while (chan_recv(work_rx, &item) == 0) {
+                do_work(&item);
+                cc_atomic_fetch_add(&worker_counts[w0], 1);
+            }
+        });
+        int w1 = 1; spawn([w1]() => {
+            WorkItem item;
+            while (chan_recv(work_rx, &item) == 0) {
+                do_work(&item);
+                cc_atomic_fetch_add(&worker_counts[w1], 1);
+            }
+        });
+        int w2 = 2; spawn([w2]() => {
+            WorkItem item;
+            while (chan_recv(work_rx, &item) == 0) {
+                do_work(&item);
+                cc_atomic_fetch_add(&worker_counts[w2], 1);
+            }
+        });
+        int w3 = 3; spawn([w3]() => {
+            WorkItem item;
+            while (chan_recv(work_rx, &item) == 0) {
+                do_work(&item);
+                cc_atomic_fetch_add(&worker_counts[w3], 1);
+            }
+        });
+        
+        /* Producer: send all items then close */
+        spawn(() => {
+            for (int i = 0; i < NUM_ITEMS; i++) {
+                WorkItem item = { .id = i };
+                for (int j = 0; j < 64; j++) item.data[j] = i + j;
+                chan_send(work_tx, item);
+            }
+            chan_close(work_tx);
+        });
+    }
+    
+    chan_free(work_rx);
+    
+    double elapsed = time_ms() - t0;
+    
+    /* Report results */
+    printf("Results:\n");
+    printf("--------\n");
+    printf("Total time: %.1f ms\n", elapsed);
+    printf("Throughput: %.0f items/sec\n", NUM_ITEMS / (elapsed / 1000.0));
+    printf("\n");
+    
+    printf("Work Distribution:\n");
+    int total = 0;
+    int max_count = 0, min_count = NUM_ITEMS;
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        int count = cc_atomic_load(&worker_counts[i]);
+        total += count;
+        if (count > max_count) max_count = count;
+        if (count < min_count) min_count = count;
+        int pct = (count * 100) / NUM_ITEMS;
+        printf("  Worker %d: %4d items (%3d%%)", i, count, pct);
+        /* Simple bar */
+        printf(" |");
+        for (int b = 0; b < pct / 2; b++) printf("#");
+        printf("\n");
+    }
+    
+    int expected = NUM_ITEMS / NUM_WORKERS;
+    int imbalance = (max_count - min_count) * 100 / expected;
+    printf("\nTotal: %d (expected %d)\n", total, NUM_ITEMS);
+    printf("Imbalance: %d%% (max=%d, min=%d, expected=%d)\n", 
+           imbalance, max_count, min_count, expected);
+    
+    /* Estimate parallelism */
+    double serial_time = NUM_ITEMS * WORK_ITERATIONS * 0.00001; /* rough estimate */
+    double speedup = serial_time / elapsed * 1000;
+    printf("Estimated parallelism: %.1fx\n", speedup > NUM_WORKERS ? NUM_WORKERS : speedup);
+    
+    return 0;
+}
