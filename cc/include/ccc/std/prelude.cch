@@ -100,5 +100,23 @@ static inline void cc_heap_arena_free(CCArena* a) {
     a->offset = 0;
 }
 
+// Detach and return the arena's memory, leaving the source arena empty.
+// Use this to transfer ownership out of an @arena block.
+// After detach, the source arena is empty and its cleanup becomes a no-op.
+static inline CCArena cc_arena_detach(CCArena* a) {
+    CCArena taken = {0};
+    if (a && a->base) {
+        taken = *a;
+        a->base = NULL;
+        a->capacity = 0;
+        a->offset = 0;
+    }
+    return taken;
+}
+
+#ifdef CC_ENABLE_SHORT_NAMES
+static inline CCArena arena_detach(CCArena* a) { return cc_arena_detach(a); }
+#endif
+
 #endif // CC_STD_PRELUDE_H
 

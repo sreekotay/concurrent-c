@@ -601,4 +601,3 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
 
     return edits_added;
 }
-

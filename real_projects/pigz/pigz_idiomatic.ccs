@@ -57,87 +57,92 @@ cc_atomic_int g_blocks_done = 0;
 /*
  * Compress a single block. 
  * Returns a CompressedResult*!IoError to demonstrate idiomatic error propagation.
+ * 
+ * Uses @arena block with arena_detach() for clean ownership transfer:
+ * - On error: @arena cleanup frees the memory
+ * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
 CompressedResult*!IoError compress_block(Block* blk, int level) {
-    // Create a fresh arena for the result. 
-    // This arena will be transferred to the writer.
     // Arena needs space for: CompressedResult struct + compressed output (up to ~112.5% of input + overhead)
-    CCArena res_arena = cc_heap_arena(blk->data.len + (blk->data.len >> 3) + 8192);
+    size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
-    // If we return an error, we must free the arena.
-    // If we return successfully, the caller (writer) now owns it.
-    @defer(err) cc_heap_arena_free(&res_arena);
+    @arena(res_arena, arena_size) {
+        CompressedResult* res = (CompressedResult*)cc_arena_alloc(res_arena, sizeof(CompressedResult), _Alignof(CompressedResult));
+        if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
+        
+        res->seq = blk->seq;
+        res->last = blk->last;
+        res->ulen = blk->data.len;
 
-    CompressedResult* res = (CompressedResult*)cc_arena_alloc(&res_arena, sizeof(CompressedResult), _Alignof(CompressedResult));
-    if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
-    
-    res->seq = blk->seq;
-    res->last = blk->last;
-    res->ulen = blk->data.len;
-    res->arena = res_arena;
+        // Calculate CRC using zlib directly
+        res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-    // Calculate CRC using zlib directly
-    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+        // Allocate output buffer in the result arena
+        size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+        unsigned char* out_buf = (unsigned char*)cc_arena_alloc(res_arena, max_out, 1);
+        if (!out_buf) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
 
-    // Allocate output buffer in the result arena
-    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-    unsigned char* out_buf = (unsigned char*)cc_arena_alloc(&res_arena, max_out, 1);
-    if (!out_buf) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
+        // Write gzip header (10 bytes)
+        unsigned char header[10] = {
+            0x1f, 0x8b,  // Magic
+            0x08,        // Deflate method
+            0x00,        // Flags (none)
+            0, 0, 0, 0,  // Mtime (not set)
+            0x00,        // Extra flags
+            0x03         // OS = Unix
+        };
+        memcpy(out_buf, header, 10);
+        size_t pos = 10;
 
-    // Write gzip header (10 bytes)
-    unsigned char header[10] = {
-        0x1f, 0x8b,  // Magic
-        0x08,        // Deflate method
-        0x00,        // Flags (none)
-        0, 0, 0, 0,  // Mtime (not set)
-        0x00,        // Extra flags
-        0x03         // OS = Unix
-    };
-    memcpy(out_buf, header, 10);
-    size_t pos = 10;
+        // Compress with zlib (raw deflate, -15 window bits)
+        z_stream strm;
+        memset(&strm, 0, sizeof(strm));
+        
+        int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+        if (ret != Z_OK) return cc_err(io_error(CC_IO_OTHER));
+        
+        strm.next_in = (Bytef*)blk->data.ptr;
+        strm.avail_in = (uInt)blk->data.len;
+        strm.next_out = out_buf + pos;
+        strm.avail_out = (uInt)(max_out - pos - 8);  // Reserve space for trailer
+        
+        ret = deflate(&strm, Z_FINISH);
+        size_t deflate_len = strm.total_out;
+        deflateEnd(&strm);
+        
+        if (ret != Z_STREAM_END) {
+            return cc_err(io_error(CC_IO_OTHER));
+        }
+        
+        pos += deflate_len;
+        
+        // Write gzip trailer: CRC32 (4 bytes) + original size mod 2^32 (4 bytes)
+        unsigned long crc = res->crc;
+        size_t in_len = blk->data.len;
+        out_buf[pos++] = crc & 0xff;
+        out_buf[pos++] = (crc >> 8) & 0xff;
+        out_buf[pos++] = (crc >> 16) & 0xff;
+        out_buf[pos++] = (crc >> 24) & 0xff;
+        out_buf[pos++] = in_len & 0xff;
+        out_buf[pos++] = (in_len >> 8) & 0xff;
+        out_buf[pos++] = (in_len >> 16) & 0xff;
+        out_buf[pos++] = (in_len >> 24) & 0xff;
 
-    // Compress with zlib (raw deflate, -15 window bits)
-    z_stream strm;
-    memset(&strm, 0, sizeof(strm));
-    
-    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-    if (ret != Z_OK) return cc_err(io_error(CC_IO_OTHER));
-    
-    strm.next_in = (Bytef*)blk->data.ptr;
-    strm.avail_in = (uInt)blk->data.len;
-    strm.next_out = out_buf + pos;
-    strm.avail_out = (uInt)(max_out - pos - 8);  // Reserve space for trailer
-    
-    ret = deflate(&strm, Z_FINISH);
-    size_t deflate_len = strm.total_out;
-    deflateEnd(&strm);
-    
-    if (ret != Z_STREAM_END) {
-        return cc_err(io_error(CC_IO_OTHER));
+        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+
+        // Update statistics
+        cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+        cc_atomic_fetch_add(&g_bytes_out, pos);
+        cc_atomic_fetch_add(&g_blocks_done, 1);
+
+        // Transfer arena ownership: detach empties res_arena, so block cleanup is no-op
+        res->arena = arena_detach(res_arena);
+        
+        return cc_ok(res);
     }
     
-    pos += deflate_len;
-    
-    // Write gzip trailer: CRC32 (4 bytes) + original size mod 2^32 (4 bytes)
-    unsigned long crc = res->crc;
-    size_t in_len = blk->data.len;
-    out_buf[pos++] = crc & 0xff;
-    out_buf[pos++] = (crc >> 8) & 0xff;
-    out_buf[pos++] = (crc >> 16) & 0xff;
-    out_buf[pos++] = (crc >> 24) & 0xff;
-    out_buf[pos++] = in_len & 0xff;
-    out_buf[pos++] = (in_len >> 8) & 0xff;
-    out_buf[pos++] = (in_len >> 16) & 0xff;
-    out_buf[pos++] = (in_len >> 24) & 0xff;
-
-    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
-
-    // Update statistics
-    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
-    cc_atomic_fetch_add(&g_bytes_out, pos);
-    cc_atomic_fetch_add(&g_blocks_done, 1);
-
-    return cc_ok(res);
+    // Unreachable - all paths return from inside @arena block
+    return cc_err(io_error(CC_IO_OTHER));
 }
 
 /* ============================================================================

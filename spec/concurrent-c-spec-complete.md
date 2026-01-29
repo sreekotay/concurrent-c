@@ -1394,14 +1394,29 @@ Result*!IoError compress_block(Block* blk) {
     Arena res_arena = cc_heap_arena(blk->data.len + 4096);
     @defer(err) cc_heap_arena_free(&res_arena);  // cleanup on error only
     
-    Result* res = cc_arena_alloc(&res_arena, sizeof(Result));
-    if (!res) return cc_err(CC_ERR_OUT_OF_MEMORY, "alloc failed");
+    Result* res = arena_alloc(Result, &res_arena, 1);
+    if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
     
-    // ... fill in res ...
+    // ... fill in res, do allocations ...
     
-    return cc_ok(res);  // success: caller owns arena, no cleanup
+    // Transfer ownership: detach leaves res_arena empty, so cleanup is no-op
+    res->arena = arena_detach(&res_arena);
+    return cc_ok(res);
 }
 ```
+
+**Arena ownership transfer with `arena_detach()`:**
+
+`arena_detach(Arena* a)` transfers the arena's memory to a new owner, leaving the source arena empty. This enables clean ownership transfer out of scoped blocks:
+
+```c
+Arena arena_detach(Arena* a);  // returns arena contents, leaves a empty
+```
+
+After detach:
+- The source arena has `base = NULL` - any cleanup becomes a no-op
+- The returned arena owns all the memory and allocations
+- The caller is responsible for eventually freeing the returned arena
 
 **Rule:** `@defer(err)` and `@defer(ok)` are only valid in functions returning a result type (`T!E`). Using them in a function returning a non-result type is a compile error.
 
