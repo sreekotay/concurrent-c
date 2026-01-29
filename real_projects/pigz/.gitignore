@@ -1,9 +1,5 @@
 # Downloaded by setup.sh (original pigz source)
-pigz.c
-yarn.c
-yarn.h
-try.c
-try.h
+pigz_c/
 
 # Binaries
 pigz

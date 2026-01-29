@@ -1,33 +1,27 @@
 # Makefile for pigz - builds both original (pthread) and CC versions
 
 CC = gcc
-CFLAGS = -O3 -Wall -Wextra -pthread -I.
+CFLAGS = -O3 -Wall -Wextra -pthread -Ipigz_c -DNOZOPFLI
 LDFLAGS = -lz -lpthread
 
-# Zopfli sources
-ZOPFLI_SRCS = zopfli/src/zopfli/blocksplitter.c \
-              zopfli/src/zopfli/cache.c \
-              zopfli/src/zopfli/deflate.c \
-              zopfli/src/zopfli/gzip_container.c \
-              zopfli/src/zopfli/hash.c \
-              zopfli/src/zopfli/katajainen.c \
-              zopfli/src/zopfli/lz77.c \
-              zopfli/src/zopfli/squeeze.c \
-              zopfli/src/zopfli/tree.c \
-              zopfli/src/zopfli/util.c \
-              zopfli/src/zopfli/zlib_container.c \
-              zopfli/src/zopfli/zopfli_lib.c
+# Original pigz sources (downloaded by setup.sh)
+PIGZ_C_DIR = pigz_c
+PIGZ_SRCS = $(PIGZ_C_DIR)/pigz.c $(PIGZ_C_DIR)/yarn.c $(PIGZ_C_DIR)/try.c
 
 # CC compiler
-CCC = ../../cc/bin/ccc
+CCC = ../../out/cc/bin/ccc
 
 # Original pigz (pthread-based)
-pigz: pigz.c yarn.c try.c yarn.h try.h $(ZOPFLI_SRCS)
-	$(CC) $(CFLAGS) -o $@ pigz.c yarn.c try.c $(ZOPFLI_SRCS) $(LDFLAGS)
+pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h
+	$(CC) $(CFLAGS) -o $@ $(PIGZ_SRCS) $(LDFLAGS)
 
 # CC version
-pigz_cc: pigz_cc.ccs zlib_wrapper.c
-	$(CCC) -o $@ pigz_cc.ccs zlib_wrapper.c --ld-flags "-lz"
+pigz_cc: pigz_cc.ccs
+	$(CCC) -o $@ pigz_cc.ccs --ld-flags "-lz"
+
+# Idiomatic CC version (with T!E result types)
+pigz_idiomatic: pigz_idiomatic.ccs
+	$(CCC) -o $@ pigz_idiomatic.ccs --ld-flags "-lz"
 
 # Download source files if not present
 setup:
