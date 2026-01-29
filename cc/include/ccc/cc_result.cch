@@ -1,17 +1,33 @@
 /*
  * Generic Result helpers for generated C.
  *
- * Two layouts are supported:
- * 
- * 1. Legacy layout (CC_DECL_RESULT): used by existing runtime code
- *    - struct { bool is_err; union { OkType ok; ErrType err; }; }
- *    - Access: r.is_err, r.ok, r.err
+ * IDIOMATIC USAGE:
+ *   CCResult_int_CCIoError res = some_fallible_op();
+ *   
+ *   // Check and handle error:
+ *   if (cc_is_err(res)) {
+ *       CCIoError err = cc_unwrap_err(res);
+ *       handle_error(err);
+ *       return;
+ *   }
+ *   int val = cc_unwrap(res);
+ *   
+ *   // Or use if @try syntax in .ccs files:
+ *   if @try (int val = some_fallible_op()) {
+ *       use(val);
+ *   } else {
+ *       // error path
+ *   }
  *
- * 2. Spec-aligned layout (CC_DECL_RESULT_SPEC): matches spec ABI
- *    - struct { bool ok; union { T value; E error; } u; }
- *    - Access: r.ok, r.u.value, r.u.error
+ * HELPERS:
+ *   cc_is_ok(res)    - true if success
+ *   cc_is_err(res)   - true if error
+ *   cc_unwrap(res)   - get value (aborts if error)
+ *   cc_unwrap_err(res) - get error (aborts if ok)
  *
- * The compiler-lowered T!>(E) syntax uses the spec layout.
+ * AVOID: Direct field access like res.u.value or res.u.error
+ *
+ * Layout: struct { bool ok; union { T value; E error; } u; }
  */
 #ifndef CC_RESULT_H
 #define CC_RESULT_H

@@ -259,7 +259,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             break;  // EOF
                         }
                         
-                        CCSlice data = opt_data.u.value;
+                        CCSlice data = cc_opt_value_unchecked(opt_data);
                         
                         // Block struct also lives in the arena
                         Block* blk = arena_alloc1(Block, &blk_arena);

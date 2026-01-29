@@ -1,14 +1,20 @@
 /*
  * Generic Optional helpers for generated C.
  *
- * Pattern:
- *   CC_DECL_OPTIONAL(CCOptional_int, int)
- *   CCOptional_int x = cc_some_CCOptional_int(42);
- *   CCOptional_int y = cc_none_CCOptional_int();
- *   if (x.has) { use(x.u.value); }
+ * IDIOMATIC USAGE:
+ *   CCOptional_int opt = cc_some_CCOptional_int(42);
+ *   
+ *   // Check and unwrap (aborts if none):
+ *   int val = cc_unwrap_opt(opt);
+ *   
+ *   // Check first, then access:
+ *   if (opt.has) {
+ *       int val = cc_opt_value_unchecked(opt);
+ *   }
  *
- * The union layout is stable and POD-only to keep ABI simple.
- * Matches the spec: struct { bool has; union { T value; } u; }
+ * AVOID: Direct field access like opt.u.value
+ *
+ * Layout: struct { bool has; union { T value; } u; }
  */
 #ifndef CC_OPTIONAL_H
 #define CC_OPTIONAL_H
