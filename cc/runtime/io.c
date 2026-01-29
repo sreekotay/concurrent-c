@@ -109,8 +109,8 @@ int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* ou
     (void)ex;
     if (!out) return EINVAL;
     CCResultSliceIoError r = cc_file_read_all(file, arena);
-    *out = r.ok;
-    int err = r.is_err ? r.err.os_code : 0;
+    if (r.ok) *out = r.u.value;
+    int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
 }
 
@@ -118,8 +118,8 @@ int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCOpt
     (void)ex;
     if (!out) return EINVAL;
     CCResultOptSliceIoError r = cc_file_read(file, arena, n);
-    if (!r.is_err) *out = r.ok;
-    int err = r.is_err ? r.err.os_code : 0;
+    if (r.ok) *out = r.u.value;
+    int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
 }
 
@@ -127,16 +127,16 @@ int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCOptional
     (void)ex;
     if (!out) return EINVAL;
     CCResultOptSliceIoError r = cc_file_read_line(file, arena);
-    if (!r.is_err) *out = r.ok;
-    int err = r.is_err ? r.err.os_code : 0;
+    if (r.ok) *out = r.u.value;
+    int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
 }
 
 int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h) {
     (void)ex;
     CCResultSizeIoError res = cc_file_write(file, data);
-    if (!res.is_err && out_written) *out_written = res.ok;
-    int err = res.is_err ? res.err.os_code : 0;
+    if (res.ok && out_written) *out_written = res.u.value;
+    int err = !res.ok ? res.u.error.os_code : 0;
     return cc__async_complete(h, err);
 }
 #endif

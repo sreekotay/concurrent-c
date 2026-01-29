@@ -52,15 +52,21 @@ typedef struct {
     size_t len;
 } CCBufWriter;
 
-// Result types used by this header.
-CC_DECL_RESULT(CCResultSliceIoError, CCSlice, CCIoError)
-CC_DECL_RESULT(CCResultSizeIoError, size_t, CCIoError)
+// Result types - using canonical CCResult_T_E naming for T!>(E) compatibility
+CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
+CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
+CC_DECL_RESULT_SPEC(CCResult_CCOptional_CCSlice_CCIoError, CCOptional_CCSlice, CCIoError)
 
-// Streaming read result: Result<Optional<Slice>, IoError>
-// - Ok(Some(slice)) = got data
-// - Ok(None) = EOF (normal end of stream)
-// - Err(e) = actual error
-CC_DECL_RESULT(CCResultOptSliceIoError, CCOptional_CCSlice, CCIoError)
+// Backwards-compat aliases for existing code
+typedef CCResult_CCSlice_CCIoError CCResultSliceIoError;
+typedef CCResult_size_t_CCIoError CCResultSizeIoError;
+typedef CCResult_CCOptional_CCSlice_CCIoError CCResultOptSliceIoError;
+#define cc_ok_CCResultSliceIoError cc_ok_CCResult_CCSlice_CCIoError
+#define cc_err_CCResultSliceIoError cc_err_CCResult_CCSlice_CCIoError
+#define cc_ok_CCResultSizeIoError cc_ok_CCResult_size_t_CCIoError
+#define cc_err_CCResultSizeIoError cc_err_CCResult_size_t_CCIoError
+#define cc_ok_CCResultOptSliceIoError cc_ok_CCResult_CCOptional_CCSlice_CCIoError
+#define cc_err_CCResultOptSliceIoError cc_err_CCResult_CCOptional_CCSlice_CCIoError
 
 // Open a file (mode like "r", "w", "a"). Returns 0 on success.
 int cc_file_open(CCFile *file, const char *path, const char *mode);
@@ -309,9 +315,10 @@ static inline CCResultOptSliceIoError cc_buf_reader_read_line(CCBufReader *r, CC
     while (1) {
         if (r->pos >= r->len) {
             CCResultOptSliceIoError fill = cc_buf_reader_next(r, r->cap);
-            if (fill.is_err) return fill;
+            if (cc_is_err(fill)) return fill;
             // Check if EOF with no data
-            if (!fill.ok.has) {
+            CCOptional_CCSlice opt = cc_unwrap(fill);
+            if (!opt.has) {
                 if (line.len == 0) {
                     // No data accumulated, true EOF
                     return cc_ok_CCResultOptSliceIoError(cc_none_CCOptional_CCSlice());
@@ -359,7 +366,7 @@ static inline CCResultSizeIoError cc_buf_writer_write(CCBufWriter *w, CCSlice da
         size_t space = w->cap - w->len;
         if (space == 0) {
             CCResultSizeIoError fl = cc_buf_writer_flush(w);
-            if (fl.is_err) return fl;
+            if (cc_is_err(fl)) return fl;
             space = w->cap;
         }
         size_t chunk = data.len - off;

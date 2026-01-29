@@ -22,7 +22,9 @@
  * ============================================================================ */
 
 #define BLOCK_SIZE (128 * 1024)
+#define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
 #define MAX_WORKERS 16
+#define REORDER_CAP 1024  // Must be > max blocks in flight
 
 /* ============================================================================
  * Data Types
@@ -31,17 +33,17 @@
 typedef struct {
     long seq;
     CCSlice data;
-    int last;
-    CCArena arena; // Owns the data
+    bool is_last;
+    CCArena arena;  // Owns the data buffer
 } Block;
 
 typedef struct {
     long seq;
     CCSlice data;
     unsigned long crc;
-    size_t ulen;
-    int last;
-    CCArena arena; // Owns the compressed data
+    size_t original_len;
+    bool is_last;
+    CCArena arena;  // Owns the compressed data buffer
 } CompressedResult;
 
 /* Global statistics */
@@ -62,7 +64,8 @@ cc_atomic_int g_blocks_done = 0;
  * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
 CompressedResult*!>(CCIoError) compress_block(Block* blk, int level) {
-    // Arena needs space for: CompressedResult struct + compressed output (up to ~112.5% of input + overhead)
+    // Arena sizing: CompressedResult struct + gzip output (header + deflate + trailer)
+    // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
     @arena(res_arena, arena_size) {
@@ -70,8 +73,8 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, int level) {
         if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
         
         res->seq = blk->seq;
-        res->last = blk->last;
-        res->ulen = blk->data.len;
+        res->is_last = blk->is_last;
+        res->original_len = blk->data.len;
 
         // Calculate CRC using zlib directly
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
@@ -139,9 +142,6 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, int level) {
         
         return cc_ok(res);
     }
-    
-    // Unreachable - all paths return from inside @arena block
-    return cc_err(CC_IO_OTHER);
 }
 
 /* ============================================================================
@@ -184,15 +184,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         /* Writer Task - must write blocks in sequence order */
         spawn([out_ptr]() => {
             long next_seq = 0;
-            // Reorder buffer sized for max expected blocks (1024 > 800 blocks for 100MB)
-            #define PENDING_CAP 1024
-            CompressedResult* pending[PENDING_CAP];
+            CompressedResult* pending[REORDER_CAP];
             memset(pending, 0, sizeof(pending));
+            bool write_error = false;
             
             CompressedResult* r;
             while (chan_recv(results_rx, &r) == 0) {
                 // Insert using modular indexing
-                size_t slot = (size_t)(r->seq % PENDING_CAP);
+                size_t slot = (size_t)(r->seq % REORDER_CAP);
                 if (pending[slot] != NULL) {
                     fprintf(stderr, "Error: reorder slot collision (seq=%ld, existing=%ld)\n", 
                             r->seq, pending[slot]->seq);
@@ -202,17 +201,21 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 pending[slot] = r;
                 
                 // Drain all consecutive blocks starting from next_seq
-                while (pending[next_seq % PENDING_CAP] != NULL) {
-                    slot = (size_t)(next_seq % PENDING_CAP);
+                while (!write_error && pending[next_seq % REORDER_CAP] != NULL) {
+                    slot = (size_t)(next_seq % REORDER_CAP);
                     r = pending[slot];
                     pending[slot] = NULL;
                     
-                    cc_file_write(out_ptr, r->data);
+                    CCResult_size_t_CCIoError wr = cc_file_write(out_ptr, r->data);
+                    if (cc_is_err(wr)) {
+                        fprintf(stderr, "Error: write failed at block %ld: %s\n", 
+                                r->seq, cc_io_error_str(cc_unwrap_err(wr)));
+                        write_error = true;
+                    }
                     cc_heap_arena_free(&r->arena);
                     next_seq++;
                 }
             }
-            #undef PENDING_CAP
         });
 
         @nursery closing(results_tx) {
@@ -221,14 +224,15 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 spawn([level]() => {
                     Block* blk;
                     while (chan_recv(blocks_rx, &blk) == 0) {
-                        // Compress and send result, log errors
+                        // Compress and send result; on error, log and continue
                         if @try (CompressedResult* res = compress_block(blk, level)) {
                             chan_send(results_tx, res);
                         } else {
-                            fprintf(stderr, "Worker compression error (seq=%ld)\n", blk->seq);
+                            // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
+                            fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
                         }
                         
-                        // Cleanup input block (Block is inside its arena)
+                        // Free input block arena
                         cc_heap_arena_free(&blk->arena);
                     }
                 });
@@ -239,16 +243,17 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 spawn([in_ptr]() => {
                     long seq = 0;
                     while (1) {
-                        CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + 1024);
+                        CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                         
-                        // Read a block using CCFile - returns Ok(Some(slice)), Ok(None) on EOF, Err on error
-                        CCResultOptSliceIoError read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
-                        if (read_res.is_err) {
+                        // Read returns Ok(Some(slice)), Ok(None) on EOF, Err on I/O error
+                        CCResult_CCOptional_CCSlice_CCIoError read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
+                        if (cc_is_err(read_res)) {
+                            fprintf(stderr, "Read error: %s\n", cc_io_error_str(cc_unwrap_err(read_res)));
                             cc_heap_arena_free(&blk_arena);
-                            break;  // Read error
+                            break;
                         }
                         
-                        CCOptional_CCSlice opt_data = read_res.ok;
+                        CCOptional_CCSlice opt_data = cc_unwrap(read_res);
                         if (!opt_data.has) {
                             cc_heap_arena_free(&blk_arena);
                             break;  // EOF
@@ -256,7 +261,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         
                         CCSlice data = opt_data.u.value;
                         
-                        // Block struct also in arena
+                        // Block struct also lives in the arena
                         Block* blk = arena_alloc1(Block, &blk_arena);
                         if (!blk) {
                             cc_heap_arena_free(&blk_arena);
@@ -265,11 +270,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         
                         blk->seq = seq++;
                         blk->data = data;
-                        blk->last = (data.len < BLOCK_SIZE);
-                        blk->arena = blk_arena;  // Transfer ownership
+                        blk->is_last = (data.len < BLOCK_SIZE);
+                        blk->arena = blk_arena;  // Transfer ownership to Block
                         
                         chan_send(blocks_tx, blk);
-                        if (blk->last) break;
+                        if (blk->is_last) break;
                     }
                 });
             }

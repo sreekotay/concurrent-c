@@ -729,14 +729,14 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
 
     /* Read stdout */
     CCResultSliceIoError stdout_res = cc_process_read_all(&proc, arena);
-    if (!stdout_res.is_err) {
-        output.stdout_data = stdout_res.ok;
+    if (stdout_res.ok) {
+        output.stdout_data = stdout_res.u.value;
     }
 
     /* Read stderr */
     CCResultSliceIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
-    if (!stderr_res.is_err) {
-        output.stderr_data = stderr_res.ok;
+    if (stderr_res.ok) {
+        output.stderr_data = stderr_res.u.value;
     }
 
     /* Wait for exit */

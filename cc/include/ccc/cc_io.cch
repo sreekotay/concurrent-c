@@ -52,6 +52,21 @@ static inline CCIoError cc_io_from_errno(int err) {
     return e;
 }
 
+// Human-readable error string (static, do not free).
+static inline const char* cc_io_error_str(CCIoError e) {
+    switch (e.kind) {
+        case CC_IO_PERMISSION_DENIED: return "permission denied";
+        case CC_IO_FILE_NOT_FOUND:    return "file not found";
+        case CC_IO_INVALID_ARGUMENT:  return "invalid argument";
+        case CC_IO_INTERRUPTED:       return "interrupted";
+        case CC_IO_OUT_OF_MEMORY:     return "out of memory";
+        case CC_IO_BUSY:              return "resource busy";
+        case CC_IO_CONNECTION_CLOSED: return "connection closed";
+        case CC_IO_OTHER:             return "I/O error";
+        default:                      return "unknown error";
+    }
+}
+
 #endif // CC_IO_H
 
 
