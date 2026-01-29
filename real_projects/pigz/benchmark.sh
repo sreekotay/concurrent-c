@@ -2,13 +2,13 @@
 # Benchmark script for comparing original pigz vs CC implementation
 
 set -e
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(dirname "$0")"
 
 # Configuration
 DATA_SIZE_MB=${1:-100}
 WORKERS=${2:-4}
 RUNS=${3:-3}
-OUT_DIR=out
+OUT_DIR="$SCRIPT_DIR/out"
 
 echo "=============================================="
 echo "pigz Benchmark: Original vs Concurrent-C"
@@ -20,20 +20,23 @@ echo "Runs: ${RUNS}"
 echo ""
 
 # Check binaries exist
-if [ ! -f $OUT_DIR/pigz ]; then
+if [ ! -f "$OUT_DIR/pigz" ]; then
     echo "Error: $OUT_DIR/pigz not found. Run 'make pigz' first."
     exit 1
 fi
 
-if [ ! -f $OUT_DIR/pigz_cc ]; then
+if [ ! -f "$OUT_DIR/pigz_cc" ]; then
     echo "Error: $OUT_DIR/pigz_cc not found. Run 'make pigz_cc' first."
     exit 1
 fi
 
-if [ ! -f $OUT_DIR/pigz_idiomatic ]; then
+if [ ! -f "$OUT_DIR/pigz_idiomatic" ]; then
     echo "Warning: $OUT_DIR/pigz_idiomatic not found, skipping idiomatic benchmark."
     SKIP_IDIOMATIC=1
 fi
+
+# Change to out directory so all temp files go there
+cd "$OUT_DIR"
 
 # Generate test data
 echo "Generating ${DATA_SIZE_MB}MB test data..."
@@ -70,19 +73,19 @@ run_benchmark() {
     echo ""
 }
 
-# Run benchmarks
-run_benchmark "Original pigz (pthread)" "$OUT_DIR/pigz -k -p $WORKERS"
-run_benchmark "CC pigz (Concurrent-C)"  "$OUT_DIR/pigz_cc -k -p $WORKERS"
+# Run benchmarks (binaries are in current directory now)
+run_benchmark "Original pigz (pthread)" "./pigz -k -p $WORKERS"
+run_benchmark "CC pigz (Concurrent-C)"  "./pigz_cc -k -p $WORKERS"
 if [ -z "$SKIP_IDIOMATIC" ]; then
-    run_benchmark "CC pigz Idiomatic (T!E)" "$OUT_DIR/pigz_idiomatic"
+    run_benchmark "CC pigz Idiomatic (T!E)" "./pigz_idiomatic"
 fi
 
 # Verify correctness
 echo "=== Correctness Check ==="
 cp bench_input.bin bench_verify.bin
 
-$OUT_DIR/pigz -k -c bench_verify.bin > orig.gz
-$OUT_DIR/pigz_cc -k -c bench_verify.bin > cc.gz
+./pigz -k -c bench_verify.bin > orig.gz
+./pigz_cc -k -c bench_verify.bin > cc.gz
 
 gunzip -c orig.gz > orig_decomp.bin
 gunzip -c cc.gz > cc_decomp.bin
@@ -100,7 +103,7 @@ else
 fi
 
 if [ -z "$SKIP_IDIOMATIC" ]; then
-    $OUT_DIR/pigz_idiomatic bench_verify.bin
+    ./pigz_idiomatic bench_verify.bin
     mv bench_verify.bin.gz idiomatic.gz
     gunzip -c idiomatic.gz > idiomatic_decomp.bin
     if cmp -s bench_verify.bin idiomatic_decomp.bin; then
@@ -117,7 +120,7 @@ echo "  Original: $(wc -c < orig.gz) bytes"
 echo "  CC:       $(wc -c < cc.gz) bytes"
 if [ -z "$SKIP_IDIOMATIC" ]; then
     cp bench_input.bin bench_verify.bin
-    $OUT_DIR/pigz_idiomatic bench_verify.bin
+    ./pigz_idiomatic bench_verify.bin
     echo "  Idiomatic: $(wc -c < bench_verify.bin.gz) bytes"
     rm -f bench_verify.bin.gz
 fi
