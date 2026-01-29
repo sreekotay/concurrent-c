@@ -1,0 +1,93 @@
+/* Test: verify channel recv delivers each item exactly once */
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define NUM_ITEMS 1000
+#define NUM_WORKERS 4
+#define BUFFER_SIZE 8
+
+typedef struct { int seq; int value; } Item;
+
+cc_atomic_int g_sent = 0;
+cc_atomic_int g_recv = 0;
+cc_atomic_int g_worker_counts[NUM_WORKERS] = {0};
+
+/* Track which items were received (to detect duplicates) */
+cc_atomic_int g_received_items[NUM_ITEMS] = {0};
+cc_atomic_int g_duplicates = 0;
+
+int main(void) {
+    Item[~BUFFER_SIZE >] tx;
+    Item[~BUFFER_SIZE <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+    @defer cc_chan_free(ch);
+    
+    @nursery {
+        /* Workers */
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            int worker_id = w;
+            spawn([worker_id]() => {
+                Item item;
+                int count = 0;
+                while (chan_recv(rx, &item) == 0) {
+                    count++;
+                    cc_atomic_fetch_add(&g_recv, 1);
+                    cc_atomic_fetch_add(&g_worker_counts[worker_id], 1);
+                    
+                    /* Check for duplicate */
+                    int prev = cc_atomic_fetch_add(&g_received_items[item.seq], 1);
+                    if (prev > 0) {
+                        cc_atomic_fetch_add(&g_duplicates, 1);
+                        fprintf(stderr, "DUPLICATE: item seq=%d received again by worker %d (prev count=%d)\n",
+                                item.seq, worker_id, prev);
+                    }
+                }
+            });
+        }
+        
+        /* Producer - then close channel */
+        spawn(() => {
+            for (int i = 0; i < NUM_ITEMS; i++) {
+                Item item = { .seq = i, .value = i * 10 };
+                chan_send(tx, item);
+                cc_atomic_fetch_add(&g_sent, 1);
+            }
+            chan_close(tx);  /* Explicitly close */
+        });
+    }
+    
+    int sent = cc_atomic_load(&g_sent);
+    int recv = cc_atomic_load(&g_recv);
+    int dups = cc_atomic_load(&g_duplicates);
+    
+    printf("Sent: %d, Received: %d, Duplicates: %d\n", sent, recv, dups);
+    printf("Worker distribution:\n");
+    for (int w = 0; w < NUM_WORKERS; w++) {
+        int c = cc_atomic_load(&g_worker_counts[w]);
+        printf("  Worker %d: %d items (%.1f%%)\n", w, c, 100.0 * c / recv);
+    }
+    
+    /* Verify */
+    int missing = 0;
+    for (int i = 0; i < NUM_ITEMS; i++) {
+        int c = cc_atomic_load(&g_received_items[i]);
+        if (c == 0) {
+            missing++;
+            if (missing <= 5) fprintf(stderr, "MISSING: item seq=%d never received\n", i);
+        } else if (c > 1) {
+            if (dups <= 5) fprintf(stderr, "EXTRA: item seq=%d received %d times\n", i, c);
+        }
+    }
+    if (missing > 5) fprintf(stderr, "... and %d more missing items\n", missing - 5);
+    
+    if (sent != recv || dups > 0 || missing > 0) {
+        printf("FAIL: sent=%d recv=%d dups=%d missing=%d\n", sent, recv, dups, missing);
+        return 1;
+    }
+    
+    printf("PASS\n");
+    return 0;
+}
