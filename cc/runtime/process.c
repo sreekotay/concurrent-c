@@ -478,9 +478,9 @@ CCResultBoolIoError cc_process_kill(CCProcess* proc, int sig) {
  * Process I/O (shared implementation)
  * ============================================================================ */
 
-CCResultSizeIoError cc_process_write(CCProcess* proc, CCSlice data) {
+CCResult_size_t_CCIoError cc_process_write(CCProcess* proc, CCSlice data) {
     if (!proc || proc->stdin_fd < 0) {
-        return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
     }
 
 #ifdef _WIN32
@@ -488,28 +488,28 @@ CCResultSizeIoError cc_process_write(CCProcess* proc, CCSlice data) {
     HANDLE h = (HANDLE)_get_osfhandle(proc->stdin_fd);
     if (!WriteFile(h, data.ptr, (DWORD)data.len, &written, NULL)) {
         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
-        return cc_err_CCResultSizeIoError(e);
+        return cc_err_CCResult_size_t_CCIoError(e);
     }
-    return cc_ok_CCResultSizeIoError((size_t)written);
+    return cc_ok_CCResult_size_t_CCIoError((size_t)written);
 #else
     ssize_t n = write(proc->stdin_fd, data.ptr, data.len);
     if (n < 0) {
-        return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
     }
-    return cc_ok_CCResultSizeIoError((size_t)n);
+    return cc_ok_CCResult_size_t_CCIoError((size_t)n);
 #endif
 }
 
-CCResultSliceIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes) {
+CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes) {
     CCSlice result = {0};
 
     if (!proc || proc->stdout_fd < 0 || !arena) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     char* buf = cc_arena_alloc(arena, max_bytes, 1);
     if (!buf) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(ENOMEM));
     }
 
 #ifdef _WIN32
@@ -517,30 +517,30 @@ CCResultSliceIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max
     HANDLE h = (HANDLE)_get_osfhandle(proc->stdout_fd);
     if (!ReadFile(h, buf, (DWORD)max_bytes, &n, NULL)) {
         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
-        return cc_err_CCResultSliceIoError(e);
+        return cc_err_CCResult_CCSlice_CCIoError(e);
     }
 #else
     ssize_t n = read(proc->stdout_fd, buf, max_bytes);
     if (n < 0) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
 #endif
 
     result.ptr = buf;
     result.len = (size_t)n;
-    return cc_ok_CCResultSliceIoError(result);
+    return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
-CCResultSliceIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes) {
+CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes) {
     CCSlice result = {0};
 
     if (!proc || proc->stderr_fd < 0 || !arena) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     char* buf = cc_arena_alloc(arena, max_bytes, 1);
     if (!buf) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(ENOMEM));
     }
 
 #ifdef _WIN32
@@ -548,18 +548,18 @@ CCResultSliceIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, siz
     HANDLE h = (HANDLE)_get_osfhandle(proc->stderr_fd);
     if (!ReadFile(h, buf, (DWORD)max_bytes, &n, NULL)) {
         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
-        return cc_err_CCResultSliceIoError(e);
+        return cc_err_CCResult_CCSlice_CCIoError(e);
     }
 #else
     ssize_t n = read(proc->stderr_fd, buf, max_bytes);
     if (n < 0) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
 #endif
 
     result.ptr = buf;
     result.len = (size_t)n;
-    return cc_ok_CCResultSliceIoError(result);
+    return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
 void cc_process_close_stdin(CCProcess* proc) {
@@ -573,9 +573,9 @@ void cc_process_close_stdin(CCProcess* proc) {
     }
 }
 
-CCResultSliceIoError cc_process_read_all(CCProcess* proc, CCArena* arena) {
+CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena* arena) {
     if (!proc || proc->stdout_fd < 0 || !arena) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     /* Read in chunks and accumulate */
@@ -583,7 +583,7 @@ CCResultSliceIoError cc_process_read_all(CCProcess* proc, CCArena* arena) {
     size_t total_len = 0;
     char* total = cc_arena_alloc(arena, total_cap, 1);
     if (!total) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(ENOMEM));
     }
 
     while (1) {
@@ -606,7 +606,7 @@ CCResultSliceIoError cc_process_read_all(CCProcess* proc, CCArena* arena) {
             char* new_buf = cc_arena_alloc(arena, new_cap, 1);
             if (!new_buf) {
                 CCSlice result = {.ptr = total, .len = total_len};
-                return cc_ok_CCResultSliceIoError(result);
+                return cc_ok_CCResult_CCSlice_CCIoError(result);
             }
             memcpy(new_buf, total, total_len);
             total = new_buf;
@@ -618,19 +618,19 @@ CCResultSliceIoError cc_process_read_all(CCProcess* proc, CCArena* arena) {
     }
 
     CCSlice result = {.ptr = total, .len = total_len};
-    return cc_ok_CCResultSliceIoError(result);
+    return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
-CCResultSliceIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena) {
+CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena) {
     if (!proc || proc->stderr_fd < 0 || !arena) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     size_t total_cap = 4096;
     size_t total_len = 0;
     char* total = cc_arena_alloc(arena, total_cap, 1);
     if (!total) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(ENOMEM));
     }
 
     while (1) {
@@ -652,7 +652,7 @@ CCResultSliceIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena)
             char* new_buf = cc_arena_alloc(arena, new_cap, 1);
             if (!new_buf) {
                 CCSlice result = {.ptr = total, .len = total_len};
-                return cc_ok_CCResultSliceIoError(result);
+                return cc_ok_CCResult_CCSlice_CCIoError(result);
             }
             memcpy(new_buf, total, total_len);
             total = new_buf;
@@ -664,7 +664,7 @@ CCResultSliceIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena)
     }
 
     CCSlice result = {.ptr = total, .len = total_len};
-    return cc_ok_CCResultSliceIoError(result);
+    return cc_ok_CCResult_CCSlice_CCIoError(result);
 }
 
 /* ============================================================================
@@ -728,13 +728,13 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
     CCProcess proc = spawn_res.ok;
 
     /* Read stdout */
-    CCResultSliceIoError stdout_res = cc_process_read_all(&proc, arena);
+    CCResult_CCSlice_CCIoError stdout_res = cc_process_read_all(&proc, arena);
     if (stdout_res.ok) {
         output.stdout_data = stdout_res.u.value;
     }
 
     /* Read stderr */
-    CCResultSliceIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
+    CCResult_CCSlice_CCIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
     if (stderr_res.ok) {
         output.stderr_data = stderr_res.u.value;
     }

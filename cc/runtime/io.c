@@ -24,66 +24,66 @@ void cc_file_close(CCFile *file) {
     file->handle = NULL;
 }
 
-CCResultSliceIoError cc_file_read_all(CCFile *file, CCArena *arena) {
+CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena) {
     if (!file || !file->handle || !arena) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     if (fseek(file->handle, 0, SEEK_END) != 0) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
     long end = ftell(file->handle);
     if (end < 0) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
     if (fseek(file->handle, 0, SEEK_SET) != 0) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
 
     size_t len = (size_t)end;
     char *buf = (char *)cc_arena_alloc(arena, len + 1, sizeof(char));
     if (!buf) {
-        return cc_err_CCResultSliceIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+        return cc_err_CCResult_CCSlice_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
     }
 
     size_t read = fread(buf, 1, len, file->handle);
     if (read != len && ferror(file->handle)) {
-        return cc_err_CCResultSliceIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
     }
     buf[read] = '\0';
     CCSlice slice = cc_slice_from_parts(buf, read, CC_SLICE_ID_UNTRACKED, read + 1);
-    return cc_ok_CCResultSliceIoError(slice);
+    return cc_ok_CCResult_CCSlice_CCIoError(slice);
 }
 
-CCResultSizeIoError cc_file_write(CCFile *file, CCSlice data) {
+CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data) {
     if (!file || !file->handle) {
-        return cc_err_CCResultSizeIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
     }
     size_t written = fwrite(data.ptr, 1, data.len, file->handle);
     if (written != data.len) {
         if (ferror(file->handle)) {
-            return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+            return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
         }
     }
-    return cc_ok_CCResultSizeIoError(written);
+    return cc_ok_CCResult_size_t_CCIoError(written);
 }
 
-CCResultSizeIoError cc_std_out_write(CCSlice data) {
-    if (!data.ptr || data.len == 0) return cc_ok_CCResultSizeIoError(0);
+CCResult_size_t_CCIoError cc_std_out_write(CCSlice data) {
+    if (!data.ptr || data.len == 0) return cc_ok_CCResult_size_t_CCIoError(0);
     size_t written = fwrite(data.ptr, 1, data.len, stdout);
     if (written != data.len && ferror(stdout)) {
-        return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
     }
-    return cc_ok_CCResultSizeIoError(written);
+    return cc_ok_CCResult_size_t_CCIoError(written);
 }
 
-CCResultSizeIoError cc_std_err_write(CCSlice data) {
-    if (!data.ptr || data.len == 0) return cc_ok_CCResultSizeIoError(0);
+CCResult_size_t_CCIoError cc_std_err_write(CCSlice data) {
+    if (!data.ptr || data.len == 0) return cc_ok_CCResult_size_t_CCIoError(0);
     size_t written = fwrite(data.ptr, 1, data.len, stderr);
     if (written != data.len && ferror(stderr)) {
-        return cc_err_CCResultSizeIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
     }
-    return cc_ok_CCResultSizeIoError(written);
+    return cc_ok_CCResult_size_t_CCIoError(written);
 }
 
 #ifdef CC_ENABLE_ASYNC
@@ -108,7 +108,7 @@ int cc_file_close_async(CCExec* ex, CCFile *file, CCAsyncHandle* h) {
 int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
-    CCResultSliceIoError r = cc_file_read_all(file, arena);
+    CCResult_CCSlice_CCIoError r = cc_file_read_all(file, arena);
     if (r.ok) *out = r.u.value;
     int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
@@ -117,7 +117,7 @@ int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* ou
 int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCOptional_CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
-    CCResultOptSliceIoError r = cc_file_read(file, arena, n);
+    CCResult_CCOptional_CCSlice_CCIoError r = cc_file_read(file, arena, n);
     if (r.ok) *out = r.u.value;
     int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
@@ -126,7 +126,7 @@ int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCOpt
 int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCOptional_CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
-    CCResultOptSliceIoError r = cc_file_read_line(file, arena);
+    CCResult_CCOptional_CCSlice_CCIoError r = cc_file_read_line(file, arena);
     if (r.ok) *out = r.u.value;
     int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
@@ -134,7 +134,7 @@ int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCOptional
 
 int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h) {
     (void)ex;
-    CCResultSizeIoError res = cc_file_write(file, data);
+    CCResult_size_t_CCIoError res = cc_file_write(file, data);
     if (res.ok && out_written) *out_written = res.u.value;
     int err = !res.ok ? res.u.error.os_code : 0;
     return cc__async_complete(h, err);

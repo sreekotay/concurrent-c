@@ -154,21 +154,21 @@ static inline int cc_process_id(const CCProcess* proc) {
  * Write to process stdin.
  * Requires pipe_stdin = true in config.
  */
-CCResultSizeIoError cc_process_write(CCProcess* proc, CCSlice data);
+CCResult_size_t_CCIoError cc_process_write(CCProcess* proc, CCSlice data);
 
 /*
  * Read from process stdout.
  * Requires pipe_stdout = true in config.
  * Allocates result in arena.
  */
-CCResultSliceIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes);
+CCResult_CCSlice_CCIoError cc_process_read(CCProcess* proc, CCArena* arena, size_t max_bytes);
 
 /*
  * Read from process stderr.
  * Requires pipe_stderr = true in config.
  * Allocates result in arena.
  */
-CCResultSliceIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes);
+CCResult_CCSlice_CCIoError cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max_bytes);
 
 /*
  * Close stdin pipe (signals EOF to child).
@@ -179,13 +179,13 @@ void cc_process_close_stdin(CCProcess* proc);
  * Read all stdout until EOF.
  * Allocates result in arena.
  */
-CCResultSliceIoError cc_process_read_all(CCProcess* proc, CCArena* arena);
+CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena* arena);
 
 /*
  * Read all stderr until EOF.
  * Allocates result in arena.
  */
-CCResultSliceIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
+CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
 
 /* ============================================================================
  * Convenience: Run and Capture
