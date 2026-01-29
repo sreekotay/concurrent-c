@@ -61,6 +61,158 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
 
 /* UFCS span rewrite lives in pass_ufcs.c now (cc__rewrite_ufcs_spans_with_nodes). */
 
+/* Helper to append to a string buffer */
+static void cc__cg_sb_append(char** out, size_t* out_len, size_t* out_cap, const char* s, size_t len) {
+    if (!s || len == 0) return;
+    while (*out_len + len + 1 > *out_cap) {
+        size_t new_cap = (*out_cap == 0) ? 256 : (*out_cap * 2);
+        char* new_out = (char*)realloc(*out, new_cap);
+        if (!new_out) return;
+        *out = new_out;
+        *out_cap = new_cap;
+    }
+    memcpy(*out + *out_len, s, len);
+    *out_len += len;
+    (*out)[*out_len] = 0;
+}
+
+static void cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, const char* s) {
+    if (s) cc__cg_sb_append(out, out_len, out_cap, s, strlen(s));
+}
+
+/* Rewrite @closing(ch) spawn(...) or @closing(ch) { ... } syntax.
+   Transforms into spawned sub-nursery for flat visual structure. */
+static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for @closing( */
+        if (c == '@' && i + 8 < n && memcmp(src + i, "@closing", 8) == 0) {
+            size_t start = i;
+            size_t j = i + 8;
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+            
+            if (j < n && src[j] == '(') {
+                /* Found @closing( - parse the channel list */
+                size_t paren_start = j;
+                j++; /* skip '(' */
+                int paren_depth = 1;
+                while (j < n && paren_depth > 0) {
+                    if (src[j] == '(') paren_depth++;
+                    else if (src[j] == ')') paren_depth--;
+                    j++;
+                }
+                if (paren_depth != 0) { i++; continue; }
+                
+                size_t paren_end = j - 1;
+                size_t chans_start = paren_start + 1;
+                size_t chans_end = paren_end;
+                
+                /* Skip whitespace after ) */
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                
+                if (j >= n) { i++; continue; }
+                
+                size_t body_start = j;
+                size_t body_end;
+                int is_block = 0;
+                
+                if (src[j] == '{') {
+                    is_block = 1;
+                    int brace_depth = 1;
+                    j++;
+                    while (j < n && brace_depth > 0) {
+                        if (src[j] == '{') brace_depth++;
+                        else if (src[j] == '}') brace_depth--;
+                        else if (src[j] == '"') {
+                            j++;
+                            while (j < n && src[j] != '"') {
+                                if (src[j] == '\\' && j + 1 < n) j++;
+                                j++;
+                            }
+                        } else if (src[j] == '\'') {
+                            j++;
+                            while (j < n && src[j] != '\'') {
+                                if (src[j] == '\\' && j + 1 < n) j++;
+                                j++;
+                            }
+                        }
+                        j++;
+                    }
+                    body_end = j;
+                } else if (j + 5 < n && memcmp(src + j, "spawn", 5) == 0) {
+                    is_block = 0;
+                    int paren_d = 0, brace_d = 0;
+                    while (j < n) {
+                        if (src[j] == '(') paren_d++;
+                        else if (src[j] == ')') paren_d--;
+                        else if (src[j] == '{') brace_d++;
+                        else if (src[j] == '}') { brace_d--; if (brace_d < 0) break; }
+                        else if (src[j] == ';' && paren_d == 0 && brace_d == 0) { j++; break; }
+                        else if (src[j] == '"') {
+                            j++;
+                            while (j < n && src[j] != '"') {
+                                if (src[j] == '\\' && j + 1 < n) j++;
+                                j++;
+                            }
+                        }
+                        j++;
+                    }
+                    body_end = j;
+                } else {
+                    i++;
+                    continue;
+                }
+                
+                cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
+                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "spawn(() => { @nursery closing(");
+                cc__cg_sb_append(&out, &out_len, &out_cap, src + chans_start, chans_end - chans_start);
+                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ") ");
+                
+                if (is_block) {
+                    cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
+                } else {
+                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "{ ");
+                    cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
+                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                }
+                
+                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " });");
+                
+                last_emit = body_end;
+                i = body_end;
+                continue;
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Rewrite `if @try (T x = expr) { ... } else { ... }` into expanded form:
    { __typeof__(expr) __cc_try_bind = (expr);
      if (__cc_try_bind.ok) { T x = __cc_try_bind.u.value; ... }
@@ -274,6 +426,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
+
+    /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
+    if (src_ufcs && src_ufcs_len) {
+        char* rewritten = cc__rewrite_closing_annotation(src_ufcs, src_ufcs_len);
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
 
     /* Rewrite `if @try (T x = expr) { ... }` into expanded form */
     if (src_ufcs && src_ufcs_len) {
@@ -698,6 +860,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "#include <ccc/cc_closure.cch>\n");
     fprintf(out, "#include <ccc/cc_slice.cch>\n");
     fprintf(out, "#include <ccc/cc_runtime.cch>\n");
+    fprintf(out, "#include <ccc/std/io.cch>\n");  /* CCFile for closure captures */
     fprintf(out, "#include <ccc/std/task_intptr.cch>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
@@ -855,7 +1018,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 if (getenv("CC_DEBUG_OPTIONAL")) fprintf(stderr, "CC: DEBUG: new len=%zu\n", src_ufcs_len);
             }
         }
-        /* Rewrite T!E -> CCResult_T_E and collect result type pairs */
+        /* Rewrite T!>(E) -> CCResult_T_E and collect result type pairs */
         {
             char* rew_res = cc__rewrite_result_types_text(ctx, src_ufcs, src_ufcs_len);
             if (rew_res) {

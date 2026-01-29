@@ -4,7 +4,7 @@
 #include <ccc/std/prelude.cch>
 
 /* Helper that may fail */
-int!CCError maybe_parse(int x) {
+int !> (CCError) maybe_parse(int x) {
     if (x < 0) {
         return cc_err(CC_ERR_INVALID_ARG, "negative");
     }
@@ -12,7 +12,7 @@ int!CCError maybe_parse(int x) {
 }
 
 /* Function that uses try to propagate errors */
-int!CCError compute(int a, int b) {
+int !> (CCError) compute(int a, int b) {
     int x = try maybe_parse(a);
     int y = try maybe_parse(b);
     return cc_ok(x + y);
@@ -20,7 +20,7 @@ int!CCError compute(int a, int b) {
 
 int main(void) {
     /* Success case */
-    int!CCError r1 = compute(5, 10);
+    int !> (CCError) r1 = compute(5, 10);
     if (!r1.ok) {
         printf("FAIL: expected ok, got error\n");
         return 1;
@@ -32,7 +32,7 @@ int main(void) {
     printf("SUCCESS: compute(5, 10) = %d\n", r1.u.value);
     
     /* Error case - first arg fails */
-    int!CCError r2 = compute(-1, 10);
+    int !> (CCError) r2 = compute(-1, 10);
     if (r2.ok) {
         printf("FAIL: expected error, got ok\n");
         return 1;
@@ -40,7 +40,7 @@ int main(void) {
     printf("SUCCESS: compute(-1, 10) returned error: %s\n", r2.u.error.message);
     
     /* Error case - second arg fails */
-    int!CCError r3 = compute(5, -2);
+    int !> (CCError) r3 = compute(5, -2);
     if (r3.ok) {
         printf("FAIL: expected error, got ok\n");
         return 1;

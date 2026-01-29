@@ -14,7 +14,7 @@ Concurrent-C is largely C + preprocessor, with a few extra surface-syntax constr
 - `spawn (call(...))`
 - UFCS-style `value.method(...)` / `ptr->method(...)` calls
 - Core keywords like `await`, `try`, `catch`, `unsafe`, `comptime`
-- Type sugar like `T?`, `T!E`, `T[:]`, `T[~N ...]`
+- Type sugar like `T?`, `T!>(E)`, `T[:]`, `T[~N ...]`
 - Duration literals like `10ms`
 
 ## Install (local, no marketplace)

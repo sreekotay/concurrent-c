@@ -558,7 +558,7 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
     }
 }
 
-/* Rewrite result types: T!E -> CCResult_T_E, also collect pairs for declaration emission */
+/* Rewrite result types: T!>(E) -> CCResult_T_E, also collect pairs for declaration emission */
 char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     (void)ctx;
     if (!src || n == 0) return NULL;
@@ -586,45 +586,78 @@ char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, si
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Detect T!E pattern: type followed by '!' followed by error type (not '!=') */
-        if (c == '!' && c2 != '=') {
-            if (i > 0) {
-                char prev = src[i - 1];
-                /* Valid type-ending chars: identifier char, ')', ']', '>', '*' (for pointers) */
-                if (cc__is_ident_char_local(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
-                    /* Check what follows the '!' - must be an identifier (error type) */
-                    size_t j = i + 1;
-                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-                    if (j < n && cc__is_ident_start_local2(src[j])) {
-                        size_t err_start = j;
-                        while (j < n && cc__is_ident_char_local(src[j])) j++;
-                        size_t err_end = j;
+        /* Detect T!>(E) pattern: type followed by '!>' followed by '(' error type ')' */
+        if (c == '!' && c2 == '>') {
+            /* Found '!>' sigil - now find the error type in parentheses */
+            size_t sigil_pos = i;
+            size_t j = i + 2;  /* skip '!>' */
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+            
+            /* Must find '(' */
+            if (j < n && src[j] == '(') {
+                j++;  /* skip '(' */
+                
+                /* Skip whitespace inside parens */
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                
+                /* Find matching ')' - track nesting for complex types */
+                size_t err_start = j;
+                int paren_depth = 1;
+                int in_s = 0, in_c = 0;
+                while (j < n && paren_depth > 0) {
+                    char ch = src[j];
+                    if (in_s) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
+                    if (in_c) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                    if (ch == '"') { in_s = 1; j++; continue; }
+                    if (ch == '\'') { in_c = 1; j++; continue; }
+                    if (ch == '(') paren_depth++;
+                    else if (ch == ')') paren_depth--;
+                    if (paren_depth > 0) j++;
+                }
+                
+                if (paren_depth == 0) {
+                    /* Found matching ')' at position j */
+                    size_t err_end = j;
+                    
+                    /* Trim trailing whitespace from error type */
+                    while (err_end > err_start && (src[err_end - 1] == ' ' || src[err_end - 1] == '\t' ||
+                                                    src[err_end - 1] == '\n' || src[err_end - 1] == '\r')) {
+                        err_end--;
+                    }
+                    
+                    j++;  /* skip ')' */
+                    
+                    /* Scan back from '!>' to find the ok type start */
+                    size_t ty_end = sigil_pos;
+                    while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t')) ty_end--;
+                    
+                    size_t ty_start = cc__scan_back_to_type_start(src, ty_end);
+                    
+                    if (ty_start < ty_end && err_start < err_end) {
+                        size_t ty_len = ty_end - ty_start;
+                        size_t err_len = err_end - err_start;
                         
-                        size_t ty_start = cc__scan_back_to_type_start(src, i);
-                        if (ty_start < i) {
-                            size_t ty_len = i - ty_start;
-                            size_t err_len = err_end - err_start;
+                        char mangled_ok[256];
+                        char mangled_err[256];
+                        cc__mangle_type_name(src + ty_start, ty_len, mangled_ok, sizeof(mangled_ok));
+                        cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
+                        
+                        if (mangled_ok[0] && mangled_err[0]) {
+                            /* Collect this result type pair for declaration */
+                            cc__cg_add_result_type(src + ty_start, ty_len, 
+                                                   src + err_start, err_len,
+                                                   mangled_ok, mangled_err);
                             
-                            char mangled_ok[256];
-                            char mangled_err[256];
-                            cc__mangle_type_name(src + ty_start, ty_len, mangled_ok, sizeof(mangled_ok));
-                            cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
-                            
-                            if (mangled_ok[0] && mangled_err[0]) {
-                                /* Collect this result type pair for declaration */
-                                cc__cg_add_result_type(src + ty_start, ty_len, 
-                                                       src + err_start, err_len,
-                                                       mangled_ok, mangled_err);
-                                
-                                cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCResult_");
-                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_ok);
-                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
-                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_err);
-                                last_emit = err_end;
-                                i = err_end;
-                                continue;
-                            }
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCResult_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_ok);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, mangled_err);
+                            last_emit = j;
+                            i = j;
+                            continue;
                         }
                     }
                 }
@@ -825,12 +858,12 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                             continue;
                         }
                         
-                        /* cc_err(CC_IO_*) -> cc_err_...(io_error(CC_IO_*)) */
+                        /* cc_err(CC_IO_*) -> cc_err_...(cc_io_error(CC_IO_*)) */
                         if (is_io_err && k + 6 < j && memcmp(src + k, "CC_IO_", 6) == 0) {
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
-                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(io_error(");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(cc_io_error(");
                             cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "))");
                             last_emit = j + 1;

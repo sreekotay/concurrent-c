@@ -1,5 +1,5 @@
 /*
- * Result channel smoke test: channels carrying T!E types.
+ * Result channel smoke test: channels carrying T !> (E) types.
  */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
@@ -11,11 +11,11 @@ CCResult_int_CCError[~4 >] results_tx;
 CCResult_int_CCError[~4 <] results_rx;
 CCChan* g_ch;
 
-int!CCError make_ok_result(void) {
+int !> (CCError) make_ok_result(void) {
     return cc_ok(42);
 }
 
-int!CCError make_err_result(void) {
+int !> (CCError) make_err_result(void) {
     return cc_err(CC_ERR_PARSE, "bad input");
 }
 

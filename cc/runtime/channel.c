@@ -1447,7 +1447,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         }
     }
     
-    while (!ch->closed) {
+    while (1) {
         /* Try lock-free dequeue */
         pthread_mutex_unlock(&ch->mu);
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
@@ -1468,6 +1468,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             return 0;
         }
         pthread_mutex_lock(&ch->mu);
+
+        if (ch->closed) break;
         
         /* Wait for data */
         if (fiber) {
@@ -1489,9 +1491,12 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 }
                 return 0;
             }
-            if (notified != 1) {
+            if (notified == 3 || ch->closed) {
+                /* Channel closed while we were waiting */
                 cc__chan_remove_recv_waiter(ch, &node);
+                break;
             }
+            cc__chan_remove_recv_waiter(ch, &node);
         } else {
             pthread_cond_wait(&ch->not_empty, &ch->mu);
         }

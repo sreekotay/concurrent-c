@@ -1,6 +1,3 @@
-# Downloaded by setup.sh (original pigz source)
-pigz_c/
-
 # Built binaries
 out/
 

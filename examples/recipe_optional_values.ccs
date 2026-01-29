@@ -8,7 +8,7 @@
  *   - Unwrapping with *opt (panics if none)
  *
  * Key insight: Optionals are for "maybe present" values.
- * Use T!E for errors, T? for legitimate absence.
+ * Use T!>(E) for errors, T? for legitimate absence.
  */
 #include <ccc/std/prelude.cch>
 

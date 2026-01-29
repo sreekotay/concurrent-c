@@ -1,12 +1,12 @@
 // Test: Result type syntax with CCIoError (custom error type)
-// Verifies int!CCIoError works correctly
+// Verifies int !> (CCIoError) works correctly
 
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_io.cch>
 #include <stdio.h>
 
-// Function returning int!CCIoError
-int!CCIoError get_value_or_error(int succeed) {
+// Function returning int !> (CCIoError)
+int !> (CCIoError) get_value_or_error(int succeed) {
     if (succeed) {
         return cc_ok(42);
     } else {
@@ -17,7 +17,7 @@ int!CCIoError get_value_or_error(int succeed) {
 
 int main(void) {
     // Test ok case
-    int!CCIoError res1 = get_value_or_error(1);
+    int !> (CCIoError) res1 = get_value_or_error(1);
     if (!res1.ok) {
         printf("FAIL: res1 should be ok\n");
         return 1;
@@ -28,7 +28,7 @@ int main(void) {
     }
     
     // Test error case
-    int!CCIoError res2 = get_value_or_error(0);
+    int !> (CCIoError) res2 = get_value_or_error(0);
     if (res2.ok) {
         printf("FAIL: res2 should be error\n");
         return 1;

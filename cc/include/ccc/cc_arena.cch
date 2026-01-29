@@ -29,7 +29,7 @@ typedef struct {
 typedef struct {
     CCArena* arena;
     size_t offset;
-} ArenaCheckpoint;
+} CCArenaCheckpoint;
 
 // Global provenance counter (defined in runtime).
 extern cc_atomic_u64 cc_arena_prov_counter;
@@ -92,8 +92,8 @@ static inline void cc_arena_reset(CCArena *arena) {
 }
 
 // Capture current arena allocation state.
-static inline ArenaCheckpoint arena_checkpoint(CCArena* arena) {
-    ArenaCheckpoint cp;
+static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
+    CCArenaCheckpoint cp;
     cp.arena = arena;
     cp.offset = arena ? CC_ATOMIC_LOAD(&arena->offset) : 0;
     return cp;
@@ -101,7 +101,7 @@ static inline ArenaCheckpoint arena_checkpoint(CCArena* arena) {
 
 // Restore arena to a previously captured checkpoint.
 // Note: This does NOT bump provenance; allocations before the checkpoint remain valid.
-static inline void arena_restore(ArenaCheckpoint checkpoint) {
+static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     CCArena* arena = checkpoint.arena;
     if (!arena) return;
     size_t off = checkpoint.offset;

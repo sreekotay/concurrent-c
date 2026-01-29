@@ -302,7 +302,7 @@ async, arena, lock, noblock, closing
 
 ### Type Constructors (4) - unchanged
 ```
-T!E, T?, char[:], char[:!]
+T!>(E), T?, char[:], char[:!]
 ```
 
 ### Expression Forms (4) - unchanged

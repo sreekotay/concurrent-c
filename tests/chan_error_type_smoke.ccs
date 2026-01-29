@@ -7,11 +7,11 @@ typedef struct {
     const char* msg;
 } ParseError;
 
-int!ParseError ok_value(void) {
+int !> (ParseError) ok_value(void) {
     return cc_ok(42);
 }
 
-int!ParseError err_value(void) {
+int !> (ParseError) err_value(void) {
     ParseError err = {.code = 1, .msg = "parse failed"};
     return cc_err(err);
 }
@@ -23,23 +23,23 @@ int main(void) {
     CCChan* ch = channel_pair(&tx, &rx);
     
     // Create and send a success value
-    int!ParseError ok_val = ok_value();
+    int !> (ParseError) ok_val = ok_value();
     int sr1 = chan_send(tx, ok_val);
     assert(sr1 == 0);  // 0 = success
 
     // Create and send an error value
-    int!ParseError err_val = err_value();
+    int !> (ParseError) err_val = err_value();
     int sr2 = chan_send(tx, err_val);
     assert(sr2 == 0);  // 0 = success
     
     // Receive using the raw channel API
-    int!ParseError r1;
+    int !> (ParseError) r1;
     int rr1 = cc_chan_recv(rx.raw, &r1, sizeof(r1));
     assert(rr1 == 0);  // 0 = success
     assert(r1.ok);  // Should be success result
     assert(r1.u.value == 42);
     
-    int!ParseError r2;
+    int !> (ParseError) r2;
     int rr2 = cc_chan_recv(rx.raw, &r2, sizeof(r2));
     assert(rr2 == 0);  // 0 = success
     assert(!r2.ok);  // Should be error result

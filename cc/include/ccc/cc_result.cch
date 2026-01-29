@@ -11,7 +11,7 @@
  *    - struct { bool ok; union { T value; E error; } u; }
  *    - Access: r.ok, r.u.value, r.u.error
  *
- * The compiler-lowered T!E syntax uses the spec layout.
+ * The compiler-lowered T!>(E) syntax uses the spec layout.
  */
 #ifndef CC_RESULT_H
 #define CC_RESULT_H
@@ -186,7 +186,7 @@ static inline bool CCResult_void_CCError_is_ok(CCResult_void_CCError r) { return
 static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { return !r.ok; }
 #endif
 
-/* cc_try macro: unwrap T!E or return error.
+/* cc_try macro: unwrap T!>(E) or return error.
    Must be used in a function that returns the same result type.
    This is a GCC statement expression and works with clang/gcc. */
 #ifndef CC_PARSER_MODE
@@ -200,7 +200,7 @@ static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { retur
 /*
  * TCC PARSER MODE: Result types use a generic placeholder during parsing.
  * 
- * The CC preprocessor rewrites T!E to __CC_RESULT(T_mangled, E_mangled).
+ * The CC preprocessor rewrites T!>(E) to __CC_RESULT(T_mangled, E_mangled).
  * In parser mode, this macro expands to __CCResultGeneric.
  * In codegen, it's rewritten to CCResult_T_E with proper declarations.
  */
@@ -315,12 +315,12 @@ typedef __CCResultGeneric CCResult_void_CCError;
  * cc_err(error) - Return error, type inferred from function return type
  *
  * The compiler automatically rewrites these based on the enclosing function's
- * return type. For example, in a function returning int!CCIoError:
+ * return type. For example, in a function returning int!>(CCIoError):
  *   cc_ok(42)  -> cc_ok_CCResult_int_CCIoError(42)
  *   cc_err(e)  -> cc_err_CCResult_int_CCIoError(e)
  *
  * Example:
- *   int!CCError read_value(void) {
+ *   int!>(CCError) read_value(void) {
  *       if (success) return cc_ok(42);
  *       return cc_err(cc_error(CC_ERR_NOT_FOUND, "not found"));
  *   }

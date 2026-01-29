@@ -3,13 +3,12 @@
  *
  * Demonstrates:
  *   - @arena block for automatic memory scope
- *   - Arena-backed String builder with UFCS
+ *   - Arena-backed CCString builder with UFCS
  *   - Request-scoped allocation: O(1) reset per iteration
  *
  * Key insight: Arena resets are instant (pointer bump reset).
  * No per-allocation free, no fragmentation, no leaks.
  */
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -18,22 +17,22 @@ int main(void) {
     for (int i = 1; i <= 3; i++) {
         @arena {
             /* All allocations this iteration use this arena. */
-            String s = string_new(arena);
+            CCString s = cc_string_new(arena);
             
             /* UFCS: method syntax on plain C types. */
             s.append("Processing request ");
             cc_string_push_int(&s, i);
             s.append("\n");
             
-            std_out.write(s);
+            cc_std_out.write(s);
 
             /* Checkpoints: reclaim temporary allocations without resetting the whole arena. */
-            ArenaCheckpoint cp = arena_checkpoint(arena);
+            CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
             char* scratch = arena_alloc(char, arena, 64);
             if (scratch) {
                 scratch[0] = '\0';
             }
-            arena_restore(cp);  /* Scratch allocations reclaimed */
+            cc_arena_restore(cp);  /* Scratch allocations reclaimed */
         }
         /* Arena reset here - O(1), no matter how much was allocated. */
     }

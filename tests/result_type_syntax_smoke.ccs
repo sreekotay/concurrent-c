@@ -1,20 +1,20 @@
-// Test: Result type syntax T!E lowers to CCResult_T_E
+// Test: Result type syntax T !> (E) lowers to CCResult_T_E
 #include <stdio.h>
 #include <ccc/cc_runtime.cch>
 
 // CCResult_int_CCError is pre-declared in cc_result.cch via CC_DECL_RESULT_SPEC
 
-int!CCError make_ok(void) {
+int !> (CCError) make_ok(void) {
     return cc_ok(42);
 }
 
-int!CCError make_err(void) {
+int !> (CCError) make_err(void) {
     return cc_err(CC_ERR_NOT_FOUND, "not found");
 }
 
 int main(void) {
-    // Declare a result using T!E syntax
-    int!CCError r;
+    // Declare a result using T !> (E) syntax
+    int !> (CCError) r;
     
     // Initialize to ok - inferred from return type
     r = make_ok();

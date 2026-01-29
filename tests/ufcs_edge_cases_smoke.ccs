@@ -2,13 +2,12 @@
    Tests the interaction between preprocessing and TCC-based UFCS handling.
    
    Key cases:
-   1. std_out.write("literal") - preprocessed to cc_std_out_write(cc_slice_from_buffer(...))
-   2. std_out.write(s) - preprocessed to cc_std_out_write_string(&s)
+   1. cc_std_out.write("literal") - preprocessed to cc_std_out_write(cc_slice_from_buffer(...))
+   2. cc_std_out.write(s) - preprocessed to cc_std_out_write_string(&s)
    3. vp->push(x) - pointer receiver UFCS, preprocessed to Vec_T_push(vp, x)
    
-   Note: Nested UFCS (std_out.write(s.as_slice())) is tested separately in ufcs_nested_multiline.ccs
+   Note: Nested UFCS (cc_std_out.write(s.as_slice())) is tested separately in ufcs_nested_multiline.ccs
 */
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 
 typedef struct {
@@ -18,12 +17,12 @@ typedef struct {
 int main(void) {
     @arena {
         // Case 1: String literal argument
-        std_out.write("case1:");
+        cc_std_out.write("case1:");
         
-        // Case 2: Simple String identifier
-        String s = string_new(arena);
+        // Case 2: Simple CCString identifier
+        CCString s = cc_string_new(arena);
         s.append("case2:");
-        std_out.write(s);
+        cc_std_out.write(s);
         
         // Case 3: Pointer receiver UFCS on Vec
         Container c;
@@ -43,9 +42,9 @@ int main(void) {
             v0.has && *v0 == 10 &&
             v1.has && *v1 == 20 &&
             v2.has && *v2 == 30) {
-            std_out.write("case3:ok\n");
+            cc_std_out.write("case3:ok\n");
         } else {
-            std_out.write("case3:FAIL\n");
+            cc_std_out.write("case3:FAIL\n");
         }
     }
     return 0;

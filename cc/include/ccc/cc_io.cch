@@ -23,6 +23,16 @@ typedef struct {
     int32_t os_code; // errno or platform-specific code; 0 when not applicable.
 } CCIoError;
 
+// Create CCIoError from a kind (os_code = 0).
+static inline CCIoError cc_io_error(CCIoErrorKind kind) {
+    return (CCIoError){kind, 0};
+}
+
+// Create CCIoError from kind and os error code.
+static inline CCIoError cc_io_error_os(CCIoErrorKind kind, int os_code) {
+    return (CCIoError){kind, os_code};
+}
+
 // Map platform errno to our IoError kind.
 static inline CCIoError cc_io_from_errno(int err) {
     CCIoError e;

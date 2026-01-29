@@ -154,18 +154,18 @@ int val = cc_unwrap(maybe);
 
 ---
 
-## Results (`T!E`)
+## Results (`T!>(E)`)
 
 ```c
 typedef struct { int code; } MyError;
 
-int!MyError divide(int a, int b) {
+int!>(MyError) divide(int a, int b) {
     if (b == 0) return cc_err((MyError){.code = 1});
     return cc_ok(a / b);
 }
 
 // Usage
-int!MyError result = divide(10, 2);
+int!>(MyError) result = divide(10, 2);
 if (cc_is_ok(result)) {
     printf("result: %d\n", cc_unwrap_ok(result));
 } else {
@@ -173,7 +173,7 @@ if (cc_is_ok(result)) {
 }
 
 // Propagate errors with try
-int!MyError caller(void) {
+int!>(MyError) caller(void) {
     int val = try divide(10, 0);  // returns early on error
     return cc_ok(val * 2);
 }

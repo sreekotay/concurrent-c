@@ -1,27 +1,26 @@
-/* Test nested UFCS in std_out.write() with multiple String variables.
-   This tests that s.as_slice() inside std_out.write() is correctly rewritten
-   even when there are multiple String variables in the same scope. */
-#define CC_ENABLE_SHORT_NAMES
+/* Test nested UFCS in cc_std_out.write() with multiple CCString variables.
+   This tests that s.as_slice() inside cc_std_out.write() is correctly rewritten
+   even when there are multiple CCString variables in the same scope. */
 #include <ccc/std/prelude.cch>
 
 int main(void) {
     @arena {
         // First string - simple case
-        String s1 = string_new(arena);
+        CCString s1 = cc_string_new(arena);
         s1.append("first:");
-        std_out.write(s1);
+        cc_std_out.write(s1);
         
         // Second string - nested UFCS case
-        String s2 = string_new(arena);
+        CCString s2 = cc_string_new(arena);
         s2.append("second:");
-        std_out.write(
+        cc_std_out.write(
             s2.as_slice()
         );
         
         // Third string - single line nested UFCS
-        String s3 = string_new(arena);
+        CCString s3 = cc_string_new(arena);
         s3.append("third\n");
-        std_out.write(s3.as_slice());
+        cc_std_out.write(s3.as_slice());
     }
     return 0;
 }

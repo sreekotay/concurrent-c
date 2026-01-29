@@ -44,7 +44,7 @@ Minimal concurrent hello world — shows nursery and spawn.
 | `recipe_defer_cleanup.ccs` | Cleanup | `@defer` on scope exit |
 | `recipe_timeout.ccs` | Deadline | Cooperative cancellation |
 | `recipe_optional_values.ccs` | Optionals | `T?` types, find/map patterns |
-| `recipe_result_error_handling.ccs` | Results | `T!E` error handling |
+| `recipe_result_error_handling.ccs` | Results | `T!>(E)` error handling |
 
 Run any recipe:
 ```bash

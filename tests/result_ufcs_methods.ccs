@@ -1,18 +1,18 @@
 // Test: Result UFCS methods (.unwrap(), .is_ok(), .is_err(), .unwrap_or())
 #include <stdio.h>
 
-int!CCError succeed(int v) {
+int !> (CCError) succeed(int v) {
     return cc_ok(v);
 }
 
-int!CCError fail_it(void) {
+int !> (CCError) fail_it(void) {
     return cc_err(CC_ERR_NOT_FOUND, "not found");
 }
 
 int main(void) {
     // Test is_ok() and is_err()
-    int!CCError r1 = succeed(42);
-    int!CCError r2 = fail_it();
+    int !> (CCError) r1 = succeed(42);
+    int !> (CCError) r2 = fail_it();
     
     if (r1.is_ok()) {
         printf("r1 is ok: %d\n", r1.u.value);
@@ -31,13 +31,13 @@ int main(void) {
     }
     
     // Test unwrap() on success
-    int!CCError r3 = succeed(100);
+    int !> (CCError) r3 = succeed(100);
     int v = r3.unwrap();
     printf("unwrap: %d\n", v);
     
     // Test unwrap_or() on success and error
-    int!CCError r4 = succeed(200);
-    int!CCError r5 = fail_it();
+    int !> (CCError) r4 = succeed(200);
+    int !> (CCError) r5 = fail_it();
     
     int v4 = r4.unwrap_or(-1);
     int v5 = r5.unwrap_or(-1);

@@ -1507,14 +1507,14 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
     return out;
 }
 
-/* Rewrite std_out.write() and std_err.write() UFCS patterns.
+/* Rewrite cc_std_out.write() and cc_std_err.write() UFCS patterns.
    These are synthetic receivers (not real variables), so need special handling.
    
    Rewrites:
-   - std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer("literal", sizeof("literal") - 1))
-   - std_out.write(s) -> cc_std_out_write_string(&s) (for String variables)
-   - std_out.write(expr) -> cc_std_out_write(expr) (for other expressions)
-   - std_err.write(...) similarly
+   - cc_std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer("literal", sizeof("literal") - 1))
+   - cc_std_out.write(s) -> cc_std_out_write_string(&s) (for CCString variables)
+   - cc_std_out.write(expr) -> cc_std_out_write(expr) (for other expressions)
+   - cc_std_err.write(...) similarly
 */
 char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
@@ -1540,11 +1540,11 @@ char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for std_out or std_err */
-        if (i + 7 <= n && (strncmp(src + i, "std_out", 7) == 0 || strncmp(src + i, "std_err", 7) == 0)) {
-            int is_err = (src[i + 4] == 'e');
+        /* Look for cc_std_out or cc_std_err */
+        if (i + 10 <= n && (strncmp(src + i, "cc_std_out", 10) == 0 || strncmp(src + i, "cc_std_err", 10) == 0)) {
+            int is_err = (src[i + 7] == 'e');  /* cc_std_err vs cc_std_out */
             size_t kw_start = i;
-            i += 7;
+            i += 10;
             
             /* Check for .write( pattern */
             size_t j = cc_skip_ws_and_comments(src, n, i);
@@ -1554,7 +1554,7 @@ char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
                     j += 5;
                     size_t k = cc_skip_ws_and_comments(src, n, j);
                     if (k < n && src[k] == '(') {
-                        /* Found std_out.write( or std_err.write( */
+                        /* Found cc_std_out.write( or cc_std_err.write( */
                         size_t paren_end = 0;
                         if (cc_find_matching_paren(src, n, k, &paren_end)) {
                             /* Extract argument */
@@ -1582,7 +1582,7 @@ char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
                             }
                             
                             if (has_ufcs) {
-                                /* Nested UFCS in argument (e.g., std_out.write(s.as_slice())).
+                                /* Nested UFCS in argument (e.g., cc_std_out.write(s.as_slice())).
                                    Rewrite the inner UFCS first, then wrap with cc_std_out_write.
                                    We handle common patterns like ident.as_slice() here. */
                                 
@@ -1635,11 +1635,11 @@ char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
                                 }
                                 
                                 /* Fallback: skip and let TCC/visitor handle it */
-                                i = kw_start + 7;
+                                i = kw_start + 10;
                                 continue;
                             }
                             
-                            /* Emit everything up to std_out/std_err */
+                            /* Emit everything up to cc_std_out/cc_std_err */
                             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, kw_start - last_emit);
                             
                             /* Determine what kind of argument we have */
@@ -1684,7 +1684,7 @@ char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
                     }
                 }
             }
-            /* Not a match, continue from after std_out/std_err */
+            /* Not a match, continue from after cc_std_out/cc_std_err */
             continue;
         }
         
@@ -1732,9 +1732,9 @@ static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, 
 }
 
 /* Rewrite result types:
-   - `T!E` -> `__CC_RESULT(T_mangled, E_mangled)`
-   The '!' must immediately follow a type name (no space).
-   We detect: identifier!identifier patterns.
+   - `T!>(E)` -> `__CC_RESULT(T_mangled, E_mangled)`
+   The '!>' sigil is followed by error type in parentheses.
+   This syntax is unambiguous and easy to parse.
    Also collects unique (T, E) pairs for later emission of CC_DECL_RESULT_SPEC calls. */
 static char* cc__rewrite_result_types(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
@@ -1753,6 +1753,7 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     /* line/col tracked for potential future error reporting */
     int line = 1; (void)line;
     int col = 1; (void)col;
+
     
     while (i < n) {
         char c = src[i];
@@ -1769,77 +1770,110 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
         if (c == '"') { in_str = 1; i++; col++; continue; }
         if (c == '\'') { in_chr = 1; i++; col++; continue; }
         
-        /* Detect T!E pattern: type followed by '!' followed by error type */
-        if (c == '!' && c2 != '=') {  /* != is not result type */
-            /* Check what precedes the '!' */
-            if (i > 0) {
-                char prev = src[i - 1];
-                /* Valid type-ending chars: identifier char, ')', ']', '>', '*' (for pointers) */
-                if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
-                    /* Check what follows the '!' - must be an identifier (error type) */
-                    size_t j = i + 1;
-                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-                    if (j < n && cc_is_ident_start(src[j])) {
-                        /* Found error type start */
-                        size_t err_start = j;
-                        while (j < n && cc_is_ident_char(src[j])) j++;
-                        size_t err_end = j;
+        /* Detect `T!>(E)` pattern: type followed by '!>' followed by '(' error type ')' */
+        if (c == '!' && c2 == '>') {
+            /* Found '!>' sigil - now find the error type in parentheses */
+            size_t sigil_pos = i;
+            size_t j = i + 2;  /* skip '!>' */
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+            
+            /* Must find '(' */
+            if (j < n && src[j] == '(') {
+                size_t paren_open = j;
+                j++;  /* skip '(' */
+                
+                /* Skip whitespace inside parens */
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                
+                /* Find matching ')' - track nesting for complex types like Error<A, B> */
+                size_t err_start = j;
+                int paren_depth = 1;
+                int in_s = 0, in_c = 0;
+                while (j < n && paren_depth > 0) {
+                    char ch = src[j];
+                    if (in_s) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '"') in_s = 0; j++; continue; }
+                    if (in_c) { if (ch == '\\' && j + 1 < n) j++; else if (ch == '\'') in_c = 0; j++; continue; }
+                    if (ch == '"') { in_s = 1; j++; continue; }
+                    if (ch == '\'') { in_c = 1; j++; continue; }
+                    if (ch == '(') paren_depth++;
+                    else if (ch == ')') paren_depth--;
+                    if (paren_depth > 0) j++;
+                }
+                
+                if (paren_depth == 0) {
+                    /* Found matching ')' at position j */
+                    size_t err_end = j;
+                    
+                    /* Trim trailing whitespace from error type */
+                    while (err_end > err_start && (src[err_end - 1] == ' ' || src[err_end - 1] == '\t' ||
+                                                    src[err_end - 1] == '\n' || src[err_end - 1] == '\r')) {
+                        err_end--;
+                    }
+                    
+                    size_t paren_close = j;
+                    j++;  /* skip ')' */
+                    
+                    /* Scan back from '!>' to find the ok type start */
+                    /* First skip any whitespace before '!>' */
+                    size_t ty_end = sigil_pos;
+                    while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t')) ty_end--;
+                    
+                    size_t ty_start = cc__scan_back_to_delim(src, ty_end);
+                    
+                    if (ty_start < ty_end && err_start < err_end) {
+                        size_t ty_len = ty_end - ty_start;
+                        size_t err_len = err_end - err_start;
                         
-                        /* Scan back to find the ok type start */
-                        size_t ty_start = cc__scan_back_to_delim(src, i);
-                        if (ty_start < i) {
-                            size_t ty_len = i - ty_start;
-                            size_t err_len = err_end - err_start;
+                        char mangled_ok[256];
+                        char mangled_err[256];
+                        cc__mangle_type_name(src + ty_start, ty_len, mangled_ok, sizeof(mangled_ok));
+                        cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
+                        
+                        if (mangled_ok[0] && mangled_err[0]) {
+                            /* Collect this type pair for later declaration emission */
+                            cc__add_result_type(src + ty_start, ty_len, src + err_start, err_len,
+                                                mangled_ok, mangled_err);
                             
-                            char mangled_ok[256];
-                            char mangled_err[256];
-                            cc__mangle_type_name(src + ty_start, ty_len, mangled_ok, sizeof(mangled_ok));
-                            cc__mangle_type_name(src + err_start, err_len, mangled_err, sizeof(mangled_err));
+                            /* Emit everything up to ty_start */
+                            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                            /* Emit __CC_RESULT(T, E) macro - parser mode uses generic,
+                               codegen phase emits real type declarations and rewrites. */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                            last_emit = j;  /* skip past ')' */
                             
-                            if (mangled_ok[0] && mangled_err[0]) {
-                                /* Collect this type pair for later declaration emission */
-                                cc__add_result_type(src + ty_start, ty_len, src + err_start, err_len,
-                                                    mangled_ok, mangled_err);
-                                
-                                /* Emit everything up to ty_start */
-                                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                                /* Emit __CC_RESULT(T, E) macro - parser mode uses generic,
-                                   codegen phase emits real type declarations and rewrites. */
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT(");
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-                                last_emit = err_end;
-                                
-                                /* Register result-typed variable for UFCS.
-                                   Look for variable name after the type (skip ws and *). */
-                                CCTypeRegistry* reg = cc_type_registry_get_global();
-                                if (reg) {
-                                    size_t v = cc_skip_ws_and_comments(src, n, err_end);
-                                    /* Skip pointer modifiers */
-                                    while (v < n && src[v] == '*') v++;
-                                    v = cc_skip_ws_and_comments(src, n, v);
-                                    if (v < n && cc_is_ident_start(src[v])) {
-                                        size_t var_start = v;
-                                        while (v < n && cc_is_ident_char(src[v])) v++;
-                                        char var_name[128];
-                                        char type_name[256];
-                                        size_t vn_len = v - var_start;
-                                        if (vn_len < sizeof(var_name)) {
-                                            memcpy(var_name, src + var_start, vn_len);
-                                            var_name[vn_len] = 0;
-                                            /* Type name is CCResult_T_E */
-                                            snprintf(type_name, sizeof(type_name), "CCResult_%s_%s",
-                                                     mangled_ok, mangled_err);
-                                            cc_type_registry_add_var(reg, var_name, type_name);
-                                        }
+                            /* Register result-typed variable for UFCS.
+                               Look for variable name after the type (skip ws and *). */
+                            CCTypeRegistry* reg = cc_type_registry_get_global();
+                            if (reg) {
+                                size_t v = cc_skip_ws_and_comments(src, n, j);
+                                /* Skip pointer modifiers */
+                                while (v < n && src[v] == '*') v++;
+                                v = cc_skip_ws_and_comments(src, n, v);
+                                if (v < n && cc_is_ident_start(src[v])) {
+                                    size_t var_start = v;
+                                    while (v < n && cc_is_ident_char(src[v])) v++;
+                                    char var_name[128];
+                                    char type_name[256];
+                                    size_t vn_len = v - var_start;
+                                    if (vn_len < sizeof(var_name)) {
+                                        memcpy(var_name, src + var_start, vn_len);
+                                        var_name[vn_len] = 0;
+                                        /* Type name is CCResult_T_E */
+                                        snprintf(type_name, sizeof(type_name), "CCResult_%s_%s",
+                                                 mangled_ok, mangled_err);
+                                        cc_type_registry_add_var(reg, var_name, type_name);
                                     }
                                 }
-                                
-                                i = err_end;
-                                continue;
                             }
+                            
+                            i = j;
+                            continue;
                         }
                     }
                 }
@@ -3030,6 +3064,169 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
     return out;
 }
 
+/* Rewrite @closing(ch) spawn(...) or @closing(ch) { ... } syntax.
+   This transforms the annotation into a spawned sub-nursery:
+   
+   @closing(ch) spawn(task);
+   becomes:
+   spawn(() => { @nursery closing(ch) { spawn(task); } });
+   
+   @closing(ch) { for (w) spawn(worker); }
+   becomes:
+   spawn(() => { @nursery closing(ch) { for (w) spawn(worker); } });
+   
+   This allows flat visual structure while maintaining correct channel close semantics. */
+static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        /* Look for @closing( */
+        if (c == '@' && i + 8 < n && memcmp(src + i, "@closing", 8) == 0) {
+            size_t start = i;
+            size_t j = i + 8;
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+            
+            if (j < n && src[j] == '(') {
+                /* Found @closing( - parse the channel list */
+                size_t paren_start = j;
+                j++; /* skip '(' */
+                int paren_depth = 1;
+                while (j < n && paren_depth > 0) {
+                    if (src[j] == '(') paren_depth++;
+                    else if (src[j] == ')') paren_depth--;
+                    j++;
+                }
+                if (paren_depth != 0) { i++; continue; } /* Malformed, skip */
+                
+                size_t paren_end = j - 1; /* position of ')' */
+                
+                /* Extract channel names from (ch1, ch2, ...) */
+                size_t chans_start = paren_start + 1;
+                size_t chans_end = paren_end;
+                
+                /* Skip whitespace after ) */
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+                
+                if (j >= n) { i++; continue; }
+                
+                /* Now expect either 'spawn' or '{' */
+                size_t body_start = j;
+                size_t body_end;
+                int is_block = 0;
+                
+                if (src[j] == '{') {
+                    /* Block form: @closing(ch) { ... } */
+                    is_block = 1;
+                    int brace_depth = 1;
+                    j++; /* skip '{' */
+                    while (j < n && brace_depth > 0) {
+                        if (src[j] == '{') brace_depth++;
+                        else if (src[j] == '}') brace_depth--;
+                        else if (src[j] == '"') {
+                            j++;
+                            while (j < n && src[j] != '"') {
+                                if (src[j] == '\\' && j + 1 < n) j++;
+                                j++;
+                            }
+                        } else if (src[j] == '\'') {
+                            j++;
+                            while (j < n && src[j] != '\'') {
+                                if (src[j] == '\\' && j + 1 < n) j++;
+                                j++;
+                            }
+                        }
+                        j++;
+                    }
+                    body_end = j; /* after '}' */
+                } else if (j + 5 < n && memcmp(src + j, "spawn", 5) == 0) {
+                    /* Single spawn form: @closing(ch) spawn(...); */
+                    is_block = 0;
+                    /* Find the end of the spawn statement (semicolon or end of closure) */
+                    int paren_d = 0;
+                    int brace_d = 0;
+                    while (j < n) {
+                        if (src[j] == '(') paren_d++;
+                        else if (src[j] == ')') paren_d--;
+                        else if (src[j] == '{') brace_d++;
+                        else if (src[j] == '}') {
+                            brace_d--;
+                            if (brace_d < 0) break; /* Hit outer brace */
+                        }
+                        else if (src[j] == ';' && paren_d == 0 && brace_d == 0) {
+                            j++; /* include semicolon */
+                            break;
+                        }
+                        else if (src[j] == '"') {
+                            j++;
+                            while (j < n && src[j] != '"') {
+                                if (src[j] == '\\' && j + 1 < n) j++;
+                                j++;
+                            }
+                        }
+                        j++;
+                    }
+                    body_end = j;
+                } else {
+                    /* Unexpected - skip */
+                    i++;
+                    continue;
+                }
+                
+                /* Emit everything up to start */
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
+                
+                /* Emit the transformed code:
+                   spawn(() => { @nursery closing(channels) { body } }); */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "spawn(() => { @nursery closing(");
+                cc_sb_append(&out, &out_len, &out_cap, src + chans_start, chans_end - chans_start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ") ");
+                
+                if (is_block) {
+                    /* Body already has braces */
+                    cc_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
+                } else {
+                    /* Wrap single spawn in braces */
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "{ ");
+                    cc_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                }
+                
+                cc_sb_append_cstr(&out, &out_len, &out_cap, " });");
+                
+                last_emit = body_end;
+                i = body_end;
+                continue;
+            }
+        }
+        
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL; /* No changes */
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Check for cc_concurrent usage and emit error with migration guidance.
    cc_concurrent syntax is deprecated; use cc_block_all instead. */
 static char* cc__rewrite_cc_concurrent(const char* src, size_t n) {
@@ -3177,7 +3374,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
        so that the simpler macro definitions work during TCC parsing.
        The codegen pass rewrites cc_ok(v) -> cc_ok_CCResult_T_E(v) after parsing. */
 
-    /* Rewrite T!E -> __CC_RESULT(T, E) */
+    /* Rewrite T!>(E) -> __CC_RESULT(T, E) */
     char* rewritten_res = cc__rewrite_result_types(cur4c, cur4c_n, input_path);
     const char* cur5 = rewritten_res ? rewritten_res : cur4c;
     size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
@@ -3202,17 +3399,23 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur7 = rewritten_unwrap ? rewritten_unwrap : cur6;
     size_t cur7_n = rewritten_unwrap ? strlen(rewritten_unwrap) : cur6_n;
 
+    /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
+    char* rewritten_closing = cc__rewrite_closing_annotation(cur7, cur7_n);
+    const char* cur7a = rewritten_closing ? rewritten_closing : cur7;
+    size_t cur7a_n = rewritten_closing ? strlen(rewritten_closing) : cur7_n;
+
     /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
-    char* rewritten_conc = cc__rewrite_cc_concurrent(cur7, cur7_n);
+    char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
     if (rewritten_conc == (char*)-1) {
+        free(rewritten_closing);
         free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
         free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
         return -1;
     }
-    const char* cur8 = rewritten_conc ? rewritten_conc : cur7;
-    size_t cur8_n = rewritten_conc ? strlen(rewritten_conc) : cur7_n;
+    const char* cur8 = rewritten_conc ? rewritten_conc : cur7a;
+    size_t cur8_n = rewritten_conc ? strlen(rewritten_conc) : cur7a_n;
 
     // Rewrite @link("lib") -> marker comments for linker
     char* rewritten_link = cc__rewrite_link_directives(cur8, cur8_n);
@@ -3307,6 +3510,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_if_try_norm);
     free(rewritten_link);
     free(rewritten_conc);
+    free(rewritten_closing);
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_try_bind);

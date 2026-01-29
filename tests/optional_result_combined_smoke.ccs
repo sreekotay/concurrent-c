@@ -1,6 +1,6 @@
 /*
- * Test: Combined use of T? and T!E
- * Shows the distinction: T? for "maybe", T!E for errors
+ * Test: Combined use of T? and T !> (E)
+ * Shows the distinction: T? for "maybe", T !> (E) for errors
  */
 #include <ccc/std/prelude.cch>
 
@@ -13,7 +13,7 @@ int? find_positive(int x) {
 }
 
 /* Returns a result - failure is an error condition */
-int!CCError require_positive(int x) {
+int !> (CCError) require_positive(int x) {
     if (x > 0) {
         return cc_ok(x);
     }
@@ -21,7 +21,7 @@ int!CCError require_positive(int x) {
 }
 
 /* Pattern: Optional input, Result output */
-int!CCError process_if_found(int x) {
+int !> (CCError) process_if_found(int x) {
     int? maybe = find_positive(x);
     if (!maybe.has) {
         return cc_err(CC_ERR_NOT_FOUND, "no positive value");
@@ -40,22 +40,22 @@ int main(void) {
     if (p2.has) { printf("FAIL: expected none\n"); return 1; }
     printf("find_positive(-3) = none (expected)\n");
     
-    /* Test T!E with positive */
-    int!CCError r1 = require_positive(5);
+    /* Test T !> (E) with positive */
+    int !> (CCError) r1 = require_positive(5);
     if (!r1.ok) { printf("FAIL: expected ok\n"); return 1; }
     printf("require_positive(5) = %d\n", r1.u.value);
     
-    /* Test T!E with non-positive */
-    int!CCError r2 = require_positive(-3);
+    /* Test T !> (E) with non-positive */
+    int !> (CCError) r2 = require_positive(-3);
     if (r2.ok) { printf("FAIL: expected error\n"); return 1; }
     printf("require_positive(-3) = error: %s\n", r2.u.error.message);
     
     /* Test combined pattern */
-    int!CCError c1 = process_if_found(10);
+    int !> (CCError) c1 = process_if_found(10);
     if (!c1.ok) { printf("FAIL: expected ok\n"); return 1; }
     printf("process_if_found(10) = %d\n", c1.u.value);
     
-    int!CCError c2 = process_if_found(-5);
+    int !> (CCError) c2 = process_if_found(-5);
     if (c2.ok) { printf("FAIL: expected error\n"); return 1; }
     printf("process_if_found(-5) = error: %s\n", c2.u.error.message);
     

@@ -20,7 +20,7 @@ void always_cleanup(void) {
     printf("always cleanup ran\n");
 }
 
-int!CCError succeed_with_defers(void) {
+int !> (CCError) succeed_with_defers(void) {
     @defer always_cleanup();
     @defer(err) err_cleanup();
     @defer(ok) ok_cleanup();
@@ -28,7 +28,7 @@ int!CCError succeed_with_defers(void) {
     return cc_ok(42);
 }
 
-int!CCError fail_with_defers(void) {
+int !> (CCError) fail_with_defers(void) {
     @defer always_cleanup();
     @defer(err) err_cleanup();
     @defer(ok) ok_cleanup();
@@ -43,7 +43,7 @@ int main(void) {
     g_ok_cleanup_ran = 0;
     g_always_cleanup_ran = 0;
     
-    int!CCError r1 = succeed_with_defers();
+    int !> (CCError) r1 = succeed_with_defers();
     
     if (!g_always_cleanup_ran) {
         printf("ERROR: @defer should have run\n");
@@ -65,7 +65,7 @@ int main(void) {
     g_ok_cleanup_ran = 0;
     g_always_cleanup_ran = 0;
     
-    int!CCError r2 = fail_with_defers();
+    int !> (CCError) r2 = fail_with_defers();
     
     if (!g_always_cleanup_ran) {
         printf("ERROR: @defer should have run\n");

@@ -40,7 +40,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `arena` | After `@` (in `@arena(a)`) | Define arena allocation scope |
 | `lock` | After `@` (in `@lock (m) as var`) | Acquire mutex guard |
 | `noblock` | After `@` (in `@noblock fn`) | Mark function as provably non-blocking |
-| `closing` | In `@nursery closing(...)` | Auto-close channels when nursery exits |
+| `closing` | In `@nursery closing(...)` or `@closing(ch)` | Auto-close channels when tasks complete |
 
 ### Special Block Forms (11)
 
@@ -51,6 +51,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@scoped type T` | Type tied to lexical scope (cannot escape) | `@scoped type Guard<T>;` |
 | `@nursery { }` | Structured concurrency scope; spawn tasks here | `@nursery { spawn (t1()); spawn (t2()); }` |
 | `@nursery closing(ch1, ch2)` | Nursery that closes channels on exit | `@nursery closing(ch) { }` |
+| `@closing(ch) spawn/{ }` | Mark spawns as owning channel (planned) | `@closing(tx) spawn(producer);` |
 | `@arena(a) { }` | Arena memory allocation scope | `@arena(a) { Vec<int> v = ...; }` |
 | `@lock (m) as g { }` | Acquire mutex, bind guard to variable | `@lock (m) as guard { guard.data++; }` |
 | `@match { case T x = ... }` | Multiplex on channel events | `@match { case int x = await ch: ... }` |
@@ -62,7 +63,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 
 | Constructor | Meaning | Example |
 |-------------|---------|---------|
-| `T!E` | Result type: success (T) or error (E) | `int!IoError read(path);` |
+| `T!>(E)` | Result type: success (T) or error (E) | `int!>(IoError) read(path);` |
 | `T?` | Optional type: value (T) or absent (null) | `int? find(arr, key);` |
 | `char[:]` | Slice (variable-length view with provenance metadata) | `void process(char[:] data);` |
 | `char[:!]` | Unique slice (move-only, exclusive ownership) | `char[:!] buf = recv(ch);` |
@@ -89,14 +90,14 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 
 | Function | Purpose | Example |
 |----------|---------|---------|
-| `cc_ok(value)` | Construct T!E success (inferred) | `return cc_ok(42);` |
-| `cc_err(error)` | Construct T!E error (inferred) | `return cc_err(MyError_NotFound);` |
-| `cc_ok(void)` | Construct void!E success (inferred) | `return cc_ok(void);` |
+| `cc_ok(value)` | Construct T!>(E) success (inferred) | `return cc_ok(42);` |
+| `cc_err(error)` | Construct T!>(E) error (inferred) | `return cc_err(MyError_NotFound);` |
+| `cc_ok(void)` | Construct void!>(E) success (inferred) | `return cc_ok(void);` |
 | `cc_err(CC_ERR_*, "msg")` | CCError shorthand | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
-| `cc_ok(T, value)` | T!CCError success (explicit) | `return cc_ok(int, 42);` |
-| `cc_ok(T, E, value)` | T!E success (explicit) | `return cc_ok(int, MyError, 42);` |
-| `cc_err(T, error)` | T!CCError error (explicit) | `return cc_err(int, cc_error(...));` |
-| `cc_err(T, E, error)` | T!E error (explicit) | `return cc_err(int, MyError, err);` |
+| `cc_ok(T, value)` | T!>(CCError) success (explicit) | `return cc_ok(int, 42);` |
+| `cc_ok(T, E, value)` | T!>(E) success (explicit) | `return cc_ok(int, MyError, 42);` |
+| `cc_err(T, error)` | T!>(CCError) error (explicit) | `return cc_err(int, cc_error(...));` |
+| `cc_err(T, E, error)` | T!>(E) error (explicit) | `return cc_err(int, MyError, err);` |
 | `cc_move(x)` | Explicit move of move-only value | `ch.send_take(arr, cc_move(arr));` |
 | `cc_cancel()` | Cancel current task or nursery | `if (timeout) cc_cancel();` |
 | `cc_with_deadline(Duration)` | Create deadline scope (runtime function) | `cc_with_deadline(seconds(30)) { }` |
@@ -104,7 +105,7 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 
 ### Result Methods (UFCS)
 
-Result types (`T!E`) support these methods via UFCS:
+Result types (`T!>(E)`) support these methods via UFCS:
 
 | Method | Purpose | Example |
 |--------|---------|---------|
@@ -212,7 +213,7 @@ nursery {
 Request handlers need predictable latency. Mark with `@latency_sensitive`:
 
 ```c
-@async @latency_sensitive Response!IoError handler(Request* req, Arena* a) {
+@async @latency_sensitive Response!>(IoError) handler(Request* req, Arena* a) {
     // Compiler enforces: only @noblock and awaited @async calls allowed
 }
 ```
@@ -243,24 +244,24 @@ When I/O queues are full, three canonical strategies handle saturation. See **Ap
 
 3. **Minimal runtime** — Only `@async` (task scheduler, channel types) requires a linked runtime. Arenas, slices, optionals, results—all lower to pure C structures. Users can replace the async runtime with custom implementations if needed.
 
-4. **Explicit by default** — Effects visible in function signatures. Allocations pass `Arena*` explicitly. Errors return `T!E` (Result types). Async code is marked `@async`. Ownership transfer is explicit (via `move()` or function parameters).
+4. **Explicit by default** — Effects visible in function signatures. Allocations pass `Arena*` explicitly. Errors return `T!>(E)` (Result types). Async code is marked `@async`. Ownership transfer is explicit (via `move()` or function parameters).
 
 5. **Scoped safety** — Arenas + tracked slices catch common lifetime errors; raw pointers remain unsafe. Compile-time provenance tracking (via slice metadata) enables `send_take` zero-copy transfers without runtime checks.
 
 **Rule:** Types with runtime-managed invariants (channel handles `T[~... >]` / `T[~... <]`, `Task<T>`, `Mutex<T>`, `Atomic<T>`) are always initialized on declaration. Plain C types follow C initialization rules.
 
-**Exception:** `T!E` (Result types) do not require immediate initialization and instead follow **definite assignment** rules. A `T!E` variable may be declared without an initializer if the compiler can prove it is assigned on all control-flow paths before any use or before scope exit.
+**Exception:** `T!>(E)` (Result types) do not require immediate initialization and instead follow **definite assignment** rules. A `T!>(E)` variable may be declared without an initializer if the compiler can prove it is assigned on all control-flow paths before any use or before scope exit.
 
 **Rule (Concurrent-C type initialization):**
 - `T?` defaults to `null` if no initializer is provided.
-- `T!E` uses **definite assignment**: the compiler verifies that a `T!E` variable is assigned on all paths before any use or scope exit.
+- `T!>(E)` uses **definite assignment**: the compiler verifies that a `T!>(E)` variable is assigned on all paths before any use or scope exit.
 - Channels, tasks, `Mutex<T>`, and `Atomic<T>` are always initialized on declaration.
 - `Map<K,V>` requires an explicit initializer (needs arena).
 
-**Rule (T!E and destructors):** Definite assignment for `T!E` is required because the destructor must know which arm (`T` or `E`) to drop. An uninitialized `T!E` at scope exit would have undefined destructor behavior—the compiler cannot determine whether to drop `value` or `error`. This is why definite assignment analysis must cover all paths to scope exit, not just paths to explicit reads.
+**Rule (T!>(E) and destructors):** Definite assignment for `T!>(E)` is required because the destructor must know which arm (`T` or `E`) to drop. An uninitialized `T!>(E)` at scope exit would have undefined destructor behavior—the compiler cannot determine whether to drop `value` or `error`. This is why definite assignment analysis must cover all paths to scope exit, not just paths to explicit reads.
 
 ```c
-int!Error x;              // OK if definitely assigned before use
+int!>(Error) x;              // OK if definitely assigned before use
 if (cond) {
     x = cc_ok(42);
 } else {
@@ -268,7 +269,7 @@ if (cond) {
 }
 use(x);                   // OK: assigned on all paths
 
-int!Error y;              // ERROR: not definitely assigned
+int!>(Error) y;              // ERROR: not definitely assigned
 if (cond) {
     y = cc_ok(1);
 }
@@ -285,14 +286,14 @@ Concurrent-C distinguishes **copyable** and **move-only** values:
 **Copyable types:**
 - All C primitive types
 - Structs containing only copyable fields
-- `T?` and `T!E` where `T` and `E` are copyable
+- `T?` and `T!>(E)` where `T` and `E` are copyable
 - `Mutex<T>`, `Atomic<T>` (handle types)
 
 **Move-only types:**
 - `Task<T>` (represents unique computation)
 - `Map<K,V>` (arena-backed, unique ownership)
 - `T?` where `T` is move-only
-- `T!E` where `T` or `E` is move-only
+- `T!>(E)` where `T` or `E` is move-only
 
 **Slices (`T[:]`):** The slice type itself is always the same, but **copyability depends on the value's provenance**:
 - Slices from arena, stack, or static sources are **copyable** (view slices)
@@ -342,10 +343,10 @@ x = await ch.recv();           // OK: can reassign the optional
 
 **Move semantics for different types:**
 
-**Results (`T!E`):** Movable as whole values. To extract inner value, use `try` or pattern matching.
+**Results (`T!>(E)`):** Movable as whole values. To extract inner value, use `try` or pattern matching.
 ```c
-int!Error r = cc_ok(42);
-int!Error s = r;        // copies (int and Error are copyable)
+int!>(Error) r = cc_ok(42);
+int!>(Error) s = r;        // copies (int and Error are copyable)
 int v = try r;          // extracts value, propagates error
 ```
 
@@ -419,7 +420,7 @@ spawn_thread(() => {
 |------|-------------|-------|
 | Primitives | Yes | Value types |
 | Structs | Yes iff all fields capturable | Structural |
-| `T?`, `T!E` | Yes iff inner types capturable | Structural |
+| `T?`, `T!>(E)` | Yes iff inner types capturable | Structural |
 | Arena slices | **Depends** | Only if arena provably outlives thread/task |
 | Static slices | Yes | Lives forever |
 | Stack slices | **No** | Frame dies on return |
@@ -478,7 +479,7 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 | Syntax | Meaning | Notes |
 |--------|---------|-------|
 | `T?` | Optional type | Postfix, not ternary `?:` |
-| `T!E` | Result type | Postfix, binds error type `E` |
+| `T!>(E)` | Result type | Postfix, binds error type `E` |
 | `T[:]` | Slice type | Distinct from C array `T[]` |
 | `T[~... >]` / `T[~... <]` | Channel handle type | `~` is not bitwise-not here |
 | `T[~n N:M >]` / `T[~n N:M <]` | Channel with topology | `N:M` is topology, not label |
@@ -501,13 +502,14 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@scoped` | Type tied to lexical scope | `@scoped type Guard<T>;` |
 | | `@nursery` | Structured concurrency block | `@nursery { spawn (task()); }` |
 | | `@nursery closing(...)` | Nursery with auto-channel-close | `@nursery closing(ch) { }` |
+| | `@closing(ch)` | Spawn(s) own channel | `@closing(tx) spawn(task);` |
 | | `@arena(a)` | Arena allocation scope | `@arena(a) { Vec<int> v = ...; }` |
 | | `@lock (m) as var` | Mutex guard acquisition | `@lock (m) as g { g.value++; }` |
 | | `@match` | Channel event dispatch | `@match { case T x = await ch: ... }` |
 | | `@defer` | Deferred cleanup statement | `@defer cleanup();` |
 | | `@for await (T x : ch)` | Async iteration loop | `@for await (int x : ch) { ... }` |
 | | `@comptime if` | Compile-time conditional | `@comptime if (feature) { }` |
-| **Type Constructors** | `T!E` | Result type (success or error) | `int!IoError read(path);` |
+| **Type Constructors** | `T!>(E)` | Result type (success or error) | `int!>(IoError) read(path);` |
 | | `T?` | Optional type (value or null) | `int? find(arr, key);` |
 | | `char[:]` | Slice (variable-length view) | `void process(char[:] data);` |
 | | `char[:!]` | Unique slice (move-only) | `char[:!] buf = recv(ch);` |
@@ -516,13 +518,13 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `spawn (expr)` | Create task (must be in `@nursery`) | `spawn (handler(request));` |
 | **Block Forms** | `cc_with_deadline(d) { }` | Apply timeout/deadline to block | `cc_with_deadline(seconds(5)) { await op(); }` |
 | | `try { } catch (E e) { }` | Multi-error handling block | `try { op1(); op2(); } catch (Err e) { }` |
-| **Library Functions** | `cc_ok(value)` | Construct T!E success (inferred) | `return cc_ok(42);` |
-| | `cc_ok(void)` | Construct void!E success (inferred) | `return cc_ok(void);` |
-| | `cc_err(error)` | Construct T!E error (inferred) | `return cc_err(MyError_NotFound);` |
-| | `cc_ok(T, value)` | T!CCError success (explicit) | `return cc_ok(int, 42);` |
-| | `cc_ok(T, E, v)` | T!E success (explicit) | `return cc_ok(int, MyError, 42);` |
-| | `cc_err(T, e)` | T!CCError error (explicit) | `return cc_err(int, cc_error(...));` |
-| | `cc_err(T, E, e)` | T!E error (explicit) | `return cc_err(int, MyError, err);` |
+| **Library Functions** | `cc_ok(value)` | Construct T!>(E) success (inferred) | `return cc_ok(42);` |
+| | `cc_ok(void)` | Construct void!>(E) success (inferred) | `return cc_ok(void);` |
+| | `cc_err(error)` | Construct T!>(E) error (inferred) | `return cc_err(MyError_NotFound);` |
+| | `cc_ok(T, value)` | T!>(CCError) success (explicit) | `return cc_ok(int, 42);` |
+| | `cc_ok(T, E, v)` | T!>(E) success (explicit) | `return cc_ok(int, MyError, 42);` |
+| | `cc_err(T, e)` | T!>(CCError) error (explicit) | `return cc_err(int, cc_error(...));` |
+| | `cc_err(T, E, e)` | T!>(E) error (explicit) | `return cc_err(int, MyError, err);` |
 | | `cc_move(x)` | Explicit move of move-only value | `ch.send_take(arr, cc_move(arr));` |
 | | `cc_cancel()` | Cancel current task/nursery | `if (timeout) cc_cancel();` |
 | | `cc_with_deadline(Duration)` | Create deadline scope | `cc_with_deadline(seconds(30)) { }` |
@@ -554,18 +556,18 @@ This section documents recommended style for Concurrent-C code.
 | Type | Correct | Incorrect |
 |------|---------|-----------|
 | Optional | `T?` | `T ?` |
-| Result | `T!E` | `T ! E` or `T! E` |
+| Result | `T!>(E)` | `T ! E` or `T! E` |
 | Slice | `char[:]` | `char [:]` or `char[ : ]` |
 | Unique slice | `char[:!]` | `char[: !]` |
 | Generic type | `Vec<int>` | `Vec < int >` |
 | Nested generic | `Map<K, V>` | `Map < K, V >` (spaces ok inside `<>` for args) |
-| Function return | `fn() -> T!E` | `fn ( ) -> T ! E` |
+| Function return | `fn() -> T!>(E)` | `fn ( ) -> T !> (E)` |
 
 **Examples:**
 
 ```c
 // Correct
-int!IoError read_int(char[:] data) {
+int!>(IoError) read_int(char[:] data) {
     char[:] trimmed = data.trim();
     return cc_ok(parse_int(trimmed));
 }
@@ -627,7 +629,7 @@ All attributes use the `@` prefix and follow consistent spacing:
 This section defines the fundamental value-level building blocks:
 
 - **§2.1 Optionals (`T?`)** — presence or absence
-- **§2.2 Results (`T!E`)** — success or failure
+- **§2.2 Results (`T!>(E)`)** — success or failure
 - **§2.3 Type Precedence** — how type modifiers bind
 - **§2.4 Arrays and Slices** — fixed arrays and views
 - **§2.5 Slice ABI** — provenance metadata layout
@@ -684,46 +686,46 @@ Surface syntax `*x` maps to `x.u.value` in lowered code.
 - After `*x` (successful unwrap) on move-only `T`, `x` is proven null
 - Functions returning `T?` are assumed to potentially return null
 
-`T?` is **not** error handling. Use `T!E` for errors.
+`T?` is **not** error handling. Use `T!>(E)` for errors.
 
 ---
 
-### 2.2 Results (`T!E`)
+### 2.2 Results (`T!>(E)`)
 
-`T!E` represents **success or failure** with an explicit error value.
+`T!>(E)` represents **success or failure** with an explicit error value.
 
 * **Unified constructor syntax**:
-  * **Inferred (preferred inside a function returning `T!E`):**
-    * `cc_ok(value)` - construct `T!E` success (T,E inferred from function return type)
-    * `cc_err(error)` - construct `T!E` error (T,E inferred from function return type)
+  * **Inferred (preferred inside a function returning `T!>(E)`):**
+    * `cc_ok(value)` - construct `T!>(E)` success (T,E inferred from function return type)
+    * `cc_err(error)` - construct `T!>(E)` error (T,E inferred from function return type)
     * `cc_err(CC_ERR_*)` or `cc_err(CC_ERR_*, "msg")` - shorthand for `cc_error(...)` when `E` is `CCError`
   * **Explicit (required outside return-context or when ambiguous):**
-    * `cc_ok(T, value)` - construct `T!CCError` success
-    * `cc_ok(T, E, value)` - construct `T!E` success (custom error type)
-    * `cc_ok(void)` - construct `void!CCError` success
-    * `cc_err(T, error)` - construct `T!CCError` error
-    * `cc_err(T, E, error)` - construct `T!E` error (custom error type)
+    * `cc_ok(T, value)` - construct `T!>(CCError)` success
+    * `cc_ok(T, E, value)` - construct `T!>(E)` success (custom error type)
+    * `cc_ok(void)` - construct `void!>(CCError)` success
+    * `cc_err(T, error)` - construct `T!>(CCError)` error
+    * `cc_err(T, E, error)` - construct `T!>(E)` error (custom error type)
 * Shorthand for `Result<T, E>`.
 
 ```c
-// Inferred constructors inside a function returning T!E
-int!CCError parse_int_safe(char[:] s) {
+// Inferred constructors inside a function returning T!>(E)
+int!>(CCError) parse_int_safe(char[:] s) {
     if (s.len() == 0) return cc_err(CC_ERR_INVALID_ARG, "empty");
     int val = parse_int(s);
     return cc_ok(val);
 }
 
 // Inferred constructors (preferred)
-int!CCError x = cc_ok(42);
-int!CCError y = cc_err(cc_error(CC_ERR_NOT_FOUND, "file not found"));
-int!IoError a = cc_ok(42);
-int!IoError b = cc_err(IoError_FileNotFound);
+int!>(CCError) x = cc_ok(42);
+int!>(CCError) y = cc_err(cc_error(CC_ERR_NOT_FOUND, "file not found"));
+int!>(IoError) a = cc_ok(42);
+int!>(IoError) b = cc_err(IoError_FileNotFound);
 
 // Explicit constructors (still available)
-int!CCError x2 = cc_ok(int, 42);
-int!CCError y2 = cc_err(int, cc_error(CC_ERR_NOT_FOUND, "file not found"));
-int!IoError a2 = cc_ok(int, IoError, 42);
-int!IoError b2 = cc_err(int, IoError, IoError_FileNotFound);
+int!>(CCError) x2 = cc_ok(int, 42);
+int!>(CCError) y2 = cc_err(int, cc_error(CC_ERR_NOT_FOUND, "file not found"));
+int!>(IoError) a2 = cc_ok(int, IoError, 42);
+int!>(IoError) b2 = cc_err(int, IoError, IoError_FileNotFound);
 
 if (x.ok) use(x.value);
 else handle(x.error);
@@ -732,25 +734,25 @@ else handle(x.error);
 **Lowering:**
 
 ```c
-// T!E lowers to a tagged union:
+// T!>(E) lowers to a tagged union:
 struct CCResult_T_E {
     bool ok;
     union { T value; E error; } u;
 };
 
 // Constructor macros (explicit forms):
-// cc_ok(void)        → cc_ok_CCResult_void_CCError()     // 1 arg: void!CCError
-// cc_ok(T, v)        → cc_ok_CCResult_T_CCError(v)       // 2 args: T!CCError
-// cc_ok(T, E, v)     → cc_ok_CCResult_T_E(v)             // 3 args: T!E (custom)
-// cc_err(T, e)       → cc_err_CCResult_T_CCError(e)      // 2 args: T!CCError
-// cc_err(T, E, e)    → cc_err_CCResult_T_E(e)            // 3 args: T!E (custom)
+// cc_ok(void)        → cc_ok_CCResult_void_CCError()     // 1 arg: void!>(CCError)
+// cc_ok(T, v)        → cc_ok_CCResult_T_CCError(v)       // 2 args: T!>(CCError)
+// cc_ok(T, E, v)     → cc_ok_CCResult_T_E(v)             // 3 args: T!>(E) (custom)
+// cc_err(T, e)       → cc_err_CCResult_T_CCError(e)      // 2 args: T!>(CCError)
+// cc_err(T, E, e)    → cc_err_CCResult_T_E(e)            // 3 args: T!>(E) (custom)
 ```
 
 Surface syntax `x.value` maps to `x.u.value`; `x.error` maps to `x.u.error`.
 
 **Rule (active field):** Only the active union member is initialized and valid, as determined by `ok`. When `ok == true`, `u.value` is active; when `ok == false`, `u.error` is active. Reading the inactive member is undefined behavior (and is a compile-time error where statically provable).
 
-**Rule (drop for T!E):** On scope exit, the destructor for the **active arm** runs if it has destructor semantics:
+**Rule (drop for T!>(E)):** On scope exit, the destructor for the **active arm** runs if it has destructor semantics:
 - If `ok == true` and `T` has a destructor, drop `u.value`
 - If `ok == false` and `E` has a destructor, drop `u.error`
 - If the value was moved out via `try` or pattern match, no destructor runs for that arm
@@ -767,9 +769,9 @@ Result types support the following methods via UFCS (Uniform Function Call Synta
 | `r.unwrap_or(default)` | `T` | Returns value if success, `default` if error |
 
 ```c
-int!CCError parse(char[:] s);
+int!>(CCError) parse(char[:] s);
 
-int!CCError r = parse("42");
+int!>(CCError) r = parse("42");
 
 // Method-style access (UFCS)
 if (r.is_ok()) {
@@ -799,7 +801,7 @@ Type modifiers bind with the following precedence (tightest first):
 3. `!E` (result)
 4. `[n]` `[:]` `[~n]` (array / slice / channel)
 
-**Rationale:** Pointer binds tightest because "result of pointer" (`T*!E` → `(T*)!E`) is far more common than "pointer to result" (`(T!E)*`). Functions returning pointer-or-error are ubiquitous in systems code.
+**Rationale:** Pointer binds tightest because "result of pointer" (`T*!E` → `(T*)!E`) is far more common than "pointer to result" (`(T!>(E))*`). Functions returning pointer-or-error are ubiquitous in systems code.
 
 **Examples:**
 
@@ -809,10 +811,10 @@ Type modifiers bind with the following precedence (tightest first):
 | `int*` | `(int)*` | pointer to int |
 | `int*?` | `((int)*)?` | optional pointer |
 | `int*!E` | `((int)*)!E` | result of pointer (success=pointer, error=E) |
-| `int!E` | `(int)!E` | result of int or E |
+| `int!>(E)` | `(int)!>(E)` | result of int or E |
 | `int?!E` | `((int)?)!E` | result whose ok-value is optional |
-| `int!E?` | `((int)!E)?` | optional result (e.g., recv from error channel) |
-| `int!E[~]` | `((int)!E)[~]` | channel of results |
+| `int!>(E)?` | `((int)!>(E))?` | optional result (e.g., recv from error channel) |
+| `int!>(E)[~]` | `((int)!>(E))[~]` | channel of results |
 | `int*!E[~]` | `(((int)*)!E)[~]` | channel of (result of pointer) |
 | `int[:]*` | `((int)[:])*` | pointer to slice |
 | `int*[:]` | `((int)*)[:]` | slice of pointers |
@@ -821,16 +823,16 @@ Type modifiers bind with the following precedence (tightest first):
 
 ```c
 // Function returning pointer or error — the common case
-Node*!IoError find_node(int id);      // (Node*)!IoError
+Node*!>(IoError) find_node(int id);      // (Node*)!IoError
 
 // Function returning optional pointer (null = not found, no error)
 Node*? lookup(int id);                // (Node*)?
 
 // Channel carrying results
-int!Error[~10 >] results_tx;          // sender for channel of results
+int!>(Error)[~10 >] results_tx;          // sender for channel of results
 ```
 
-**Note:** For a channel `ch : (T!E)[~]`, `ch.recv()` returns `(T!E)?` (i.e., `T!E?`), where `null` means "closed+drained" and `err(e)` is an application-level error value.
+**Note:** For a channel `ch : (T!>(E))[~]`, `ch.recv()` returns `(T!>(E))?` (i.e., `T!>(E)?`), where `null` means "closed+drained" and `err(e)` is an application-level error value.
 
 ---
 
@@ -1035,7 +1037,7 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
 **Example:**
 
 ```c
-@async void!Error worker(Mutex<int>* m) {
+@async void!>(Error) worker(Mutex<int>* m) {
     // ✅ CORRECT: guard doesn't cross suspension point
     {
         @lock (m) as guard {  // guard is @scoped
@@ -1046,7 +1048,7 @@ A type marked `@scoped` is **tied to a lexical scope** and cannot outlive that s
     await io_operation();  // ✅ OK: no @scoped values held
 }
 
-@async void!Error bad(Mutex<int>* m) {
+@async void!>(Error) bad(Mutex<int>* m) {
     @lock (m) as guard {
         guard++;
         await io_operation();  // ❌ ERROR: @scoped value guard held across await
@@ -1082,7 +1084,7 @@ struct Container {
 If a function has `@scoped` values in scope at a suspension point, that's a compile error. The typical fix is to release the value before suspending:
 
 ```c
-@async int!Error correct(Mutex<int>* m) {
+@async int!>(Error) correct(Mutex<int>* m) {
     let val = {
         @lock (m) as g {
             g + 1
@@ -1142,7 +1144,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§ 7
 **Example:**
 
 ```c
-@async int!Error pattern(Mutex<int>* m) {
+@async int!>(Error) pattern(Mutex<int>* m) {
     // ✅ CORRECT: use guard, then release, then suspend
     let val = {
         @lock (m) as g {
@@ -1154,7 +1156,7 @@ For complete deadline semantics, scoping rules, and runtime behavior, see **§ 7
     return cc_ok(val);
 }
 
-@async int!Error antipattern(Mutex<int>* m) {
+@async int!>(Error) antipattern(Mutex<int>* m) {
     @lock (m) as g {
         let val = g + 1;
         
@@ -1390,7 +1392,7 @@ Arena scratch = arena(kilobytes(64));
 These are useful for ownership transfer patterns where cleanup should only happen on error:
 
 ```c
-Result*!IoError compress_block(Block* blk) {
+Result*!>(IoError) compress_block(Block* blk) {
     Arena res_arena = cc_heap_arena(blk->data.len + 4096);
     @defer(err) cc_heap_arena_free(&res_arena);  // cleanup on error only
     
@@ -1418,7 +1420,7 @@ After detach:
 - The returned arena owns all the memory and allocations
 - The caller is responsible for eventually freeing the returned arena
 
-**Rule:** `@defer(err)` and `@defer(ok)` are only valid in functions returning a result type (`T!E`). Using them in a function returning a non-result type is a compile error.
+**Rule:** `@defer(err)` and `@defer(ok)` are only valid in functions returning a result type (`T!>(E)`). Using them in a function returning a non-result type is a compile error.
 
 **Lowering:**
 
@@ -1466,7 +1468,7 @@ __cleanup_active = false;  // cancel cleanup;
 
 ```c
 // Transaction commit/rollback
-void!DbError transfer(Db* db, Account from, Account to, int amount) {
+void!>(DbError) transfer(Db* db, Account from, Account to, int amount) {
     try db.begin();
     @defer rollback: db.rollback();
     
@@ -1478,7 +1480,7 @@ void!DbError transfer(Db* db, Account from, Account to, int amount) {
 }
 
 // Conditional cleanup
-void!IoError process(char[:] path, Arena* out) {
+void!>(IoError) process(char[:] path, Arena* out) {
     Arena scratch = arena(kilobytes(64));
     @defer cleanup: arena_free(&scratch);
     
@@ -1498,7 +1500,7 @@ void!IoError process(char[:] path, Arena* out) {
 **Rule (defer is scope-bound):** Defer statements create `@scoped` handles (see § 3.1). A defer statement or cancellable defer name cannot be held across a suspension point. Attempting to reference a defer across `await` or `@match` is a compile error. This prevents defers from running during async operations where cleanup order becomes unpredictable.
 
 ```c
-@async void!Error good(Arena* scratch) {
+@async void!>(Error) good(Arena* scratch) {
     // ✅ CORRECT: defer within sync scope, not across suspension
     {
         @defer cleanup: arena_free(scratch);
@@ -1510,7 +1512,7 @@ void!IoError process(char[:] path, Arena* out) {
     await io_operation();
 }
 
-@async void!Error bad(Arena* scratch) {
+@async void!>(Error) bad(Arena* scratch) {
     @defer cleanup: arena_free(scratch);
     // ❌ ERROR: defer is @scoped and cannot be held across await
     // await io_operation();
@@ -2087,23 +2089,23 @@ chan_free(ch);  // free what you created
 
 **Error channels:**
 
-Channels can carry results using `T!E` as the element type:
+Channels can carry results using `T!>(E)` as the element type:
 
 ```c
-int!ParseError[~100 >] results_tx;        // async sender of Result<int, ParseError>
-int!ParseError[~100 <] results_rx;        // async receiver of Result<int, ParseError>
+int!>(ParseError)[~100 >] results_tx;        // async sender of Result<int, ParseError>
+int!>(ParseError)[~100 <] results_rx;        // async receiver of Result<int, ParseError>
 CCChan* results_ch = channel_pair(&results_tx, &results_rx);
 
-int!ParseError[~100 sync >] sync_results_tx;   // sync sender
-int!ParseError[~100 sync <] sync_results_rx;   // sync receiver
+int!>(ParseError)[~100 sync >] sync_results_tx;   // sync sender
+int!>(ParseError)[~100 sync <] sync_results_rx;   // sync receiver
 CCChan* sync_results_ch = channel_pair(&sync_results_tx, &sync_results_rx);
 ```
 
-**Rule (recv return type):** `recv()` always returns `(ElemType)?`. For a channel with element type `T!E`, `recv()` returns `(T!E)?` which is spelled `T!E?`. The outer `?` indicates channel state (null = closed+drained); the inner `!E` is application-level success/failure.
+**Rule (recv return type):** `recv()` always returns `(ElemType)?`. For a channel with element type `T!>(E)`, `recv()` returns `(T!>(E))?` which is spelled `T!>(E)?`. The outer `?` indicates channel state (null = closed+drained); the inner `!E` is application-level success/failure.
 
 ```c
 // Async channel: must use await
-int!ParseError? r = await results.recv();
+int!>(ParseError)? r = await results.recv();
 if (!r) {
     // channel closed+drained
 } else if (r.ok) {
@@ -2113,7 +2115,7 @@ if (!r) {
 }
 
 // Sync channel: no await
-int!ParseError? r = results.recv();
+int!>(ParseError)? r = results.recv();
 if (!r) {
     // channel closed+drained
 } else if (r.ok) {
@@ -2142,7 +2144,7 @@ replaced_5 Semantics
 * **Close** does not drop buffered values; they remain available for recv.
 * **Termination** is observed when the channel is both closed and drained (`recv()` returns `null`).
 
-**Rule:** `recv()` returns `null` only when the channel is closed and drained. It never returns `null` to represent an application-level error. For per-item errors, use `T!E[~ <]` channels where `recv()` returns `T!E?`.
+**Rule:** `recv()` returns `null` only when the channel is closed and drained. It never returns `null` to represent an application-level error. For per-item errors, use `T!>(E)[~ <]` channels where `recv()` returns `T!>(E)?`.
 
 **Rule (slice element ownership):** For slice element types, `send` deep-copies into channel-internal storage. While queued, the channel owns the copy. On successful `recv`, the receiver gets a **unique slice**; the receiver frees it on scope exit (or transfers it via `send_take` / return). If the value is never received (still buffered when channel is freed), the channel frees it.
 
@@ -2323,11 +2325,11 @@ void close(&tx);                        // idempotent, no await
 
 // Cancellation-aware variants (must await)
 bool ok = await send_cancellable(&tx, value);   // returns false if cancelled
-T!Cancelled? x = await recv_cancellable(&rx);   // returns err(Cancelled) if cancelled
+T!>(Cancelled)? x = await recv_cancellable(&rx);   // returns err(Cancelled) if cancelled
 
 // Non-blocking (no await, either context)
 bool ok = try_send(&tx, value);        // returns false if full/closed, never awaits
-T!RecvStatus x = try_recv(&rx);        // returns immediately
+T!>(RecvStatus) x = try_recv(&rx);        // returns immediately
 
 // Timeout (must await)
 T? x = await recv_timeout(&rx, Duration d);
@@ -2351,7 +2353,7 @@ void close(&stx);                       // idempotent
 
 // Non-blocking (no await, either context)
 bool ok = try_send(&stx, value);        // returns false if full/closed
-T!RecvStatus x = try_recv(&srx);        // returns immediately
+T!>(RecvStatus) x = try_recv(&srx);        // returns immediately
 
 // Timeout (blocks up to duration, no await)
 T? x = recv_timeout(&srx, Duration d);
@@ -2586,6 +2588,35 @@ The `closing(...)` clause ensures channels are closed after all children exit, e
 // Producer and consumer both exit before out is closed
 ```
 
+**`@closing` Annotation (Planned):**
+
+> **Note:** The `@closing` annotation is a planned feature for future releases. Currently, use nested `@nursery closing(...)` blocks for channel ownership management.
+
+For more complex pipelines, `@closing(ch)` will provide a flatter syntax by annotating individual spawns or spawn groups:
+
+```c
+// Planned syntax (not yet implemented):
+@closing(ch) spawn (producer(ch));              // single spawn owns channel
+@closing(ch) {                                  // group owns channel
+    spawn (worker1(ch));
+    spawn (worker2(ch));
+}
+```
+
+**Current approach:** Use nested nurseries:
+
+```c
+@nursery {
+    spawn(writer);
+    @nursery closing(results_tx) {
+        for (int w = 0; w < N; w++) spawn(worker);
+        @nursery closing(blocks_tx) {
+            spawn(reader);
+        }
+    }
+}
+```
+
 ---
 
 #### 6.1.2 Compile-Time Restrictions (Normative)
@@ -2779,7 +2810,7 @@ A nursery does **not** guarantee:
 The implicit nursery in an `@async` function is created at function entry and joined at function exit (including early returns and error propagation).
 
 ```c
-@async int!Error work() {
+@async int!>(Error) work() {
     int n = read(0, buf, 128);  // auto-wrapped in implicit nursery
 
     if (n < 0) return cc_err(Error.Fail);  // implicit nursery joined here
@@ -2909,7 +2940,7 @@ log_event(evt).start();  // fire and forget
 
 **Rule (double-await):** Awaiting an already-completed task returns the cached result immediately.
 
-**Rule (detached task errors):** If a detached task returns `T!E` with an error and is never awaited, the error is silently discarded.
+**Rule (detached task errors):** If a detached task returns `T!>(E)` with an error and is never awaited, the error is silently discarded.
 
 **Rule (Task<T> ABI):** `Task<T>` is an opaque handle. Its internal representation is implementation-defined.
 
@@ -3029,7 +3060,7 @@ chan_free(ch);                            // free the channel when done
 **Cancellation integration:**
 
 ```c
-@async void!Error reader(int[~ <] ch) {
+@async void!>(Error) reader(int[~ <] ch) {
     @match {
         case int x = await ch.recv():
             process(x);
@@ -3098,7 +3129,7 @@ Function signatures make clear what context is required:
 
 ```c
 // Clearly async
-@async int!Error async_reader(int[~ <] ch) {
+@async int!>(Error) async_reader(int[~ <] ch) {
     int x = await recv(&ch);  // obvious: must await
     return cc_ok(x);
 }
@@ -3155,7 +3186,7 @@ if (!x) {
 }
 
 // With error values
-int!Error[~ <]? x = await recv(&error_rx);
+int!>(Error)[~ <]? x = await recv(&error_rx);
 if @try (int val = *x) {
     process(val);
 } else if (is_none(*x)) {
@@ -3266,7 +3297,7 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
     spawn (timeout_enforcer());
 }
 
-@async int!Error reader(int[~ <] ch) {
+@async int!>(Error) reader(int[~ <] ch) {
     @match {
         case int x = await ch.recv():
             return cc_ok(x);
@@ -3274,7 +3305,7 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
     }
 }
 
-@async void!Error timeout_enforcer() {
+@async void!>(Error) timeout_enforcer() {
     @match {
         case await sleep(Duration{5, 0}):
             return cc_err(void, Error.Timeout);
@@ -3330,7 +3361,7 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 **Rule (implicit cancel case):** When `@match` appears inside a cancellable context (nursery, spawned task, or any task that can be cancelled), the compiler implicitly adds a cancellation case:
 
 ```c
-@async void!Error worker(int[~ <] ch) {  // async recv handle
+@async void!>(Error) worker(int[~ <] ch) {  // async recv handle
     while (true) {
         @match {
             case int x = ch.recv():    // async channel recv, naturally awaitable
@@ -3343,7 +3374,7 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 }
 
 // Sync channels don't work with @match:
-@async void!Error bad_sync(int[~ sync <] ch) {
+@async void!>(Error) bad_sync(int[~ sync <] ch) {
     @match {
         case int x = ch.recv():  // ❌ ERROR: @match requires async channel
             process(x);
@@ -3360,7 +3391,7 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 **Desugaring:**
 
 ```c
-@async void!Error worker(int[~] ch) {
+@async void!>(Error) worker(int[~] ch) {
     while (true) {
         @match {
             case int x = ch.recv():
@@ -3381,7 +3412,7 @@ enum WorkerError {
     Timeout,
 }
 
-@async int!WorkerError worker() {
+@async int!>(WorkerError) worker() {
     @match {
         case result = async_io():
             return cc_ok(result);
@@ -3409,25 +3440,25 @@ For operations **outside `@match`** (single await, channel recv/send, sleep), us
 
 ```c
 // Channels
-T!Cancelled? recv_cancellable(T[~ <]* rx);      // returns err(Cancelled) if cancelled
+T!>(Cancelled)? recv_cancellable(T[~ <]* rx);      // returns err(Cancelled) if cancelled
 bool send_cancellable(T[~ >]* tx, T value);     // returns false if cancelled
 
 // Tasks
-T!Cancelled await task_cancellable<T>(Task<T!Cancelled> t);
+T!>(Cancelled) await task_cancellable<T>(Task<T!>(Cancelled)> t);
 
 // Sleep
-Task<void!Cancelled> sleep_cancellable(Duration d);
+Task<void!>(Cancelled)> sleep_cancellable(Duration d);
 
 // Timing
-Task<T!Cancelled> with_timeout_cancellable<T>(Task<T!Cancelled> t, Duration d);
+Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duration d);
 ```
 
 **Example (non-select context):**
 
 ```c
-@async void!Error reader(int[~] ch) {
+@async void!>(Error) reader(int[~] ch) {
     while (true) {
-        int!Cancelled? x = await ch.recv_cancellable();
+        int!>(Cancelled)? x = await ch.recv_cancellable();
         
         if @try (err = x) {
             if (err == Cancelled) return cc_ok(void);  // task was cancelled
@@ -3453,7 +3484,7 @@ Task<T!Cancelled> with_timeout_cancellable<T>(Task<T!Cancelled> t, Duration d);
 For cases where neither implicit `@match` nor variants apply, use the polling-based API:
 
 ```c
-@async void!Error work() {
+@async void!>(Error) work() {
     while (!cc_is_cancelled()) {
         int x = await long_operation();
         process(x);
@@ -3499,7 +3530,7 @@ enum WorkerError {
     spawn (timeout_enforcer());
 }
 
-@async void!WorkerError reader(int[~ <] requests) {
+@async void!>(WorkerError) reader(int[~ <] requests) {
     while (true) {
         @match {
             case int req = requests.recv():
@@ -3509,7 +3540,7 @@ enum WorkerError {
     }
 }
 
-@async void!WorkerError writer(int[~ >] responses) {
+@async void!>(WorkerError) writer(int[~ >] responses) {
     for (Response r : response_queue) {
         @match {
             case responses.send(r):
@@ -3519,7 +3550,7 @@ enum WorkerError {
     }
 }
 
-@async void!WorkerError timeout_enforcer() {
+@async void!>(WorkerError) timeout_enforcer() {
     @match {
         case sleep(Duration{5, 0}):
             return cc_err(void, WorkerError.Timeout);
@@ -3568,7 +3599,7 @@ enum TaskError {
     IoError(IoError),
 }
 
-@async int!TaskError worker() {
+@async int!>(TaskError) worker() {
     @match {
         case int x = ch.recv():
             return cc_ok(x);
@@ -3577,7 +3608,7 @@ enum TaskError {
 }
 
 // Bad: no Cancelled variant, so implicit case can't work
-@async int!IoError reader() {
+@async int!>(IoError) reader() {
     int x = await ch.recv();  // ❌ can't be cancelled effectively
     return cc_ok(x);
 }
@@ -3627,7 +3658,7 @@ Duration deadline_remaining(Deadline d);
 **Usage Pattern:**
 
 ```c
-@async Response!IoError http_handler(Request* req, Arena* req_arena) {
+@async Response!>(IoError) http_handler(Request* req, Arena* req_arena) {
     Deadline deadline = deadline_after(seconds(5));
     
     // Wrap deadline-sensitive operations
@@ -3757,7 +3788,7 @@ Streaming uses explicit channel parameters:
 
 ```c
 // Fail-fast: function can fail, channel carries plain values
-@async void!IoError read_lines(char[:] path, char[:][~]* out) {
+@async void!>(IoError) read_lines(char[:] path, char[:][~]* out) {
     defer out.close();
     File f = try open(path);
     while (true) {
@@ -3768,7 +3799,7 @@ Streaming uses explicit channel parameters:
 }
 
 // Per-item errors: each item can independently fail
-@async void parse_nums(char[:][~]* in, int!ParseError[~]* out) {
+@async void parse_nums(char[:][~]* in, int!>(ParseError)[~]* out) {
     defer out.close();
     @for await (char[:] line : in) {
         await out.send(parse_int(line));
@@ -3784,7 +3815,7 @@ Streaming uses explicit channel parameters:
 // Internal Scope (created implicitly in @async functions for batching/wrapping)
 struct Scope {
     void spawn(expr);                              // (internal) spawn async work
-    @async T!E run_blocking<T, E>(() => T!E);  // (internal) run closure on thread pool
+    @async T!>(E) run_blocking<T, E>(() => T!>(E));  // (internal) run closure on thread pool
     void cancel();                                 // (internal) cancel all spawned work
     bool cancelled();                              // (internal) check cancellation
 }
@@ -3796,18 +3827,18 @@ T      await Task<T>;                  // suspend until complete
 void   Task<T>.cancel();               // request cooperative cancellation
 
 // Cancellation-aware variants (observe cancellation when awaited)
-T!Cancelled      await task_cancellable<T>(Task<T!Cancelled> t);
-T!Cancelled?     recv_cancellable<T>(T[~ <]* rx);      // returns err(Cancelled) if cancelled
+T!>(Cancelled)      await task_cancellable<T>(Task<T!>(Cancelled)> t);
+T!>(Cancelled)?     recv_cancellable<T>(T[~ <]* rx);      // returns err(Cancelled) if cancelled
 bool             send_cancellable<T>(T[~ >]* tx, T value);
-Task<void!Cancelled> sleep_cancellable(Duration d);
-Task<T!Cancelled> with_timeout_cancellable<T>(Task<T!Cancelled> t, Duration d);
+Task<void!>(Cancelled)> sleep_cancellable(Duration d);
+Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duration d);
 
 // Cancellation polling (valid only in @async functions)
 bool   is_cancelled();
 
 // Timing
 Task<void> sleep(Duration d);
-Task<T!E> with_timeout<T, E>(Task<T!E> t, Duration d);
+Task<T!>(E)> with_timeout<T, E>(Task<T!>(E)> t, Duration d);
 
 // Sync bridge (can block)
 T block_on<T>(Task<T> t);    // run task to completion, blocking
@@ -4666,7 +4697,7 @@ This section defines the error model:
 
 Errors in Concurrent-C are **value-based**, not exceptions.
 
-* `T!E` is the return type for functions that can fail.
+* `T!>(E)` is the return type for functions that can fail.
 * `try` unwraps success or propagates error.
 * `catch` handles errors locally.
 * No unwinding — `defer` always runs.
@@ -4676,41 +4707,41 @@ Errors in Concurrent-C are **value-based**, not exceptions.
 ### 7.9 Returning errors
 
 ```c
-int!IoError read_value(char[:] path) {
+int!>(IoError) read_value(char[:] path) {
     File f = try open(path);
     return try f.read_int();
 }
 
 // Inferred construction (recommended)
-int!IoError x = cc_ok(42);
-int!IoError y = cc_err(IoError.FileNotFound);
+int!>(IoError) x = cc_ok(42);
+int!>(IoError) y = cc_err(IoError.FileNotFound);
 
 // Explicit construction (still supported)
-int!IoError x2 = cc_ok(int, IoError, 42);
-int!IoError y2 = cc_err(int, IoError, IoError.FileNotFound);
+int!>(IoError) x2 = cc_ok(int, IoError, 42);
+int!>(IoError) y2 = cc_err(int, IoError, IoError.FileNotFound);
 ```
 
 ---
 
 ### 7.10 `try` propagation
 
-`try expr` unwraps `T!E` on success, or returns `err(e)` from the enclosing function on failure.
+`try expr` unwraps `T!>(E)` on success, or returns `err(e)` from the enclosing function on failure.
 
 ```c
-int!IoError parse_file(char[:] path) {
+int!>(IoError) parse_file(char[:] path) {
     char[:] content = try read_file(path);
     return try parse_int(content);
 }
 ```
 
-**Rule:** `try` is valid when the enclosing function returns `U!E` with a compatible error type.
+**Rule:** `try` is valid when the enclosing function returns `U!>(E)` with a compatible error type.
 
 **Try-binding in conditionals:**
 
 `if @try (T x = expr)` unwraps a result and binds the value in the then-branch:
 
 ```c
-int!CCError res = parse_int(s);
+int!>(CCError) res = parse_int(s);
 if @try (int x = res) {
     // x is the unwrapped value (int)
     printf("parsed: %d\n", x);
@@ -4742,7 +4773,7 @@ This is syntactic sugar for:
 
 ```c
 // Instead of:
-Result*!IoError res_val = compress_block(blk, level);
+Result*!>(IoError) res_val = compress_block(blk, level);
 if (res_val.is_ok()) {
     Result* res = res_val.unwrap();
     chan_send(results_tx, res);
@@ -4751,7 +4782,7 @@ if (res_val.is_ok()) {
 }
 
 // Write:
-Result*!IoError res_val = compress_block(blk, level);
+Result*!>(IoError) res_val = compress_block(blk, level);
 if @try (Result* res = res_val) {
     chan_send(results_tx, res);
 } else {
@@ -4763,7 +4794,7 @@ if @try (Result* res = res_val) {
 
 ### 7.11 `catch` handling
 
-`catch` converts a `T!E` to `T` by providing a fallback value or handler.
+`catch` converts a `T!>(E)` to `T` by providing a fallback value or handler.
 
 ```c
 // Default value on error
@@ -4780,7 +4811,7 @@ int y = parse_int(s) catch(e) {
 
 ```c
 // To re-propagate certain errors, use try + catch in caller
-int!IoError read_or_default(char[:] path) {
+int!>(IoError) read_or_default(char[:] path) {
     File f = try open(path);           // propagates IoError
     return f.read_int() catch 0;       // catch ParseError, yield 0
 }
@@ -4792,7 +4823,7 @@ int z = read_int(path) catch(e) {
 };
 ```
 
-**Rule:** The `catch` expression has type `T`, not `T!E`. After `catch`, the error has been handled.
+**Rule:** The `catch` expression has type `T`, not `T!>(E)`. After `catch`, the error has been handled.
 
 ---
 
@@ -4834,7 +4865,7 @@ try {
     return cc_err(void, e);  // Propagate fatal errors
 }
 
-// Nested try/catch for layered handling (returns Data!NetworkError)
+// Nested try/catch for layered handling (returns Data!>(NetworkError))
 try {
     try {
         data = try fetch_from_cache(key);
@@ -4863,14 +4894,14 @@ try {
 
 ### 7.12 Async + errors
 
-Async functions can return `T!E`:
+Async functions can return `T!>(E)`:
 
 ```c
-@async int!IoError fetch(char[:] url) {
+@async int!>(IoError) fetch(char[:] url) {
     return try await http_get(url);
 }
 
-@async void!IoError process() {
+@async void!>(IoError) process() {
     int len = try await fetch("http://...");
     use(len);
 }
@@ -4888,25 +4919,25 @@ When composing functions with different error types, use explicit conversion wit
 enum AppError { Io(IoError), Parse(ParseError) }
 
 // Helper to convert error types
-int!AppError parse_with_app_error(char[:] s) {
-    int!ParseError r = parse_int(s);
+int!>(AppError) parse_with_app_error(char[:] s) {
+    int!>(ParseError) r = parse_int(s);
     if (r.ok) return cc_ok(r.value);
     return cc_err(AppError.Parse(r.error));
 }
 
-int!AppError read_with_app_error(char[:] path) {
-    char[:]!IoError r = read_file(path);
+int!>(AppError) read_with_app_error(char[:] path) {
+    char[:]!>(IoError) r = read_file(path);
     if (r.ok) return cc_ok(r.value);
     return cc_err(AppError.Io(r.error));
 }
 
-int!AppError process(char[:] path) {
+int!>(AppError) process(char[:] path) {
     char[:] s = try read_with_app_error(path);
     return parse_with_app_error(s);
 }
 ```
 
-**Rule:** Error type conversion is explicit. There is no implicit coercion from `T!E1` to `T!E2` even if `E1` can be embedded in `E2`.
+**Rule:** Error type conversion is explicit. There is no implicit coercion from `T!>(E1)` to `T!>(E2)` even if `E1` can be embedded in `E2`.
 
 ---
 
@@ -6173,7 +6204,7 @@ struct Optional_int {
 // sizeof = 8 bytes
 ```
 
-**Result (`T!E`) layout:**
+**Result (`T!>(E)`) layout:**
 
 ```c
 struct Result_T_E {
@@ -6405,7 +6436,7 @@ enum BoundsError {
 ### Pattern 1: Request Handler
 
 ```c
-@async @latency_sensitive Response!IoError my_handler(Request* req, Arena* a) {
+@async @latency_sensitive Response!>(IoError) my_handler(Request* req, Arena* a) {
     // CPU work: inline (compiler inlines aggressively)
     Parsed p = parse(req.body);
     
@@ -6485,7 +6516,7 @@ This pattern is the recommended template for long-lived connections (WebSocket, 
 3. **Teardown phase:** bounded, shielded cleanup to perform protocol-correct closes
 
 ```c
-@async void!IoError handle_conn(Duplex* conn, Arena* conn_arena) {
+@async void!>(IoError) handle_conn(Duplex* conn, Arena* conn_arena) {
     // 1) Handshake (short deadline)
     with_deadline(deadline_after(seconds(3))) {
         try await protocol_handshake(conn, conn_arena);
@@ -6559,7 +6590,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 | Sugar | Full | Meaning |
 |-------|------|---------|
 | `T?` | `Option<T>` | Optional value |
-| `T!E` | `Result<T, E>` | Either T or error E |
+| `T!>(E)` | `Result<T, E>` | Either T or error E |
 | `T[:]` | Slice of T | Pointer + length |
 | `T[~... >]` / `T[~... <]` | `AsyncChanTx<T>` / `AsyncChanRx<T>` | Async channel handles |
 | `T[~N ... >]` / `T[~N ... <]` | `AsyncChanTx<T, N>` / `AsyncChanRx<T, N>` | Async handles, capacity N |
@@ -6576,7 +6607,7 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 #include <ccc/std/log.cch>
 
 // Handler: Mark @latency_sensitive to ensure predictable latency
-@async @latency_sensitive Response!IoError api_handler(Request* req, Arena* a) {
+@async @latency_sensitive Response!>(IoError) api_handler(Request* req, Arena* a) {
     // CPU work: parse (inlined, no latency)
     UserId user_id = try parse_user_id(req.path);
     
@@ -6628,9 +6659,9 @@ Phase 1.0 is complete and canonical for unary request/response and long-lived co
 Long-lived connection loops rely on timely cancellation when deadlines expire or connections close:
 
 ```c
-@async void!IoError connection_handler(Duplex* conn, Arena* conn_arena) {
+@async void!>(IoError) connection_handler(Duplex* conn, Arena* conn_arena) {
     with_deadline(deadline_after(seconds(30))) {
-        while (char[:]?!IoError msg = try await conn.read(conn_arena)) {
+        while (char[:]?!>(IoError) msg = try await conn.read(conn_arena)) {
             if (!msg) break;
             process(msg);
         }
@@ -6660,19 +6691,19 @@ Many operations produce sequences of items asynchronously: request body chunks, 
 
 ```c
 // Request body
-while (char[:]?!IoError chunk = try await req.body.read_chunk(arena)) {
+while (char[:]?!>(IoError) chunk = try await req.body.read_chunk(arena)) {
     if (!chunk) break;
     process(chunk);
 }
 
 // Response body
-while (char[:]?!IoError chunk = try await resp_iter.next(arena)) {
+while (char[:]?!>(IoError) chunk = try await resp_iter.next(arena)) {
     if (!chunk) break;
     process(chunk);
 }
 
 // WebSocket frames
-while (char[:]?!IoError frame = try await ws.read_frame(arena)) {
+while (char[:]?!>(IoError) frame = try await ws.read_frame(arena)) {
     if (!frame) break;
     process(frame);
 }
@@ -6691,7 +6722,7 @@ for await (char[:] chunk in req.body) {
 }
 
 // Desugars to:
-while (char[:]?!IoError chunk_opt = try await req.body.next(arena)) {
+while (char[:]?!>(IoError) chunk_opt = try await req.body.next(arena)) {
     if (!chunk_opt) break;
     char[:] chunk = *chunk_opt;
     process(chunk);
@@ -6715,7 +6746,7 @@ while (char[:]?!IoError chunk_opt = try await req.body.next(arena)) {
 Real protocols often need unidirectional closure: proxies (forward until upstream closes, continue sending to downstream), gRPC (send messages, signal EOF on write, keep reading responses), TLS termination (clean close on write, drain read side).
 
 ```c
-@async void!IoError proxy_handler(Duplex* client, Duplex* upstream, Arena* a) {
+@async void!>(IoError) proxy_handler(Duplex* client, Duplex* upstream, Arena* a) {
     // Bidirectional forwarding
     @nursery {
         spawn (forward_client_to_upstream(client, upstream, a));
@@ -6927,7 +6958,7 @@ Desugars to:
 {
     AsyncIterator<char[:]> iter = req.body;
     while (true) {
-        char[:]?!IoError next_result = await iter.next(arena);
+        char[:]?!>(IoError) next_result = await iter.next(arena);
         
         if @try (char[:] chunk = next_result) {
             // Chunk is valid here; process it

@@ -10,7 +10,7 @@
 
 The Concurrent-C Standard Library (`<std/...>`) provides minimal, composable wrappers around common systems operations, designed to integrate seamlessly with Concurrent-C's core features (arenas, slices, async, error values) while maintaining portability and zero-overhead abstraction.
 
-**Philosophy:** Stay small (only battle-tested essentials), be explicit (allocations visible, arenas passed), leverage CC features (T!E for errors, slices for views, channels for streaming), remain optional (header-only, no mandatory linkage), and **use UFCS for natural, discoverable APIs**.
+**Philosophy:** Stay small (only battle-tested essentials), be explicit (allocations visible, arenas passed), leverage CC features (T!>(E) for errors, slices for views, channels for streaming), remain optional (header-only, no mandatory linkage), and **use UFCS for natural, discoverable APIs**.
 
 **UFCS Pattern:** All types use method syntax via UFCS. Free functions exist for genericity and composition but methods are primary for users.
 
@@ -37,7 +37,7 @@ split(&s, ",");
 
 2. **Header-Only:** All Phase 1 functions defined in headers; no compilation required.
 3. **Explicit Allocation:** All allocations via `Arena*` passed as explicit parameters. No hidden allocators.
-4. **Error Values:** All fallible operations return `T!E` (Result types); no errno, no exceptions.
+4. **Error Values:** All fallible operations return `T!>(E)` (Result types); no errno, no exceptions.
 5. **Slices Everywhere:** Parameters and returns use `char[:]` views where appropriate; avoid unnecessary copies.
 6. **Portability:** Abstract OS differences (e.g., path separators) transparently.
 7. **No Dependencies:** Stdlib depends only on C standard library and CC language primitives.
@@ -66,11 +66,11 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 | `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read_all()` return) |
 | `char[:]?!IoError` | `((char[:])?)!IoError` | result whose ok-value is optional (e.g., streaming `read()`) |
 | `T*!IoError` | `((T)*)!IoError` | result of pointer (e.g., `cc_dir_open()` return) |
-| `T!E?` | `((T)!E)?` | optional result (e.g., `recv()` on error channel) |
+| `T!>(E)?` | `((T)!>(E))?` | optional result (e.g., `recv()` on error channel) |
 
 **Key distinction:**
 - `T?!E` — "operation may fail; if it succeeds, value may be absent" (streaming read: error, EOF, or data)
-- `T!E?` — "value may be absent; if present, it's a result" (channel recv: closed, or ok/err)
+- `T!>(E)?` — "value may be absent; if present, it's a result" (channel recv: closed, or ok/err)
 - `T*!E` — "operation may fail; if it succeeds, returns a pointer" (common for allocation/lookup)
 
 ---
@@ -1862,7 +1862,7 @@ void process_csv(char* filename) {
 
 ### 5. Networking (`<std/net.cch>`)
 
-Concurrent-C networking provides safe, async-first primitives for TCP/UDP, TLS, HTTP clients, and DNS. All operations integrate with the arena model and return `T!E` results.
+Concurrent-C networking provides safe, async-first primitives for TCP/UDP, TLS, HTTP clients, and DNS. All operations integrate with the arena model and return `T!>(E)` results.
 
 #### 5.1 Design Principles
 
@@ -2561,7 +2561,7 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 
 - Rust `std`: Minimal scope, safety-first, owned types, UFCS methods.
 - Zig `std`: Explicit allocators, composability, low-level control.
-- C `libc`: Keep what works (stdio, basic ops), add safety (T!E, slices, UFCS).
+- C `libc`: Keep what works (stdio, basic ops), add safety (T!>(E), slices, UFCS).
 
 ---
 

@@ -1,8 +1,8 @@
 /*
- * Recipe: Error Handling with Result Types (T!E)
+ * Recipe: Error Handling with Result Types (T!>(E))
  *
  * Demonstrates:
- *   - Declaring functions that return T!E (Result types)
+ *   - Declaring functions that return T!>(E) (Result types)
  *   - Using try to propagate errors
  *   - Manual error checking with .ok and .u.value/.u.error
  *
@@ -12,7 +12,7 @@
 #include <ccc/std/prelude.cch>
 
 /* Simulated I/O operation that can fail. */
-int!CCError read_config_value(const char* key) {
+int!>(CCError) read_config_value(const char* key) {
     if (!key || key[0] == '\0') {
         return cc_err(CC_ERR_INVALID_ARG, "empty key");
     }
@@ -26,7 +26,7 @@ int!CCError read_config_value(const char* key) {
 }
 
 /* Function that uses try to propagate errors. */
-int!CCError get_total_wait_time(void) {
+int!>(CCError) get_total_wait_time(void) {
     int timeout = try read_config_value("timeout");
     int retries = try read_config_value("max_retries");
     return cc_ok(timeout * retries);
@@ -34,7 +34,7 @@ int!CCError get_total_wait_time(void) {
 
 /* Function that handles errors locally. */
 int get_timeout_with_default(int default_val) {
-    int!CCError result = read_config_value("timeout");
+    int!>(CCError) result = read_config_value("timeout");
     if (result.ok) {
         return result.u.value;
     }
@@ -45,7 +45,7 @@ int get_timeout_with_default(int default_val) {
 
 int main(void) {
     /* Test 1: Successful try propagation */
-    int!CCError total = get_total_wait_time();
+    int!>(CCError) total = get_total_wait_time();
     if (!total.ok) {
         printf("FAIL: expected ok, got error: %s\n", total.u.error.message);
         return 1;
@@ -53,7 +53,7 @@ int main(void) {
     printf("total wait time: %d seconds\n", total.u.value);
     
     /* Test 2: Error propagation via try */
-    int!CCError missing = read_config_value("unknown_key");
+    int!>(CCError) missing = read_config_value("unknown_key");
     if (missing.ok) {
         printf("FAIL: expected error for unknown key\n");
         return 1;
@@ -65,7 +65,7 @@ int main(void) {
     printf("timeout (with default fallback): %d\n", timeout);
     
     /* Test 4: Invalid argument error */
-    int!CCError invalid = read_config_value("");
+    int!>(CCError) invalid = read_config_value("");
     if (invalid.ok) {
         printf("FAIL: expected error for empty key\n");
         return 1;

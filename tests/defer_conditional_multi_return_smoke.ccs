@@ -23,7 +23,7 @@ void do_cleanup(int* resource) {
 
 // Function with multiple error return paths
 // @defer(err) should run on ALL error returns
-MyData!MyError multi_return_func(int path) {
+MyData !> (MyError) multi_return_func(int path) {
     int resource = 42;
     @defer(err) do_cleanup(&resource);
     
@@ -61,7 +61,7 @@ int main(void) {
     
     // Test path 1 - first error return
     printf("Testing path 1:\n");
-    MyData!MyError r1 = multi_return_func(1);
+    MyData !> (MyError) r1 = multi_return_func(1);
     if (cc_is_err(r1)) {
         MyError e = cc_unwrap_err_as(r1, MyError);
         printf("  error code=%d\n", e.code);
@@ -75,7 +75,7 @@ int main(void) {
     // Test path 2 - second error return (this was the bug!)
     printf("Testing path 2:\n");
     cleanup_count = 0;
-    MyData!MyError r2 = multi_return_func(2);
+    MyData !> (MyError) r2 = multi_return_func(2);
     if (cc_is_err(r2)) {
         MyError e = cc_unwrap_err_as(r2, MyError);
         printf("  error code=%d\n", e.code);
@@ -89,7 +89,7 @@ int main(void) {
     // Test path 3 - third error return
     printf("Testing path 3:\n");
     cleanup_count = 0;
-    MyData!MyError r3 = multi_return_func(3);
+    MyData !> (MyError) r3 = multi_return_func(3);
     if (cc_is_err(r3)) {
         MyError e = cc_unwrap_err_as(r3, MyError);
         printf("  error code=%d\n", e.code);
@@ -103,7 +103,7 @@ int main(void) {
     // Test path 0 - success path, @defer(err) should NOT run
     printf("Testing success path:\n");
     cleanup_count = 0;
-    MyData!MyError r0 = multi_return_func(0);
+    MyData !> (MyError) r0 = multi_return_func(0);
     if (cc_is_ok(r0)) {
         printf("  value=%d\n", cc_unwrap_as(r0, MyData).value);
     }

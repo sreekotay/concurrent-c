@@ -25,7 +25,7 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
  * Returns newly allocated string, or NULL if no rewrites. */
 char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, size_t n);
 
-/* Rewrite result type syntax `T!E` to `CCResult_T_E`.
+/* Rewrite result type syntax `T!>(E)` to `CCResult_T_E`.
  * Returns newly allocated string, or NULL if no rewrites. */
 char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, size_t n);
 

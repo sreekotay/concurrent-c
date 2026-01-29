@@ -1,4 +1,3 @@
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 
 int add_ints(int a, int b);
@@ -6,11 +5,11 @@ int add_ints(int a, int b);
 int main(void) {
     int v = add_ints(40, 2);
     @arena {
-        String s = string_new(arena);
+        CCString s = cc_string_new(arena);
         s.append("build_graph multi ok: ");
         cc_string_push_int(&s, v);
         s.append("\n");
-        std_out.write(s);
+        cc_std_out.write(s);
     }
     return 0;
 }
