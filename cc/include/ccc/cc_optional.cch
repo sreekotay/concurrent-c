@@ -250,9 +250,10 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 #include <stdlib.h>
 
 #ifdef CC_PARSER_MODE
-/* For TCC parsing: cc_unwrap_opt(x) returns .u.value */
-#define cc_unwrap_opt(opt) (opt).u.value
-#define cc_opt_value(opt) (opt).u.value
+/* For TCC parsing: cc_unwrap_opt(x) returns ._scalar for scalar types.
+   For struct types like CCOptional_CCSlice, use .u.value directly. */
+#define cc_unwrap_opt(opt) (opt).u._scalar
+#define cc_opt_value(opt) (opt).u._scalar
 #else
 /* Real mode cc_some/cc_none - these are placeholder definitions.
    The codegen pass rewrites cc_some(v) and cc_none() to typed versions
