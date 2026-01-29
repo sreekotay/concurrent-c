@@ -288,9 +288,9 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 #define cc_unwrap_or(opt, default_val) ((opt).has ? (opt).u.value : (default_val))
 
 /* Convenience macros for type names */
-#define cc_opt(T) CCOptional_##T
-#define cc_res(T, E) CCResult_##T##_##E
-#define cc_opt_res(T, E) CCOptional_CCResult_##T##_##E
-#define cc_res_opt(T, E) CCResult_CCOptional_##T##_##E
+#define CCOpt(T) CCOptional_##T
+#define CCRes(T, E) CCResult_##T##_##E
+#define CCOptRes(T, E) CCOptional_CCResult_##T##_##E
+#define CCResOpt(T, E) CCResult_CCOptional_##T##_##E
 
 #endif /* CC_OPTIONAL_H */

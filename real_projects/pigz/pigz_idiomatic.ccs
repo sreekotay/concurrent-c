@@ -246,7 +246,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                         
                         // Read returns Ok(Some(slice)), Ok(None) on EOF, Err on I/O error
-                        cc_res_opt(CCSlice, CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
+                        CCResOpt(CCSlice, CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
                         if (cc_is_err(read_res)) {
                             fprintf(stderr, "Read error: %s\n", cc_io_error_str(cc_unwrap_err(read_res)));
                             cc_heap_arena_free(&blk_arena);
