@@ -2,8 +2,10 @@
 # Run tests with ThreadSanitizer to detect data races
 #
 # Usage:
-#   ./scripts/test_tsan.sh              # Run quick TSan tests
-#   ./scripts/test_tsan.sh --all        # Run all tests with TSan
+#   ./scripts/test_tsan.sh                    # Run quick TSan tests
+#   ./scripts/test_tsan.sh --all              # Run all tests with TSan
+#   ./scripts/test_tsan.sh --timeout 10s      # Run with 10s timeout per test
+#   ./scripts/test_tsan.sh --all --timeout 10s # Run all tests with 10s timeout
 
 set -euo pipefail
 
@@ -21,18 +23,90 @@ if ! command -v clang &> /dev/null; then
     exit 1
 fi
 
+# Helper function to run command with timeout (works on macOS)
+run_with_timeout() {
+    local timeout_sec="$1"
+    shift
+    local cmd=("$@")
+    
+    # Try to use timeout command (gtimeout on macOS if coreutils installed)
+    if command -v timeout &> /dev/null; then
+        timeout "$timeout_sec" "${cmd[@]}" 2>&1
+    elif command -v gtimeout &> /dev/null; then
+        gtimeout "$timeout_sec" "${cmd[@]}" 2>&1
+    else
+        # Fallback: use background process with kill
+        local pid
+        local tmpfile=$(mktemp)
+        ("${cmd[@]}" > "$tmpfile" 2>&1) &
+        pid=$!
+        (
+            sleep "$timeout_sec"
+            if kill -0 $pid 2>/dev/null; then
+                kill $pid 2>/dev/null || true
+                echo "timeout: command terminated after ${timeout_sec}s" >> "$tmpfile"
+            fi
+        ) &
+        local killer_pid=$!
+        wait $pid 2>/dev/null
+        local exit_code=$?
+        kill $killer_pid 2>/dev/null || true
+        cat "$tmpfile"
+        rm -f "$tmpfile"
+        return $exit_code
+    fi
+}
+
 run_test() {
     local test_file="$1"
     local name
-    name=$(basename "$test_file" .ccs)
+    local output
+    local exit_code
+    if [[ "$test_file" == *.ccs ]]; then
+        name=$(basename "$test_file" .ccs)
+    else
+        name=$(basename "$test_file" .c)
+    fi
     
     printf "  %-40s " "$name"
     
-    # Build and run with TSan
-    local output
-    output=$(CC=clang CFLAGS="-fsanitize=thread -g" \
-        ./cc/bin/ccc run "$test_file" --no-cache 2>&1) || true
-    local exit_code=$?
+    if [[ "$test_file" == *.c ]]; then
+        local bin="/tmp/tsan_${name}"
+        # Compile first (no timeout needed)
+        if ! output=$(clang -fsanitize=thread -g -Icc/include "$test_file" -lpthread -o "$bin" 2>&1); then
+            echo -e "${RED}COMPILE FAIL${NC}"
+            echo "$output"
+            rm -f "$bin"
+            return 1
+        fi
+        
+        # Run with timeout if specified
+        if [ -n "$TIMEOUT" ]; then
+            output=$(run_with_timeout "$TIMEOUT" "$bin" 2>&1) || true
+            exit_code=$?
+        else
+            output=$("$bin" 2>&1) || true
+            exit_code=$?
+        fi
+        rm -f "$bin"
+    else
+        # Run with timeout if specified
+        if [ -n "$TIMEOUT" ]; then
+            output=$(run_with_timeout "$TIMEOUT" bash -c "CC=clang CFLAGS=\"-fsanitize=thread -g\" ./cc/bin/ccc run \"$test_file\" --no-cache 2>&1") || true
+            exit_code=$?
+        else
+            output=$(CC=clang CFLAGS="-fsanitize=thread -g" \
+                ./cc/bin/ccc run "$test_file" --no-cache 2>&1) || true
+            exit_code=$?
+        fi
+    fi
+    
+    # Check for timeout
+    if echo "$output" | grep -qE "(timeout|Terminated|killed)"; then
+        echo -e "${RED}TIMEOUT${NC}"
+        echo "$output" | tail -5
+        return 1
+    fi
     
     # Check for TSan errors
     if echo "$output" | grep -qE "ThreadSanitizer.*data race"; then
@@ -53,6 +127,7 @@ run_test() {
 # TSan-focused tests
 TSAN_TESTS=(
     tests/tsan_closure_capture_smoke.ccs
+    tests/tsan_closure_make_stress.c
     tests/fiber_join_waiter_race.ccs
     tests/nursery_multi_join_race.ccs
     tests/join_done_before_wait_smoke.ccs
@@ -66,9 +141,31 @@ TSAN_TESTS=(
 failed=0
 passed=0
 
-mode="${1:-quick}"
+mode="quick"
+TIMEOUT=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --all)
+            mode="--all"
+            shift
+            ;;
+        --timeout)
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
 
 echo -e "${YELLOW}=== ThreadSanitizer Tests ===${NC}"
+if [ -n "$TIMEOUT" ]; then
+    echo -e "${YELLOW}Timeout: ${TIMEOUT} per test${NC}"
+fi
 echo ""
 
 for test in "${TSAN_TESTS[@]}"; do

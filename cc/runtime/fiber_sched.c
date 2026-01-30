@@ -35,26 +35,8 @@
 
 #include "wake_primitive.h"
 
-/* TSan annotation to establish synchronization - tells TSan that this point
- * synchronizes with a corresponding __tsan_release on the same address. */
-#if defined(__SANITIZE_THREAD__) || defined(__has_feature) && __has_feature(thread_sanitizer)
-extern void __tsan_acquire(void* addr);
-extern void __tsan_release(void* addr);
-extern void __tsan_write_range(void* addr, size_t size);
-#define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
-#define TSAN_RELEASE(addr) __tsan_release(addr)
-#define TSAN_WRITE_RANGE(addr, size) __tsan_write_range(addr, size)
-extern void* __tsan_create_fiber(unsigned flags);
-extern void __tsan_switch_to_fiber(void* fiber, unsigned flags);
-#define TSAN_FIBER_CREATE() __tsan_create_fiber(0)
-#define TSAN_FIBER_SWITCH(f) do { if (f) __tsan_switch_to_fiber((f), 0); } while (0)
-#else
-#define TSAN_ACQUIRE(addr) ((void)0)
-#define TSAN_RELEASE(addr) ((void)0)
-#define TSAN_WRITE_RANGE(addr, size) ((void)0)
-#define TSAN_FIBER_CREATE() NULL
-#define TSAN_FIBER_SWITCH(f) ((void)0)
-#endif
+/* TSan annotations for synchronization and fiber context switching */
+#include "tsan_helpers.h"
 
 /* ============================================================================
  * CPU pause for spin loops

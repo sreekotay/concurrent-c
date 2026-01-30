@@ -17,7 +17,7 @@ endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g
 else
-  CFLAGS := $(CFLAGS_COMMON) -O2
+  CFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections
 endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)

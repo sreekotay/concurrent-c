@@ -18,10 +18,14 @@ The core strength of the Concurrent-C implementation is that the **lifetime of m
 
 To achieve 1:1 parity with original `pigz`, the following must be implemented:
 
-### Dictionary Chaining (Sequential Dependency)
-Original `pigz` achieves better compression by using the last 32KB of block $N$ as a dictionary for block $N+1$.
-- **Implementation:** Use a "Bucket Brigade" of small channels or a chain of `Future<CCSlice>` handles.
-- **Parallelism Impact:** High. Since the dependency is on the *raw input* (available immediately after reading) rather than the *compressed output*, workers can still run in parallel with only a nanosecond-scale staggered start.
+### Single-Member Gzip Strategy
+To achieve 1:1 byte parity with original `pigz`, we use a single global gzip member rather than concatenating multiple members.
+- **Implementation:** 
+  - The **Writer** emits a single 10-byte gzip header at the start.
+  - **Workers** produce raw deflate streams (using `Z_SYNC_FLUSH` to ensure byte-alignment at block boundaries).
+  - The **Writer** combines individual block CRCs using parallel CRC combination math (ported from `pigz.c`) and emits a single 8-byte trailer at the end.
+- **Overhead Reduction:** Eliminates the 18-byte-per-block overhead (header + trailer) inherent in the concatenated strategy, closing the ~1.4KB gap on a 10MB file.
+- **Idiomatic Pattern:** The Writer task acts as the "Aggregator" in the pipeline, centralizing the sequential finalization (header, trailer, and CRC combination) while workers remain purely parallel.
 
 ### Metadata & Signal Handling
 - **File Attributes:** A dedicated fiber to sync `chmod`, `chown`, and `utimes` after the Writer completes.

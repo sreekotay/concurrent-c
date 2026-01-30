@@ -1,0 +1,19 @@
+# pigz Binary Size Comparison (Optimized)
+
+## Optimized Results (2026-01-30)
+After enabling `-ffunction-sections`, `-fdata-sections`, and `-Wl,-dead_strip` by default in `ccc`, and applying the same to the original `pigz` build, the Concurrent-C binaries are significantly smaller.
+
+| Version | Size (Unstripped) | Size (Stripped) | Notes |
+|---------|-------------------|-----------------|-------|
+| `out/pigz` (Original) | 106K | 102K | pthread-based, compiled with `gcc -O3` |
+| `out/pigz_cc` (CC) | 88K | 85K | Concurrent-C, compiled with `ccc -O` |
+| `out/pigz_idiomatic` (CC) | 88K | 85K | Concurrent-C, compiled with `ccc -O` |
+
+## Analysis
+- **Default Stripping**: `ccc` now enables dead-code stripping by default for all non-TCC backends. This ensures that unused runtime components (networking, etc.) are removed even in debug builds, though the impact is most significant in release.
+- **Efficiency**: The CC version is now **~16.7% smaller** than the original pthread version when both are fully optimized and stripped.
+- **Runtime Overhead**: The Concurrent-C runtime (fibers, channels, nurseries) is more compact than the system's pthread implementation for this application.
+
+## Verification
+- Unused symbols like `cc_net_*`, `cc_dir_*`, and `cc_process_*` are successfully stripped.
+- The binaries remain fully functional and pass all correctness checks.

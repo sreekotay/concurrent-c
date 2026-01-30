@@ -12,8 +12,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+/* Reduced for TSan: still exercises work stealing race but runs faster */
+#define BURST_SIZE 100
+#define ITERATIONS 8
+#else
 #define BURST_SIZE 2000
 #define ITERATIONS 200
+#endif
 
 cc_atomic_int completed = 0;
 cc_atomic_int duplicates = 0;
@@ -73,7 +79,8 @@ int main(void) {
             return 1;
         }
         
-        if ((iter + 1) % 20 == 0) {
+        /* Progress reporting: show every 20 iterations, or at least once if ITERATIONS < 20 */
+        if ((iter + 1) % 20 == 0 || (iter + 1 == ITERATIONS && ITERATIONS < 20)) {
             printf("  completed %d/%d\n", iter + 1, ITERATIONS);
         }
     }

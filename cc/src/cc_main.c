@@ -2074,7 +2074,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     // For smaller release binaries, ensure the compiler emits per-function/data sections.
     // This enables the linker to dead-strip unused runtime code.
     // TCC doesn't support these flags.
-    if (opt && opt->opt_release && !is_tcc) {
+    if (!is_tcc) {
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
     }
     // Finally append the compilation inputs/outputs.
@@ -2167,7 +2167,7 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
     }
     // TCC doesn't support -ffunction-sections/-fdata-sections
-    if (opt && opt->opt_release && !cc__is_tcc(cc_bin)) {
+    if (!cc__is_tcc(cc_bin)) {
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
     }
     if (run_cmd(cmd, opt->verbose) != 0) return -1;
@@ -2195,7 +2195,7 @@ static int cc__link_many(const CCBuildOptions* opt,
              ldflags_env ? ldflags_env : "",
              opt->ld_flags ? opt->ld_flags : "");
     // TCC doesn't support -Wl,-dead_strip or -Wl,--gc-sections
-    if (opt && opt->opt_release && !is_tcc) {
+    if (!is_tcc) {
 #if defined(__APPLE__)
         strncat(cmd, " -Wl,-dead_strip", sizeof(cmd) - strlen(cmd) - 1);
 #elif defined(__linux__)

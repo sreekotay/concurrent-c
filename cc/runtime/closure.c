@@ -12,15 +12,7 @@
 #include <stdatomic.h>
 
 /* TSan annotations for closure capture synchronization */
-#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
-extern void __tsan_acquire(void* addr);
-extern void __tsan_release(void* addr);
-#define TSAN_ACQUIRE(addr) do { if (addr) __tsan_acquire(addr); } while(0)
-#define TSAN_RELEASE(addr) do { if (addr) __tsan_release(addr); } while(0)
-#else
-#define TSAN_ACQUIRE(addr) ((void)0)
-#define TSAN_RELEASE(addr) ((void)0)
-#endif
+#include "tsan_helpers.h"
 
 typedef struct {
     CCClosure0 c;

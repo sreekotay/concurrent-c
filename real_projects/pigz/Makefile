@@ -20,15 +20,15 @@ $(OUT_DIR):
 
 # Original pigz (pthread-based)
 $(OUT_DIR)/pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h | $(OUT_DIR)
-	$(CC) $(CFLAGS) -o $@ $(PIGZ_SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,-dead_strip -o $@ $(PIGZ_SRCS) $(LDFLAGS)
 
 # CC version
-$(OUT_DIR)/pigz_cc: pigz_cc.ccs | $(OUT_DIR)
-	$(CCC) -o $@ pigz_cc.ccs --ld-flags "-lz"
+$(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz"
 
 # Idiomatic CC version (with T!E result types)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
-	$(CCC) -o $@ pigz_idiomatic.ccs --ld-flags "-lz"
+	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz"
 
 # Convenience targets
 pigz: $(OUT_DIR)/pigz

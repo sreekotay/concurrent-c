@@ -494,4 +494,3 @@ int cc__collect_defer_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
     free(rewritten);
     return edits_added;
 }
-

@@ -176,6 +176,51 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
     cc__normalize_type_name(out);
 }
 
+/* Unmangle a type name: reverse of cc__mangle_type_name.
+   - Replaces trailing 'ptr' with '*' (for pointer types)
+   - Does not unmangle underscores (ambiguous with real underscores in type names)
+   Example: "CompressedResultptr" -> "CompressedResult*" */
+static void cc__unmangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
+    if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
+    
+    if (len >= sizeof(out_sz)) len = out_sz - 2; /* Leave room for '*' and '\0' */
+    
+    /* Check if type name ends with 'ptr' (pointer type) */
+    if (len >= 3 && src[len - 3] == 'p' && src[len - 2] == 't' && src[len - 1] == 'r') {
+        /* Make sure 'ptr' is not part of a known type like 'intptr_t' or 'intptr' */
+        /* Simple heuristic: if there's a preceding letter that's not '_', it's likely a pointer */
+        int is_pointer = 1;
+        
+        /* Check for known exception types that end in 'ptr' but aren't pointers */
+        static const char* non_ptr_suffixes[] = {"intptr", "uintptr", NULL};
+        for (int i = 0; non_ptr_suffixes[i]; i++) {
+            size_t slen = strlen(non_ptr_suffixes[i]);
+            if (len >= slen && strncmp(src + len - slen, non_ptr_suffixes[i], slen) == 0) {
+                /* Check if this is standalone (not part of larger word) */
+                if (len == slen || !cc__is_ident_char_local(src[len - slen - 1])) {
+                    is_pointer = 0;
+                    break;
+                }
+            }
+        }
+        
+        if (is_pointer) {
+            /* Copy everything except 'ptr', add '*' */
+            size_t copy_len = len - 3;
+            if (copy_len >= out_sz - 1) copy_len = out_sz - 2;
+            memcpy(out, src, copy_len);
+            out[copy_len] = '*';
+            out[copy_len + 1] = '\0';
+            return;
+        }
+    }
+    
+    /* No unmangling needed, just copy */
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, src, len);
+    out[len] = '\0';
+}
+
 /* Scan back from position `from` to find the start of a type token (delimited by ; { } , ( ) newline). */
 static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
     size_t i = from;
@@ -385,10 +430,28 @@ char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, 
 CCCodegenResultTypePair cc__cg_result_types[64];
 size_t cc__cg_result_type_count = 0;
 
+/* Built-in result types already declared in stdlib headers (io.cch, etc.) */
+static const char* cc__builtin_result_types[] = {
+    "CCResult_CCSlice_CCIoError",           /* io.cch: cc_file_read */
+    "CCResult_size_t_CCIoError",            /* io.cch: cc_file_write */
+    "CCResult_CCOptional_CCSlice_CCIoError",/* io.cch */
+    NULL
+};
+
+static int cc__is_builtin_result_type(const char* mangled_ok, const char* mangled_err) {
+    char type_name[256];
+    snprintf(type_name, sizeof(type_name), "CCResult_%s_%s", mangled_ok, mangled_err);
+    for (int i = 0; cc__builtin_result_types[i]; i++) {
+        if (strcmp(type_name, cc__builtin_result_types[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
                                     const char* mangled_ok, const char* mangled_err) {
-    /* Skip built-in result types (already declared in cc_result.cch) */
+    /* Skip built-in result types (already declared in cc_result.cch and io.cch) */
     if (strcmp(mangled_err, "CCError") == 0) return;
+    if (cc__is_builtin_result_type(mangled_ok, mangled_err)) return;
     
     /* Check for duplicates */
     for (size_t i = 0; i < cc__cg_result_type_count; i++) {
@@ -412,15 +475,21 @@ static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* er
 }
 
 /* Scan for result type patterns and collect type pairs.
-   Handles both formats:
+   Handles these formats:
    - __CC_RESULT(T, E) - from preprocessor macro approach
-   - CCResult_T_E - legacy or direct usage */
+   - CCRes(T, E)       - convenience macro (parser mode expands to __CCResultGeneric)
+   - CCResPtr(T, E)    - convenience macro for pointer types
+   - CCResult_T_E      - legacy or direct usage */
 static void cc__scan_for_existing_result_types(const char* src, size_t n) {
     /* Reset collection */
     cc__cg_result_type_count = 0;
     
     const char* macro_prefix = "__CC_RESULT(";
     size_t macro_prefix_len = strlen(macro_prefix);
+    const char* ccres_prefix = "CCRes(";
+    size_t ccres_prefix_len = strlen(ccres_prefix);
+    const char* ccresptr_prefix = "CCResPtr(";
+    size_t ccresptr_prefix_len = strlen(ccresptr_prefix);
     const char* struct_prefix = "CCResult_";
     size_t struct_prefix_len = strlen(struct_prefix);
     
@@ -481,6 +550,69 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
                     
                     /* Skip built-in result types */
                     if (strcmp(err_type, "CCError") != 0) {
+                        cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
+                    }
+                }
+            }
+            i = j + 1;
+            continue;
+        }
+        
+        /* Look for CCRes(T, E) and CCResPtr(T, E) convenience macros */
+        int is_ccres = (i + ccres_prefix_len < n && strncmp(src + i, ccres_prefix, ccres_prefix_len) == 0);
+        int is_ccresptr = (!is_ccres && i + ccresptr_prefix_len < n && strncmp(src + i, ccresptr_prefix, ccresptr_prefix_len) == 0);
+        if (is_ccres || is_ccresptr) {
+            /* Make sure this isn't part of a longer identifier */
+            if (i > 0 && cc__is_ident_char_local(src[i-1])) {
+                i++;
+                continue;
+            }
+            
+            size_t prefix_len = is_ccres ? ccres_prefix_len : ccresptr_prefix_len;
+            size_t j = i + prefix_len;
+            
+            /* Skip whitespace */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            
+            /* Parse first type (T) */
+            size_t ok_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t ok_end = j;
+            
+            /* Skip whitespace and comma */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != ',') { i++; continue; }
+            j++; /* skip comma */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            
+            /* Parse second type (E) */
+            size_t err_start = j;
+            while (j < n && cc__is_ident_char_local(src[j])) j++;
+            size_t err_end = j;
+            
+            /* Skip to closing paren */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != ')') { i++; continue; }
+            
+            if (ok_end > ok_start && err_end > err_start) {
+                char ok_type[128], err_type[128], mangled_ok[128];
+                size_t ok_len = ok_end - ok_start;
+                size_t err_len = err_end - err_start;
+                
+                if (ok_len < sizeof(ok_type) && err_len < sizeof(err_type)) {
+                    memcpy(ok_type, src + ok_start, ok_len);
+                    ok_type[ok_len] = '\0';
+                    memcpy(err_type, src + err_start, err_len);
+                    err_type[err_len] = '\0';
+                    
+                    /* For CCResPtr, the mangled ok type has 'ptr' suffix */
+                    if (is_ccresptr) {
+                        snprintf(mangled_ok, sizeof(mangled_ok), "%sptr", ok_type);
+                        /* The actual C type needs '*' suffix */
+                        char actual_ok[128];
+                        snprintf(actual_ok, sizeof(actual_ok), "%s*", ok_type);
+                        cc__cg_add_result_type(actual_ok, strlen(actual_ok), err_type, err_len, mangled_ok, err_type);
+                    } else {
                         cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
                     }
                 }
@@ -723,7 +855,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
         }
         
         /* Detect function definition with result return type.
-           Handles both: __CC_RESULT(T, E) and CCResult_T_E */
+           Handles: __CC_RESULT(T, E), CCRes(T, E), CCResPtr(T, E), CCResult_T_E */
         if (fn_brace_depth < 0) {
             char detected_type[256] = {0};
             size_t j = i;
@@ -749,6 +881,38 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         snprintf(detected_type, sizeof(detected_type), "CCResult_%.*s_%.*s",
                                  (int)(t_end - t_start), src + t_start,
                                  (int)(e_end - e_start), src + e_start);
+                    }
+                }
+            }
+            /* Check for CCRes(T, E) or CCResPtr(T, E) convenience macro patterns */
+            else if (c == 'C' && i + 6 < n && (memcmp(src + i, "CCRes(", 6) == 0 || 
+                     (i + 9 < n && memcmp(src + i, "CCResPtr(", 9) == 0))) {
+                int is_ptr = (memcmp(src + i, "CCResPtr(", 9) == 0);
+                j = i + (is_ptr ? 9 : 6);
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                size_t t_start = j;
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                size_t t_end = j;
+                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                if (j < n && src[j] == ',') {
+                    j++;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    size_t e_start = j;
+                    while (j < n && cc__is_ident_char_local(src[j])) j++;
+                    size_t e_end = j;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && src[j] == ')' && t_end > t_start && e_end > e_start) {
+                        j++; /* skip ')' */
+                        /* Build CCResult_Tptr_E or CCResult_T_E from the macro args */
+                        if (is_ptr) {
+                            snprintf(detected_type, sizeof(detected_type), "CCResult_%.*sptr_%.*s",
+                                     (int)(t_end - t_start), src + t_start,
+                                     (int)(e_end - e_start), src + e_start);
+                        } else {
+                            snprintf(detected_type, sizeof(detected_type), "CCResult_%.*s_%.*s",
+                                     (int)(t_end - t_start), src + t_start,
+                                     (int)(e_end - e_start), src + e_start);
+                        }
                     }
                 }
             }

@@ -1,6 +1,9 @@
 /*
  * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
  *
+ * NOTE: This is a simplified reference implementation. For the feature-complete,
+ * production-ready version, see real_projects/pigz/pigz_cc/pigz_cc.ccs.
+ *
  * This version demonstrates:
  * - Result types (T!>(E)) for error propagation
  * - CCFile with Result-based I/O (cc_file_read, cc_file_write)
@@ -216,7 +219,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     r = pending[slot];
                     pending[slot] = NULL;
                     
-                    CCResult_size_t_CCIoError wr = cc_file_write(out_ptr, r->data);
+                    CCRes(size_t, CCIoError) wr = cc_file_write(out_ptr, r->data);
                     if (cc_is_err(wr)) {
                         fprintf(stderr, "Error: write failed at block %ld: %s\n", 
                                 r->seq, cc_io_error_str(cc_unwrap_err(wr)));

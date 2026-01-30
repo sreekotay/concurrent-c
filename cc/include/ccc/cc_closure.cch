@@ -59,7 +59,13 @@ typedef struct {
 
 #if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
 /* TSan can report false positives on local stack writes in tiny inline helpers.
-   These helpers only touch a local struct, so suppressing TSan here is safe. */
+   These helpers only touch a local struct, so suppressing TSan here is safe.
+   
+   To validate this suppression is safe:
+   1. Run tests/tsan_closure_make_stress.c with TSan enabled
+   2. If TSan reports races, investigate: either the suppression is masking a real
+      race, or TSAN_IGNORE_LOCAL_WRITE usage needs adjustment
+   3. Expected: No TSan errors (suppression is safe for thread-local stack writes) */
 #define CC_TSAN_NOSAN_FN __attribute__((no_sanitize("thread")))
 #else
 #define CC_TSAN_NOSAN_FN

@@ -60,6 +60,19 @@ Notes:
 - On macOS, TSan requires `clang`.
 - TSan runs are slower; keep them focused on stress/race tests.
 
+### Validating TSan suppressions
+
+Some functions use `__attribute__((no_sanitize("thread")))` to suppress TSan checking. This is safe only when:
+1. The function only accesses thread-local memory (e.g., local stack variables)
+2. There are no real data races (suppression only hides false positives)
+
+To validate a suppression is safe:
+1. Create a stress test that calls the suppressed function concurrently from multiple threads/fibers
+2. Run with TSan: `CC=clang CFLAGS="-fsanitize=thread" ./cc/bin/ccc run <test>`
+3. If TSan reports races, investigate: either the suppression is masking a real race, or the suppression mechanism needs adjustment
+
+Example: `tests/tsan_closure_make_stress.c` validates that `cc_closure*_make` suppressions are safe (these functions only write to thread-local stack structs).
+
 ## Scheduler synchronization invariants (fiber scheduler)
 
 Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
@@ -75,4 +88,3 @@ Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
 - Fiber state transitions are linear: `CREATED -> READY -> RUNNING -> PARKED -> READY -> RUNNING -> DONE`.
 
 If you add new scheduler behaviors, update these invariants and extend the stress tests.
-
