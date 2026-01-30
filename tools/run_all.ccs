@@ -5,7 +5,7 @@
  *   ccc run tools/run_all.ccs -- examples   # run all examples
  *   ccc run tools/run_all.ccs -- stress     # run all stress tests (10s timeout)
  *   ccc run tools/run_all.ccs -- perf       # run all perf benchmarks
- *   ccc run tools/run_all.ccs -- all        # run everything
+ *   clear       # run everything
  *
  * This demonstrates the dir and process stdlib modules.
  */
@@ -22,12 +22,12 @@ typedef struct {
     int skipped;
 } Stats;
 
-/* Skip files that run indefinitely or exit non-zero by design */
-static int should_skip(const char* path) {
-    if (strstr(path, "tcp_echo") != NULL) return 1;       /* Server */
-    if (strstr(path, "http_get") != NULL) return 1;       /* Needs network */
-    if (strstr(path, "worker_pool") != NULL) return 1;    /* Long-running */
-    if (strstr(path, "deadlock_detect_demo") != NULL) return 1;  /* Intentional exit(1) */
+/* Returns the expected exit code for a given test path.
+ * Most tests expect 0, but some (like deadlock demos) expect 1.
+ * Returns -1 if the test should be skipped entirely (like servers). */
+static int get_expected_exit_code(const char* path) {
+    if (strstr(path, "recipe_tcp_echo") != NULL) return -1;       /* Server */
+    if (strstr(path, "deadlock_detect_demo") != NULL) return 1;   /* Expected deadlock abort */
     return 0;
 }
 
@@ -44,7 +44,8 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
     for (size_t i = 0; i < n; i++) {
         const char* path = cc_glob_result_get(&files, i);
         
-        if (should_skip(path)) {
+        int expected_exit = get_expected_exit_code(path);
+        if (expected_exit == -1) {
             printf("  [%zu/%zu] %s ... SKIP (server/long-running)\n", i + 1, n, path);
             stats->skipped++;
             continue;
@@ -92,15 +93,15 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         CCProcessOutput out = res.ok;
         int exit_code = cc_process_output_exit_code(&out);
         
-        if (exit_code == 0) {
-            printf("OK\n");
+        if (exit_code == expected_exit) {
+            printf("OK%s\n", expected_exit != 0 ? " (expected failure)" : "");
             stats->passed++;
-        } else if (exit_code == 124) {
+        } else if (exit_code == 124 && expected_exit != 124) {
             /* 124 = timeout (like GNU timeout) */
             printf("TIMEOUT (>%ds)\n", timeout_sec);
             stats->failed++;
         } else {
-            printf("FAIL (exit %d)\n", exit_code);
+            printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
             /* Print stdout/stderr on failure for debugging */
             const char* out_str = cc_process_output_stdout_str(&out);
             size_t out_len = cc_process_output_stdout_len(&out);
