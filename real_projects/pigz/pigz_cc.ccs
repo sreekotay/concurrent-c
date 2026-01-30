@@ -352,7 +352,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         CCArena arena = cc_heap_arena(BLOCK_SIZE + 1024);
                         
                         /* Read into the fresh arena */
-                        CCResult_CCOptional_CCSlice_CCIoError read_result = cc_file_read(in_f, &arena, BLOCK_SIZE);
+                        CCRes(CCSlice, CCIoError) read_result = cc_file_read(in_f, &arena, BLOCK_SIZE);
                         
                         /* Check for error */
                         if (!read_result.ok) {
@@ -360,14 +360,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             break;
                         }
                         
-                        /* Check for EOF */
-                        CCOptional_CCSlice data_opt = read_result.u.value;
-                        if (!data_opt.has) {
-                            cc_heap_arena_free(&arena);
-                            break;  /* EOF */
-                        }
-                        CCSlice data = data_opt.u.value;
-                        
+                        /* Check for EOF (empty slice means EOF) */
+                        CCSlice data = read_result.u.value;
                         if (data.len == 0) {
                             cc_heap_arena_free(&arena);
                             break;  /* EOF */
@@ -386,8 +380,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         blk->arena = arena;
                         
                         /* Check if this is the last block by peeking */
-                        CCResult_CCOptional_CCSlice_CCIoError peek = cc_file_read(in_f, &arena, 1);
-                        if (!peek.ok || !peek.u.value.has) {
+                        CCResult_CCSlice_CCIoError peek = cc_file_read(in_f, &arena, 1);
+                        if (!peek.ok || peek.u.value.len == 0) {
                             blk->last = 1;
                         } else {
                             blk->last = 0;
