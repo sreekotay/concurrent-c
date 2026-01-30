@@ -375,6 +375,13 @@ static void cc__maybe_record_decl(char*** scope_names,
         const char* eq = strchr(p, '=');
         if (!eq || eq > lp) return;
     }
+    /* Ignore member assignments like `g.block = ...` or `p->field = ...` */
+    const char* eq = strchr(p, '=');
+    if (eq) {
+        for (const char* t = p; t < eq; t++) {
+            if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) return;
+        }
+    }
     const char* name_s = NULL;
     size_t name_n = 0;
     const char* cur = p;
@@ -519,7 +526,15 @@ static void cc__collect_caps_from_block(char*** scope_names,
         if (cc__is_keyword_tok(s, n)) continue;
         if (ignore_name0 && strlen(ignore_name0) == n && strncmp(ignore_name0, s, n) == 0) continue;
         if (ignore_name1 && strlen(ignore_name1) == n && strncmp(ignore_name1, s, n) == 0) continue;
-        if (s > block && (s[-1] == '.' || (s[-1] == '>' && s > block + 1 && s[-2] == '-'))) continue;
+        {
+            const char* prev = s;
+            while (prev > block && (prev[-1] == ' ' || prev[-1] == '\t' || prev[-1] == '\n' || prev[-1] == '\r')) {
+                prev--;
+            }
+            if (prev > block && (prev[-1] == '.' || (prev[-1] == '>' && prev > block + 1 && prev[-2] == '-'))) {
+                continue;
+            }
+        }
         int found = 0;
         for (int d = max_depth; d >= 1 && !found; d--) {
             if (cc__name_in_list(scope_names[d], scope_counts[d], s, n)) found = 1;

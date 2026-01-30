@@ -237,6 +237,19 @@ typedef struct __CCResultGeneric {
     } u;
 } __CCResultGeneric;
 
+/* In parser mode, result type declarations use generic placeholder helpers. */
+#undef CC_DECL_RESULT_SPEC
+#define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                     \
+    typedef __CCResultGeneric name;                                    \
+    static inline name cc_ok_##name(OkType v) {                        \
+        (void)v;                                                       \
+        return __cc_result_generic_ok();                               \
+    }                                                                  \
+    static inline name cc_err_##name(ErrType e) {                      \
+        (void)e;                                                       \
+        return __cc_result_generic_err();                              \
+    }
+
 /* THE KEY MACRO: In parser mode, all result types resolve to generic.
    Usage: __CC_RESULT(int, CCIoError) expands to __CCResultGeneric
    Codegen rewrites this to CCResult_int_CCIoError */
