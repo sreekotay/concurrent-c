@@ -11,7 +11,10 @@
 // Parse the given file and return an AST handle. Returns NULL on failure.
 CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols);
 
-// Free an AST returned by cc_tcc_bridge_parse_to_ast.
+// Parse from in-memory source string (no temp files). Returns NULL on failure.
+CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, CCSymbolTable* symbols);
+
+// Free an AST returned by cc_tcc_bridge_parse_to_ast or cc_tcc_bridge_parse_string_to_ast.
 void cc_tcc_bridge_free_ast(CCASTRoot* root);
 
 #endif // CC_PARSER_TCC_BRIDGE_H

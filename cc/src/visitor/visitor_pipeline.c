@@ -27,10 +27,11 @@
 #include "visitor/walk.h"
 
 
-/* Helper: reparse rewritten source to get updated stub AST */
+/* Helper: reparse rewritten source to get updated stub AST (file-based for correctness) */
 static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t rewritten_len,
                                            const char* input_path, CCSymbolTable* symbols,
                                            char** tmp_path_out) {
+    /* Use file-based path for reparse - the prelude and path handling is complex */
     char* tmp_path = cc__write_temp_c_file(rewritten_src, rewritten_len, input_path);
     if (!tmp_path) return NULL;
 
@@ -48,6 +49,7 @@ static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t re
 
     if (pp_err == 0) {
         root2->lowered_is_temp = 1;
+        if (!getenv("CC_KEEP_REPARSE")) unlink(pp_path);
     }
 
     *tmp_path_out = tmp_path;

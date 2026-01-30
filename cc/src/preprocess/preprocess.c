@@ -3534,3 +3534,247 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     return 0;
 }
 
+// Preprocess source string to output string (no temp files).
+// skip_checks: if true, skip validation checks (use for reparse passes).
+char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks) {
+    if (!input || input_len == 0) return NULL;
+
+    /* Create type registry for this file (or reuse existing global) */
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!reg) {
+        reg = cc_type_registry_new();
+        cc_type_registry_set_global(reg);
+    }
+
+    /* Make a copy of input since some rewrites modify in-place */
+    char* buf = (char*)malloc(input_len + 1);
+    if (!buf) return NULL;
+    memcpy(buf, input, input_len);
+    buf[input_len] = 0;
+    size_t got = input_len;
+
+    /* Check for unawaited channel ops in @async functions (before rewrites).
+       Skip if requested (reparse passes) or if path looks like a temp file. */
+    if (!skip_checks && input_path) {
+        const char* basename = strrchr(input_path, '/');
+        basename = basename ? basename + 1 : input_path;
+        int is_temp_file = basename && (strncmp(basename, "cc_reparse_", 11) == 0 ||
+                            strncmp(basename, "cc_pp_", 6) == 0 ||
+                            strncmp(input_path, "/tmp/", 5) == 0);
+        if (!is_temp_file) {
+            int chan_err = cc__check_async_chan_await(buf, got, input_path);
+            if (chan_err != 0) {
+                free(buf);
+                return NULL;
+            }
+            /* Check for cc_block_on with non-@nonblocking functions (warning only) */
+            cc__check_block_on_nonblocking(buf, got, input_path);
+        }
+    }
+
+    char* rewritten_deadline = cc__rewrite_with_deadline_syntax(buf, got);
+    const char* cur = rewritten_deadline ? rewritten_deadline : buf;
+    size_t cur_n = rewritten_deadline ? strlen(rewritten_deadline) : got;
+
+    char* rewritten_match = cc__rewrite_match_syntax(cur, cur_n, input_path);
+    const char* cur_m = rewritten_match ? rewritten_match : cur;
+    size_t cur_m_n = rewritten_match ? strlen(rewritten_match) : cur_n;
+
+    char* rewritten_slice = cc__rewrite_slice_types(cur_m, cur_m_n, input_path);
+    const char* cur2 = rewritten_slice ? rewritten_slice : cur_m;
+    size_t cur2_n = rewritten_slice ? strlen(rewritten_slice) : cur_m_n;
+
+    char* rewritten_chan = cc__rewrite_chan_handle_types(cur2, cur2_n, input_path);
+    const char* cur3 = rewritten_chan ? rewritten_chan : cur2;
+    size_t cur3_n = rewritten_chan ? strlen(rewritten_chan) : cur2_n;
+
+    /* Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V and vec_new<T>/map_new<K,V> -> init calls */
+    char* rewritten_generic = cc_rewrite_generic_containers(cur3, cur3_n, input_path);
+    const char* cur3g = rewritten_generic ? rewritten_generic : cur3;
+    size_t cur3g_n = rewritten_generic ? strlen(rewritten_generic) : cur3_n;
+
+    /* Rewrite container UFCS: v.push(x) -> Vec_T_push(&v, x) */
+    char* rewritten_ufcs = cc_rewrite_ufcs_container_calls(cur3g, cur3g_n, input_path);
+    const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3g;
+    size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3g_n;
+
+    /* Rewrite std_out.write()/std_err.write() UFCS patterns */
+    char* rewritten_stdio = cc_rewrite_std_io_ufcs(cur3u, cur3u_n);
+    const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3u;
+    size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3u_n;
+
+    /* Rewrite T? -> __CC_OPTIONAL(T) */
+    char* rewritten_opt = cc__rewrite_optional_types(cur3s, cur3s_n, input_path);
+    const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
+    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
+
+    /* Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v)
+       and cc_none_CCOptional_T() -> __CC_OPTIONAL_NONE(T) for parser mode */
+    char* rewritten_opt_ctor = cc__rewrite_optional_constructors(cur4, cur4_n);
+    const char* cur4c = rewritten_opt_ctor ? rewritten_opt_ctor : cur4;
+    size_t cur4c_n = rewritten_opt_ctor ? strlen(rewritten_opt_ctor) : cur4_n;
+
+    /* Rewrite T!>(E) -> __CC_RESULT(T, E) */
+    char* rewritten_res = cc__rewrite_result_types(cur4c, cur4c_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4c;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
+
+    /* Normalize `if @try (` to `if (try ` so both syntaxes work */
+    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5, cur5_n);
+    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5;
+    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5_n;
+
+    /* Rewrite if (try T x = expr) -> expanded form (must come before try expr rewrite) */
+    char* rewritten_try_bind = cc__rewrite_try_binding(cur5a, cur5a_n);
+    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5;
+    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5_n;
+
+    /* Rewrite try expr -> cc_try(expr) */
+    char* rewritten_try = cc__rewrite_try_exprs(cur5b, cur5b_n);
+    const char* cur6 = rewritten_try ? rewritten_try : cur5b;
+    size_t cur6_n = rewritten_try ? strlen(rewritten_try) : cur5b_n;
+
+    /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
+    char* rewritten_unwrap = cc__rewrite_optional_unwrap(cur6, cur6_n);
+    const char* cur7 = rewritten_unwrap ? rewritten_unwrap : cur6;
+    size_t cur7_n = rewritten_unwrap ? strlen(rewritten_unwrap) : cur6_n;
+
+    /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
+    char* rewritten_closing = cc__rewrite_closing_annotation(cur7, cur7_n);
+    const char* cur7a = rewritten_closing ? rewritten_closing : cur7;
+    size_t cur7a_n = rewritten_closing ? strlen(rewritten_closing) : cur7_n;
+
+    /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
+    char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
+    if (rewritten_conc == (char*)-1) {
+        free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
+        free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor);
+        free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
+        free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
+        free(rewritten_match); free(rewritten_deadline); free(buf);
+        return NULL;
+    }
+    const char* cur8 = rewritten_conc ? rewritten_conc : cur7a;
+    size_t cur8_n = rewritten_conc ? strlen(rewritten_conc) : cur7a_n;
+
+    // Rewrite @link("lib") -> marker comments for linker
+    char* rewritten_link = cc__rewrite_link_directives(cur8, cur8_n);
+    const char* use = rewritten_link ? rewritten_link : cur8;
+    size_t use_n = strlen(use);
+
+    /* Build output string using open_memstream (POSIX) */
+    char* out_buf = NULL;
+    size_t out_size = 0;
+    FILE* out = open_memstream(&out_buf, &out_size);
+    if (!out) {
+        /* Fallback: estimate size and manually build */
+        free(rewritten_if_try_norm); free(rewritten_link); free(rewritten_conc);
+        free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
+        free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor);
+        free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
+        free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
+        free(rewritten_match); free(rewritten_deadline); free(buf);
+        return NULL;
+    }
+
+    /* Emit container type declarations from type registry */
+    {
+        size_t n_vec = cc_type_registry_vec_count(reg);
+        size_t n_map = cc_type_registry_map_count(reg);
+        
+        if (n_vec > 0 || n_map > 0) {
+            fprintf(out, "/* --- CC generic container declarations --- */\n");
+            fprintf(out, "#include <ccc/std/vec.cch>\n");
+            fprintf(out, "#include <ccc/std/map.cch>\n");
+            fprintf(out, "#ifndef CC_PARSER_MODE\n");
+            
+            /* Emit Vec declarations */
+            for (size_t i = 0; i < n_vec; i++) {
+                const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
+                if (inst && inst->type1 && inst->mangled_name) {
+                    const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                    if (strcmp(mangled_elem, "char") == 0) continue;
+                    int is_complex = (strchr(inst->type1, '*') != NULL || 
+                                      strncmp(inst->type1, "struct ", 7) == 0 ||
+                                      strncmp(inst->type1, "union ", 6) == 0);
+                    if (is_complex) {
+                        int opt_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
+                                               strcmp(mangled_elem, "intptr") == 0 ||
+                                               strcmp(mangled_elem, "voidptr") == 0);
+                        if (!opt_predeclared) {
+                            fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
+                        }
+                        fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
+                                inst->type1, inst->mangled_name, mangled_elem);
+                    } else {
+                        fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                    }
+                }
+            }
+            
+            /* Emit Map declarations */
+            for (size_t i = 0; i < n_map; i++) {
+                const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
+                if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
+                    const char* hash_fn = "cc_kh_hash_i32";
+                    const char* eq_fn = "cc_kh_eq_i32";
+                    if (strcmp(inst->type1, "int") == 0) {
+                        hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                    } else if (strstr(inst->type1, "64") != NULL) {
+                        hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                    } else if (strstr(inst->type1, "slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
+                        hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
+                    }
+                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
+                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                }
+            }
+            
+            fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
+            fprintf(out, "/* --- end container declarations --- */\n\n");
+        }
+    }
+
+    /* If result types are used, include cc_result.cch */
+    if (cc__result_type_count > 0) {
+        fprintf(out, "/* --- CC result type support --- */\n");
+        fprintf(out, "#ifndef CC_PARSER_MODE\n");
+        fprintf(out, "#define CC_PARSER_MODE 1\n");
+        fprintf(out, "#endif\n");
+        fprintf(out, "#include <ccc/cc_result.cch>\n");
+        fprintf(out, "/* --- end result support --- */\n\n");
+    }
+
+    char rel[1024];
+    fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
+    fputs(use, out);
+    fclose(out);
+
+    /* Cleanup intermediate buffers */
+    free(rewritten_if_try_norm);
+    free(rewritten_link);
+    free(rewritten_conc);
+    free(rewritten_closing);
+    free(rewritten_unwrap);
+    free(rewritten_try);
+    free(rewritten_try_bind);
+    free(rewritten_res);
+    free(rewritten_opt_ctor);
+    free(rewritten_opt);
+    free(rewritten_stdio);
+    free(rewritten_ufcs);
+    free(rewritten_generic);
+    free(rewritten_chan);
+    free(rewritten_slice);
+    free(rewritten_match);
+    free(rewritten_deadline);
+    free(buf);
+
+    return out_buf;
+}
+
+// Wrapper that runs all checks (default behavior for initial parse).
+char* cc_preprocess_to_string(const char* input, size_t input_len, const char* input_path) {
+    return cc_preprocess_to_string_ex(input, input_len, input_path, 0);
+}
+

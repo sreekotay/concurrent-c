@@ -23,6 +23,7 @@
 /* The patched TCC should export these. Mark weak so we can still link if the
    extension is absent, and fall back to stubs at runtime. */
 __attribute__((weak)) struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols);
+__attribute__((weak)) struct CCASTStubRoot* cc_tcc_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, CCSymbolTable* symbols);
 __attribute__((weak)) void cc_tcc_free_ast(struct CCASTStubRoot* r);
 __attribute__((weak)) void tcc_set_ext_parser(struct TCCExtParser const *p);
 extern const struct TCCExtParser cc_ext_parser;
@@ -78,6 +79,41 @@ CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char*
     return root;
 }
 
+// Parse from in-memory source string (no temp files).
+CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, CCSymbolTable* symbols) {
+    if (!source_code || !cc_tcc_parse_string_to_ast) return NULL;
+    (void)symbols;
+    if (tcc_set_ext_parser) {
+        tcc_set_ext_parser(&cc_ext_parser);
+    }
+    struct CCASTStubRoot* r = cc_tcc_parse_string_to_ast(source_code, virtual_filename, original_path, symbols);
+    if (!r) return NULL;
+    CCASTRoot* root = (CCASTRoot*)malloc(sizeof(CCASTRoot));
+    if (!root) {
+        cc_tcc_free_ast(r);
+        return NULL;
+    }
+    memset(root, 0, sizeof(*root));
+    // No lowered_path for string-based parsing (no temp file to clean up).
+    root->lowered_path = virtual_filename ? strdup(virtual_filename) : NULL;
+    root->lowered_is_temp = 0; // No temp file to delete.
+    root->tcc_root = r;
+    root->nodes = (const struct CCASTStubNode*)r->nodes;
+    root->node_count = r->count;
+
+    /* Debug: dump stub nodes (best-effort) */
+    if (getenv("CC_DEBUG_STUB_NODES") && root->nodes && root->node_count > 0) {
+        const struct CCASTStubNode* nn = root->nodes;
+        int arenas = 0;
+        for (int i = 0; i < root->node_count; i++) {
+            if (nn[i].kind == 4) arenas++;
+        }
+        fprintf(stderr, "CC_DEBUG_STUB_NODES: %s: nodes=%d arenas=%d\n",
+                original_path ? original_path : "<string>", root->node_count, arenas);
+    }
+    return root;
+}
+
 void cc_tcc_bridge_free_ast(CCASTRoot* root) {
     if (!root) return;
     const char* keep_pp = getenv("CC_KEEP_PP");
@@ -97,6 +133,14 @@ void cc_tcc_bridge_free_ast(CCASTRoot* root) {
 
 CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols) {
     (void)preprocessed_path;
+    (void)original_path;
+    (void)symbols;
+    return NULL;
+}
+
+CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, CCSymbolTable* symbols) {
+    (void)source_code;
+    (void)virtual_filename;
     (void)original_path;
     (void)symbols;
     return NULL;

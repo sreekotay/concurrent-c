@@ -45,6 +45,28 @@
 
 #define cc__is_ident_char_local cc_is_ident_char
 
+/* Helper: reparse source string to AST (file-based for correctness with complex prelude) */
+static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
+                                            const char* input_path, CCSymbolTable* symbols) {
+    /* Use file-based path for reparse - the prelude and path handling is complex */
+    char* tmp_path = cc__write_temp_c_file(src, src_len, input_path);
+    if (!tmp_path) return NULL;
+
+    char pp_path[128];
+    int pp_err = cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path));
+    const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
+
+    CCASTRoot* root = cc_tcc_bridge_parse_to_ast(use_path, input_path, symbols);
+    if (pp_err == 0 && !getenv("CC_KEEP_REPARSE")) unlink(pp_path);
+    if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
+    free(tmp_path);
+
+    if (root && pp_err == 0) {
+        root->lowered_is_temp = 0; /* Already cleaned up */
+    }
+    return root;
+}
+
 /* AST-driven async lowering (implemented in `cc/src/visitor/async_ast.c`). */
 int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                        const CCVisitorCtx* ctx,
@@ -590,16 +612,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
        (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
-        char* tmp_path = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
-        char pp_path[128];
-        int pp_err = tmp_path ? cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path)) : EINVAL;
-        const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
-        CCASTRoot* root3 = use_path ? cc_tcc_bridge_parse_to_ast(use_path, ctx->input_path, ctx->symbols) : NULL;
-        if (pp_err == 0 && !(getenv("CC_KEEP_REPARSE"))) unlink(pp_path);
-        if (tmp_path) {
-            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
-            free(tmp_path);
-        }
+        CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (!root3) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -666,16 +679,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc_tcc_bridge_free_ast(root3);
 
         /* Reparse after closure rewrite so spawn/nursery/arena spans are correct. */
-        char* tmp2 = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
-        char pp2[128];
-        int pp2_err = tmp2 ? cc_preprocess_file(tmp2, pp2, sizeof(pp2)) : EINVAL;
-        const char* use2 = (pp2_err == 0) ? pp2 : tmp2;
-        CCASTRoot* root4 = use2 ? cc_tcc_bridge_parse_to_ast(use2, ctx->input_path, ctx->symbols) : NULL;
-        if (pp2_err == 0 && !(getenv("CC_KEEP_REPARSE"))) unlink(pp2);
-        if (tmp2) {
-            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp2);
-            free(tmp2);
-        }
+        CCASTRoot* root4 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (!root4) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -708,16 +712,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc_tcc_bridge_free_ast(root4);
 
         /* Reparse after spawn rewrite so nursery/arena end braces are correct. */
-        char* tmp3 = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
-        char pp3[128];
-        int pp3_err = tmp3 ? cc_preprocess_file(tmp3, pp3, sizeof(pp3)) : EINVAL;
-        const char* use3 = (pp3_err == 0) ? pp3 : tmp3;
-        CCASTRoot* root5 = use3 ? cc_tcc_bridge_parse_to_ast(use3, ctx->input_path, ctx->symbols) : NULL;
-        if (pp3_err == 0 && !(getenv("CC_KEEP_REPARSE"))) unlink(pp3);
-        if (tmp3) {
-            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp3);
-            free(tmp3);
-        }
+        CCASTRoot* root5 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (!root5) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -784,23 +779,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* AST-driven @async lowering (state machine).
        IMPORTANT: run AFTER CC statement-level lowering so @nursery/@arena/spawn/closures are real C. */
     if (src_ufcs && ctx && ctx->symbols) {
-        char* tmp_path = cc__write_temp_c_file(src_ufcs, src_ufcs_len, ctx->input_path);
-        char pp_path[128];
-        int pp_err = tmp_path ? cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path)) : EINVAL;
-        const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
+        CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (getenv("CC_DEBUG_REPARSE")) {
-            fprintf(stderr, "CC: reparse: tmp=%s pp=%s pp_err=%d use=%s\n",
-                    tmp_path ? tmp_path : "<null>",
-                    (pp_err == 0) ? pp_path : "<n/a>",
-                    pp_err,
-                    use_path ? use_path : "<null>");
+            fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2 ? root2->node_count : -1);
         }
-        CCASTRoot* root2 = use_path ? cc_tcc_bridge_parse_to_ast(use_path, ctx->input_path, ctx->symbols) : NULL;
         if (!root2) {
-            if (tmp_path) {
-                if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
-                free(tmp_path);
-            }
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
             free(src_all);
@@ -808,22 +791,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(closure_defs);
             return EINVAL;
         }
-        if (pp_err == 0) root2->lowered_is_temp = 1;
-        if (getenv("CC_DEBUG_REPARSE")) {
-            fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2->node_count);
-        }
 
         char* rewritten = NULL;
         size_t rewritten_len = 0;
         int ar = cc_async_rewrite_state_machine_ast(root2, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
         cc_tcc_bridge_free_ast(root2);
-        if (tmp_path) {
-            if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
-            free(tmp_path);
-        }
-        if (pp_err == 0 && !(getenv("CC_KEEP_REPARSE"))) {
-            unlink(pp_path);
-        }
         if (ar < 0) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);

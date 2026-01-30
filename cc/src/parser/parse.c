@@ -9,26 +9,52 @@
 
 #include "tcc_bridge.h"
 #include "preprocess/preprocess.h"
+#include "util/path.h"
 
 int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** out_root) {
     if (!input_path || !out_root) {
         return EINVAL;
     }
 #ifdef CC_TCC_EXT_AVAILABLE
-    char tmp_path[128];
-    int pp_err = cc_preprocess_file(input_path, tmp_path, sizeof(tmp_path));
-    const char* use_path = (pp_err == 0) ? tmp_path : input_path;
+    /* Read input file into memory */
+    FILE* f = fopen(input_path, "r");
+    if (!f) return errno ? errno : EIO;
+    fseek(f, 0, SEEK_END);
+    long file_len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (file_len < 0 || file_len > (1 << 22)) { /* 4MB cap */
+        fclose(f);
+        return ENOMEM;
+    }
+    char* file_buf = (char*)malloc((size_t)file_len + 1);
+    if (!file_buf) {
+        fclose(f);
+        return ENOMEM;
+    }
+    size_t got = fread(file_buf, 1, (size_t)file_len, f);
+    file_buf[got] = '\0';
+    fclose(f);
 
-    CCASTRoot* root = cc_tcc_bridge_parse_to_ast(use_path, input_path, symbols);
+    /* Preprocess to string (no temp file) */
+    char* pp_buf = cc_preprocess_to_string(file_buf, got, input_path);
+    free(file_buf);
+    if (!pp_buf) {
+        return -1;
+    }
+
+    /* Parse from string (no temp file).
+       Use same relative path for virtual filename that #line directive uses. */
+    char rel_path[1024];
+    cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
+    CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(pp_buf, rel_path, input_path, symbols);
+    free(pp_buf);
     if (root) {
         root->original_path = input_path;
-        if (pp_err == 0) {
-            root->lowered_is_temp = 1;
-        }
+        root->lowered_is_temp = 0;
         *out_root = root;
         return 0;
     }
-    // Fall back to stub when hook is unavailable or returns NULL.
+    return -1;
 #endif
     // Fallback: dummy AST so the pipeline keeps running when hooks are absent.
     (void)symbols;
