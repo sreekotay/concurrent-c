@@ -170,7 +170,7 @@ void test_defer_in_loop(void) {
 }
 
 int main(void) {
-    printf("Testing @defer semantics and spawn closure limitation\n");
+    printf("Testing @defer semantics in spawn closures\n");
     printf("=====================================================\n");
     
     test_defer_in_function();

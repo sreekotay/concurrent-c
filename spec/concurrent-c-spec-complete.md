@@ -1588,6 +1588,37 @@ void!>(IoError) process(char[:] path, Arena* out) {
 }
 ```
 
+**Defer in spawn closures:**
+
+`@defer` works inside spawn closure bodies. The defer runs when the closure scope exits, providing automatic cleanup for resources allocated within spawned tasks:
+
+```c
+@nursery {
+    spawn([]() => {
+        z_stream strm;
+        deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+        @defer deflateEnd(&strm);  // ✅ runs when closure exits
+        
+        while (chan_recv(blocks_rx, &blk) == 0) {
+            // ... process blocks ...
+        }
+        // deflateEnd(&strm) runs here automatically
+    });
+}
+```
+
+**Scope-based semantics:** Defer is scope-based (runs at `}`), not function-based like Go's `defer`. This means defer inside a loop runs at the end of each iteration:
+
+```c
+for (int i = 0; i < 3; i++) {
+    Resource r;
+    resource_init(&r, i);
+    @defer resource_cleanup(&r);  // runs at END of each iteration
+    process(&r);
+}
+// resource_cleanup ran 3 times, once per iteration
+```
+
 ---
 
 ### 3.2 Arena blocks

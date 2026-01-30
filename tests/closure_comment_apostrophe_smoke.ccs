@@ -11,7 +11,7 @@
 
 void test_apostrophe_in_comment(int level) {
     @nursery {
-        spawn([level]() => {  /* Can't use @defer inside closures! */
+        spawn([level]() => {  /* Test comment with apostrophe - it's fine */
             printf("level=%d\n", level);
         });
     }
