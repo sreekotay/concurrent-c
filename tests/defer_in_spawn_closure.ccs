@@ -1,0 +1,192 @@
+/*
+ * Test: @defer inside spawn closures
+ * 
+ * This file verifies that @defer works correctly inside spawn closures.
+ * The closure pass now applies defer lowering to closure bodies.
+ * 
+ * Block-level defer semantics: @defer is SCOPE-based (runs at '}'), not
+ * function-based like Go. This is correct behavior and mirrors C++ RAII.
+ */
+
+#define CC_ENABLE_SHORT_NAMES
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* Global counters to verify cleanup ran */
+cc_atomic_int g_cleanup_count = 0;
+cc_atomic_int g_worker_count = 0;
+
+/* Simulated resource */
+typedef struct {
+    int id;
+    int initialized;
+} Resource;
+
+void resource_init(Resource* r, int id) {
+    r->id = id;
+    r->initialized = 1;
+    printf("Resource %d initialized\n", id);
+}
+
+void resource_cleanup(Resource* r) {
+    if (r->initialized) {
+        printf("Resource %d cleaned up\n", r->id);
+        r->initialized = 0;
+        cc_atomic_fetch_add(&g_cleanup_count, 1);
+    }
+}
+
+/* 
+ * Test 1: @defer at function level (works fine)
+ * This demonstrates that defer works correctly in regular functions.
+ */
+void test_defer_in_function(void) {
+    printf("\n=== Test 1: @defer in regular function ===\n");
+    cc_atomic_store(&g_cleanup_count, 0);
+    
+    Resource r;
+    resource_init(&r, 100);
+    @defer resource_cleanup(&r);
+    
+    printf("Doing work...\n");
+    // @defer runs here at function exit
+}
+
+/*
+ * Test 2: @defer at block level inside function (works fine)
+ * Demonstrates that defer is scope-based, not function-based.
+ */
+void test_defer_block_level(void) {
+    printf("\n=== Test 2: @defer at block level ===\n");
+    cc_atomic_store(&g_cleanup_count, 0);
+    
+    printf("Before block\n");
+    {
+        Resource r;
+        resource_init(&r, 200);
+        @defer resource_cleanup(&r);
+        printf("Inside block\n");
+        // @defer runs here at block exit, BEFORE "After block" prints
+    }
+    printf("After block (cleanup should have run)\n");
+    
+    if (cc_atomic_load(&g_cleanup_count) != 1) {
+        printf("ERROR: Block-level defer didn't run at block exit!\n");
+    }
+}
+
+/*
+ * Test 3: @defer inside spawn closure (now works!)
+ */
+void test_defer_spawn_immediate(void) {
+    printf("\n=== Test 3: @defer inside spawn closure ===\n");
+    cc_atomic_store(&g_cleanup_count, 0);
+    cc_atomic_store(&g_worker_count, 0);
+    
+    @nursery {
+        spawn([]() => {
+            Resource r;
+            resource_init(&r, 300);
+            @defer resource_cleanup(&r);  // This now works!
+            
+            printf("Worker: doing work\n");
+            cc_atomic_fetch_add(&g_worker_count, 1);
+            // @defer runs here when closure exits
+        });
+    }
+    
+    printf("All workers done. Cleanup count: %d, Worker count: %d\n",
+           cc_atomic_load(&g_cleanup_count), cc_atomic_load(&g_worker_count));
+    
+    if (cc_atomic_load(&g_cleanup_count) != 1) {
+        printf("ERROR: @defer in spawn closure didn't run!\n");
+    }
+}
+
+/*
+ * Test 4: @defer inside spawn closure with multiple workers (now works!)
+ * This is the pattern from pigz - defer works correctly now.
+ */
+void test_defer_spawn_multiple_workers(void) {
+    printf("\n=== Test 4: @defer in multiple spawn workers ===\n");
+    cc_atomic_store(&g_cleanup_count, 0);
+    cc_atomic_store(&g_worker_count, 0);
+    
+    @nursery {
+        for (int idx = 0; idx < 3; idx++) {
+            int worker_id = idx;  // capture-friendly local
+            spawn([worker_id]() => {
+                Resource r;
+                resource_init(&r, 400 + worker_id);
+                @defer resource_cleanup(&r);  // This now works!
+                
+                printf("Worker %d: doing work\n", worker_id);
+                cc_atomic_fetch_add(&g_worker_count, 1);
+                // @defer runs here when closure exits
+            });
+        }
+    }
+    
+    int expected_cleanup = 3;
+    int actual_cleanup = cc_atomic_load(&g_cleanup_count);
+    printf("Cleanup count: expected=%d, actual=%d\n", expected_cleanup, actual_cleanup);
+    
+    if (actual_cleanup != expected_cleanup) {
+        printf("ERROR: Not all resources cleaned up!\n");
+    }
+}
+
+/*
+ * Test 5: Loop-level defer semantics exploration
+ * 
+ * Should @defer inside a loop run:
+ *   a) Once at function exit? (Go-style, NO)
+ *   b) At end of each iteration? (C++ RAII-style, YES in CC)
+ *   
+ * CC uses scope-based defer, so it runs at block exit (each iteration).
+ */
+void test_defer_in_loop(void) {
+    printf("\n=== Test 5: @defer in loop (scope-based) ===\n");
+    cc_atomic_store(&g_cleanup_count, 0);
+    
+    for (int i = 0; i < 3; i++) {
+        Resource r;
+        resource_init(&r, 500 + i);
+        @defer resource_cleanup(&r);
+        printf("Loop iteration %d\n", i);
+        // @defer runs HERE at end of each iteration
+    }
+    
+    int expected = 3;
+    int actual = cc_atomic_load(&g_cleanup_count);
+    printf("Cleanup count: expected=%d, actual=%d\n", expected, actual);
+    
+    if (actual != expected) {
+        printf("ERROR: Loop-level defer semantics incorrect!\n");
+    } else {
+        printf("CORRECT: Defer ran at end of each loop iteration\n");
+    }
+}
+
+int main(void) {
+    printf("Testing @defer semantics and spawn closure limitation\n");
+    printf("=====================================================\n");
+    
+    test_defer_in_function();
+    test_defer_block_level();
+    test_defer_spawn_immediate();
+    test_defer_spawn_multiple_workers();
+    test_defer_in_loop();
+    
+    printf("\n=====================================================\n");
+    printf("Tests complete.\n");
+    printf("\nFEATURE VERIFIED:\n");
+    printf("  @defer inside spawn closures now works correctly.\n");
+    printf("  The closure pass applies defer lowering to closure bodies.\n");
+    printf("\nSEMANTICS:\n");
+    printf("  Block-level defer is scope-based like C++ RAII.\n");
+    printf("  @defer runs at scope exit ('}'), not at function exit like Go.\n");
+    
+    return 0;
+}

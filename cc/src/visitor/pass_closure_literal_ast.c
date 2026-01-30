@@ -9,6 +9,7 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
+#include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_type_syntax.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -1958,7 +1959,16 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             if (!lowered2) lowered2 = strdup(lowered_body);
             /* Rewrite T!E result types in closure body */
             char* lowered3 = cc__rewrite_result_types_text(ctx, lowered2, strlen(lowered2));
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered3 ? lowered3 : lowered2);
+            /* Rewrite @defer in closure body */
+            char* lowered4 = NULL;
+            size_t lowered4_len = 0;
+            const char* src_for_defer = lowered3 ? lowered3 : lowered2;
+            if (cc__rewrite_defer_syntax(ctx, src_for_defer, strlen(src_for_defer), &lowered4, &lowered4_len) > 0 && lowered4) {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered4);
+                free(lowered4);
+            } else {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", src_for_defer);
+            }
             free(lowered3);
             free(lowered2);
         } else {
