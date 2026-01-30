@@ -3,7 +3,7 @@
  *
  * Usage:
  *   ccc run tools/run_all.ccs -- examples   # run all examples
- *   ccc run tools/run_all.ccs -- stress     # run all stress tests
+ *   ccc run tools/run_all.ccs -- stress     # run all stress tests (10s timeout)
  *   ccc run tools/run_all.ccs -- perf       # run all perf benchmarks
  *   ccc run tools/run_all.ccs -- all        # run everything
  *
@@ -11,6 +11,9 @@
  */
 
 #include <ccc/std/prelude.cch>
+
+/* Default timeout for stress tests (seconds) */
+#define STRESS_TIMEOUT_SEC 10
 
 typedef struct {
     int passed;
@@ -27,7 +30,7 @@ static int should_skip(const char* path) {
     return 0;
 }
 
-static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats) {
+static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats, int timeout_sec) {
     printf("\n=== %s ===\n", label);
 
     CCGlobResult files = cc_glob(arena, pattern);
@@ -49,7 +52,21 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         printf("  [%zu/%zu] %s ... ", i + 1, n, path);
         fflush(stdout);
 
-        const char* args[] = {"ccc", "run", path, NULL};
+        /* Build args: ccc run [--timeout N] path */
+        const char* args[6];
+        int argc = 0;
+        args[argc++] = "ccc";
+        args[argc++] = "run";
+        
+        char timeout_str[16];
+        if (timeout_sec > 0) {
+            args[argc++] = "--timeout";
+            snprintf(timeout_str, sizeof(timeout_str), "%d", timeout_sec);
+            args[argc++] = timeout_str;
+        }
+        args[argc++] = path;
+        args[argc] = NULL;
+
         CCResultProcessOutputIoError res = cc_process_run(arena, "./out/cc/bin/ccc", args);
 
         if (res.is_err) {
@@ -59,19 +76,18 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         }
 
         CCProcessOutput out = res.ok;
-        if (cc_process_output_success(&out)) {
+        int exit_code = cc_process_output_exit_code(&out);
+        
+        if (exit_code == 0) {
             printf("OK\n");
             stats->passed++;
-        } else {
-            printf("FAIL (exit %d)\n", cc_process_output_exit_code(&out));
+        } else if (exit_code == 124) {
+            /* 124 = timeout (like GNU timeout) */
+            printf("TIMEOUT (>%ds)\n", timeout_sec);
             stats->failed++;
-            // Show first few lines of output on failure
-            size_t errlen = cc_process_output_stderr_len(&out);
-            if (errlen > 0) {
-                printf("    stderr: %.*s\n",
-                       (int)(errlen > 200 ? 200 : errlen),
-                       cc_process_output_stderr_str(&out));
-            }
+        } else {
+            printf("FAIL (exit %d)\n", exit_code);
+            stats->failed++;
         }
     }
 }
@@ -96,7 +112,7 @@ int main(int argc, char** argv) {
         printf("Usage: ccc run tools/run_all.ccs -- <category>\n");
         printf("\nCategories:\n");
         printf("  examples  - run all example programs\n");
-        printf("  stress    - run all stress tests\n");
+        printf("  stress    - run all stress tests (%ds timeout)\n", STRESS_TIMEOUT_SEC);
         printf("  perf      - run all performance benchmarks\n");
         printf("  all       - run everything\n");
         return 1;
@@ -105,15 +121,15 @@ int main(int argc, char** argv) {
     printf("Concurrent-C Test Runner\n");
 
     if (do_examples) {
-        run_files(&arena, "examples/*.ccs", "Examples", &stats);
+        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0);  /* No timeout */
     }
 
     if (do_stress) {
-        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats);
+        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC);
     }
 
     if (do_perf) {
-        run_files(&arena, "perf/*.ccs", "Performance Benchmarks", &stats);
+        run_files(&arena, "perf/*.ccs", "Performance Benchmarks", &stats, 0);  /* No timeout */
     }
 
     // Summary

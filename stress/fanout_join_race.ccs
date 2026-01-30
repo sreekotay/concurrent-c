@@ -10,8 +10,8 @@
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-#define FAN_SIZE 200
-#define ITERATIONS 50
+#define FAN_SIZE 300
+#define ITERATIONS 100
 
 cc_atomic_int sum = 0;
 

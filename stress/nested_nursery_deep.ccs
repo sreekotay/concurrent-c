@@ -12,8 +12,8 @@
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-#define DEPTH 20
-#define ITERATIONS 100
+#define DEPTH 30
+#define ITERATIONS 200
 
 cc_atomic_int deepest_reached = 0;
 

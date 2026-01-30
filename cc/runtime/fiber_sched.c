@@ -1267,9 +1267,24 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         fiber_task* expected = NULL;
         if (atomic_compare_exchange_strong_explicit(&f->join_waiter_fiber, &expected, current,
                                                      memory_order_acq_rel, memory_order_acquire)) {
-            /* Successfully registered as fiber waiter - park until woken */
+            /* Successfully registered as fiber waiter - park until woken.
+             * Must check unpark_pending to handle race where target completes
+             * before we park (cc__fiber_unpark sets unpark_pending if we're 
+             * still RUNNING). */
             while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+                /* Check if unpark already happened before we try to park */
+                if (atomic_exchange_explicit(&current->unpark_pending, 0, memory_order_acq_rel)) {
+                    continue;  /* Already woken, re-check done flag */
+                }
+                
                 atomic_store_explicit(&current->state, FIBER_PARKED, memory_order_release);
+                
+                /* Check again after setting PARKED - race window closed */
+                if (atomic_exchange_explicit(&current->unpark_pending, 0, memory_order_acq_rel)) {
+                    atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
+                    continue;  /* Already woken, re-check done flag */
+                }
+                
                 atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
                 mco_yield(current->coro);
                 atomic_fetch_sub_explicit(&g_sched.parked, 1, memory_order_relaxed);

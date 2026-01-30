@@ -10,7 +10,8 @@
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-#define ITERATIONS 1000
+#define ITERATIONS 2000
+#define NUM_OBSERVERS 8
 
 cc_atomic_int target_done = 0;
 cc_atomic_int observers_done = 0;
@@ -40,18 +41,18 @@ int main(void) {
         cc_atomic_store(&target_done, 0);
         cc_atomic_store(&observers_done, 0);
         
-        /* Spawn target and 3 observers that race to see completion */
+        /* Spawn target and NUM_OBSERVERS observers that race to see completion */
         CCNursery* n = cc_nursery_create();
         cc_nursery_spawn(n, target_task, (void*)(intptr_t)iter);
-        cc_nursery_spawn(n, observer_task, NULL);
-        cc_nursery_spawn(n, observer_task, NULL);
-        cc_nursery_spawn(n, observer_task, NULL);
+        for (int o = 0; o < NUM_OBSERVERS; o++) {
+            cc_nursery_spawn(n, observer_task, NULL);
+        }
         cc_nursery_wait(n);
         cc_nursery_free(n);
         
         int obs = cc_atomic_load(&observers_done);
-        if (obs != 3) {
-            fprintf(stderr, "FAIL: iter %d: only %d/3 observers done\n", iter, obs);
+        if (obs != NUM_OBSERVERS) {
+            fprintf(stderr, "FAIL: iter %d: only %d/%d observers done\n", iter, obs, NUM_OBSERVERS);
             return 1;
         }
         

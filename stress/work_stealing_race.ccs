@@ -10,13 +10,14 @@
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
+#include <stdlib.h>
 
-#define BURST_SIZE 1000
-#define ITERATIONS 100
+#define BURST_SIZE 2000
+#define ITERATIONS 200
 
 cc_atomic_int completed = 0;
 cc_atomic_int duplicates = 0;
-cc_atomic_int task_ids[BURST_SIZE];
+cc_atomic_int* task_ids = NULL;
 
 void* burst_task(void* arg) {
     int id = (int)(intptr_t)arg;
@@ -36,6 +37,13 @@ void* burst_task(void* arg) {
 
 int main(void) {
     printf("work_stealing_race: burst=%d, iterations=%d\n", BURST_SIZE, ITERATIONS);
+    
+    /* Allocate task_ids array dynamically */
+    task_ids = (cc_atomic_int*)calloc(BURST_SIZE, sizeof(cc_atomic_int));
+    if (!task_ids) {
+        fprintf(stderr, "FAIL: could not allocate task_ids\n");
+        return 1;
+    }
     
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&completed, 0);
@@ -70,6 +78,7 @@ int main(void) {
         }
     }
     
+    free(task_ids);
     printf("work_stealing_race: PASS\n");
     return 0;
 }
