@@ -1,0 +1,2 @@
+# Unknown type names should produce a helpful error message
+unknown type name 'SomeUndefinedType'

@@ -1,0 +1,11 @@
+/* Test that unknown type names produce a clear error message.
+ * This should fail with "unknown type name 'SomeUndefinedType'"
+ * rather than a confusing "';' expected" or "'{' expected".
+ */
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    SomeUndefinedType my_var = {0};
+    (void)my_var;
+    return 0;
+}
