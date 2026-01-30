@@ -1,7 +1,10 @@
 # TCC Extension Points for Concurrent C
 
-This document describes the hooks added to TCC for Concurrent C integration.
-All extensions are guarded by `CONFIG_CC_EXT` to ensure vanilla TCC builds are unaffected.
+Technical reference for the hooks added to TCC for Concurrent C integration.
+
+All extensions are guarded by `#ifdef CONFIG_CC_EXT` to ensure vanilla TCC builds are unaffected.
+
+> See also: [ARCHITECTURE.md](ARCHITECTURE.md) for patch workflow, [README.md](README.md) for overview.
 
 ## 1. External Parser API (`TCCExtParser`)
 

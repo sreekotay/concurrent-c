@@ -1,8 +1,8 @@
 # TCC Patch Architecture
 
-## Overview
-
 Concurrent-C extends TCC (Tiny C Compiler) with hooks for parsing CC syntax and emitting stub-AST nodes. These extensions are maintained as **patches** applied on top of a pristine TCC upstream.
+
+> See also: [HOOKS.md](HOOKS.md) for technical API reference, [README.md](README.md) for quick start.
 
 ## Key Principle
 

@@ -2,63 +2,52 @@
 
 This directory contains patches to TCC (Tiny C Compiler) that enable CC language extensions.
 
-## Patch Overview
+## Documentation
 
-**0001-cc-ext-hooks.patch** (~3700 lines)
+| Document | Purpose |
+|----------|---------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Patch workflow, build configuration, common mistakes |
+| [HOOKS.md](HOOKS.md) | Technical reference for TCC extension points and APIs |
 
-A unified patch containing all CC extensions to TCC:
-
-1. **Core Infrastructure** (`tcc.h`, `libtcc.c`)
-   - AST stub recording system for CC visitor passes
-   - `ext_parser` hooks for external statement/expression parsing
-   - UFCS scratch state (`cc_last_member_*`, `cc_last_recv_type`)
-
-2. **Statement Extensions** (`tccgen.c`)
-   - `@arena` and `@arena_init` block parsing
-   - `@nursery` block parsing
-   - `@defer` statement parsing
-   - `spawn` statement parsing
-
-3. **Expression Extensions** (`tccgen.c`, `tccpp.c`)
-   - `await` unary operator
-   - UFCS tolerance (member-call syntax on non-struct receivers)
-   - Receiver type extraction for type-qualified UFCS
-   - `=>` arrow token for closures
-
-4. **Closure Literals** (`tccgen.c`)
-   - `() => expr` and `() => { block }` syntax
-   - `[captures](...) => ...` with capture lists
-   - `@unsafe [...](...) => ...` for unsafe closures
-
-## Applying Patches
-
-The patches are automatically applied during the build:
+## Quick Start
 
 ```bash
-make tcc-patch-apply   # Apply patches to third_party/tcc
-make tcc               # Build TCC with CC extensions
+# Apply patches (after clone or submodule update)
+make tcc-patch-apply
+
+# Build TCC with CC extensions
+make tcc
+
+# After modifying TCC sources, regenerate the patch
+make tcc-patch-regen
 ```
 
-## Regenerating Patches
+## Patch File
 
-After modifying TCC sources:
+**0001-cc-ext-hooks.patch** - All CC extensions to TCC in a single patch:
 
-```bash
-make tcc-patch-regen   # Regenerate 0001-cc-ext-hooks.patch
-```
+- AST stub recording system for CC visitor passes
+- External parser hooks (`ext_parser`) for CC syntax
+- UFCS (Uniform Function Call Syntax) support
+- Statement extensions: `@arena`, `@nursery`, `@defer`, `spawn`
+- Expression extensions: `await`, closures (`=>` syntax)
+- New tokens: `TOK_CC_ARROW` for `=>`
 
-## Upstream Compatibility
-
-- Base: TCC `origin/mob` branch
-- The patch is designed to be minimal and isolated behind `CONFIG_CC_EXT`
-- Goal: keep changes upstreamable or at least easy to rebase
+All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 
 ## Files Modified
 
 | File | Changes |
 |------|---------|
+| `Makefile` | Adds `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
 | `tcc.h` | AST node types, TCCState extensions, new tokens |
 | `tcc.c` | CC output type flag |
-| `libtcc.c` | `cc_tcc_parse_to_ast()` API, ext_parser setup |
-| `tccgen.c` | Statement/expression parsing extensions |
+| `libtcc.c` | `cc_tcc_parse_to_ast()` API, include path setup |
+| `tccgen.c` | Statement/expression parsing extensions, better error messages |
 | `tccpp.c` | `=>` arrow token lexing |
+
+## Upstream Compatibility
+
+- Base: TCC `origin/mob` branch
+- Extensions are isolated behind `CONFIG_CC_EXT`
+- Goal: keep changes minimal and easy to rebase
