@@ -221,6 +221,7 @@ static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { retur
 typedef struct __CCGenericError {
     int kind;
     int os_errno;
+    int os_code;
     const char* message;
     char __pad[48];
 } __CCGenericError;

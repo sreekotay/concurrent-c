@@ -64,4 +64,7 @@ test: pigz pigz_cc
 clean:
 	rm -rf $(OUT_DIR) *.o *.gz *.bin
 
-.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic
+smoke: pigz_cc
+	@./smoke.sh
+
+.PHONY: setup test clean all pigz pigz_cc pigz_idiomatic smoke
