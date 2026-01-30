@@ -490,6 +490,8 @@ static unsigned char cc__lookup_decl_flags(char** scope_names,
     return 0;
 }
 
+/* Fallback: look up a captured name in the nearest function signature. */
+
 static void cc__collect_caps_from_block(char*** scope_names,
                                         int* scope_counts,
                                         int max_depth,
@@ -554,6 +556,76 @@ typedef struct {
     int line_start;      /* Line where function body starts */
 } CCFuncSig;
 
+static const char* cc__lookup_param_type_in_sig(const CCFuncSig* sig, const char* name);
+
+/* Fallback: look up a captured name in the nearest function signature. */
+static const char* cc__lookup_param_type_for_closure(const CCFuncSig* sigs,
+                                                     int sig_n,
+                                                     const char* name,
+                                                     int closure_line) {
+    if (!sigs || sig_n <= 0 || !name || closure_line <= 0) return NULL;
+    int best_idx = -1;
+    int best_line = -1;
+    for (int i = 0; i < sig_n; i++) {
+        if (!sigs[i].name || sigs[i].line_start <= 0) continue;
+        if (sigs[i].line_start <= closure_line && sigs[i].line_start > best_line) {
+            best_line = sigs[i].line_start;
+            best_idx = i;
+        }
+    }
+    if (best_idx < 0) return NULL;
+    for (int p = 0; p < sigs[best_idx].param_count; p++) {
+        if (!sigs[best_idx].param_names || !sigs[best_idx].param_types) break;
+        const char* nm = sigs[best_idx].param_names[p];
+        const char* ty = sigs[best_idx].param_types[p];
+        if (nm && ty && strcmp(nm, name) == 0) return ty;
+    }
+    return NULL;
+}
+
+static int cc__is_ident_boundary_char(char c) {
+    return !(cc__is_ident_char2(c));
+}
+
+static const char* cc__lookup_param_type_by_src(const CCFuncSig* sigs,
+                                                int sig_n,
+                                                const char* src,
+                                                size_t closure_off,
+                                                const char* param_name) {
+    if (!sigs || sig_n <= 0 || !src || !param_name) return NULL;
+    const CCFuncSig* best_sig = NULL;
+    size_t best_off = 0;
+    for (int i = 0; i < sig_n; i++) {
+        if (!sigs[i].name) continue;
+        size_t name_len = strlen(sigs[i].name);
+        const char* p = src;
+        const char* last = NULL;
+        while ((p = strstr(p, sigs[i].name)) != NULL) {
+            size_t off = (size_t)(p - src);
+            if (off >= closure_off) break;
+            char prev = (off > 0) ? src[off - 1] : '\0';
+            char next = (off + name_len < closure_off) ? src[off + name_len] : '\0';
+            if ((off == 0 || cc__is_ident_boundary_char(prev)) &&
+                (next == '\0' || cc__is_ident_boundary_char(next) || next == '(' || next == ' ' || next == '\t')) {
+                const char* q = p + name_len;
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '(') {
+                    last = p;
+                }
+            }
+            p += name_len;
+        }
+        if (last) {
+            size_t off = (size_t)(last - src);
+            if (off < closure_off && off >= best_off) {
+                best_off = off;
+                best_sig = &sigs[i];
+            }
+        }
+    }
+    return cc__lookup_param_type_in_sig(best_sig, param_name);
+}
+
 static void cc__free_func_sigs(CCFuncSig* sigs, int n) {
     if (!sigs) return;
     for (int i = 0; i < n; i++) {
@@ -573,6 +645,17 @@ static const CCFuncSig* cc__lookup_sig(const CCFuncSig* sigs, int n, const char*
     for (int i = 0; i < n; i++) {
         if (!sigs[i].name) continue;
         if (strcmp(sigs[i].name, name) == 0) return &sigs[i];
+    }
+    return NULL;
+}
+
+static const char* cc__lookup_param_type_in_sig(const CCFuncSig* sig, const char* name) {
+    if (!sig || !name) return NULL;
+    for (int p = 0; p < sig->param_count; p++) {
+        if (!sig->param_names || !sig->param_types) break;
+        const char* nm = sig->param_names[p];
+        const char* ty = sig->param_types[p];
+        if (nm && ty && strcmp(nm, name) == 0) return ty;
     }
     return NULL;
 }
@@ -1538,7 +1621,15 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                             ty = cc__lookup_decl_type(scope_names[dd], scope_types[dd], scope_counts[dd], caps[ci]);
                             if (ty) fl = cc__lookup_decl_flags(scope_names[dd], scope_flags[dd], scope_counts[dd], caps[ci]);
                         }
-                        if (ty) d->cap_types[ci] = strdup(ty);
+                        if (!ty) {
+                            ty = cc__lookup_param_type_by_src(sigs, sig_n, in_src, d->start_off, caps[ci]);
+                        }
+                        if (!ty) {
+                            ty = cc__lookup_param_type_for_closure(sigs, sig_n, caps[ci], d->start_line);
+                        }
+                        if (ty) {
+                            d->cap_types[ci] = strdup(ty);
+                        }
                         if (cc__cap_is_ref(d, caps[ci])) fl |= 4; /* bit 2: reference capture */
                         d->cap_flags[ci] = fl;
                         if (!ty) {

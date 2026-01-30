@@ -27,32 +27,19 @@
 #include "visitor/walk.h"
 
 
-/* Helper: reparse rewritten source to get updated stub AST (file-based for correctness) */
+/* Helper: reparse rewritten source to get updated stub AST (in-memory). */
 static CCASTRoot* cc__reparse_after_rewrite(const char* rewritten_src, size_t rewritten_len,
-                                           const char* input_path, CCSymbolTable* symbols,
-                                           char** tmp_path_out) {
-    /* Use file-based path for reparse - the prelude and path handling is complex */
-    char* tmp_path = cc__write_temp_c_file(rewritten_src, rewritten_len, input_path);
-    if (!tmp_path) return NULL;
-
-    char pp_path[128];
-    int pp_err = cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path));
-    const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
-
-    CCASTRoot* root2 = cc_tcc_bridge_parse_to_ast(use_path, input_path, symbols);
-    if (!root2) {
-        unlink(tmp_path);
-        free(tmp_path);
-        if (pp_err == 0) unlink(pp_path);
-        return NULL;
-    }
-
-    if (pp_err == 0) {
-        root2->lowered_is_temp = 1;
-        if (!getenv("CC_KEEP_REPARSE")) unlink(pp_path);
-    }
-
-    *tmp_path_out = tmp_path;
+                                           const char* input_path, CCSymbolTable* symbols) {
+    char* pp_buf = cc_preprocess_to_string_ex(rewritten_src, rewritten_len, input_path, 1);
+    if (!pp_buf) return NULL;
+    size_t pp_len = strlen(pp_buf);
+    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len);
+    free(pp_buf);
+    if (!prep) return NULL;
+    char rel_path[1024];
+    cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
+    CCASTRoot* root2 = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
+    free(prep);
     return root2;
 }
 
@@ -120,8 +107,7 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     char* rewritten_async = NULL;
     size_t rewritten_async_len = 0;
     if (src_ufcs) {
-        char* tmp_path = NULL;
-        CCASTRoot* root2 = cc__reparse_after_rewrite(src_ufcs, src_ufcs_len, src_path, ctx->symbols, &tmp_path);
+        CCASTRoot* root2 = cc__reparse_after_rewrite(src_ufcs, src_ufcs_len, src_path, ctx->symbols);
         if (!root2) {
             if (src_ufcs != src_all) free(src_ufcs);
             free(src_all);
@@ -131,11 +117,6 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
 
         int ar = cc_async_rewrite_state_machine_ast(root2, ctx, src_ufcs, src_ufcs_len, &rewritten_async, &rewritten_async_len);
         cc_tcc_bridge_free_ast(root2);
-
-        if (tmp_path) {
-            unlink(tmp_path);
-            free(tmp_path);
-        }
 
         if (ar < 0) {
             if (src_ufcs != src_all) free(src_ufcs);

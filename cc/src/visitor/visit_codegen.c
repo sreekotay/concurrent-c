@@ -45,25 +45,19 @@
 
 #define cc__is_ident_char_local cc_is_ident_char
 
-/* Helper: reparse source string to AST (file-based for correctness with complex prelude) */
+/* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
                                             const char* input_path, CCSymbolTable* symbols) {
-    /* Use file-based path for reparse - the prelude and path handling is complex */
-    char* tmp_path = cc__write_temp_c_file(src, src_len, input_path);
-    if (!tmp_path) return NULL;
-
-    char pp_path[128];
-    int pp_err = cc_preprocess_file(tmp_path, pp_path, sizeof(pp_path));
-    const char* use_path = (pp_err == 0) ? pp_path : tmp_path;
-
-    CCASTRoot* root = cc_tcc_bridge_parse_to_ast(use_path, input_path, symbols);
-    if (pp_err == 0 && !getenv("CC_KEEP_REPARSE")) unlink(pp_path);
-    if (!getenv("CC_KEEP_REPARSE")) unlink(tmp_path);
-    free(tmp_path);
-
-    if (root && pp_err == 0) {
-        root->lowered_is_temp = 0; /* Already cleaned up */
-    }
+    char* pp_buf = cc_preprocess_to_string_ex(src, src_len, input_path, 1);
+    if (!pp_buf) return NULL;
+    size_t pp_len = strlen(pp_buf);
+    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len);
+    free(pp_buf);
+    if (!prep) return NULL;
+    char rel_path[1024];
+    cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
+    CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
+    free(prep);
     return root;
 }
 

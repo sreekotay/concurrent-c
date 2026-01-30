@@ -42,6 +42,7 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
        (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers.
        cc_result.cch provides __CC_RESULT macro which handles parser-mode fallback. */
     const char* prelude =
+        "#line 1 \"<cc-prelude>\"\n"
         "#define CC_PARSER_MODE 1\n"
         "#include <stdlib.h>\n"
         "#include <stdint.h>\n"
@@ -91,5 +92,49 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
     }
     close(fd);
     return strdup(tmpl);
+}
+
+char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len) {
+    if (!buf || !out_len) return NULL;
+    *out_len = 0;
+    /* Prelude for reparse: must provide CC runtime types used by intermediate rewrites
+       (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers.
+       cc_result.cch provides __CC_RESULT macro which handles parser-mode fallback. */
+    const char* prelude =
+        "#define CC_PARSER_MODE 1\n"
+        "#include <stdlib.h>\n"
+        "#include <stdint.h>\n"
+        "typedef intptr_t CCAbIntptr;\n"
+        "#include <ccc/cc_closure.cch>\n"
+        "#include <ccc/cc_nursery.cch>\n"
+        "#include <ccc/cc_arena.cch>\n"
+        "#include <ccc/cc_result.cch>\n"
+        "#include <ccc/cc_optional.cch>\n"
+        "/* Minimal std/prelude declarations used by @arena lowering */\n"
+        "static inline size_t kilobytes(size_t n);\n"
+        "static inline size_t megabytes(size_t n);\n"
+        "static inline CCArena cc_heap_arena(size_t bytes);\n"
+        "static inline void cc_heap_arena_free(CCArena* a);\n"
+        "#include <ccc/cc_slice.cch>\n"
+        "#include <ccc/std/task_intptr.cch>\n"
+        "typedef struct CCChan CCChan;\n"
+        "CCTaskIntptr cc_chan_send_task(CCChan* ch, const void* value, size_t value_size);\n"
+        "CCTaskIntptr cc_chan_recv_task(CCChan* ch, void* out_value, size_t value_size);\n"
+        "typedef struct { void (*fn)(void); } __cc_spawn_void_arg;\n"
+        "typedef struct { void (*fn)(int); int arg; } __cc_spawn_int_arg;\n"
+        "static void* __cc_spawn_thunk_void(void*);\n"
+        "static void* __cc_spawn_thunk_int(void*);\n";
+    size_t pre_len = strlen(prelude);
+    size_t total = pre_len + len;
+    char* out = (char*)malloc(total + 1);
+    if (!out) return NULL;
+    size_t off = 0;
+    memcpy(out + off, prelude, pre_len);
+    off += pre_len;
+    memcpy(out + off, buf, len);
+    off += len;
+    out[off] = '\0';
+    *out_len = off;
+    return out;
 }
 
