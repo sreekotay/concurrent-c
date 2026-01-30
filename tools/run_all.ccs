@@ -11,6 +11,7 @@
  */
 
 #include <ccc/std/prelude.cch>
+#include <unistd.h>
 
 /* Default timeout for stress tests (seconds) */
 #define STRESS_TIMEOUT_SEC 10
@@ -51,6 +52,9 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         
         printf("  [%zu/%zu] %s ... ", i + 1, n, path);
         fflush(stdout);
+
+        /* Small delay between tests to avoid resource contention */
+        usleep(1000);  /* 1ms */
 
         /* Build args: ccc run [--timeout N] path */
         const char* args[6];

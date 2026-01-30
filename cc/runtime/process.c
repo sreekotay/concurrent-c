@@ -144,7 +144,12 @@ CCResultStatusIoError cc_process_wait(CCProcess* proc) {
     }
 
     int wstatus;
-    if (waitpid(proc->pid, &wstatus, 0) < 0) {
+    pid_t result;
+    do {
+        result = waitpid(proc->pid, &wstatus, 0);
+    } while (result < 0 && errno == EINTR);  /* Retry on signal interruption */
+    
+    if (result < 0) {
         return cc_err_CCResultStatusIoError(cc_io_from_errno(errno));
     }
 
@@ -596,8 +601,11 @@ CCResult_CCSlice_CCIoError cc_process_read_all(CCProcess* proc, CCArena* arena) 
         }
         if (n == 0) break;
 #else
-        ssize_t n = read(proc->stdout_fd, buf, sizeof(buf));
-        if (n <= 0) break;
+        ssize_t n;
+        do {
+            n = read(proc->stdout_fd, buf, sizeof(buf));
+        } while (n < 0 && errno == EINTR);  /* Retry on signal interruption */
+        if (n <= 0) break;  /* EOF or error */
 #endif
 
         /* Grow buffer if needed */
@@ -643,8 +651,11 @@ CCResult_CCSlice_CCIoError cc_process_read_all_stderr(CCProcess* proc, CCArena* 
         }
         if (n == 0) break;
 #else
-        ssize_t n = read(proc->stderr_fd, buf, sizeof(buf));
-        if (n <= 0) break;
+        ssize_t n;
+        do {
+            n = read(proc->stderr_fd, buf, sizeof(buf));
+        } while (n < 0 && errno == EINTR);  /* Retry on signal interruption */
+        if (n <= 0) break;  /* EOF or error */
 #endif
 
         while (total_len + (size_t)n > total_cap) {
@@ -727,16 +738,26 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
 
     CCProcess proc = spawn_res.ok;
 
-    /* Read stdout */
+    /* Read stdout - blocks until child closes its stdout (usually on exit) */
     CCResult_CCSlice_CCIoError stdout_res = cc_process_read_all(&proc, arena);
     if (stdout_res.ok) {
         output.stdout_data = stdout_res.u.value;
+    }
+    /* Close our end after reading */
+    if (proc.stdout_fd >= 0) {
+        close(proc.stdout_fd);
+        proc.stdout_fd = -1;
     }
 
     /* Read stderr */
     CCResult_CCSlice_CCIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
     if (stderr_res.ok) {
         output.stderr_data = stderr_res.u.value;
+    }
+    /* Close our end after reading */
+    if (proc.stderr_fd >= 0) {
+        close(proc.stderr_fd);
+        proc.stderr_fd = -1;
     }
 
     /* Wait for exit */
