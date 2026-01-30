@@ -823,8 +823,8 @@ For generated C code, these macros provide direct access without UFCS lowering:
 
 | Macro | Expands To | Description |
 |-------|------------|-------------|
-| `CCRes(T, E)` | `CCResult_T_E` | Result type name |
-| `CCResPtr(T, E)` | `CCResult_Tptr_E` | Result of pointer |
+| `CCRes(T, E)` | `CCResult_T_E` | Result type name (C interop) |
+| `CCResPtr(T, E)` | `CCResult_Tptr_E` | Result of pointer (C interop) |
 | `CCResOpt(T, E)` | `CCResult_CCOptional_T_E` | Result containing Optional |
 
 ```c
@@ -845,7 +845,8 @@ int v = r.unwrap_or(0);      // returns 0 on error
 if (r.ok) use(r.u.value);
 
 // Macro-style access (for generated C code)
-CCRes(int, CCError) res = parse("42");
+// Prefer sigil types in .ccs; use CCRes* only for C interop or explicit name mangling.
+int!>(CCError) res = parse("42");
 if (cc_is_err(res)) {
     CCError err = cc_unwrap_err(res);
     handle_error(err);

@@ -9,30 +9,34 @@ Runs: 3
 Generating 100MB test data...
 
 === Original pigz (pthread) ===
-  Run 1: 1.031s, output:  104889633 bytes
-  Run 2: 0.807s, output:  104889633 bytes
-  Run 3: 0.793s, output:  104889633 bytes
-  Average: 0.877s
+  Run 1: 0.443s, output:  104889633 bytes
+  Run 2: 0.429s, output:  104889633 bytes
+  Run 3: 0.758s, output:  104889633 bytes
+  Average: 0.543s
 
 === CC pigz (Concurrent-C) ===
-  Run 1: 0.773s, output:  104904000 bytes
-  Run 2: 0.713s, output:  104904000 bytes
-  Run 3: 0.747s, output:  104904000 bytes
-  Average: 0.744s
+bench_test.bin: 104857600 -> 104889610 bytes (-0.0%), 800 blocks, 4 workers
+  Run 1: 0.431s, output:  104889628 bytes
+bench_test.bin: 104857600 -> 104889610 bytes (-0.0%), 800 blocks, 4 workers
+  Run 2: 0.444s, output:  104889628 bytes
+bench_test.bin: 104857600 -> 104889610 bytes (-0.0%), 800 blocks, 4 workers
+  Run 3: 0.434s, output:  104889628 bytes
+  Average: 0.436s
 
 === CC pigz Idiomatic (T!E) ===
 Compressed bench_test.bin to bench_test.bin.gz
 Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
-  Run 1: 0.682s, output:  104904000 bytes
+  Run 1: 0.418s, output:  104904000 bytes
 Compressed bench_test.bin to bench_test.bin.gz
 Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
-  Run 2: 0.697s, output:  104904000 bytes
+  Run 2: 0.403s, output:  104904000 bytes
 Compressed bench_test.bin to bench_test.bin.gz
 Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
-  Run 3: 0.720s, output:  104904000 bytes
-  Average: 0.700s
+  Run 3: 0.409s, output:  104904000 bytes
+  Average: 0.410s
 
 === Correctness Check ===
+bench_verify.bin: 104857600 -> 104889610 bytes (-0.0%), 800 blocks, 4 workers
 Original: PASS (decompresses correctly)
 CC:       PASS (decompresses correctly)
 Compressed bench_verify.bin to bench_verify.bin.gz
@@ -41,9 +45,9 @@ Idiomatic: PASS (decompresses correctly)
 
 Compressed sizes:
   Original:  104889635 bytes
-  CC:        104904000 bytes
+  CC:        104889628 bytes
 Compressed bench_verify.bin to bench_verify.bin.gz
 Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
-  Idiomatic:  104904000 bytes
+  Idiomatic: 104904000 bytes
 
 Done.

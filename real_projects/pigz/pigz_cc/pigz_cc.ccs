@@ -151,19 +151,22 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, CCSlice dict, int leve
         // Calculate CRC using zlib directly
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-        // Allocate output buffer in the result arena
-        size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
-        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
+    // Compress with zlib (raw deflate, -15 window bits)
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    
+    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+    if (ret != Z_OK) return cc_err(CC_IO_OTHER);
 
-        size_t pos = 0;
+    // Allocate output buffer in the result arena using deflateBound
+    size_t max_out = deflateBound(&strm, (uLong)blk->data.len) + 64;
+    unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+    if (!out_buf) {
+        deflateEnd(&strm);
+        return cc_err(CC_IO_OUT_OF_MEMORY);
+    }
 
-        // Compress with zlib (raw deflate, -15 window bits)
-        z_stream strm;
-        memset(&strm, 0, sizeof(strm));
-        
-        int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-        if (ret != Z_OK) return cc_err(CC_IO_OTHER);
+    size_t pos = 0;
 
         // Set dictionary if provided
         if (dict.len > 0) {
@@ -175,14 +178,54 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, CCSlice dict, int leve
         strm.next_out = out_buf + pos;
         strm.avail_out = (uInt)(max_out - pos);
         
-        // Use Z_SYNC_FLUSH to ensure byte alignment at the end of each block.
-        // This is necessary for simple concatenation of deflate streams.
-        // For the last block, we use Z_FINISH to properly close the deflate stream.
-        ret = deflate(&strm, blk->is_last ? Z_FINISH : Z_SYNC_FLUSH);
-        size_t deflate_len = strm.total_out;
+        // Deflate input with no flush until all input is consumed.
+        while (strm.avail_in > 0) {
+            ret = deflate(&strm, Z_NO_FLUSH);
+            if (ret != Z_OK) break;
+            if (strm.avail_out == 0) { ret = Z_BUF_ERROR; break; }
+        }
+
+        if (ret == Z_OK) {
+            if (blk->is_last) {
+                // Finish the stream on the last block.
+                do {
+                    ret = deflate(&strm, Z_FINISH);
+                    if (ret != Z_OK && ret != Z_STREAM_END) break;
+                    if (strm.avail_out == 0) { ret = Z_BUF_ERROR; break; }
+                } while (ret != Z_STREAM_END);
+            } else {
+#if ZLIB_VERNUM >= 0x1260
+                int setdict = (dict.len > 0);
+                // Match pigz.c logic for block boundary alignment.
+                ret = deflate(&strm, Z_BLOCK);
+                if (ret == Z_OK) {
+                    int bits = 0;
+                    (void)deflatePending(&strm, Z_NULL, &bits);
+                    if ((bits & 1) || !setdict) {
+                        ret = deflate(&strm, Z_SYNC_FLUSH);
+                    } else if (bits & 7) {
+                        do {
+                            ret = deflatePrime(&strm, 10, 2);
+                            if (ret != Z_OK) break;
+                            (void)deflatePending(&strm, Z_NULL, &bits);
+                        } while (bits & 7);
+                        if (ret == Z_OK) ret = deflate(&strm, Z_BLOCK);
+                    }
+                }
+#else
+                ret = deflate(&strm, Z_SYNC_FLUSH);
+                int setdict = 0;
+#endif
+                if (ret == Z_OK && !setdict) {
+                    // For independent blocks, add a full flush marker.
+                    ret = deflate(&strm, Z_FULL_FLUSH);
+                }
+            }
+        }
+    size_t deflate_len = strm.total_out;
         deflateEnd(&strm);
         
-        if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
+    if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
             return cc_err(CC_IO_OTHER);
         }
         
@@ -382,6 +425,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 spawn([in_ptr]() => {
                     long seq = 0;
                     bool hit_eof = false;
+                    Block* prev_blk = NULL;
                     
                     // Maintain a buffer for the last_tail (32KB)
                     unsigned char last_tail_buf[32768];
@@ -406,6 +450,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                         if (data.len == 0) {
                             cc_heap_arena_free(&blk_arena);
+                            if (prev_blk) {
+                                prev_blk->is_last = true;
+                                chan_send(blocks_tx, prev_blk);
+                                prev_blk = NULL;
+                            }
                             break;  // EOF with no data
                         }
                         
@@ -420,9 +469,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         blk->seq = seq++;
                         blk->data = data;
                         blk->dict = (CCSlice){0};
-                        // Short read means EOF - this is the last block
-                        blk->is_last = (data.len < BLOCK_SIZE);
-                        hit_eof = blk->is_last;
+                        blk->is_last = false;  // set later once we know if this is last
                         blk->arena = blk_arena;  // Transfer ownership to Block
                         
                         // Dictionary Chaining: Copying Strategy
@@ -441,8 +488,23 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         size_t tail_len = data.len > 32768 ? 32768 : data.len;
                         memcpy(last_tail_buf, (const unsigned char*)data.ptr + data.len - tail_len, tail_len);
                         last_tail_len = tail_len;
-                        
-                        chan_send(blocks_tx, blk);
+
+                        // If we already have a pending block, send it now.
+                        if (prev_blk) {
+                            chan_send(blocks_tx, prev_blk);
+                        }
+
+                        // If this was a short read, it's the last block.
+                        if (data.len < BLOCK_SIZE) {
+                            blk->is_last = true;
+                            chan_send(blocks_tx, blk);
+                            prev_blk = NULL;
+                            hit_eof = true;
+                            break;
+                        }
+
+                        // Otherwise, hold this block until we read the next one
+                        prev_blk = blk;
                     }
                 });
             }

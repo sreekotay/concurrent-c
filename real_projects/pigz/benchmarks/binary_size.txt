@@ -17,3 +17,8 @@ After enabling `-ffunction-sections`, `-fdata-sections`, and `-Wl,-dead_strip` b
 ## Verification
 - Unused symbols like `cc_net_*`, `cc_dir_*`, and `cc_process_*` are successfully stripped.
 - The binaries remain fully functional and pass all correctness checks.
+
+## Current Sizes (Unstripped) (2026-01-30)
+- `out/pigz`: 108056 bytes
+- `out/pigz_cc`: 90824 bytes
+- `out/pigz_idiomatic`: 90544 bytes

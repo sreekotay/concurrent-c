@@ -74,7 +74,7 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 
 ### Type Macros
 
-Convenience macros for constructing Optional and Result type names in C:
+Convenience macros for constructing Optional and Result type names in C (interop only):
 
 | Macro | Expands To | Example |
 |-------|------------|---------|
@@ -99,7 +99,8 @@ Macros for working with `T!>(E)` Result types:
 **Idiomatic pattern:**
 
 ```c
-CCRes(CCSlice, CCIoError) res = cc_file_read(file, arena, n);
+// Prefer sigil types in .ccs; use CCRes* only for C interop.
+CCSlice!>(CCIoError) res = cc_file_read(file, arena, n);
 if (cc_is_err(res)) {
     CCIoError err = cc_unwrap_err(res);
     handle_error(err);
