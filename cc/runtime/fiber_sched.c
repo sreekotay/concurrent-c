@@ -210,7 +210,7 @@ typedef struct fiber_task {
     struct fiber_task* _Atomic join_waiter_fiber;  /* Single waiting fiber (common case) */
     pthread_mutex_t join_mu;            /* Mutex for join condvar (thread waiters) */
     pthread_cond_t join_cv;             /* Per-fiber condvar for thread waiters */
-    int join_cv_initialized;            /* Lazy init flag for condvar */
+    _Atomic int join_cv_initialized;    /* Lazy init flag for condvar (atomic for race-free signaling) */
     
     /* Debug info for deadlock detection */
     const char* park_reason;  /* Why fiber parked (e.g., "chan_send", "chan_recv", "join") */
@@ -643,7 +643,7 @@ static fiber_task* fiber_alloc(void) {
     /* Allocate new fiber */
     fiber_task* nf = (fiber_task*)calloc(1, sizeof(fiber_task));
     if (nf) {
-        nf->join_cv_initialized = 0;
+        atomic_store_explicit(&nf->join_cv_initialized, 0, memory_order_relaxed);
         atomic_store(&nf->join_waiters, 0);
         atomic_store(&nf->join_waiter_fiber, NULL);
         nf->fiber_id = atomic_fetch_add(&g_next_fiber_id, 1);
@@ -667,7 +667,7 @@ static void fiber_free(fiber_task* f) {
 static void fiber_destroy(fiber_task* f) {
     if (!f) return;
     if (f->coro) mco_destroy(f->coro);
-    if (f->join_cv_initialized) {
+    if (atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire)) {
         pthread_mutex_destroy(&f->join_mu);
         pthread_cond_destroy(&f->join_cv);
     }
@@ -754,7 +754,7 @@ static void fiber_entry(mco_coro* co) {
         }
         
         /* Then signal thread waiters via condvar if initialized */
-        if (atomic_load_explicit((_Atomic int*)&f->join_cv_initialized, memory_order_acquire)) {
+        if (atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire)) {
             pthread_mutex_lock(&f->join_mu);
             pthread_cond_broadcast(&f->join_cv);
             pthread_mutex_unlock(&f->join_mu);
@@ -1285,11 +1285,21 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     } else {
         /* Not in fiber context - use condvar (safe to block thread) */
         
-        /* Lazy init condvar */
-        if (!f->join_cv_initialized) {
+        /* Lazy init condvar with CAS to avoid double init */
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&f->join_cv_initialized, &expected, 1,
+                                                     memory_order_acq_rel, memory_order_acquire)) {
+            /* We won the race - initialize the condvar */
             pthread_mutex_init(&f->join_mu, NULL);
             pthread_cond_init(&f->join_cv, NULL);
-            f->join_cv_initialized = 1;
+        }
+        /* else: another thread already initialized it */
+        
+        /* Re-check done after init - fiber may have completed during init window */
+        if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+            atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
+            if (out_result) *out_result = f->result;
+            return 0;
         }
         
         pthread_mutex_lock(&f->join_mu);
