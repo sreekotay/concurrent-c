@@ -390,7 +390,7 @@ index 1c2f6949..bb20e58e 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 6d42de67..31394197 100644
+index 6d42de67..fafdbf16 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -58,6 +58,11 @@ ST_DATA int nocode_wanted; /* no code generation wanted */
@@ -1147,7 +1147,7 @@ index 6d42de67..31394197 100644
      while (1) {
  
          oldint = 0;
-@@ -8684,6 +9183,31 @@ static int decl(int l)
+@@ -8684,6 +9183,41 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -1156,8 +1156,18 @@ index 6d42de67..31394197 100644
 +               Pattern: IDENT IDENT followed by declaration context (;, =, ,, [)
 +               This gives a much clearer error than "';' expected" or "'{' expected"
 +               
-+               We distinguish from call expressions like "await func()" or "spawn task()"
-+               by checking the third token - if it's '(', this is likely a call, not a decl. */
++               We distinguish declarations from call expressions by checking the third token:
++               
++                 TRIGGERS error (declaration pattern):
++                   MyType x;      ->  IDENT IDENT ;
++                   MyType x = 0;  ->  IDENT IDENT =
++                   MyType a, b;   ->  IDENT IDENT ,
++                   MyType arr[5]; ->  IDENT IDENT [
++               
++                 SKIPS error (call pattern - let ext_parser handle):
++                   await func();  ->  IDENT IDENT (
++                   spawn task();  ->  IDENT IDENT (
++            */
 +            if (tok >= TOK_UIDENT) {
 +                const char *maybe_type = get_tok_str(tok, NULL);
 +                int first_tok = tok;
@@ -1179,7 +1189,7 @@ index 6d42de67..31394197 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8720,8 +9244,69 @@ static int decl(int l)
+@@ -8720,8 +9254,69 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -1250,7 +1260,7 @@ index 6d42de67..31394197 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8860,6 +9445,13 @@ static int decl(int l)
+@@ -8860,6 +9455,13 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -1264,7 +1274,7 @@ index 6d42de67..31394197 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8900,14 +9492,26 @@ static int decl(int l)
+@@ -8900,14 +9502,26 @@ static int decl(int l)
                  }
                  if (tok != ',') {
                      if (l == VT_JMP)
