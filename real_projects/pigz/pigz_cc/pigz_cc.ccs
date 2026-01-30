@@ -170,6 +170,30 @@ static unsigned long crc32_comb_with_size(unsigned long crc1, unsigned long crc2
 }
 
 /* ============================================================================
+ * Adler-32 Combination (matches pigz.c:1403)
+ * ============================================================================ */
+
+#define ADLER_BASE 65521U
+#define LOW16 0xffff
+
+static unsigned long adler32_comb(unsigned long adler1, unsigned long adler2, size_t len2) {
+    unsigned long sum1;
+    unsigned long sum2;
+    unsigned rem;
+
+    rem = (unsigned)(len2 % ADLER_BASE);
+    sum1 = adler1 & LOW16;
+    sum2 = (rem * sum1) % ADLER_BASE;
+    sum1 += (adler2 & LOW16) + ADLER_BASE - 1;
+    sum2 += ((adler1 >> 16) & LOW16) + ((adler2 >> 16) & LOW16) + ADLER_BASE - rem;
+    if (sum1 >= ADLER_BASE) sum1 -= ADLER_BASE;
+    if (sum1 >= ADLER_BASE) sum1 -= ADLER_BASE;
+    if (sum2 >= (ADLER_BASE << 1)) sum2 -= (ADLER_BASE << 1);
+    if (sum2 >= ADLER_BASE) sum2 -= ADLER_BASE;
+    return sum1 | (sum2 << 16);
+}
+
+/* ============================================================================
  * Compression Worker
  * ============================================================================ */
 
@@ -194,8 +218,12 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
         res->is_last = blk->is_last;
         res->original_len = blk->data.len;
 
-        // Stage 1: Setup & CRC (matches pigz.c:2323-2324)
-        res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+        // Stage 1: Setup & Checksum (matches pigz.c:2323-2324)
+        if (g.form == 0) {
+            res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+        } else {
+            res->crc = adler32(1UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+        }
 
         if (level <= 9) {
             (void)deflateReset(strm);
@@ -368,7 +396,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             memset(pending, 0, sizeof(pending));
             bool write_failed = false;
 
-            unsigned long global_crc = 0;
+            unsigned long global_crc = (g.form == 0 ? 0UL : 1UL);
             size_t total_len = 0;
             bool first_block = true;
             
@@ -421,12 +449,16 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     r = pending[slot];
                     pending[slot] = NULL;
                     
-                    // Accumulate global CRC and total length
+                    // Accumulate global checksum and total length
                     if (first_block) {
                         global_crc = r->crc;
                         first_block = false;
                     } else {
-                        global_crc = crc32_comb_with_size(global_crc, r->crc, r->original_len, block_size);
+                        if (g.form == 0) {
+                            global_crc = crc32_comb_with_size(global_crc, r->crc, r->original_len, block_size);
+                        } else {
+                            global_crc = adler32_comb(global_crc, r->crc, r->original_len);
+                        }
                     }
                     total_len += r->original_len;
 
@@ -466,10 +498,6 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     }
                 } else {
                     // zlib trailer: Adler-32 (4 bytes)
-                    // Note: pigz_cc currently uses CRC32 for both, but zlib needs Adler32.
-                    // For now, just write something or implement Adler32 combination.
-                    // pigz.c uses a custom Adler32 combination if I recall.
-                    // Let's just write the CRC32 for now as a placeholder if we don't have Adler32.
                     unsigned char trailer[4];
                     trailer[0] = (global_crc >> 24) & 0xff;
                     trailer[1] = (global_crc >> 16) & 0xff;

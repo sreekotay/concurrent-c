@@ -1,8 +1,8 @@
 # Makefile for pigz - builds both original (pthread) and CC versions
 
 CC = gcc
-CFLAGS = -O3 -Wall -Wextra -pthread -Ipigz_c -DNOZOPFLI
-LDFLAGS = -lz -lpthread
+CFLAGS = -O3 -Wall -Wextra -pthread -Ipigz_c -I/opt/homebrew/include
+LDFLAGS = -lz -lpthread -lzopfli -L/opt/homebrew/lib
 
 # Output directory for binaries
 OUT_DIR = out
