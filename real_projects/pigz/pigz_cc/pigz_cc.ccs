@@ -167,13 +167,13 @@ static unsigned long crc32_comb_with_size(unsigned long crc1, unsigned long crc2
 
 /*
  * Compress a single block using a provided z_stream.
- * Returns a CompressedResult*!>(IoError) to demonstrate idiomatic error propagation.
+ * Returns a CompressedResult*!>(CCIoError) to demonstrate idiomatic error propagation.
  * 
  * Uses @arena block with cc_arena_detach() for clean ownership transfer:
  * - On error: @arena cleanup frees the memory
  * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
-CompressedResult*!>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
+CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
     // Arena sizing: CompressedResult struct + deflate output
     // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
@@ -186,23 +186,20 @@ CompressedResult*!>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlic
         res->is_last = blk->is_last;
         res->original_len = blk->data.len;
 
-        // Calculate CRC using zlib directly
+        // Stage 1: Setup & CRC (matches pigz.c:2323-2324)
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
-
-        // Reset stream and set parameters (matches pigz.c:2323-2324)
         (void)deflateReset(strm);
         (void)deflateParams(strm, level, strategy);
 
-        // Allocate output buffer in the result arena using deflateBound
+        // Stage 2: Output Buffer Allocation
+        // Use deflateBound to ensure we have enough space for the compressed data
         size_t max_out = deflateBound(strm, (uLong)blk->data.len) + 64;
         unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
-        if (!out_buf) {
-            return cc_err(CC_IO_OUT_OF_MEMORY);
-        }
+        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
         size_t pos = 0;
 
-        // Set dictionary if provided
+        // Stage 3: Dictionary Loading (matches pigz.c:2330-2335)
         if (dict.len > 0) {
             deflateSetDictionary(strm, (const Bytef*)dict.ptr, (uInt)dict.len);
         }
@@ -213,13 +210,14 @@ CompressedResult*!>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlic
         strm->avail_out = (uInt)(max_out - pos);
         
         int ret;
-        // Deflate input with no flush until all input is consumed.
+        // Stage 4: Deflate Loop (matches pigz.c:2340-2350)
         while (strm->avail_in > 0) {
             ret = deflate(strm, Z_NO_FLUSH);
             if (ret != Z_OK) break;
             if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
         }
 
+        // Stage 5: Block Boundary Alignment (matches pigz.c:1990-2010)
         if (ret == Z_OK) {
             if (blk->is_last) {
                 // Finish the stream on the last block.
@@ -231,7 +229,7 @@ CompressedResult*!>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlic
             } else {
 #if ZLIB_VERNUM >= 0x1260
                 int setdict = (dict.len > 0);
-                // Match pigz.c logic for block boundary alignment (pigz.c:1990-2010)
+                // Align to byte boundary without finishing the stream
                 ret = deflate(strm, Z_BLOCK);
                 if (ret == Z_OK) {
                     int bits = 0;
@@ -257,17 +255,17 @@ CompressedResult*!>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlic
                 }
             }
         }
-        size_t deflate_len = strm->total_out;
         
+        // Stage 6: Finalize Result
+        size_t deflate_len = strm->total_out;
         if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
             return cc_err(CC_IO_OTHER);
         }
         
         pos += deflate_len;
-        
         res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
 
-        // Update statistics
+        // Update global statistics
         cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);
@@ -581,14 +579,14 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
         }
 
         @arena(dir_arena, megabytes(1)) {
-            CCResultDirIterIoError iter_res = cc_dir_open(dir_arena, path);
+            CCDirIter* !> (CCIoError) iter_res = cc_dir_open(dir_arena, path);
             if (cc_is_ok(iter_res)) {
                 CCDirIter* iter = cc_unwrap(iter_res);
                 @defer cc_dir_close(iter);
 
                 int ret = 0;
                 while (true) {
-                    CCResultDirEntryIoError entry_res = cc_dir_next(iter, dir_arena);
+                    CCDirEntry !> (CCIoError) entry_res = cc_dir_next(iter, dir_arena);
                     if (cc_is_err(entry_res)) {
                         // CCIoError is a struct, need _as variant
                         CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
