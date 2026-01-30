@@ -44,8 +44,9 @@ typedef struct {
     long seq;
     CCSlice data;
     CCSlice dict;  // Copy of previous block's tail
+    CCSlice lens;  // Optional: list of rsyncable segment lengths (size_t)
     bool is_last;
-    CCArena arena; // Owns both data and dict
+    CCArena arena; // Owns data, dict, and lens
 } Block;
 
 typedef struct {
@@ -77,6 +78,7 @@ struct {
     char *sufx;             // compressed file suffix
     int headis;             // header bits (matches pigz.c)
     ZopfliOptions zopts;    // zopfli compression options
+    int rsync;              // true for rsync blocking
     char *name;             // name for gzip header
     char *alias;            // name for zip header when input is stdin
     char *comment;          // comment for gzip or zip header
@@ -235,7 +237,11 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
 
             // Stage 2: Output Buffer Allocation
             // Use deflateBound to ensure we have enough space for the compressed data
-            size_t max_out = deflateBound(strm, (uLong)blk->data.len) + 64;
+            // For rsyncable, we might have many sync markers which add overhead (~5 bytes each)
+            size_t max_out = deflateBound(strm, (uLong)blk->data.len) + 128;
+            if (blk->lens.len > 0) {
+                max_out += (blk->lens.len / sizeof(size_t)) * 10; // Extra space for sync markers
+            }
             unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
             if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
@@ -251,27 +257,42 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
             strm->next_out = out_buf + pos;
             strm->avail_out = (uInt)(max_out - pos);
             
-            int ret;
-            // Stage 4: Deflate Loop (matches pigz.c:2340-2350)
+        int ret;
+        // Stage 4: Deflate Loop (matches pigz.c:2340-2350)
+        if (blk->lens.len == 0) {
+            // Standard single-segment block
             while (strm->avail_in > 0) {
                 ret = deflate(strm, Z_NO_FLUSH);
                 if (ret != Z_OK) break;
                 if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
             }
-
-            // Stage 5: Block Boundary Alignment (matches pigz.c:1990-2010)
-            if (ret == Z_OK) {
-                if (blk->is_last) {
-                    // Finish the stream on the last block.
-                    do {
-                        ret = deflate(strm, Z_FINISH);
-                        if (ret != Z_OK && ret != Z_STREAM_END) break;
-                        if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
-                    } while (ret != Z_STREAM_END);
-                } else {
+        } else {
+            // Rsyncable multi-segment block (matches pigz.c:1787-1856)
+            size_t* lens = (size_t*)blk->lens.ptr;
+            size_t n_lens = blk->lens.len / sizeof(size_t);
+            size_t total_in = 0;
+            ret = Z_OK;
+            
+            for (size_t i = 0; i < n_lens; i++) {
+                size_t segment_len = lens[i];
+                if (segment_len == 0) segment_len = blk->data.len - total_in;
+                
+                strm->avail_in = (uInt)segment_len;
+                // next_in is already set correctly at the start or by previous deflate calls
+                total_in += segment_len;
+                
+                // Deflate segment
+                while (strm->avail_in > 0) {
+                    ret = deflate(strm, Z_NO_FLUSH);
+                    if (ret != Z_OK) break;
+                    if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
+                }
+                if (ret != Z_OK) break;
+                
+                // Flush at rsync boundary (unless it's the very end of the last block)
+                if (total_in < blk->data.len || !blk->is_last) {
 #if ZLIB_VERNUM >= 0x1260
-                    int setdict = (dict.len > 0);
-                    // Align to byte boundary without finishing the stream
+                    int setdict = (dict.len > 0 || i > 0);
                     ret = deflate(strm, Z_BLOCK);
                     if (ret == Z_OK) {
                         int bits = 0;
@@ -289,14 +310,58 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
                     }
 #else
                     ret = deflate(strm, Z_SYNC_FLUSH);
-                    int setdict = 0;
 #endif
-                    if (ret == Z_OK && !setdict) {
-                        // For independent blocks, add a full flush marker.
-                        ret = deflate(strm, Z_FULL_FLUSH);
-                    }
+                    if (ret != Z_OK) break;
                 }
             }
+        }
+
+        // Stage 5: Block Boundary Alignment (matches pigz.c:1990-2010)
+        // (Only needed if not already handled by the rsyncable loop)
+        if (ret == Z_OK && blk->lens.len == 0) {
+            if (blk->is_last) {
+                // Finish the stream on the last block.
+                do {
+                    ret = deflate(strm, Z_FINISH);
+                    if (ret != Z_OK && ret != Z_STREAM_END) break;
+                    if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
+                } while (ret != Z_STREAM_END);
+            } else {
+#if ZLIB_VERNUM >= 0x1260
+                int setdict = (dict.len > 0);
+                // Align to byte boundary without finishing the stream
+                ret = deflate(strm, Z_BLOCK);
+                if (ret == Z_OK) {
+                    int bits = 0;
+                    (void)deflatePending(strm, Z_NULL, &bits);
+                    if ((bits & 1) || !setdict) {
+                        ret = deflate(strm, Z_SYNC_FLUSH);
+                    } else if (bits & 7) {
+                        do {
+                            ret = deflatePrime(strm, 10, 2);
+                            if (ret != Z_OK) break;
+                            (void)deflatePending(strm, Z_NULL, &bits);
+                        } while (bits & 7);
+                        if (ret == Z_OK) ret = deflate(strm, Z_BLOCK);
+                    }
+                }
+#else
+                ret = deflate(strm, Z_SYNC_FLUSH);
+                int setdict = 0;
+#endif
+                if (ret == Z_OK && !setdict) {
+                    // For independent blocks, add a full flush marker.
+                    ret = deflate(strm, Z_FULL_FLUSH);
+                }
+            }
+        } else if (ret == Z_OK && blk->lens.len > 0 && blk->is_last) {
+            // Final finish for rsyncable last block
+            do {
+                ret = deflate(strm, Z_FINISH);
+                if (ret != Z_OK && ret != Z_STREAM_END) break;
+                if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
+            } while (ret != Z_STREAM_END);
+        }
             
         // Stage 6: Finalize Result
         size_t deflate_len = strm->total_out;
@@ -603,7 +668,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                                 chan_send(results_tx, cc_unwrap(res_val));
                             } else {
                                 // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
-                                fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
+                                CCIoError err = cc_unwrap_err_as(res_val, CCIoError);
+                                fprintf(stderr, "Compression error (seq=%ld, kind=%d, os_code=%d)\n", blk->seq, err.kind, err.os_code);
                             }
                             
                             // Free input block arena
@@ -619,6 +685,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     long seq = 0;
                     bool hit_eof = false;
                     Block* prev_blk = NULL;
+                    unsigned long rolling_hash = 2047; // RSYNCHIT
                     
                     // Maintain a buffer for the last_tail (32KB)
                     unsigned char last_tail_buf[32768];
@@ -628,8 +695,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         // Check if pipeline is shutting down due to error
                         if (cc_atomic_load(&g_pipeline_error)) break;
                         
-                        // Arena needs space for data, Block struct, and dictionary copy
-                        CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD + 32768);
+                        // Arena needs space for data, Block struct, dictionary copy, and rsync hits
+                        CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD + 65536 + (BLOCK_SIZE / 5 * sizeof(size_t)));
                         
                         // Read returns Ok(slice) or Err; empty slice on EOF
                         CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
@@ -662,9 +729,45 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         blk->seq = seq++;
                         blk->data = data;
                         blk->dict = (CCSlice){0};
+                        blk->lens = (CCSlice){0};
                         blk->is_last = false;  // set later once we know if this is last
                         blk->arena = blk_arena;  // Transfer ownership to Block
                         
+                        // Rsyncable Logic: Find hits and fill blk->lens
+                        if (g.rsync) {
+                            // Max hits in a block: BLOCK_SIZE / 5 (shortest possible block is 5 bytes)
+                            size_t max_hits = BLOCK_SIZE / 5;
+                            size_t* hits = arena_alloc(size_t, &blk_arena, max_hits);
+                            if (!hits) {
+                                fprintf(stderr, "Failed to allocate hits array\n");
+                                cc_atomic_store(&g_pipeline_error, 1);
+                                cc_heap_arena_free(&blk_arena);
+                                break;
+                            }
+                            size_t n_hits = 0;
+                            
+                            const unsigned char* p = (const unsigned char*)data.ptr;
+                            size_t last_hit_pos = 0;
+                            for (size_t i = 0; i < data.len; i++) {
+                                rolling_hash = ((rolling_hash << 1) ^ p[i]) & 0xFFF; // RSYNCMASK
+                                if (rolling_hash == 2047) { // RSYNCHIT
+                                    if (n_hits < max_hits) {
+                                        hits[n_hits++] = (i + 1) - last_hit_pos;
+                                        last_hit_pos = i + 1;
+                                    }
+                                }
+                            }
+                            if (n_hits > 0) {
+                                // If there's data left after the last hit, add it as a final segment
+                                if (last_hit_pos < data.len) {
+                                    if (n_hits < max_hits) {
+                                        hits[n_hits++] = data.len - last_hit_pos;
+                                    }
+                                }
+                                blk->lens = cc_slice_from_parts(hits, n_hits * sizeof(size_t), CC_SLICE_ID_UNTRACKED, n_hits * sizeof(size_t));
+                            }
+                        }
+
                         // Dictionary Chaining: Copying Strategy
                         if (last_tail_len > 0) {
                             unsigned char* dict_mem = arena_alloc(unsigned char, &blk_arena, last_tail_len);
@@ -837,6 +940,7 @@ int main(int argc, char *argv[]) {
     g.form = 0;
     g.sufx = ".gz";
     g.headis = 3;
+    g.rsync = 0;
     g.name = NULL;
     g.alias = NULL;
     g.comment = NULL;
@@ -859,6 +963,8 @@ int main(int argc, char *argv[]) {
                 g.keep = 1;
             } else if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--recursive") == 0) {
                 g.recursive = 1;
+            } else if (strcmp(argv[i], "-R") == 0 || strcmp(argv[i], "--rsyncable") == 0) {
+                g.rsync = 1;
             } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--force") == 0) {
                 g.force = 1;
             } else if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "--silent") == 0) {
