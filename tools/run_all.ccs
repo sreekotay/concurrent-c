@@ -87,6 +87,24 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
             stats->failed++;
         } else {
             printf("FAIL (exit %d)\n", exit_code);
+            /* Print stdout/stderr on failure for debugging */
+            const char* out_str = cc_process_output_stdout_str(&out);
+            size_t out_len = cc_process_output_stdout_len(&out);
+            if (out_len > 0 && out_str) {
+                printf("    stdout: %.*s", (int)(out_len > 200 ? 200 : out_len), out_str);
+                if (out_len > 200) printf("...(truncated)");
+                printf("\n");
+            }
+            const char* err_str = cc_process_output_stderr_str(&out);
+            size_t err_len = cc_process_output_stderr_len(&out);
+            if (err_len > 0 && err_str) {
+                printf("    stderr: %.*s", (int)(err_len > 200 ? 200 : err_len), err_str);
+                if (err_len > 200) printf("...(truncated)");
+                printf("\n");
+            }
+            if (out_len == 0 && err_len == 0) {
+                printf("    (no output captured)\n");
+            }
             stats->failed++;
         }
     }

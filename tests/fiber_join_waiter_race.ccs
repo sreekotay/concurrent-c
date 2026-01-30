@@ -1,0 +1,82 @@
+/*
+ * Smoke test: fiber join waiter registration race
+ * 
+ * This test targets a specific race condition in cc_fiber_join:
+ * 
+ * 1. Joiner increments join_waiters
+ * 2. Joiner checks f->done (false)
+ * 3. Child sets f->done = 1
+ * 4. Child reads join_waiter_fiber -> NULL (joiner hasn't set it yet!)
+ * 5. Child doesn't unpark anyone
+ * 6. Joiner sets join_waiter_fiber
+ * 7. Joiner enters parking loop
+ * 8. If joiner doesn't see f->done=1, it parks forever -> DEADLOCK
+ *
+ * To maximize the race window:
+ * - Use 1 worker thread (CC_WORKERS=1) so joiner and child can't run in parallel
+ * - Child does minimal work (returns immediately)
+ * - Deep nesting creates many join points
+ * - Many iterations to hit the race
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define DEPTH 20
+#define ITERATIONS 500
+
+cc_atomic_int completed_depth = 0;
+
+void* instant_task(void* arg);
+
+void* instant_task(void* arg) {
+    int depth = (int)(intptr_t)arg;
+    
+    /* Track max depth reached */
+    if (depth > cc_atomic_load(&completed_depth)) {
+        cc_atomic_store(&completed_depth, depth);
+    }
+    
+    if (depth < DEPTH) {
+        /* Immediately spawn nested nursery - no delay to maximize race window */
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, instant_task, (void*)(intptr_t)(depth + 1));
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+    }
+    
+    return NULL;
+}
+
+int main(int argc, char** argv) {
+    int iterations = ITERATIONS;
+    int depth = DEPTH;
+    
+    /* Allow overriding via args for stress testing */
+    if (argc > 1) iterations = atoi(argv[1]);
+    if (argc > 2) depth = atoi(argv[2]);
+    
+    printf("fiber_join_waiter_race: depth=%d, iterations=%d\n", depth, iterations);
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        cc_atomic_store(&completed_depth, 0);
+        
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, instant_task, (void*)(intptr_t)1);
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        int reached = cc_atomic_load(&completed_depth);
+        if (reached != depth) {
+            fprintf(stderr, "FAIL: iter %d: only reached depth %d/%d\n", iter, reached, depth);
+            return 1;
+        }
+        
+        if ((iter + 1) % 100 == 0) {
+            printf("  completed %d/%d\n", iter + 1, iterations);
+        }
+    }
+    
+    printf("fiber_join_waiter_race: PASS\n");
+    return 0;
+}

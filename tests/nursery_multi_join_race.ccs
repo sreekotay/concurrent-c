@@ -1,0 +1,57 @@
+/*
+ * Smoke test: nursery multi-join race
+ * 
+ * Tests the race where multiple fibers complete around the same time
+ * and the nursery tries to join them. This is different from the
+ * single parent-child join race.
+ *
+ * Pattern:
+ *   nursery spawns N fibers that complete quickly
+ *   nursery_wait joins them all sequentially
+ *   Race: fiber completes while/before join starts
+ *
+ * Run with: CC_WORKERS=4 ccc run tests/nursery_multi_join_race.ccs
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define NUM_FIBERS 16
+#define ITERATIONS 1000
+
+cc_atomic_int completed = 0;
+
+void* quick_task(void* arg) {
+    int id = (int)(intptr_t)arg;
+    /* Minimal work - maximize race window */
+    (void)id;
+    cc_atomic_fetch_add(&completed, 1);
+    return NULL;
+}
+
+int main(void) {
+    printf("nursery_multi_join_race: fibers=%d, iterations=%d\n", NUM_FIBERS, ITERATIONS);
+    
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&completed, 0);
+        
+        CCNursery* n = cc_nursery_create();
+        for (int i = 0; i < NUM_FIBERS; i++) {
+            cc_nursery_spawn(n, quick_task, (void*)(intptr_t)i);
+        }
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+        
+        int done = cc_atomic_load(&completed);
+        if (done != NUM_FIBERS) {
+            fprintf(stderr, "FAIL: iter %d: only %d/%d completed\n", iter, done, NUM_FIBERS);
+            return 1;
+        }
+        
+        if ((iter + 1) % 200 == 0) {
+            printf("  completed %d/%d\n", iter + 1, ITERATIONS);
+        }
+    }
+    
+    printf("nursery_multi_join_race: PASS\n");
+    return 0;
+}

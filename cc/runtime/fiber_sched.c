@@ -208,6 +208,7 @@ typedef struct fiber_task {
     /* Per-fiber join synchronization */
     _Atomic int join_waiters;           /* Count of threads/fibers waiting to join */
     struct fiber_task* _Atomic join_waiter_fiber;  /* Single waiting fiber (common case) */
+    _Atomic int join_lock;              /* Spinlock for done/waiter handshake */
     pthread_mutex_t join_mu;            /* Mutex for join condvar (thread waiters) */
     pthread_cond_t join_cv;             /* Per-fiber condvar for thread waiters */
     _Atomic int join_cv_initialized;    /* Lazy init flag for condvar (atomic for race-free signaling) */
@@ -631,6 +632,7 @@ static fiber_task* fiber_alloc(void) {
             atomic_store(&f->unpark_pending, 0);
             atomic_store(&f->join_waiters, 0);
             atomic_store(&f->join_waiter_fiber, NULL);
+            atomic_store(&f->join_lock, 0);
             f->park_reason = NULL;
             f->park_file = NULL;
             f->park_line = 0;
@@ -646,6 +648,7 @@ static fiber_task* fiber_alloc(void) {
         atomic_store_explicit(&nf->join_cv_initialized, 0, memory_order_relaxed);
         atomic_store(&nf->join_waiters, 0);
         atomic_store(&nf->join_waiter_fiber, NULL);
+        atomic_store(&nf->join_lock, 0);
         nf->fiber_id = atomic_fetch_add(&g_next_fiber_id, 1);
     }
     return nf;
@@ -731,6 +734,28 @@ extern void __tsan_release(void* addr);
 #define TSAN_RELEASE(addr) ((void)0)
 #endif
 
+/* Simple spinlock for join handshake - ensures proper ordering between
+ * child setting done=1 and parent registering as waiter */
+static inline void join_spinlock_lock(_Atomic int* lock) {
+    for (;;) {
+        /* Spin with pause until lock looks free */
+        while (atomic_load_explicit(lock, memory_order_relaxed) != 0) {
+            cpu_pause();
+        }
+        /* Try to acquire */
+        int expected = 0;
+        if (atomic_compare_exchange_weak_explicit(lock, &expected, 1,
+                                                   memory_order_acquire,
+                                                   memory_order_relaxed)) {
+            return;
+        }
+    }
+}
+
+static inline void join_spinlock_unlock(_Atomic int* lock) {
+    atomic_store_explicit(lock, 0, memory_order_release);
+}
+
 static void fiber_entry(mco_coro* co) {
     fiber_task* f = (fiber_task*)mco_get_user_data(co);
     if (f && f->fn) {
@@ -740,26 +765,32 @@ static void fiber_entry(mco_coro* co) {
         TSAN_ACQUIRE(f->arg);  /* Tell TSan: sync with release on same address */
         f->result = f->fn(f->arg);
     }
-    atomic_store_explicit(&f->state, FIBER_DONE, memory_order_release);
+    /* Handshake lock ensures proper ordering between child setting done=1
+     * and parent registering as waiter. The joiner holds this lock while
+     * checking done and setting join_waiter_fiber, so we're guaranteed to
+     * either see the waiter OR the joiner will see done=1 before parking. */
+    join_spinlock_lock(&f->join_lock);
     atomic_store_explicit(&f->done, 1, memory_order_release);
+    fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
+    join_spinlock_unlock(&f->join_lock);
+    
+    if (waiter) {
+        cc__fiber_unpark(waiter);
+    }
+    
+    /* Signal thread waiters via condvar if initialized */
+    if (atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire)) {
+        pthread_mutex_lock(&f->join_mu);
+        pthread_cond_broadcast(&f->join_cv);
+        pthread_mutex_unlock(&f->join_mu);
+    }
+    
+    atomic_store_explicit(&f->state, FIBER_DONE, memory_order_release);
     atomic_fetch_sub_explicit(&g_sched.pending, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_sched.completed, 1, memory_order_relaxed);
     
-    /* Signal per-fiber joiners - targeted wakeup */
-    if (atomic_load_explicit(&f->join_waiters, memory_order_acquire) > 0) {
-        /* First, unpark any fiber waiter (common case for nested nurseries) */
-        fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
-        if (waiter) {
-            cc__fiber_unpark(waiter);
-        }
-        
-        /* Then signal thread waiters via condvar if initialized */
-        if (atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire)) {
-            pthread_mutex_lock(&f->join_mu);
-            pthread_cond_broadcast(&f->join_cv);
-            pthread_mutex_unlock(&f->join_mu);
-        }
-    }
+    /* Ensure all stores are visible before returning to pool */
+    atomic_thread_fence(memory_order_release);
     
     /* Coroutine returns, will be cleaned up by caller (nursery) */
 }
@@ -1017,12 +1048,18 @@ int cc_fiber_sched_init(size_t num_workers) {
     }
     
     if (num_workers == 0) {
-        #if CC_FIBER_WORKERS > 0
-        num_workers = CC_FIBER_WORKERS;
-        #else
-        long n = sysconf(_SC_NPROCESSORS_ONLN);
-        num_workers = n > 0 ? (size_t)n : 4;
-        #endif
+        const char* env = getenv("CC_WORKERS");
+        if (env) {
+            num_workers = (size_t)strtoul(env, NULL, 10);
+        }
+        if (num_workers == 0) {
+            #if CC_FIBER_WORKERS > 0
+            num_workers = CC_FIBER_WORKERS;
+            #else
+            long n = sysconf(_SC_NPROCESSORS_ONLN);
+            num_workers = n > 0 ? (size_t)n : 4;
+            #endif
+        }
     }
     if (num_workers > MAX_WORKERS) num_workers = MAX_WORKERS;
     
@@ -1096,6 +1133,23 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     int reused = 0;
     if (f->coro) {
         mco_state st = f->coro->state;  /* Inline mco_status for speed */
+        
+        /* If coro is still MCO_RUNNING, the previous fiber_entry set done=1
+         * but mco_resume hasn't returned yet. Spin-wait for it to exit.
+         * This is a very short window - just waiting for context switch. */
+        if (st == MCO_RUNNING) {
+            for (int spin = 0; spin < 10000; spin++) {
+                cpu_pause();
+                st = f->coro->state;
+                if (st != MCO_RUNNING) break;
+            }
+            /* After spinning, if still running, yield and retry */
+            while (st == MCO_RUNNING) {
+                sched_yield();
+                st = f->coro->state;
+            }
+        }
+        
         if (st == MCO_DEAD || st == MCO_SUSPENDED) {
             /* MCO_DEAD: completed coro from pool, needs context reset
              * MCO_SUSPENDED: pre-warmed coro, already has valid context */
@@ -1263,39 +1317,69 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         /* We're inside a fiber - PARK instead of blocking the worker thread.
          * This is critical for nested nurseries to avoid deadlock. */
         
-        /* Store ourselves as the waiter fiber */
-        fiber_task* expected = NULL;
-        if (atomic_compare_exchange_strong_explicit(&f->join_waiter_fiber, &expected, current,
-                                                     memory_order_acq_rel, memory_order_acquire)) {
-            /* Successfully registered as fiber waiter - park until woken.
-             * Must check unpark_pending to handle race where target completes
-             * before we park (cc__fiber_unpark sets unpark_pending if we're 
-             * still RUNNING). */
-            while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
-                /* Check if unpark already happened before we try to park */
-                if (atomic_exchange_explicit(&current->unpark_pending, 0, memory_order_acq_rel)) {
-                    continue;  /* Already woken, re-check done flag */
-                }
-                
-                atomic_store_explicit(&current->state, FIBER_PARKED, memory_order_release);
-                
-                /* Check again after setting PARKED - race window closed */
-                if (atomic_exchange_explicit(&current->unpark_pending, 0, memory_order_acq_rel)) {
-                    atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
-                    continue;  /* Already woken, re-check done flag */
-                }
-                
-                atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
-                mco_yield(current->coro);
-                atomic_fetch_sub_explicit(&g_sched.parked, 1, memory_order_relaxed);
+        /* Handshake lock: ensures proper ordering between us checking done and
+         * setting join_waiter_fiber, and the child setting done and reading waiter.
+         * Either we see done=1 (child completed first), OR the child will see
+         * our registration (we registered first). No lost wakeups possible. */
+        join_spinlock_lock(&f->join_lock);
+        
+        /* Re-check done under lock */
+        if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+            join_spinlock_unlock(&f->join_lock);
+            atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
+            if (out_result) *out_result = f->result;
+            return 0;
+        }
+        
+        /* Store ourselves as the waiter fiber - guaranteed visible to child */
+        atomic_store_explicit(&f->join_waiter_fiber, current, memory_order_release);
+        join_spinlock_unlock(&f->join_lock);
+        
+        /* Now park until woken. At this point, either:
+         * 1. Child hasn't completed yet - will see our registration and unpark us
+         * 2. Child completed while we held lock - done=1, handled above */
+        while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+            /* Check if unpark already happened before we try to park */
+            if (atomic_exchange_explicit(&current->unpark_pending, 0, memory_order_acq_rel)) {
+                continue;  /* Already woken, re-check done flag */
+            }
+            
+            atomic_store_explicit(&current->state, FIBER_PARKED, memory_order_release);
+            
+            /* Check again after setting PARKED - race window closed */
+            if (atomic_exchange_explicit(&current->unpark_pending, 0, memory_order_acq_rel)) {
                 atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
+                continue;  /* Already woken, re-check done flag */
             }
-        } else {
-            /* Another fiber already waiting - fall back to spin-wait 
-             * (rare case, and condvar would deadlock) */
-            while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
-                sched_yield();
+            
+            /* Final check for done flag after setting PARKED */
+            if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+                atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
+                break;
             }
+            
+            /* Re-check state - if child already unparked us (changed PARKED->READY),
+             * don't yield. */
+            int cur_state = atomic_load_explicit(&current->state, memory_order_acquire);
+            if (cur_state != FIBER_PARKED) {
+                /* Child already changed our state - we were unparked */
+                atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
+                continue;
+            }
+            
+            /* Full memory barrier + final done check before committing to yield.
+             * This ensures we see the latest f->done value after all our stores
+             * (including state=PARKED) are visible to other threads. */
+            atomic_thread_fence(memory_order_seq_cst);
+            if (atomic_load_explicit(&f->done, memory_order_seq_cst)) {
+                atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
+                break;
+            }
+            
+            atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
+            mco_yield(current->coro);
+            atomic_fetch_sub_explicit(&g_sched.parked, 1, memory_order_relaxed);
+            atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
         }
     } else {
         /* Not in fiber context - use condvar (safe to block thread) */
@@ -1432,10 +1516,13 @@ void cc__fiber_unpark(void* fiber_ptr) {
     if (!atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_READY,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
-        if (expected == FIBER_READY) {
-            return;
+        if (expected == FIBER_DONE) {
+            return;  /* Already completed, nothing to do */
         }
-        /* Fiber is still RUNNING; record pending wake and return. */
+        /* Fiber is READY (executing) or RUNNING - record pending wake.
+         * This handles the race where the fiber is in cc_fiber_join about to park
+         * but hasn't set PARKED yet. The fiber will check unpark_pending before
+         * actually yielding. */
         atomic_store_explicit(&f->unpark_pending, 1, memory_order_release);
         return;
     }
