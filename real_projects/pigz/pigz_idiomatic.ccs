@@ -219,7 +219,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     r = pending[slot];
                     pending[slot] = NULL;
                     
-                    CCRes(size_t, CCIoError) wr = cc_file_write(out_ptr, r->data);
+                    size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
                     if (cc_is_err(wr)) {
                         fprintf(stderr, "Error: write failed at block %ld: %s\n", 
                                 r->seq, cc_io_error_str(cc_unwrap_err(wr)));
@@ -276,7 +276,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                         
                         // Read returns Ok(slice) or Err; empty slice on EOF
-                        CCRes(CCSlice, CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
+                        CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
                         if (cc_is_err(read_res)) {
                             fprintf(stderr, "Read error: %s\n", cc_io_error_str(cc_unwrap_err(read_res)));
                             cc_atomic_store(&g_pipeline_error, 1);

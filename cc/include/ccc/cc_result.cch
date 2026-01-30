@@ -225,6 +225,7 @@ typedef struct __CCGenericError {
     char __pad[48];
 } __CCGenericError;
 
+
 /* Generic result placeholder struct - used for ALL result types during parsing.
    Field names match the real CC_DECL_RESULT_SPEC layout so user code compiles.
    Uses named union 'u' matching the real struct layout. */

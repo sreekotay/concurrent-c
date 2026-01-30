@@ -51,6 +51,11 @@ typedef struct {
     CCArena arena;  // Owns the compressed data buffer
 } CompressedResult;
 
+/* TODO: The compiler should auto-generate this declaration before first usage,
+   but the insertion logic doesn't yet handle user-defined struct pointer result types.
+   For now, declare explicitly after the struct is defined.
+   See: real_projects/pigz/TODO_result_type_ordering.md */
+
 /* Global configuration and state */
 struct {
     size_t block;           // uncompressed input size per thread
@@ -264,7 +269,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             };
             
             // Use Result-based I/O for cleaner code
-            CCRes(size_t, CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10));
+            size_t !> (CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10));
             if (cc_is_ok(hdr_wr)) {
                 // Header written successfully
             } else {
@@ -303,7 +308,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     total_len += r->original_len;
 
                     // Use Result-based I/O for writing data
-                    CCRes(size_t, CCIoError) wr = cc_file_write(out_ptr, r->data);
+                    size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
                     if (cc_is_ok(wr)) {
                         // Block written successfully
                     } else {
@@ -329,7 +334,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 trailer[6] = (total_len >> 16) & 0xff;
                 trailer[7] = (total_len >> 24) & 0xff;
                 
-                CCRes(size_t, CCIoError) tr_wr = cc_file_write(out_ptr, cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8));
+                size_t !> (CCIoError) tr_wr = cc_file_write(out_ptr, cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8));
                 if (cc_is_ok(tr_wr)) {
                     // Trailer written successfully
                 } else {
@@ -357,7 +362,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         }
                         
                         // Compress and send result; on error, log and continue
-                        CCResPtr(CompressedResult, CCIoError) res_val = compress_block(blk, blk->dict, level);
+                        // TODO: CCResPtr macro has parser-mode type mismatch; use sigil syntax for consistency
+                        CompressedResult* !> (CCIoError) res_val = compress_block(blk, blk->dict, level);
                         if (cc_is_ok(res_val)) {
                             chan_send(results_tx, cc_unwrap(res_val));
                         } else {
@@ -389,7 +395,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD + 32768);
                         
                         // Read returns Ok(slice) or Err; empty slice on EOF
-                        CCRes(CCSlice, CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
+                        CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
                         if (cc_is_err(read_res)) {
                             fprintf(stderr, "Read error\n");
                             cc_atomic_store(&g_pipeline_error, 1);

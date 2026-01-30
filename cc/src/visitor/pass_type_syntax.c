@@ -845,8 +845,8 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
         }
         if (c == '}') {
             brace_depth--;
-            /* Exit function scope */
-            if (fn_brace_depth >= 0 && brace_depth < fn_brace_depth) {
+            /* Exit function scope - use <= to catch when we return to the function's starting level */
+            if (fn_brace_depth >= 0 && brace_depth <= fn_brace_depth) {
                 current_result_type[0] = 0;
                 fn_brace_depth = -1;
             }
@@ -862,6 +862,7 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             
             /* Check for __CC_RESULT(T, E) pattern */
             if (c == '_' && i + 12 < n && memcmp(src + i, "__CC_RESULT(", 12) == 0) {
+                fprintf(stderr, "[DEBUG] Found __CC_RESULT at pos %zu\n", i);
                 j = i + 12;
                 while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
                 size_t t_start = j;
@@ -936,8 +937,11 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             if (detected_type[0]) {
                 while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r' || src[j] == '*')) j++;
                 if (j < n && cc__is_ident_start_local2(src[j])) {
+                    /* Capture function name for debug */
+                    size_t fn_start = j;
                     /* Skip function name */
                     while (j < n && cc__is_ident_char_local(src[j])) j++;
+                    size_t fn_end = j;
                     while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
                     if (j < n && src[j] == '(') {
                         /* Skip params */

@@ -1027,6 +1027,108 @@ static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
     return out;
 }
 
+/* Rewrite result constructors for parser mode:
+   - `cc_ok_CCResult_T_E(v)` -> `__CC_RESULT_OK(0, 0, v)`
+   - `cc_err_CCResult_T_E(e)` -> `__CC_RESULT_ERR(0, 0, e)`
+   This avoids typed constructors during TCC parsing while preserving arg checking. */
+static char* cc__rewrite_result_constructors(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    
+    size_t i = 0;
+    size_t last_emit = 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        
+        const char* ok_prefix = "cc_ok_CCResult_";
+        const char* err_prefix = "cc_err_CCResult_";
+        size_t ok_len = 15;  /* strlen("cc_ok_CCResult_") */
+        size_t err_len = 16; /* strlen("cc_err_CCResult_") */
+        
+        int is_ok = (i + ok_len < n && strncmp(src + i, ok_prefix, ok_len) == 0);
+        int is_err = (i + err_len < n && strncmp(src + i, err_prefix, err_len) == 0);
+        
+        if (is_ok || is_err) {
+            /* Ensure not part of a longer identifier */
+            if (i > 0 && cc_is_ident_char(src[i - 1])) {
+                i++;
+                continue;
+            }
+            
+            size_t prefix_len = is_ok ? ok_len : err_len;
+            size_t j = i + prefix_len;
+            
+            /* Skip mangled type name */
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            
+            /* Skip whitespace to find '(' */
+            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+            if (j >= n || src[j] != '(') {
+                i++;
+                continue;
+            }
+            
+            /* Parse argument list */
+            size_t args_start = j + 1;
+            size_t k = args_start;
+            int depth = 1;
+            int in_s = 0, in_c = 0;
+            while (k < n && depth > 0) {
+                char ch = src[k];
+                if (in_s) { if (ch == '\\' && k + 1 < n) k++; else if (ch == '"') in_s = 0; k++; continue; }
+                if (in_c) { if (ch == '\\' && k + 1 < n) k++; else if (ch == '\'') in_c = 0; k++; continue; }
+                if (ch == '"') { in_s = 1; k++; continue; }
+                if (ch == '\'') { in_c = 1; k++; continue; }
+                if (ch == '(') depth++;
+                else if (ch == ')') depth--;
+                if (depth > 0) k++;
+            }
+            if (depth != 0) {
+                i++;
+                continue;
+            }
+            
+            size_t args_end = k;
+            size_t call_end = k + 1;
+            
+            /* Emit everything up to function name */
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            if (is_ok) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_OK(0, 0, ");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_ERR(0, 0, ");
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+            last_emit = call_end;
+            i = call_end;
+            continue;
+        }
+        
+        i++;
+    }
+    
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* ============================================================================
  * Generic container syntax lowering: Vec<T> -> Vec_T, Map<K,V> -> Map_K_V
  * Also: vec_new<T>(...) -> Vec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
@@ -3379,15 +3481,20 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur5 = rewritten_res ? rewritten_res : cur4c;
     size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
 
+    /* Rewrite cc_ok_CCResult_T_E / cc_err_CCResult_T_E for parser mode */
+    char* rewritten_res_ctor = cc__rewrite_result_constructors(cur5, cur5_n);
+    const char* cur5c = rewritten_res_ctor ? rewritten_res_ctor : cur5;
+    size_t cur5c_n = rewritten_res_ctor ? strlen(rewritten_res_ctor) : cur5_n;
+
     /* Normalize `if @try (` to `if (try ` so both syntaxes work */
-    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5, cur5_n);
-    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5;
-    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5_n;
+    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5c, cur5c_n);
+    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5c;
+    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5c_n;
 
     /* Rewrite if (try T x = expr) -> expanded form (must come before try expr rewrite) */
     char* rewritten_try_bind = cc__rewrite_try_binding(cur5a, cur5a_n);
-    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5;
-    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5_n;
+    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5c;
+    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5c_n;
 
     /* Rewrite try expr -> cc_try(expr) */
     char* rewritten_try = cc__rewrite_try_exprs(cur5b, cur5b_n);
@@ -3408,7 +3515,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_closing);
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
         free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
@@ -3514,6 +3621,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_try_bind);
+    free(rewritten_res_ctor);
     free(rewritten_res);
     free(rewritten_opt_ctor);
     free(rewritten_opt);
@@ -3619,15 +3727,20 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     const char* cur5 = rewritten_res ? rewritten_res : cur4c;
     size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
 
+    /* Rewrite cc_ok_CCResult_T_E / cc_err_CCResult_T_E for parser mode */
+    char* rewritten_res_ctor = cc__rewrite_result_constructors(cur5, cur5_n);
+    const char* cur5c = rewritten_res_ctor ? rewritten_res_ctor : cur5;
+    size_t cur5c_n = rewritten_res_ctor ? strlen(rewritten_res_ctor) : cur5_n;
+
     /* Normalize `if @try (` to `if (try ` so both syntaxes work */
-    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5, cur5_n);
-    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5;
-    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5_n;
+    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5c, cur5c_n);
+    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5c;
+    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5c_n;
 
     /* Rewrite if (try T x = expr) -> expanded form (must come before try expr rewrite) */
     char* rewritten_try_bind = cc__rewrite_try_binding(cur5a, cur5a_n);
-    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5;
-    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5_n;
+    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5c;
+    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5c_n;
 
     /* Rewrite try expr -> cc_try(expr) */
     char* rewritten_try = cc__rewrite_try_exprs(cur5b, cur5b_n);
@@ -3648,7 +3761,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
-        free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor);
+        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_res); free(rewritten_opt_ctor);
         free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
         free(rewritten_match); free(rewritten_deadline); free(buf);
@@ -3670,7 +3783,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         /* Fallback: estimate size and manually build */
         free(rewritten_if_try_norm); free(rewritten_link); free(rewritten_conc);
         free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
-        free(rewritten_try_bind); free(rewritten_res); free(rewritten_opt_ctor);
+        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_res); free(rewritten_opt_ctor);
         free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
         free(rewritten_match); free(rewritten_deadline); free(buf);
@@ -3758,6 +3871,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     free(rewritten_unwrap);
     free(rewritten_try);
     free(rewritten_try_bind);
+    free(rewritten_res_ctor);
     free(rewritten_res);
     free(rewritten_opt_ctor);
     free(rewritten_opt);

@@ -1,7 +1,9 @@
 // Test: Result types with custom structs using accessor macros
 // Verifies cc_unwrap_as() works for struct value types
+// Also tests mixing sigil syntax with CCRes/CCResPtr macros
 
 #include <stdio.h>
+#include <ccc/std/prelude.cch>  // Step 4: include prelude for spawn/nursery
 
 // Custom struct types
 typedef struct {
@@ -14,7 +16,7 @@ typedef struct {
     const char* msg;
 } MyError;
 
-// Function returning custom result type
+// Function returning custom result type (value)
 MyData !> (MyError) create_data(int succeed) {
     if (succeed) {
         MyData d = {10, 20};
@@ -25,6 +27,26 @@ MyData !> (MyError) create_data(int succeed) {
     }
 }
 
+// Step 1: Function returning POINTER result type with sigil syntax
+MyData*!>(MyError) create_data_ptr(int succeed) {
+    static MyData storage = {100, 200};
+    if (succeed) {
+        return cc_ok(&storage);
+    } else {
+        MyError e = {99, "ptr failed"};
+        return cc_err(e);
+    }
+}
+
+// Helper returning stdlib result type
+size_t !> (CCIoError) create_size_result(void) {
+    return cc_ok((size_t)42);
+}
+
+// Regression: typed constructor initializer should parse in TCC
+size_t !> (CCIoError) create_size_result_typed(void) {
+    return cc_ok_CCResult_size_t_CCIoError(24);
+}
 
 int main(void) {
     // Test 1: success case with cc_unwrap_as
@@ -49,6 +71,63 @@ int main(void) {
     } else {
         printf("unwrap: error\n");
     }
+    
+    // Step 1 test: pointer result type with sigil syntax
+    MyData*!>(MyError) res_ptr = create_data_ptr(1);
+    if (cc_is_ok(res_ptr)) {
+        MyData* p = cc_unwrap(res_ptr);
+        printf("ptr: x=%d y=%d\n", p->x, p->y);
+    }
+    
+    // Step 2 test: Use sigil syntax for pointer result type
+    MyData*!>(MyError) res_mixed = create_data_ptr(1);
+    if (cc_is_ok(res_mixed)) {
+        MyData* p2 = cc_unwrap(res_mixed);
+        printf("mixed: x=%d y=%d\n", p2->x, p2->y);
+    }
+    
+    // Step 3 test: sigil syntax for value type
+    MyData !> (MyError) res_macro = create_data(1);
+    if (cc_is_ok(res_macro)) {
+        MyData d3 = cc_unwrap_as(res_macro, MyData);
+        printf("macro: x=%d y=%d\n", d3.x, d3.y);
+    }
+    
+    // Step 4 test: nursery spawn with result type used inside closure
+    // (pigz_cc.ccs declares result vars inside spawn, doesn't capture them)
+    int spawn_ok = 0;
+    @nursery {
+        spawn(@unsafe [&spawn_ok]() => {
+            // Result type declared and used inside the spawn closure
+            MyData*!>(MyError) res_in_spawn = create_data_ptr(1);
+            if (cc_is_ok(res_in_spawn)) {
+                MyData* p = cc_unwrap(res_in_spawn);
+                if (p->x == 100 && p->y == 200) spawn_ok = 1;
+            }
+        });
+    }
+    printf("spawn: %s\n", spawn_ok ? "ok" : "FAIL");
+    
+    // Step 5a: Test stdlib result type OUTSIDE spawn first
+    size_t !> (CCIoError) res_outside = create_size_result();
+    printf("outside_spawn: %s\n", cc_is_ok(res_outside) ? "ok" : "FAIL");
+
+    // Regression: typed constructor initializer path
+    size_t !> (CCIoError) res_outside_typed = cc_ok_CCResult_size_t_CCIoError(7);
+    printf("outside_typed: %s\n", cc_is_ok(res_outside_typed) ? "ok" : "FAIL");
+    
+    // Step 5b test: Same thing INSIDE spawn
+    int spawn_stdlib = 0;
+    @nursery {
+        spawn(@unsafe [&spawn_stdlib]() => {
+            // Try sigil syntax instead of CCRes macro
+            size_t !> (CCIoError) res_stdlib = create_size_result_typed();
+            if (cc_is_ok(res_stdlib)) {
+                spawn_stdlib = 1;
+            }
+        });
+    }
+    printf("spawn_stdlib: %s\n", spawn_stdlib ? "ok" : "FAIL");
     
     printf("all tests passed\n");
     return 0;
