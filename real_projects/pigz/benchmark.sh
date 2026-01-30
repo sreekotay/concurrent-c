@@ -73,12 +73,47 @@ run_benchmark() {
     echo ""
 }
 
+# Function to run decompression benchmark
+run_decomp_benchmark() {
+    local name=$1
+    local cmd=$2
+    local total_time=0
+    
+    echo "=== $name (Decompression) ==="
+    for run in $(seq 1 $RUNS); do
+        # Ensure fresh compressed input
+        cp bench_compressed.gz bench_test.gz
+        
+        # Time decompression
+        start=$(python3 -c 'import time; print(time.time())')
+        $cmd bench_test.gz
+        end=$(python3 -c 'import time; print(time.time())')
+        
+        elapsed=$(python3 -c "print(f'{$end - $start:.3f}')")
+        
+        echo "  Run $run: ${elapsed}s"
+        rm -f bench_test.gz bench_test
+        
+        total_time=$(python3 -c "print($total_time + $elapsed)")
+    done
+    
+    avg=$(python3 -c "print(f'{$total_time / $RUNS:.3f}')")
+    echo "  Average: ${avg}s"
+    echo ""
+}
+
 # Run benchmarks (binaries are in current directory now)
 run_benchmark "Original pigz (pthread)" "./pigz -k -p $WORKERS"
 run_benchmark "CC pigz (Concurrent-C)"  "./pigz_cc -k -p $WORKERS"
 if [ -z "$SKIP_IDIOMATIC" ]; then
     run_benchmark "CC pigz Idiomatic (T!E)" "./pigz_idiomatic"
 fi
+
+# Prepare compressed file for decompression benchmarks
+./pigz -k -p $WORKERS -c bench_input.bin > bench_compressed.gz
+
+run_decomp_benchmark "Original pigz (pthread)" "./pigz -d -k -p $WORKERS"
+run_decomp_benchmark "CC pigz (Concurrent-C)"  "./pigz_cc -d -k -p $WORKERS"
 
 # Verify correctness
 echo "=== Correctness Check ==="
@@ -126,7 +161,7 @@ if [ -z "$SKIP_IDIOMATIC" ]; then
 fi
 
 # Cleanup
-rm -f bench_input.bin bench_verify.bin bench_test.bin
+rm -f bench_input.bin bench_verify.bin bench_test.bin bench_compressed.gz
 rm -f orig.gz cc.gz orig_decomp.bin cc_decomp.bin
 
 echo ""
