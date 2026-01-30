@@ -765,17 +765,25 @@ static void fiber_entry(mco_coro* co) {
         TSAN_ACQUIRE(f->arg);  /* Tell TSan: sync with release on same address */
         f->result = f->fn(f->arg);
     }
-    /* Handshake lock ensures proper ordering between child setting done=1
-     * and parent registering as waiter. The joiner holds this lock while
-     * checking done and setting join_waiter_fiber, so we're guaranteed to
-     * either see the waiter OR the joiner will see done=1 before parking. */
-    join_spinlock_lock(&f->join_lock);
-    atomic_store_explicit(&f->done, 1, memory_order_release);
-    fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
-    join_spinlock_unlock(&f->join_lock);
-    
-    if (waiter) {
-        cc__fiber_unpark(waiter);
+    /* Fast path: if no one is waiting to join, skip the lock entirely.
+     * This is safe because any joiner that starts after we read join_waiters
+     * will see done=1 when they check under the lock. */
+    int waiters = atomic_load_explicit(&f->join_waiters, memory_order_relaxed);
+    if (waiters == 0) {
+        /* No joiners - just set done, no need for lock or waiter check */
+        atomic_store_explicit(&f->done, 1, memory_order_release);
+    } else {
+        /* Someone might be joining - use handshake lock to ensure either:
+         * 1. We see their waiter registration, OR
+         * 2. They see our done=1 before parking */
+        join_spinlock_lock(&f->join_lock);
+        atomic_store_explicit(&f->done, 1, memory_order_release);
+        fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
+        join_spinlock_unlock(&f->join_lock);
+        
+        if (waiter) {
+            cc__fiber_unpark(waiter);
+        }
     }
     
     /* Signal thread waiters via condvar if initialized */
