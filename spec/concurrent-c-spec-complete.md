@@ -2,6 +2,8 @@
 
 A C preprocessor that extends C syntax with first-class concurrency, desugaring to portable C.
 
+The key concept: lifetime of memory and the lifetime of tasks are explicitly bound to the structure of the code.
+
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
