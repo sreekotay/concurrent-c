@@ -7,3 +7,43 @@ Workers: 4
 Runs: 3
 
 Generating 100MB test data...
+
+=== Original pigz (pthread) ===
+  Run 1: 0.442s, output:  104889633 bytes
+  Run 2: 0.442s, output:  104889633 bytes
+  Run 3: 0.447s, output:  104889633 bytes
+  Average: 0.444s
+
+=== CC pigz (Concurrent-C) ===
+  Run 1: 0.440s, output:  104889628 bytes
+  Run 2: 0.436s, output:  104889628 bytes
+  Run 3: 0.425s, output:  104889628 bytes
+  Average: 0.434s
+
+=== CC pigz Idiomatic (T!E) ===
+Compressed bench_test.bin to bench_test.bin.gz
+Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
+  Run 1: 0.394s, output:  104904000 bytes
+Compressed bench_test.bin to bench_test.bin.gz
+Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
+  Run 2: 0.393s, output:  104904000 bytes
+Compressed bench_test.bin to bench_test.bin.gz
+Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
+  Run 3: 0.399s, output:  104904000 bytes
+  Average: 0.395s
+
+=== Correctness Check ===
+Original: PASS (decompresses correctly)
+CC:       PASS (decompresses correctly)
+Compressed bench_verify.bin to bench_verify.bin.gz
+Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
+Idiomatic: PASS (decompresses correctly)
+
+Compressed sizes:
+  Original:  104889635 bytes
+  CC:        104889628 bytes
+Compressed bench_verify.bin to bench_verify.bin.gz
+Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks
+  Idiomatic:  104904000 bytes
+
+Done.

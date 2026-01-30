@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <dirent.h>
+#include "/opt/homebrew/include/zopfli.h"
 
 /* ============================================================================
  * Configuration
@@ -75,6 +76,7 @@ struct {
     int form;               // 0=gzip, 1=zlib
     char *sufx;             // compressed file suffix
     int headis;             // header bits (matches pigz.c)
+    ZopfliOptions zopts;    // zopfli compression options
 } g;
 
 /* Global statistics */
@@ -194,74 +196,76 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
 
         // Stage 1: Setup & CRC (matches pigz.c:2323-2324)
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
-        (void)deflateReset(strm);
-        (void)deflateParams(strm, level, strategy);
 
-        // Stage 2: Output Buffer Allocation
-        // Use deflateBound to ensure we have enough space for the compressed data
-        size_t max_out = deflateBound(strm, (uLong)blk->data.len) + 64;
-        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
-        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
+        if (level <= 9) {
+            (void)deflateReset(strm);
+            (void)deflateParams(strm, level, strategy);
 
-        size_t pos = 0;
+            // Stage 2: Output Buffer Allocation
+            // Use deflateBound to ensure we have enough space for the compressed data
+            size_t max_out = deflateBound(strm, (uLong)blk->data.len) + 64;
+            unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+            if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
-        // Stage 3: Dictionary Loading (matches pigz.c:2330-2335)
-        if (dict.len > 0) {
-            deflateSetDictionary(strm, (const Bytef*)dict.ptr, (uInt)dict.len);
-        }
-        
-        strm->next_in = (Bytef*)blk->data.ptr;
-        strm->avail_in = (uInt)blk->data.len;
-        strm->next_out = out_buf + pos;
-        strm->avail_out = (uInt)(max_out - pos);
-        
-        int ret;
-        // Stage 4: Deflate Loop (matches pigz.c:2340-2350)
-        while (strm->avail_in > 0) {
-            ret = deflate(strm, Z_NO_FLUSH);
-            if (ret != Z_OK) break;
-            if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
-        }
+            size_t pos = 0;
 
-        // Stage 5: Block Boundary Alignment (matches pigz.c:1990-2010)
-        if (ret == Z_OK) {
-            if (blk->is_last) {
-                // Finish the stream on the last block.
-                do {
-                    ret = deflate(strm, Z_FINISH);
-                    if (ret != Z_OK && ret != Z_STREAM_END) break;
-                    if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
-                } while (ret != Z_STREAM_END);
-            } else {
+            // Stage 3: Dictionary Loading (matches pigz.c:2330-2335)
+            if (dict.len > 0) {
+                deflateSetDictionary(strm, (const Bytef*)dict.ptr, (uInt)dict.len);
+            }
+            
+            strm->next_in = (Bytef*)blk->data.ptr;
+            strm->avail_in = (uInt)blk->data.len;
+            strm->next_out = out_buf + pos;
+            strm->avail_out = (uInt)(max_out - pos);
+            
+            int ret;
+            // Stage 4: Deflate Loop (matches pigz.c:2340-2350)
+            while (strm->avail_in > 0) {
+                ret = deflate(strm, Z_NO_FLUSH);
+                if (ret != Z_OK) break;
+                if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
+            }
+
+            // Stage 5: Block Boundary Alignment (matches pigz.c:1990-2010)
+            if (ret == Z_OK) {
+                if (blk->is_last) {
+                    // Finish the stream on the last block.
+                    do {
+                        ret = deflate(strm, Z_FINISH);
+                        if (ret != Z_OK && ret != Z_STREAM_END) break;
+                        if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
+                    } while (ret != Z_STREAM_END);
+                } else {
 #if ZLIB_VERNUM >= 0x1260
-                int setdict = (dict.len > 0);
-                // Align to byte boundary without finishing the stream
-                ret = deflate(strm, Z_BLOCK);
-                if (ret == Z_OK) {
-                    int bits = 0;
-                    (void)deflatePending(strm, Z_NULL, &bits);
-                    if ((bits & 1) || !setdict) {
-                        ret = deflate(strm, Z_SYNC_FLUSH);
-                    } else if (bits & 7) {
-                        do {
-                            ret = deflatePrime(strm, 10, 2);
-                            if (ret != Z_OK) break;
-                            (void)deflatePending(strm, Z_NULL, &bits);
-                        } while (bits & 7);
-                        if (ret == Z_OK) ret = deflate(strm, Z_BLOCK);
+                    int setdict = (dict.len > 0);
+                    // Align to byte boundary without finishing the stream
+                    ret = deflate(strm, Z_BLOCK);
+                    if (ret == Z_OK) {
+                        int bits = 0;
+                        (void)deflatePending(strm, Z_NULL, &bits);
+                        if ((bits & 1) || !setdict) {
+                            ret = deflate(strm, Z_SYNC_FLUSH);
+                        } else if (bits & 7) {
+                            do {
+                                ret = deflatePrime(strm, 10, 2);
+                                if (ret != Z_OK) break;
+                                (void)deflatePending(strm, Z_NULL, &bits);
+                            } while (bits & 7);
+                            if (ret == Z_OK) ret = deflate(strm, Z_BLOCK);
+                        }
+                    }
+#else
+                    ret = deflate(strm, Z_SYNC_FLUSH);
+                    int setdict = 0;
+#endif
+                    if (ret == Z_OK && !setdict) {
+                        // For independent blocks, add a full flush marker.
+                        ret = deflate(strm, Z_FULL_FLUSH);
                     }
                 }
-#else
-                ret = deflate(strm, Z_SYNC_FLUSH);
-                int setdict = 0;
-#endif
-                if (ret == Z_OK && !setdict) {
-                    // For independent blocks, add a full flush marker.
-                    ret = deflate(strm, Z_FULL_FLUSH);
-                }
             }
-        }
-        
+            
         // Stage 6: Finalize Result
         size_t deflate_len = strm->total_out;
         if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
@@ -270,11 +274,37 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
         
         pos += deflate_len;
         res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
-
-        // Update global statistics
-        cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
         cc_atomic_fetch_add(&g_bytes_out, pos);
-        cc_atomic_fetch_add(&g_blocks_done, 1);
+    } else {
+        // Zopfli compression (level 11)
+        unsigned char* out = NULL;
+        size_t outsize = 0;
+        
+        // Zopfli only supports raw deflate for parts, we'll need to wrap it ourselves
+        // or use ZopfliCompress for the whole block. pigz.c uses ZopfliDeflatePart.
+        // For simplicity in this first pass, we use ZopfliCompress which handles the format.
+        ZopfliFormat format = ZOPFLI_FORMAT_DEFLATE; // We want raw deflate to match our manual header/trailer
+        
+        ZopfliCompress(&g.zopts, format, (const unsigned char*)blk->data.ptr, blk->data.len, &out, &outsize);
+        
+        if (!out) return cc_err(CC_IO_OTHER);
+        
+        // Copy Zopfli output to arena
+        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, outsize);
+        if (!out_buf) {
+            free(out);
+            return cc_err(CC_IO_OUT_OF_MEMORY);
+        }
+        memcpy(out_buf, out, outsize);
+        free(out);
+        
+        res->data = cc_slice_from_parts(out_buf, outsize, CC_SLICE_ID_UNTRACKED, outsize);
+        cc_atomic_fetch_add(&g_bytes_out, outsize);
+    }
+
+    // Update global statistics
+    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+    cc_atomic_fetch_add(&g_blocks_done, 1);
 
         // Transfer arena ownership: detach empties res_arena, so block cleanup is no-op
         res->arena = cc_arena_detach(res_arena);
@@ -466,10 +496,34 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // Initialize z_stream once per worker (matches pigz.c:2310-2320)
                     z_stream strm;
                     memset(&strm, 0, sizeof(strm));
-                    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, strategy);
-                    if (ret != Z_OK) {
-                        fprintf(stderr, "Worker failed to initialize zlib\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
+                    if (level <= 9) {
+                        int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, strategy);
+                        if (ret != Z_OK) {
+                            fprintf(stderr, "Worker failed to initialize zlib\n");
+                            cc_atomic_store(&g_pipeline_error, 1);
+                        } else {
+                            Block* blk;
+                            while (chan_recv(blocks_rx, &blk) == 0) {
+                                // Check if pipeline is shutting down due to error
+                                if (cc_atomic_load(&g_pipeline_error)) {
+                                    cc_heap_arena_free(&blk->arena);
+                                    continue;  // Drain channel but don't process
+                                }
+                                
+                                // Compress and send result; on error, log and continue
+                                CompressedResult* !> (CCIoError) res_val = compress_block(&strm, blk, blk->dict, level, strategy);
+                                if (cc_is_ok(res_val)) {
+                                    chan_send(results_tx, cc_unwrap(res_val));
+                                } else {
+                                    // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
+                                    fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
+                                }
+                                
+                                // Free input block arena
+                                cc_heap_arena_free(&blk->arena);
+                            }
+                            deflateEnd(&strm);
+                        }
                     } else {
                         Block* blk;
                         while (chan_recv(blocks_rx, &blk) == 0) {
@@ -491,7 +545,6 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             // Free input block arena
                             cc_heap_arena_free(&blk->arena);
                         }
-                        deflateEnd(&strm);
                     }
                 });
             }
@@ -711,6 +764,7 @@ int main(int argc, char *argv[]) {
     g.form = 0;
     g.sufx = ".gz";
     g.headis = 3;
+    ZopfliInitOptions(&g.zopts);
     int num_workers = 4;
     int level = 6;
     int strategy = Z_DEFAULT_STRATEGY;
@@ -752,6 +806,8 @@ int main(int argc, char *argv[]) {
                 level = 1;
             } else if (strcmp(argv[i], "--best") == 0) {
                 level = 9;
+            } else if (strcmp(argv[i], "-11") == 0) {
+                level = 11;
             } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
                 usage(argv[0]);
                 return 0;
