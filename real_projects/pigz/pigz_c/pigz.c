@@ -432,7 +432,10 @@
 #endif
 
 #ifndef NOZOPFLI
-#  include "zopfli/src/zopfli/deflate.h"    // ZopfliDeflatePart(),
+#  include <zopfli.h>
+void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,
+                       const unsigned char* in, size_t instart, size_t inend,
+                       unsigned char* bp, unsigned char** out, size_t* outsize);
                                             // ZopfliInitOptions(),
                                             // ZopfliOptions
 #endif
