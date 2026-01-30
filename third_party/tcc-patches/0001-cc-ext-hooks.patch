@@ -1,131 +1,22 @@
-diff --git a/cc_ast_record.h b/cc_ast_record.h
-new file mode 100644
-index 00000000..0118ed29
---- /dev/null
-+++ b/cc_ast_record.h
-@@ -0,0 +1,117 @@
-+/* CC AST Recording - included by tccgen.c when CONFIG_CC_EXT is defined */
-+#ifndef CC_AST_RECORD_H
-+#define CC_AST_RECORD_H
-+
-+static void cc_ast_ensure_tables(void) {
-+    if (!tcc_state) return;
-+    if (!tcc_state->cc_nodes) {
-+        tcc_state->cc_nodes_cap = 64;
-+        tcc_state->cc_nodes_count = 0;
-+        tcc_state->cc_nodes = tcc_mallocz(tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
-+    }
-+    if (!tcc_state->cc_node_stack) {
-+        tcc_state->cc_node_stack_cap = 64;
-+        tcc_state->cc_node_stack_top = -1;
-+        tcc_state->cc_node_stack = tcc_mallocz(tcc_state->cc_node_stack_cap * sizeof(int));
-+    }
-+}
-+
-+void cc_ast_record_start(int kind) {
-+    cc_ast_ensure_tables();
-+    if (!tcc_state || !tcc_state->cc_nodes || !tcc_state->cc_node_stack) return;
-+    if (tcc_state->cc_nodes_count >= tcc_state->cc_nodes_cap) {
-+        tcc_state->cc_nodes_cap *= 2;
-+        tcc_state->cc_nodes = tcc_realloc(tcc_state->cc_nodes, tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
-+    }
-+    if (tcc_state->cc_node_stack_top + 1 >= tcc_state->cc_node_stack_cap) {
-+        tcc_state->cc_node_stack_cap *= 2;
-+        tcc_state->cc_node_stack = tcc_realloc(tcc_state->cc_node_stack, tcc_state->cc_node_stack_cap * sizeof(int));
-+    }
-+    if (!tcc_state->cc_nodes || !tcc_state->cc_node_stack) return;
-+    int parent = (tcc_state->cc_node_stack_top >= 0) ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
-+    int idx = tcc_state->cc_nodes_count++;
-+    tcc_state->cc_nodes[idx].kind = kind;
-+    tcc_state->cc_nodes[idx].parent = parent;
-+    tcc_state->cc_nodes[idx].file = file ? tcc_strdup(file->filename) : NULL;
-+    tcc_state->cc_nodes[idx].line_start = file ? file->line_num : 0;
-+    tcc_state->cc_nodes[idx].line_end = tcc_state->cc_nodes[idx].line_start;
-+    tcc_state->cc_nodes[idx].col_start = 0;
-+    tcc_state->cc_nodes[idx].col_end = 0;
-+    tcc_state->cc_nodes[idx].aux1 = 0;
-+    tcc_state->cc_nodes[idx].aux2 = 0;
-+    tcc_state->cc_nodes[idx].aux_s1 = NULL;
-+    tcc_state->cc_nodes[idx].aux_s2 = NULL;
-+    tcc_state->cc_node_stack[++tcc_state->cc_node_stack_top] = idx;
-+}
-+
-+void cc_ast_record_end(void) {
-+    if (!tcc_state || !tcc_state->cc_nodes || tcc_state->cc_node_stack_top < 0) return;
-+    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-+    if (file && (tcc_state->cc_nodes[idx].aux2 & (1U << 31)) == 0)
-+        tcc_state->cc_nodes[idx].line_end = file->line_num;
-+    tcc_state->cc_node_stack_top--;
-+}
-+
-+static void cc_ast_record_call(int flags) {
-+    cc_ast_ensure_tables();
-+    if (!tcc_state || !tcc_state->cc_nodes || !tcc_state->cc_node_stack) return;
-+    cc_ast_record_start(CC_AST_NODE_CALL);
-+    if (tcc_state->cc_node_stack_top < 0) return;
-+    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-+    int callee_tok = (vtop && vtop->sym) ? (vtop->sym->v & ~SYM_FIELD) : 0;
-+    const char *callee_name = callee_tok ? get_tok_str(callee_tok, NULL) : NULL;
-+    int is_ufcs = (tcc_state->cc_last_member_tok != 0);
-+    int occ = 0;
-+    if (is_ufcs) {
-+        int line = file ? file->line_num : 0;
-+        if (tcc_state->cc_ufcs_seq_line != line) { tcc_state->cc_ufcs_seq_line = line; tcc_state->cc_ufcs_seq_count = 0; }
-+        occ = ++tcc_state->cc_ufcs_seq_count;
-+    }
-+    tcc_state->cc_nodes[idx].aux1 = callee_tok;
-+    tcc_state->cc_nodes[idx].aux2 = (flags & 1) | (is_ufcs ? 2 : 0) | (occ << 8);
-+    tcc_state->cc_nodes[idx].aux_s1 = callee_name ? tcc_strdup(callee_name) : NULL;
-+    tcc_state->cc_nodes[idx].aux_s2 = (is_ufcs && tcc_state->cc_last_recv_type[0]) ? tcc_strdup(tcc_state->cc_last_recv_type) : NULL;
-+    if (is_ufcs && tcc_state->cc_last_member_line) {
-+        tcc_state->cc_nodes[idx].line_start = tcc_state->cc_last_member_line;
-+        tcc_state->cc_nodes[idx].col_start = tcc_state->cc_last_member_col;
-+    } else {
-+        tcc_state->cc_nodes[idx].col_start = tok_col;
-+    }
-+    tcc_state->cc_last_member_tok = tcc_state->cc_last_member_flags = tcc_state->cc_last_member_col = tcc_state->cc_last_member_line = 0;
-+    if (!tcc_state->cc_call_stack) {
-+        tcc_state->cc_call_stack_cap = 32; tcc_state->cc_call_stack_top = -1;
-+        tcc_state->cc_call_stack = tcc_mallocz(tcc_state->cc_call_stack_cap * sizeof(int));
-+    }
-+    if (tcc_state->cc_call_stack) {
-+        if (tcc_state->cc_call_stack_top + 1 >= tcc_state->cc_call_stack_cap) {
-+            tcc_state->cc_call_stack_cap *= 2;
-+            tcc_state->cc_call_stack = tcc_realloc(tcc_state->cc_call_stack, tcc_state->cc_call_stack_cap * sizeof(int));
-+        }
-+        if (tcc_state->cc_call_stack) tcc_state->cc_call_stack[++tcc_state->cc_call_stack_top] = idx;
-+    }
-+}
-+
-+static void cc_ast_record_assign_start(int op_tok) {
-+    if (!tcc_state) return;
-+    cc_ast_record_start(CC_AST_NODE_ASSIGN);
-+    if (tcc_state->cc_node_stack_top < 0) return;
-+    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-+    const char *lhs = (vtop && vtop->sym) ? get_tok_str(vtop->sym->v & ~SYM_FIELD, NULL) : NULL;
-+    const char *op = (op_tok == '=') ? "=" : get_tok_str(op_tok, NULL);
-+    tcc_state->cc_nodes[idx].aux1 = op_tok;
-+    tcc_state->cc_nodes[idx].aux_s1 = lhs ? tcc_strdup(lhs) : NULL;
-+    tcc_state->cc_nodes[idx].aux_s2 = op ? tcc_strdup(op) : NULL;
-+    tcc_state->cc_nodes[idx].col_start = tok_col;
-+    if (op) tcc_state->cc_nodes[idx].col_end = tok_col + (int)strlen(op);
-+}
-+
-+static void cc_ast_record_return_start(void) {
-+    if (!tcc_state) return;
-+    cc_ast_record_start(CC_AST_NODE_RETURN);
-+    if (tcc_state->cc_node_stack_top < 0) return;
-+    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-+    tcc_state->cc_nodes[idx].col_start = tok_col;
-+    tcc_state->cc_nodes[idx].col_end = tok_col + 6;
-+}
-+
-+#endif /* CC_AST_RECORD_H */
+diff --git a/Makefile b/Makefile
+index d21f1cad..cfff431b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -21,6 +21,9 @@ LIBTCC1 = libtcc1.a
+ LINK_LIBTCC =
+ LIBS =
+ CFLAGS += $(CPPFLAGS)
++ifeq ($(CONFIG_cc_ext),yes)
++  CFLAGS += -DCONFIG_CC_EXT
++endif
+ VPATH = $(TOPSRC)
+ -LTCC = $(TOP)/$(LIBTCC)
+ 
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..32d4844d 100644
+index 171e3622..73bff3de 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,154 @@
+@@ -66,6 +66,165 @@
  
  #include "tcc.h"
  
@@ -180,8 +71,14 @@ index 171e3622..32d4844d 100644
 +#ifdef CONFIG_CC_EXT
 +    s->cc_parser_mode = 1;
 +#endif
-+    /* Add basic include paths for CC std headers (relative to caller cwd).
-+       The CC driver adds absolute paths via tcc_add_include_path() as needed. */
++    /* Add basic include paths for CC std headers.
++       Priority 1: CC_INCLUDE_PATH env var (set by driver for external projects).
++       Priority 2: Relative paths (work when running from CC repo). */
++    const char* cc_inc_env = getenv("CC_INCLUDE_PATH");
++    if (cc_inc_env && cc_inc_env[0]) {
++        tcc_add_include_path(s, cc_inc_env);
++        tcc_add_sysinclude_path(s, cc_inc_env);
++    }
 +    tcc_add_include_path(s, ".");
 +    tcc_add_include_path(s, "include");
 +    tcc_add_include_path(s, "cc/include");
@@ -192,6 +89,11 @@ index 171e3622..32d4844d 100644
 +    tcc_add_sysinclude_path(s, "cc/include");
 +    tcc_add_sysinclude_path(s, "./cc/include");
 +    tcc_add_sysinclude_path(s, "../cc/include");
++    /* TCC's builtin headers (stdarg.h, stddef.h, etc.) - needed for parsing code that
++       includes system headers like zlib.h that depend on these. */
++    tcc_add_sysinclude_path(s, "third_party/tcc/include");
++    tcc_add_sysinclude_path(s, "../third_party/tcc/include");
++    tcc_add_sysinclude_path(s, "../../third_party/tcc/include");
 +#ifdef __APPLE__
 +    /* macOS SDK paths for std headers. */
 +    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
@@ -280,7 +182,7 @@ index 171e3622..32d4844d 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +886,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +897,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */

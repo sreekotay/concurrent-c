@@ -34,7 +34,7 @@ ifeq ($(TCC_EXT),1)
   ifneq ($(TCC_INC_ABS),)
     override TCC_INC := $(TCC_INC_ABS)
   endif
-  CFLAGS += -DCC_TCC_EXT_AVAILABLE -I$(TCC_INC)
+  CFLAGS += -DCC_TCC_EXT_AVAILABLE -DCONFIG_CC_EXT -I$(TCC_INC)
   # If TCC_LIB points to a directory, link -Ldir -ltcc; if it points to an
   # archive, link that archive directly.
   ifneq ($(suffix $(TCC_LIB)),.a)
