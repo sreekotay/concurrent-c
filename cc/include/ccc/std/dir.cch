@@ -64,10 +64,23 @@ static inline bool cc_dir_entry_is_symlink(const CCDirEntry* e) {
 /* Directory iterator (opaque handle) */
 typedef struct CCDirIter CCDirIter;
 
-/* Result types */
-CC_DECL_RESULT(CCResultDirIterIoError, CCDirIter*, CCIoError)
-CC_DECL_RESULT(CCResultDirEntryIoError, CCDirEntry, CCIoError)
-CC_DECL_RESULT(CCResultBoolIoError, bool, CCIoError)
+/* Result types - use CC_DECL_RESULT_SPEC for canonical names with helper functions */
+CC_DECL_RESULT_SPEC(CCResult_CCDirIterptr_CCIoError, CCDirIter*, CCIoError)
+CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
+CC_DECL_RESULT_SPEC(CCResult_bool_CCIoError, bool, CCIoError)
+
+/* Legacy aliases for compatibility */
+typedef CCResult_CCDirIterptr_CCIoError CCResultDirIterIoError;
+typedef CCResult_CCDirEntry_CCIoError CCResultDirEntryIoError;
+typedef CCResult_bool_CCIoError CCResultBoolIoError;
+
+/* Legacy function name aliases */
+#define cc_ok_CCResultDirIterIoError cc_ok_CCResult_CCDirIterptr_CCIoError
+#define cc_err_CCResultDirIterIoError cc_err_CCResult_CCDirIterptr_CCIoError
+#define cc_ok_CCResultDirEntryIoError cc_ok_CCResult_CCDirEntry_CCIoError
+#define cc_err_CCResultDirEntryIoError cc_err_CCResult_CCDirEntry_CCIoError
+#define cc_ok_CCResultBoolIoError cc_ok_CCResult_bool_CCIoError
+#define cc_err_CCResultBoolIoError cc_err_CCResult_bool_CCIoError
 
 /* ============================================================================
  * Directory Iteration

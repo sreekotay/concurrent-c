@@ -1,0 +1,40 @@
+/* Test: dir result types compile correctly */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    @arena(a, kilobytes(64)) {
+        // Test 1: open directory (pointer result, can use cc_unwrap)
+        CCDirIter*!>(CCIoError) iter_res = cc_dir_open(a, ".");
+        if (cc_is_err(iter_res)) {
+            printf("Failed to open directory\n");
+            return 1;
+        }
+        CCDirIter* iter = cc_unwrap(iter_res);
+        
+        // Test 2: iterate (struct result, need cc_unwrap_as)
+        int count = 0;
+        while (count < 5) {
+            CCDirEntry!>(CCIoError) entry_res = cc_dir_next(iter, a);
+            if (cc_is_err(entry_res)) {
+                // CCIoError is a struct, need _as variant
+                CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
+                if (err.kind == CC_IO_OTHER && err.os_code == 0) {
+                    // EOF
+                    break;
+                }
+                printf("Error reading directory\n");
+                cc_dir_close(iter);
+                return 1;
+            }
+            // CCDirEntry is a struct, need _as variant
+            CCDirEntry entry = cc_unwrap_as(entry_res, CCDirEntry);
+            printf("Entry: %s\n", (const char*)entry.name.ptr);
+            count++;
+        }
+        
+        cc_dir_close(iter);
+        printf("Dir test passed, found %d entries\n", count);
+    }
+    return 0;
+}

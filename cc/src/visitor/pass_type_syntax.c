@@ -430,11 +430,14 @@ char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, 
 CCCodegenResultTypePair cc__cg_result_types[64];
 size_t cc__cg_result_type_count = 0;
 
-/* Built-in result types already declared in stdlib headers (io.cch, etc.) */
+/* Built-in result types already declared in stdlib headers (io.cch, dir.cch, etc.) */
 static const char* cc__builtin_result_types[] = {
     "CCResult_CCSlice_CCIoError",           /* io.cch: cc_file_read */
     "CCResult_size_t_CCIoError",            /* io.cch: cc_file_write */
     "CCResult_CCOptional_CCSlice_CCIoError",/* io.cch */
+    "CCResult_CCDirIterptr_CCIoError",      /* dir.cch: cc_dir_open */
+    "CCResult_CCDirEntry_CCIoError",        /* dir.cch: cc_dir_next */
+    "CCResult_bool_CCIoError",              /* dir.cch: cc_dir_create, etc. */
     NULL
 };
 

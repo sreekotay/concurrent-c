@@ -933,6 +933,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Result type declarations are emitted later, after they're collected during
+       cc__rewrite_result_types_text processing. */
+
     /* Captures are lowered via __cc_closure_make_N factories. */
     if (closure_protos && closure_protos_len > 0) {
         fputs("/* --- CC closure forward decls --- */\n", out);
@@ -1001,86 +1004,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
             
-            /* Insert result type declarations into source at the right position.
-               Find first usage, then back up to before the enclosing function. */
-            if (cc__cg_result_type_count > 0) {
-                const char* insert_pos = NULL;
-                /* Find the first usage of any CCResult_T_E type in the source */
-                size_t earliest_pos = src_ufcs_len;
-                for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
-                    CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
-                    char pattern[256];
-                    snprintf(pattern, sizeof(pattern), "CCResult_%s_%s", p->mangled_ok, p->mangled_err);
-                    const char* found = strstr(src_ufcs, pattern);
-                    if (found && (size_t)(found - src_ufcs) < earliest_pos) {
-                        earliest_pos = (size_t)(found - src_ufcs);
-                    }
-                }
-                if (earliest_pos < src_ufcs_len) {
-                    /* Back up to find the enclosing function definition.
-                       Look for "int main(" or "type name(" at start of line. */
-                    size_t pos = earliest_pos;
-                    while (pos > 0) {
-                        /* Find start of current line */
-                        size_t line_start = pos;
-                        while (line_start > 0 && src_ufcs[line_start - 1] != '\n') line_start--;
-                        
-                        /* Check if this line looks like a function definition */
-                        const char* line = src_ufcs + line_start;
-                        /* Skip leading whitespace */
-                        while (*line == ' ' || *line == '\t') line++;
-                        
-                        /* Check for common function patterns */
-                        if ((strncmp(line, "int ", 4) == 0 || strncmp(line, "void ", 5) == 0 ||
-                             strncmp(line, "static ", 7) == 0 || strncmp(line, "CCResult_", 9) == 0) &&
-                            strchr(line, '(') != NULL && strchr(line, '{') != NULL) {
-                            /* Found a function definition - insert before this line */
-                            earliest_pos = line_start;
-                            break;
-                        }
-                        
-                        /* Move to previous line */
-                        if (line_start == 0) break;
-                        pos = line_start - 1;
-                    }
-                    insert_pos = src_ufcs + earliest_pos;
-                } else {
-                    /* No usage found (shouldn't happen) - insert at end */
-                    insert_pos = src_ufcs + src_ufcs_len;
-                }
-                
-                if (insert_pos) {
-                    size_t insert_offset = (size_t)(insert_pos - src_ufcs);
-                    
-                    /* Build declaration string */
-                    char* decls = NULL;
-                    size_t decls_len = 0, decls_cap = 0;
-                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, 
-                        "/* --- CC result type declarations (auto-generated) --- */\n");
-                    for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
-                        CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
-                        char line[512];
-                        snprintf(line, sizeof(line), "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
-                                 p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
-                        cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
-                    }
-                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, 
-                        "/* --- end result type declarations --- */\n\n");
-                    
-                    /* Build new source: prefix + decls + suffix */
-                    char* new_src = NULL;
-                    size_t new_len = 0, new_cap = 0;
-                    cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, insert_offset);
-                    cc__sb_append_local(&new_src, &new_len, &new_cap, decls, decls_len);
-                    cc__sb_append_local(&new_src, &new_len, &new_cap, 
-                                        src_ufcs + insert_offset, src_ufcs_len - insert_offset);
-                    
-                    free(decls);
-                    if (src_ufcs != src_all) free(src_ufcs);
-                    src_ufcs = new_src;
-                    src_ufcs_len = new_len;
-                }
-            }
+            /* Result type declarations are now emitted at file scope in the header section,
+               so no need to splice them into source here. */
         }
         /* Insert optional type declarations for custom types.
            Each CC_DECL_OPTIONAL is inserted right before the first use of that specific
@@ -1190,6 +1115,63 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
+        
+        /* Insert result type declarations INTO the source at the right position.
+           They must come AFTER custom type definitions but BEFORE functions that use them.
+           Find the first CCResult_ usage and insert before that line (at file scope). */
+        if (cc__cg_result_type_count > 0) {
+            /* Find first usage of any CCResult_T_E type in the source */
+            size_t earliest_pos = src_ufcs_len;
+            for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
+                CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
+                char pattern[256];
+                snprintf(pattern, sizeof(pattern), "CCResult_%s_%s", p->mangled_ok, p->mangled_err);
+                const char* found = strstr(src_ufcs, pattern);
+                if (found && (size_t)(found - src_ufcs) < earliest_pos) {
+                    earliest_pos = (size_t)(found - src_ufcs);
+                }
+            }
+            
+            if (earliest_pos < src_ufcs_len) {
+                /* Back up to start of line */
+                while (earliest_pos > 0 && src_ufcs[earliest_pos - 1] != '\n') {
+                    earliest_pos--;
+                }
+                
+                /* Build declaration string */
+                char* decls = NULL;
+                size_t decls_len = 0, decls_cap = 0;
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "/* --- CC result type declarations (auto-generated) --- */\n");
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "#ifndef CC_PARSER_MODE\n");
+                for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
+                    CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
+                    char line[512];
+                    snprintf(line, sizeof(line), "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                            p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
+                    cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
+                }
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "#endif /* !CC_PARSER_MODE */\n");
+                cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap,
+                    "/* --- end result type declarations --- */\n\n");
+                
+                /* Build new source: prefix + decls + suffix */
+                char* new_src = NULL;
+                size_t new_len = 0, new_cap = 0;
+                cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, earliest_pos);
+                cc__sb_append_local(&new_src, &new_len, &new_cap, decls, decls_len);
+                cc__sb_append_local(&new_src, &new_len, &new_cap,
+                                    src_ufcs + earliest_pos, src_ufcs_len - earliest_pos);
+                
+                free(decls);
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = new_src;
+                src_ufcs_len = new_len;
+            }
+        }
+        
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);
 

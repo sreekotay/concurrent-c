@@ -5,7 +5,6 @@
  * The closure pass now applies defer lowering to closure bodies.
  */
 
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <stdlib.h>

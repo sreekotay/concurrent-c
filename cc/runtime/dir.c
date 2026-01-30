@@ -54,12 +54,12 @@ struct CCDirIter {
 
 CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path) {
     if (!arena || !path) {
-        return cc_err_CCResultDirIterIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     CCDirIter*     iter = cc_arena_alloc(arena, sizeof(CCDirIter), _Alignof(CCDirIter));
     if (!iter) {
-        return cc_err_CCResultDirIterIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(ENOMEM));
     }
     memset(iter, 0, sizeof(*iter));
     iter->arena = arena;
@@ -69,7 +69,7 @@ CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path) {
     char pattern[MAX_PATH];
     size_t len = strlen(path);
     if (len + 3 >= MAX_PATH) {
-        return cc_err_CCResultDirIterIoError(cc_io_from_errno(ENAMETOOLONG));
+        return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(ENAMETOOLONG));
     }
     memcpy(pattern, path, len);
     if (len > 0 && path[len-1] != '\\' && path[len-1] != '/') {
@@ -82,24 +82,24 @@ CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path) {
     if (iter->handle == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
         CCIoError e = {.kind = CC_IO_FILE_NOT_FOUND, .os_code = (int)err};
-        return cc_err_CCResultDirIterIoError(e);
+        return cc_err_CCResult_CCDirIterptr_CCIoError(e);
     }
     iter->first = 1;
 #else
     iter->dir = opendir(path);
     if (!iter->dir) {
-        return cc_err_CCResultDirIterIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(errno));
     }
 #endif
 
-    return cc_ok_CCResultDirIterIoError(iter);
+    return cc_ok_CCResult_CCDirIterptr_CCIoError(iter);
 }
 
 CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
     CCDirEntry entry = {0};
 
     if (!iter || !arena) {
-        return cc_err_CCResultDirEntryIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_CCDirEntry_CCIoError(cc_io_from_errno(EINVAL));
     }
 
 #ifdef _WIN32
@@ -107,10 +107,10 @@ CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
         if (!FindNextFileA(iter->handle, &iter->find_data)) {
             DWORD err = GetLastError();
             if (err == ERROR_NO_MORE_FILES) {
-                return cc_err_CCResultDirEntryIoError(CC_DIR_EOF_ERROR);
+                return cc_err_CCResult_CCDirEntry_CCIoError(CC_DIR_EOF_ERROR);
             }
             CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
-            return cc_err_CCResultDirEntryIoError(e);
+            return cc_err_CCResult_CCDirEntry_CCIoError(e);
         }
     }
     iter->first = 0;
@@ -119,14 +119,14 @@ CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
     while (strcmp(iter->find_data.cFileName, ".") == 0 ||
            strcmp(iter->find_data.cFileName, "..") == 0) {
         if (!FindNextFileA(iter->handle, &iter->find_data)) {
-            return cc_err_CCResultDirEntryIoError(CC_DIR_EOF_ERROR);
+            return cc_err_CCResult_CCDirEntry_CCIoError(CC_DIR_EOF_ERROR);
         }
     }
 
     size_t name_len = strlen(iter->find_data.cFileName);
     char* name_copy = cc_arena_alloc(arena, name_len + 1, 1);
     if (!name_copy) {
-        return cc_err_CCResultDirEntryIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCDirEntry_CCIoError(cc_io_from_errno(ENOMEM));
     }
     memcpy(name_copy, iter->find_data.cFileName, name_len + 1);
     entry.name.ptr = name_copy;
@@ -150,13 +150,13 @@ CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
     }
 
     if (!de) {
-        return cc_err_CCResultDirEntryIoError(CC_DIR_EOF_ERROR);
+        return cc_err_CCResult_CCDirEntry_CCIoError(CC_DIR_EOF_ERROR);
     }
 
     size_t name_len = strlen(de->d_name);
     char* name_copy = cc_arena_alloc(arena, name_len + 1, 1);
     if (!name_copy) {
-        return cc_err_CCResultDirEntryIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_CCDirEntry_CCIoError(cc_io_from_errno(ENOMEM));
     }
     memcpy(name_copy, de->d_name, name_len + 1);
     entry.name.ptr = name_copy;
@@ -175,7 +175,7 @@ CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
 #endif
 #endif
 
-    return cc_ok_CCResultDirEntryIoError(entry);
+    return cc_ok_CCResult_CCDirEntry_CCIoError(entry);
 }
 
 void cc_dir_close(CCDirIter* iter) {
@@ -234,33 +234,33 @@ bool cc_path_is_file(const char* path) {
 
 CCResultBoolIoError cc_dir_create(const char* path) {
     if (!path) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 #ifdef _WIN32
     if (CreateDirectoryA(path, NULL)) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
     CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
-    return cc_err_CCResultBoolIoError(e);
+    return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (mkdir(path, 0755) == 0) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
-    return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+    return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
 #endif
 }
 
 CCResultBoolIoError cc_dir_create_all(const char* path) {
     if (!path) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     /* Make a mutable copy */
     size_t len = strlen(path);
     char* buf = malloc(len + 1);
     if (!buf) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(ENOMEM));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(ENOMEM));
     }
     memcpy(buf, path, len + 1);
 
@@ -277,14 +277,14 @@ CCResultBoolIoError cc_dir_create_all(const char* path) {
                     if (err != ERROR_ALREADY_EXISTS) {
                         free(buf);
                         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
-                        return cc_err_CCResultBoolIoError(e);
+                        return cc_err_CCResult_bool_CCIoError(e);
                     }
                 }
 #else
                 if (mkdir(buf, 0755) != 0 && errno != EEXIST) {
                     int err = errno;
                     free(buf);
-                    return cc_err_CCResultBoolIoError(cc_io_from_errno(err));
+                    return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(err));
                 }
 #endif
             }
@@ -294,44 +294,44 @@ CCResultBoolIoError cc_dir_create_all(const char* path) {
     }
 
     free(buf);
-    return cc_ok_CCResultBoolIoError(true);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 CCResultBoolIoError cc_dir_remove(const char* path) {
     if (!path) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 #ifdef _WIN32
     if (RemoveDirectoryA(path)) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
     CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
-    return cc_err_CCResultBoolIoError(e);
+    return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (rmdir(path) == 0) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
-    return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+    return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
 #endif
 }
 
 CCResultBoolIoError cc_file_remove(const char* path) {
     if (!path) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 #ifdef _WIN32
     if (DeleteFileA(path)) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
     CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
-    return cc_err_CCResultBoolIoError(e);
+    return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (unlink(path) == 0) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
-    return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+    return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
 #endif
 }
 
@@ -360,20 +360,20 @@ CCSlice cc_dir_cwd(CCArena* arena) {
 
 CCResultBoolIoError cc_dir_chdir(const char* path) {
     if (!path) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 #ifdef _WIN32
     if (SetCurrentDirectoryA(path)) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
     DWORD err = GetLastError();
     CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)err};
-    return cc_err_CCResultBoolIoError(e);
+    return cc_err_CCResult_bool_CCIoError(e);
 #else
     if (chdir(path) == 0) {
-        return cc_ok_CCResultBoolIoError(true);
+        return cc_ok_CCResult_bool_CCIoError(true);
     }
-    return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+    return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
 #endif
 }
 
@@ -448,15 +448,15 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
 static void glob_dir(CCArena* arena, CCGlobResult* result,
                      const char* dir, const char* pattern, int recursive) {
     CCResultDirIterIoError iter_res = cc_dir_open(arena, dir);
-    if (iter_res.is_err) return;
+    if (cc_is_err(iter_res)) return;
 
-    CCDirIter* iter = iter_res.ok;
+    CCDirIter* iter = cc_unwrap(iter_res);
     while (1) {
         CCResultDirEntryIoError entry_res = cc_dir_next(iter, arena);
-        if (entry_res.is_err) break;
+        if (cc_is_err(entry_res)) break;
 
-        CCDirEntry entry = entry_res.ok;
-        const char* name = entry.name.ptr;
+        CCDirEntry entry = cc_unwrap(entry_res);
+        const char* name = (const char*)entry.name.ptr;
 
         /* Build full path */
         size_t dir_len = strlen(dir);
@@ -490,14 +490,14 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
 
     /* Recurse into subdirectories */
     CCResultDirIterIoError iter_res = cc_dir_open(arena, dir);
-    if (iter_res.is_err) return;
+    if (cc_is_err(iter_res)) return;
 
-    CCDirIter* iter = iter_res.ok;
+    CCDirIter* iter = cc_unwrap(iter_res);
     while (1) {
         CCResultDirEntryIoError entry_res = cc_dir_next(iter, arena);
-        if (entry_res.is_err) break;
+        if (cc_is_err(entry_res)) break;
 
-        CCDirEntry entry = entry_res.ok;
+        CCDirEntry entry = cc_unwrap(entry_res);
         if (entry.type != CC_DIRENT_DIR) continue;
 
         size_t dir_len = strlen(dir);

@@ -8,7 +8,6 @@
  * function-based like Go. This is correct behavior and mirrors C++ RAII.
  */
 
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <stdlib.h>

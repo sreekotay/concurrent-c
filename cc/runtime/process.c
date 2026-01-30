@@ -278,14 +278,14 @@ CCResultStatusIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec) 
 
 CCResultBoolIoError cc_process_kill(CCProcess* proc, int sig) {
     if (!proc || proc->pid <= 0) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     if (kill(proc->pid, sig) < 0) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
     }
 
-    return cc_ok_CCResultBoolIoError(true);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 #else /* _WIN32 */
@@ -490,17 +490,17 @@ CCResultStatusIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec) 
 
 CCResultBoolIoError cc_process_kill(CCProcess* proc, int sig) {
     if (!proc || !proc->handle) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
     /* On Windows, treat SIGKILL/SIGTERM as TerminateProcess */
     (void)sig;
     if (!TerminateProcess(proc->handle, 1)) {
         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
-        return cc_err_CCResultBoolIoError(e);
+        return cc_err_CCResult_bool_CCIoError(e);
     }
 
-    return cc_ok_CCResultBoolIoError(true);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 #endif /* _WIN32 */
@@ -828,38 +828,38 @@ CCSlice cc_env_get(CCArena* arena, const char* name) {
 
 CCResultBoolIoError cc_env_set(const char* name, const char* value) {
     if (!name) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
 #ifdef _WIN32
     if (!SetEnvironmentVariableA(name, value)) {
         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
-        return cc_err_CCResultBoolIoError(e);
+        return cc_err_CCResult_bool_CCIoError(e);
     }
 #else
     if (setenv(name, value ? value : "", 1) < 0) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
     }
 #endif
 
-    return cc_ok_CCResultBoolIoError(true);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 CCResultBoolIoError cc_env_unset(const char* name) {
     if (!name) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(EINVAL));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
 
 #ifdef _WIN32
     if (!SetEnvironmentVariableA(name, NULL)) {
         CCIoError e = {.kind = CC_IO_OTHER, .os_code = (int)GetLastError()};
-        return cc_err_CCResultBoolIoError(e);
+        return cc_err_CCResult_bool_CCIoError(e);
     }
 #else
     if (unsetenv(name) < 0) {
-        return cc_err_CCResultBoolIoError(cc_io_from_errno(errno));
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
     }
 #endif
 
-    return cc_ok_CCResultBoolIoError(true);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }

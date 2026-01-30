@@ -16,6 +16,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <signal.h>
+#include <errno.h>
+#include <dirent.h>
 
 /* ============================================================================
  * Configuration
@@ -60,6 +65,10 @@ typedef struct {
 struct {
     size_t block;           // uncompressed input size per thread
     crc_t shift;            // pre-calculated CRC-32 shift for length block
+    int strategy;           // compression strategy
+    int recursive;          // recursive directory processing
+    int keep;               // keep original file
+    int to_stdout;          // write to stdout
 } g;
 
 /* Global statistics */
@@ -69,6 +78,35 @@ cc_atomic_int g_blocks_done = 0;
 
 /* Global error flag - when set, all tasks should exit ASAP */
 cc_atomic_int g_pipeline_error = 0;
+
+/* Signal handling */
+static void cut_short(int sig) {
+    (void)sig;
+    cc_atomic_store(&g_pipeline_error, 1);
+}
+
+/* Metadata preservation (matches pigz.c:3857) */
+static int copymeta(const char *from, const char *to) {
+    struct stat st;
+    struct timeval times[2];
+
+    if (stat(from, &st) != 0 || !S_ISREG(st.st_mode))
+        return -1;
+
+    // Set mode bits
+    int ret = chmod(to, st.st_mode & 07777);
+
+    // Copy owner and group
+    ret += chown(to, st.st_uid, st.st_gid);
+
+    // Copy access and modify times
+    times[0].tv_sec = st.st_atime;
+    times[0].tv_usec = 0;
+    times[1].tv_sec = st.st_mtime;
+    times[1].tv_usec = 0;
+    ret += utimes(to, times);
+    return ret;
+}
 
 /* ============================================================================
  * CRC32 Combination
@@ -128,14 +166,14 @@ static unsigned long crc32_comb_with_size(unsigned long crc1, unsigned long crc2
  * ============================================================================ */
 
 /*
- * Compress a single block. 
+ * Compress a single block using a provided z_stream.
  * Returns a CompressedResult*!>(IoError) to demonstrate idiomatic error propagation.
  * 
  * Uses @arena block with cc_arena_detach() for clean ownership transfer:
  * - On error: @arena cleanup frees the memory
  * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
-CompressedResult*!>(CCIoError) compress_block(Block* blk, CCSlice dict, int level) {
+CompressedResult*!>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
     // Arena sizing: CompressedResult struct + deflate output
     // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
@@ -151,81 +189,77 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, CCSlice dict, int leve
         // Calculate CRC using zlib directly
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-    // Compress with zlib (raw deflate, -15 window bits)
-    z_stream strm;
-    memset(&strm, 0, sizeof(strm));
-    
-    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-    if (ret != Z_OK) return cc_err(CC_IO_OTHER);
+        // Reset stream and set parameters (matches pigz.c:2323-2324)
+        (void)deflateReset(strm);
+        (void)deflateParams(strm, level, strategy);
 
-    // Allocate output buffer in the result arena using deflateBound
-    size_t max_out = deflateBound(&strm, (uLong)blk->data.len) + 64;
-    unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
-    if (!out_buf) {
-        deflateEnd(&strm);
-        return cc_err(CC_IO_OUT_OF_MEMORY);
-    }
+        // Allocate output buffer in the result arena using deflateBound
+        size_t max_out = deflateBound(strm, (uLong)blk->data.len) + 64;
+        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+        if (!out_buf) {
+            return cc_err(CC_IO_OUT_OF_MEMORY);
+        }
 
-    size_t pos = 0;
+        size_t pos = 0;
 
         // Set dictionary if provided
         if (dict.len > 0) {
-            deflateSetDictionary(&strm, (const Bytef*)dict.ptr, (uInt)dict.len);
+            deflateSetDictionary(strm, (const Bytef*)dict.ptr, (uInt)dict.len);
         }
         
-        strm.next_in = (Bytef*)blk->data.ptr;
-        strm.avail_in = (uInt)blk->data.len;
-        strm.next_out = out_buf + pos;
-        strm.avail_out = (uInt)(max_out - pos);
+        strm->next_in = (Bytef*)blk->data.ptr;
+        strm->avail_in = (uInt)blk->data.len;
+        strm->next_out = out_buf + pos;
+        strm->avail_out = (uInt)(max_out - pos);
         
+        int ret;
         // Deflate input with no flush until all input is consumed.
-        while (strm.avail_in > 0) {
-            ret = deflate(&strm, Z_NO_FLUSH);
+        while (strm->avail_in > 0) {
+            ret = deflate(strm, Z_NO_FLUSH);
             if (ret != Z_OK) break;
-            if (strm.avail_out == 0) { ret = Z_BUF_ERROR; break; }
+            if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
         }
 
         if (ret == Z_OK) {
             if (blk->is_last) {
                 // Finish the stream on the last block.
                 do {
-                    ret = deflate(&strm, Z_FINISH);
+                    ret = deflate(strm, Z_FINISH);
                     if (ret != Z_OK && ret != Z_STREAM_END) break;
-                    if (strm.avail_out == 0) { ret = Z_BUF_ERROR; break; }
+                    if (strm->avail_out == 0) { ret = Z_BUF_ERROR; break; }
                 } while (ret != Z_STREAM_END);
             } else {
 #if ZLIB_VERNUM >= 0x1260
                 int setdict = (dict.len > 0);
-                // Match pigz.c logic for block boundary alignment.
-                ret = deflate(&strm, Z_BLOCK);
+                // Match pigz.c logic for block boundary alignment (pigz.c:1990-2010)
+                ret = deflate(strm, Z_BLOCK);
                 if (ret == Z_OK) {
                     int bits = 0;
-                    (void)deflatePending(&strm, Z_NULL, &bits);
+                    (void)deflatePending(strm, Z_NULL, &bits);
                     if ((bits & 1) || !setdict) {
-                        ret = deflate(&strm, Z_SYNC_FLUSH);
+                        ret = deflate(strm, Z_SYNC_FLUSH);
                     } else if (bits & 7) {
                         do {
-                            ret = deflatePrime(&strm, 10, 2);
+                            ret = deflatePrime(strm, 10, 2);
                             if (ret != Z_OK) break;
-                            (void)deflatePending(&strm, Z_NULL, &bits);
+                            (void)deflatePending(strm, Z_NULL, &bits);
                         } while (bits & 7);
-                        if (ret == Z_OK) ret = deflate(&strm, Z_BLOCK);
+                        if (ret == Z_OK) ret = deflate(strm, Z_BLOCK);
                     }
                 }
 #else
-                ret = deflate(&strm, Z_SYNC_FLUSH);
+                ret = deflate(strm, Z_SYNC_FLUSH);
                 int setdict = 0;
 #endif
                 if (ret == Z_OK && !setdict) {
                     // For independent blocks, add a full flush marker.
-                    ret = deflate(&strm, Z_FULL_FLUSH);
+                    ret = deflate(strm, Z_FULL_FLUSH);
                 }
             }
         }
-    size_t deflate_len = strm.total_out;
-        deflateEnd(&strm);
+        size_t deflate_len = strm->total_out;
         
-    if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
+        if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
             return cc_err(CC_IO_OTHER);
         }
         
@@ -249,7 +283,10 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, CCSlice dict, int leve
  * Main Compression Pipeline
  * ============================================================================ */
 
-int compress_file(const char* in_path, const char* out_path, int num_workers, int level) {
+/* Forward declarations */
+int process_path(const char* path, int num_workers, int level, int strategy);
+
+int compress_file(const char* in_path, const char* out_path, int num_workers, int level, int strategy) {
     // Open input file
     CCFile in_file;
     if (cc_file_open(&in_file, in_path, "rb") != 0) {
@@ -395,27 +432,36 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         @nursery closing(results_tx) {
             /* Compression Workers */
             for (int w = 0; w < num_workers; w++) {
-                spawn([level, results_tx]() => {
-                    Block* blk;
-                    while (chan_recv(blocks_rx, &blk) == 0) {
-                        // Check if pipeline is shutting down due to error
-                        if (cc_atomic_load(&g_pipeline_error)) {
+                spawn([level, strategy, results_tx]() => {
+                    // Initialize z_stream once per worker (matches pigz.c:2310-2320)
+                    z_stream strm;
+                    memset(&strm, 0, sizeof(strm));
+                    int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, strategy);
+                    if (ret != Z_OK) {
+                        fprintf(stderr, "Worker failed to initialize zlib\n");
+                        cc_atomic_store(&g_pipeline_error, 1);
+                    } else {
+                        Block* blk;
+                        while (chan_recv(blocks_rx, &blk) == 0) {
+                            // Check if pipeline is shutting down due to error
+                            if (cc_atomic_load(&g_pipeline_error)) {
+                                cc_heap_arena_free(&blk->arena);
+                                continue;  // Drain channel but don't process
+                            }
+                            
+                            // Compress and send result; on error, log and continue
+                            CompressedResult* !> (CCIoError) res_val = compress_block(&strm, blk, blk->dict, level, strategy);
+                            if (cc_is_ok(res_val)) {
+                                chan_send(results_tx, cc_unwrap(res_val));
+                            } else {
+                                // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
+                                fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
+                            }
+                            
+                            // Free input block arena
                             cc_heap_arena_free(&blk->arena);
-                            continue;  // Drain channel but don't process
                         }
-                        
-                        // Compress and send result; on error, log and continue
-                        // TODO: CCResPtr macro has parser-mode type mismatch; use sigil syntax for consistency
-                        CompressedResult* !> (CCIoError) res_val = compress_block(blk, blk->dict, level);
-                        if (cc_is_ok(res_val)) {
-                            chan_send(results_tx, cc_unwrap(res_val));
-                        } else {
-                            // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
-                            fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
-                        }
-                        
-                        // Free input block arena
-                        cc_heap_arena_free(&blk->arena);
+                        deflateEnd(&strm);
                     }
                 });
             }
@@ -520,6 +566,86 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     return 0;
 }
 
+/* Process a single path (file or directory) recursively */
+int process_path(const char* path, int num_workers, int level, int strategy) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        fprintf(stderr, "pigz_cc: %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        if (!g.recursive) {
+            fprintf(stderr, "pigz_cc: %s is a directory -- ignored\n", path);
+            return 0;
+        }
+
+        @arena(dir_arena, megabytes(1)) {
+            CCResultDirIterIoError iter_res = cc_dir_open(dir_arena, path);
+            if (cc_is_ok(iter_res)) {
+                CCDirIter* iter = cc_unwrap(iter_res);
+                @defer cc_dir_close(iter);
+
+                int ret = 0;
+                while (true) {
+                    CCResultDirEntryIoError entry_res = cc_dir_next(iter, dir_arena);
+                    if (cc_is_err(entry_res)) {
+                        // CCIoError is a struct, need _as variant
+                        CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
+                        if (err.kind == CC_IO_OTHER && err.os_code == 0) break; // EOF
+                        fprintf(stderr, "pigz_cc: %s: error reading directory\n", path);
+                        ret = 1;
+                        break;
+                    }
+
+                    // CCDirEntry is a struct, need _as variant  
+                    CCDirEntry entry = cc_unwrap_as(entry_res, CCDirEntry);
+                    const char* name = (const char*)entry.name.ptr;
+                    
+                    // Skip . and ..
+                    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+
+                    // Join path
+                    CCSlice path_slice = cc_slice_from_buffer((void*)path, strlen(path));
+                    CCSlice full_path_slice = cc_path_join(dir_arena, path_slice, entry.name);
+                    const char* full_path = (const char*)full_path_slice.ptr;
+
+                    ret |= process_path(full_path, num_workers, level, strategy);
+                }
+                return ret;
+            } else {
+                fprintf(stderr, "pigz_cc: %s: failed to open directory\n", path);
+                return 1;
+            }
+        }
+    }
+
+    /* It's a file - build output name and compress */
+    char output_file[4096];
+    if (g.to_stdout) {
+        snprintf(output_file, sizeof(output_file), "/dev/stdout");
+    } else {
+        // Skip if already has .gz suffix unless forced
+        size_t len = strlen(path);
+        if (len > 3 && strcmp(path + len - 3, ".gz") == 0) {
+            fprintf(stderr, "pigz_cc: %s already has .gz suffix -- skipped\n", path);
+            return 0;
+        }
+        snprintf(output_file, sizeof(output_file), "%s.gz", path);
+    }
+
+    int ret = compress_file(path, output_file, num_workers, level, strategy);
+    
+    if (ret == 0 && !g.to_stdout) {
+        copymeta(path, output_file);
+        if (!g.keep) {
+            unlink(path);
+        }
+    }
+    
+    return ret;
+}
+
 /* ============================================================================
  * Command Line Interface
  * ============================================================================ */
@@ -529,24 +655,39 @@ void usage(const char *prog) {
     fprintf(stderr, "  -c          Write to stdout\n");
     fprintf(stderr, "  -k          Keep original file\n");
     fprintf(stderr, "  -p N        Use N compression threads (default: 4)\n");
+    fprintf(stderr, "  -r          Recursive directory processing\n");
     fprintf(stderr, "  -1..-9      Compression level (default: 6)\n");
+    fprintf(stderr, "  -H          Huffman-only strategy\n");
+    fprintf(stderr, "  -U          RLE strategy\n");
     fprintf(stderr, "  -h          Show this help\n");
 }
 
 int main(int argc, char *argv[]) {
-    int to_stdout = 0;
-    int keep = 0;
+    g.to_stdout = 0;
+    g.keep = 0;
+    g.recursive = 0;
     int num_workers = 4;
     int level = 6;
+    int strategy = Z_DEFAULT_STRATEGY;
     const char *input_file = NULL;
+    
+    /* Set up signal handling (matches pigz.c:4627) */
+    signal(SIGINT, cut_short);
+    signal(SIGTERM, cut_short);
     
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
             if (strcmp(argv[i], "-c") == 0) {
-                to_stdout = 1;
+                g.to_stdout = 1;
             } else if (strcmp(argv[i], "-k") == 0) {
-                keep = 1;
+                g.keep = 1;
+            } else if (strcmp(argv[i], "-r") == 0) {
+                g.recursive = 1;
+            } else if (strcmp(argv[i], "-H") == 0) {
+                strategy = Z_HUFFMAN_ONLY;
+            } else if (strcmp(argv[i], "-U") == 0) {
+                strategy = Z_RLE;
             } else if (strcmp(argv[i], "-h") == 0) {
                 usage(argv[0]);
                 return 0;
@@ -576,31 +717,19 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    /* Build output filename */
-    char output_file[4096];
-    if (to_stdout) {
-        snprintf(output_file, sizeof(output_file), "/dev/stdout");
-    } else {
-        snprintf(output_file, sizeof(output_file), "%s.gz", input_file);
-    }
-    
-    /* Compress */
-    int ret = compress_file(input_file, output_file, num_workers, level);
-    
-    /* Delete original if requested */
-    if (ret == 0 && !keep && !to_stdout) {
-        unlink(input_file);
-    }
+    /* Process path recursively */
+    int ret = process_path(input_file, num_workers, level, strategy);
     
     /* Print statistics */
     long bytes_in = cc_atomic_load(&g_bytes_in);
     long bytes_out = cc_atomic_load(&g_bytes_out);
     int blocks = cc_atomic_load(&g_blocks_done);
-    fprintf(stderr, "%s: %ld -> %ld bytes (%.1f%%), %d blocks, %d workers\n",
-            input_file,
-            bytes_in, bytes_out,
-            bytes_in > 0 ? 100.0 * (1.0 - (double)bytes_out / bytes_in) : 0.0,
-            blocks, num_workers);
+    if (bytes_in > 0) {
+        fprintf(stderr, "Total: %ld -> %ld bytes (%.1f%%), %d blocks, %d workers\n",
+                bytes_in, bytes_out,
+                100.0 * (1.0 - (double)bytes_out / bytes_in),
+                blocks, num_workers);
+    }
     
     return ret;
 }
