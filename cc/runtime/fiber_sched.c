@@ -35,6 +35,27 @@
 
 #include "wake_primitive.h"
 
+/* TSan annotation to establish synchronization - tells TSan that this point
+ * synchronizes with a corresponding __tsan_release on the same address. */
+#if defined(__SANITIZE_THREAD__) || defined(__has_feature) && __has_feature(thread_sanitizer)
+extern void __tsan_acquire(void* addr);
+extern void __tsan_release(void* addr);
+extern void __tsan_write_range(void* addr, size_t size);
+#define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
+#define TSAN_RELEASE(addr) __tsan_release(addr)
+#define TSAN_WRITE_RANGE(addr, size) __tsan_write_range(addr, size)
+extern void* __tsan_create_fiber(unsigned flags);
+extern void __tsan_switch_to_fiber(void* fiber, unsigned flags);
+#define TSAN_FIBER_CREATE() __tsan_create_fiber(0)
+#define TSAN_FIBER_SWITCH(f) do { if (f) __tsan_switch_to_fiber((f), 0); } while (0)
+#else
+#define TSAN_ACQUIRE(addr) ((void)0)
+#define TSAN_RELEASE(addr) ((void)0)
+#define TSAN_WRITE_RANGE(addr, size) ((void)0)
+#define TSAN_FIBER_CREATE() NULL
+#define TSAN_FIBER_SWITCH(f) ((void)0)
+#endif
+
 /* ============================================================================
  * CPU pause for spin loops
  * ============================================================================ */
@@ -132,25 +153,47 @@ void cc_nursery_dump_timing(void);
 #define SPIN_FAST_ITERS_DEFAULT 256
 #define SPIN_YIELD_ITERS_DEFAULT 16
 
-static int g_spin_fast_iters = -1;   /* -1 = not initialized */
-static int g_spin_yield_iters = -1;
+static _Atomic int g_spin_fast_iters = -1;   /* -1 = not initialized */
+static _Atomic int g_spin_yield_iters = -1;
 
 static int get_spin_fast_iters(void) {
-    if (g_spin_fast_iters < 0) {
+    int val = atomic_load_explicit(&g_spin_fast_iters, memory_order_acquire);
+    if (val < 0) {
         const char* env = getenv("CC_SPIN_FAST_ITERS");
-        g_spin_fast_iters = env ? atoi(env) : SPIN_FAST_ITERS_DEFAULT;
-        if (g_spin_fast_iters <= 0) g_spin_fast_iters = SPIN_FAST_ITERS_DEFAULT;
+        int new_val = env ? atoi(env) : SPIN_FAST_ITERS_DEFAULT;
+        if (new_val <= 0) new_val = SPIN_FAST_ITERS_DEFAULT;
+        /* Use compare-and-swap to ensure only one thread initializes */
+        int expected = -1;
+        if (atomic_compare_exchange_strong_explicit(&g_spin_fast_iters, &expected, new_val,
+                                                     memory_order_release,
+                                                     memory_order_acquire)) {
+            val = new_val;
+        } else {
+            /* Another thread initialized it, use their value */
+            val = atomic_load_explicit(&g_spin_fast_iters, memory_order_acquire);
+        }
     }
-    return g_spin_fast_iters;
+    return val;
 }
 
 static int get_spin_yield_iters(void) {
-    if (g_spin_yield_iters < 0) {
+    int val = atomic_load_explicit(&g_spin_yield_iters, memory_order_acquire);
+    if (val < 0) {
         const char* env = getenv("CC_SPIN_YIELD_ITERS");
-        g_spin_yield_iters = env ? atoi(env) : SPIN_YIELD_ITERS_DEFAULT;
-        if (g_spin_yield_iters <= 0) g_spin_yield_iters = SPIN_YIELD_ITERS_DEFAULT;
+        int new_val = env ? atoi(env) : SPIN_YIELD_ITERS_DEFAULT;
+        if (new_val <= 0) new_val = SPIN_YIELD_ITERS_DEFAULT;
+        /* Use compare-and-swap to ensure only one thread initializes */
+        int expected = -1;
+        if (atomic_compare_exchange_strong_explicit(&g_spin_yield_iters, &expected, new_val,
+                                                      memory_order_release,
+                                                      memory_order_acquire)) {
+            val = new_val;
+        } else {
+            /* Another thread initialized it, use their value */
+            val = atomic_load_explicit(&g_spin_yield_iters, memory_order_acquire);
+        }
     }
-    return g_spin_yield_iters;
+    return val;
 }
 
 /* Backward compatibility macros - used in hot paths, cached after first call */
@@ -212,6 +255,7 @@ typedef struct fiber_task {
     pthread_mutex_t join_mu;            /* Mutex for join condvar (thread waiters) */
     pthread_cond_t join_cv;             /* Per-fiber condvar for thread waiters */
     _Atomic int join_cv_initialized;    /* Lazy init flag for condvar (atomic for race-free signaling) */
+    void* tsan_fiber;                   /* TSan fiber handle (if enabled) */
     
     /* Debug info for deadlock detection */
     const char* park_reason;  /* Why fiber parked (e.g., "chan_send", "chan_recv", "join") */
@@ -445,6 +489,7 @@ static void cc__fiber_check_deadlock(void) {
 /* Per-worker thread-local state */
 static __thread fiber_task* tls_current_fiber = NULL;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
+static __thread void* tls_tsan_sched_fiber = NULL;
 
 /* Called when a thread is about to block in cc_block_on.
  * Only tracks blocking on fiber worker threads - blocking on executor threads
@@ -633,6 +678,7 @@ static fiber_task* fiber_alloc(void) {
             atomic_store(&f->join_waiters, 0);
             atomic_store(&f->join_waiter_fiber, NULL);
             atomic_store(&f->join_lock, 0);
+            f->tsan_fiber = TSAN_FIBER_CREATE();
             f->park_reason = NULL;
             f->park_file = NULL;
             f->park_line = 0;
@@ -649,6 +695,7 @@ static fiber_task* fiber_alloc(void) {
         atomic_store(&nf->join_waiters, 0);
         atomic_store(&nf->join_waiter_fiber, NULL);
         atomic_store(&nf->join_lock, 0);
+        nf->tsan_fiber = TSAN_FIBER_CREATE();
         nf->fiber_id = atomic_fetch_add(&g_next_fiber_id, 1);
     }
     return nf;
@@ -721,18 +768,6 @@ static void fiber_panic(const char* msg, fiber_task* f, mco_result res) {
 /* ============================================================================
  * Fiber Entry Point
  * ============================================================================ */
-
-/* TSan annotation to establish synchronization - tells TSan that this point
- * synchronizes with a corresponding __tsan_release on the same address. */
-#if defined(__SANITIZE_THREAD__) || defined(__has_feature) && __has_feature(thread_sanitizer)
-extern void __tsan_acquire(void* addr);
-extern void __tsan_release(void* addr);
-#define TSAN_ACQUIRE(addr) __tsan_acquire(addr)
-#define TSAN_RELEASE(addr) __tsan_release(addr)
-#else
-#define TSAN_ACQUIRE(addr) ((void)0)
-#define TSAN_RELEASE(addr) ((void)0)
-#endif
 
 /* Simple spinlock for join handshake - ensures proper ordering between
  * child setting done=1 and parent registering as waiter */
@@ -824,7 +859,11 @@ static void fiber_resume(fiber_task* f) {
         fiber_panic("coroutine not in suspended state", f, MCO_NOT_SUSPENDED);
     }
     
+    /* Switch TSan to the fiber context before resuming. */
+    TSAN_FIBER_SWITCH(f->tsan_fiber);
     mco_result res = mco_resume(f->coro);
+    /* Switch back to scheduler context after resume returns. */
+    TSAN_FIBER_SWITCH(tls_tsan_sched_fiber);
     
     /* Release running lock */
     atomic_store_explicit(&f->running_lock, 0, memory_order_release);
@@ -854,6 +893,13 @@ static void* worker_main(void* arg) {
     fiber_task* batch[WORKER_BATCH_SIZE];
     fiber_task* steal_buf[STEAL_BATCH_SIZE];
     
+    /* Initialize TSan fiber context for the scheduler thread.
+     * This models user-space fiber switches for TSan. */
+    if (!tls_tsan_sched_fiber) {
+        tls_tsan_sched_fiber = TSAN_FIBER_CREATE();
+        TSAN_FIBER_SWITCH(tls_tsan_sched_fiber);
+    }
+
     /* Per-worker PRNG state for randomized stealing */
     uint64_t rng_state = (uint64_t)worker_id * 0x9E3779B97F4A7C15ULL + rdtsc();
     
@@ -1192,6 +1238,16 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                 co->state = MCO_SUSPENDED;
                 co->func = fiber_entry;
                 co->user_data = f;
+                
+                /* TSan: Mark stack memory as reused when resetting pooled fiber.
+                 * This tells TSan that the stack memory is being reused for a new
+                 * execution context, clearing any previous TSan state for this memory.
+                 * Without this, TSan sees writes to the same stack address from different
+                 * threads and incorrectly flags it as a data race. */
+                if (co->stack_base && co->stack_size > 0) {
+                    TSAN_WRITE_RANGE(co->stack_base, co->stack_size);
+                }
+                
                 reused = 1;
             }
         } else {

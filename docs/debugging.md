@@ -48,3 +48,31 @@ Minimum viable approach:
 
 With `#line` mapping, debuggers and diagnostics will typically attribute locations to the `.ccs` file even though the compiler is compiling `out/<stem>.c`.
 
+## Concurrency debugging (ThreadSanitizer)
+
+Use the provided scripts for regular race detection:
+
+- Quick TSan run: `./scripts/test_tsan.sh`
+- Full TSan run: `./scripts/test_tsan.sh --all`
+- Stress tests under TSan: `./scripts/stress_sanitize.sh tsan`
+
+Notes:
+- On macOS, TSan requires `clang`.
+- TSan runs are slower; keep them focused on stress/race tests.
+
+## Scheduler synchronization invariants (fiber scheduler)
+
+Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
+
+- `running_lock` protects `mco_resume()`/`cc__fiber_unpark()` from concurrent resume.
+  Any unpark path must wait until `running_lock == 0`.
+- `join_lock` + `join_waiter_fiber` provide a handshake so joiners never miss a wakeup.
+  `done=1` is set under the join lock and the waiter is read atomically.
+- `state=FIBER_DONE` is set before signaling waiters.
+  Joiners must wait for `state==FIBER_DONE` before freeing or reusing fibers.
+- `unpark_pending` handles the park/unpark race: an unpark before park sets the
+  flag, and park re-checks it both before and after setting `state=PARKED`.
+- Fiber state transitions are linear: `CREATED -> READY -> RUNNING -> PARKED -> READY -> RUNNING -> DONE`.
+
+If you add new scheduler behaviors, update these invariants and extend the stress tests.
+

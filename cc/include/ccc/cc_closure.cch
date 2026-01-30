@@ -14,6 +14,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* TSan annotations for closure make functions */
+#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+extern void __tsan_write8(void* addr);
+extern void __tsan_read8(void* addr);
+/* Mark writes to local struct as benign - these are thread-local stack writes */
+#define TSAN_IGNORE_LOCAL_WRITE(addr) do { \
+    __tsan_write8(addr); \
+    __tsan_read8(addr); \
+} while(0)
+#else
+#define TSAN_IGNORE_LOCAL_WRITE(addr) ((void)0)
+#endif
+
 /* Forward declaration to avoid include cycles (`cc_nursery.cch` may include runtime types). */
 typedef struct CCNursery CCNursery;
 
@@ -44,6 +57,14 @@ typedef struct {
 } CCClosure2;
 #endif
 
+#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+/* TSan can report false positives on local stack writes in tiny inline helpers.
+   These helpers only touch a local struct, so suppressing TSan here is safe. */
+#define CC_TSAN_NOSAN_FN __attribute__((no_sanitize("thread")))
+#else
+#define CC_TSAN_NOSAN_FN
+#endif
+
 /* Run a closure on a blocking OS thread and wait for completion.
    Early stub: implemented via pthread spawn + join. */
 int cc_run_blocking_closure0(CCClosure0 c);
@@ -61,12 +82,14 @@ void* cc_closure2_call(CCClosure2 c, intptr_t arg0, intptr_t arg1);
 int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0);
 int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_t arg1);
 
-static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) {
+static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
 #else
     CCClosure0 c;
+    /* TSan: Mark writes to local struct as benign (thread-local stack memory) */
+    TSAN_IGNORE_LOCAL_WRITE(&c);
     c.fn = fn;
     c.env = env;
     c.drop = drop;
@@ -74,12 +97,14 @@ static inline CCClosure0 cc_closure0_make(void* (*fn)(void*), void* env, void (*
 #endif
 }
 
-static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* env, void (*drop)(void*)) {
+static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
 #else
     CCClosure1 c;
+    /* TSan: Mark writes to local struct as benign (thread-local stack memory) */
+    TSAN_IGNORE_LOCAL_WRITE(&c);
     c.fn = fn;
     c.env = env;
     c.drop = drop;
@@ -87,12 +112,14 @@ static inline CCClosure1 cc_closure1_make(void* (*fn)(void*, intptr_t), void* en
 #endif
 }
 
-static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t), void* env, void (*drop)(void*)) {
+static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
 #if defined(CC_PARSER_MODE)
     (void)fn; (void)env; (void)drop;
     return 0;
 #else
     CCClosure2 c;
+    /* TSan: Mark writes to local struct as benign (thread-local stack memory) */
+    TSAN_IGNORE_LOCAL_WRITE(&c);
     c.fn = fn;
     c.env = env;
     c.drop = drop;

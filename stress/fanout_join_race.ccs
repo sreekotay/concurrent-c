@@ -19,7 +19,7 @@ void* fan_task(void* arg) {
     int id = (int)(intptr_t)arg;
     
     /* Variable amount of work based on ID */
-    for (volatile int i = 0; i < (id % 100); i++) {}
+    for (int i = 0; i < (id % 100); i++) {}
     
     cc_atomic_fetch_add(&sum, id);
     return (void*)(intptr_t)id;

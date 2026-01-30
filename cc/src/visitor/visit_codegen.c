@@ -836,7 +836,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
      * acquire is in the closure trampoline before reading captures. */
     fprintf(out, "\n/* --- Closure capture synchronization --- */\n");
     fprintf(out, "#include <stdatomic.h>\n");
+    fprintf(out, "#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))\n");
+    fprintf(out, "extern void __tsan_release(void* addr);\n");
+    fprintf(out, "extern void __tsan_acquire(void* addr);\n");
+    fprintf(out, "#define CC_TSAN_RELEASE(addr) do { if (addr) __tsan_release(addr); } while(0)\n");
+    fprintf(out, "#define CC_TSAN_ACQUIRE(addr) do { if (addr) __tsan_acquire(addr); } while(0)\n");
+    fprintf(out, "#else\n");
     fprintf(out, "#define CC_TSAN_RELEASE(addr) atomic_thread_fence(memory_order_release)\n");
+    fprintf(out, "#define CC_TSAN_ACQUIRE(addr) atomic_thread_fence(memory_order_acquire)\n");
+    fprintf(out, "#endif\n");
     
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
     fprintf(out, "\n");

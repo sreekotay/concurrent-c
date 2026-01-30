@@ -53,6 +53,9 @@ run_test() {
 # TSan-focused tests
 TSAN_TESTS=(
     tests/tsan_closure_capture_smoke.ccs
+    tests/fiber_join_waiter_race.ccs
+    tests/nursery_multi_join_race.ccs
+    tests/join_done_before_wait_smoke.ccs
     stress/nested_nursery_race.ccs
     stress/nested_nursery_deep.ccs
     stress/work_stealing_race.ccs

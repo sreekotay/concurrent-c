@@ -1893,6 +1893,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         }
         if (d->cap_count > 0) {
             cc__append_fmt(&defs, &defs_len, &defs_cap, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n", d->id, d->id);
+            cc__append_str(&defs, &defs_len, &defs_cap, "  CC_TSAN_ACQUIRE(__env);\n");
             for (int ci = 0; ci < d->cap_count; ci++) {
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";

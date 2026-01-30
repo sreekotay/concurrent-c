@@ -1,0 +1,45 @@
+/*
+ * Smoke test: join after child already completed.
+ *
+ * This targets the join/unpark_pending path where the child finishes before
+ * the parent reaches the park point.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 1000
+#define FIBERS 16
+
+cc_atomic_int completed = 0;
+
+void* quick_task(void* arg) {
+    (void)arg;
+    cc_atomic_fetch_add(&completed, 1);
+    return NULL;
+}
+
+int main(void) {
+    printf("join_done_before_wait_smoke: iterations=%d fibers=%d\n", ITERATIONS, FIBERS);
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&completed, 0);
+
+        CCNursery* n = cc_nursery_create();
+        for (int i = 0; i < FIBERS; i++) {
+            cc_nursery_spawn(n, quick_task, (void*)(intptr_t)i);
+        }
+
+        /* Give child fibers a chance to complete before we join. */
+        cc_sleep_ms(1);
+
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+
+        int done = cc_atomic_load(&completed);
+        if (done != FIBERS) {
+            fprintf(stderr, "FAIL: iter %d: only %d/%d completed\n", iter, done, FIBERS);
+            return 1;
+        }
+    }
+    printf("join_done_before_wait_smoke: PASS\n");
+    return 0;
+}
