@@ -596,8 +596,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         if (chan_cap > 1024) chan_cap = 1024;
     }
 
-    CCTask*[~chan_cap >] tasks_tx;
-    CCTask*[~chan_cap <] tasks_rx;
+    CCTask[~chan_cap >] tasks_tx;
+    CCTask[~chan_cap <] tasks_rx;
 
     CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
     @defer cc_chan_free(tasks_ch);
@@ -736,19 +736,17 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             }
             
             // Task-handle pattern: await tasks in FIFO order (no reorder buffer!)
-            CCTask* task;
+            CCTask task;
             while (!write_failed && cc_io_avail(chan_recv(tasks_rx, &task))) {
                 // Check for global error (e.g. SIGINT)
                 if (cc_atomic_load(&g_pipeline_error)) {
                     write_failed = true;
-                    cc_task_free(task);
+                    cc_task_free(&task);
                     break;
                 }
 
-                // Await this task - blocks until compression is done
-                void* result = NULL;
-                cc_task_join_result(task, &result);
-                cc_task_free(task);
+                // Await this task - blocks until compression is done (cc_block_on_intptr consumes the task)
+                void* result = (void*)cc_block_on_intptr(task);
                 CompressedResult* r = (CompressedResult*)result;
                 
                 if (!r) {
@@ -966,8 +964,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         if (prev_blk) {
                             prev_blk->is_last = true;
                             // Spawn task for pending block and send handle
-                            CCTask* task = NULL;
-                            cc_spawn(&task, compress_block_task, prev_blk);
+                            CCTask task = cc_spawn(compress_block_task, prev_blk);
                             (void)chan_send(tasks_tx, task);
                             prev_blk = NULL;
                         }
@@ -1043,16 +1040,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                     // If we already have a pending block, spawn task and send handle
                     if (prev_blk) {
-                        CCTask* task = NULL;
-                        cc_spawn(&task, compress_block_task, prev_blk);
+                        CCTask task = cc_spawn(compress_block_task, prev_blk);
                         (void)chan_send(tasks_tx, task);
                     }
 
                     // If this was a short read, it's the last block.
                     if (data.len < block_size) {
                         blk->is_last = true;
-                        CCTask* task = NULL;
-                        cc_spawn(&task, compress_block_task, blk);
+                        CCTask task = cc_spawn(compress_block_task, blk);
                         (void)chan_send(tasks_tx, task);
                         prev_blk = NULL;
                         hit_eof = true;

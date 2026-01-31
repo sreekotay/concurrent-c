@@ -4,6 +4,7 @@
 
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_exec.cch>
+#include <ccc/std/task.cch>
 
 #include <errno.h>
 #include <pthread.h>
@@ -12,7 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
-struct CCTask {
+struct CCSpawnTask {
     void* (*fn)(void*);
     void* arg;
     void* result;
@@ -21,6 +22,13 @@ struct CCTask {
     pthread_mutex_t mu;
     pthread_cond_t cv;
 };
+
+/* Accessor to set spawn task in CCTask._data */
+static inline void cc__set_spawn_task(CCTask* t, struct CCSpawnTask* task) {
+    /* CCTaskSpawnInternal layout: just a pointer at offset 0 */
+    struct CCSpawnTask** ptr = (struct CCSpawnTask**)t->_data;
+    *ptr = task;
+}
 
 static CCExec* g_sched_exec = NULL;
 static pthread_mutex_t g_sched_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -79,15 +87,15 @@ int cc_scheduler_stats(CCSchedulerStats* out) {
     return 0;
 }
 
-static void cc__task_free_internal(CCTask* task) {
+static void cc__spawn_task_free_internal(struct CCSpawnTask* task) {
     if (!task) return;
     pthread_mutex_destroy(&task->mu);
     pthread_cond_destroy(&task->cv);
     free(task);
 }
 
-static void cc__task_job(void* arg) {
-    CCTask* task = (CCTask*)arg;
+static void cc__spawn_task_job(void* arg) {
+    struct CCSpawnTask* task = (struct CCSpawnTask*)arg;
     if (!task) return;
     void* r = NULL;
     if (task->fn) r = task->fn(task->arg);
@@ -98,31 +106,80 @@ static void cc__task_job(void* arg) {
     int detach = task->detached;
     pthread_mutex_unlock(&task->mu);
     if (detach) {
-        cc__task_free_internal(task);
+        cc__spawn_task_free_internal(task);
     }
 }
 
-int cc_spawn(CCTask** out_task, void* (*fn)(void*), void* arg) {
+/* NEW unified API: cc_spawn returns CCTask value */
+CCTask cc_spawn(void* (*fn)(void*), void* arg) {
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!fn) return out;
+    CCExec* ex = cc__sched_exec_lazy();
+    if (!ex) return out;
+    struct CCSpawnTask* task = (struct CCSpawnTask*)calloc(1, sizeof(struct CCSpawnTask));
+    if (!task) return out;
+    task->fn = fn;
+    task->arg = arg;
+    pthread_mutex_init(&task->mu, NULL);
+    pthread_cond_init(&task->cv, NULL);
+    int err = cc_exec_submit(ex, cc__spawn_task_job, task);
+    if (err != 0) {
+        cc__spawn_task_free_internal(task);
+        return out;
+    }
+    out.kind = CC_TASK_KIND_SPAWN;
+    cc__set_spawn_task(&out, task);
+    return out;
+}
+
+/* Helper function that unpacks and calls a closure */
+static void* cc__closure0_wrapper(void* arg) {
+    CCClosure0* pc = (CCClosure0*)arg;
+    void* result = pc->fn(pc->env);
+    if (pc->drop) pc->drop(pc->env);
+    free(pc);
+    return result;
+}
+
+/* NEW unified API: cc_spawn_closure0 returns CCTask value */
+CCTask cc_spawn_closure0(CCClosure0 c) {
+    /* Wrap closure in a simple function that calls the closure */
+    /* For simplicity, we allocate and pass the closure as arg */
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!c.fn) return out;
+    
+    /* Create a heap copy of the closure */
+    CCClosure0* heap_c = (CCClosure0*)malloc(sizeof(CCClosure0));
+    if (!heap_c) return out;
+    *heap_c = c;
+    
+    return cc_spawn(cc__closure0_wrapper, heap_c);
+}
+
+/* Legacy API for backward compatibility */
+int cc_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg) {
     if (!out_task || !fn) return EINVAL;
     *out_task = NULL;
     CCExec* ex = cc__sched_exec_lazy();
     if (!ex) return ENOMEM;
-    CCTask* task = (CCTask*)calloc(1, sizeof(CCTask));
+    struct CCSpawnTask* task = (struct CCSpawnTask*)calloc(1, sizeof(struct CCSpawnTask));
     if (!task) return ENOMEM;
     task->fn = fn;
     task->arg = arg;
     pthread_mutex_init(&task->mu, NULL);
     pthread_cond_init(&task->cv, NULL);
-    int err = cc_exec_submit(ex, cc__task_job, task);
+    int err = cc_exec_submit(ex, cc__spawn_task_job, task);
     if (err != 0) {
-        cc__task_free_internal(task);
+        cc__spawn_task_free_internal(task);
         return err;
     }
     *out_task = task;
     return 0;
 }
 
-int cc_task_join(CCTask* task) {
+int cc_spawn_task_join(struct CCSpawnTask* task) {
     if (!task) return EINVAL;
     pthread_mutex_lock(&task->mu);
     while (!task->done) {
@@ -132,7 +189,7 @@ int cc_task_join(CCTask* task) {
     return 0;
 }
 
-int cc_task_join_result(CCTask* task, void** out_result) {
+int cc_spawn_task_join_result(struct CCSpawnTask* task, void** out_result) {
     if (!task) return EINVAL;
     pthread_mutex_lock(&task->mu);
     while (!task->done) {
@@ -143,12 +200,12 @@ int cc_task_join_result(CCTask* task, void** out_result) {
     return 0;
 }
 
-void cc_task_free(CCTask* task) {
+void cc_spawn_task_free(struct CCSpawnTask* task) {
     if (!task) return;
     pthread_mutex_lock(&task->mu);
     if (task->done) {
         pthread_mutex_unlock(&task->mu);
-        cc__task_free_internal(task);
+        cc__spawn_task_free_internal(task);
         return;
     }
     task->detached = 1;

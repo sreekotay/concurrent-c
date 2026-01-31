@@ -1,5 +1,5 @@
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 
 /* Channel ops in @async functions use cc_chan_send_task/cc_chan_recv_task
    which return task handles compatible with await. */

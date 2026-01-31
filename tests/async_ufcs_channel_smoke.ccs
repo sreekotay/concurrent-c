@@ -2,7 +2,7 @@
    This uses the ergonomic form: `await tx.send(val)` instead of the explicit
    cc_chan_send_task() call. */
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 #include <stdio.h>
 #include <assert.h>
 

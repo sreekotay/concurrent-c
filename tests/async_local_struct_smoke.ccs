@@ -8,7 +8,7 @@
  */
 
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 #include <stdio.h>
 #include <string.h>
 

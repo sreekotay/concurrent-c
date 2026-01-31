@@ -1,5 +1,5 @@
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 
 @async int f(int x) {
     if (x == 0) {

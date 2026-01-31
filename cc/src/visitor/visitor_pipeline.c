@@ -159,7 +159,7 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     fprintf(out, "#include <ccc/cc_closure.cch>\n");
     fprintf(out, "#include <ccc/cc_slice.cch>\n");
     fprintf(out, "#include <ccc/cc_runtime.cch>\n");
-    fprintf(out, "#include <ccc/std/task_intptr.cch>\n");
+    fprintf(out, "#include <ccc/std/task.cch>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */

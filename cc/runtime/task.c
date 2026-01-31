@@ -1,8 +1,9 @@
 /*
- * Executor-backed Task<intptr_t> (bridge for async bring-up).
+ * Unified CCTask runtime (async, future, and spawn tasks).
  */
 
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
+#include <ccc/cc_sched.cch>
 
 #include <ccc/cc_exec.cch>
 #include <ccc/cc_channel.cch>
@@ -20,12 +21,40 @@ void cc__deadlock_thread_unblock(void);
 #include <string.h>
 #include <unistd.h>
 
+/* Internal task data layouts (stored in CCTask._data) */
 typedef struct {
     CCChan* done;
     volatile int cancelled;
     intptr_t result;
     CCClosure0 c;
-} CCTaskIntptrHeap;
+} CCTaskHeap;
+
+#ifndef CC_TASK_INTERNAL_TYPES_DEFINED
+#define CC_TASK_INTERNAL_TYPES_DEFINED
+/* Internal representation for FUTURE kind tasks */
+typedef struct {
+    CCFuture fut;
+    void* heap;
+} CCTaskFutureInternal;
+
+/* Internal representation for POLL kind tasks */
+typedef struct {
+    cc_task_poll_fn poll;
+    int (*wait)(void* frame);
+    void* frame;
+    void (*drop)(void* frame);
+} CCTaskPollInternal;
+
+/* Internal representation for SPAWN kind tasks */
+typedef struct {
+    struct CCSpawnTask* spawn;
+} CCTaskSpawnInternal;
+
+/* Accessor macros to get internal data from CCTask */
+#define TASK_FUTURE(t) ((CCTaskFutureInternal*)((t)->_data))
+#define TASK_POLL(t) ((CCTaskPollInternal*)((t)->_data))
+#define TASK_SPAWN(t) ((CCTaskSpawnInternal*)((t)->_data))
+#endif /* CC_TASK_INTERNAL_TYPES_DEFINED */
 
 static CCExec* g_task_exec = NULL;
 static pthread_mutex_t g_task_exec_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -51,8 +80,8 @@ static CCExec* cc__task_exec_lazy(void) {
     return ex;
 }
 
-static void cc__task_intptr_job(void* arg) {
-    CCTaskIntptrHeap* h = (CCTaskIntptrHeap*)arg;
+static void cc__task_job(void* arg) {
+    CCTaskHeap* h = (CCTaskHeap*)arg;
     if (!h) return;
 
     int err = 0;
@@ -71,15 +100,15 @@ static void cc__task_intptr_job(void* arg) {
     }
 }
 
-CCTaskIntptr cc_run_blocking_task_intptr(CCClosure0 c) {
-    CCTaskIntptr out;
+CCTask cc_run_blocking_task(CCClosure0 c) {
+    CCTask out;
     memset(&out, 0, sizeof(out));
     if (!c.fn) return out;
 
     CCExec* ex = cc__task_exec_lazy();
     if (!ex) return out;
 
-    CCTaskIntptrHeap* h = (CCTaskIntptrHeap*)calloc(1, sizeof(CCTaskIntptrHeap));
+    CCTaskHeap* h = (CCTaskHeap*)calloc(1, sizeof(CCTaskHeap));
     if (!h) return out;
     h->done = cc_chan_create(1);
     if (!h->done) {
@@ -90,14 +119,15 @@ CCTaskIntptr cc_run_blocking_task_intptr(CCClosure0 c) {
     h->result = 0;
     h->c = c;
 
-    out.kind = CC_TASK_INTPTR_KIND_FUTURE;
-    cc_future_init(&out.future.fut);
-    out.future.fut.handle.done = h->done;
-    out.future.fut.handle.cancelled = 0;
-    out.future.fut.result = &h->result;
-    out.future.heap = h;
+    out.kind = CC_TASK_KIND_FUTURE;
+    CCTaskFutureInternal* fut = TASK_FUTURE(&out);
+    cc_future_init(&fut->fut);
+    fut->fut.handle.done = h->done;
+    fut->fut.handle.cancelled = 0;
+    fut->fut.result = &h->result;
+    fut->heap = h;
 
-    int sub = cc_exec_submit(ex, cc__task_intptr_job, h);
+    int sub = cc_exec_submit(ex, cc__task_job, h);
     if (sub != 0) {
         cc_atomic_fetch_add(&g_task_submit_failures, 1);
         if (h->done) {
@@ -125,72 +155,88 @@ int cc_blocking_pool_stats(CCExecStats* out_exec, uint64_t* out_submit_failures)
     return cc_exec_stats(ex, out_exec);
 }
 
-CCFutureStatus cc_task_intptr_poll(CCTaskIntptr* t, intptr_t* out_val, int* out_err) {
+CCFutureStatus cc_task_poll(CCTask* t, intptr_t* out_val, int* out_err) {
     if (!t) return CC_FUTURE_ERR;
-    if (t->kind == CC_TASK_INTPTR_KIND_FUTURE) {
-        CCFutureStatus st = cc_future_poll(&t->future.fut, out_err);
-        if (st == CC_FUTURE_READY && out_val && t->future.fut.result) {
-            *out_val = *(const intptr_t*)t->future.fut.result;
+    if (t->kind == CC_TASK_KIND_FUTURE) {
+        CCTaskFutureInternal* fut = TASK_FUTURE(t);
+        CCFutureStatus st = cc_future_poll(&fut->fut, out_err);
+        if (st == CC_FUTURE_READY && out_val && fut->fut.result) {
+            *out_val = *(const intptr_t*)fut->fut.result;
         }
         return st;
     }
-    if (t->kind == CC_TASK_INTPTR_KIND_POLL) {
-        if (!t->poll.poll) return CC_FUTURE_ERR;
-        return t->poll.poll(t->poll.frame, out_val, out_err);
+    if (t->kind == CC_TASK_KIND_POLL) {
+        CCTaskPollInternal* p = TASK_POLL(t);
+        if (!p->poll) return CC_FUTURE_ERR;
+        return p->poll(p->frame, out_val, out_err);
+    }
+    if (t->kind == CC_TASK_KIND_SPAWN) {
+        /* Spawn tasks don't support non-blocking poll - always return PENDING */
+        return CC_FUTURE_PENDING;
     }
     return CC_FUTURE_ERR;
 }
 
-CCTaskIntptr cc_task_intptr_make_poll(cc_task_intptr_poll_fn poll, void* frame, void (*drop)(void*)) {
-    CCTaskIntptr t;
+CCTask cc_task_make_poll(cc_task_poll_fn poll, void* frame, void (*drop)(void*)) {
+    CCTask t;
     memset(&t, 0, sizeof(t));
     if (!poll || !frame) return t;
-    t.kind = CC_TASK_INTPTR_KIND_POLL;
-    t.poll.poll = poll;
-    t.poll.wait = NULL;
-    t.poll.frame = frame;
-    t.poll.drop = drop;
+    t.kind = CC_TASK_KIND_POLL;
+    CCTaskPollInternal* p = TASK_POLL(&t);
+    p->poll = poll;
+    p->wait = NULL;
+    p->frame = frame;
+    p->drop = drop;
     return t;
 }
 
-CCTaskIntptr cc_task_intptr_make_poll_ex(cc_task_intptr_poll_fn poll, int (*wait)(void*), void* frame, void (*drop)(void*)) {
-    CCTaskIntptr t;
+CCTask cc_task_make_poll_ex(cc_task_poll_fn poll, int (*wait)(void*), void* frame, void (*drop)(void*)) {
+    CCTask t;
     memset(&t, 0, sizeof(t));
     if (!poll || !frame) return t;
-    t.kind = CC_TASK_INTPTR_KIND_POLL;
-    t.poll.poll = poll;
-    t.poll.wait = wait;
-    t.poll.frame = frame;
-    t.poll.drop = drop;
+    t.kind = CC_TASK_KIND_POLL;
+    CCTaskPollInternal* p = TASK_POLL(&t);
+    p->poll = poll;
+    p->wait = wait;
+    p->frame = frame;
+    p->drop = drop;
     return t;
 }
 
-void cc_task_intptr_free(CCTaskIntptr* t) {
+void cc_task_free(CCTask* t) {
     if (!t) return;
-    if (t->kind == CC_TASK_INTPTR_KIND_FUTURE) {
-        CCTaskIntptrHeap* h = (CCTaskIntptrHeap*)t->future.heap;
-        if (t->future.fut.handle.done) {
-            cc_future_free(&t->future.fut);
+    if (t->kind == CC_TASK_KIND_FUTURE) {
+        CCTaskFutureInternal* fut = TASK_FUTURE(t);
+        CCTaskHeap* h = (CCTaskHeap*)fut->heap;
+        if (fut->fut.handle.done) {
+            cc_future_free(&fut->fut);
         }
         if (h) {
             h->cancelled = 1;
             free(h);
         }
-    } else if (t->kind == CC_TASK_INTPTR_KIND_POLL) {
-        if (t->poll.drop && t->poll.frame) t->poll.drop(t->poll.frame);
-        t->poll.poll = NULL;
-        t->poll.frame = NULL;
-        t->poll.drop = NULL;
+    } else if (t->kind == CC_TASK_KIND_POLL) {
+        CCTaskPollInternal* p = TASK_POLL(t);
+        if (p->drop && p->frame) p->drop(p->frame);
+        p->poll = NULL;
+        p->frame = NULL;
+        p->drop = NULL;
+    } else if (t->kind == CC_TASK_KIND_SPAWN) {
+        CCTaskSpawnInternal* s = TASK_SPAWN(t);
+        if (s->spawn) {
+            cc_spawn_task_free(s->spawn);
+        }
     }
     memset(t, 0, sizeof(*t));
 }
 
 /* Cancel a task and wake up anyone blocked on it.
    This closes the done channel, causing cc_block_on_intptr to return immediately. */
-void cc_task_intptr_cancel(CCTaskIntptr* t) {
+void cc_task_cancel(CCTask* t) {
     if (!t) return;
-    if (t->kind == CC_TASK_INTPTR_KIND_FUTURE) {
-        CCTaskIntptrHeap* h = (CCTaskIntptrHeap*)t->future.heap;
+    if (t->kind == CC_TASK_KIND_FUTURE) {
+        CCTaskFutureInternal* fut = TASK_FUTURE(t);
+        CCTaskHeap* h = (CCTaskHeap*)fut->heap;
         if (h) {
             h->cancelled = 1;
             /* Close the done channel to wake up blocked waiters */
@@ -199,29 +245,49 @@ void cc_task_intptr_cancel(CCTaskIntptr* t) {
             }
         }
         /* Also mark the future handle as cancelled */
-        t->future.fut.handle.cancelled = 1;
-    } else if (t->kind == CC_TASK_INTPTR_KIND_POLL) {
+        fut->fut.handle.cancelled = 1;
+    } else if (t->kind == CC_TASK_KIND_POLL) {
         /* For poll-based tasks, we can't easily cancel - just mark frame for cleanup */
         /* The poll function should check cancellation state */
+    } else if (t->kind == CC_TASK_KIND_SPAWN) {
+        /* Spawn tasks can't be cancelled mid-flight - pthread doesn't support that safely */
     }
 }
 
-intptr_t cc_block_on_intptr(CCTaskIntptr t) {
+intptr_t cc_block_on_intptr(CCTask t) {
     intptr_t r = 0;
     int err = 0;
     cc__deadlock_thread_block();  /* Track that this thread is blocking */
+    
+    /* Handle spawn tasks directly with join */
+    if (t.kind == CC_TASK_KIND_SPAWN) {
+        CCTaskSpawnInternal* s = TASK_SPAWN(&t);
+        if (s->spawn) {
+            void* result = NULL;
+            cc_spawn_task_join_result(s->spawn, &result);
+            r = (intptr_t)result;
+            cc_spawn_task_free(s->spawn);
+        }
+        cc__deadlock_thread_unblock();
+        return r;
+    }
+    
     for (;;) {
-        CCFutureStatus st = cc_task_intptr_poll(&t, &r, &err);
+        CCFutureStatus st = cc_task_poll(&t, &r, &err);
         if (st == CC_FUTURE_PENDING) {
-            if (t.kind == CC_TASK_INTPTR_KIND_FUTURE) {
+            if (t.kind == CC_TASK_KIND_FUTURE) {
                 /* For "future" tasks, block directly on the done channel once and then return the result.
                    This avoids spin-polling and avoids needing to preserve the completion for poll(). */
-                err = cc_async_wait(&t.future.fut.handle);
-                if (err == 0 && t.future.fut.result) r = *(const intptr_t*)t.future.fut.result;
+                CCTaskFutureInternal* fut = TASK_FUTURE(&t);
+                err = cc_async_wait(&fut->fut.handle);
+                if (err == 0 && fut->fut.result) r = *(const intptr_t*)fut->fut.result;
                 break;
-            } else if (t.kind == CC_TASK_INTPTR_KIND_POLL && t.poll.wait) {
-                /* Task has a wait function - use it to block efficiently */
-                (void)t.poll.wait(t.poll.frame);
+            } else if (t.kind == CC_TASK_KIND_POLL) {
+                CCTaskPollInternal* p = TASK_POLL(&t);
+                if (p->wait) {
+                    /* Task has a wait function - use it to block efficiently */
+                    (void)p->wait(p->frame);
+                }
             }
             /* For POLL tasks without wait: tight loop. These are pure state machines
                making progress on every poll (no external blocking). No yield needed. */
@@ -230,7 +296,7 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
         break;
     }
     cc__deadlock_thread_unblock();
-    cc_task_intptr_free(&t);
+    cc_task_free(&t);
     (void)err;
     return r;
 }
@@ -239,7 +305,7 @@ intptr_t cc_block_on_intptr(CCTaskIntptr t) {
 /* --- cc_block_all implementation --- */
 
 typedef struct {
-    CCTaskIntptr task;      /* Copy of the task (we own it) */
+    CCTask task;            /* Copy of the task (we own it) */
     intptr_t* result_slot;  /* Where to store the result */
 } CCBlockAllSlot;
 
@@ -255,7 +321,7 @@ static void* cc__block_all_worker(void* arg) {
    Returns 0 on success, error code if any task fails.
    Results are stored in the results array (must be at least count elements).
    Note: Takes ownership of the tasks (they are freed after completion). */
-int cc_block_all(int count, CCTaskIntptr* tasks, intptr_t* results) {
+int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
     if (count <= 0) return 0;
     if (!tasks) return EINVAL;
 
@@ -294,7 +360,7 @@ int cc_block_all(int count, CCTaskIntptr* tasks, intptr_t* results) {
 /* --- cc_block_race implementation --- */
 
 typedef struct {
-    CCTaskIntptr task;
+    CCTask task;
     int index;
     CCChan* done_chan;  /* Shared channel to signal completion */
     intptr_t result;
@@ -327,7 +393,7 @@ static void* cc__block_race_worker(void* arg) {
    result: result of the winning task
    Returns 0 on success.
    Note: Other tasks continue running in background (cancelled on nursery cleanup). */
-int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result) {
+int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
     if (count <= 0) return EINVAL;
     if (!tasks) return EINVAL;
 
@@ -378,7 +444,7 @@ int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result)
     /* Cancel remaining tasks - this wakes up workers blocked in cc_block_on_intptr */
     for (int i = 0; i < count; i++) {
         if (i != msg.index) {
-            cc_task_intptr_cancel(&slots[i].task);
+            cc_task_cancel(&slots[i].task);
         }
     }
     
@@ -399,7 +465,7 @@ int cc_block_race(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result)
    winner: index of the first successful task
    result: result of the winning task
    Returns 0 if any task succeeded, ECANCELED if all failed. */
-int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result) {
+int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
     if (count <= 0) return EINVAL;
     if (!tasks) return EINVAL;
 
@@ -464,7 +530,7 @@ int cc_block_any(int count, CCTaskIntptr* tasks, int* winner, intptr_t* result) 
     /* Cancel remaining tasks - this wakes up workers blocked in cc_block_on_intptr */
     for (int i = 0; i < count; i++) {
         if (!found_success || i != first_result.index) {
-            cc_task_intptr_cancel(&slots[i].task);
+            cc_task_cancel(&slots[i].task);
         }
     }
     

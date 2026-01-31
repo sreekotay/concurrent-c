@@ -15,7 +15,7 @@
 #include "scheduler.c"
 #include "nursery.c"
 #include "closure.c"
-#include "task_intptr.c"
+#include "task.c"
 #include "io.c"
 #include "string.c"
 #include "exec.c"

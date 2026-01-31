@@ -14,7 +14,7 @@
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_nursery.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 
 /* Surface channel helpers (ergonomic layer over CCChanTx/CCChanRx).
    These are macros so they can infer sizes from expressions / pointers.
@@ -105,7 +105,7 @@ CCChan* channel_pair(CCChanTx* tx, CCChanRx* rx);
 
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;
-typedef struct CCTask CCTask;
+/* CCTask is now defined in <ccc/std/task.cch> as a value type */
 
 /* Explicit move primitive.
    Best-effort: uses GNU statement-expr supported by Clang/GCC.

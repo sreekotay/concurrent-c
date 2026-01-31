@@ -32,16 +32,6 @@ static void* cc__closure0_trampoline(void* p) {
     return r;
 }
 
-int cc_spawn_closure0(CCTask** out_task, CCClosure0 c) {
-    if (!out_task || !c.fn) return EINVAL;
-    CCClosure0Heap* h = (CCClosure0Heap*)malloc(sizeof(CCClosure0Heap));
-    if (!h) return ENOMEM;
-    h->c = c;
-    int err = cc_spawn(out_task, cc__closure0_trampoline, h);
-    if (err != 0) free(h);
-    return err;
-}
-
 int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
     if (!n || !c.fn) return EINVAL;
     CCClosure0Heap* h = (CCClosure0Heap*)malloc(sizeof(CCClosure0Heap));
@@ -125,23 +115,17 @@ int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_
 
 int cc_run_blocking_closure0(CCClosure0 c) {
     if (!c.fn) return EINVAL;
-    CCTask* t = NULL;
-    int err = cc_spawn_closure0(&t, c);
-    if (err != 0) return err;
-    int j = cc_task_join(t);
-    cc_task_free(t);
-    return j;
+    CCTask t = cc_spawn_closure0(c);
+    if (t.kind == CC_TASK_KIND_INVALID) return ENOMEM;
+    (void)cc_block_on_intptr(t);  /* blocks until done and frees task */
+    return 0;
 }
 
 void* cc_run_blocking_closure0_ptr(CCClosure0 c) {
     if (!c.fn) return NULL;
-    CCTask* t = NULL;
-    int err = cc_spawn_closure0(&t, c);
-    if (err != 0) return NULL;
-    void* r = NULL;
-    (void)cc_task_join_result(t, &r);
-    cc_task_free(t);
-    return r;
+    CCTask t = cc_spawn_closure0(c);
+    if (t.kind == CC_TASK_KIND_INVALID) return NULL;
+    return (void*)cc_block_on_intptr(t);  /* blocks until done and frees task */
 }
 
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0) {

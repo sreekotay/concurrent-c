@@ -1,5 +1,5 @@
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 #include <ccc/std/prelude.cch>
 
 @async int noop(int v) { return v; }

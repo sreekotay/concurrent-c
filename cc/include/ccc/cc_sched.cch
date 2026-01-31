@@ -23,12 +23,64 @@ typedef int bool;
 
 #include <ccc/cc_closure.cch>
 
-typedef struct CCTask CCTask;
-
 typedef struct {
     struct timespec deadline; // absolute; tv_sec=0 means no deadline
     int cancelled;            // cooperative flag
 } CCDeadline;
+
+/* Deadline function declarations */
+CCDeadline cc_deadline_none(void);
+CCDeadline cc_deadline_after_ms(uint64_t ms);
+bool cc_deadline_expired(const CCDeadline* d);
+const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct timespec* out);
+
+/* Forward declaration for CCSpawnTask (internal handle for OS-thread spawned tasks) */
+struct CCSpawnTask;
+
+/* ============================================================================
+ * CCTask - Unified task type for all task kinds
+ * ============================================================================ */
+#ifndef CC_TASK_DEFINED
+#define CC_TASK_DEFINED
+
+#if defined(CC_PARSER_MODE)
+/* Parse-only dummy type: TCC doesn't like assigning/returning structs during stub-AST parsing. */
+typedef int CCTask;
+typedef int CCTaskIntptr;
+typedef int CCTaskKind;
+typedef int CCTaskIntptrKind;
+#define CC_TASK_KIND_INVALID 0
+#define CC_TASK_KIND_SPAWN   1
+#define CC_TASK_KIND_FUTURE  2
+#define CC_TASK_KIND_POLL    3
+#define CC_TASK_INTPTR_KIND_INVALID 0
+#define CC_TASK_INTPTR_KIND_FUTURE  2
+#define CC_TASK_INTPTR_KIND_POLL    3
+#else
+
+typedef enum {
+    CC_TASK_KIND_INVALID = 0,
+    CC_TASK_KIND_SPAWN = 1,   /* OS thread (from cc_spawn) */
+    CC_TASK_KIND_FUTURE = 2,  /* Executor pool */
+    CC_TASK_KIND_POLL = 3,    /* State machine (from @async) */
+} CCTaskKind;
+
+/* Opaque CCTask struct - the actual layout is implementation detail.
+   This struct is 128 bytes to fit all variants. */
+typedef struct CCTask {
+    CCTaskKind kind;
+    char _data[124];  /* Opaque storage for union members */
+} CCTask;
+
+/* Backward compatibility type aliases */
+typedef CCTask CCTaskIntptr;
+typedef CCTaskKind CCTaskIntptrKind;
+#define CC_TASK_INTPTR_KIND_INVALID CC_TASK_KIND_INVALID
+#define CC_TASK_INTPTR_KIND_FUTURE  CC_TASK_KIND_FUTURE
+#define CC_TASK_INTPTR_KIND_POLL    CC_TASK_KIND_POLL
+
+#endif /* CC_PARSER_MODE */
+#endif /* CC_TASK_DEFINED */
 
 typedef struct {
     size_t workers;
@@ -40,21 +92,33 @@ typedef struct {
 int cc_scheduler_init(void);
 void cc_scheduler_shutdown(void);
 
-// Spawn a detached task. The task handle can be joined via cc_task_join.
-// Returns 0 on success, errno-style code on failure.
-int cc_spawn(CCTask** out_task, void* (*fn)(void*), void* arg);
-// Spawn a detached 0-arg closure (env freed via drop, if provided).
-int cc_spawn_closure0(CCTask** out_task, CCClosure0 c);
+/* ============================================================================
+ * NEW unified CCTask API (returns CCTask value from task.cch)
+ * ============================================================================ */
 
-// Join a task; returns 0 on success.
-int cc_task_join(CCTask* task);
+/* Spawn an OS-thread task. Returns a CCTask value with kind=CC_TASK_KIND_SPAWN.
+   Use cc_block_on_intptr(task) to wait and get the result.
+   On failure, returns CCTask with kind=CC_TASK_KIND_INVALID. */
+CCTask cc_spawn(void* (*fn)(void*), void* arg);
+/* Spawn a 0-arg closure (env freed via drop, if provided). */
+CCTask cc_spawn_closure0(CCClosure0 c);
 
-// Join a task and retrieve its return value (the task function's `void*` result).
-// Returns 0 on success.
-int cc_task_join_result(CCTask* task, void** out_result);
+/* ============================================================================
+ * DEPRECATED legacy API (pointer-based, for backward compatibility)
+ * ============================================================================ */
 
-// Free task handle (after join or if spawn failed after allocation).
-void cc_task_free(CCTask* task);
+// Legacy spawn returning task via out-pointer (deprecated, use cc_spawn() instead)
+int cc_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg);
+int cc_spawn_closure0_legacy(struct CCSpawnTask** out_task, CCClosure0 c);
+
+// Join a legacy spawn task; returns 0 on success.
+int cc_spawn_task_join(struct CCSpawnTask* task);
+
+// Join a legacy spawn task and retrieve its return value.
+int cc_spawn_task_join_result(struct CCSpawnTask* task, void** out_result);
+
+// Free legacy spawn task handle.
+void cc_spawn_task_free(struct CCSpawnTask* task);
 
 // Snapshot scheduler stats; returns 0 on success.
 int cc_scheduler_stats(CCSchedulerStats* out);

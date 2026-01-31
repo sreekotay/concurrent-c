@@ -14,7 +14,7 @@
  * - With CC_DEADLOCK_ABORT=0: prints warning but continues (hangs forever)
  */
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 #include <stdio.h>
 
 @async int producer(CCChanTx tx) {

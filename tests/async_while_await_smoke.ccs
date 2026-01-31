@@ -1,5 +1,5 @@
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 
 static int add1(int x) { return x + 1; } /* sync */
 

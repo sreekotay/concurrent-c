@@ -827,7 +827,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "#include <ccc/cc_slice.cch>\n");
     fprintf(out, "#include <ccc/cc_runtime.cch>\n");
     fprintf(out, "#include <ccc/std/io.cch>\n");  /* CCFile for closure captures */
-    fprintf(out, "#include <ccc/std/task_intptr.cch>\n");
+    fprintf(out, "#include <ccc/std/task.cch>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     

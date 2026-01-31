@@ -2131,7 +2131,7 @@ int cc_chan_match_select_future(CCExec* ex, CCChanMatchCase* cases, size_t n, si
  * Result is errno (0=success). Caller must ensure value/out_value outlives the task.
  */
 
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 
 typedef struct {
     CCChan* ch;

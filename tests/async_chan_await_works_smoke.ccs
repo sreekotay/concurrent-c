@@ -2,7 +2,7 @@
    Uses cc_chan_*_task() directly since chan_send/recv are macros that
    don't interact well with await in the current implementation. */
 #include <ccc/cc_runtime.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 #include <stdio.h>
 #include <assert.h>
 

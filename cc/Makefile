@@ -46,7 +46,7 @@ ifeq ($(TCC_EXT),1)
 endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
-SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
+SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/cccn/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
@@ -55,7 +55,13 @@ DEPS := $(OBJS:.o=.d)
 REAL_BINARY := $(OUT_BINDIR)/ccc
 WRAPPER := bin/ccc
 
-all: $(WRAPPER)
+# CCCN (CCC Next) refactor
+CCCN_SRCS := $(wildcard src/cccn/**/*.c) src/build/build_helpers.c src/util/*.c src/driver.c src/preprocess/preprocess.c src/comptime/symbols.c src/parser/tcc_bridge.c src/parser/cc_ext_parser.c src/visitor/pass.c src/visitor/visitor_fileutil.c src/visitor/visitor_pipeline.c src/visitor/pass_strip_markers.c src/visitor/pass_ufcs.c src/visitor/pass_closure_calls.c src/visitor/pass_autoblock.c src/visitor/pass_await_normalize.c src/visitor/async_ast.c src/visitor/checker.c src/visitor/pass_arena_ast.c src/visitor/pass_nursery_spawn_ast.c src/visitor/pass_closure_literal_ast.c src/visitor/pass_defer_syntax.c src/visitor/pass_channel_syntax.c src/visitor/pass_type_syntax.c src/visitor/pass_match_syntax.c src/visitor/pass_with_deadline_syntax.c src/visitor/edit_buffer.c src/visitor/walk.c src/visitor/visitor.c src/visitor/ufcs.c src/preprocess/type_registry.c src/visitor/visit_codegen.c src/parser/parse.c
+CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
+CCCN_BINARY := $(OUT_BINDIR)/cccn
+CCCN_WRAPPER := bin/cccn
+
+all: $(WRAPPER) $(CCCN_WRAPPER)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
@@ -72,6 +78,18 @@ $(WRAPPER): $(REAL_BINARY)
 	@printf '%s\n' 'set -e' >> $@
 	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
 	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/ccc" "$$@"' >> $@
+	@chmod +x $@
+
+$(CCCN_BINARY): $(CCCN_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(CCCN_OBJS) $(LDLIBS)
+
+$(CCCN_WRAPPER): $(CCCN_BINARY)
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '#!/bin/sh' > $@
+	@printf '%s\n' 'set -e' >> $@
+	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
+	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/cccn" "$$@"' >> $@
 	@chmod +x $@
 
 $(OBJDIR)/%.o: %.c

@@ -1,6 +1,6 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_closure.cch>
-#include <ccc/std/task_intptr.cch>
+#include <ccc/std/task.cch>
 
 int g = 0;
 
