@@ -12,7 +12,7 @@
 #define BLOCK_SIZE (128 * 1024)
 #define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
 #define MAX_WORKERS 16
-#define CHAN_CAP 64
+#define CHAN_CAP 256
 // Reorder buffer must hold: channel capacity + workers (each may hold 1 block)
 #define REORDER_CAP (CHAN_CAP + MAX_WORKERS)
 

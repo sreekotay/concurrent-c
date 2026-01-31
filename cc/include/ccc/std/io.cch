@@ -137,6 +137,33 @@ int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_writ
 int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* deadline);
 #endif
 
+// Read into caller-provided buffer (no allocation). Returns bytes read, 0 on EOF.
+// For streaming scenarios where you want to reuse the same buffer.
+static inline CCResult_size_t_CCIoError cc_file_read_buf(CCFile *file, void *buf, size_t n) {
+    if (!file || !file->handle || !buf || n == 0) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    }
+    size_t got = fread(buf, 1, n, file->handle);
+    if (got == 0 && ferror(file->handle)) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    }
+    return cc_ok_CCResult_size_t_CCIoError(got);
+}
+
+// Write from caller-provided buffer (no slice overhead). Returns bytes written.
+// For streaming scenarios where you want to avoid slice construction.
+static inline CCResult_size_t_CCIoError cc_file_write_buf(CCFile *file, const void *buf, size_t n) {
+    if (!file || !file->handle || !buf) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    }
+    if (n == 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    size_t written = fwrite(buf, 1, n, file->handle);
+    if (written != n && ferror(file->handle)) {
+        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    }
+    return cc_ok_CCResult_size_t_CCIoError(written);
+}
+
 static inline CCResult_size_t_CCIoError cc_file_sync(CCFile *file) {
     if (!file || !file->handle) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
     if (fflush(file->handle) != 0) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));

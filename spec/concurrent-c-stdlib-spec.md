@@ -454,6 +454,16 @@ char[:]!IoError File.read_all(Arena* a);
 // Write all bytes from data.
 size_t !IoError File.write(char[:] data);
 
+// Read into caller-provided buffer (no allocation).
+// For streaming scenarios where you want to reuse the same buffer.
+// Returns bytes read; 0 on EOF.
+size_t !IoError File.read_buf(void* buf, size_t n);
+
+// Write from caller-provided buffer (no slice overhead).
+// For streaming scenarios where you want to avoid slice construction.
+// Returns bytes written.
+size_t !IoError File.write_buf(const void* buf, size_t n);
+
 i64    !IoError File.seek(i64 offset, int whence);      // SEEK_SET/CUR/END
 i64    !IoError File.tell();                            // Current position
 
@@ -2671,8 +2681,10 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | Method | Purpose |
 |--------|---------|
 | `file_open(a, path, mode)` | Open |
-| `.read()`, `.read_all()`, `.read_line()` | Read |
-| `.write()` | Write |
+| `.read()`, `.read_all()`, `.read_line()` | Read (arena-allocated) |
+| `.read_buf(buf, n)` | Read into caller buffer (no allocation) |
+| `.write()` | Write (from slice) |
+| `.write_buf(buf, n)` | Write from caller buffer (no slice) |
 | `.seek()`, `.tell()` | Position |
 | `.sync()` | Flush |
 | `.close()` | Close |

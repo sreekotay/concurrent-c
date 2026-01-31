@@ -258,8 +258,8 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
  * Decompression Engine (matches pigz.c:2700-2750)
  * ============================================================================ */
 
+// decompress_block - currently unused, single-threaded decompression in decompress_file
 DecompressedResult* !> (CCIoError) decompress_block(CCSlice member, long seq) {
-    // Initial estimate for decompressed size (gzip members are usually 128KB)
     size_t est_size = 256 * 1024;
     @arena(res_arena, est_size + 8192) {
         DecompressedResult* res = arena_alloc1(DecompressedResult, res_arena);
@@ -268,14 +268,12 @@ DecompressedResult* !> (CCIoError) decompress_block(CCSlice member, long seq) {
 
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
-        // 15 + 16 for gzip decoding
         if (inflateInit2(&strm, 15 + 16) != Z_OK) return cc_err(CC_IO_OTHER);
         @defer inflateEnd(&strm);
 
         strm.next_in = (Bytef*)member.ptr;
         strm.avail_in = (uInt)member.len;
 
-        // Allocate output buffer
         unsigned char* out_buf = arena_alloc(unsigned char, res_arena, est_size);
         if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
@@ -283,18 +281,17 @@ DecompressedResult* !> (CCIoError) decompress_block(CCSlice member, long seq) {
         strm.avail_out = (uInt)est_size;
 
         int ret = inflate(&strm, Z_FINISH);
-        if (ret != Z_STREAM_END && ret != Z_OK) {
-            return cc_err(CC_IO_OTHER);
-        }
+        if (ret != Z_STREAM_END && ret != Z_OK) return cc_err(CC_IO_OTHER);
 
-        size_t actual_size = strm.total_out;
-        res->data = cc_slice_from_parts(out_buf, actual_size, CC_SLICE_ID_UNTRACKED, est_size);
+        res->data = cc_slice_from_parts(out_buf, strm.total_out, CC_SLICE_ID_UNTRACKED, est_size);
         res->arena = cc_arena_detach(res_arena);
         return cc_ok(res);
     }
 }
 
 int decompress_file(const char* in_path, const char* out_path, int num_workers) {
+    (void)num_workers;  // Single-threaded for now
+    
     CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
     if (cc_file_open(&in_file, real_in, "rb") != 0) {
@@ -324,149 +321,64 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     }
     @defer cc_file_close(&out_file);
 
-    CCFile* out_ptr = &out_file;
-    CCFile* in_ptr = &in_file;
-
-    // Channels for pipeline
-    int chan_cap = CHAN_CAP;
-    if (g.max_mem > 0) {
-        chan_cap = (int)(g.max_mem / (BLOCK_SIZE + 65536));
-        if (chan_cap < 1) chan_cap = 1;
-        if (chan_cap > 1024) chan_cap = 1024;
+    // Single-threaded streaming decompression
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    if (inflateInit2(&strm, 15 + 16) != Z_OK) {  // 15 + 16 for gzip
+        fprintf(stderr, "Failed to initialize decompression\n");
+        return 1;
     }
-    int reorder_cap = chan_cap + num_workers;
+    @defer inflateEnd(&strm);
 
-    MemberJob*[~chan_cap >] members_tx;
-    MemberJob*[~chan_cap <] members_rx;
-    DecompressedResult*[~chan_cap >] results_tx;
-    DecompressedResult*[~chan_cap <] results_rx;
+    unsigned char in_buf[BLOCK_SIZE];
+    unsigned char out_buf[BLOCK_SIZE];
+    size_t total_in = 0, total_out = 0;
+    int ret;
 
-    CCChan* members_ch = channel_pair(&members_tx, &members_rx);
-    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
-    @defer cc_chan_free(members_ch);
-    @defer cc_chan_free(results_ch);
-
-    @nursery {
-        /* Writer Task */
-        spawn([out_ptr, results_rx, in_path, reorder_cap]() => {
-            long next_seq = 0;
-            DecompressedResult** pending = (DecompressedResult**)calloc(reorder_cap, sizeof(DecompressedResult*));
-            @defer free(pending);
-            bool write_failed = false;
-            size_t total_out = 0;
-            
-            DecompressedResult* r;
-            while (chan_recv(results_rx, &r) == 0) {
-                if (cc_atomic_load(&g_pipeline_error)) {
-                    write_failed = true;
-                    cc_heap_arena_free(&r->arena);
-                    break;
-                }
-
-                pending[r->seq % reorder_cap] = r;
-                while (pending[next_seq % reorder_cap]) {
-                    r = pending[next_seq % reorder_cap];
-                    pending[next_seq % reorder_cap] = NULL;
-                    
-                    total_out += r->data.len;
-                    if (!g.test && !g.list) {
-                        CCRes(size_t, CCIoError) wr = cc_file_write(out_ptr, r->data);
-                        if (cc_is_err(wr)) {
-                            fprintf(stderr, "Error: write failed\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            write_failed = true;
-                        }
-                    }
-                    cc_heap_arena_free(&r->arena);
-                    next_seq++;
-                }
-            }
-
-            if (g.list && !cc_atomic_load(&g_pipeline_error)) {
-                // Basic listing parity (matches pigz.c:listing)
-                long in_size = cc_atomic_load(&g_bytes_in);
-                double ratio = in_size > 0 ? 100.0 * (1.0 - (double)in_size / total_out) : 0.0;
-                printf("%10ld %10zu %6.1f%% %s\n", in_size, total_out, ratio, in_path ? in_path : "<stdin>");
-            }
-
-            // Cleanup any remaining pending blocks
-            for (int i = 0; i < reorder_cap; i++) {
-                if (pending[i]) cc_heap_arena_free(&pending[i]->arena);
-            }
-        });
-
-        @nursery closing(results_tx) {
-            /* Workers */
-            for (int i = 0; i < num_workers; i++) {
-                spawn([members_rx, results_tx]() => {
-                    MemberJob* job;
-                    while (chan_recv(members_rx, &job) == 0) {
-                        DecompressedResult* !> (CCIoError) res_val = decompress_block(job->member, job->seq);
-                        if (cc_is_ok(res_val)) {
-                            chan_send(results_tx, cc_unwrap(res_val));
-                        }
-                        cc_heap_arena_free(&job->arena);
-                    }
-                });
-            }
-
-            /* Reader Task - Serial Member Identification (matches pigz.c:2700-2750) */
-            @nursery closing(members_tx) {
-                spawn([in_ptr, members_tx]() => {
-                    long seq = 0;
-                    CCArena scan_arena = cc_heap_arena(BLOCK_SIZE * 2);
-                    @defer cc_heap_arena_free(&scan_arena);
-                    
-                    unsigned char* buf = arena_alloc(unsigned char, &scan_arena, BLOCK_SIZE * 2);
-                    size_t buf_len = 0;
-                    
-                    while (true) {
-                        // Read into the second half of the buffer
-                        CCRes(CCSlice, CCIoError) res = cc_file_read(in_ptr, &scan_arena, BLOCK_SIZE);
-                        if (cc_is_err(res)) break;
-                        CCSlice data = cc_unwrap_as(res, CCSlice);
-                        if (data.len == 0) break;
-                        
-                        // We don't actually use the scan_arena for the jobs, we create fresh ones
-                        // to transfer ownership to workers.
-                        
-                        size_t pos = 0;
-                        while (pos < data.len) {
-                            // Scan for gzip magic 1f 8b
-                            const unsigned char* p = (const unsigned char*)data.ptr + pos;
-                            size_t remaining = data.len - pos;
-                            
-                            // This is a simplified member identification.
-                            // Real pigz scans for the magic header.
-                            // For now, we'll treat the whole read as a member if it starts with magic,
-                            // or just pass it through.
-                            
-                            CCArena job_arena = cc_heap_arena(remaining + 1024);
-                            CCSlice member_data = cc_slice_from_buffer(arena_alloc(unsigned char, &job_arena, remaining), remaining);
-                            memcpy(member_data.ptr, p, remaining);
-                            
-                            MemberJob* job = arena_alloc1(MemberJob, &job_arena);
-                            if (!job) { cc_heap_arena_free(&job_arena); break; }
-                            job->seq = seq++;
-                            job->member = member_data;
-                            job->arena = job_arena;
-                            chan_send(members_tx, job);
-                            
-                            pos += remaining;
-                        }
-                    }
-                });
-            }
+    do {
+        // Read compressed data using buffer API (no arena allocation)
+        CCRes(size_t, CCIoError) read_res = cc_file_read_buf(&in_file, in_buf, sizeof(in_buf));
+        if (cc_is_err(read_res)) {
+            fprintf(stderr, "Error reading input\n");
+            return 1;
         }
+        size_t bytes_read = cc_unwrap(read_res);
+        if (bytes_read == 0) break;
+        
+        total_in += bytes_read;
+        strm.next_in = in_buf;
+        strm.avail_in = (uInt)bytes_read;
+
+        // Decompress and write
+        do {
+            strm.next_out = out_buf;
+            strm.avail_out = sizeof(out_buf);
+            
+            ret = inflate(&strm, Z_NO_FLUSH);
+            if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+                fprintf(stderr, "Decompression error: %d\n", ret);
+                return 1;
+            }
+
+            size_t have = sizeof(out_buf) - strm.avail_out;
+            if (have > 0 && !g.test && !g.list) {
+                CCRes(size_t, CCIoError) write_res = cc_file_write_buf(&out_file, out_buf, have);
+                if (cc_is_err(write_res) || cc_unwrap(write_res) != have) {
+                    fprintf(stderr, "Error writing output\n");
+                    return 1;
+                }
+                total_out += have;
+            }
+        } while (strm.avail_out == 0);
+        
+    } while (ret != Z_STREAM_END);
+
+    if (g.list) {
+        double ratio = total_in > 0 ? 100.0 * (1.0 - (double)total_in / total_out) : 0.0;
+        printf("%10zu %10zu %6.1f%% %s\n", total_in, total_out, ratio, in_path ? in_path : "<stdin>");
     }
 
     cc_file_sync(&out_file);
-    
-    // Deep sync if requested (matches pigz.c:3500)
-    if (g.sync) {
-        cc_file_sync(&out_file);
-    }
-
     return 0;
 }
 

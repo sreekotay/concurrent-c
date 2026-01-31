@@ -1,48 +1,62 @@
 ==============================================
-pigz Benchmark: Original vs Concurrent-C
+pigz Benchmark: Real Compressible Data
 ==============================================
 
-Data size: 500MB
 Workers: 4
 Runs: 3
 
-Warning: ./out/pigz_idiomatic not found, skipping idiomatic benchmark.
-Generating 500MB test data...
+=== Preparing Test Data ===
 
-=== Original pigz (pthread) ===
-  Run 1: 2.024s, output:  524448033 bytes
-  Run 2: 2.142s, output:  524448033 bytes
-  Run 3: 2.062s, output:  524448033 bytes
-  Average: 2.076s
+==============================================
+COMPRESSION BENCHMARKS
+==============================================
 
-=== CC pigz (Concurrent-C) ===
-Total: 524288000 -> 524448010 bytes (-0.0%), 4000 blocks, 4 workers
-  Run 1: 3.315s, output:  524448043 bytes
-Total: 524288000 -> 524448010 bytes (-0.0%), 4000 blocks, 4 workers
-  Run 2: 2.128s, output:  524448043 bytes
-Total: 524288000 -> 524448010 bytes (-0.0%), 4000 blocks, 4 workers
-  Run 3: 2.148s, output:  524448043 bytes
-  Average: 2.530s
+=== Original pigz (pthread) (Compression) ===
+Input: 191M ( 200000000 bytes)
+  Run 1: 1.406s,  73124431 bytes (36.6%), 135.7 MB/s
+  Run 2: 1.405s,  73124431 bytes (36.6%), 135.8 MB/s
+  Run 3: 1.401s,  73124431 bytes (36.6%), 136.1 MB/s
+  Average: 1.404s (135.9 MB/s)
+
+=== CC pigz (Concurrent-C) (Compression) ===
+Input: 191M ( 200000000 bytes)
+Total: 200000000 -> 73124404 bytes (63.4%), 1526 blocks, 4 workers
+  Run 1: 1.706s,  73124437 bytes (36.6%), 111.8 MB/s
+Total: 200000000 -> 73124404 bytes (63.4%), 1526 blocks, 4 workers
+  Run 2: 1.389s,  73124437 bytes (36.6%), 137.3 MB/s
+Total: 200000000 -> 73124404 bytes (63.4%), 1526 blocks, 4 workers
+  Run 3: 1.399s,  73124437 bytes (36.6%), 136.3 MB/s
+  Average: 1.498s (127.3 MB/s)
+
+=== Preparing Compressed Files ===
+Original pigz compressed:  80M
+Total: 200000000 -> 73124404 bytes (63.4%), 1526 blocks, 4 workers
+CC pigz compressed:  80M
+
+==============================================
+DECOMPRESSION BENCHMARKS
+==============================================
 
 === Original pigz (pthread) (Decompression) ===
-  Run 1: 0.300s
-  Run 2: 0.300s
-  Run 3: 0.290s
-  Average: 0.297s
+  Run 1: 0.348s,  200000000 bytes decompressed, 548.1 MB/s
+  Run 2: 0.427s,  200000000 bytes decompressed, 446.7 MB/s
+  Run 3: 0.315s,  200000000 bytes decompressed, 605.5 MB/s
+  Average: 0.363s
 
 === CC pigz (Concurrent-C) (Decompression) ===
-  Run 1: 0.065s
-  Run 2: 0.907s
-  Run 3: 0.190s
-  Average: 0.387s
+  Run 1: 0.373s,  200000000 bytes decompressed, 511.4 MB/s
+  Run 2: 0.280s,  200000000 bytes decompressed, 681.2 MB/s
+  Run 3: 0.292s,  200000000 bytes decompressed, 653.2 MB/s
+  Average: 0.315s
 
 === Correctness Check ===
-Total: 524288000 -> 524448010 bytes (-0.0%), 4000 blocks, 4 workers
-Original: PASS (decompresses correctly)
-CC:       PASS (decompresses correctly)
+Total: 200000000 -> 73124404 bytes (63.4%), 1526 blocks, 4 workers
+Original pigz: PASS
+CC pigz:       PASS
 
-Compressed sizes:
-  Original:  524448035 bytes
-  CC:        524448045 bytes
+=== Compression Summary ===
+Input:          191M ( 200000000 bytes)
+Original pigz:   70M ( 73124433 bytes) - 36.56%
+CC pigz:         81M ( 73124439 bytes) - 36.56%
 
 Done.
