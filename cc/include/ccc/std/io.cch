@@ -183,6 +183,19 @@ static inline CCResult_size_t_CCIoError cc_file_tell(CCFile *file) {
     return cc_ok_CCResult_size_t_CCIoError((size_t)pos);
 }
 
+// Get file size in bytes. Returns 0 for non-seekable files (pipes, sockets).
+// Does not change file position.
+static inline CCResult_size_t_CCIoError cc_file_size(CCFile *file) {
+    if (!file || !file->handle) return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+    long cur = ftell(file->handle);
+    if (cur < 0) return cc_ok_CCResult_size_t_CCIoError(0);  // Non-seekable
+    if (fseek(file->handle, 0, SEEK_END) != 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    long end = ftell(file->handle);
+    fseek(file->handle, cur, SEEK_SET);  // Restore position
+    if (end < 0) return cc_ok_CCResult_size_t_CCIoError(0);
+    return cc_ok_CCResult_size_t_CCIoError((size_t)end);
+}
+
 // Stdout/Stderr convenience
 CCResult_size_t_CCIoError cc_std_out_write(CCSlice data);
 CCResult_size_t_CCIoError cc_std_err_write(CCSlice data);

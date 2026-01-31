@@ -27,9 +27,11 @@
 #define BLOCK_SIZE (128 * 1024)
 #define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
 #define MAX_WORKERS 16
+// Channel capacity controls backpressure - keep small to limit in-flight blocks
 #define CHAN_CAP 64
 // Reorder buffer must hold: channel capacity + workers (each may hold 1 block)
-#define REORDER_CAP (CHAN_CAP + MAX_WORKERS)
+// Reorder buffer needs margin for worker timing variance
+#define REORDER_CAP ((CHAN_CAP + MAX_WORKERS) * 4)
 
 /* ============================================================================
  * Data Types
@@ -221,8 +223,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     
                     size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
                     if (cc_is_err(wr)) {
-                        fprintf(stderr, "Error: write failed at block %ld: %s\n", 
-                                r->seq, cc_io_error_str(cc_unwrap_err(wr)));
+                        fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
                         // Signal all tasks to exit
                         cc_atomic_store(&g_pipeline_error, 1);
                         write_failed = true;
@@ -278,7 +279,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         // Read returns Ok(slice) or Err; empty slice on EOF
                         CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
                         if (cc_is_err(read_res)) {
-                            fprintf(stderr, "Read error: %s\n", cc_io_error_str(cc_unwrap_err(read_res)));
+                            fprintf(stderr, "Read error\n");
                             cc_atomic_store(&g_pipeline_error, 1);
                             cc_heap_arena_free(&blk_arena);
                             break;

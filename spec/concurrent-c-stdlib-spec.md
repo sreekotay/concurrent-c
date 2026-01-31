@@ -466,6 +466,7 @@ size_t !IoError File.write_buf(const void* buf, size_t n);
 
 i64    !IoError File.seek(i64 offset, int whence);      // SEEK_SET/CUR/END
 i64    !IoError File.tell();                            // Current position
+size_t !IoError File.size();                            // File size (0 for non-seekable)
 
 // Flush to disk; observes flush errors.
 void   !IoError File.sync();
@@ -2685,7 +2686,7 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | `.read_buf(buf, n)` | Read into caller buffer (no allocation) |
 | `.write()` | Write (from slice) |
 | `.write_buf(buf, n)` | Write from caller buffer (no slice) |
-| `.seek()`, `.tell()` | Position |
+| `.seek()`, `.tell()`, `.size()` | Position/size |
 | `.sync()` | Flush |
 | `.close()` | Close |
 

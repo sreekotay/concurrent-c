@@ -12,7 +12,9 @@
 #define BLOCK_SIZE (128 * 1024)
 #define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
 #define MAX_WORKERS 16
-#define CHAN_CAP 256
+// Channel capacity controls flow: small = more backpressure, limits in-flight blocks
+// Reorder buffer = chan_cap + num_workers, so keep chan_cap reasonable
+#define CHAN_CAP 64
 // Reorder buffer must hold: channel capacity + workers (each may hold 1 block)
 #define REORDER_CAP (CHAN_CAP + MAX_WORKERS)
 
@@ -75,6 +77,7 @@ struct {
     int headis;             // header bits (matches pigz.c)
     ZopfliOptions zopts;    // zopfli compression options
     int rsync;              // true for rsync blocking
+    int setdict;            // 1=use dictionaries, 0=independent blocks (-i)
     int decode;             // 0=compress, 1=decompress
     int test;               // 1 to test integrity
     int list;               // 1 to list metadata

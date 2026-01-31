@@ -8,7 +8,7 @@ OUT_DIR="$SCRIPT_DIR/out"
 DATA_DIR="$SCRIPT_DIR/testdata"
 
 # Configuration
-WORKERS=${1:-4}
+WORKERS=${1:-8}
 RUNS=${2:-3}
 
 echo "=============================================="
