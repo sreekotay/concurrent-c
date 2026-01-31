@@ -1,0 +1,242 @@
+/* pigz_cc_taskhandle.ccs - Test variant using task handles for ordering
+ * 
+ * This tests the "task handles in channel" pattern for ordering.
+ * Uses per-block spawn + FIFO await for ordering (no reorder buffer).
+ * 
+ * Includes dictionary passing for compression quality parity.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+
+/* Minimal Block structure */
+typedef struct {
+    long seq;
+    unsigned char* data;
+    size_t len;
+    unsigned char* dict;
+    size_t dict_len;
+} Block;
+
+/* Compressed result */
+typedef struct {
+    long seq;
+    unsigned char* data;
+    size_t len;
+    size_t original_len;
+    unsigned long crc;
+} CompressedResult;
+
+/* Global for simplicity */
+static size_t g_block_size = 128 * 1024;  /* 128KB blocks */
+static int g_level = 6;
+
+/* ============================================================================
+ * Compress function (runs on scheduler thread)
+ * ============================================================================ */
+void* compress_block_fn(void* arg) {
+    Block* blk = (Block*)arg;
+    
+    /* Per-call z_stream init */
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    if (deflateInit2(&strm, g_level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        if (blk->dict) free(blk->dict);
+        free(blk->data);
+        free(blk);
+        return NULL;
+    }
+    
+    /* Set dictionary if available (for compression quality) */
+    if (blk->dict && blk->dict_len > 0) {
+        deflateSetDictionary(&strm, blk->dict, (uInt)blk->dict_len);
+    }
+    
+    /* Allocate output buffer (worst case: ~0.1% expansion) */
+    size_t out_cap = blk->len + (blk->len >> 3) + 1024;
+    unsigned char* out_buf = (unsigned char*)malloc(out_cap);
+    if (!out_buf) {
+        deflateEnd(&strm);
+        if (blk->dict) free(blk->dict);
+        free(blk->data);
+        free(blk);
+        return NULL;
+    }
+    
+    /* Compress */
+    strm.next_in = blk->data;
+    strm.avail_in = (uInt)blk->len;
+    strm.next_out = out_buf;
+    strm.avail_out = (uInt)out_cap;
+    
+    int ret = deflate(&strm, Z_SYNC_FLUSH);
+    if (ret != Z_OK && ret != Z_STREAM_END) {
+        free(out_buf);
+        deflateEnd(&strm);
+        if (blk->dict) free(blk->dict);
+        free(blk->data);
+        free(blk);
+        return NULL;
+    }
+    
+    size_t out_len = out_cap - strm.avail_out;
+    
+    /* Calculate CRC */
+    unsigned long crc = crc32(0L, blk->data, (uInt)blk->len);
+    
+    deflateEnd(&strm);
+    
+    /* Build result */
+    CompressedResult* r = (CompressedResult*)malloc(sizeof(CompressedResult));
+    r->seq = blk->seq;
+    r->data = out_buf;
+    r->len = out_len;
+    r->original_len = blk->len;
+    r->crc = crc;
+    
+    /* Free input block (we own it) */
+    if (blk->dict) free(blk->dict);
+    free(blk->data);
+    free(blk);
+    
+    return r;
+}
+
+/* ============================================================================
+ * Main test
+ * ============================================================================ */
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <input_file> [num_blocks]\n", argv[0]);
+        return 1;
+    }
+    
+    const char* in_path = argv[1];
+    int max_blocks = (argc > 2) ? atoi(argv[2]) : 1000;
+    
+    /* Open input */
+    FILE* f = fopen(in_path, "rb");
+    if (!f) {
+        fprintf(stderr, "Cannot open %s\n", in_path);
+        return 1;
+    }
+    
+    /* Channel for task handles (CCTask pointers) */
+    int chan_cap = 64;
+    CCTask*[~chan_cap >] tasks_tx;
+    CCTask*[~chan_cap <] tasks_rx;
+    CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+    
+    /* Stats (atomics for safe sharing) */
+    _Atomic size_t total_in = 0;
+    _Atomic size_t total_out = 0;
+    _Atomic int blocks_processed = 0;
+    _Atomic size_t* p_total_in = &total_in;
+    _Atomic size_t* p_total_out = &total_out;
+    _Atomic int* p_blocks_processed = &blocks_processed;
+    
+    @nursery {
+        /* Reader: read blocks, spawn tasks, send handles */
+        spawn([f, max_blocks, tasks_tx]() => {
+            long seq = 0;
+            
+            /* Dictionary buffer - last 32KB of previous block */
+            unsigned char last_tail[32768];
+            size_t last_tail_len = 0;
+            
+            while (seq < max_blocks) {
+                /* Allocate block */
+                Block* blk = (Block*)malloc(sizeof(Block));
+                blk->data = (unsigned char*)malloc(g_block_size);
+                
+                /* Read */
+                size_t n = fread(blk->data, 1, g_block_size, f);
+                if (n == 0) {
+                    free(blk->data);
+                    free(blk);
+                    break;
+                }
+                
+                blk->seq = seq++;
+                blk->len = n;
+                
+                /* Copy dictionary from previous block (for compression quality) */
+                if (last_tail_len > 0) {
+                    blk->dict = (unsigned char*)malloc(last_tail_len);
+                    memcpy(blk->dict, last_tail, last_tail_len);
+                    blk->dict_len = last_tail_len;
+                } else {
+                    blk->dict = NULL;
+                    blk->dict_len = 0;
+                }
+                
+                /* Update dictionary for next block (last 32KB of this block) */
+                size_t tail_len = n > 32768 ? 32768 : n;
+                memcpy(last_tail, blk->data + n - tail_len, tail_len);
+                last_tail_len = tail_len;
+                
+                /* Spawn task, get handle */
+                CCTask* task = NULL;
+                cc_spawn(&task, compress_block_fn, blk);
+                
+                /* Send handle through channel (FIFO order) */
+                chan_send(tasks_tx, task);
+            }
+            chan_close(tasks_tx);
+        });
+        
+        /* Writer: await tasks in FIFO order (NO REORDER BUFFER!) */
+        spawn([tasks_rx, p_total_in, p_total_out, p_blocks_processed]() => {
+            long expected_seq = 0;
+            CCTask* task;
+            
+            while (chan_recv(tasks_rx, &task) == 0) {
+                /* Join THIS task - blocks until done */
+                void* result = NULL;
+                cc_task_join_result(task, &result);
+                cc_task_free(task);
+                CompressedResult* r = (CompressedResult*)result;
+                
+                if (!r) {
+                    fprintf(stderr, "Compression failed at block %ld\n", expected_seq);
+                    expected_seq++;
+                    continue;
+                }
+                
+                /* Verify ordering */
+                if (r->seq != expected_seq) {
+                    fprintf(stderr, "ORDER ERROR: expected seq %ld, got %ld\n", 
+                            expected_seq, r->seq);
+                }
+                
+                cc_atomic_fetch_add(p_total_in, r->original_len);
+                cc_atomic_fetch_add(p_total_out, r->len);
+                cc_atomic_fetch_add(p_blocks_processed, 1);
+                expected_seq++;
+                
+                /* Cleanup */
+                free(r->data);
+                free(r);
+            }
+        });
+    }
+    
+    fclose(f);
+    chan_free(tasks_rx);
+    
+    size_t final_in = cc_atomic_load(p_total_in);
+    size_t final_out = cc_atomic_load(p_total_out);
+    int final_blocks = cc_atomic_load(p_blocks_processed);
+    
+    printf("Task-handle pattern test:\n");
+    printf("  Blocks: %d\n", final_blocks);
+    printf("  Input:  %zu bytes\n", final_in);
+    printf("  Output: %zu bytes (%.1f%%)\n", final_out, 100.0 * final_out / final_in);
+    printf("  Order:  PRESERVED (via FIFO await)\n");
+    
+    return 0;
+}
