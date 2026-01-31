@@ -117,8 +117,7 @@ int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* ou
 int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
-    CCResult_CCSlice_CCIoError r = cc_file_read(file, arena, n);
-    if (r.ok) *out = r.u.value;
+    CCResult_bool_CCIoError r = cc_file_read(file, arena, n, out);
     int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
 }
@@ -126,8 +125,7 @@ int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSli
 int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h) {
     (void)ex;
     if (!out) return EINVAL;
-    CCResult_CCSlice_CCIoError r = cc_file_read_line(file, arena);
-    if (r.ok) *out = r.u.value;
+    CCResult_bool_CCIoError r = cc_file_read_line(file, arena, out);
     int err = !r.ok ? r.u.error.os_code : 0;
     return cc__async_complete(h, err);
 }

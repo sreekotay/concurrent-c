@@ -351,20 +351,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         /* Create a fresh arena for this block (idiomatic transfer) */
                         CCArena arena = cc_heap_arena(BLOCK_SIZE + 1024);
                         
-                        /* Read into the fresh arena */
-                        CCSlice !> (CCIoError) read_result = cc_file_read(in_f, &arena, BLOCK_SIZE);
-                        
-                        /* Check for error */
-                        if (!read_result.ok) {
+                        /* Read into the fresh arena - returns Ok(true)=data, Ok(false)=EOF */
+                        CCSlice data;
+                        if (!cc_io_avail(cc_file_read(in_f, &arena, BLOCK_SIZE, &data))) {
                             cc_heap_arena_free(&arena);
-                            break;
-                        }
-                        
-                        /* Check for EOF (empty slice means EOF) */
-                        CCSlice data = read_result.u.value;
-                        if (data.len == 0) {
-                            cc_heap_arena_free(&arena);
-                            break;  /* EOF */
+                            break;  /* EOF or error */
                         }
                         
                         /* Allocate Block on heap for lock-free channel send */
@@ -380,8 +371,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         blk->arena = arena;
                         
                         /* Check if this is the last block by peeking */
-                        CCResult_CCSlice_CCIoError peek = cc_file_read(in_f, &arena, 1);
-                        if (!peek.ok || peek.u.value.len == 0) {
+                        CCSlice peek_data;
+                        if (!cc_io_avail(cc_file_read(in_f, &arena, 1, &peek_data))) {
                             blk->last = 1;
                         } else {
                             blk->last = 0;

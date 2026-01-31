@@ -513,16 +513,10 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         CCArena chunk_arena = cc_heap_arena(BLOCK_SIZE + 256);
                         unsigned char* buf = arena_alloc(unsigned char, &chunk_arena, BLOCK_SIZE);
                         
-                        CCRes(size_t, CCIoError) res = cc_file_read_buf(in_ptr, buf, BLOCK_SIZE);
-                        if (cc_is_err(res)) {
+                        size_t bytes_read;
+                        if (!cc_io_avail(cc_file_read_buf(in_ptr, buf, BLOCK_SIZE, &bytes_read))) {
                             cc_heap_arena_free(&chunk_arena);
-                            break;
-                        }
-                        
-                        size_t bytes_read = cc_unwrap(res);
-                        if (bytes_read == 0) {
-                            cc_heap_arena_free(&chunk_arena);
-                            break;
+                            break;  // EOF or error
                         }
                         
                         cc_atomic_fetch_add(p_total_in, bytes_read);
@@ -949,17 +943,18 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // Arena needs space for data, Block struct, dictionary copy, and rsync hits
                     CCArena blk_arena = cc_heap_arena(block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t)));
                     
-                    // Read returns Ok(slice) or Err; empty slice on EOF
-                    CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, block_size);
+                    // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
+                    CCSlice data;
+                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, block_size, &data);
                     if (cc_is_err(read_res)) {
                         fprintf(stderr, "Read error\n");
                         cc_atomic_store(&g_pipeline_error, 1);
                         cc_heap_arena_free(&blk_arena);
                         break;
                     }
-                    CCSlice data = cc_unwrap_as(read_res, CCSlice);
 
-                    if (data.len == 0) {
+                    if (!cc_io_avail(read_res)) {
+                        // EOF
                         cc_heap_arena_free(&blk_arena);
                         if (prev_blk) {
                             prev_blk->is_last = true;

@@ -80,23 +80,30 @@ int cc_file_read_all_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CC
 #endif
 
 // Read up to n bytes. Returns:
-// - Ok(slice) with data, or empty slice on EOF
-// - Err(e) on actual error
-static inline CCResult_CCSlice_CCIoError cc_file_read(CCFile *file, CCArena *arena, size_t n) {
-    if (!file || !file->handle || !arena || n == 0) {
-        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
+// - Ok(true) = got data (stored in *out)
+// - Ok(false) = EOF (no more data)
+// - Err(e) = actual error
+// Usage: while (cc_io_avail(cc_file_read(file, arena, n, &data))) { process(data); }
+static inline CCResult_bool_CCIoError cc_file_read(CCFile *file, CCArena *arena, size_t n, CCSlice *out) {
+    if (!file || !file->handle || !arena || n == 0 || !out) {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
     char *buf = (char *)cc_arena_alloc(arena, n, sizeof(char));
     if (!buf) {
-        return cc_err_CCResult_CCSlice_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+        return cc_err_CCResult_bool_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
     }
     size_t got = fread(buf, 1, n, file->handle);
-    if (got == 0 && ferror(file->handle)) {
-        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(errno));
+    if (got == 0) {
+        if (ferror(file->handle)) {
+            return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
+        }
+        // EOF - return Ok(false)
+        *out = cc_slice_empty();
+        return cc_ok_CCResult_bool_CCIoError(false);
     }
-    // Return slice (empty on EOF, with data otherwise)
-    CCSlice slice = cc_slice_from_parts(buf, got, CC_SLICE_ID_UNTRACKED, n);
-    return cc_ok_CCResult_CCSlice_CCIoError(slice);
+    // Got data - return Ok(true)
+    *out = cc_slice_from_parts(buf, got, CC_SLICE_ID_UNTRACKED, n);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 #ifdef CC_ENABLE_ASYNC
@@ -105,24 +112,31 @@ int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t
 #endif
 
 // Read one line (includes delimiter). Returns:
-// - Ok(slice) with line, or empty slice on EOF
-// - Err(e) on actual error
-static inline CCResult_CCSlice_CCIoError cc_file_read_line(CCFile *file, CCArena *arena) {
-    if (!file || !file->handle || !arena) {
-        return cc_err_CCResult_CCSlice_CCIoError(cc_io_from_errno(EINVAL));
+// - Ok(true) = got line (stored in *out)
+// - Ok(false) = EOF (no more lines)
+// - Err(e) = actual error
+// Usage: while (cc_io_avail(cc_file_read_line(file, arena, &line))) { process(line); }
+static inline CCResult_bool_CCIoError cc_file_read_line(CCFile *file, CCArena *arena, CCSlice *out) {
+    if (!file || !file->handle || !arena || !out) {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
     CCString line = cc_string_new(arena);
-    if (!line.data) return cc_err_CCResult_CCSlice_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+    if (!line.data) return cc_err_CCResult_bool_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
     int c;
     while ((c = fgetc(file->handle)) != EOF) {
         if (!cc_string_push_char(&line, (char)c)) {
-            return cc_err_CCResult_CCSlice_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
+            return cc_err_CCResult_bool_CCIoError((CCIoError){CC_IO_OUT_OF_MEMORY, ENOMEM});
         }
         if (c == '\n') break;
     }
-    // Return slice (empty on EOF)
-    CCSlice slice = cc_string_as_slice(&line);
-    return cc_ok_CCResult_CCSlice_CCIoError(slice);
+    if (line.len == 0) {
+        // EOF with no data
+        *out = cc_slice_empty();
+        return cc_ok_CCResult_bool_CCIoError(false);
+    }
+    // Got line - return Ok(true)
+    *out = cc_string_as_slice(&line);
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 #ifdef CC_ENABLE_ASYNC
@@ -137,17 +151,28 @@ int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_writ
 int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* deadline);
 #endif
 
-// Read into caller-provided buffer (no allocation). Returns bytes read, 0 on EOF.
+// Read into caller-provided buffer (no allocation). Returns:
+// - Ok(true) = got data (bytes read stored in *out)
+// - Ok(false) = EOF (no more data)
+// - Err(e) = actual error
 // For streaming scenarios where you want to reuse the same buffer.
-static inline CCResult_size_t_CCIoError cc_file_read_buf(CCFile *file, void *buf, size_t n) {
-    if (!file || !file->handle || !buf || n == 0) {
-        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(EINVAL));
+// Usage: while (cc_io_avail(cc_file_read_buf(file, buf, n, &got))) { process(buf, got); }
+static inline CCResult_bool_CCIoError cc_file_read_buf(CCFile *file, void *buf, size_t n, size_t *out) {
+    if (!file || !file->handle || !buf || n == 0 || !out) {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
     size_t got = fread(buf, 1, n, file->handle);
-    if (got == 0 && ferror(file->handle)) {
-        return cc_err_CCResult_size_t_CCIoError(cc_io_from_errno(errno));
+    if (got == 0) {
+        if (ferror(file->handle)) {
+            return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(errno));
+        }
+        // EOF - return Ok(false)
+        *out = 0;
+        return cc_ok_CCResult_bool_CCIoError(false);
     }
-    return cc_ok_CCResult_size_t_CCIoError(got);
+    // Got data - return Ok(true)
+    *out = got;
+    return cc_ok_CCResult_bool_CCIoError(true);
 }
 
 // Write from caller-provided buffer (no slice overhead). Returns bytes written.

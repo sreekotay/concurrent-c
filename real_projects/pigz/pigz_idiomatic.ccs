@@ -276,16 +276,16 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         
                         CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                         
-                        // Read returns Ok(slice) or Err; empty slice on EOF
-                        CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE);
+                        // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
+                        CCSlice data;
+                        bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
                         if (cc_is_err(read_res)) {
                             fprintf(stderr, "Read error\n");
                             cc_atomic_store(&g_pipeline_error, 1);
                             cc_heap_arena_free(&blk_arena);
                             break;
                         }
-                        CCSlice data = cc_unwrap_as(read_res, CCSlice);
-                        if (data.len == 0) {
+                        if (!cc_io_avail(read_res)) {
                             cc_heap_arena_free(&blk_arena);
                             break;  // EOF with no data
                         }
