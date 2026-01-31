@@ -44,29 +44,29 @@ int test_consumer_outside(void) {
     @nursery closing(tx) {
         spawn([tx]() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
-                if (chan_send(tx, 0 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+                if (cc_io_avail(chan_send(tx, 0 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
         spawn([tx]() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
-                if (chan_send(tx, 1 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+                if (cc_io_avail(chan_send(tx, 1 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
         spawn([tx]() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
-                if (chan_send(tx, 2 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+                if (cc_io_avail(chan_send(tx, 2 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
         spawn([tx]() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
-                if (chan_send(tx, 3 * 1000 + i) == 0) cc_atomic_fetch_add(&g_sent, 1);
+                if (cc_io_avail(chan_send(tx, 3 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
     }
     
-    /* Consumer OUTSIDE nursery - drains until EPIPE */
+    /* Consumer OUTSIDE nursery - drains until closed */
     int val;
-    while (chan_recv(rx, &val) == 0) {
+    while (cc_io_avail(chan_recv(rx, &val))) {
         cc_atomic_fetch_add(&g_received, 1);
     }
     

@@ -1,16 +1,16 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/task_intptr.cch>
 
-/* Channel ops are blocking - autoblock pass wraps them automatically. No explicit await needed. */
+/* Channel ops in @async functions use cc_chan_send_task/cc_chan_recv_task
+   which return task handles compatible with await. */
 @async int f(CCChanTx tx, CCChanRx rx) {
     int out = 0;
-    int rc = 0;
+    int v = 7;
 
-    rc = tx.send(7);  /* Autoblock wraps this blocking call */
-    if (rc != 0) return 100 + rc;
+    /* Use task-returning API for await compatibility */
+    if (await cc_chan_send_task(tx.raw, &v, sizeof(v)) != 0) return 100;
 
-    rc = rx.recv(&out);  /* Autoblock wraps this blocking call */
-    if (rc != 0) return 200 + rc;
+    if (await cc_chan_recv_task(rx.raw, &out, sizeof(out)) != 0) return 200;
 
     return out;
 }

@@ -30,7 +30,7 @@ int main(void) {
     
     /* Drain */
     int val;
-    while (chan_try_recv(rx, &val) == 0) { }
+    while (cc_io_avail(chan_try_recv(rx, &val))) { }
     
     chan_close(tx);
     chan_free(rx);

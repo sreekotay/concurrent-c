@@ -11,8 +11,7 @@ typedef struct {
 static void* sender(void* p) {
     Ctx* c = (Ctx*)p;
     int v = 7;
-    int rc = chan_send(c->tx, v);
-    if (rc != 0) return (void*)1;
+    if (!cc_io_avail(chan_send(c->tx, v))) return (void*)1;
     c->done = 1;
     return NULL;
 }
@@ -41,7 +40,7 @@ int main(void) {
     if (c.done != 0) return 2;
 
     int out = 0;
-    if (chan_recv(rx, &out) != 0) return 3;
+    if (!cc_io_avail(chan_recv(rx, &out))) return 3;
     pthread_join(th, NULL);
 
     chan_close(tx);

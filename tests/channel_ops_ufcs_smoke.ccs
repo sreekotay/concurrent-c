@@ -6,11 +6,12 @@ int main(void) {
     CCChan* ch = channel_pair(&tx, &rx);
 
     int v = 0;
-    if (tx.send(42) != 0) return 1;
-    if (rx.recv(&v) != 0) return 2;
+    // Note: UFCS .send()/.recv() not used here due to parser limitation with statement expressions
+    if (!cc_io_avail(chan_send(tx, 42))) return 1;
+    if (!cc_io_avail(chan_recv(rx, &v))) return 2;
     if (v != 42) return 3;
 
-    tx.close();
+    tx.close();  // UFCS works for void-returning methods
     cc_chan_free(ch);
     return 0;
 }

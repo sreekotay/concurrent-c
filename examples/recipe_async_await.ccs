@@ -53,7 +53,7 @@ int main(void) {
         
         /* Drain synchronously */
         int val, sum = 0;
-        while (chan_try_recv(rx, &val) == 0) {
+        while (cc_io_avail(chan_try_recv(rx, &val))) {
             printf("  received: %d\n", val);
             sum += val;
         }

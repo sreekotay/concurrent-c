@@ -42,7 +42,7 @@ int main(void) {
         /* Results collector - must run in parallel for unbuffered channels */
         spawn(() => {
             Result r;
-            while (chan_recv(results_rx, &r) == 0) {
+            while (cc_io_avail(chan_recv(results_rx, &r))) {
                 cc_atomic_fetch_add(&g_total_sum, r.result);
                 cc_atomic_fetch_add(&g_result_count, 1);
             }
@@ -53,11 +53,11 @@ int main(void) {
             for (int w = 0; w < NUM_WORKERS; w++) {
                 spawn(() => {
                     Job job;
-                    while (chan_recv(jobs_rx, &job) == 0) {
+                    while (cc_io_avail(chan_recv(jobs_rx, &job))) {
                         /* Compute sum 1..n */
                         int sum = (job.n * (job.n + 1)) / 2;
                         Result r = {.id = job.id, .result = sum};
-                        chan_send(results_tx, r);
+                        (void)chan_send(results_tx, r);
                     }
                 });
             }
@@ -67,7 +67,7 @@ int main(void) {
                 spawn(() => {
                     for (int i = 0; i < NUM_JOBS; i++) {
                         Job j = {.id = i, .n = i + 1};
-                        chan_send(jobs_tx, j);
+                        (void)chan_send(jobs_tx, j);
                     }
                 });
             }

@@ -283,7 +283,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             long next_seq = 0;
             
             Result* r;
-            while (chan_recv(results_rx, &r) == 0) {
+            while (cc_io_avail(chan_recv(results_rx, &r))) {
                 /* Buffer out-of-order results */
                 if (r->seq != next_seq) {
                     if (pending_count >= pending_cap) {
@@ -331,9 +331,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             for (int w = 0; w < num_workers; w++) {
                 spawn([level]() => {
                     Block* blk;
-                    while (chan_recv(blocks_rx, &blk) == 0) {
+                    while (cc_io_avail(chan_recv(blocks_rx, &blk))) {
                         Result* res = compress_block(blk, level);
-                        chan_send(results_tx, res);
+                        (void)chan_send(results_tx, res);
                         cc_heap_arena_free(&blk->arena);
                         free(blk);
                     }
@@ -389,7 +389,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         }
                         
                         /* Send block pointer to workers - ownership transfers */
-                        chan_send(blocks_tx, blk);
+                        (void)chan_send(blocks_tx, blk);
                         
                         if (blk->last) {
                             break;

@@ -82,7 +82,7 @@ void run_test_large_buffer(void) {
             int wid = w;
             spawn([wid]() => {
                 Item item;
-                while (chan_recv(rx, &item) == 0) {
+                while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);
                     /* Small work simulation */
                     volatile int x = 0;
@@ -119,7 +119,7 @@ void run_test_small_buffer(void) {
             int wid = w;
             spawn([wid]() => {
                 Item item;
-                while (chan_recv(rx, &item) == 0) {
+                while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);
                     volatile int x = 0;
                     for (int i = 0; i < 1000; i++) x += i;

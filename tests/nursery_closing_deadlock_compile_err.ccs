@@ -18,7 +18,7 @@ int main(void) {
         // Consumer: recv-until-close INSIDE the same nursery => deadlock under spec semantics.
         spawn(() => {
             int v = 0;
-            while (chan_recv(ch_rx, &v) == 0) {
+            while (cc_io_avail(chan_recv(ch_rx, &v))) {
                 received_sum += v;
             }
         });

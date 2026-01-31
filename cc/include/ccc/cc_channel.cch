@@ -30,11 +30,46 @@ typedef int bool;
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_exec.cch>
 #include <ccc/cc_chan_handle.cch>
+#include <ccc/cc_result.cch>
+#include <ccc/cc_io.cch>
 
 typedef struct CCAsyncHandle CCAsyncHandle;
 #include <ccc/std/future.cch>
 
 typedef struct CCChan CCChan;
+
+/*
+ * Unified I/O pattern for channels: bool !>(CCIoError)
+ * Channels use CCIoError (same as files, network) for unified error handling.
+ * - Ok(true)  = operation succeeded, got/sent data
+ * - Ok(false) = channel closed gracefully (EOF)
+ * - Err(e)    = actual error
+ */
+
+/*
+ * Convert errno-style return to bool !>(CCIoError).
+ * 0 → Ok(true), EPIPE → Ok(false), other → Err(e)
+ */
+static inline CCResult_bool_CCIoError cc_chan_result_from_errno(int err) {
+    if (err == 0) {
+        return cc_ok_CCResult_bool_CCIoError(true);
+    } else if (err == EPIPE) {
+        return cc_ok_CCResult_bool_CCIoError(false);
+    } else {
+        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(err));
+    }
+}
+
+/*
+ * Unified I/O helper for bool !>(CCIoError) results.
+ * 
+ * cc_io_avail(res) - true only if result is success AND value is true
+ *                    Use for: while (cc_io_avail(chan_recv(rx, &item))) { ... }
+ *                    Breaks on both error AND graceful close/EOF.
+ */
+static inline bool cc_io_avail(CCResult_bool_CCIoError res) {
+    return res.ok && res.u.value;
+}
 
 typedef enum {
     CC_CHAN_MODE_BLOCK = 0,   // block when full/empty (default)

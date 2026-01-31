@@ -202,7 +202,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             bool write_failed = false;
             
             CompressedResult* r;
-            while (!write_failed && chan_recv(results_rx, &r) == 0) {
+            while (!write_failed && cc_io_avail(chan_recv(results_rx, &r))) {
                 // Insert using modular indexing
                 size_t slot = (size_t)(r->seq % REORDER_CAP);
                 
@@ -243,7 +243,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             for (int w = 0; w < num_workers; w++) {
                 spawn([level, results_tx]() => {
                     Block* blk;
-                    while (chan_recv(blocks_rx, &blk) == 0) {
+                    while (cc_io_avail(chan_recv(blocks_rx, &blk))) {
                         // Check if pipeline is shutting down due to error
                         if (cc_atomic_load(&g_pipeline_error)) {
                             cc_heap_arena_free(&blk->arena);
@@ -252,7 +252,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         
                         // Compress and send result; on error, log and continue
                         if @try (CompressedResult* res = compress_block(blk, level)) {
-                            chan_send(results_tx, res);
+                            (void)chan_send(results_tx, res);
                         } else {
                             // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
                             fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
@@ -306,7 +306,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         hit_eof = blk->is_last;
                         blk->arena = blk_arena;  // Transfer ownership to Block
                         
-                        chan_send(blocks_tx, blk);
+                        (void)chan_send(blocks_tx, blk);
                     }
                 });
             }

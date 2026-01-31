@@ -24,13 +24,11 @@ int main(void) {
     
     // Create and send a success value
     int !> (ParseError) ok_val = ok_value();
-    int sr1 = chan_send(tx, ok_val);
-    assert(sr1 == 0);  // 0 = success
+    assert(cc_io_avail(chan_send(tx, ok_val)));  // should succeed
 
     // Create and send an error value
     int !> (ParseError) err_val = err_value();
-    int sr2 = chan_send(tx, err_val);
-    assert(sr2 == 0);  // 0 = success
+    assert(cc_io_avail(chan_send(tx, err_val)));  // should succeed
     
     // Receive using the raw channel API
     int !> (ParseError) r1;

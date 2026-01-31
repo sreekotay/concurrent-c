@@ -69,28 +69,28 @@ int main(int argc, char** argv) {
         /* Spawn workers - unroll since capture from loop var not supported */
         int w0 = 0; spawn([w0]() => {
             WorkItem item;
-            while (chan_recv(work_rx, &item) == 0) {
+            while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w0], 1);
             }
         });
         int w1 = 1; spawn([w1]() => {
             WorkItem item;
-            while (chan_recv(work_rx, &item) == 0) {
+            while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w1], 1);
             }
         });
         int w2 = 2; spawn([w2]() => {
             WorkItem item;
-            while (chan_recv(work_rx, &item) == 0) {
+            while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w2], 1);
             }
         });
         int w3 = 3; spawn([w3]() => {
             WorkItem item;
-            while (chan_recv(work_rx, &item) == 0) {
+            while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w3], 1);
             }

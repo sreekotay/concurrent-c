@@ -67,7 +67,7 @@ typedef struct CCDirIter CCDirIter;
 /* Result types - use CC_DECL_RESULT_SPEC for canonical names with helper functions */
 CC_DECL_RESULT_SPEC(CCResult_CCDirIterptr_CCIoError, CCDirIter*, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
-CC_DECL_RESULT_SPEC(CCResult_bool_CCIoError, bool, CCIoError)
+/* CCResult_bool_CCIoError is declared in cc_io.cch (unified I/O result type) */
 
 /* Legacy aliases for compatibility */
 typedef CCResult_CCDirIterptr_CCIoError CCResultDirIterIoError;

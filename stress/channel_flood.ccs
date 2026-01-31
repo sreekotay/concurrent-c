@@ -27,7 +27,7 @@ int main(void) {
         /* Consumer */
         spawn(() => {
             int v;
-            while (chan_recv(rx, &v) == 0) {
+            while (cc_io_avail(chan_recv(rx, &v))) {
                 cc_atomic_fetch_add(&g_received, 1);
             }
         });
@@ -38,7 +38,7 @@ int main(void) {
                 int n = msgs_per;  /* Capture local copy */
                 spawn([n]() => {
                     for (int i = 0; i < n; i++) {
-                        chan_send(tx, i);
+                        (void)chan_send(tx, i);
                     }
                 });
             }

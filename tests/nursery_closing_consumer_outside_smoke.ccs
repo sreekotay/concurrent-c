@@ -7,8 +7,7 @@ static volatile int g_err = 0;
 
 void producer(CCChanTx tx) {
     for (int i = 1; i <= 3; i++) {
-        int e = chan_send(tx, i);
-        if (e != 0) { g_err = e; return; }
+        if (!cc_io_avail(chan_send(tx, i))) { g_err = 1; return; }
     }
 }
 
@@ -27,13 +26,13 @@ int main(void) {
 
     if (g_err != 0) return 10;
 
-    // Consumer OUTSIDE nursery: drains until channel closes (EPIPE).
+    // Consumer OUTSIDE nursery: drains until channel closes.
     int sum = 0;
     for (;;) {
         int v = 0;
-        int e = chan_recv(ch_rx, &v);
-        if (e == 0) { sum += v; continue; }
-        if (e == EPIPE) break;
+        CCResult_bool_CCIoError res = chan_recv(ch_rx, &v);
+        if (cc_io_avail(res)) { sum += v; continue; }
+        if (cc_is_ok(res) && !cc_unwrap(res)) break; // closed
         return 11;
     }
 

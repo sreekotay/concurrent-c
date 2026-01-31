@@ -59,7 +59,7 @@ int main(void) {
                 
                 CCTask* task = NULL;
                 cc_spawn(&task, process_item, item);
-                chan_send(tasks_tx, task);
+                (void)chan_send(tasks_tx, task);
                 printf("[producer] spawned task for item %d\n", i);
             }
             chan_close(tasks_tx);  /* Signal no more tasks */
@@ -69,7 +69,7 @@ int main(void) {
         spawn([tasks_rx]() => {
             printf("\n[consumer] receiving results in order:\n");
             CCTask* task;
-            while (chan_recv(tasks_rx, &task) == 0) {
+            while (cc_io_avail(chan_recv(tasks_rx, &task))) {
                 void* result = NULL;
                 cc_task_join_result(task, &result);
                 cc_task_free(task);

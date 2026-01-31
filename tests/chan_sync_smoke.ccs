@@ -14,10 +14,10 @@ CCChan* g_ch;
 
 static void* sender_thread(void* arg) {
     (void)arg;
-    // Send values
-    tx.send(10);
-    tx.send(20);
-    tx.close();
+    // Send values (use non-UFCS form due to parser limitation)
+    (void)chan_send(tx, 10);
+    (void)chan_send(tx, 20);
+    chan_close(tx);
     return NULL;
 }
 
@@ -29,21 +29,21 @@ int main(void) {
     
     // Receive values (blocks OS thread, no await)
     int v1 = 0, v2 = 0;
-    int err1 = rx.recv(&v1);
-    int err2 = rx.recv(&v2);
+    CCResult_bool_CCIoError res1 = chan_recv(rx, &v1);
+    CCResult_bool_CCIoError res2 = chan_recv(rx, &v2);
     
     pthread_join(tid, NULL);
     
     // Verify
-    assert(err1 == 0 && "first recv should succeed");
-    assert(err2 == 0 && "second recv should succeed");
+    assert(cc_io_avail(res1) && "first recv should succeed");
+    assert(cc_io_avail(res2) && "second recv should succeed");
     assert(v1 == 10 && "first value should be 10");
     assert(v2 == 20 && "second value should be 20");
     
-    // Third recv should return EPIPE (closed + drained)
+    // Third recv should return Ok(false) - closed + drained
     int v3 = 0;
-    int err3 = rx.recv(&v3);
-    assert(err3 == EPIPE && "recv on closed+drained should return EPIPE");
+    CCResult_bool_CCIoError res3 = chan_recv(rx, &v3);
+    assert(cc_is_ok(res3) && !cc_unwrap(res3) && "recv on closed+drained should return Ok(false)");
     
     // Free the channel exactly once (tx and rx share the same underlying channel)
     cc_chan_free(g_ch);

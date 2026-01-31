@@ -7,13 +7,13 @@ int main(void) {
     int[~1 <, Drop] rx;
     channel_pair(&tx, &rx);
 
-    int rc1 = chan_send(tx, 1);
-    int rc2 = chan_send(tx, 2);
-    assert(rc1 == 0);
-    assert(rc2 == EAGAIN);
+    CCResult_bool_CCIoError rc1 = chan_send(tx, 1);
+    CCResult_bool_CCIoError rc2 = chan_send(tx, 2);
+    assert(cc_io_avail(rc1));
+    assert(!cc_is_ok(rc2) && cc_unwrap_err(rc2).os_code == EAGAIN);
 
     int v = 0;
-    assert(chan_recv(rx, &v) == 0);
+    assert(cc_io_avail(chan_recv(rx, &v)));
     assert(v == 1);
 
     chan_close(tx);

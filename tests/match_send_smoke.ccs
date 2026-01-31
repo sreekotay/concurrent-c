@@ -13,7 +13,7 @@ int main(void) {
         }
     }
 
-    assert(chan_recv(rx, &out) == 0);
+    assert(cc_io_avail(chan_recv(rx, &out)));
     assert(out == 42);
     chan_close(tx);
     chan_free(rx);

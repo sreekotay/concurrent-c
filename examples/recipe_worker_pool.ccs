@@ -32,9 +32,9 @@ int main(void) {
         for (int w = 0; w < NUM_WORKERS; w++) {
             spawn(() => {
                 int job;
-                while (chan_recv(jobs_rx, &job) == 0) {
+                while (cc_io_avail(chan_recv(jobs_rx, &job))) {
                     printf("worker: processed job %d\n", job);
-                    chan_send(done_tx, job);  /* report done */
+                    (void)chan_send(done_tx, job);  /* report done */
                 }
             });
         }
@@ -43,7 +43,7 @@ int main(void) {
         @nursery closing(jobs_tx) {
             spawn(() => {
                 for (int j = 1; j <= NUM_JOBS; j++) {
-                    chan_send(jobs_tx, j);
+                    (void)chan_send(jobs_tx, j);
                 }
                 printf("feeder: sent %d jobs\n", NUM_JOBS);
             });
@@ -55,7 +55,7 @@ int main(void) {
     chan_close(done_tx);
     int jobs_done = 0;
     int v;
-    while (chan_recv(done_rx, &v) == 0) {
+    while (cc_io_avail(chan_recv(done_rx, &v))) {
         jobs_done++;
     }
 

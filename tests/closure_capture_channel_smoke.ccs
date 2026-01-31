@@ -10,7 +10,7 @@ int main(void) {
     // Capture channel handle in closure
     CCClosure0 producer = [tx]() => {
         for (int i = 0; i < 3; i++) {
-            chan_send(tx, i * 10);
+            (void)chan_send(tx, i * 10);
         }
         chan_close(tx);
     };

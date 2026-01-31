@@ -24,23 +24,23 @@ int main(void) {
     // Create 1:1 channel (single producer, single consumer)
     g_11_ch = channel_pair(&one_to_one_tx, &one_to_one_rx);
     
-    // Basic send/recv test on N:1
-    many_to_one_tx.send(42);
+    // Basic send/recv test on N:1 (use non-UFCS due to parser limitation)
+    (void)chan_send(many_to_one_tx, 42);
     int v1 = 0;
-    int err1 = many_to_one_rx.recv(&v1);
-    assert(err1 == 0 && v1 == 42 && "N:1 channel should work");
+    CCResult_bool_CCIoError res1 = chan_recv(many_to_one_rx, &v1);
+    assert(cc_io_avail(res1) && v1 == 42 && "N:1 channel should work");
     
-    // Basic send/recv test on 1:1
-    one_to_one_tx.send(99);
+    // Basic send/recv test on 1:1 (use non-UFCS due to parser limitation)
+    (void)chan_send(one_to_one_tx, 99);
     int v2 = 0;
-    int err2 = one_to_one_rx.recv(&v2);
-    assert(err2 == 0 && v2 == 99 && "1:1 channel should work");
+    CCResult_bool_CCIoError res2 = chan_recv(one_to_one_rx, &v2);
+    assert(cc_io_avail(res2) && v2 == 99 && "1:1 channel should work");
     
     // Cleanup
-    many_to_one_tx.close();
+    chan_close(many_to_one_tx);
     cc_chan_free(g_n1_ch);
     
-    one_to_one_tx.close();
+    chan_close(one_to_one_tx);
     cc_chan_free(g_11_ch);
     
     printf("channel topology smoke: PASS\n");

@@ -232,7 +232,7 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
     /* Cheap filters. */
     if (!memmem(line, len, "while", 5)) return 0;
     /* Accept either the raw runtime API or the ergonomic macro form. */
-    if (!memmem(line, len, "cc_chan_recv", 12) && !memmem(line, len, "chan_recv", 8)) return 0;
+    if (!memmem(line, len, "cc_chan_recv", 12) && !memmem(line, len, "chan_recv", 9)) return 0;
     if (!memmem(line, len, chname, strlen(chname))) return 0;
 
     /* Normalize by removing whitespace so we can match many formatting variants. */
@@ -246,12 +246,17 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
     }
     tmp[tn] = '\0';
 
-    /* Catch:
+    /* Catch (old errno-style API):
        - while(cc_chan_recv(ch,...)==0)
        - while((cc_chan_recv(ch,...)==0))
        - while(!cc_chan_recv(ch,...))
        - while(chan_recv(ch,...)==0)
-       - while(!chan_recv(ch,...)) */
+       - while(!chan_recv(ch,...))
+       
+       Catch (new bool !>(E) API):
+       - while(cc_io_avail(chan_recv(ch,...)))
+       - while(cc_io_avail(cc_chan_recv(ch,...)))
+    */
     char pat1[256];
     snprintf(pat1, sizeof(pat1), "while(cc_chan_recv(%s", chname);
     char pat2[256];
@@ -260,10 +265,19 @@ static int cc__line_has_deadlock_recv_until_close(const char* line, size_t len, 
     snprintf(pat3, sizeof(pat3), "while(chan_recv(%s", chname);
     char pat4[256];
     snprintf(pat4, sizeof(pat4), "while(!chan_recv(%s", chname);
+    /* New patterns for cc_io_avail */
+    char pat5[256];
+    snprintf(pat5, sizeof(pat5), "while(cc_io_avail(chan_recv(%s", chname);
+    char pat6[256];
+    snprintf(pat6, sizeof(pat6), "while(cc_io_avail(cc_chan_recv(%s", chname);
+    
     if (strstr(tmp, pat1) && strstr(tmp, "==0")) return 1;
     if (strstr(tmp, pat2)) return 1;
     if (strstr(tmp, pat3) && strstr(tmp, "==0")) return 1;
     if (strstr(tmp, pat4)) return 1;
+    /* New patterns */
+    if (strstr(tmp, pat5)) return 1;
+    if (strstr(tmp, pat6)) return 1;
     return 0;
 }
 

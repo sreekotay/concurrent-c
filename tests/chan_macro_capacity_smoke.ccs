@@ -11,7 +11,7 @@ int main(void) {
     
     // Send NUM_ITEMS values
     for (int i = 0; i < NUM_ITEMS; i++) {
-        chan_send(tx, i * 10);
+        (void)chan_send(tx, i * 10);
     }
     chan_close(tx);
     

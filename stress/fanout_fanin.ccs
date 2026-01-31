@@ -31,7 +31,7 @@ int main(void) {
         /* Collector: must run in parallel with workers for unbuffered channels */
         spawn(() => {
             int v;
-            while (chan_recv(done_rx, &v) == 0) {
+            while (cc_io_avail(chan_recv(done_rx, &v))) {
                 cc_atomic_fetch_add(&g_sum, (int64_t)v);
                 cc_atomic_fetch_add(&g_collected, 1);
             }
@@ -42,10 +42,10 @@ int main(void) {
             for (int w = 0; w < NUM_WORKERS; w++) {
                 spawn(() => {
                     int v;
-                    while (chan_recv(work_rx, &v) == 0) {
+                    while (cc_io_avail(chan_recv(work_rx, &v))) {
                         /* "Process" by squaring */
                         int result = v * v;
-                        chan_send(done_tx, result);
+                        (void)chan_send(done_tx, result);
                     }
                 });
             }
@@ -54,7 +54,7 @@ int main(void) {
             @nursery closing(work_tx) {
                 spawn(() => {
                     for (int i = 0; i < NUM_ITEMS; i++) {
-                        chan_send(work_tx, i);
+                        (void)chan_send(work_tx, i);
                     }
                 });
             }

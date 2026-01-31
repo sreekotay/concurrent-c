@@ -11,28 +11,22 @@ static volatile int g_got = 0;
 void producer(CCChanTx tx) {
     int v1 = 1;
     int v2 = 2;
-    int e = 0;
 
-    e = chan_send(tx, v1);
-    if (e != 0) { g_err = e; return; }
+    if (!cc_io_avail(chan_send(tx, v1))) { g_err = 1; return; }
 
     // Ensure nursery end is reached while producer is still running.
     usleep(50 * 1000);
 
-    e = chan_send(tx, v2);
-    if (e != 0) { g_err = e; return; }
+    if (!cc_io_avail(chan_send(tx, v2))) { g_err = 1; return; }
 }
 
 void consumer(CCChanRx rx) {
     int v = 0;
-    int e = 0;
 
-    e = chan_recv(rx, &v);
-    if (e != 0) { g_err = e; return; }
+    if (!cc_io_avail(chan_recv(rx, &v))) { g_err = 1; return; }
     g_got += v;
 
-    e = chan_recv(rx, &v);
-    if (e != 0) { g_err = e; return; }
+    if (!cc_io_avail(chan_recv(rx, &v))) { g_err = 1; return; }
     g_got += v;
 }
 
@@ -56,15 +50,15 @@ int main(void) {
 
     // After nursery exit, channel should now be closed.
     int tmp = 0;
-    int tr = chan_try_recv(ch_rx, &tmp);
-    if (tr != EPIPE) {
-        fprintf(stderr, "nursery_closing_order_smoke: expected channel closed after nursery; try_recv=%d (EPIPE=%d)\n", tr, EPIPE);
+    CCResult_bool_CCIoError tr = chan_try_recv(ch_rx, &tmp);
+    if (!(cc_is_ok(tr) && !cc_unwrap(tr))) {
+        fprintf(stderr, "nursery_closing_order_smoke: expected channel closed after nursery\n");
         return 12;
     }
     int v3 = 3;
-    int e = chan_send(ch_tx, v3);
-    if (e != EPIPE) {
-        fprintf(stderr, "nursery_closing_order_smoke: expected send EPIPE after nursery; send=%d (EPIPE=%d)\n", e, EPIPE);
+    CCResult_bool_CCIoError e = chan_send(ch_tx, v3);
+    if (!(cc_is_ok(e) && !cc_unwrap(e))) {
+        fprintf(stderr, "nursery_closing_order_smoke: expected send to return closed after nursery\n");
         return 13;
     }
 

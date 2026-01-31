@@ -7,11 +7,11 @@ int main(void) {
     channel_pair(&tx, &rx);
 
     // Fill then overwrite
-    assert(chan_send(tx, 1) == 0);
-    assert(chan_send(tx, 2) == 0);
+    assert(cc_io_avail(chan_send(tx, 1)));
+    assert(cc_io_avail(chan_send(tx, 2)));
 
     int v = 0;
-    assert(chan_recv(rx, &v) == 0);
+    assert(cc_io_avail(chan_recv(rx, &v)));
     assert(v == 2);
 
     chan_close(tx);

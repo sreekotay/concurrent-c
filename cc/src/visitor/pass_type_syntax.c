@@ -437,7 +437,7 @@ static const char* cc__builtin_result_types[] = {
     "CCResult_CCOptional_CCSlice_CCIoError",/* io.cch */
     "CCResult_CCDirIterptr_CCIoError",      /* dir.cch: cc_dir_open */
     "CCResult_CCDirEntry_CCIoError",        /* dir.cch: cc_dir_next */
-    "CCResult_bool_CCIoError",              /* dir.cch: cc_dir_create, etc. */
+    "CCResult_bool_CCIoError",              /* dir.cch, channel: unified I/O result */
     NULL
 };
 

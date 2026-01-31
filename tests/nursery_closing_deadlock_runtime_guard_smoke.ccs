@@ -25,9 +25,9 @@ int main(void) {
         spawn(() => {
             int v = 0;
             for (;;) {
-                int rc = chan_recv(ch_rx, &v);
-                if (rc == 0) continue;
-                g_err = rc; /* expect EDEADLK from the guard */
+                CCResult_bool_CCIoError res = chan_recv(ch_rx, &v);
+                if (cc_io_avail(res)) continue;
+                g_err = cc_is_ok(res) ? EPIPE : cc_unwrap_err(res).os_code; /* expect EDEADLK from the guard */
                 break;
             }
         });

@@ -14,7 +14,7 @@ int main(void) {
         /* Producer: sends values 1, 2, 3 then exits. */
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
-                chan_send(ch_tx, i);
+                (void)chan_send(ch_tx, i);
                 printf("sent %d\n", i);
             }
             /* Producer exits; channel stays open for consumer. */
@@ -23,7 +23,7 @@ int main(void) {
         /* Consumer: receives until channel closes. */
         spawn(() => {
             int v;
-            while (chan_recv(ch_rx, &v) == 0) {
+            while (cc_io_avail(chan_recv(ch_rx, &v))) {
                 printf("got %d\n", v);
                 received_sum += v;
             }

@@ -37,7 +37,7 @@ int main(void) {
         /* Producer */
         spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
-                chan_send(g_tx0, i);
+                (void)chan_send(g_tx0, i);
             }
             chan_close(g_tx0);
         });
@@ -45,8 +45,8 @@ int main(void) {
         /* Stage 1 */
         spawn(() => {
             int v;
-            while (chan_recv(g_rx0, &v) == 0) {
-                chan_send(g_tx1, v + 1);
+            while (cc_io_avail(chan_recv(g_rx0, &v))) {
+                (void)chan_send(g_tx1, v + 1);
             }
             chan_close(g_tx1);
         });
@@ -54,8 +54,8 @@ int main(void) {
         /* Stage 2 */
         spawn(() => {
             int v;
-            while (chan_recv(g_rx1, &v) == 0) {
-                chan_send(g_tx2, v + 1);
+            while (cc_io_avail(chan_recv(g_rx1, &v))) {
+                (void)chan_send(g_tx2, v + 1);
             }
             chan_close(g_tx2);
         });
@@ -63,8 +63,8 @@ int main(void) {
         /* Stage 3 */
         spawn(() => {
             int v;
-            while (chan_recv(g_rx2, &v) == 0) {
-                chan_send(g_tx3, v + 1);
+            while (cc_io_avail(chan_recv(g_rx2, &v))) {
+                (void)chan_send(g_tx3, v + 1);
             }
             chan_close(g_tx3);
         });
@@ -72,8 +72,8 @@ int main(void) {
         /* Stage 4 */
         spawn(() => {
             int v;
-            while (chan_recv(g_rx3, &v) == 0) {
-                chan_send(g_tx4, v + 1);
+            while (cc_io_avail(chan_recv(g_rx3, &v))) {
+                (void)chan_send(g_tx4, v + 1);
             }
             chan_close(g_tx4);
         });
@@ -81,7 +81,7 @@ int main(void) {
         /* Consumer */
         spawn(() => {
             int v;
-            while (chan_recv(g_rx4, &v) == 0) {
+            while (cc_io_avail(chan_recv(g_rx4, &v))) {
                 g_output_count++;
                 g_output_sum += v;
             }

@@ -442,7 +442,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         /* Writer Task - writes decompressed data (runs behind) */
         spawn([out_ptr, decompressed_rx, p_total_out]() => {
             DecompChunk chunk;
-            while (chan_recv(decompressed_rx, &chunk) == 0) {
+                while (cc_io_avail(chan_recv(decompressed_rx, &chunk))) {
                 if (chunk.data.len > 0 && !g.test && !g.list) {
                     CCRes(size_t, CCIoError) wr = cc_file_write_buf(out_ptr, chunk.data.ptr, chunk.data.len);
                     if (cc_is_err(wr)) {
@@ -463,7 +463,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                     fprintf(stderr, "Failed to initialize decompression\n");
                 } else {
                     DecompChunk in_chunk;
-                    while (chan_recv(compressed_rx, &in_chunk) == 0) {
+                    while (cc_io_avail(chan_recv(compressed_rx, &in_chunk))) {
                         strm.next_in = (Bytef*)in_chunk.data.ptr;
                         strm.avail_in = (uInt)in_chunk.data.len;
                         
@@ -491,7 +491,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                                     .data = cc_slice_from_parts(out_buf, have, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
                                     .arena = out_arena
                                 };
-                                chan_send(decompressed_tx, out_chunk);
+                                (void)chan_send(decompressed_tx, out_chunk);
                             } else {
                                 cc_heap_arena_free(&out_arena);
                             }
@@ -531,7 +531,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                             .data = cc_slice_from_parts(buf, bytes_read, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
                             .arena = chunk_arena
                         };
-                        chan_send(compressed_tx, chunk);
+                        (void)chan_send(compressed_tx, chunk);
                     }
                 });
             }
@@ -737,7 +737,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             
             // Task-handle pattern: await tasks in FIFO order (no reorder buffer!)
             CCTask* task;
-            while (!write_failed && chan_recv(tasks_rx, &task) == 0) {
+            while (!write_failed && cc_io_avail(chan_recv(tasks_rx, &task))) {
                 // Check for global error (e.g. SIGINT)
                 if (cc_atomic_load(&g_pipeline_error)) {
                     write_failed = true;
@@ -968,7 +968,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             // Spawn task for pending block and send handle
                             CCTask* task = NULL;
                             cc_spawn(&task, compress_block_task, prev_blk);
-                            chan_send(tasks_tx, task);
+                            (void)chan_send(tasks_tx, task);
                             prev_blk = NULL;
                         }
                         break;  // EOF with no data
@@ -1045,7 +1045,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     if (prev_blk) {
                         CCTask* task = NULL;
                         cc_spawn(&task, compress_block_task, prev_blk);
-                        chan_send(tasks_tx, task);
+                        (void)chan_send(tasks_tx, task);
                     }
 
                     // If this was a short read, it's the last block.
@@ -1053,7 +1053,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         blk->is_last = true;
                         CCTask* task = NULL;
                         cc_spawn(&task, compress_block_task, blk);
-                        chan_send(tasks_tx, task);
+                        (void)chan_send(tasks_tx, task);
                         prev_blk = NULL;
                         hit_eof = true;
                         break;

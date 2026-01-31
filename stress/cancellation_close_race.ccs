@@ -71,8 +71,7 @@ int test_close_while_recv(void) {
         @nursery {
             spawn([rx]() => {
                 int val;
-                int err = chan_recv(rx, &val);
-                if (err != 0) {
+                if (!cc_io_avail(chan_recv(rx, &val))) {
                     cc_atomic_fetch_add(&g_close_errors, 1);
                 }
             });

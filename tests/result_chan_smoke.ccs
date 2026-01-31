@@ -22,25 +22,25 @@ int !> (CCError) make_err_result(void) {
 int main(void) {
     g_ch = channel_pair(&results_tx, &results_rx);
     
-    // Send a success
+    // Send a success (use non-UFCS form due to parser limitation)
     CCResult_int_CCError ok_result = make_ok_result();
-    results_tx.send(ok_result);
+    (void)chan_send(results_tx, ok_result);
     
     // Send an error
     CCResult_int_CCError err_result = make_err_result();
-    results_tx.send(err_result);
+    (void)chan_send(results_tx, err_result);
     
-    results_tx.close();
+    chan_close(results_tx);
     
-    // Receive
+    // Receive (use non-UFCS form due to parser limitation)
     CCResult_int_CCError r1 = {0};
-    int e1 = results_rx.recv(&r1);
-    assert(e1 == 0 && r1.ok && "first result should be ok");
+    CCResult_bool_CCIoError res1 = chan_recv(results_rx, &r1);
+    assert(cc_io_avail(res1) && r1.ok && "first result should be ok");
     assert(r1.u.value == 42);
     
     CCResult_int_CCError r2 = {0};
-    int e2 = results_rx.recv(&r2);
-    assert(e2 == 0 && !r2.ok && "second result should be error");
+    CCResult_bool_CCIoError res2 = chan_recv(results_rx, &r2);
+    assert(cc_io_avail(res2) && !r2.ok && "second result should be error");
     assert(r2.u.error.kind == CC_ERR_PARSE);
     
     cc_chan_free(g_ch);

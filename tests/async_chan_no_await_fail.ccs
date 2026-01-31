@@ -3,7 +3,7 @@
 #include <ccc/std/task_intptr.cch>
 
 @async int f(CCChanTx tx) {
-    chan_send(tx, 42);  /* ERROR: must be awaited */
+    (void)chan_send(tx, 42);  /* ERROR: must be awaited */
     return 0;
 }
 

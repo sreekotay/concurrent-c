@@ -7,8 +7,8 @@ int main(void) {
 
     int v = 42;
     int out = 0;
-    if (chan_send(tx, v) != 0) return 1;
-    if (chan_recv(rx, &out) != 0) return 2;
+    if (!cc_io_avail(chan_send(tx, v))) return 1;
+    if (!cc_io_avail(chan_recv(rx, &out))) return 2;
     chan_close(tx);
     cc_chan_free(ch);
     return (out == 42) ? 0 : 3;

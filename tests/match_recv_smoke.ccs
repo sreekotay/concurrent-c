@@ -6,7 +6,7 @@ int main(void) {
     int[~1 <] rx;
     channel_pair(&tx, &rx);
 
-    chan_send(tx, 7);
+    (void)chan_send(tx, 7);
 
     int out = 0;
     @match {
