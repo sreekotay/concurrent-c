@@ -1,0 +1,88 @@
+/*
+ * Recipe: Ordered Parallel Processing
+ *
+ * Demonstrates:
+ *   - Processing items in parallel while preserving output order
+ *   - Using task handles through a channel (spawn → send handle → await in order)
+ *   - No reorder buffer needed - FIFO await gives natural ordering
+ *
+ * Pattern:
+ *   1. Reader spawns a task for each item, sends task HANDLE (not result)
+ *   2. Writer receives handles in order, awaits each → results come out ordered
+ *
+ * Key insight: The channel carries task handles, not results. Since we send
+ * handles in input order and await them in FIFO order, outputs are ordered
+ * even though work completes out-of-order.
+ */
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#define NUM_ITEMS 8
+#define CHAN_CAP 4
+
+typedef struct {
+    int id;
+    int result;
+} Item;
+
+/* Simulate variable-time work (items complete out of order). */
+void* process_item(void* arg) {
+    Item* item = (Item*)arg;
+    
+    /* Odd items take longer - simulates out-of-order completion. */
+    int delay_us = (item->id % 2 == 1) ? 50000 : 10000;
+    usleep(delay_us);
+    
+    item->result = item->id * item->id;  /* Square the ID */
+    printf("  [worker] completed item %d (delay=%dms)\n", item->id, delay_us/1000);
+    return item;
+}
+
+int main(void) {
+    CCTask*[~CHAN_CAP >] tasks_tx;
+    CCTask*[~CHAN_CAP <] tasks_rx;
+    CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+
+    printf("=== Ordered Parallel Processing ===\n");
+    printf("Processing %d items with variable delays...\n\n", NUM_ITEMS);
+
+    @nursery {
+        /* Producer: spawn tasks, send handles in order, then close channel. */
+        spawn([tasks_tx]() => {
+            for (int i = 1; i <= NUM_ITEMS; i++) {
+                Item* item = malloc(sizeof(Item));
+                item->id = i;
+                
+                CCTask* task = NULL;
+                cc_spawn(&task, process_item, item);
+                chan_send(tasks_tx, task);
+                printf("[producer] spawned task for item %d\n", i);
+            }
+            chan_close(tasks_tx);  /* Signal no more tasks */
+        });
+
+        /* Consumer: await handles in FIFO order → ordered output! */
+        spawn([tasks_rx]() => {
+            printf("\n[consumer] receiving results in order:\n");
+            CCTask* task;
+            while (chan_recv(tasks_rx, &task) == 0) {
+                void* result = NULL;
+                cc_task_join_result(task, &result);
+                cc_task_free(task);
+                
+                Item* item = (Item*)result;
+                printf("[consumer] item %d: %d^2 = %d\n", 
+                       item->id, item->id, item->result);
+                free(item);
+            }
+        });
+    }
+
+    cc_chan_free(tasks_ch);
+    printf("\nDone! Results printed in order despite out-of-order completion.\n");
+    return 0;
+}
