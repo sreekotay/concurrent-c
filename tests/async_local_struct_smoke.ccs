@@ -1,0 +1,33 @@
+/* Test: @async function with local struct variable
+ * 
+ * This should work but currently fails with:
+ *   error: struct/union/enum name expected
+ * 
+ * The state machine generation doesn't properly handle
+ * struct-typed local variables.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+@async int use_local_struct(int a, int b) {
+    /* Local struct variable - this breaks state machine generation */
+    Point p;
+    p.x = a;
+    p.y = b;
+    return p.x + p.y;
+}
+
+int main(void) {
+    CCTaskIntptr t = use_local_struct(10, 20);
+    int result = cc_block_on(int, t);
+    printf("result = %d\n", result);
+    return (result == 30) ? 0 : 1;
+}

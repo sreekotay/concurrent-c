@@ -1,0 +1,34 @@
+/* Test: @async function returning pointer type
+ * 
+ * This should work but may fail to compile.
+ * Workaround: return intptr_t and cast.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct {
+    int value;
+} Result;
+
+@async Result* create_result(int v) {
+    Result* r = (Result*)malloc(sizeof(Result));
+    r->value = v;
+    return r;
+}
+
+int main(void) {
+    CCTaskIntptr t = create_result(42);
+    /* This cast may be needed depending on how task handles work */
+    Result* r = (Result*)(intptr_t)cc_block_on(intptr_t, t);
+    if (!r) {
+        printf("FAIL: got NULL\n");
+        return 1;
+    }
+    printf("result->value = %d\n", r->value);
+    int ok = (r->value == 42);
+    free(r);
+    return ok ? 0 : 1;
+}

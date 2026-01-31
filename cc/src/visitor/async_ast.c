@@ -1517,15 +1517,25 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         return 0;
     }
 
-    /* pointer-like declaration (e.g. `CCNursery* n = ...;`, `CCArena* a = ...;`) hoisted into frame:
-       rewrite as assignment to the frame slot so we don't emit invalid `T __f->x = ...`. */
+    /* pointer-like declaration (e.g. `CCNursery* n = ...;`, `unsigned char* buf = ...;`) hoisted into frame:
+       rewrite as assignment to the frame slot so we don't emit invalid `T __f->x = ...`.
+       Now supports multi-word types like "unsigned char*", "const int*", etc. */
     {
         const char* q = p;
         if (cc__is_ident_start(*q)) {
-            /* parse base type ident */
-            q++;
-            while (cc__is_ident_char(*q)) q++;
-            q = cc__skip_ws(q);
+            /* parse type (may be multi-word like "unsigned char", "const int", "struct Foo") */
+            while (1) {
+                /* parse one identifier */
+                while (cc__is_ident_char(*q)) q++;
+                q = cc__skip_ws(q);
+                /* check if we hit the pointer marker */
+                if (*q == '*') break;
+                /* check if another type token follows (like "char" after "unsigned") */
+                if (cc__is_ident_start(*q)) continue;
+                /* not another token and not '*' - not a pointer decl; reset and try struct handling */
+                q = p;
+                break;
+            }
             int saw_ptr = 0;
             while (*q == '*') { saw_ptr = 1; q++; q = cc__skip_ws(q); }
             if (saw_ptr) {
@@ -1558,6 +1568,93 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                                 free(rhs2);
                                 return 1;
                             }
+                            /* pointer declaration without initializer (e.g. `T* x;`) - skip, variable is in frame */
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* struct/other type declaration (e.g. `BigStruct s;`, `MyType x = init;`) hoisted into frame:
+       - With initializer: emit as assignment to frame slot
+       - Without initializer: skip (variable is already declared in frame struct)
+       
+       Conservative approach: parse `TYPE NAME = ...` or `TYPE NAME;` from the start.
+       TYPE can be one or more identifier tokens. NAME must be in frame mapping. */
+    {
+        const char* q = p;
+        /* Skip "struct", "union", "enum" keyword if present */
+        if (strncmp(q, "struct ", 7) == 0) q += 7;
+        else if (strncmp(q, "union ", 6) == 0) q += 6;
+        else if (strncmp(q, "enum ", 5) == 0) q += 5;
+        q = cc__skip_ws(q);
+        
+        /* Parse one or more type tokens (e.g., "unsigned", "long", "BigStruct") */
+        const char* type_start = q;
+        int n_type_tokens = 0;
+        while (cc__is_ident_start(*q)) {
+            while (cc__is_ident_char(*q)) q++;
+            n_type_tokens++;
+            q = cc__skip_ws(q);
+            /* Stop if next char is not an ident start (e.g., '=' or ';' or '*') */
+            if (!cc__is_ident_start(*q)) break;
+        }
+        
+        /* Need at least 2 tokens: one type token + one variable name token */
+        /* Actually, for single-word types: TYPE NAME, we need the last parsed token to be NAME */
+        /* The variable name is the last identifier token before '=' or ';' */
+        if (n_type_tokens >= 2) {
+            /* The last token we parsed might be the variable name.
+               Backtrack: re-parse to find where the variable name starts. */
+            q = type_start;
+            const char* var_start = NULL;
+            const char* var_end = NULL;
+            const char* prev_start = NULL;
+            const char* prev_end = NULL;
+            while (cc__is_ident_start(*q)) {
+                prev_start = var_start;
+                prev_end = var_end;
+                var_start = q;
+                while (cc__is_ident_char(*q)) q++;
+                var_end = q;
+                q = cc__skip_ws(q);
+                if (!cc__is_ident_start(*q)) break;
+            }
+            
+            /* var_start/var_end is the last identifier; check if it's followed by '=' or ';' */
+            if (var_start && var_end && (*q == '=' || *q == ';' || *q == '\0')) {
+                size_t nn = (size_t)(var_end - var_start);
+                if (nn > 0 && nn < 128) {
+                    char nm[128];
+                    memcpy(nm, var_start, nn);
+                    nm[nn] = 0;
+                    
+                    /* Check if this identifier is in the frame mapping */
+                    int is_frame = 0;
+                    for (int k = 0; k < e->map_n; k++) {
+                        if (e->map_names[k] && strcmp(e->map_names[k], nm) == 0) { is_frame = 1; break; }
+                    }
+                    
+                    if (is_frame) {
+                        if (*q == '=') {
+                            /* Declaration with initializer - emit as assignment */
+                            q++;
+                            q = cc__skip_ws(q);
+                            int aw_next = 0;
+                            char* init2 = cc__emit_awaits_in_expr(e, q, &aw_next);
+                            if (!init2) return 0;
+                            char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
+                            char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
+                            free(init2);
+                            if (lhs2 && rhs2) cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                            free(lhs2);
+                            free(rhs2);
+                            return 1;
+                        } else {
+                            /* Declaration without initializer - skip, variable is in frame */
+                            return 1;
                         }
                     }
                 }
@@ -2046,13 +2143,12 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
             if (!n[i].aux_s1) continue;
             if (!n[i].aux_s2) continue;
-            /* Hoist scalar locals (modeled as intptr_t) and pointer locals (modeled with their type).
+            /* Hoist scalar locals (modeled as intptr_t), pointer locals, and struct/other types.
                IMPORTANT: TCC parses CC headers in CC_PARSER_MODE where some CC ABI types are dummy `int`
                (e.g. CCClosure0). To avoid accidentally hoisting those as scalar locals, require that the
                *source text* for the declarator starts with an actual scalar keyword when aux_s2 says "int". */
             int is_scalar = (strcmp(n[i].aux_s2, "int") == 0 || strcmp(n[i].aux_s2, "intptr_t") == 0);
-            int is_ptr = (strchr(n[i].aux_s2, '*') != NULL);
-            if (!is_scalar && !is_ptr) continue;
+            /* Note: We no longer skip non-scalar/non-pointer types - struct types must be hoisted too. */
             /* Ensure this declaration is actually inside the brace-bounded function body.
                This prevents accidentally hoisting decls from other functions when stub-AST parentage is noisy. */
             if (fn->lbrace && fn->rbrace) {

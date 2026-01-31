@@ -1,0 +1,57 @@
+/* Test: @async with zlib-like pattern (struct + pointer after early return)
+ * This tests the exact pattern that broke in pigz_cc_taskhandle
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Mock z_stream-like struct */
+typedef struct {
+    unsigned char* next_in;
+    unsigned int avail_in;
+    unsigned char* next_out;
+    unsigned int avail_out;
+} MockStream;
+
+@async intptr_t compress_like_async(unsigned char* data, size_t len) {
+    /* Init stream - early return on failure */
+    MockStream strm;
+    memset(&strm, 0, sizeof(strm));
+    if (len == 0) {
+        return 0;
+    }
+    
+    /* Allocate output buffer after early return */
+    size_t out_cap = len + 1024;
+    unsigned char* out_buf = (unsigned char*)malloc(out_cap);
+    if (!out_buf) {
+        return 0;
+    }
+    
+    /* Use stream */
+    strm.next_in = data;
+    strm.avail_in = (unsigned int)len;
+    strm.next_out = out_buf;
+    strm.avail_out = (unsigned int)out_cap;
+    
+    /* Simple "compression" - just copy */
+    memcpy(out_buf, data, len);
+    
+    intptr_t result = (intptr_t)len;
+    free(out_buf);
+    
+    return result;
+}
+
+int main(void) {
+    unsigned char data[] = "Hello, World!";
+    
+    CCTaskIntptr t = compress_like_async(data, sizeof(data));
+    intptr_t result = cc_block_on(intptr_t, t);
+    
+    printf("result = %ld (expected %zu)\n", (long)result, sizeof(data));
+    return (result == sizeof(data)) ? 0 : 1;
+}

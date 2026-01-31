@@ -1,0 +1,65 @@
+/* Test: @async function with variable declaration after early return
+ * 
+ * Pattern that may fail:
+ *   @async ... {
+ *       if (error) return NULL;
+ *       T* ptr = malloc(...);  // Declaration after conditional return
+ *   }
+ * 
+ * The state machine generation might not properly handle variables
+ * declared after early return branches.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task_intptr.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    int x;
+    int y;
+    int z;
+} BigStruct;
+
+@async intptr_t complex_async(int should_fail) {
+    /* Early return branch */
+    if (should_fail) {
+        return 0;
+    }
+    
+    /* Variable declarations after early return */
+    BigStruct s;
+    memset(&s, 0, sizeof(s));
+    s.x = 10;
+    s.y = 20;
+    
+    /* Another variable after struct */
+    unsigned char* buf = (unsigned char*)malloc(1024);
+    if (!buf) {
+        return 0;
+    }
+    
+    /* Use both */
+    buf[0] = (unsigned char)s.x;
+    buf[1] = (unsigned char)s.y;
+    
+    int result = buf[0] + buf[1];
+    free(buf);
+    
+    return (intptr_t)result;
+}
+
+int main(void) {
+    /* Test success path */
+    CCTaskIntptr t1 = complex_async(0);
+    int r1 = (int)cc_block_on(intptr_t, t1);
+    printf("success path: %d (expected 30)\n", r1);
+    
+    /* Test failure path */
+    CCTaskIntptr t2 = complex_async(1);
+    int r2 = (int)cc_block_on(intptr_t, t2);
+    printf("failure path: %d (expected 0)\n", r2);
+    
+    return (r1 == 30 && r2 == 0) ? 0 : 1;
+}
