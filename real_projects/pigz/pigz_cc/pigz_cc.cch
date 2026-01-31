@@ -65,6 +65,7 @@ CC_DECL_RESULT_SPEC(CCResult_DecompressedResultPtr_CCIoError, DecompressedResult
 struct {
     size_t block;           // uncompressed input size per thread
     crc_t shift;            // pre-calculated CRC-32 shift for length block
+    int level;              // compression level (1-9, or 11 for zopfli)
     int strategy;           // compression strategy
     int recursive;          // recursive directory processing
     int keep;               // keep original file

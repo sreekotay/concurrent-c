@@ -13,6 +13,7 @@
 #define _STDARG_H
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/cc_sched.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -298,6 +299,39 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
     }
 }
 
+/* Wrapper for task-handle pattern: spawns as independent task */
+void* compress_block_task(void* arg) {
+    Block* blk = (Block*)arg;
+    
+    // Initialize z_stream for this task if needed (level <= 9)
+    z_stream strm;
+    z_stream* strm_ptr = NULL;
+    if (g.level <= 9) {
+        memset(&strm, 0, sizeof(strm));
+        int ret = deflateInit2(&strm, g.level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
+        if (ret != Z_OK) {
+            cc_heap_arena_free(&blk->arena);
+            return NULL;
+        }
+        strm_ptr = &strm;
+    }
+    
+    CompressedResult* !>(CCIoError) res = compress_block(strm_ptr, blk, blk->dict, g.level, g.strategy);
+    
+    // Cleanup z_stream
+    if (strm_ptr) {
+        deflateEnd(strm_ptr);
+    }
+    
+    // Free input block arena
+    cc_heap_arena_free(&blk->arena);
+    
+    if (cc_is_err(res)) {
+        return NULL;
+    }
+    return cc_unwrap(res);
+}
+
 /* ============================================================================
  * Decompression Engine (matches pigz.c:2700-2750)
  * ============================================================================ */
@@ -524,6 +558,12 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 int process_path(const char* path, int num_workers, int level, int strategy);
 
 int compress_file(const char* in_path, const char* out_path, int num_workers, int level, int strategy) {
+    (void)num_workers;  // Not used with task-handle pattern
+    
+    // Store level and strategy in globals for task wrapper access
+    g.level = level;
+    g.strategy = strategy;
+    
     // Open input file
     CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
@@ -548,40 +588,27 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     size_t block_size = g.block;
     g.shift = x2nmodp(g.block, 3);
     
-    // Channels for pipeline
+    // Channel for task handles (task-handle pattern: spawn per block, FIFO await)
     int chan_cap = CHAN_CAP;
     if (g.max_mem > 0) {
         chan_cap = (int)(g.max_mem / (block_size + 65536));
         if (chan_cap < 1) chan_cap = 1;
         if (chan_cap > 1024) chan_cap = 1024;
     }
-    
-    // Reorder buffer: handles out-of-order block completion from parallel workers.
-    // Theory says max gap = chan_cap*2 + num_workers, but in practice timing
-    // variance can create larger gaps. Use generous fixed size.
-    // Memory cost is trivial: 64KB for 8192 pointers.
-    int reorder_cap = 8192;
 
-    Block*[~chan_cap >] blocks_tx;
-    Block*[~chan_cap <] blocks_rx;
-    CompressedResult*[~chan_cap >] results_tx;
-    CompressedResult*[~chan_cap <] results_rx;
+    CCTask*[~chan_cap >] tasks_tx;
+    CCTask*[~chan_cap <] tasks_rx;
 
-    CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
-    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
-    @defer cc_chan_free(blocks_ch);
-    @defer cc_chan_free(results_ch);
+    CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+    @defer cc_chan_free(tasks_ch);
 
     // Pointers for closure capture
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
     @nursery {
-        /* Writer Task - must write blocks in sequence order */
-        spawn([out_ptr, block_size, out_path, reorder_cap]() => {
-            long next_seq = 0;
-            CompressedResult** pending = (CompressedResult**)calloc(reorder_cap, sizeof(CompressedResult*));
-            @defer free(pending);
+        /* Writer Task - awaits task handles in FIFO order (no reorder buffer needed) */
+        spawn([out_ptr, block_size, out_path, tasks_rx]() => {
             bool write_failed = false;
 
             // gzip + zip use CRC32 init 0; zlib uses Adler-32 init 1
@@ -622,7 +649,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         (unsigned char)((g.mtime >> 8) & 0xff),
                         (unsigned char)((g.mtime >> 16) & 0xff),
                         (unsigned char)((g.mtime >> 24) & 0xff),
-                        (unsigned char)(level >= 9 ? 2 : level == 1 ? 4 : 0), // Extra flags
+                        (unsigned char)(g.level >= 9 ? 2 : g.level == 1 ? 4 : 0), // Extra flags
                         0x03         // OS = Unix
                     };
                     size_t !> (CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10));
@@ -656,9 +683,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 } else if (g.form == 1) {
                     // zlib header
                     unsigned head = (0x78 << 8) +
-                                   (level >= 9 ? 3 << 6 :
-                                    level == 1 ? 0 << 6 :
-                                    level >= 6 ? 1 << 6 :
+                                   (g.level >= 9 ? 3 << 6 :
+                                    g.level == 1 ? 0 << 6 :
+                                    g.level >= 6 ? 1 << 6 :
                                     2 << 6);
                     head += 31 - (head % 31);
                     unsigned char header[2];
@@ -708,61 +735,55 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 }
             }
             
-            CompressedResult* r;
-            while (!write_failed && chan_recv(results_rx, &r) == 0) {
+            // Task-handle pattern: await tasks in FIFO order (no reorder buffer!)
+            CCTask* task;
+            while (!write_failed && chan_recv(tasks_rx, &task) == 0) {
                 // Check for global error (e.g. SIGINT)
                 if (cc_atomic_load(&g_pipeline_error)) {
                     write_failed = true;
-                    cc_heap_arena_free(&r->arena);
+                    cc_task_free(task);
                     break;
                 }
 
-                // Insert using modular indexing
-                size_t slot = (size_t)(r->seq % reorder_cap);
+                // Await this task - blocks until compression is done
+                void* result = NULL;
+                cc_task_join_result(task, &result);
+                cc_task_free(task);
+                CompressedResult* r = (CompressedResult*)result;
                 
-                // Collision is a logic bug in pipeline sizing - abort immediately
-                if (pending[slot] != NULL) {
-                    fprintf(stderr, "FATAL: Reorder buffer collision at seq %ld (slot %zu holds seq %ld)\n", 
-                            r->seq, slot, pending[slot]->seq);
-                    fprintf(stderr, "This indicates REORDER_CAP (%d) is too small for the pipeline.\n", reorder_cap);
-                    abort();
+                if (!r) {
+                    fprintf(stderr, "Compression task failed\n");
+                    cc_atomic_store(&g_pipeline_error, 1);
+                    write_failed = true;
+                    break;
                 }
-                pending[slot] = r;
                 
-                // Drain all consecutive blocks starting from next_seq
-                while (!write_failed && pending[next_seq % reorder_cap] != NULL) {
-                    slot = (size_t)(next_seq % reorder_cap);
-                    r = pending[slot];
-                    pending[slot] = NULL;
-                    
-                    // Accumulate global checksum and total length
-                    if (first_block) {
-                        global_crc = r->crc;
-                        first_block = false;
-                    } else {
-                        if (g.form == 1)
-                            global_crc = adler32_comb(global_crc, r->crc, r->original_len);
-                        else
-                            global_crc = crc32_comb_with_size(global_crc, r->crc, r->original_len, block_size);
-                    }
-                    total_len += r->original_len;
-                    total_comp_len += r->data.len;
+                // Accumulate global checksum and total length
+                if (first_block) {
+                    global_crc = r->crc;
+                    first_block = false;
+                } else {
+                    if (g.form == 1)
+                        global_crc = adler32_comb(global_crc, r->crc, r->original_len);
+                    else
+                        global_crc = crc32_comb_with_size(global_crc, r->crc, r->original_len, block_size);
+                }
+                total_len += r->original_len;
+                total_comp_len += r->data.len;
 
-                    // Use Result-based I/O for writing data (unless testing/listing)
-                    if (!g.list && !g.test) {
-                        size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
-                        if (cc_is_ok(wr)) {
-                            // Block written successfully
-                        } else {
-                            fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            write_failed = true;
-                        }
+                // Use Result-based I/O for writing data (unless testing/listing)
+                if (!g.list && !g.test) {
+                    size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
+                    if (cc_is_ok(wr)) {
+                        // Block written successfully
+                    } else {
+                        fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
+                        cc_atomic_store(&g_pipeline_error, 1);
+                        write_failed = true;
                     }
-                    
-                    cc_heap_arena_free(&r->arena);
-                    next_seq++;
                 }
+                
+                cc_heap_arena_free(&r->arena);
             }
 
             // Write gzip/zlib trailer (matches pigz.c:1180-1210)
@@ -909,201 +930,139 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     unlink(out_path);
                 }
             }
-
-            // Cleanup any remaining pending blocks
-            for (int i = 0; i < reorder_cap; i++) {
-                if (pending[i]) cc_heap_arena_free(&pending[i]->arena);
-            }
         });
 
-        @nursery closing(results_tx) {
-            /* Compression Workers */
-            for (int w = 0; w < num_workers; w++) {
-                spawn([level, strategy, results_tx, blocks_rx]() => {
-                    // Initialize z_stream once per worker (matches pigz.c:2310-2320)
-                    z_stream strm;
-                    memset(&strm, 0, sizeof(strm));
-                    if (level <= 9) {
-                        int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, strategy);
-                        if (ret != Z_OK) {
-                            fprintf(stderr, "Worker failed to initialize zlib\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                        } else {
-                            Block* blk;
-                            while (chan_recv(blocks_rx, &blk) == 0) {
-                                // Check if pipeline is shutting down due to error
-                                if (cc_atomic_load(&g_pipeline_error)) {
-                                    cc_heap_arena_free(&blk->arena);
-                                    continue;  // Drain channel but don't process
-                                }
-                                
-                                // Compress and send result; on error, fail the pipeline
-                                CompressedResult* !> (CCIoError) res_val = compress_block(&strm, blk, blk->dict, level, strategy);
-                                if (cc_is_ok(res_val)) {
-                                    chan_send(results_tx, cc_unwrap(res_val));
-                                } else {
-                                    // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
-                                    fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
-                                    cc_atomic_store(&g_pipeline_error, 1);
-                                }
-                                
-                                // Free input block arena
-                                cc_heap_arena_free(&blk->arena);
-                            }
-                            deflateEnd(&strm);
-                        }
-                    } else {
-                        Block* blk;
-                        while (chan_recv(blocks_rx, &blk) == 0) {
-                            // Check if pipeline is shutting down due to error
-                            if (cc_atomic_load(&g_pipeline_error)) {
-                                cc_heap_arena_free(&blk->arena);
-                                continue;  // Drain channel but don't process
-                            }
-                            
-                            // Compress and send result; on error, fail the pipeline
-                            CompressedResult* !> (CCIoError) res_val = compress_block(&strm, blk, blk->dict, level, strategy);
-                            if (cc_is_ok(res_val)) {
-                                chan_send(results_tx, cc_unwrap(res_val));
-                            } else {
-                                // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
-                                CCIoError err = cc_unwrap_err_as(res_val, CCIoError);
-                                fprintf(stderr, "Compression error (seq=%ld, kind=%d, os_code=%d)\n", blk->seq, err.kind, err.os_code);
-                                cc_atomic_store(&g_pipeline_error, 1);
-                            }
-                            
-                            // Free input block arena
-                            cc_heap_arena_free(&blk->arena);
-                        }
+        /* Reader Task - spawns compression tasks and sends handles through channel */
+        @nursery closing(tasks_tx) {
+            spawn([in_ptr, tasks_tx]() => {
+                long seq = 0;
+                bool hit_eof = false;
+                Block* prev_blk = NULL;
+                unsigned long rolling_hash = 2047; // RSYNCHIT
+                
+                // Maintain a buffer for the last_tail (32KB)
+                unsigned char last_tail_buf[32768];
+                size_t last_tail_len = 0;
+                
+                while (!hit_eof) {
+                    // Check if pipeline is shutting down due to error
+                    if (cc_atomic_load(&g_pipeline_error)) break;
+                    
+                    // Arena needs space for data, Block struct, dictionary copy, and rsync hits
+                    CCArena blk_arena = cc_heap_arena(block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t)));
+                    
+                    // Read returns Ok(slice) or Err; empty slice on EOF
+                    CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, block_size);
+                    if (cc_is_err(read_res)) {
+                        fprintf(stderr, "Read error\n");
+                        cc_atomic_store(&g_pipeline_error, 1);
+                        cc_heap_arena_free(&blk_arena);
+                        break;
                     }
-                });
-            }
+                    CCSlice data = cc_unwrap_as(read_res, CCSlice);
 
-            /* Reader Task */
-            @nursery closing(blocks_tx) {
-                spawn([in_ptr, blocks_tx]() => {
-                    long seq = 0;
-                    bool hit_eof = false;
-                    Block* prev_blk = NULL;
-                    unsigned long rolling_hash = 2047; // RSYNCHIT
-                    
-                    // Maintain a buffer for the last_tail (32KB)
-                    unsigned char last_tail_buf[32768];
-                    size_t last_tail_len = 0;
-                    
-                    while (!hit_eof) {
-                        // Check if pipeline is shutting down due to error
-                        if (cc_atomic_load(&g_pipeline_error)) break;
-                        
-                        // Arena needs space for data, Block struct, dictionary copy, and rsync hits
-                        CCArena blk_arena = cc_heap_arena(block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t)));
-                        
-                        // Read returns Ok(slice) or Err; empty slice on EOF
-                        CCSlice !> (CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, block_size);
-                        if (cc_is_err(read_res)) {
-                            fprintf(stderr, "Read error\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            cc_heap_arena_free(&blk_arena);
-                            break;
-                        }
-                        CCSlice data = cc_unwrap_as(read_res, CCSlice);
-
-                        if (data.len == 0) {
-                            cc_heap_arena_free(&blk_arena);
-                            if (prev_blk) {
-                                prev_blk->is_last = true;
-                                chan_send(blocks_tx, prev_blk);
-                                prev_blk = NULL;
-                            }
-                            break;  // EOF with no data
-                        }
-                        
-                        // Block struct also lives in the arena
-                        Block* blk = arena_alloc1(Block, &blk_arena);
-                        if (!blk) {
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            cc_heap_arena_free(&blk_arena);
-                            break;
-                        }
-                        
-                        blk->seq = seq++;
-                        blk->data = data;
-                        blk->dict = (CCSlice){0};
-                        blk->lens = (CCSlice){0};
-                        blk->is_last = false;  // set later once we know if this is last
-                        blk->arena = blk_arena;  // Transfer ownership to Block
-                        
-                        // Rsyncable Logic: Find hits and fill blk->lens
-                        if (g.rsync) {
-                            // Max hits in a block: block_size / 5 (shortest possible block is 5 bytes)
-                            size_t max_hits = block_size / 5;
-                            size_t* hits = arena_alloc(size_t, &blk_arena, max_hits);
-                            if (!hits) {
-                                fprintf(stderr, "Failed to allocate hits array\n");
-                                cc_atomic_store(&g_pipeline_error, 1);
-                                cc_heap_arena_free(&blk_arena);
-                                break;
-                            }
-                            size_t n_hits = 0;
-                            
-                            const unsigned char* p = (const unsigned char*)data.ptr;
-                            size_t last_hit_pos = 0;
-                            for (size_t i = 0; i < data.len; i++) {
-                                rolling_hash = ((rolling_hash << 1) ^ p[i]) & 0xFFF; // RSYNCMASK
-                                if (rolling_hash == 2047) { // RSYNCHIT
-                                    if (n_hits < max_hits) {
-                                        hits[n_hits++] = (i + 1) - last_hit_pos;
-                                        last_hit_pos = i + 1;
-                                    }
-                                }
-                            }
-                            if (n_hits > 0) {
-                                // If there's data left after the last hit, add it as a final segment
-                                if (last_hit_pos < data.len) {
-                                    if (n_hits < max_hits) {
-                                        hits[n_hits++] = data.len - last_hit_pos;
-                                    }
-                                }
-                                blk->lens = cc_slice_from_parts(hits, n_hits * sizeof(size_t), CC_SLICE_ID_UNTRACKED, n_hits * sizeof(size_t));
-                            }
-                        }
-
-                        // Dictionary Chaining: Copying Strategy
-                        if (g.setdict && last_tail_len > 0) {
-                            unsigned char* dict_mem = arena_alloc(unsigned char, &blk_arena, last_tail_len);
-                            if (!dict_mem) {
-                                cc_atomic_store(&g_pipeline_error, 1);
-                                cc_heap_arena_free(&blk_arena);
-                                break;
-                            }
-                            memcpy(dict_mem, last_tail_buf, last_tail_len);
-                            blk->dict = cc_slice_from_parts(dict_mem, last_tail_len, CC_SLICE_ID_UNTRACKED, last_tail_len);
-                        }
-                        
-                        // Update last_tail for the next block
-                        size_t tail_len = data.len > 32768 ? 32768 : data.len;
-                        memcpy(last_tail_buf, (const unsigned char*)data.ptr + data.len - tail_len, tail_len);
-                        last_tail_len = tail_len;
-
-                        // If we already have a pending block, send it now.
+                    if (data.len == 0) {
+                        cc_heap_arena_free(&blk_arena);
                         if (prev_blk) {
-                            chan_send(blocks_tx, prev_blk);
-                        }
-
-                        // If this was a short read, it's the last block.
-                        if (data.len < block_size) {
-                            blk->is_last = true;
-                            chan_send(blocks_tx, blk);
+                            prev_blk->is_last = true;
+                            // Spawn task for pending block and send handle
+                            CCTask* task = NULL;
+                            cc_spawn(&task, compress_block_task, prev_blk);
+                            chan_send(tasks_tx, task);
                             prev_blk = NULL;
-                            hit_eof = true;
+                        }
+                        break;  // EOF with no data
+                    }
+                    
+                    // Block struct also lives in the arena
+                    Block* blk = arena_alloc1(Block, &blk_arena);
+                    if (!blk) {
+                        cc_atomic_store(&g_pipeline_error, 1);
+                        cc_heap_arena_free(&blk_arena);
+                        break;
+                    }
+                    
+                    blk->seq = seq++;
+                    blk->data = data;
+                    blk->dict = (CCSlice){0};
+                    blk->lens = (CCSlice){0};
+                    blk->is_last = false;  // set later once we know if this is last
+                    blk->arena = blk_arena;  // Transfer ownership to Block
+                    
+                    // Rsyncable Logic: Find hits and fill blk->lens
+                    if (g.rsync) {
+                        // Max hits in a block: block_size / 5 (shortest possible block is 5 bytes)
+                        size_t max_hits = block_size / 5;
+                        size_t* hits = arena_alloc(size_t, &blk_arena, max_hits);
+                        if (!hits) {
+                            fprintf(stderr, "Failed to allocate hits array\n");
+                            cc_atomic_store(&g_pipeline_error, 1);
+                            cc_heap_arena_free(&blk_arena);
                             break;
                         }
-
-                        // Otherwise, hold this block until we read the next one
-                        prev_blk = blk;
+                        size_t n_hits = 0;
+                        
+                        const unsigned char* p = (const unsigned char*)data.ptr;
+                        size_t last_hit_pos = 0;
+                        for (size_t i = 0; i < data.len; i++) {
+                            rolling_hash = ((rolling_hash << 1) ^ p[i]) & 0xFFF; // RSYNCMASK
+                            if (rolling_hash == 2047) { // RSYNCHIT
+                                if (n_hits < max_hits) {
+                                    hits[n_hits++] = (i + 1) - last_hit_pos;
+                                    last_hit_pos = i + 1;
+                                }
+                            }
+                        }
+                        if (n_hits > 0) {
+                            // If there's data left after the last hit, add it as a final segment
+                            if (last_hit_pos < data.len) {
+                                if (n_hits < max_hits) {
+                                    hits[n_hits++] = data.len - last_hit_pos;
+                                }
+                            }
+                            blk->lens = cc_slice_from_parts(hits, n_hits * sizeof(size_t), CC_SLICE_ID_UNTRACKED, n_hits * sizeof(size_t));
+                        }
                     }
-                });
-            }
+
+                    // Dictionary Chaining: Copying Strategy
+                    if (g.setdict && last_tail_len > 0) {
+                        unsigned char* dict_mem = arena_alloc(unsigned char, &blk_arena, last_tail_len);
+                        if (!dict_mem) {
+                            cc_atomic_store(&g_pipeline_error, 1);
+                            cc_heap_arena_free(&blk_arena);
+                            break;
+                        }
+                        memcpy(dict_mem, last_tail_buf, last_tail_len);
+                        blk->dict = cc_slice_from_parts(dict_mem, last_tail_len, CC_SLICE_ID_UNTRACKED, last_tail_len);
+                    }
+                    
+                    // Update last_tail for the next block
+                    size_t tail_len = data.len > 32768 ? 32768 : data.len;
+                    memcpy(last_tail_buf, (const unsigned char*)data.ptr + data.len - tail_len, tail_len);
+                    last_tail_len = tail_len;
+
+                    // If we already have a pending block, spawn task and send handle
+                    if (prev_blk) {
+                        CCTask* task = NULL;
+                        cc_spawn(&task, compress_block_task, prev_blk);
+                        chan_send(tasks_tx, task);
+                    }
+
+                    // If this was a short read, it's the last block.
+                    if (data.len < block_size) {
+                        blk->is_last = true;
+                        CCTask* task = NULL;
+                        cc_spawn(&task, compress_block_task, blk);
+                        chan_send(tasks_tx, task);
+                        prev_blk = NULL;
+                        hit_eof = true;
+                        break;
+                    }
+
+                    // Otherwise, hold this block until we read the next one
+                    prev_blk = blk;
+                }
+            });
         }
     }
 
