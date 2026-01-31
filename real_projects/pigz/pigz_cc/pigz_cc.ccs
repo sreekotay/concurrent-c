@@ -9,10 +9,10 @@
  * - Arena-backed ownership transfer
  */
 
+#include "stdarg.h"
+#define _STDARG_H
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
-#include "/Users/skotay/Documents/code/concurrent-c/third_party/tcc/include/stdarg.h"
-#define _STDARG_H
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,78 +25,11 @@
 #include <dirent.h>
 #include "/opt/homebrew/include/zopfli.h"
 
-/* ============================================================================
- * Configuration
- * ============================================================================ */
-
-#define BLOCK_SIZE (128 * 1024)
-#define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
-#define MAX_WORKERS 16
-#define CHAN_CAP 64
-// Reorder buffer must hold: channel capacity + workers (each may hold 1 block)
-#define REORDER_CAP (CHAN_CAP + MAX_WORKERS)
+#include "pigz_cc.cch"
 
 /* ============================================================================
- * Data Types
+ * Global State & Statistics
  * ============================================================================ */
-
-typedef uint32_t crc_t;
-
-typedef struct {
-    long seq;
-    CCSlice data;
-    CCSlice dict;  // Copy of previous block's tail
-    CCSlice lens;  // Optional: list of rsyncable segment lengths (size_t)
-    bool is_last;
-    CCArena arena; // Owns data, dict, and lens
-} Block;
-
-typedef struct {
-    long seq;
-    CCSlice data;
-    unsigned long crc;
-    size_t original_len;
-    bool is_last;
-    CCArena arena;  // Owns the compressed data buffer
-} CompressedResult;
-
-typedef struct {
-    long seq;
-    CCSlice data;
-    CCArena arena;
-} DecompressedResult;
-
-typedef struct {
-    long seq;
-    CCSlice member;
-    CCArena arena;
-} MemberJob;
-
-typedef DecompressedResult* DecompressedResultPtr;
-typedef CompressedResult* CompressedResultPtr;
-
-/* Global configuration and state */
-struct {
-    size_t block;           // uncompressed input size per thread
-    crc_t shift;            // pre-calculated CRC-32 shift for length block
-    int strategy;           // compression strategy
-    int recursive;          // recursive directory processing
-    int keep;               // keep original file
-    int to_stdout;          // write to stdout
-    int force;              // force overwrite
-    int verbosity;          // verbosity level
-    int sync;               // force sync to storage
-    int form;               // 0=gzip, 1=zlib
-    char *sufx;             // compressed file suffix
-    int headis;             // header bits (matches pigz.c)
-    ZopfliOptions zopts;    // zopfli compression options
-    int rsync;              // true for rsync blocking
-    int decode;             // 0=compress, 1=decompress
-    char *name;             // name for gzip header
-    char *alias;            // name for zip header when input is stdin
-    char *comment;          // comment for gzip or zip header
-    time_t mtime;           // modification time for header
-} g;
 
 /* Global statistics */
 cc_atomic_i64 g_bytes_in = 0;
@@ -105,121 +38,6 @@ cc_atomic_int g_blocks_done = 0;
 
 /* Global error flag - when set, all tasks should exit ASAP */
 cc_atomic_int g_pipeline_error = 0;
-
-/* Signal handling */
-static void cut_short(int sig) {
-    (void)sig;
-    cc_atomic_store(&g_pipeline_error, 1);
-}
-
-/* Metadata preservation (matches pigz.c:3857) */
-static int copymeta(const char *from, const char *to) {
-    struct stat st;
-    struct timeval times[2];
-
-    if (stat(from, &st) != 0 || !S_ISREG(st.st_mode))
-        return -1;
-
-    // Set mode bits
-    int ret = chmod(to, st.st_mode & 07777);
-
-    // Copy owner and group
-    ret += chown(to, st.st_uid, st.st_gid);
-
-    // Copy access and modify times
-    times[0].tv_sec = st.st_atime;
-    times[0].tv_usec = 0;
-    times[1].tv_sec = st.st_mtime;
-    times[1].tv_usec = 0;
-    ret += utimes(to, times);
-    return ret;
-}
-
-/* Extract just the filename from a path (matches pigz.c:justname) */
-static char *justname(char *path) {
-    char *p = strrchr(path, '/');
-    return p == NULL ? path : p + 1;
-}
-
-/* ============================================================================
- * CRC32 Combination
- * ============================================================================ */
-
-// CRC-32 polynomial, reflected.
-#define POLY 0xedb88320
-
-// Return a(x) multiplied by b(x) modulo p(x), where p(x) is the CRC
-// polynomial, reflected. For speed, this requires that a not be zero.
-// (matches pigz.c:1328-1344)
-static crc_t multmodp(crc_t a, crc_t b) {
-    crc_t m = (crc_t)1 << 31;
-    crc_t p = 0;
-    for (;;) {
-        if (a & m) {
-            p ^= b;
-            if ((a & (m - 1)) == 0)
-                break;
-        }
-        m >>= 1;
-        b = b & 1 ? (b >> 1) ^ POLY : b >> 1;
-    }
-    return p;
-}
-
-// Table of x^2^n modulo p(x).
-static const crc_t x2n_table[] = {
-    0x40000000, 0x20000000, 0x08000000, 0x00800000, 0x00008000,
-    0xedb88320, 0xb1e6b092, 0xa06a2517, 0xed627dae, 0x88d14467,
-    0xd7bbfe6a, 0xec447f11, 0x8e7ea170, 0x6427800e, 0x4d47bae0,
-    0x09fe548f, 0x83852d0f, 0x30362f1a, 0x7b5a9cc3, 0x31fec169,
-    0x9fec022a, 0x6c8dedc4, 0x15d6874d, 0x5fde7a4e, 0xbad90e37,
-    0x2e4e5eef, 0x4eaba214, 0xa8a472c0, 0x429a969e, 0x148d302a,
-    0xc40ba6d0, 0xc4e22c3c};
-
-// Return x^(n*2^k) modulo p(x).
-// (matches pigz.c:1350-1361)
-static crc_t x2nmodp(size_t n, unsigned k) {
-    crc_t p = (crc_t)1 << 31;       // x^0 == 1
-    while (n) {
-        if (n & 1)
-            p = multmodp(x2n_table[k & 31], p);
-        n >>= 1;
-        k++;
-    }
-    return p;
-}
-
-// This uses the pre-computed g.shift value most of the time. Only the last
-// combination requires a new x2nmodp() calculation.
-// (matches pigz.c:1363-1367)
-static unsigned long crc32_comb_with_size(unsigned long crc1, unsigned long crc2,
-                               size_t len2, size_t block_size) {
-    return multmodp(len2 == block_size ? g.shift : x2nmodp(len2, 3), crc1) ^ crc2;
-}
-
-/* ============================================================================
- * Adler-32 Combination (matches pigz.c:1403-1421)
- * ============================================================================ */
-
-#define ADLER_BASE 65521U
-#define LOW16 0xffff
-
-static unsigned long adler32_comb(unsigned long adler1, unsigned long adler2, size_t len2) {
-    unsigned long sum1;
-    unsigned long sum2;
-    unsigned rem;
-
-    rem = (unsigned)(len2 % ADLER_BASE);
-    sum1 = adler1 & LOW16;
-    sum2 = (rem * sum1) % ADLER_BASE;
-    sum1 += (adler2 & LOW16) + ADLER_BASE - 1;
-    sum2 += ((adler1 >> 16) & LOW16) + ((adler2 >> 16) & LOW16) + ADLER_BASE - rem;
-    if (sum1 >= ADLER_BASE) sum1 -= ADLER_BASE;
-    if (sum1 >= ADLER_BASE) sum1 -= ADLER_BASE;
-    if (sum2 >= (ADLER_BASE << 1)) sum2 -= (ADLER_BASE << 1);
-    if (sum2 >= ADLER_BASE) sum2 -= ADLER_BASE;
-    return sum1 | (sum2 << 16);
-}
 
 /* ============================================================================
  * Compression Worker
@@ -984,8 +802,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     return 0;
 }
 
-/* Process a single path (file or directory) recursively */
-// (matches pigz.c:3800-3900)
+/* Process a single path (file or directory) recursively (matches pigz.c:4600-4620) */
 int process_path(const char* path, int num_workers, int level, int strategy) {
     if (path == NULL) {
         /* Stdin - no stat needed */
