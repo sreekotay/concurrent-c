@@ -139,6 +139,15 @@ CCChan* cc_chan_create_sync(size_t capacity, CCChanMode mode, bool allow_send_ta
 // Close the channel: unblocks waiters. Further sends fail with EPIPE.
 void cc_chan_close(CCChan* ch);
 
+// Close channel with error code - recv() will return this error instead of EPIPE.
+// Use for downstream error propagation in pipelines (producer -> consumer).
+void cc_chan_close_err(CCChan* ch, int err);
+
+// Close rx side with error - send() will return this error.
+// Enables upstream error propagation in pipelines (consumer -> producer).
+// Does not set the channel closed flag, only signals senders.
+void cc_chan_rx_close_err(CCChan* ch, int err);
+
 // Free channel resources. Safe to call on NULL. Undefined if called while
 // other threads are still using the channel.
 void cc_chan_free(CCChan* ch);

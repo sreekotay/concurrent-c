@@ -301,6 +301,9 @@ struct CCChan {
     void *buf;                 /* Data buffer: ring buffer for mutex path, slot array for lock-free */
     size_t elem_size;
     int closed;
+    int tx_error_code;         /* Error code when tx closed with error (downstream propagation) */
+    int rx_error_closed;       /* Flag: rx side was error-closed */
+    int rx_error_code;         /* Error code from rx side (upstream propagation to senders) */
     CCChanMode mode;
     int allow_take;
     int is_sync;               /* 1 = sync (blocks OS thread), 0 = async (cooperative) */
@@ -639,6 +642,35 @@ void cc_chan_close(CCChan* ch) {
     cc__chan_broadcast_activity();
 }
 
+void cc_chan_close_err(CCChan* ch, int err) {
+    if (!ch) return;
+    pthread_mutex_lock(&ch->mu);
+    ch->closed = 1;
+    ch->tx_error_code = err;
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_cond_broadcast(&ch->not_full);
+    /* Wake all waiting fibers */
+    cc__chan_wake_all_waiters(ch);
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();  /* Flush fiber wakes immediately */
+    cc__chan_broadcast_activity();
+}
+
+void cc_chan_rx_close_err(CCChan* ch, int err) {
+    if (!ch) return;
+    pthread_mutex_lock(&ch->mu);
+    ch->rx_error_closed = 1;
+    ch->rx_error_code = err;
+    pthread_cond_broadcast(&ch->not_full);  /* Wake senders */
+    /* Wake fiber send waiters too */
+    while (ch->send_waiters_head) {
+        cc__chan_wake_one_send_waiter_close(ch);
+    }
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();  /* Flush fiber wakes immediately */
+    cc__chan_broadcast_activity();
+}
+
 void cc_chan_free(CCChan* ch) {
     if (!ch) return;
     
@@ -692,7 +724,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     if (ch->cap == 0) {
         if (fiber && !deadline) {
             /* Fiber-aware blocking: park the fiber instead of condvar wait */
-            while (!ch->closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
+            while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
@@ -710,7 +742,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             }
         } else {
             /* Traditional condvar blocking */
-            while (!ch->closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
+            while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
                     if (err == ETIMEDOUT) { return ETIMEDOUT; }
@@ -720,13 +752,14 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             }
         }
         
+        if (ch->rx_error_closed) return ch->rx_error_code;
         return ch->closed ? EPIPE : 0;
     }
 
     /* Buffered channel */
     if (fiber && !deadline) {
         /* Fiber-aware blocking */
-        while (!ch->closed && ch->count == ch->cap) {
+        while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap) {
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
             atomic_store(&node.notified, 0);
@@ -742,7 +775,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         }
     } else {
         /* Traditional condvar blocking */
-        while (!ch->closed && ch->count == ch->cap && err == 0) {
+        while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
                 if (err == ETIMEDOUT) { return ETIMEDOUT; }
@@ -752,6 +785,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         }
     }
     
+    if (ch->rx_error_closed) return ch->rx_error_code;
     return ch->closed ? EPIPE : 0;
 }
 
@@ -812,7 +846,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
          * The caller must decrement rv_recv_waiters AFTER dequeue. */
         if (ch->closed && !ch->rv_has_value) {
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-            return EPIPE;
+            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
         }
         return 0;
     }
@@ -864,7 +898,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         }
     }
     
-    if (ch->closed && ch->count == 0) return EPIPE;
+    if (ch->closed && ch->count == 0) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
     return 0;
 }
 
@@ -1018,7 +1052,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     int err = 0;
 
-    while (!ch->closed) {
+    while (!ch->closed && !ch->rx_error_closed) {
         /* If a receiver is waiting, handoff directly */
         cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
         if (rnode) {
@@ -1040,7 +1074,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         atomic_store(&node.notified, 0);
         cc__chan_add_send_waiter(ch, &node);
 
-        while (!ch->closed && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
+        while (!ch->closed && !ch->rx_error_closed && !atomic_load_explicit(&node.notified, memory_order_acquire) && err == 0) {
             if (fiber && !deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
@@ -1064,8 +1098,8 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 return 0;
             }
             if (notify_val == 3) {
-                /* notified=3 means woken by close */
-                return EPIPE;
+                /* notified=3 means woken by close or rx_error_close */
+                return ch->rx_error_closed ? ch->rx_error_code : EPIPE;
             }
         }
 
@@ -1074,13 +1108,18 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
             cc__chan_remove_send_waiter(ch, &node);  /* Remove from queue before returning */
             return ETIMEDOUT;
         }
+        if (ch->rx_error_closed) {
+            atomic_store_explicit(&node.notified, 2, memory_order_release);
+            cc__chan_remove_send_waiter(ch, &node);  /* Remove from queue before returning */
+            return ch->rx_error_code;
+        }
         if (ch->closed) {
             atomic_store_explicit(&node.notified, 2, memory_order_release);
             cc__chan_remove_send_waiter(ch, &node);  /* Remove from queue before returning */
             return EPIPE;
         }
     }
-    return EPIPE;
+    return ch->rx_error_closed ? ch->rx_error_code : EPIPE;
 }
 
 static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct timespec* deadline) {
@@ -1134,9 +1173,9 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 return 0;
             }
             if (notify_val == 3) {
-                /* notified=3 means woken by close with no data */
+                /* notified=3 means woken by close or close_err with no data */
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-                return EPIPE;
+                return ch->tx_error_code ? ch->tx_error_code : EPIPE;
             }
         }
 
@@ -1150,10 +1189,10 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             atomic_store_explicit(&node.notified, 2, memory_order_release);
             cc__chan_remove_recv_waiter(ch, &node);  /* Remove from queue before returning */
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-            return EPIPE;
+            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
         }
     }
-    return EPIPE;
+    return ch->tx_error_code ? ch->tx_error_code : EPIPE;
 }
 
 static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct timespec* deadline) {
@@ -1187,12 +1226,15 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         ch->elem_size <= sizeof(void*)) {
         /* Check closed flag (relaxed read is fine, we'll verify under lock if needed) */
         if (ch->closed) return EPIPE;
+        /* Check rx error closed (upstream error propagation) */
+        if (ch->rx_error_closed) return ch->rx_error_code;
         
         /* Direct handoff: if receivers waiting, give item directly to one.
          * This must be done under lock to coordinate with the fair queue. */
         if (ch->recv_waiters_head != NULL) {
             cc_chan_lock(ch);
             if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+            if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
             cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
             if (rnode) {
                 /* Direct handoff to waiting receiver */
@@ -1243,6 +1285,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     
     /* Unbuffered channels: check closed before mutex path */
     if (ch->cap == 0 && ch->closed) return EPIPE;
+    if (ch->cap == 0 && ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path (unbuffered, initial setup, or lock-free full) */
     cc_chan_lock(ch);
@@ -1250,6 +1293,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+    if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
     
     /* Unbuffered (rendezvous) channel - direct handoff */
     if (ch->cap == 0) {
@@ -1382,7 +1426,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc_chan_lock(ch);
             if (ch->closed && cc_chan_try_dequeue_lockfree(ch, out_value) != 0) {
                 pthread_mutex_unlock(&ch->mu);
-                return EPIPE;
+                return ch->tx_error_code ? ch->tx_error_code : EPIPE;
             }
             pthread_mutex_unlock(&ch->mu);
             return 0;
@@ -1513,7 +1557,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         }
         return 0;
     }
-    return EPIPE;
+    return ch->tx_error_code ? ch->tx_error_code : EPIPE;
 }
 
 
@@ -1525,6 +1569,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
         if (ch->closed) return EPIPE;
+        if (ch->rx_error_closed) return ch->rx_error_code;
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
             /* Signal any waiters */
@@ -1543,17 +1588,20 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     
     /* Unbuffered channels: check closed before mutex path */
     if (ch->cap == 0 && ch->closed) return EPIPE;
+    if (ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path */
     pthread_mutex_lock(&ch->mu);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+    if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
     if (ch->cap == 0) {
         /* Non-blocking rendezvous: only send if a receiver is waiting. */
         cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
         if (!rnode) {
             pthread_mutex_unlock(&ch->mu);
+            if (ch->rx_error_closed) return ch->rx_error_code;
             return ch->closed ? EPIPE : EAGAIN;
         }
         channel_store_slot(rnode->data, value, ch->elem_size);
@@ -1614,7 +1662,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc__chan_broadcast_activity();
             return 0;
         }
-        return ch->closed ? EPIPE : EAGAIN;
+        return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN;
     }
     
     /* Standard mutex path */
@@ -1625,7 +1673,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         cc__fiber_wait_node* snode = cc__chan_pop_send_waiter(ch);
         if (!snode) {
             pthread_mutex_unlock(&ch->mu);
-            return ch->closed ? EPIPE : EAGAIN;
+            return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN;
         }
         channel_load_slot(snode->data, out_value, ch->elem_size);
         atomic_store_explicit(&snode->notified, 1, memory_order_release);
@@ -1652,10 +1700,10 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc__chan_broadcast_activity();
             return 0;
         }
-        return ch->closed ? EPIPE : EAGAIN;
+        return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN;
     }
     
-    if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? EPIPE : EAGAIN; }
+    if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN; }
     cc_chan_dequeue(ch, out_value);
     pthread_mutex_unlock(&ch->mu);
     return 0;
@@ -1669,6 +1717,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
         if (ch->closed) return EPIPE;
+        if (ch->rx_error_closed) return ch->rx_error_code;
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
             /* Signal any recv waiters */
@@ -1689,6 +1738,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
+    if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
     if (ch->cap == 0) {
         err = cc_chan_send_unbuffered(ch, value, abs_deadline);
         pthread_mutex_unlock(&ch->mu);
@@ -1776,7 +1826,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             pthread_mutex_lock(&ch->mu);
             if (ch->closed && cc_chan_try_dequeue_lockfree(ch, out_value) != 0) {
                 pthread_mutex_unlock(&ch->mu);
-                return EPIPE;
+                return ch->tx_error_code ? ch->tx_error_code : EPIPE;
             }
             pthread_mutex_unlock(&ch->mu);
             return 0;
@@ -1842,7 +1892,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             }
         }
         pthread_mutex_unlock(&ch->mu);
-        return ch->closed ? EPIPE : ETIMEDOUT;
+        return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : ETIMEDOUT;
     }
     
     err = cc_chan_wait_empty(ch, abs_deadline);

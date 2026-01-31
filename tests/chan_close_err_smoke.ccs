@@ -1,0 +1,118 @@
+// Test: cc_chan_close_err() and cc_chan_rx_close_err() for bidirectional error propagation
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <errno.h>
+
+int main(void) {
+    // Test 1: cc_chan_close_err() makes recv return the error code (downstream propagation)
+    {
+        int[~4 >] tx1;
+        int[~4 <] rx1;
+        CCChan* ch1 = channel_pair(&tx1, &rx1);
+        
+        // Send one value
+        int val = 42;
+        int rc = cc_chan_send(ch1, &val, sizeof(val));
+        assert(rc == 0);
+        
+        // Close with error
+        cc_chan_close_err(ch1, EINVAL);
+        
+        // Recv should get the value first
+        int recv_val = 0;
+        rc = cc_chan_recv(ch1, &recv_val, sizeof(recv_val));
+        assert(rc == 0);
+        assert(recv_val == 42);
+        
+        // Next recv should return EINVAL (not EPIPE)
+        rc = cc_chan_recv(ch1, &recv_val, sizeof(recv_val));
+        assert(rc == EINVAL);
+        
+        cc_chan_free(ch1);
+        printf("Test 1 (close_err downstream): OK\n");
+    }
+    
+    // Test 2: cc_chan_rx_close_err() makes send return the error code (upstream propagation)
+    {
+        int[~4 >] tx2;
+        int[~4 <] rx2;
+        CCChan* ch2 = channel_pair(&tx2, &rx2);
+        
+        // Close rx side with error
+        cc_chan_rx_close_err(ch2, ENOENT);
+        
+        // Send should return ENOENT
+        int val = 42;
+        int rc = cc_chan_send(ch2, &val, sizeof(val));
+        assert(rc == ENOENT);
+        
+        // try_send should also return ENOENT
+        rc = cc_chan_try_send(ch2, &val, sizeof(val));
+        assert(rc == ENOENT);
+        
+        cc_chan_close(ch2);  // Close normally
+        cc_chan_free(ch2);
+        printf("Test 2 (rx_close_err upstream): OK\n");
+    }
+    
+    // Test 3: Regular close still returns EPIPE
+    {
+        int[~4 >] tx3;
+        int[~4 <] rx3;
+        CCChan* ch3 = channel_pair(&tx3, &rx3);
+        
+        cc_chan_close(ch3);  // Regular close
+        
+        int recv_val = 0;
+        int rc = cc_chan_recv(ch3, &recv_val, sizeof(recv_val));
+        assert(rc == EPIPE);
+        
+        cc_chan_free(ch3);
+        printf("Test 3 (regular close returns EPIPE): OK\n");
+    }
+    
+    // Test 4: Unbuffered channel with close_err
+    {
+        int[~ >] tx4;  // Unbuffered
+        int[~ <] rx4;
+        CCChan* ch4 = channel_pair(&tx4, &rx4);
+        
+        // Close with error
+        cc_chan_close_err(ch4, EIO);
+        
+        // Recv should return EIO
+        int recv_val = 0;
+        int rc = cc_chan_recv(ch4, &recv_val, sizeof(recv_val));
+        assert(rc == EIO);
+        
+        // Send should return EPIPE (channel is closed)
+        int val = 42;
+        rc = cc_chan_send(ch4, &val, sizeof(val));
+        assert(rc == EPIPE);
+        
+        cc_chan_free(ch4);
+        printf("Test 4 (unbuffered close_err): OK\n");
+    }
+    
+    // Test 5: Unbuffered channel with rx_close_err
+    {
+        int[~ >] tx5;  // Unbuffered
+        int[~ <] rx5;
+        CCChan* ch5 = channel_pair(&tx5, &rx5);
+        
+        // Close rx side with error
+        cc_chan_rx_close_err(ch5, EACCES);
+        
+        // try_send should return EACCES
+        int val = 42;
+        int rc = cc_chan_try_send(ch5, &val, sizeof(val));
+        assert(rc == EACCES);
+        
+        cc_chan_close(ch5);
+        cc_chan_free(ch5);
+        printf("Test 5 (unbuffered rx_close_err): OK\n");
+    }
+    
+    printf("chan_close_err_smoke: ALL TESTS PASSED\n");
+    return 0;
+}
