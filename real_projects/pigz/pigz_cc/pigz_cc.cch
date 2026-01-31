@@ -70,12 +70,15 @@ struct {
     int force;              // force overwrite
     int verbosity;          // verbosity level
     int sync;               // force sync to storage
-    int form;               // 0=gzip, 1=zlib
+    int form;               // 0=gzip, 1=zlib, 2=zip
     char *sufx;             // compressed file suffix
     int headis;             // header bits (matches pigz.c)
     ZopfliOptions zopts;    // zopfli compression options
     int rsync;              // true for rsync blocking
     int decode;             // 0=compress, 1=decompress
+    int test;               // 1 to test integrity
+    int list;               // 1 to list metadata
+    size_t max_mem;         // max memory usage in bytes
     char *name;             // name for gzip header
     char *alias;            // name for zip header when input is stdin
     char *comment;          // comment for gzip or zip header
