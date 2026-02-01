@@ -1,0 +1,74 @@
+// Test: Pointer result type as FIRST usage of an error type
+// Regression test for bug where pointer result types failed when declared
+// before any non-pointer result type with the same error type.
+//
+// The bug was: "cannot convert 'MyError' to 'int'" when cc_err() was used
+// in a function returning T*!>(E) if no T!>(E) function was declared first.
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <ccc/std/prelude.cch>
+
+typedef struct {
+    int x;
+    int y;
+} MyData;
+
+typedef struct {
+    int code;
+    const char* msg;
+} MyError;
+
+// CRITICAL: This pointer result function is declared FIRST
+// Before the fix, this would fail to compile
+MyData*!>(MyError) create_ptr_first(int succeed) {
+    if (succeed) {
+        static MyData storage = {100, 200};
+        return cc_ok(&storage);
+    } else {
+        MyError e = {99, "ptr failed"};
+        return cc_err(e);
+    }
+}
+
+// Non-pointer result function declared SECOND (not needed after fix)
+MyData !> (MyError) create_value(int succeed) {
+    if (succeed) {
+        MyData d = {10, 20};
+        return cc_ok(d);
+    } else {
+        MyError e = {42, "value failed"};
+        return cc_err(e);
+    }
+}
+
+int main(void) {
+    // Test pointer result (declared first)
+    MyData*!>(MyError) res1 = create_ptr_first(1);
+    if (!cc_is_ok(res1)) {
+        printf("FAIL: res1 should be ok\n");
+        return 1;
+    }
+    MyData* p = cc_unwrap(res1);
+    if (p->x != 100 || p->y != 200) {
+        printf("FAIL: res1 data wrong\n");
+        return 1;
+    }
+    
+    // Test pointer result error case
+    MyData*!>(MyError) res2 = create_ptr_first(0);
+    if (!cc_is_err(res2)) {
+        printf("FAIL: res2 should be error\n");
+        return 1;
+    }
+    
+    // Test value result
+    MyData !> (MyError) res3 = create_value(1);
+    if (!cc_is_ok(res3)) {
+        printf("FAIL: res3 should be ok\n");
+        return 1;
+    }
+    
+    printf("result_ptr_first_smoke: OK\n");
+    return 0;
+}

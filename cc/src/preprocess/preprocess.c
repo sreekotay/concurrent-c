@@ -2226,14 +2226,14 @@ static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, 
    - `T!>(E)` -> `__CC_RESULT(T_mangled, E_mangled)`
    The '!>' sigil is followed by error type in parentheses.
    This syntax is unambiguous and easy to parse.
-   Also collects unique (T, E) pairs for later emission of CC_DECL_RESULT_SPEC calls. */
+   Also collects unique (T, E) pairs for later emission of CC_DECL_RESULT_SPEC calls.
+   
+   NOTE: Do NOT reset cc__result_type_count here - cc__rewrite_inferred_result_ctors
+   may have already registered types from function signatures, and we must keep those. */
 static char* cc__rewrite_result_types(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
-    
-    /* Reset result type collection */
-    cc__result_type_count = 0;
     
     size_t i = 0;
     size_t last_emit = 0;
@@ -3498,13 +3498,14 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
         }
         
         /* Detect function returning T!E or T!>(E) - look for pattern: T!E name( or T!>(E) name( 
-           Handle space before ! (e.g., "MyData !> (MyError)") */
+           Handle space before ! (e.g., "MyData !> (MyError)" or "MyData*!>(MyError)") */
         if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
             /* Skip backwards over whitespace to find the type */
             size_t prev_idx = i - 1;
             while (prev_idx > 0 && (src[prev_idx] == ' ' || src[prev_idx] == '\t')) prev_idx--;
             char prev = src[prev_idx];
-            if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
+            /* Valid chars before !: identifier chars, closing brackets, pointer star */
+            if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>' || prev == '*') {
                 /* Check for error type after ! - two forms:
                    1. T!E (simple form)
                    2. T!>(E) (arrow form with parentheses) */
@@ -3572,6 +3573,15 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                                         current_err_type[err_len] = 0;
                                     }
                                     fn_brace_depth = brace_depth;
+                                    
+                                    /* Register this result type so it gets declared in parse stubs.
+                                       This is critical for pointer result types that are declared first. */
+                                    char mangled_ok[128], mangled_err[128];
+                                    cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
+                                    cc__mangle_type_name(current_err_type, strlen(current_err_type), mangled_err, sizeof(mangled_err));
+                                    cc__add_result_type(current_ok_type, strlen(current_ok_type),
+                                                        current_err_type, strlen(current_err_type),
+                                                        mangled_ok, mangled_err);
                                 }
                             }
                         }
@@ -3632,12 +3642,17 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     
                     if (is_err_shorthand && depth == 0) {
                         /* Rewrite cc_err(CC_ERR_*) -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, NULL))
-                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, "msg")) */
+                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, "msg"))
+                           Type names must be mangled (e.g., MyData* -> MyDataptr) */
+                        char mangled_ok[128], mangled_err[128];
+                        cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
+                        cc__mangle_type_name(current_err_type, strlen(current_err_type), mangled_err, sizeof(mangled_err));
+                        
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_CCResult_");
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_ok_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_err_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(cc_error(");
                         /* Copy args */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
@@ -3653,7 +3668,12 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     if (is_short && depth == 0) {
                         /* Rewrite short form to typed constructor call:
                            cc_ok(x) -> cc_ok_CCResult_T_E(x)
-                           cc_err(e) -> cc_err_CCResult_T_E(e) */
+                           cc_err(e) -> cc_err_CCResult_T_E(e)
+                           Type names must be mangled (e.g., MyData* -> MyDataptr) */
+                        char mangled_ok[128], mangled_err[128];
+                        cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
+                        cc__mangle_type_name(current_err_type, strlen(current_err_type), mangled_err, sizeof(mangled_err));
+                        
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         
                         if (is_ok) {
@@ -3661,9 +3681,9 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         } else {
                             cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_CCResult_");
                         }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_ok_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_err_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                         /* Copy argument */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
@@ -4381,18 +4401,37 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         fprintf(out, "#define CC_PARSER_MODE 1\n");
         fprintf(out, "#endif\n");
         fprintf(out, "#include <ccc/cc_result.cch>\n");
-        /* Emit parse-time stub typedefs for user-defined Result types.
+        /* Emit parse-time stub typedefs and constructors for user-defined Result types.
            Uses __CCResultGeneric so TCC can parse before actual types are defined.
+           Constructor macros cast away values and call generic helpers.
            Real type expansion happens in codegen via CC_DECL_RESULT_SPEC. */
         for (size_t i = 0; i < cc__result_type_count; i++) {
             const char* ok = cc__result_types[i].mangled_ok;
             const char* err = cc__result_types[i].mangled_err;
-            /* Skip predefined result types (already in cc_result.cch or parse stubs) */
+            /* Skip predefined result types (already in cc_result.cch or headers via CC_DECL_RESULT_SPEC).
+               CCError types are all predefined in cc_result.cch.
+               Some CCIoError types are predefined in io.cch/dir.cch but not all. */
             if (strcmp(err, "CCError") == 0) continue;
-            /* Emit parse-time stub typedef (generic struct placeholder) */
+            /* Skip specific predefined CCIoError types from stdlib headers */
+            if (strcmp(err, "CCIoError") == 0) {
+                if (strcmp(ok, "bool") == 0 || strcmp(ok, "size_t") == 0 ||
+                    strcmp(ok, "CCSlice") == 0 || strcmp(ok, "CCDirIterptr") == 0 ||
+                    strcmp(ok, "CCDirEntry") == 0 || strcmp(ok, "CCOptional_CCSlice") == 0) {
+                    continue;
+                }
+            }
+            /* Emit parse-time stub typedef (generic struct placeholder).
+               Use guards to prevent conflicts with CC_DECL_RESULT_SPEC in headers. */
             fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
             fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
             fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
+            /* Constructor macros that work in parser mode - only define if not already defined */
+            fprintf(out, "#ifndef cc_ok_CCResult_%s_%s\n", ok, err);
+            fprintf(out, "#define cc_ok_CCResult_%s_%s(v) ((void)(v), __cc_result_generic_ok())\n", ok, err);
+            fprintf(out, "#endif\n");
+            fprintf(out, "#ifndef cc_err_CCResult_%s_%s\n", ok, err);
+            fprintf(out, "#define cc_err_CCResult_%s_%s(e) ((void)(e), __cc_result_generic_err())\n", ok, err);
+            fprintf(out, "#endif\n");
             fprintf(out, "#endif\n");
         }
         fprintf(out, "/* --- end result support --- */\n\n");
@@ -4696,17 +4735,35 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
        in the source at first use, so they have access to the actual type definition.
        This allows field access like p.u.value.x to work correctly. */
     
-    /* Emit typedefs for user-defined Result types */
+    /* Emit typedefs and constructor macros for user-defined Result types.
+       In parser mode, we emit macros that cast away the value/error and call generic helpers.
+       This allows type-checking to pass even though the actual types aren't fully defined. */
     for (size_t i = 0; i < cc__result_type_count; i++) {
-        /* Check if not a known/pre-defined result type */
         const char* ok = cc__result_types[i].mangled_ok;
         const char* err = cc__result_types[i].mangled_err;
         /* Only emit if not already covered by common result types in parse stubs */
-        if (!(strcmp(ok, "int") == 0 && strcmp(err, "CCError") == 0) &&
-            !(strcmp(ok, "bool") == 0 && strcmp(err, "CCError") == 0) &&
-            !(strcmp(ok, "void") == 0 && strcmp(err, "CCError") == 0) &&
-            !(strcmp(ok, "size_t") == 0 && strcmp(err, "CCError") == 0)) {
+        /* Skip predefined result types (already in cc_result.cch or headers via CC_DECL_RESULT_SPEC) */
+        if (strcmp(err, "CCError") == 0) continue;
+        /* Skip specific predefined CCIoError types from stdlib headers */
+        if (strcmp(err, "CCIoError") == 0) {
+            if (strcmp(ok, "bool") == 0 || strcmp(ok, "size_t") == 0 ||
+                strcmp(ok, "CCSlice") == 0 || strcmp(ok, "CCDirIterptr") == 0 ||
+                strcmp(ok, "CCDirEntry") == 0 || strcmp(ok, "CCOptional_CCSlice") == 0) {
+                continue;
+            }
+        }
+        {
+            /* Typedef and constructor macros with guards to avoid conflicts */
+            fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
+            fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
             fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
+            fprintf(out, "#ifndef cc_ok_CCResult_%s_%s\n", ok, err);
+            fprintf(out, "#define cc_ok_CCResult_%s_%s(v) ((void)(v), __cc_result_generic_ok())\n", ok, err);
+            fprintf(out, "#endif\n");
+            fprintf(out, "#ifndef cc_err_CCResult_%s_%s\n", ok, err);
+            fprintf(out, "#define cc_err_CCResult_%s_%s(e) ((void)(e), __cc_result_generic_err())\n", ok, err);
+            fprintf(out, "#endif\n");
+            fprintf(out, "#endif\n");
         }
     }
     
