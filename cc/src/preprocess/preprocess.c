@@ -992,12 +992,38 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
                         cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
                         
                         if (mangled[0]) {
-                            /* Collect for typedef generation */
+                            /* Check if we've already emitted this type */
+                            int already_emitted = 0;
+                            for (size_t ti = 0; ti < cc__optional_type_count; ti++) {
+                                if (strcmp(cc__optional_types[ti], mangled) == 0) {
+                                    already_emitted = 1;
+                                    break;
+                                }
+                            }
+                            
+                            /* Collect for tracking */
                             cc__add_optional_type(mangled);
                             
                             /* Emit everything up to ty_start */
                             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            /* Emit CCOptional_T - real type name */
+                            
+                            /* For user types (not known types), emit inline struct definition on first use */
+                            if (!already_emitted && !cc__is_known_optional_type(mangled)) {
+                                /* Extract original type name (before mangling) */
+                                char orig_type[256];
+                                size_t orig_len = ty_len < sizeof(orig_type) - 1 ? ty_len : sizeof(orig_type) - 1;
+                                memcpy(orig_type, src + ty_start, orig_len);
+                                orig_type[orig_len] = '\0';
+                                
+                                /* Emit struct definition: typedef struct { int has; union { T value; } u; } CCOptional_T; */
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, "typedef struct { int has; union { ");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, orig_type);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, " value; } u; } CCOptional_");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, "; ");
+                            }
+                            
+                            /* Emit CCOptional_T - type name */
                             cc_sb_append_cstr(&out, &out_len, &out_cap, "CCOptional_");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
                             last_emit = i + 1; /* skip past '?' */
@@ -4158,9 +4184,15 @@ static const char* cc__parse_stubs =
     /* Key macros: rewritten T? -> __CC_OPTIONAL(T), T!>(E) -> __CC_RESULT(T,E) */
     "#define __CC_OPTIONAL(T) __CCOptionalGeneric\n"
     "#define __CC_RESULT(T, E) __CCResultGeneric\n"
-    /* Typed optional constructors for rewriting cc_some_CCOptional_T -> __CC_OPTIONAL_SOME */
-    "#define __CC_OPTIONAL_SOME(T, v) ((void)(v), (__CCOptionalGeneric){.has = 1})\n"
-    "#define __CC_OPTIONAL_NONE(T) ((__CCOptionalGeneric){.has = 0})\n"
+    /* Typed optional constructors for rewriting cc_some_CCOptional_T -> __CC_OPTIONAL_SOME
+       These use CCOptional_##T to match the inline struct definitions.
+       Using variadic (...) to handle compound literals with commas like (Point){x, y}.
+       Mark as defined to prevent header from overriding. */
+    "#ifndef __CC_TYPED_OPT_CTORS_DEFINED\n"
+    "#define __CC_TYPED_OPT_CTORS_DEFINED\n"
+    "#define __CC_OPTIONAL_SOME(T, ...) ((CCOptional_##T){.has = 1, .u.value = (__VA_ARGS__)})\n"
+    "#define __CC_OPTIONAL_NONE(T) ((CCOptional_##T){.has = 0})\n"
+    "#endif\n"
     /* Common optional types (direct names, for explicit CCOptional_T usage) */
     "typedef __CCOptionalGeneric CCOptional_int;\n"
     "typedef __CCOptionalGeneric CCOptional_bool;\n"
@@ -4339,12 +4371,9 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     /* Prepend parse-time stubs (only once) */
     fputs(cc__parse_stubs, out);
     
-    /* Emit typedefs for user-defined Optional types */
-    for (size_t i = 0; i < cc__optional_type_count; i++) {
-        if (!cc__is_known_optional_type(cc__optional_types[i])) {
-            fprintf(out, "typedef __CCOptionalGeneric CCOptional_%s;\n", cc__optional_types[i]);
-        }
-    }
+    /* Note: User-defined Optional types (CCOptional_Point etc.) are emitted inline
+       in the source at first use, so they have access to the actual type definition.
+       This allows field access like p.u.value.x to work correctly. */
     
     /* Emit typedefs for user-defined Result types */
     for (size_t i = 0; i < cc__result_type_count; i++) {

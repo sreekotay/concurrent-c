@@ -148,9 +148,12 @@ static inline __CCOptionalGeneric __cc_optional_generic_none(void) {
 
 /* Macro-based some/none that accept any type - parser mode just validates types.
    The value is unused but the expression is type-checked.
-   Using variadic macro (...) for the value to handle compound literals with commas. */
+   Using variadic macro (...) for the value to handle compound literals with commas.
+   Skip if typed constructors already defined by parse stubs. */
+#ifndef __CC_TYPED_OPT_CTORS_DEFINED
 #define __CC_OPTIONAL_SOME(T, ...) ((void)(__VA_ARGS__), __cc_optional_generic_some())
 #define __CC_OPTIONAL_NONE(T) __cc_optional_generic_none()
+#endif
 
 /* Helper macro to assign values to optionals - uses _scalar in parser mode.
    This allows vec/map macros to work correctly with the generic struct. */
