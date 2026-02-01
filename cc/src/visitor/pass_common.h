@@ -174,4 +174,54 @@ static inline size_t cc_pass_line_indent(const char* src, size_t src_len, int li
     return i - lo;
 }
 
+/* ============================================================================
+ * Diagnostic Helpers (gcc/clang compatible format)
+ *
+ * Use these instead of ad-hoc fprintf(stderr, "CC: error: ...") calls.
+ * Format: file:line:col: error: message
+ * This format is recognized by IDEs for jump-to-error.
+ * ============================================================================ */
+
+#include <stdio.h>
+#include <stdarg.h>
+
+/* Emit error in gcc/clang format */
+static inline void cc_pass_error(const char* file, int line, int col, const char* fmt, ...) {
+    const char* f = file ? file : "<input>";
+    int l = (line > 0) ? line : 1;
+    int c = (col > 0) ? col : 1;
+    fprintf(stderr, "%s:%d:%d: error: ", f, l, c);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+/* Emit note (follow-up to error) */
+static inline void cc_pass_note(const char* file, int line, int col, const char* fmt, ...) {
+    const char* f = file ? file : "<input>";
+    int l = (line > 0) ? line : 1;
+    int c = (col > 0) ? col : 1;
+    fprintf(stderr, "%s:%d:%d: note: ", f, l, c);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+/* Emit warning */
+static inline void cc_pass_warning(const char* file, int line, int col, const char* fmt, ...) {
+    const char* f = file ? file : "<input>";
+    int l = (line > 0) ? line : 1;
+    int c = (col > 0) ? col : 1;
+    fprintf(stderr, "%s:%d:%d: warning: ", f, l, c);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
 #endif /* CC_VISITOR_PASS_COMMON_H */
