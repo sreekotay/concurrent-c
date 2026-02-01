@@ -26,7 +26,7 @@ typedef int bool;
 #include <stdlib.h>
 
 #include <ccc/cc_runtime.cch>
-#include <ccc/cc_io.cch>
+#include <ccc/cc_io_error.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_exec.cch>
 #include "async_io.cch"

@@ -27,7 +27,7 @@ extern char **environ;  /* For posix_spawn with inherited environment */
  * Helpers
  * ============================================================================ */
 
-/* Use cc_io_from_errno() from cc_io.cch for error conversion. */
+/* Use cc_io_from_errno() from cc_io_error.cch for error conversion. */
 
 /* ============================================================================
  * Process Spawning - POSIX

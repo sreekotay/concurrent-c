@@ -28,7 +28,7 @@ typedef int bool;
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
-#include <ccc/cc_io.cch>
+#include <ccc/cc_io_error.cch>
 
 /* Directory entry type */
 typedef enum {
@@ -67,7 +67,7 @@ typedef struct CCDirIter CCDirIter;
 /* Result types - use CC_DECL_RESULT_SPEC for canonical names with helper functions */
 CC_DECL_RESULT_SPEC(CCResult_CCDirIterptr_CCIoError, CCDirIter*, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
-/* CCResult_bool_CCIoError is declared in cc_io.cch (unified I/O result type) */
+/* CCResult_bool_CCIoError is declared in cc_io_error.cch (unified I/O result type) */
 
 /* Legacy aliases for compatibility */
 typedef CCResult_CCDirIterptr_CCIoError CCResultDirIterIoError;

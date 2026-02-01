@@ -351,9 +351,7 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                 if (!after || !cc_is_ident_char(after)) {
                     size_t k = j + 5;
                     while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\r' || src[k] == '\n')) k++;
-                    if (k >= n || src[k] != '{') { i++; col++; continue; }
-
-                    size_t body_s = k;
+                    if (k >= n || src[k] != '{') { i++; col++; continue; }                    size_t body_s = k;
                     int br = 1;
                     int in_s2 = 0, in_lc2 = 0, in_bc2 = 0;
                     char q2 = 0;

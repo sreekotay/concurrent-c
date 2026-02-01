@@ -791,12 +791,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "/* CC visitor: passthrough of lowered C (preprocess + TCC parse) */\n");
     fprintf(out, "#include <stdlib.h>\n");
     fprintf(out, "#include <stdint.h>\n");
-    fprintf(out, "#include <ccc/cc_nursery.cch>\n");
-    fprintf(out, "#include <ccc/cc_closure.cch>\n");
-    fprintf(out, "#include <ccc/cc_slice.cch>\n");
-    fprintf(out, "#include <ccc/cc_runtime.cch>\n");
-    fprintf(out, "#include <ccc/std/io.cch>\n");  /* CCFile for closure captures */
-    fprintf(out, "#include <ccc/std/task.cch>\n");
+    /* Include lowered headers (.h) - these are generated from .cch files
+       with CC type syntax transformed to valid C. Lowered headers live in
+       out/include/ which should be added to include path before cc/include/. */
+    fprintf(out, "#include <ccc/cc_nursery.h>\n");
+    fprintf(out, "#include <ccc/cc_closure.h>\n");
+    fprintf(out, "#include <ccc/cc_slice.h>\n");
+    fprintf(out, "#include <ccc/cc_runtime.h>\n");
+    fprintf(out, "#include <ccc/std/io.h>\n");  /* CCFile for closure captures */
+    fprintf(out, "#include <ccc/std/task.h>\n");
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     
@@ -843,8 +846,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             
             if (n_vec > 0 || n_map > 0) {
                 fprintf(out, "/* --- CC generic container declarations --- */\n");
-                fprintf(out, "#include <ccc/std/vec.cch>\n");
-                fprintf(out, "#include <ccc/std/map.cch>\n");
+                fprintf(out, "#include <ccc/std/vec.h>\n");
+                fprintf(out, "#include <ccc/std/map.h>\n");
                 /* Vec/Map declarations must be skipped in parser mode where they're
                    already typedef'd to generic placeholders in vec.cch/map.cch */
                 fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -1117,7 +1120,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 for (size_t ri = 0; ri < cc__cg_result_type_count; ri++) {
                     CCCodegenResultTypePair* p = &cc__cg_result_types[ri];
                     char line[512];
-                    snprintf(line, sizeof(line), "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n",
+                    /* Use guards to avoid conflicts with pre-existing CC_DECL_RESULT_SPEC in headers */
+                    snprintf(line, sizeof(line), "#ifndef CCResult_%s_%s_DEFINED\n"
+                             "#define CCResult_%s_%s_DEFINED 1\n"
+                             "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n"
+                             "#endif\n",
+                            p->mangled_ok, p->mangled_err,
+                            p->mangled_ok, p->mangled_err,
                             p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
                     cc__sb_append_cstr_local(&decls, &decls_len, &decls_cap, line);
                 }

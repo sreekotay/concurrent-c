@@ -1,4 +1,4 @@
-#include <ccc/cc_io.cch>
+#include <ccc/cc_io_error.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/std/io.cch>

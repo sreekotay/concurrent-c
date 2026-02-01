@@ -1,0 +1,27 @@
+/*
+ * Compiler compatibility: stdbool, stdint, stddef.
+ * Include this instead of duplicating the boilerplate.
+ */
+#pragma once
+#ifndef CC_COMPAT_H
+#define CC_COMPAT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+
+#if __has_include(<stdbool.h>)
+#include <stdbool.h>
+#else
+#ifndef __bool_true_false_are_defined
+typedef int bool;
+#define true 1
+#define false 0
+#define __bool_true_false_are_defined 1
+#endif
+#endif
+
+#endif /* CC_COMPAT_H */

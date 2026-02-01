@@ -1,0 +1,34 @@
+/*
+ * Test header for CCRes macro usage in .cch files.
+ * Uses CCRes(T, E) which expands to:
+ *   - __CCResultGeneric in parser mode
+ *   - CCResult_T_E in real compilation
+ */
+#ifndef CC_IO_TEST_H
+#define CC_IO_TEST_H
+
+#include <ccc/cc_io_error.cch>
+#include <ccc/cc_optional.cch>
+
+/* Test function using CCRes(T, E) macro */
+static inline CCRes(bool, CCIoError) cc_io_test_func(void) {
+    return cc_ok_CCResult_bool_CCIoError(true);
+}
+
+/* Test with CCRes(int, CCError) */
+static inline CCRes(int, CCError) cc_io_test_int(int x) {
+    if (x < 0) {
+        return cc_err_CCResult_int_CCError(cc_error(CC_ERR_INVALID_ARG, "negative"));
+    }
+    return cc_ok_CCResult_int_CCError(x * 2);
+}
+
+/* Test with CCOpt(int) */
+static inline CCOpt(int) cc_io_test_opt(bool has_value) {
+    if (has_value) {
+        return cc_some_CCOptional_int(42);
+    }
+    return cc_none_CCOptional_int();
+}
+
+#endif /* CC_IO_TEST_H */

@@ -1,0 +1,50 @@
+// Test CCRes macro in headers
+#include <ccc/cc_io_test.cch>
+#include <stdio.h>
+
+int main(void) {
+    // Test CCRes(bool, CCIoError)
+    CCResult_bool_CCIoError res1 = cc_io_test_func();
+    if (!cc_is_ok(res1)) {
+        printf("FAIL: cc_io_test_func returned error\n");
+        return 1;
+    }
+    if (!cc_unwrap(res1)) {
+        printf("FAIL: cc_io_test_func returned false\n");
+        return 1;
+    }
+    
+    // Test CCRes(int, CCError)
+    CCResult_int_CCError res2 = cc_io_test_int(21);
+    if (!cc_is_ok(res2)) {
+        printf("FAIL: cc_io_test_int(21) returned error\n");
+        return 1;
+    }
+    if (cc_unwrap(res2) != 42) {
+        printf("FAIL: cc_io_test_int(21) = %d, expected 42\n", cc_unwrap(res2));
+        return 1;
+    }
+    
+    // Test error case
+    CCResult_int_CCError res3 = cc_io_test_int(-5);
+    if (cc_is_ok(res3)) {
+        printf("FAIL: cc_io_test_int(-5) should have returned error\n");
+        return 1;
+    }
+    
+    // Test CCOpt(int)
+    CCOptional_int opt1 = cc_io_test_opt(true);
+    if (!cc_is_some(opt1)) {
+        printf("FAIL: cc_io_test_opt(true) returned none\n");
+        return 1;
+    }
+    
+    CCOptional_int opt2 = cc_io_test_opt(false);
+    if (!cc_is_none(opt2)) {
+        printf("FAIL: cc_io_test_opt(false) returned some\n");
+        return 1;
+    }
+    
+    printf("PASS\n");
+    return 0;
+}

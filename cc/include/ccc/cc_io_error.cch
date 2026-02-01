@@ -1,8 +1,9 @@
 /*
- * Basic IO error representation and helpers.
+ * Basic I/O error types and helpers.
+ * Used by channels, files, network - all I/O operations.
  */
-#ifndef CC_IO_H
-#define CC_IO_H
+#ifndef CC_IO_ERROR_H
+#define CC_IO_ERROR_H
 
 #include <stdint.h>
 #include <errno.h>
@@ -77,6 +78,6 @@ static inline const char* cc_io_error_str(CCIoError e) {
  */
 CC_DECL_RESULT_SPEC(CCResult_bool_CCIoError, bool, CCIoError)
 
-#endif // CC_IO_H
+#endif /* CC_IO_ERROR_H */
 
 

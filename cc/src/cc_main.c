@@ -27,6 +27,7 @@ static char g_ccc_path[PATH_MAX];
 static char g_ccc_sig_path[PATH_MAX];
 static char g_cc_dir[PATH_MAX];
 static char g_cc_include[PATH_MAX];
+static char g_cc_lowered_include[PATH_MAX];  /* out/include with lowered .h headers */
 static char g_cc_runtime_o[PATH_MAX];
 static char g_cc_runtime_c[PATH_MAX];
 static char g_out_root[PATH_MAX];
@@ -312,6 +313,8 @@ static void cc_init_paths(const char* argv0) {
             g_repo_root[sizeof(g_repo_root) - 1] = '\0';
             // g_cc_include points to parent of ccc/ so -I enables <ccc/...> includes
             snprintf(g_cc_include, sizeof(g_cc_include), "%s/include", cc_home);
+            // In installed layout, lowered headers are in the same dir (pre-lowered during install)
+            snprintf(g_cc_lowered_include, sizeof(g_cc_lowered_include), "%s/include", cc_home);
             snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/concurrent_c.c", rt);
             // No prebuilt runtime .o in installed layout; will compile from source.
             g_cc_runtime_o[0] = '\0';
@@ -335,6 +338,8 @@ static void cc_init_paths(const char* argv0) {
             g_repo_root[sizeof(g_repo_root) - 1] = '\0';
             // g_cc_include points to parent of ccc/ so -I enables <ccc/...> includes
             snprintf(g_cc_include, sizeof(g_cc_include), "%s/include", tmp);
+            // In installed layout, lowered headers are in the same dir (pre-lowered during install)
+            snprintf(g_cc_lowered_include, sizeof(g_cc_lowered_include), "%s/include", tmp);
             snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/concurrent_c.c", rt);
             g_cc_runtime_o[0] = '\0';
             snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/lib/ccc", tmp);
@@ -391,6 +396,8 @@ static void cc_init_paths(const char* argv0) {
 
         snprintf(g_cc_dir, sizeof(g_cc_dir), "%s/cc", g_repo_root);
         snprintf(g_cc_include, sizeof(g_cc_include), "%s/cc/include", g_repo_root);
+        // Lowered headers (.h versions of .cch) live under out/include
+        snprintf(g_cc_lowered_include, sizeof(g_cc_lowered_include), "%s/out/include", g_repo_root);
         // Prefer the compiler-build runtime object (built by `make -C cc`) which now lives under out/.
         snprintf(g_cc_runtime_o, sizeof(g_cc_runtime_o), "%s/out/cc/obj/runtime/concurrent_c.o", g_repo_root);
         snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
@@ -1803,8 +1810,8 @@ static int compile_with_build(const CCBuildOptions* opt, CCBuildSummary* summary
         extracted_ld[sizeof(extracted_ld) - 1] = '\0';
     }
     char link_inc_flags[512];
-    snprintf(link_inc_flags, sizeof(link_inc_flags), "-I%s -I%s -I%s",
-             g_cc_include, g_cc_dir, g_repo_root);
+    snprintf(link_inc_flags, sizeof(link_inc_flags), "-I%s -I%s -I%s -I%s",
+             g_cc_lowered_include, g_cc_include, g_cc_dir, g_repo_root);
     if (src_dir[0]) {
         strncat(link_inc_flags, " -I", sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
         strncat(link_inc_flags, src_dir, sizeof(link_inc_flags) - strlen(link_inc_flags) - 1);
@@ -2038,18 +2045,20 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     char cmd[2048];
 
     // TCC doesn't support -MMD/-MF/-MT dependency tracking flags
+    // Add lowered include path first so .h versions of .cch are found before originals
     if (is_tcc) {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
                  target_part ? target_part : "",
                  sysroot_part ? sysroot_part : "",
+                 g_cc_lowered_include,
                  g_cc_include,
                  g_cc_dir,
                  g_repo_root);
     } else {
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -MMD -MF %s -MT %s -I%s -I%s -I%s -I%s",
                  cc_bin,
                  ccflags_env ? ccflags_env : "",
                  cppflags_env ? cppflags_env : "",
@@ -2057,6 +2066,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
                  sysroot_part ? sysroot_part : "",
                  dep_path ? dep_path : "/dev/null",
                  obj_path ? obj_path : "out.o",
+                 g_cc_lowered_include,
                  g_cc_include,
                  g_cc_dir,
                  g_repo_root);
@@ -2151,12 +2161,13 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
     const char* ccflags_env = getenv("CFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -c %s -o %s",
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -I%s -c %s -o %s",
              cc_bin,
              ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",
              target_part ? target_part : "",
              sysroot_part ? sysroot_part : "",
+             g_cc_lowered_include,
              g_cc_include,
              g_cc_dir,
              g_repo_root,
@@ -2732,7 +2743,7 @@ static int run_build_mode(int argc, char** argv) {
 
         fprintf(mk, "CC_BUILD_FILE := %s\n", build_path_for_help);
         fprintf(mk, "CC_OUT_DIR := %s\n", g_out_root);
-        fprintf(mk, "CC_INCLUDE := -I%s\n", g_cc_include);
+        fprintf(mk, "CC_INCLUDE := -I%s -I%s\n", g_cc_lowered_include, g_cc_include);
         fprintf(mk, "CC_RUNTIME_C := %s\n", g_cc_runtime_c);
         if (g_cc_runtime_o[0]) {
             fprintf(mk, "CC_RUNTIME_O := %s\n", g_cc_runtime_o);
@@ -3610,7 +3621,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "--print-cflags") == 0) {
-        printf("-I%s\n", g_cc_include);
+        printf("-I%s -I%s\n", g_cc_lowered_include, g_cc_include);
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "--print-libs") == 0) {

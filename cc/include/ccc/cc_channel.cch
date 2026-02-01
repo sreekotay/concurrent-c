@@ -31,7 +31,7 @@ typedef int bool;
 #include <ccc/cc_exec.cch>
 #include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_result.cch>
-#include <ccc/cc_io.cch>
+#include <ccc/cc_io_error.cch>
 
 typedef struct CCAsyncHandle CCAsyncHandle;
 #include <ccc/std/future.cch>

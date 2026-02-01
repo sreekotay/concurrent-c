@@ -44,7 +44,7 @@ struct CCDirIter {
  * Helpers
  * ============================================================================ */
 
-/* Use cc_io_from_errno() from cc_io.cch for error conversion.
+/* Use cc_io_from_errno() from cc_io_error.cch for error conversion.
  * For EOF on directory iteration, use CC_IO_OTHER with os_code=0. */
 #define CC_DIR_EOF_ERROR ((CCIoError){.kind = CC_IO_OTHER, .os_code = 0})
 

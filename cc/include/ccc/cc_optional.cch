@@ -318,15 +318,56 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 /* Get value or default (no abort) */
 #define cc_unwrap_or(opt, default_val) ((opt).has ? (opt).u.value : (default_val))
 
-/* Convenience macros for type names */
+/* Convenience macros for type names.
+ * In parser mode, these expand to generic placeholders. */
+#ifdef CC_PARSER_MODE
+#define CCOpt(T) __CCOptionalGeneric
+#define CCOptPtr(T) __CCOptionalGeneric
+#else
 #define CCOpt(T) CCOptional_##T
 #define CCOptPtr(T) CCOptional_##T##ptr
+#endif
 
-/* C interop: explicit result type names (no parser-mode rewriting). */
+/* C interop: explicit result/optional type names.
+ * In parser mode, these expand to generic placeholders.
+ * In real compilation, they expand to the actual type names.
+ *
+ * Type macros:
+ *   CCRes(int, CCError)      -> CCResult_int_CCError
+ *   CCResPtr(char, CCError)  -> CCResult_charptr_CCError
+ *
+ * Constructor macros:
+ *   CCRes_ok(int, CCError, 42)     -> cc_ok_CCResult_int_CCError(42)
+ *   CCRes_err(int, CCError, err)   -> cc_err_CCResult_int_CCError(err)
+ *   CCOpt_some(int, 42)            -> cc_some_CCOptional_int(42)
+ *   CCOpt_none(int)                -> cc_none_CCOptional_int()
+ */
+#ifdef CC_PARSER_MODE
+#define CCRes(T, E) __CCResultGeneric
+#define CCResPtr(T, E) __CCResultGeneric
+#define CCOptRes(T, E) __CCOptionalGeneric
+#define CCResOpt(T, E) __CCResultGeneric
+#define CCRes_ok(T, E, v) __cc_result_generic_ok()
+#define CCRes_err(T, E, e) __cc_result_generic_err()
+#define CCResPtr_ok(T, E, v) __cc_result_generic_ok()
+#define CCResPtr_err(T, E, e) __cc_result_generic_err()
+#define CCResOpt_ok(T, E, v) __cc_result_generic_ok()
+#define CCResOpt_err(T, E, e) __cc_result_generic_err()
+#define CCOpt_some(T, v) __cc_optional_generic_some()
+#define CCOpt_none(T) __cc_optional_generic_none()
+#else
 #define CCRes(T, E) CCResult_##T##_##E
 #define CCResPtr(T, E) CCResult_##T##ptr_##E
-
 #define CCOptRes(T, E) CCOptional_CCResult_##T##_##E
 #define CCResOpt(T, E) CCResult_CCOptional_##T##_##E
+#define CCRes_ok(T, E, v) cc_ok_CCResult_##T##_##E(v)
+#define CCRes_err(T, E, e) cc_err_CCResult_##T##_##E(e)
+#define CCResPtr_ok(T, E, v) cc_ok_CCResult_##T##ptr_##E(v)
+#define CCResPtr_err(T, E, e) cc_err_CCResult_##T##ptr_##E(e)
+#define CCResOpt_ok(T, E, v) cc_ok_CCResult_CCOptional_##T##_##E(v)
+#define CCResOpt_err(T, E, e) cc_err_CCResult_CCOptional_##T##_##E(e)
+#define CCOpt_some(T, v) cc_some_CCOptional_##T(v)
+#define CCOpt_none(T) cc_none_CCOptional_##T()
+#endif
 
 #endif /* CC_OPTIONAL_H */

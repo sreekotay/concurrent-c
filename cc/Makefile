@@ -48,7 +48,8 @@ endif
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
 # Use old visitor/pass.c - cccn/pass_main.c only implements 2 of 13 passes (UFCS, closures)
 # TODO: Complete cccn passes and switch back
-SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/cccn/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
+# Note: src/tools/ is excluded - those are standalone utilities with their own main()
+SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/cccn/% src/tools/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
 # Keep cccn modules for standalone cccn binary (not pass_main - using old visitor/pass.c)
 CCCN_CORE := src/cccn/ast/ast.c src/cccn/parser/parser.c src/cccn/codegen/codegen.c src/cccn/passes/pass_ufcs.c src/cccn/passes/pass_closure.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
@@ -73,7 +74,15 @@ CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
 CCCN_BINARY := $(OUT_BINDIR)/cccn
 CCCN_WRAPPER := bin/cccn
 
+# Lowered headers output directory
+OUT_INCLUDE := ../out/include
+
 all: $(WRAPPER) $(CCCN_WRAPPER)
+
+# Lower .cch headers to .h files (must run before examples that use generated C)
+.PHONY: lower-headers
+lower-headers:
+	@scripts/lower_headers.sh include $(OUT_INCLUDE)
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
