@@ -717,6 +717,238 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
             size_t j = i + 1;
             while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
             if (j < n && src[j] == '~') {
+                /* Check for 'owned' keyword - skip owned channels, they're handled by later pass */
+                int is_owned = 0;
+                {
+                    size_t scan = j + 1;
+                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t' || (src[scan] >= '0' && src[scan] <= '9'))) scan++;
+                    if (scan + 5 <= n && memcmp(src + scan, "owned", 5) == 0) {
+                        char next = (scan + 5 < n) ? src[scan + 5] : 0;
+                        int is_ident = (next == '_' || (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9'));
+                        if (!is_ident) {
+                            is_owned = 1;
+                        }
+                    }
+                }
+                
+                if (is_owned) {
+                    /* Transform owned channel: T[~N owned { ... }] varname; */
+                    size_t scan = j + 1;
+                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t' || (src[scan] >= '0' && src[scan] <= '9'))) scan++;
+                    scan += 5;  /* Skip "owned" */
+                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t')) scan++;
+                    
+                    if (scan >= n || src[scan] != '{') {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: owned channel requires { ... } block at %s:%d:%d\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    /* Find matching '}' for the owned block */
+                    size_t brace_start = scan;
+                    int brace_depth = 0;
+                    int in_str2 = 0, in_chr2 = 0;
+                    size_t brace_end = scan;
+                    for (size_t bi = scan; bi < n; bi++) {
+                        char bc = src[bi];
+                        if (in_str2) { if (bc == '\\' && bi + 1 < n) { bi++; continue; } if (bc == '"') in_str2 = 0; continue; }
+                        if (in_chr2) { if (bc == '\\' && bi + 1 < n) { bi++; continue; } if (bc == '\'') in_chr2 = 0; continue; }
+                        if (bc == '"') { in_str2 = 1; continue; }
+                        if (bc == '\'') { in_chr2 = 1; continue; }
+                        if (bc == '{') brace_depth++;
+                        else if (bc == '}') {
+                            brace_depth--;
+                            if (brace_depth == 0) { brace_end = bi; break; }
+                        }
+                    }
+                    
+                    if (brace_depth != 0) {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: unterminated owned block at %s:%d:%d\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    /* Find ']' after the owned block */
+                    size_t k = brace_end + 1;
+                    while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                    if (k >= n || src[k] != ']') {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: expected ] after owned block at %s:%d:%d\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    /* Find variable name after ] */
+                    size_t var_start = k + 1;
+                    while (var_start < n && (src[var_start] == ' ' || src[var_start] == '\t')) var_start++;
+                    size_t var_end = var_start;
+                    while (var_end < n && (src[var_end] == '_' || (src[var_end] >= 'A' && src[var_end] <= 'Z') ||
+                           (src[var_end] >= 'a' && src[var_end] <= 'z') || (src[var_end] >= '0' && src[var_end] <= '9'))) var_end++;
+                    
+                    if (var_end == var_start) {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: expected variable name after owned channel type at %s:%d:%d\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    /* Find semicolon */
+                    size_t semi = var_end;
+                    while (semi < n && src[semi] != ';') semi++;
+                    if (semi >= n) {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: expected ; after owned channel declaration at %s:%d:%d\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    /* Extract element type (before [) */
+                    size_t ty_start = cc__scan_back_to_delim(src, i);
+                    char elem_ty[256];
+                    size_t elem_len = i - ty_start;
+                    if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
+                    memcpy(elem_ty, src + ty_start, elem_len);
+                    elem_ty[elem_len] = 0;
+                    while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) elem_ty[--elem_len] = 0;
+                    
+                    /* Extract capacity (between ~ and owned) */
+                    char cap_expr[128] = "0";
+                    {
+                        size_t cs = j + 1;
+                        while (cs < brace_start && (src[cs] == ' ' || src[cs] == '\t')) cs++;
+                        size_t ce = cs;
+                        while (ce < brace_start && src[ce] != ' ' && src[ce] != '\t' && memcmp(src + ce, "owned", 5) != 0) ce++;
+                        if (ce > cs) {
+                            size_t cl = ce - cs;
+                            if (cl >= sizeof(cap_expr)) cl = sizeof(cap_expr) - 1;
+                            memcpy(cap_expr, src + cs, cl);
+                            cap_expr[cl] = 0;
+                        }
+                    }
+                    
+                    /* Extract variable name */
+                    char var_name[128];
+                    size_t vlen = var_end - var_start;
+                    if (vlen >= sizeof(var_name)) vlen = sizeof(var_name) - 1;
+                    memcpy(var_name, src + var_start, vlen);
+                    var_name[vlen] = 0;
+                    
+                    /* Extract owned block content (closures) - keep it for closure pass */
+                    char owned_content[4096];
+                    size_t owned_len = brace_end - brace_start - 1;  /* Exclude { and } */
+                    if (owned_len >= sizeof(owned_content)) owned_len = sizeof(owned_content) - 1;
+                    memcpy(owned_content, src + brace_start + 1, owned_len);
+                    owned_content[owned_len] = 0;
+                    
+                    /* Generate transformed code:
+                     * Note: We can't fully expand the closures here, but we can generate
+                     * a form that's valid C and will be processed by later passes. */
+                    
+                    /* For now, emit a comment and let pass_channel_syntax handle it later.
+                     * But we need to emit something valid for TCC to parse...
+                     * 
+                     * Actually, the cleanest is to emit the manual API form:
+                     * CCChan* varname = cc_chan_create_owned(cap, sizeof(elem), create, destroy, reset);
+                     * But we need to extract the closures...
+                     *
+                     * Simplest working approach: emit placeholders that will compile
+                     * and mark with a special comment for later pass.
+                     */
+                    
+                    /* Emit up to the owned channel */
+                    if (ty_start > last_emit) {
+                        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    }
+                    
+                    /* Emit transformed owned channel as a placeholder that compiles.
+                     * The closures are embedded and will be processed by closure pass. */
+                    char buf[8192];
+                    static int owned_id = 0;
+                    int id = owned_id++;
+                    
+                    /* Extract closures from owned_content by looking for .create, .destroy, .reset */
+                    char create_c[2048] = "{0}";
+                    char destroy_c[2048] = "{0}";
+                    char reset_c[2048] = "{0}";
+                    
+                    /* Simple extraction: find ".field = " and copy until next "," or "}" at same depth */
+                    const char* p = owned_content;
+                    while (*p) {
+                        while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',')) p++;
+                        if (*p != '.') { p++; continue; }
+                        p++;
+                        char field[32];
+                        size_t fn = 0;
+                        while (*p && fn + 1 < sizeof(field) && ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_')) {
+                            field[fn++] = *p++;
+                        }
+                        field[fn] = 0;
+                        while (*p && (*p == ' ' || *p == '\t')) p++;
+                        if (*p != '=') continue;
+                        p++;
+                        while (*p && (*p == ' ' || *p == '\t')) p++;
+                        
+                        /* Find end of closure */
+                        const char* closure_start = p;
+                        int depth = 0;
+                        int in_s = 0;
+                        while (*p) {
+                            if (in_s) { if (*p == '\\' && *(p+1)) p++; else if (*p == '"') in_s = 0; p++; continue; }
+                            if (*p == '"') { in_s = 1; p++; continue; }
+                            if (*p == '(' || *p == '[' || *p == '{') depth++;
+                            else if (*p == ')' || *p == ']' || *p == '}') depth--;
+                            if (depth < 0 || (depth == 0 && *p == ',')) break;
+                            p++;
+                        }
+                        
+                        size_t clen = p - closure_start;
+                        char* dest = NULL;
+                        size_t dcap = 0;
+                        if (strcmp(field, "create") == 0) { dest = create_c; dcap = sizeof(create_c); }
+                        else if (strcmp(field, "destroy") == 0) { dest = destroy_c; dcap = sizeof(destroy_c); }
+                        else if (strcmp(field, "reset") == 0) { dest = reset_c; dcap = sizeof(reset_c); }
+                        
+                        if (dest && clen < dcap) {
+                            memcpy(dest, closure_start, clen);
+                            dest[clen] = 0;
+                            /* Trim trailing whitespace */
+                            while (clen > 0 && (dest[clen-1] == ' ' || dest[clen-1] == '\t' || dest[clen-1] == '\n')) dest[--clen] = 0;
+                        }
+                    }
+                    
+                    /* Generate code with closure variables and channel creation */
+                    snprintf(buf, sizeof(buf),
+                             "/* owned channel %s */\n"
+                             "CCClosure0 __cc_owned_%d_create = %s;\n"
+                             "CCClosure1 __cc_owned_%d_destroy = %s;\n"
+                             "CCClosure1 __cc_owned_%d_reset = %s;\n"
+                             "CCChan* %s = cc_chan_create_owned(%s, sizeof(%s), "
+                             "__cc_owned_%d_create, __cc_owned_%d_destroy, __cc_owned_%d_reset)",
+                             var_name,
+                             id, create_c,
+                             id, destroy_c,
+                             id, reset_c,
+                             var_name, cap_expr, elem_ty,
+                             id, id, id);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, buf);
+                    
+                    /* Advance past the semicolon */
+                    last_emit = semi;  /* Leave ; to be emitted */
+                    while (i <= semi) {
+                        if (src[i] == '\n') { line++; col = 1; }
+                        else col++;
+                        i++;
+                    }
+                    continue;
+                }
+                
                 /* Find ']' (same line, best-effort) */
                 size_t k = j + 1;
                 while (k < n && src[k] != ']' && src[k] != '\n') k++;

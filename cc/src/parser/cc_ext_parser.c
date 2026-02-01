@@ -146,13 +146,18 @@ static int cc_try_cc_closure(void) {
         }
         next(); /* consume '(' */
         
-        /* Skip params until ')' */
+        /* Count params (comma-separated, accounting for nesting) */
+        int cap_param_count = 0;
         int par = 1;
+        int saw_content = 0;
         while (tok != TOK_EOF && par > 0) {
             if (tok == '(') par++;
-            else if (tok == ')') par--;
+            else if (tok == ')') { par--; if (par > 0) saw_content = 1; }
+            else if (tok == ',' && par == 1) { cap_param_count++; saw_content = 0; }
+            else saw_content = 1;
             if (par > 0) next();
         }
+        if (saw_content) cap_param_count++;
         if (tok != ')') {
             tcc_error("unmatched '(' in closure parameter list");
             return 0;
@@ -169,7 +174,7 @@ static int cc_try_cc_closure(void) {
             int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
             tcc_state->cc_nodes[idx].line_start = start_line;
             tcc_state->cc_nodes[idx].col_start = start_col;
-            tcc_state->cc_nodes[idx].aux1 = 0;
+            tcc_state->cc_nodes[idx].aux1 = cap_param_count;
             tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("closure");
         }
         next(); /* consume '=>' */

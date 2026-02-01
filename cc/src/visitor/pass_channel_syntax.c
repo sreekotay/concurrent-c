@@ -20,6 +20,130 @@
 #define cc__is_ident_start_local2 cc_is_ident_start
 #define cc__skip_ws_local2 cc_skip_ws
 
+/* Global counter for unique owned channel IDs */
+static int g_owned_channel_id = 0;
+
+/* Scan for matching closing brace, accounting for nested braces, strings, and comments.
+ * Returns the position of the matching '}' or (size_t)-1 if not found. */
+static size_t cc__scan_matching_brace(const char* src, size_t len, size_t open_brace) {
+    if (!src || open_brace >= len || src[open_brace] != '{') return (size_t)-1;
+    int depth = 0;
+    int in_str = 0, in_chr = 0, in_line_comment = 0, in_block_comment = 0;
+    for (size_t i = open_brace; i < len; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < len) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < len) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        
+        if (c == '{') depth++;
+        else if (c == '}') {
+            depth--;
+            if (depth == 0) return i;
+        }
+    }
+    return (size_t)-1;
+}
+
+/* Parse the owned block to extract closure texts.
+ * Expected format: { .create = <closure>, .destroy = <closure>, .reset = <closure> }
+ * Returns 1 on success, 0 on failure. */
+static int cc__parse_owned_block(const char* src, size_t start, size_t end,
+                                  char* out_create, size_t create_cap,
+                                  char* out_destroy, size_t destroy_cap,
+                                  char* out_reset, size_t reset_cap) {
+    if (!src || start >= end) return 0;
+    out_create[0] = 0;
+    out_destroy[0] = 0;
+    out_reset[0] = 0;
+    
+    size_t i = start;
+    while (i < end) {
+        /* Skip whitespace */
+        while (i < end && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r' || src[i] == ',')) i++;
+        if (i >= end) break;
+        
+        /* Look for .field = */
+        if (src[i] != '.') { i++; continue; }
+        i++;
+        
+        /* Read field name */
+        char field[32];
+        size_t fn = 0;
+        while (i < end && fn + 1 < sizeof(field) && cc_is_ident_char(src[i])) {
+            field[fn++] = src[i++];
+        }
+        field[fn] = 0;
+        
+        /* Skip to '=' */
+        while (i < end && (src[i] == ' ' || src[i] == '\t')) i++;
+        if (i >= end || src[i] != '=') continue;
+        i++;
+        while (i < end && (src[i] == ' ' || src[i] == '\t')) i++;
+        
+        /* Find the closure: [captures](params) => body */
+        size_t closure_start = i;
+        
+        /* Find '=>' to locate the closure body */
+        size_t arrow = (size_t)-1;
+        for (size_t j = i; j + 1 < end; j++) {
+            if (src[j] == '=' && src[j + 1] == '>') { arrow = j; break; }
+        }
+        if (arrow == (size_t)-1) continue;
+        
+        /* Find the end of the closure body */
+        size_t body_start = arrow + 2;
+        while (body_start < end && (src[body_start] == ' ' || src[body_start] == '\t' || src[body_start] == '\n')) body_start++;
+        
+        size_t closure_end;
+        if (body_start < end && src[body_start] == '{') {
+            /* Block body - find matching } */
+            size_t rbrace = cc__scan_matching_brace(src, end, body_start);
+            if (rbrace == (size_t)-1) continue;
+            closure_end = rbrace + 1;
+        } else {
+            /* Expression body - find comma or end of block */
+            closure_end = body_start;
+            int paren_depth = 0;
+            while (closure_end < end) {
+                char c = src[closure_end];
+                if (c == '(' || c == '[') paren_depth++;
+                else if (c == ')' || c == ']') paren_depth--;
+                else if (paren_depth == 0 && (c == ',' || c == '}')) break;
+                closure_end++;
+            }
+            /* Trim trailing whitespace */
+            while (closure_end > body_start && (src[closure_end - 1] == ' ' || src[closure_end - 1] == '\t' || src[closure_end - 1] == '\n')) {
+                closure_end--;
+            }
+        }
+        
+        /* Copy closure text to appropriate output */
+        size_t closure_len = closure_end - closure_start;
+        char* dest = NULL;
+        size_t dest_cap = 0;
+        if (strcmp(field, "create") == 0) { dest = out_create; dest_cap = create_cap; }
+        else if (strcmp(field, "destroy") == 0) { dest = out_destroy; dest_cap = destroy_cap; }
+        else if (strcmp(field, "reset") == 0) { dest = out_reset; dest_cap = reset_cap; }
+        
+        if (dest && closure_len < dest_cap) {
+            memcpy(dest, src + closure_start, closure_len);
+            dest[closure_len] = 0;
+        }
+        
+        i = closure_end;
+    }
+    
+    return (out_create[0] != 0 && out_destroy[0] != 0);  /* create and destroy are required */
+}
+
 /* Find channel declaration before a given offset.
  * Searches backwards for `name` with preceding [~ ... ] bracket spec. */
 static int cc__find_chan_decl_before(const char* src,
@@ -546,8 +670,57 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
             size_t j = i + 1;
             while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
             if (j < n && src[j] == '~') {
-                size_t k = j + 1;
-                while (k < n && src[k] != ']' && src[k] != '\n') k++;
+                /* Check for 'owned' keyword */
+                int is_owned = 0;
+                size_t owned_brace = 0;
+                size_t owned_end = 0;
+                {
+                    size_t scan = j + 1;
+                    while (scan < n) {
+                        while (scan < n && (src[scan] == ' ' || src[scan] == '\t' || (src[scan] >= '0' && src[scan] <= '9'))) scan++;
+                        if (scan + 5 <= n && memcmp(src + scan, "owned", 5) == 0 &&
+                            (scan + 5 >= n || !cc__is_ident_char_local2(src[scan + 5]))) {
+                            is_owned = 1;
+                            scan += 5;
+                            while (scan < n && (src[scan] == ' ' || src[scan] == '\t')) scan++;
+                            if (scan < n && src[scan] == '{') {
+                                owned_brace = scan;
+                                owned_end = cc__scan_matching_brace(src, n, scan);
+                                if (owned_end == (size_t)-1) {
+                                    char rel[1024];
+                                    fprintf(stderr, "CC: error: unterminated owned block at %s:%d:%d\n",
+                                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                            line, col);
+                                    free(out);
+                                    return NULL;
+                                }
+                            }
+                            break;
+                        }
+                        if (src[scan] == ']' || src[scan] == '>' || src[scan] == '<') break;
+                        scan++;
+                    }
+                }
+                
+                size_t k;
+                if (is_owned && owned_end != (size_t)-1 && owned_end != 0) {
+                    /* Owned channel: find ] after the owned block */
+                    k = owned_end + 1;
+                    while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                    if (k >= n || src[k] != ']') {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: expected ] after owned block at %s:%d:%d\n",
+                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col);
+                        free(out);
+                        return NULL;
+                    }
+                } else {
+                    /* Regular channel: find ] */
+                    k = j + 1;
+                    while (k < n && src[k] != ']' && src[k] != '\n') k++;
+                }
+                
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
                     fprintf(stderr, "CC: error: unterminated channel handle type at %s:%d:%d\n",
@@ -556,6 +729,121 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                     free(out);
                     return NULL;
                 }
+                
+                /* Handle owned channels FIRST (they don't need > or <) */
+                if (is_owned && owned_brace != 0 && owned_end != (size_t)-1) {
+                    /* Parse owned channel */
+                    char create_closure[2048], destroy_closure[2048], reset_closure[2048];
+                    if (!cc__parse_owned_block(src, owned_brace + 1, owned_end,
+                                               create_closure, sizeof(create_closure),
+                                               destroy_closure, sizeof(destroy_closure),
+                                               reset_closure, sizeof(reset_closure))) {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: owned block requires .create and .destroy at %s:%d:%d\n",
+                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    /* Extract element type (before [~) */
+                    size_t ty_start = i;
+                    while (ty_start > 0) {
+                        char p = src[ty_start - 1];
+                        if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+                        ty_start--;
+                    }
+                    while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
+                    
+                    char elem_ty[256];
+                    size_t elem_len = i - ty_start;
+                    if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
+                    memcpy(elem_ty, src + ty_start, elem_len);
+                    elem_ty[elem_len] = 0;
+                    while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) elem_ty[--elem_len] = 0;
+                    
+                    /* Extract capacity (between ~ and owned) */
+                    char cap_expr[128] = "0";
+                    {
+                        size_t cs = j + 1;
+                        while (cs < owned_brace && (src[cs] == ' ' || src[cs] == '\t')) cs++;
+                        size_t ce = cs;
+                        while (ce < owned_brace && src[ce] != ' ' && src[ce] != '\t' && 
+                               memcmp(src + ce, "owned", 5) != 0) ce++;
+                        if (ce > cs) {
+                            size_t cl = ce - cs;
+                            if (cl >= sizeof(cap_expr)) cl = sizeof(cap_expr) - 1;
+                            memcpy(cap_expr, src + cs, cl);
+                            cap_expr[cl] = 0;
+                        }
+                    }
+                    
+                    /* Find variable name (after ]) */
+                    size_t var_start = k + 1;
+                    while (var_start < n && (src[var_start] == ' ' || src[var_start] == '\t')) var_start++;
+                    size_t var_end = var_start;
+                    while (var_end < n && cc__is_ident_char_local2(src[var_end])) var_end++;
+                    
+                    char var_name[128];
+                    size_t var_len = var_end - var_start;
+                    if (var_len >= sizeof(var_name)) var_len = sizeof(var_name) - 1;
+                    memcpy(var_name, src + var_start, var_len);
+                    var_name[var_len] = 0;
+                    
+                    /* Find the semicolon */
+                    size_t semi = var_end;
+                    while (semi < n && src[semi] != ';') semi++;
+                    if (semi >= n) {
+                        char rel[1024];
+                        fprintf(stderr, "CC: error: expected ; after owned channel declaration at %s:%d:%d\n",
+                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col);
+                        free(out);
+                        return NULL;
+                    }
+                    
+                    int owned_id = g_owned_channel_id++;
+                    
+                    /* Generate output */
+                    if (ty_start >= last_emit) {
+                        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    }
+                    
+                    /* Emit closure declarations */
+                    char buf[4096];
+                    snprintf(buf, sizeof(buf),
+                             "/* owned channel %s */\n"
+                             "CCClosure0 __cc_owned_%d_create = %s;\n"
+                             "CCClosure1 __cc_owned_%d_destroy = %s;\n",
+                             var_name, owned_id, create_closure,
+                             owned_id, destroy_closure);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, buf);
+                    
+                    if (reset_closure[0]) {
+                        snprintf(buf, sizeof(buf),
+                                 "CCClosure1 __cc_owned_%d_reset = %s;\n",
+                                 owned_id, reset_closure);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, buf);
+                    } else {
+                        snprintf(buf, sizeof(buf),
+                                 "CCClosure1 __cc_owned_%d_reset = {0};\n",
+                                 owned_id);
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, buf);
+                    }
+                    
+                    /* Emit channel creation */
+                    snprintf(buf, sizeof(buf),
+                             "CCChan* %s = cc_chan_create_owned(%s, sizeof(%s), "
+                             "__cc_owned_%d_create, __cc_owned_%d_destroy, __cc_owned_%d_reset)",
+                             var_name, cap_expr, elem_ty,
+                             owned_id, owned_id, owned_id);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, buf);
+                    
+                    last_emit = semi;  /* Leave the ; to be emitted */
+                    while (i <= semi) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
+                    continue;
+                }
+                
                 int saw_gt = 0, saw_lt = 0;
                 for (size_t t = j; t < k; t++) {
                     if (src[t] == '>') saw_gt = 1;

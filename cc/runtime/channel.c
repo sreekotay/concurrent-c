@@ -726,13 +726,24 @@ void cc_chan_free(CCChan* ch) {
     /* For owned channels, destroy remaining items in the buffer */
     if (ch->is_owned && ch->on_destroy.fn && ch->buf && ch->elem_size > 0) {
         pthread_mutex_lock(&ch->mu);
-        if (ch->use_lockfree) {
-            /* Lock-free path: drain queue and destroy items */
+        if (ch->use_lockfree && ch->elem_size <= sizeof(void*)) {
+            /* Lock-free path with small elements: items stored directly in queue (zero-copy) */
+            void* queue_val = NULL;
+            while (lfds711_queue_bmm_dequeue(&ch->lfqueue_state, NULL, &queue_val) == 1) {
+                /* queue_val IS the item value (not a slot index) */
+                intptr_t item_val = 0;
+                memcpy(&item_val, &queue_val, ch->elem_size);
+                ch->on_destroy.fn(ch->on_destroy.env, item_val);
+            }
+        } else if (ch->use_lockfree) {
+            /* Lock-free path with large elements: items in buffer, queue holds slot indices */
             void* key = NULL;
             while (lfds711_queue_bmm_dequeue(&ch->lfqueue_state, NULL, &key) == 1) {
                 size_t slot_idx = (size_t)(uintptr_t)key;
                 char* item_ptr = (char*)ch->buf + (slot_idx * ch->elem_size);
-                ch->on_destroy.fn(ch->on_destroy.env, (intptr_t)item_ptr);
+                intptr_t item_val = 0;
+                memcpy(&item_val, item_ptr, ch->elem_size < sizeof(intptr_t) ? ch->elem_size : sizeof(intptr_t));
+                ch->on_destroy.fn(ch->on_destroy.env, item_val);
             }
         } else {
             /* Mutex path: iterate buffer and destroy items */
@@ -742,7 +753,10 @@ void cc_chan_free(CCChan* ch) {
             for (size_t i = 0; i < count; i++) {
                 size_t idx = (head + i) % slots;
                 char* item_ptr = (char*)ch->buf + (idx * ch->elem_size);
-                ch->on_destroy.fn(ch->on_destroy.env, (intptr_t)item_ptr);
+                /* Read the item value from the buffer slot */
+                intptr_t item_val = 0;
+                memcpy(&item_val, item_ptr, ch->elem_size < sizeof(intptr_t) ? ch->elem_size : sizeof(intptr_t));
+                ch->on_destroy.fn(ch->on_destroy.env, item_val);
             }
         }
         pthread_mutex_unlock(&ch->mu);
@@ -1292,7 +1306,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     
     /* Owned channel (pool): call on_reset before returning item to pool */
     if (ch->is_owned && ch->on_reset.fn) {
-        ch->on_reset.fn(ch->on_reset.env, (intptr_t)value);
+        /* Extract the item value from the send buffer (value points TO the item data) */
+        intptr_t item_val = 0;
+        memcpy(&item_val, value, value_size < sizeof(intptr_t) ? value_size : sizeof(intptr_t));
+        ch->on_reset.fn(ch->on_reset.env, item_val);
     }
     
     /* Deadline scope: if caller installed a current deadline, use deadline-aware send. */
@@ -1507,11 +1524,14 @@ static int cc_chan_recv_owned(CCChan* ch, void* out_value, size_t value_size) {
             ch->items_created++;
             pthread_mutex_unlock(&ch->mu);
             
-            /* Call on_create to get new item - return value is pointer to created value */
+            /* Call on_create to get new item.
+             * Return value semantics: the return value IS the item.
+             * - For pointer pools (void*[~N owned]): returns the pointer value
+             * - For struct pools: returns pointer to static/heap data to copy from
+             * We copy up to value_size bytes treating returned pointer as item value. */
             void* created = ch->on_create.fn(ch->on_create.env);
-            if (created) {
-                memcpy(out_value, created, value_size);
-            }
+            /* The return value IS the item - copy it directly */
+            memcpy(out_value, &created, value_size < sizeof(void*) ? value_size : sizeof(void*));
             return 0;
         }
         

@@ -1,0 +1,80 @@
+// Test: Owned channel syntax T[~N owned { ... }]
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+static int g_create_count = 0;
+static int g_destroy_count = 0;
+static int g_reset_count = 0;
+
+int main(void) {
+    printf("Test 1: Basic owned channel syntax\n");
+    fflush(stdout);
+    {
+        // Declare owned channel with lifecycle closures
+        void*[~4 owned {
+            .create = []() => {
+                g_create_count++;
+                void* p = malloc(64);
+                printf("  create: p=%p\n", p);
+                return p;
+            },
+            .destroy = [](intptr_t r) => {
+                g_destroy_count++;
+                printf("  destroy: r=%p\n", (void*)r);
+                free((void*)r);
+                return NULL;
+            },
+            .reset = [](intptr_t r) => {
+                g_reset_count++;
+                printf("  reset: r=%p\n", (void*)r);
+                return NULL;
+            }
+        }] pool;
+        
+        assert(pool != NULL);
+        printf("  pool created: %p\n", (void*)pool);
+        fflush(stdout);
+        
+        // Recv from empty pool - should create
+        void* r1 = NULL;
+        int rc = cc_chan_recv(pool, &r1, sizeof(r1));
+        assert(rc == 0);
+        assert(g_create_count == 1);
+        assert(r1 != NULL);
+        printf("  recv 1: item=%p, creates=%d\n", r1, g_create_count);
+        fflush(stdout);
+        
+        // Return to pool
+        rc = cc_chan_send(pool, &r1, sizeof(r1));
+        assert(rc == 0);
+        assert(g_reset_count == 1);
+        printf("  send 1: returned, resets=%d\n", g_reset_count);
+        fflush(stdout);
+        
+        // Recv again - should get from pool
+        void* r2 = NULL;
+        rc = cc_chan_recv(pool, &r2, sizeof(r2));
+        assert(rc == 0);
+        assert(g_create_count == 1);  // No new create
+        printf("  recv 2: item=%p (from pool), creates=%d\n", r2, g_create_count);
+        fflush(stdout);
+        
+        // Return it
+        rc = cc_chan_send(pool, &r2, sizeof(r2));
+        assert(rc == 0);
+        printf("  send 2: returned\n");
+        fflush(stdout);
+        
+        // Free pool
+        printf("  freeing pool...\n");
+        fflush(stdout);
+        cc_chan_free(pool);
+        printf("  freed, destroys=%d\n", g_destroy_count);
+        fflush(stdout);
+        
+        printf("Test 1: PASSED\n");
+    }
+    
+    printf("\nowned_channel_syntax_smoke: ALL TESTS PASSED\n");
+    return 0;
+}

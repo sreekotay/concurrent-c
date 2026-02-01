@@ -21,15 +21,16 @@ static void* test_resource_create(void* env) {
     TestResource* r = (TestResource*)malloc(sizeof(TestResource));
     r->value = 100;
     r->id = g_next_id++;
-    return r;
+    printf("  create: id=%d\n", r->id);
+    return r;  // Returns pointer as item value
 }
 
 static void* test_resource_destroy(void* env, intptr_t item_ptr) {
     (void)env;
     g_destroy_count++;
     TestResource* r = (TestResource*)item_ptr;
-    printf("  destroy: resource id=%d, value=%d\n", r->id, r->value);
-    // Note: we don't free here since the channel stores copies
+    printf("  destroy: id=%d\n", r->id);
+    free(r);
     return NULL;
 }
 
@@ -37,7 +38,7 @@ static void* test_resource_reset(void* env, intptr_t item_ptr) {
     (void)env;
     g_reset_count++;
     TestResource* r = (TestResource*)item_ptr;
-    printf("  reset: resource id=%d, value=%d -> 100\n", r->id, r->value);
+    printf("  reset: id=%d, value=%d -> 100\n", r->id, r->value);
     r->value = 100;  // Reset to initial value
     return NULL;
 }
@@ -50,47 +51,56 @@ int main(void) {
         CCClosure1 on_destroy = cc_closure1_make(test_resource_destroy, NULL, NULL);
         CCClosure1 on_reset = cc_closure1_make(test_resource_reset, NULL, NULL);
         
-        // Create owned channel (pool) with capacity 3
-        CCChan* pool = cc_chan_create_owned(3, sizeof(TestResource), on_create, on_destroy, on_reset);
+        // Create owned channel (pool) of TestResource* pointers with capacity 3
+        CCChan* pool = cc_chan_create_owned(3, sizeof(TestResource*), on_create, on_destroy, on_reset);
         assert(pool != NULL);
         
         // Recv from empty pool - should create new item
-        TestResource r1;
-        int rc = cc_chan_recv(pool, &r1, sizeof(TestResource));
+        TestResource* r1 = NULL;
+        int rc = cc_chan_recv(pool, &r1, sizeof(TestResource*));
         assert(rc == 0);
-        assert(r1.value == 100);
-        assert(r1.id == 1);
+        assert(r1 != NULL);
+        assert(r1->value == 100);
+        assert(r1->id == 1);
         assert(g_create_count == 1);
-        printf("  recv 1: got resource id=%d, creates=%d\n", r1.id, g_create_count);
+        printf("  recv 1: got resource id=%d, creates=%d\n", r1->id, g_create_count);
         
         // Recv again - should create another
-        TestResource r2;
-        rc = cc_chan_recv(pool, &r2, sizeof(TestResource));
+        TestResource* r2 = NULL;
+        rc = cc_chan_recv(pool, &r2, sizeof(TestResource*));
         assert(rc == 0);
-        assert(r2.id == 2);
+        assert(r2 != NULL);
+        assert(r2->id == 2);
         assert(g_create_count == 2);
-        printf("  recv 2: got resource id=%d, creates=%d\n", r2.id, g_create_count);
+        printf("  recv 2: got resource id=%d, creates=%d\n", r2->id, g_create_count);
         
         // Modify and return first resource
-        r1.value = 42;
-        rc = cc_chan_send(pool, &r1, sizeof(TestResource));
+        r1->value = 42;
+        rc = cc_chan_send(pool, &r1, sizeof(TestResource*));
         assert(rc == 0);
         assert(g_reset_count == 1);  // on_reset should have been called
         printf("  send 1: returned resource, resets=%d\n", g_reset_count);
         
         // Recv - should get from pool (not create new)
-        TestResource r3;
-        rc = cc_chan_recv(pool, &r3, sizeof(TestResource));
+        TestResource* r3 = NULL;
+        rc = cc_chan_recv(pool, &r3, sizeof(TestResource*));
         assert(rc == 0);
-        assert(r3.value == 100);  // Should be reset
+        assert(r3 != NULL);
+        assert(r3->value == 100);  // Should be reset
         assert(g_create_count == 2);  // No new creates
-        printf("  recv 3: got resource id=%d (from pool), creates=%d\n", r3.id, g_create_count);
+        printf("  recv 3: got resource id=%d (from pool), creates=%d\n", r3->id, g_create_count);
         
-        // Free pool - should destroy remaining items
+        // Return r2 and r3 to pool before freeing
+        rc = cc_chan_send(pool, &r2, sizeof(TestResource*));
+        assert(rc == 0);
+        rc = cc_chan_send(pool, &r3, sizeof(TestResource*));
+        assert(rc == 0);
+        
+        // Free pool - should destroy remaining items (r1 was already returned)
         printf("  freeing pool...\n");
         cc_chan_free(pool);
-        // Note: destroy count depends on what's in pool at free time
         printf("  destroys=%d\n", g_destroy_count);
+        assert(g_destroy_count == 2);  // r2 and r3 should be destroyed
         
         printf("Test 1: PASSED\n");
     }
