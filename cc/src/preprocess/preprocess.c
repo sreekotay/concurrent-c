@@ -96,6 +96,54 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
 /* End scanner helper                                                         */
 /* ========================================================================== */
 
+/* ========================================================================== */
+/* Rewrite chain helper - reduces boilerplate in sequential transforms        */
+/* ========================================================================== */
+
+/* Apply a rewrite function and update the current buffer.
+ * If the rewrite returns a new buffer, frees the old one and updates cur/cur_n.
+ * Returns 0 on success, -1 on error (rewrite returned (char*)-1).
+ */
+static int cc__chain_rewrite(
+    char** cur,           /* Current buffer (may be updated) */
+    size_t* cur_n,        /* Current length (may be updated) */
+    char* (*rewrite_fn)(const char*, size_t),
+    char** allocated      /* Track for cleanup; set to new buffer if allocated */
+) {
+    char* result = rewrite_fn(*cur, *cur_n);
+    if (result == (char*)-1) return -1;  /* Error sentinel */
+    if (result) {
+        if (*allocated) free(*allocated);  /* Free previous in chain */
+        *allocated = result;
+        *cur = result;
+        *cur_n = strlen(result);
+    }
+    return 0;
+}
+
+/* Same but for rewrite functions that take input_path */
+static int cc__chain_rewrite_path(
+    char** cur,
+    size_t* cur_n,
+    char* (*rewrite_fn)(const char*, size_t, const char*),
+    const char* input_path,
+    char** allocated
+) {
+    char* result = rewrite_fn(*cur, *cur_n, input_path);
+    if (result == (char*)-1) return -1;
+    if (result) {
+        if (*allocated) free(*allocated);
+        *allocated = result;
+        *cur = result;
+        *cur_n = strlen(result);
+    }
+    return 0;
+}
+
+/* ========================================================================== */
+/* End rewrite chain helper                                                   */
+/* ========================================================================== */
+
 /* Rewrite `@match { case <hdr>: <body> ... }` into valid C using cc_chan_match_select.
    This is intentionally text-based: the construct is not valid C, so TCC must see rewritten code.
 
@@ -1288,24 +1336,12 @@ static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
     
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     
     while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         
         /* Check for cc_some_CCOptional_ or cc_none_CCOptional_ patterns */
         const char* some_prefix = "cc_some_CCOptional_";
@@ -1417,24 +1453,12 @@ static char* cc__rewrite_result_constructors(const char* src, size_t n) {
     
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     
     while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         
         const char* ok_prefix = "cc_ok_CCResult_";
         const char* err_prefix = "cc_err_CCResult_";
