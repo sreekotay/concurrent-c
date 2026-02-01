@@ -4463,30 +4463,12 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         for (size_t i = 0; i < cc__result_type_count; i++) {
             const char* ok = cc__result_types[i].mangled_ok;
             const char* err = cc__result_types[i].mangled_err;
-            /* Skip predefined result types (already in cc_result.cch or headers via CC_DECL_RESULT_SPEC).
-               CCError types are all predefined in cc_result.cch.
-               Some CCIoError types are predefined in io.cch/dir.cch but not all. */
-            if (strcmp(err, "CCError") == 0) continue;
-            /* Skip specific predefined CCIoError types from stdlib headers */
-            if (strcmp(err, "CCIoError") == 0) {
-                if (strcmp(ok, "bool") == 0 || strcmp(ok, "size_t") == 0 ||
-                    strcmp(ok, "CCSlice") == 0 || strcmp(ok, "CCDirIterptr") == 0 ||
-                    strcmp(ok, "CCDirEntry") == 0 || strcmp(ok, "CCOptional_CCSlice") == 0) {
-                    continue;
-                }
-            }
-            /* Emit parse-time stub typedef (generic struct placeholder).
-               Use guards to prevent conflicts with CC_DECL_RESULT_SPEC in headers. */
+            /* Emit parse-time stub typedef for ALL result types encountered.
+               Use guards to handle any pre-existing definitions from CC_DECL_RESULT_SPEC.
+               Don't emit constructor macros - CC_DECL_RESULT_SPEC will provide functions. */
             fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
             fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
             fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
-            /* Constructor macros that work in parser mode - only define if not already defined */
-            fprintf(out, "#ifndef cc_ok_CCResult_%s_%s\n", ok, err);
-            fprintf(out, "#define cc_ok_CCResult_%s_%s(v) ((void)(v), __cc_result_generic_ok())\n", ok, err);
-            fprintf(out, "#endif\n");
-            fprintf(out, "#ifndef cc_err_CCResult_%s_%s\n", ok, err);
-            fprintf(out, "#define cc_err_CCResult_%s_%s(e) ((void)(e), __cc_result_generic_err())\n", ok, err);
-            fprintf(out, "#endif\n");
             fprintf(out, "#endif\n");
         }
         fprintf(out, "/* --- end result support --- */\n\n");
@@ -4796,30 +4778,12 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     for (size_t i = 0; i < cc__result_type_count; i++) {
         const char* ok = cc__result_types[i].mangled_ok;
         const char* err = cc__result_types[i].mangled_err;
-        /* Only emit if not already covered by common result types in parse stubs */
-        /* Skip predefined result types (already in cc_result.cch or headers via CC_DECL_RESULT_SPEC) */
-        if (strcmp(err, "CCError") == 0) continue;
-        /* Skip specific predefined CCIoError types from stdlib headers */
-        if (strcmp(err, "CCIoError") == 0) {
-            if (strcmp(ok, "bool") == 0 || strcmp(ok, "size_t") == 0 ||
-                strcmp(ok, "CCSlice") == 0 || strcmp(ok, "CCDirIterptr") == 0 ||
-                strcmp(ok, "CCDirEntry") == 0 || strcmp(ok, "CCOptional_CCSlice") == 0) {
-                continue;
-            }
-        }
-        {
-            /* Typedef and constructor macros with guards to avoid conflicts */
-            fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
-            fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
-            fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
-            fprintf(out, "#ifndef cc_ok_CCResult_%s_%s\n", ok, err);
-            fprintf(out, "#define cc_ok_CCResult_%s_%s(v) ((void)(v), __cc_result_generic_ok())\n", ok, err);
-            fprintf(out, "#endif\n");
-            fprintf(out, "#ifndef cc_err_CCResult_%s_%s\n", ok, err);
-            fprintf(out, "#define cc_err_CCResult_%s_%s(e) ((void)(e), __cc_result_generic_err())\n", ok, err);
-            fprintf(out, "#endif\n");
-            fprintf(out, "#endif\n");
-        }
+        /* Emit typedef for ALL result types - use guards to handle pre-existing definitions.
+           Don't emit constructor macros - CC_DECL_RESULT_SPEC will provide functions. */
+        fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
+        fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
+        fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
+        fprintf(out, "#endif\n");
     }
     
     /* Add #line directive for source mapping */

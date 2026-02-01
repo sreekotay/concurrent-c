@@ -164,15 +164,33 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
 } while(0)
 
 /* Common result types - defined in non-parser mode only.
-   Parser mode uses typedefs to __CCResultGeneric (defined later in this file). */
+   Parser mode uses typedefs to __CCResultGeneric (defined later in this file).
+   Guards allow codegen to emit these first without conflicts. */
 #ifndef CC_PARSER_MODE
+#ifndef CCResult_int_CCError_DEFINED
+#define CCResult_int_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_int_CCError, int, CCError)
+#endif
+#ifndef CCResult_bool_CCError_DEFINED
+#define CCResult_bool_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_bool_CCError, bool, CCError)
+#endif
+#ifndef CCResult_size_t_CCError_DEFINED
+#define CCResult_size_t_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCError, size_t, CCError)
+#endif
+#ifndef CCResult_voidptr_CCError_DEFINED
+#define CCResult_voidptr_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_voidptr_CCError, void*, CCError)
+#endif
+#ifndef CCResult_charptr_CCError_DEFINED
+#define CCResult_charptr_CCError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_charptr_CCError, char*, CCError)
+#endif
 
 /* Void result (for functions that return only success/error) */
+#ifndef CCResult_void_CCError_DEFINED
+#define CCResult_void_CCError_DEFINED 1
 typedef struct CCResult_void_CCError {
     bool ok;
     union { char _dummy; CCError error; } u;
@@ -198,7 +216,8 @@ static inline void CCResult_void_CCError_unwrap(CCResult_void_CCError r) {
 }
 static inline bool CCResult_void_CCError_is_ok(CCResult_void_CCError r) { return r.ok; }
 static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { return !r.ok; }
-#endif
+#endif /* CCResult_void_CCError_DEFINED */
+#endif /* CC_PARSER_MODE */
 
 /* cc_try macro: unwrap T!>(E) or return error.
    Must be used in a function that returns the same result type.

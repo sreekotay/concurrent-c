@@ -452,8 +452,7 @@ static int cc__is_builtin_result_type(const char* mangled_ok, const char* mangle
 
 static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
                                     const char* mangled_ok, const char* mangled_err) {
-    /* Skip built-in result types (already declared in cc_result.cch and io.cch) */
-    if (strcmp(mangled_err, "CCError") == 0) return;
+    /* Check if this is a built-in type (in stdlib headers) - skip to avoid redefinition */
     if (cc__is_builtin_result_type(mangled_ok, mangled_err)) return;
     
     /* Check for duplicates */
