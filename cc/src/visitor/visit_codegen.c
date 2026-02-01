@@ -683,51 +683,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
 
-        /* 2) spawn(...) -> cc_nursery_spawn* (hard error if outside nursery). */
-        {
-            char* rewritten = NULL;
-            size_t rewritten_len = 0;
-            int r = cc__rewrite_spawn_stmts_with_nodes(root4, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
-            if (r < 0) {
-                cc_tcc_bridge_free_ast(root4);
-                fclose(out);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(src_all);
-                free(closure_protos);
-                free(closure_defs);
-                return EINVAL;
-            }
-            if (r > 0) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rewritten;
-                src_ufcs_len = rewritten_len;
-            }
-        }
-        cc_tcc_bridge_free_ast(root4);
-
-        /* Reparse after spawn rewrite so nursery/arena end braces are correct. */
-        CCASTRoot* root5 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
-        if (!root5) {
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            free(closure_protos);
-            free(closure_defs);
-            return EINVAL;
-        }
-
-        /* 3+4) Batch nursery + arena using EditBuffer so we don't have stale AST offsets.
-           Both passes use root5; without batching, nursery changes src_ufcs but arena
-           still references root5's offsets (which are now wrong). */
+        /* 2+3+4) Batch spawn + nursery + arena using EditBuffer so we don't have stale AST offsets.
+           All passes use root4; without batching, each pass changes src_ufcs but subsequent
+           passes still reference root4's offsets (which would be wrong).
+           ELIMINATED ONE REPARSE by using cc__collect_spawn_edits instead of whole-file rewrite. */
         {
             CCEditBuffer eb;
             cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
 
-            int n_nursery = cc__collect_nursery_edits(root5, ctx, &eb);
-            int n_arena = cc__collect_arena_edits(root5, ctx, &eb);
+            int n_spawn = cc__collect_spawn_edits(root4, ctx, &eb);
+            int n_nursery = cc__collect_nursery_edits(root4, ctx, &eb);
+            int n_arena = cc__collect_arena_edits(root4, ctx, &eb);
 
-            if (n_nursery < 0 || n_arena < 0) {
-                cc_tcc_bridge_free_ast(root5);
+            if (n_spawn < 0 || n_nursery < 0 || n_arena < 0) {
+                cc_tcc_bridge_free_ast(root4);
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
                 free(src_all);
@@ -746,7 +715,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
             }
         }
-        cc_tcc_bridge_free_ast(root5);
+        cc_tcc_bridge_free_ast(root4);
     }
 
     /* Lower @defer (and hard-error on cancel) using a syntax-driven pass.
