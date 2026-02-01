@@ -52,7 +52,7 @@ struct CCDirIter {
  * Directory Iteration
  * ============================================================================ */
 
-CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path) {
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, const char* path) {
     if (!arena || !path) {
         return cc_err_CCResult_CCDirIterptr_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -95,7 +95,7 @@ CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path) {
     return cc_ok_CCResult_CCDirIterptr_CCIoError(iter);
 }
 
-CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
+CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter* iter, CCArena* arena) {
     CCDirEntry entry = {0};
 
     if (!iter || !arena) {
@@ -232,7 +232,7 @@ bool cc_path_is_file(const char* path) {
 #endif
 }
 
-CCResultBoolIoError cc_dir_create(const char* path) {
+CCResult_bool_CCIoError cc_dir_create(const char* path) {
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -251,7 +251,7 @@ CCResultBoolIoError cc_dir_create(const char* path) {
 #endif
 }
 
-CCResultBoolIoError cc_dir_create_all(const char* path) {
+CCResult_bool_CCIoError cc_dir_create_all(const char* path) {
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -297,7 +297,7 @@ CCResultBoolIoError cc_dir_create_all(const char* path) {
     return cc_ok_CCResult_bool_CCIoError(true);
 }
 
-CCResultBoolIoError cc_dir_remove(const char* path) {
+CCResult_bool_CCIoError cc_dir_remove(const char* path) {
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -316,7 +316,7 @@ CCResultBoolIoError cc_dir_remove(const char* path) {
 #endif
 }
 
-CCResultBoolIoError cc_file_remove(const char* path) {
+CCResult_bool_CCIoError cc_file_remove(const char* path) {
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -358,7 +358,7 @@ CCSlice cc_dir_cwd(CCArena* arena) {
     return result;
 }
 
-CCResultBoolIoError cc_dir_chdir(const char* path) {
+CCResult_bool_CCIoError cc_dir_chdir(const char* path) {
     if (!path) {
         return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(EINVAL));
     }
@@ -447,12 +447,12 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
 
 static void glob_dir(CCArena* arena, CCGlobResult* result,
                      const char* dir, const char* pattern, int recursive) {
-    CCResultDirIterIoError iter_res = cc_dir_open(arena, dir);
+    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, dir);
     if (cc_is_err(iter_res)) return;
 
     CCDirIter* iter = cc_unwrap(iter_res);
     while (1) {
-        CCResultDirEntryIoError entry_res = cc_dir_next(iter, arena);
+        CCResult_CCDirEntry_CCIoError entry_res = cc_dir_next(iter, arena);
         if (cc_is_err(entry_res)) break;
 
         CCDirEntry entry = cc_unwrap(entry_res);
@@ -489,12 +489,12 @@ static void glob_recurse(CCArena* arena, CCGlobResult* result,
     glob_dir(arena, result, dir, pattern, recursive);
 
     /* Recurse into subdirectories */
-    CCResultDirIterIoError iter_res = cc_dir_open(arena, dir);
+    CCResult_CCDirIterptr_CCIoError iter_res = cc_dir_open(arena, dir);
     if (cc_is_err(iter_res)) return;
 
     CCDirIter* iter = cc_unwrap(iter_res);
     while (1) {
-        CCResultDirEntryIoError entry_res = cc_dir_next(iter, arena);
+        CCResult_CCDirEntry_CCIoError entry_res = cc_dir_next(iter, arena);
         if (cc_is_err(entry_res)) break;
 
         CCDirEntry entry = cc_unwrap(entry_res);
