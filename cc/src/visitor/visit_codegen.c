@@ -1177,6 +1177,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         free(closure_protos);
         if (closure_defs && closure_defs_len > 0) {
+            /* Run @defer lowering on closure definitions too (handles @defer inside spawn closures) */
+            char* closure_defs_lowered = NULL;
+            size_t closure_defs_lowered_len = 0;
+            if (cc__rewrite_defer_syntax(ctx, closure_defs, closure_defs_len, 
+                                          &closure_defs_lowered, &closure_defs_lowered_len) > 0) {
+                free(closure_defs);
+                closure_defs = closure_defs_lowered;
+                closure_defs_len = closure_defs_lowered_len;
+            }
+            
             /* Emit closure definitions at end-of-file so global names are in scope. */
             fputs("\n#line 1 \"<cc-generated:closures>\"\n", out);
             fwrite(closure_defs, 1, closure_defs_len, out);

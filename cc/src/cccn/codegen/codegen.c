@@ -2,6 +2,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Sanitize parse stub type names - return proper C type name or NULL if should be kept */
+static const char* sanitize_type_name(const char* type) {
+    if (!type) return NULL;
+    /* Parse stub types that should be mapped to their real equivalents */
+    if (strcmp(type, "__CCOptionalGeneric") == 0) return "CCOptional_int";  /* Default */
+    if (strcmp(type, "__CCResultGeneric") == 0) return "CCResult_int_CCError";  /* Default */
+    if (strcmp(type, "__CCVecGeneric") == 0) return "Vec_void";
+    if (strcmp(type, "__CCMapGeneric") == 0) return "Map_void_void";
+    /* Return NULL to indicate the type should be used as-is */
+    return NULL;
+}
+
 /* Forward declarations */
 typedef struct ClosureEmitCtx ClosureEmitCtx;
 static void emit_node(const CCNNode* node, FILE* out, int indent);
@@ -23,6 +35,85 @@ static EmitState g_emit_state = {0};
 
 /* Current file being emitted (for closure type lookup) */
 static const CCNFile* g_current_file = NULL;
+
+/* Track typedef names for anonymous structs during emission.
+ * Maps type_str to typedef name (for typedefs where name == type_str,
+ * indicating the anonymous struct now has this name). */
+static struct {
+    const char** names;
+    int count;
+    int cap;
+} g_typedef_names = {0};
+
+static void register_typedef_name(const char* name) {
+    if (!name) return;
+    /* Check if already present */
+    for (int i = 0; i < g_typedef_names.count; i++) {
+        if (strcmp(g_typedef_names.names[i], name) == 0) return;
+    }
+    if (g_typedef_names.count >= g_typedef_names.cap) {
+        int new_cap = g_typedef_names.cap ? g_typedef_names.cap * 2 : 32;
+        g_typedef_names.names = realloc(g_typedef_names.names, new_cap * sizeof(char*));
+        g_typedef_names.cap = new_cap;
+    }
+    g_typedef_names.names[g_typedef_names.count++] = strdup(name);
+}
+
+static int is_typedef_for_anon_struct(const char* name) {
+    for (int i = 0; i < g_typedef_names.count; i++) {
+        if (strcmp(g_typedef_names.names[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static void clear_typedef_names(void) {
+    for (int i = 0; i < g_typedef_names.count; i++) {
+        free((void*)g_typedef_names.names[i]);
+    }
+    free(g_typedef_names.names);
+    g_typedef_names.names = NULL;
+    g_typedef_names.count = g_typedef_names.cap = 0;
+}
+
+/* Mapping from STRUCT_DECL node pointers to typedef names */
+static struct {
+    const CCNNode** nodes;
+    const char** names;
+    int count;
+    int cap;
+} g_struct_typedef_map = {0};
+
+static void register_struct_typedef(const CCNNode* struct_node, const char* name) {
+    if (g_struct_typedef_map.count >= g_struct_typedef_map.cap) {
+        int new_cap = g_struct_typedef_map.cap ? g_struct_typedef_map.cap * 2 : 32;
+        g_struct_typedef_map.nodes = realloc(g_struct_typedef_map.nodes, new_cap * sizeof(CCNNode*));
+        g_struct_typedef_map.names = realloc(g_struct_typedef_map.names, new_cap * sizeof(char*));
+        g_struct_typedef_map.cap = new_cap;
+    }
+    g_struct_typedef_map.nodes[g_struct_typedef_map.count] = struct_node;
+    g_struct_typedef_map.names[g_struct_typedef_map.count] = strdup(name);
+    g_struct_typedef_map.count++;
+}
+
+static const char* lookup_struct_typedef(const CCNNode* struct_node) {
+    for (int i = 0; i < g_struct_typedef_map.count; i++) {
+        if (g_struct_typedef_map.nodes[i] == struct_node) {
+            return g_struct_typedef_map.names[i];
+        }
+    }
+    return NULL;
+}
+
+static void clear_struct_typedef_map(void) {
+    for (int i = 0; i < g_struct_typedef_map.count; i++) {
+        free((void*)g_struct_typedef_map.names[i]);
+    }
+    free(g_struct_typedef_map.nodes);
+    free(g_struct_typedef_map.names);
+    g_struct_typedef_map.nodes = NULL;
+    g_struct_typedef_map.names = NULL;
+    g_struct_typedef_map.count = g_struct_typedef_map.cap = 0;
+}
 
 /* Check if AST contains nursery statements (recursive helper) */
 static int has_nursery_stmt(const CCNNode* node) {
@@ -367,7 +458,12 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                     fprintf(out, "auto ");
                 } else if (ret && strncmp(ret, "struct __CC", 11) == 0) {
                     /* Strip "struct " from __CC* types - they're typedef'd */
-                    fprintf(out, "%s ", ret + 7);
+                    const char* sanitized = sanitize_type_name(ret + 7);
+                    fprintf(out, "%s ", sanitized ? sanitized : ret + 7);
+                } else if (ret && strncmp(ret, "__CC", 4) == 0) {
+                    /* Generic parse stub type - sanitize to proper type */
+                    const char* sanitized = sanitize_type_name(ret);
+                    fprintf(out, "%s ", sanitized ? sanitized : ret);
                 } else {
                     fprintf(out, "%s ", ret);
                 }
@@ -523,6 +619,10 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                 if (strncmp(type_str, "struct __CC", 11) == 0) {
                     emit_type = type_str + 7;  /* Skip "struct " */
                 }
+                /* Sanitize parse stub types */
+                const char* sanitized = sanitize_type_name(emit_type);
+                if (sanitized) emit_type = sanitized;
+                
                 /* Check for array type (contains '[') */
                 const char* bracket = strchr(emit_type, '[');
                 if (bracket) {
@@ -837,24 +937,35 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
 
         case CCN_STRUCT_DECL:
             /* struct/union definition */
-            /* Skip anonymous structs (generated by TCC for internal use) */
-            if (node->as.struct_decl.name && strchr(node->as.struct_decl.name, '.')) {
-                break;  /* Skip L.1, L.2 etc anonymous structs */
-            }
-            /* Skip parse stub structs (defined in real headers) */
+            /* Skip parse stub structs (defined in real headers).
+               Check both the struct name AND if this struct is linked to a parse stub typedef. */
             if (node->as.struct_decl.name && 
                 (strncmp(node->as.struct_decl.name, "__CC", 4) == 0 ||
-                 strcmp(node->as.struct_decl.name, "CCChan") == 0)) {
+                 strcmp(node->as.struct_decl.name, "CCChan") == 0 ||
+                 strncmp(node->as.struct_decl.name, "CC", 2) == 0)) {
+                break;
+            }
+            /* For anonymous structs (L.N), check if linked typedef is a parse stub */
+            {
+                const char* typedef_name = lookup_struct_typedef(node);
+                if (typedef_name && (
+                    strncmp(typedef_name, "__CC", 4) == 0 ||
+                    strncmp(typedef_name, "CC", 2) == 0 ||
+                    strncmp(typedef_name, "Vec_", 4) == 0 ||
+                    strncmp(typedef_name, "Map_", 4) == 0)) {
+                    break;
+                }
+            }
+            /* Skip if no fields (forward declaration) */
+            if (node->as.struct_decl.fields.len == 0) {
                 break;
             }
             emit_line_directive(node, out);
+            fprintf(out, "typedef ");
             if (node->as.struct_decl.is_union) {
                 fprintf(out, "union");
             } else {
                 fprintf(out, "struct");
-            }
-            if (node->as.struct_decl.name) {
-                fprintf(out, " %s", node->as.struct_decl.name);
             }
             fprintf(out, " {\n");
             for (int i = 0; i < node->as.struct_decl.fields.len; i++) {
@@ -867,7 +978,20 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                 }
             }
             emit_indent(indent, out);
-            fprintf(out, "};\n");
+            /* Use the struct name as typedef name if available and not anonymous */
+            if (node->as.struct_decl.name && 
+                !strstr(node->as.struct_decl.name, "<anonymous>") &&
+                !strchr(node->as.struct_decl.name, '.')) {
+                fprintf(out, "} %s;\n", node->as.struct_decl.name);
+            } else {
+                /* Look up typedef name for anonymous struct */
+                const char* typedef_name = lookup_struct_typedef(node);
+                if (typedef_name) {
+                    fprintf(out, "} %s;\n", typedef_name);
+                } else {
+                    fprintf(out, "};\n");
+                }
+            }
             break;
 
         case CCN_TYPEDEF:
@@ -876,6 +1000,11 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
             if (node->as.typedef_decl.type_str &&
                 strstr(node->as.typedef_decl.type_str, "<anonymous>")) {
                 break;  /* Skip anonymous struct typedefs */
+            }
+            /* Skip circular typedefs (typedef T T) - from anonymous struct resolution */
+            if (node->as.typedef_decl.name && node->as.typedef_decl.type_str &&
+                strcmp(node->as.typedef_decl.name, node->as.typedef_decl.type_str) == 0) {
+                break;
             }
             if (node->as.typedef_decl.name &&
                 strncmp(node->as.typedef_decl.name, "__CC", 4) == 0) {
@@ -886,13 +1015,15 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                 strstr(node->as.typedef_decl.type_str, "__CC")) {
                 break;
             }
+            /* Skip typedefs starting with CC (internal types) */
+            if (node->as.typedef_decl.name &&
+                strncmp(node->as.typedef_decl.name, "CC", 2) == 0) {
+                break;
+            }
             /* Skip forward declarations of parse stub types */
             if (node->as.typedef_decl.name &&
                 (strncmp(node->as.typedef_decl.name, "Vec_", 4) == 0 ||
-                 strncmp(node->as.typedef_decl.name, "Map_", 4) == 0 ||
-                 strncmp(node->as.typedef_decl.name, "CCChan", 6) == 0 ||
-                 strncmp(node->as.typedef_decl.name, "CCOptional_", 11) == 0 ||
-                 strncmp(node->as.typedef_decl.name, "CCResult_", 9) == 0)) {
+                 strncmp(node->as.typedef_decl.name, "Map_", 4) == 0)) {
                 break;
             }
             emit_line_directive(node, out);
@@ -934,14 +1065,87 @@ int cc_emit_c(const CCNFile* file, FILE* out) {
     g_emit_state.file = NULL;
     g_emit_state.line = 0;
     g_current_file = file;  /* For closure type lookup */
+    
+    /* Pre-scan for circular typedefs (name == type_str).
+       These indicate anonymous structs that have been given typedef names.
+       Also build a mapping from struct line numbers to typedef names. */
+    clear_typedef_names();
+    clear_struct_typedef_map();
+    if (file->root->kind == CCN_FILE) {
+        /* First pass: collect typedef names */
+        for (int i = 0; i < file->root->as.file.items.len; i++) {
+            CCNNode* item = file->root->as.file.items.items[i];
+            if (item && item->kind == CCN_TYPEDEF) {
+                if (item->as.typedef_decl.name && item->as.typedef_decl.type_str &&
+                    strcmp(item->as.typedef_decl.name, item->as.typedef_decl.type_str) == 0) {
+                    /* This typedef name is for an anonymous struct */
+                    register_typedef_name(item->as.typedef_decl.name);
+                }
+            }
+        }
+        /* Second pass: link anonymous structs to their typedefs.
+           Look for TYPEDEF nodes that reference anonymous structs:
+           - name == type_str (circular typedef from our TCC fix)
+           - type_str starts with "struct " and ends with the typedef name
+           Find the nearest preceding STRUCT_DECL. */
+        for (int i = 0; i < file->root->as.file.items.len; i++) {
+            CCNNode* item = file->root->as.file.items.items[i];
+            if (item && item->kind == CCN_TYPEDEF &&
+                item->as.typedef_decl.name && item->as.typedef_decl.type_str) {
+                int is_anon_struct_typedef = 0;
+                const char* name = item->as.typedef_decl.name;
+                const char* type = item->as.typedef_decl.type_str;
+                
+                /* Check if name == type (our TCC fix for anonymous structs) */
+                if (strcmp(name, type) == 0) {
+                    is_anon_struct_typedef = 1;
+                }
+                /* Check if type is "struct Name" where Name == name */
+                if (!is_anon_struct_typedef && strncmp(type, "struct ", 7) == 0) {
+                    if (strcmp(type + 7, name) == 0) {
+                        is_anon_struct_typedef = 1;
+                    }
+                }
+                
+                if (is_anon_struct_typedef) {
+                    /* Find the nearest preceding STRUCT_DECL (search backwards). */
+                    for (int j = i - 1; j >= 0 && j >= i - 10; j--) {
+                        CCNNode* prev = file->root->as.file.items.items[j];
+                        if (prev && prev->kind == CCN_STRUCT_DECL &&
+                            prev->as.struct_decl.fields.len > 0) {
+                            /* Found a struct with fields - link it if not already linked */
+                            if (!lookup_struct_typedef(prev)) {
+                                register_struct_typedef(prev, name);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fprintf(out, "/* Generated by cccn (Concurrent-C Compiler) */\n");
     fprintf(out, "#define CCC_VERSION 4\n\n");
     /* Note: CC_PARSER_MODE is intentionally NOT defined - we want real runtime types */
     
-    /* Check if CC runtime is needed (nursery, spawn, channels, etc.) */
+    /* Check if CC runtime is needed (nursery, spawn, channels, Optional, Result, etc.) */
     int has_nursery = has_nursery_stmt(file->root);
-    int needs_runtime = has_nursery || file->closure_count > 0;
+    int has_cc_types = g_typedef_names.count > 0;  /* Has Optional/Result types */
+    /* Also check if any CC-specific includes exist */
+    int has_cc_includes = 0;
+    if (file->root->kind == CCN_FILE) {
+        for (int i = 0; i < file->root->as.file.items.len; i++) {
+            CCNNode* item = file->root->as.file.items.items[i];
+            if (item && item->kind == CCN_INCLUDE && item->as.include.path) {
+                if (strstr(item->as.include.path, "ccc/") != NULL) {
+                    has_cc_includes = 1;
+                    break;
+                }
+            }
+        }
+    }
+    int needs_runtime = has_nursery || file->closure_count > 0 || has_cc_types || has_cc_includes;
     
     if (needs_runtime) {
         fprintf(out, "#include <ccc/cc_runtime.cch>\n\n");

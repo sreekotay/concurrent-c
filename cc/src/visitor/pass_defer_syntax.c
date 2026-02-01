@@ -484,9 +484,7 @@ int cc__collect_defer_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
     if (r == 0 || !rewritten) {
         /* No changes */
         return 0;
-    }
-
-    /* Add a whole-file replacement edit */
+    }    /* Add a whole-file replacement edit */
     int edits_added = 0;
     if (cc_edit_buffer_add(eb, 0, eb->src_len, rewritten, 40, "defer") == 0) {
         edits_added = 1;

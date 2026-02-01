@@ -141,6 +141,7 @@ enum {
     CC_STUB_ASSIGN = 14,
     CC_STUB_RETURN = 15,
     CC_STUB_PARAM = 16,
+    CC_STUB_UNARY = 23,  /* Unary operator (e.g., &, *, !) */
 };
 
 enum {
@@ -873,6 +874,7 @@ static int cc__walk_call(int idx,
         int to_move_n = 0;
         for (int i = 0; i < cl->len; i++) {
             const StubNodeView* c = &nodes[cl->child[i]];
+            /* Direct IDENT child */
             if (c->kind == CC_STUB_IDENT && c->aux_s1) {
                 /* The recorder also emits the callee as an IDENT child; ignore that and
                    mark any slice variable args as moved. */
@@ -880,6 +882,20 @@ static int cc__walk_call(int idx,
                 CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, c->aux_s1);
                 if (v && v->is_slice && to_move_n < (int)(sizeof(to_move)/sizeof(to_move[0]))) {
                     to_move[to_move_n++] = v;
+                }
+            }
+            /* Handle address-of: cc_move(x) expands to cc__move_marker_impl(&(x), x)
+               Look inside UNARY '&' to find the identifier */
+            if (c->kind == CC_STUB_UNARY && c->aux_s1 && strcmp(c->aux_s1, "&") == 0) {
+                const ChildList* ucl = &kids[cl->child[i]];
+                for (int j = 0; j < ucl->len; j++) {
+                    const StubNodeView* uc = &nodes[ucl->child[j]];
+                    if (uc->kind == CC_STUB_IDENT && uc->aux_s1) {
+                        CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, uc->aux_s1);
+                        if (v && v->is_slice && to_move_n < (int)(sizeof(to_move)/sizeof(to_move[0]))) {
+                            to_move[to_move_n++] = v;
+                        }
+                    }
                 }
             }
         }

@@ -551,8 +551,19 @@ static const char* ccn_kind_name(CCNKind kind) {
         case CCN_EXPR_CLOSURE: return "EXPR_CLOSURE";
         case CCN_EXPR_AWAIT: return "EXPR_AWAIT";
         case CCN_EXPR_TRY: return "EXPR_TRY";
+        case CCN_EXPR_FIELD: return "EXPR_FIELD";
+        case CCN_EXPR_INDEX: return "EXPR_INDEX";
+        case CCN_EXPR_TERNARY: return "EXPR_TERNARY";
+        case CCN_EXPR_CAST: return "EXPR_CAST";
+        case CCN_EXPR_SIZEOF: return "EXPR_SIZEOF";
         case CCN_TYPE_NAME: return "TYPE_NAME";
         case CCN_TYPE_PTR: return "TYPE_PTR";
+        case CCN_STRUCT_DECL: return "STRUCT_DECL";
+        case CCN_STRUCT_FIELD: return "STRUCT_FIELD";
+        case CCN_TYPEDEF: return "TYPEDEF";
+        case CCN_ENUM_DECL: return "ENUM_DECL";
+        case CCN_ENUM_VALUE: return "ENUM_VALUE";
+        case CCN_INCLUDE: return "INCLUDE";
         default: return "?";
     }
 }
@@ -741,6 +752,20 @@ void ccn_node_dump(CCNNode* node, int indent) {
             
         case CCN_TYPE_NAME:
             printf(" name=%s\n", node->as.type_name.name);
+            break;
+        
+        case CCN_STRUCT_DECL:
+            printf(" name=%s line=%d fields=%d\n", 
+                   node->as.struct_decl.name ? node->as.struct_decl.name : "NULL",
+                   node->span.start.line,
+                   node->as.struct_decl.fields.len);
+            break;
+        
+        case CCN_TYPEDEF:
+            printf(" name=%s type=%s line=%d\n",
+                   node->as.typedef_decl.name ? node->as.typedef_decl.name : "NULL",
+                   node->as.typedef_decl.type_str ? node->as.typedef_decl.type_str : "NULL",
+                   node->span.start.line);
             break;
             
         default:

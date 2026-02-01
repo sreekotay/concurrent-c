@@ -948,6 +948,11 @@ static int cc__is_known_optional_type(const char* mangled) {
 static char* cc__rewrite_optional_types(const char* src, size_t n, const char* input_path) {
     (void)input_path; /* Reserved for future error reporting */
     if (!src || n == 0) return NULL;
+    
+    /* Reset optional type tracking for each preprocessing call.
+       This ensures inline typedefs are emitted fresh each time. */
+    cc__optional_type_count = 0;
+    
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     
@@ -1142,18 +1147,18 @@ static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
             
             if (is_some) {
-                /* cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v) */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_OPTIONAL_SOME(");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                /* Copy the argument */
+                /* cc_some_CCOptional_T(v) -> ((void)(v), (CCOptional_T){.has = 1})
+                   Use comma expression that evaluates arg (for AST) and returns typed result */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)(");
                 cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_end - arg_start);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-            } else {
-                /* cc_none_CCOptional_T() -> __CC_OPTIONAL_NONE(T) */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_OPTIONAL_NONE(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "), (CCOptional_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 1})");
+            } else {
+                /* cc_none_CCOptional_T() -> (CCOptional_T){.has = 0} */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(CCOptional_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 0}");
             }
             
             last_emit = j;  /* skip past ')' */
@@ -1250,15 +1255,18 @@ static char* cc__rewrite_result_constructors(const char* src, size_t n) {
             size_t args_end = k;
             size_t call_end = k + 1;
             
-            /* Emit everything up to function name */
+            /* Emit everything up to function name.
+               Use comma expression: ((void)(arg), (__CCResultGeneric){.ok=1/0})
+               This evaluates the arg (so it appears in TCC's AST for codegen to find)
+               while returning the generic stub type. Visitor pass will rewrite output. */
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            if (is_ok) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_OK(0, 0, ");
-            } else {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_ERR(0, 0, ");
-            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)(");
             cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+            if (is_ok) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "), ((__CCResultGeneric){.ok = 1}))");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "), ((__CCResultGeneric){.ok = 0}))");
+            }
             last_emit = call_end;
             i = call_end;
             continue;
@@ -3257,17 +3265,44 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
             continue;
         }
         
-        /* Detect function returning T!E - look for pattern: T!E name( */
+        /* Detect function returning T!E or T!>(E) - look for pattern: T!E name( or T!>(E) name( 
+           Handle space before ! (e.g., "MyData !> (MyError)") */
         if (c == '!' && c2 != '=' && fn_brace_depth < 0 && i > 0) {
-            char prev = src[i - 1];
+            /* Skip backwards over whitespace to find the type */
+            size_t prev_idx = i - 1;
+            while (prev_idx > 0 && (src[prev_idx] == ' ' || src[prev_idx] == '\t')) prev_idx--;
+            char prev = src[prev_idx];
             if (cc_is_ident_char(prev) || prev == ')' || prev == ']' || prev == '>') {
-                /* Check for error type after ! */
+                /* Check for error type after ! - two forms:
+                   1. T!E (simple form)
+                   2. T!>(E) (arrow form with parentheses) */
                 size_t j = i + 1;
-                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-                if (j < n && cc_is_ident_start(src[j])) {
-                    size_t err_start = j;
-                    while (j < n && cc_is_ident_char(src[j])) j++;
-                    size_t err_end = j;
+                size_t err_start = 0, err_end = 0;
+                
+                /* Check for !> arrow form */
+                if (j < n && src[j] == '>') {
+                    j++; /* skip '>' */
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && src[j] == '(') {
+                        j++; /* skip '(' */
+                        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                        err_start = j;
+                        while (j < n && cc_is_ident_char(src[j])) j++;
+                        err_end = j;
+                        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                        if (j < n && src[j] == ')') j++; /* skip ')' */
+                    }
+                } else {
+                    /* Simple !E form */
+                    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+                    if (j < n && cc_is_ident_start(src[j])) {
+                        err_start = j;
+                        while (j < n && cc_is_ident_char(src[j])) j++;
+                        err_end = j;
+                    }
+                }
+                
+                if (err_start < err_end) {
                     
                     /* Skip whitespace, then check for identifier followed by '(' */
                     while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '*')) j++;
@@ -3364,12 +3399,14 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     }
                     
                     if (is_err_shorthand && depth == 0) {
-                        /* Rewrite cc_err(CC_ERR_*) -> cc_err(cc_error(CC_ERR_*, NULL))
-                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err(cc_error(CC_ERR_*, "msg")) */
+                        /* Rewrite cc_err(CC_ERR_*) -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, NULL))
+                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, "msg")) */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err(");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_CCResult_");
                         cc_sb_append_cstr(&out, &out_len, &out_cap, current_ok_type);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", cc_error(");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_err_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(cc_error(");
                         /* Copy args */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
                         if (is_err_shorthand_no_msg) {
@@ -3382,21 +3419,20 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     }
                     
                     if (is_short && depth == 0) {
-                        /* Rewrite short form to long form */
+                        /* Rewrite short form to typed constructor call:
+                           cc_ok(x) -> cc_ok_CCResult_T_E(x)
+                           cc_err(e) -> cc_err_CCResult_T_E(e) */
                         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                         
                         if (is_ok) {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_ok(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_ok_CCResult_");
                         } else {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err(");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_err_CCResult_");
                         }
                         cc_sb_append_cstr(&out, &out_len, &out_cap, current_ok_type);
-                        /* Add error type if not CCError */
-                        if (strcmp(current_err_type, "CCError") != 0) {
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, current_err_type);
-                        }
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, current_err_type);
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                         /* Copy argument */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
@@ -3722,14 +3758,16 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     const char* cur4c = rewritten_opt_ctor ? rewritten_opt_ctor : cur4;
     size_t cur4c_n = rewritten_opt_ctor ? strlen(rewritten_opt_ctor) : cur4_n;
 
-    /* NOTE: cc_ok(v)/cc_err(e) inference moved to codegen pass (pass_type_syntax.c)
-       so that the simpler macro definitions work during TCC parsing.
-       The codegen pass rewrites cc_ok(v) -> cc_ok_CCResult_T_E(v) after parsing. */
+    /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on function return type.
+       This MUST run BEFORE type rewriting so it can detect T!>(E) syntax. */
+    char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4c, cur4c_n);
+    const char* cur4i = rewritten_infer ? rewritten_infer : cur4c;
+    size_t cur4i_n = rewritten_infer ? strlen(rewritten_infer) : cur4c_n;
 
-    /* Rewrite T!>(E) -> __CC_RESULT(T, E) */
-    char* rewritten_res = cc__rewrite_result_types(cur4c, cur4c_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4c;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
+    /* Rewrite T!>(E) -> CCResult_T_E */
+    char* rewritten_res = cc__rewrite_result_types(cur4i, cur4i_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4i;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4i_n;
 
     /* Rewrite cc_ok_CCResult_T_E / cc_err_CCResult_T_E for parser mode */
     char* rewritten_res_ctor = cc__rewrite_result_constructors(cur5, cur5_n);
@@ -3765,7 +3803,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_closing);
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
+        free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_infer); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
         free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
         fclose(in); fclose(out); unlink(tmp_path);
@@ -3872,6 +3910,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     free(rewritten_try);
     free(rewritten_try_bind);
     free(rewritten_res_ctor);
+    free(rewritten_infer);
     free(rewritten_res);
     free(rewritten_opt_ctor);
     free(rewritten_opt);
@@ -3961,21 +4000,26 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3u;
     size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3u_n;
 
-    /* Rewrite T? -> __CC_OPTIONAL(T) */
+    /* Rewrite T? -> CCOptional_T with inline typedef */
     char* rewritten_opt = cc__rewrite_optional_types(cur3s, cur3s_n, input_path);
     const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
     size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
 
-    /* Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v)
-       and cc_none_CCOptional_T() -> __CC_OPTIONAL_NONE(T) for parser mode */
+    /* Rewrite cc_some_CCOptional_T(v)/cc_none_CCOptional_T() for parser mode */
     char* rewritten_opt_ctor = cc__rewrite_optional_constructors(cur4, cur4_n);
     const char* cur4c = rewritten_opt_ctor ? rewritten_opt_ctor : cur4;
     size_t cur4c_n = rewritten_opt_ctor ? strlen(rewritten_opt_ctor) : cur4_n;
 
-    /* Rewrite T!>(E) -> __CC_RESULT(T, E) */
-    char* rewritten_res = cc__rewrite_result_types(cur4c, cur4c_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4c;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4c_n;
+    /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on function return type.
+       This MUST run BEFORE type rewriting so it can detect T!>(E) syntax. */
+    char* rewritten_infer2 = cc__rewrite_inferred_result_ctors(cur4c, cur4c_n);
+    const char* cur4i = rewritten_infer2 ? rewritten_infer2 : cur4c;
+    size_t cur4i_n = rewritten_infer2 ? strlen(rewritten_infer2) : cur4c_n;
+
+    /* Rewrite T!>(E) -> CCResult_T_E */
+    char* rewritten_res = cc__rewrite_result_types(cur4i, cur4i_n, input_path);
+    const char* cur5 = rewritten_res ? rewritten_res : cur4i;
+    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4i_n;
 
     /* Rewrite cc_ok_CCResult_T_E / cc_err_CCResult_T_E for parser mode */
     char* rewritten_res_ctor = cc__rewrite_result_constructors(cur5, cur5_n);
@@ -4011,7 +4055,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
     if (rewritten_conc == (char*)-1) {
         free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
-        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_res); free(rewritten_opt_ctor);
+        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_infer2); free(rewritten_res); free(rewritten_opt_ctor);
         free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
         free(rewritten_match); free(rewritten_deadline); free(buf);
@@ -4033,7 +4077,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         /* Fallback: estimate size and manually build */
         free(rewritten_if_try_norm); free(rewritten_link); free(rewritten_conc);
         free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
-        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_res); free(rewritten_opt_ctor);
+        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_infer2); free(rewritten_res); free(rewritten_opt_ctor);
         free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
         free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
         free(rewritten_match); free(rewritten_deadline); free(buf);
@@ -4098,13 +4142,27 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         }
     }
 
-    /* If result types are used, include cc_result.cch */
+    /* If result types are used, include cc_result.cch and emit parse-time stubs for custom types */
     if (cc__result_type_count > 0) {
         fprintf(out, "/* --- CC result type support --- */\n");
         fprintf(out, "#ifndef CC_PARSER_MODE\n");
         fprintf(out, "#define CC_PARSER_MODE 1\n");
         fprintf(out, "#endif\n");
         fprintf(out, "#include <ccc/cc_result.cch>\n");
+        /* Emit parse-time stub typedefs for user-defined Result types.
+           Uses __CCResultGeneric so TCC can parse before actual types are defined.
+           Real type expansion happens in codegen via CC_DECL_RESULT_SPEC. */
+        for (size_t i = 0; i < cc__result_type_count; i++) {
+            const char* ok = cc__result_types[i].mangled_ok;
+            const char* err = cc__result_types[i].mangled_err;
+            /* Skip predefined result types (already in cc_result.cch or parse stubs) */
+            if (strcmp(err, "CCError") == 0) continue;
+            /* Emit parse-time stub typedef (generic struct placeholder) */
+            fprintf(out, "#ifndef CCResult_%s_%s_DEFINED\n", ok, err);
+            fprintf(out, "#define CCResult_%s_%s_DEFINED 1\n", ok, err);
+            fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
+            fprintf(out, "#endif\n");
+        }
         fprintf(out, "/* --- end result support --- */\n\n");
     }
 
@@ -4122,6 +4180,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     free(rewritten_try);
     free(rewritten_try_bind);
     free(rewritten_res_ctor);
+    free(rewritten_infer2);
     free(rewritten_res);
     free(rewritten_opt_ctor);
     free(rewritten_opt);
@@ -4185,14 +4244,18 @@ static const char* cc__parse_stubs =
     "#define __CC_OPTIONAL(T) __CCOptionalGeneric\n"
     "#define __CC_RESULT(T, E) __CCResultGeneric\n"
     /* Typed optional constructors for rewriting cc_some_CCOptional_T -> __CC_OPTIONAL_SOME
-       These use CCOptional_##T to match the inline struct definitions.
-       Using variadic (...) to handle compound literals with commas like (Point){x, y}.
-       Mark as defined to prevent header from overriding. */
+       These need to be function calls (not compound literals) so TCC records them in the AST.
+       Using comma expressions to type-check the value while returning through the function. */
     "#ifndef __CC_TYPED_OPT_CTORS_DEFINED\n"
     "#define __CC_TYPED_OPT_CTORS_DEFINED\n"
-    "#define __CC_OPTIONAL_SOME(T, ...) ((CCOptional_##T){.has = 1, .u.value = (__VA_ARGS__)})\n"
-    "#define __CC_OPTIONAL_NONE(T) ((CCOptional_##T){.has = 0})\n"
+    "#define __CC_OPTIONAL_SOME(T, ...) __cc_optional_some_impl(__VA_ARGS__)\n"
+    "#define __CC_OPTIONAL_NONE(T) __cc_optional_none_impl()\n"
     "#endif\n"
+    "/* Helper functions - extern (not inline) so TCC records the calls */\n"
+    "__CCOptionalGeneric __cc_optional_some_impl(long v);\n"
+    "__CCOptionalGeneric __cc_optional_none_impl(void);\n"
+    "__CCResultGeneric __cc_result_ok_impl(long v);\n"
+    "__CCResultGeneric __cc_result_err_impl(int kind, const char* msg);\n"
     /* Common optional types (direct names, for explicit CCOptional_T usage) */
     "typedef __CCOptionalGeneric CCOptional_int;\n"
     "typedef __CCOptionalGeneric CCOptional_bool;\n"
@@ -4299,7 +4362,25 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 3: Rewrite T!>(E) -> CCResult_T_E */
+    /* Pass 3: Infer result constructor types from enclosing function:
+       cc_ok(x) -> cc_ok_CCResult_T_E(x) when inside a function returning T!E
+       This must run BEFORE type rewrite so we can still detect T!E syntax. */
+    buffers[buf_idx] = cc__rewrite_inferred_result_ctors(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 3b: Rewrite cc_ok_CCResult_T_E(v) -> __cc_result_ok_impl(v) */
+    buffers[buf_idx] = cc__rewrite_result_constructors(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 3c: Rewrite T!>(E) -> CCResult_T_E */
     buffers[buf_idx] = cc__rewrite_result_types(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];

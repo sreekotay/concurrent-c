@@ -64,9 +64,7 @@ Notes:
 
 Some functions use `__attribute__((no_sanitize("thread")))` to suppress TSan checking. This is safe only when:
 1. The function only accesses thread-local memory (e.g., local stack variables)
-2. There are no real data races (suppression only hides false positives)
-
-To validate a suppression is safe:
+2. There are no real data races (suppression only hides false positives)To validate a suppression is safe:
 1. Create a stress test that calls the suppressed function concurrently from multiple threads/fibers
 2. Run with TSan: `CC=clang CFLAGS="-fsanitize=thread" ./cc/bin/ccc run <test>`
 3. If TSan reports races, investigate: either the suppression is masking a real race, or the suppression mechanism needs adjustment
