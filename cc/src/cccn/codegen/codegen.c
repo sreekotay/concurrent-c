@@ -535,7 +535,8 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                     fprintf(out, "%s %s", emit_type, node->as.var.name);
                 }
             } else {
-                fprintf(out, "auto %s", node->as.var.name);
+                /* No type info - use int as fallback (C89 implicit int) */
+                fprintf(out, "int %s", node->as.var.name);
             }
             if (node->as.var.init) {
                 fprintf(out, " = ");
@@ -949,6 +950,28 @@ int cc_emit_c(const CCNFile* file, FILE* out) {
                  strncmp(item->as.var.name, "CCOptional_", 11) == 0 ||
                  strncmp(item->as.var.name, "CCResult_", 9) == 0 ||
                  strncmp(item->as.var.name, "__CC", 4) == 0)) {
+                continue;
+            }
+            
+            /* Skip any declaration with <anonymous> type (TCC internal representation) */
+            if (item->kind == CCN_VAR_DECL && item->as.var.type_node &&
+                item->as.var.type_node->kind == CCN_TYPE_NAME &&
+                item->as.var.type_node->as.type_name.name &&
+                strstr(item->as.var.type_node->as.type_name.name, "<anonymous>")) {
+                continue;
+            }
+            
+            /* Skip typedefs with <anonymous> (handled by struct emission) */
+            if (item->kind == CCN_TYPEDEF && item->as.typedef_decl.type_str &&
+                strstr(item->as.typedef_decl.type_str, "<anonymous>")) {
+                continue;
+            }
+            
+            /* Skip functions with <anonymous> return type (can't emit valid C) */
+            if (item->kind == CCN_FUNC_DECL && item->as.func.return_type &&
+                item->as.func.return_type->kind == CCN_TYPE_NAME &&
+                item->as.func.return_type->as.type_name.name &&
+                strstr(item->as.func.return_type->as.type_name.name, "<anonymous>")) {
                 continue;
             }
             
