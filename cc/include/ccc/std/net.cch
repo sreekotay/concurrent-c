@@ -167,31 +167,4 @@ CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena);
 /* Parse string to IP address */
 CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
 
-/* ============================================================================
- * Short Name Aliases (when CC_ENABLE_SHORT_NAMES defined)
- * ============================================================================ */
-
-#ifdef CC_ENABLE_SHORT_NAMES
-typedef CCNetError NetError;
-typedef CCSocket Socket;
-typedef CCListener Listener;
-typedef CCUdpSocket UdpSocket;
-typedef CCUdpPacket UdpPacket;
-typedef CCIpAddr IpAddr;
-typedef CCShutdownMode ShutdownMode;
-
-#define tcp_connect(addr, len, err) cc_tcp_connect(addr, len, err)
-#define tcp_listen(addr, len, err) cc_tcp_listen(addr, len, err)
-#define dns_lookup(arena, host, len, err) cc_dns_lookup(arena, host, len, err)
-
-/* UFCS-style method macros */
-#define Socket_read(s, a, n, e) cc_socket_read(s, a, n, e)
-#define Socket_write(s, d, l, e) cc_socket_write(s, d, l, e)
-#define Socket_close(s) cc_socket_close(s)
-#define Socket_shutdown(s, m, e) cc_socket_shutdown(s, m, e)
-
-#define Listener_accept(ln, e) cc_listener_accept(ln, e)
-#define Listener_close(ln) cc_listener_close(ln)
-#endif /* CC_ENABLE_SHORT_NAMES */
-
 #endif /* CC_STD_NET_H */

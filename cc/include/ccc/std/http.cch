@@ -10,24 +10,10 @@
 #ifndef CC_STD_HTTP_H
 #define CC_STD_HTTP_H
 
-
+#include <ccc/cc_compat.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include "net.cch"  /* For CCNetError in CCHttpErrorInfo */
-
-#include <stdint.h>
-#include <stddef.h>
-
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
 
 /* ============================================================================
  * Error Types
@@ -165,30 +151,6 @@ typedef struct CCParsedUrl {
 
 /* Parse URL into components (all slices point into original URL) */
 CCParsedUrl cc_url_parse(const char* url, size_t url_len, CCHttpError* out_err);
-
-/* ============================================================================
- * Short Name Aliases
- * ============================================================================ */
-
-#ifdef CC_ENABLE_SHORT_NAMES
-typedef CCHttpError HttpError;
-typedef CCHttpErrorInfo HttpErrorInfo;
-typedef CCHttpResponse HttpResponse;
-typedef CCHttpRequest HttpRequest;
-typedef CCHttpClientConfig HttpClientConfig;
-typedef CCHttpClient HttpClient;
-typedef CCParsedUrl ParsedUrl;
-
-#define http_get(arena, url, len, err) cc_http_get(arena, url, len, err)
-#define http_post(arena, url, ulen, body, blen, err) cc_http_post(arena, url, ulen, body, blen, err)
-#define http_client_new(cfg) cc_http_client_new(cfg)
-#define http_client_default() cc_http_client_default()
-#define url_parse(url, len, err) cc_url_parse(url, len, err)
-
-#define HttpClient_get(c, a, u, l, e) cc_http_client_get(c, a, u, l, e)
-#define HttpClient_post(c, a, u, ul, b, bl, e) cc_http_client_post(c, a, u, ul, b, bl, e)
-#define HttpClient_request(c, a, r, e) cc_http_client_request(c, a, r, e)
-#endif /* CC_ENABLE_SHORT_NAMES */
 
 /* ============================================================================
  * Implementation (header-only)

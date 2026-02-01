@@ -43,16 +43,4 @@ CCSlice cc_dns_lookup_family(CCArena* arena, const char* hostname, size_t hostna
 /* Reverse lookup: IP address to hostname */
 CCSlice cc_dns_reverse(CCArena* arena, const CCIpAddr* addr, CCNetError* out_err);
 
-/* ============================================================================
- * Short Name Aliases
- * ============================================================================ */
-
-#ifdef CC_ENABLE_SHORT_NAMES
-typedef CCDnsFamily DnsFamily;
-
-#define dns_lookup(arena, host, len, err) cc_dns_lookup(arena, host, len, err)
-#define dns_lookup_family(arena, host, len, fam, err) cc_dns_lookup_family(arena, host, len, fam, err)
-#define dns_reverse(arena, addr, err) cc_dns_reverse(arena, addr, err)
-#endif /* CC_ENABLE_SHORT_NAMES */
-
 #endif /* CC_STD_DNS_H */

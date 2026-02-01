@@ -8,23 +8,10 @@
 #ifndef CC_STD_TLS_H
 #define CC_STD_TLS_H
 
+#include <ccc/cc_compat.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include "net.cch"
-
-#include <stdint.h>
-#include <stddef.h>
-
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
 
 /* ============================================================================
  * TLS Configuration
@@ -160,25 +147,5 @@ CCTlsPrivateKey* cc_tls_load_private_key(CCArena* arena, const char* path, size_
 /* Load trust anchors (CA certs) from PEM file */
 typedef struct CCTlsTrustAnchors CCTlsTrustAnchors;
 CCTlsTrustAnchors* cc_tls_load_trust_anchors(CCArena* arena, const char* path, size_t path_len, CCNetError* out_err);
-
-/* ============================================================================
- * Short Name Aliases
- * ============================================================================ */
-
-#ifdef CC_ENABLE_SHORT_NAMES
-typedef CCTlsClientConfig TlsClientConfig;
-typedef CCTlsServerConfig TlsServerConfig;
-typedef CCTlsConn TlsConn;
-typedef CCTlsInfo TlsInfo;
-
-#define tls_connect(sock, cfg, buf, len, arena, err) cc_tls_connect(sock, cfg, buf, len, arena, err)
-#define tls_connect_addr(addr, len, cfg, arena, err) cc_tls_connect_addr(addr, len, cfg, arena, err)
-#define tls_accept(sock, cfg, buf, len, arena, err) cc_tls_accept(sock, cfg, buf, len, arena, err)
-
-#define TlsConn_read(c, a, n, e) cc_tls_read(c, a, n, e)
-#define TlsConn_write(c, d, l, e) cc_tls_write(c, d, l, e)
-#define TlsConn_close(c) cc_tls_close(c)
-#define TlsConn_info(c) cc_tls_info(c)
-#endif /* CC_ENABLE_SHORT_NAMES */
 
 #endif /* CC_STD_TLS_H */

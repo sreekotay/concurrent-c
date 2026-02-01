@@ -1,27 +1,10 @@
 /*
- * Header-only string and slice helpers for Concurrent-C stdlib (phase 1).
- *
- * C ABI uses prefixed names (CCString, cc_string_*). Short aliases are
- * provided only via std/prelude.h when CC_ENABLE_SHORT_NAMES is defined.
+ * Header-only string and slice helpers for Concurrent-C stdlib.
  */
 #ifndef CC_STD_STRING_H
 #define CC_STD_STRING_H
 
-#include <stddef.h>
-#include <stdint.h>
-#ifndef __has_include
-#define __has_include(x) 0
-#endif
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
+#include <ccc/cc_compat.cch>
 #include <ctype.h>
 #include <string.h>
 #include <stdlib.h>

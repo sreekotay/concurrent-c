@@ -5,23 +5,10 @@
 #ifndef CC_STD_IO_H
 #define CC_STD_IO_H
 
-#include <stddef.h>
+#include <ccc/cc_compat.cch>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
-#ifndef __has_include
-#define __has_include(x) 0
-#endif
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
 #include <limits.h>
 #include <stdlib.h>
 
@@ -60,24 +47,18 @@ CC_DECL_RESULT_SPEC(CCResult_CCOptional_CCSlice_CCIoError, CCOptional_CCSlice, C
 
 // Open a file (mode like "r", "w", "a"). Returns 0 on success.
 int cc_file_open(CCFile *file, const char *path, const char *mode);
-#ifdef CC_ENABLE_ASYNC
 int cc_file_open_async(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h);
 int cc_file_open_async_deadline(CCExec* ex, CCFile *file, const char *path, const char *mode, CCAsyncHandle* h, const CCDeadline* deadline);
-#endif
 
 // Close file (ignores errors).
 void cc_file_close(CCFile *file);
-#ifdef CC_ENABLE_ASYNC
 int cc_file_close_async(CCExec* ex, CCFile *file, CCAsyncHandle* h);
 int cc_file_close_async_deadline(CCExec* ex, CCFile *file, CCAsyncHandle* h, const CCDeadline* deadline);
-#endif
 
 // Read entire file into arena; returns slice view. On error, is_err is set.
 CCResult_CCSlice_CCIoError cc_file_read_all(CCFile *file, CCArena *arena);
-#ifdef CC_ENABLE_ASYNC
 int cc_file_read_all_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h);
 int cc_file_read_all_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
-#endif
 
 // Read up to n bytes. Returns:
 // - Ok(true) = got data (stored in *out)
@@ -106,10 +87,8 @@ static inline CCResult_bool_CCIoError cc_file_read(CCFile *file, CCArena *arena,
     return cc_ok_CCResult_bool_CCIoError(true);
 }
 
-#ifdef CC_ENABLE_ASYNC
 int cc_file_read_async(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h);
 int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t n, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
-#endif
 
 // Read one line (includes delimiter). Returns:
 // - Ok(true) = got line (stored in *out)
@@ -139,17 +118,13 @@ static inline CCResult_bool_CCIoError cc_file_read_line(CCFile *file, CCArena *a
     return cc_ok_CCResult_bool_CCIoError(true);
 }
 
-#ifdef CC_ENABLE_ASYNC
 int cc_file_read_line_async(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h);
 int cc_file_read_line_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CCSlice* out, CCAsyncHandle* h, const CCDeadline* deadline);
-#endif
 
 // Write all bytes; returns number of bytes written or IoError.
 CCResult_size_t_CCIoError cc_file_write(CCFile *file, CCSlice data);
-#ifdef CC_ENABLE_ASYNC
 int cc_file_write_async(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h);
 int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t* out_written, CCAsyncHandle* h, const CCDeadline* deadline);
-#endif
 
 // Read into caller-provided buffer (no allocation). Returns:
 // - Ok(true) = got data (bytes read stored in *out)
@@ -230,14 +205,6 @@ static inline CCResult_size_t_CCIoError cc_std_out_write_string(const CCString* 
 static inline CCResult_size_t_CCIoError cc_std_err_write_string(const CCString* s) {
     return cc_std_err_write(cc_string_as_slice(s));
 }
-
-// Short-name UFCS helpers when CC_ENABLE_SHORT_NAMES is defined.
-#ifdef CC_ENABLE_SHORT_NAMES
-static inline CCResult_size_t_CCIoError std_out_write(CCSlice data) { return cc_std_out_write(data); }
-static inline CCResult_size_t_CCIoError std_out_write_string(const CCString* s) { return cc_std_out_write(cc_string_as_slice(s)); }
-static inline CCResult_size_t_CCIoError std_err_write(CCSlice data) { return cc_std_err_write(data); }
-static inline CCResult_size_t_CCIoError std_err_write_string(const CCString* s) { return cc_std_err_write(cc_string_as_slice(s)); }
-#endif
 
 // ------------------------- Path helpers ------------------------------------
 

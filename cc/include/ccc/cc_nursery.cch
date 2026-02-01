@@ -6,19 +6,7 @@
 #ifndef CC_NURSERY_H
 #define CC_NURSERY_H
 
-#ifndef __has_include
-#define __has_include(x) 0
-#endif
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
+#include <ccc/cc_compat.cch>
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_chan_handle.cch>

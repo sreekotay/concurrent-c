@@ -1,30 +1,11 @@
 /*
  * Process spawning and management for Concurrent-C stdlib.
  * Cross-platform: POSIX (macOS, Linux, BSD) and Windows.
- *
- * C ABI uses prefixed names (cc_process_*).
- * Short aliases available via CC_ENABLE_SHORT_NAMES.
  */
 #ifndef CC_STD_PROCESS_H
 #define CC_STD_PROCESS_H
 
-#include <stddef.h>
-#include <stdint.h>
-
-#ifndef __has_include
-#define __has_include(x) 0
-#endif
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
-
+#include <ccc/cc_compat.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
@@ -264,29 +245,5 @@ CCResultBoolIoError cc_env_set(const char* name, const char* value);
  * Unset environment variable for current process.
  */
 CCResultBoolIoError cc_env_unset(const char* name);
-
-/* ============================================================================
- * Short Names (opt-in via CC_ENABLE_SHORT_NAMES)
- * ============================================================================ */
-
-#ifdef CC_ENABLE_SHORT_NAMES
-#define Process CCProcess
-#define ProcessStatus CCProcessStatus
-#define ProcessConfig CCProcessConfig
-#define ProcessOutput CCProcessOutput
-
-static inline CCResultProcessIoError process_spawn(const CCProcessConfig* c) { return cc_process_spawn(c); }
-static inline CCResultProcessIoError process_spawn_simple(const char* p, const char** a) { return cc_process_spawn_simple(p, a); }
-static inline CCResultProcessIoError process_spawn_shell(const char* c) { return cc_process_spawn_shell(c); }
-static inline CCResultStatusIoError process_wait(CCProcess* p) { return cc_process_wait(p); }
-static inline CCResultStatusIoError process_try_wait(CCProcess* p) { return cc_process_try_wait(p); }
-static inline CCResultBoolIoError process_kill(CCProcess* p, int s) { return cc_process_kill(p, s); }
-static inline int process_id(const CCProcess* p) { return cc_process_id(p); }
-static inline CCResultProcessOutputIoError process_run(CCArena* a, const char* p, const char** args) { return cc_process_run(a, p, args); }
-static inline CCResultProcessOutputIoError process_run_shell(CCArena* a, const char* c) { return cc_process_run_shell(a, c); }
-static inline CCSlice env_get(CCArena* a, const char* n) { return cc_env_get(a, n); }
-static inline CCResultBoolIoError env_set(const char* n, const char* v) { return cc_env_set(n, v); }
-static inline CCResultBoolIoError env_unset(const char* n) { return cc_env_unset(n); }
-#endif
 
 #endif /* CC_STD_PROCESS_H */

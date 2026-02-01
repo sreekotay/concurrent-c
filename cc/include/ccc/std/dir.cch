@@ -1,30 +1,11 @@
 /*
  * Directory and filesystem operations for Concurrent-C stdlib.
  * Cross-platform: POSIX (macOS, Linux, BSD) and Windows.
- *
- * C ABI uses prefixed names (cc_dir_*, cc_glob_*).
- * Short aliases available via CC_ENABLE_SHORT_NAMES.
  */
 #ifndef CC_STD_DIR_H
 #define CC_STD_DIR_H
 
-#include <stddef.h>
-#include <stdint.h>
-
-#ifndef __has_include
-#define __has_include(x) 0
-#endif
-#if __has_include(<stdbool.h>)
-#include <stdbool.h>
-#else
-#ifndef __bool_true_false_are_defined
-typedef int bool;
-#define true 1
-#define false 0
-#define __bool_true_false_are_defined 1
-#endif
-#endif
-
+#include <ccc/cc_compat.cch>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
@@ -192,34 +173,5 @@ CCGlobResult cc_glob(CCArena* arena, const char* pattern);
  * Supports: * (any chars), ? (single char)
  */
 bool cc_glob_match(const char* pattern, const char* name);
-
-/* ============================================================================
- * Short Names (opt-in via CC_ENABLE_SHORT_NAMES)
- * ============================================================================ */
-
-#ifdef CC_ENABLE_SHORT_NAMES
-#define DirEntry CCDirEntry
-#define DirIter CCDirIter
-#define DirEntryType CCDirEntryType
-#define DIRENT_FILE CC_DIRENT_FILE
-#define DIRENT_DIR CC_DIRENT_DIR
-#define DIRENT_SYMLINK CC_DIRENT_SYMLINK
-#define DIRENT_OTHER CC_DIRENT_OTHER
-
-static inline CCResultDirIterIoError dir_open(CCArena* a, const char* p) { return cc_dir_open(a, p); }
-static inline CCResultDirEntryIoError dir_next(CCDirIter* i, CCArena* a) { return cc_dir_next(i, a); }
-static inline void dir_close(CCDirIter* i) { cc_dir_close(i); }
-static inline bool path_exists(const char* p) { return cc_path_exists(p); }
-static inline bool path_is_dir(const char* p) { return cc_path_is_dir(p); }
-static inline bool path_is_file(const char* p) { return cc_path_is_file(p); }
-static inline CCResultBoolIoError dir_create(const char* p) { return cc_dir_create(p); }
-static inline CCResultBoolIoError dir_create_all(const char* p) { return cc_dir_create_all(p); }
-static inline CCResultBoolIoError dir_remove(const char* p) { return cc_dir_remove(p); }
-static inline CCResultBoolIoError file_remove(const char* p) { return cc_file_remove(p); }
-static inline CCSlice dir_cwd(CCArena* a) { return cc_dir_cwd(a); }
-static inline CCResultBoolIoError dir_chdir(const char* p) { return cc_dir_chdir(p); }
-static inline CCGlobResult glob(CCArena* a, const char* p) { return cc_glob(a, p); }
-static inline bool glob_match(const char* p, const char* n) { return cc_glob_match(p, n); }
-#endif
 
 #endif /* CC_STD_DIR_H */
