@@ -20,6 +20,8 @@ typedef struct {
     int in_block_comment;
     int in_str;
     int in_chr;
+    int line;  /* Current line (1-based), updated if track_pos is true */
+    int col;   /* Current column (1-based), updated if track_pos is true */
 } CCScannerState;
 
 /* Initialize scanner state */
@@ -28,12 +30,15 @@ static void cc_scanner_init(CCScannerState* s) {
     s->in_block_comment = 0;
     s->in_str = 0;
     s->in_chr = 0;
+    s->line = 1;
+    s->col = 1;
 }
 
 /* Process current character and advance past non-code (comments, strings).
  * Returns 1 if we're in a comment/string (caller should continue to next char).
  * Returns 0 if we're at actual code (caller should process the character).
  * Updates *pos to skip multi-char sequences.
+ * Updates s->line and s->col to track position.
  */
 static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n, size_t* pos) {
     size_t i = *pos;
@@ -41,6 +46,9 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     
     char c = src[i];
     char c2 = (i + 1 < n) ? src[i + 1] : 0;
+    
+    /* Track newlines for position */
+    if (c == '\n') { s->line++; s->col = 1; } else { s->col++; }
     
     /* Inside line comment */
     if (s->in_line_comment) {
@@ -54,6 +62,7 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
         if (c == '*' && c2 == '/') {
             s->in_block_comment = 0;
             *pos += 2;
+            s->col++;  /* Account for '/' */
         } else {
             (*pos)++;
         }
@@ -64,6 +73,7 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     if (s->in_str) {
         if (c == '\\' && i + 1 < n) {
             *pos += 2;  /* Skip escape sequence */
+            s->col++;   /* Account for escaped char */
         } else {
             if (c == '"') s->in_str = 0;
             (*pos)++;
@@ -75,6 +85,7 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     if (s->in_chr) {
         if (c == '\\' && i + 1 < n) {
             *pos += 2;  /* Skip escape sequence */
+            s->col++;   /* Account for escaped char */
         } else {
             if (c == '\'') s->in_chr = 0;
             (*pos)++;
@@ -83,12 +94,14 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
     }
     
     /* Check for start of comment/string */
-    if (c == '/' && c2 == '/') { s->in_line_comment = 1; *pos += 2; return 1; }
-    if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; return 1; }
+    if (c == '/' && c2 == '/') { s->in_line_comment = 1; *pos += 2; s->col++; return 1; }
+    if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; s->col++; return 1; }
     if (c == '"') { s->in_str = 1; (*pos)++; return 1; }
     if (c == '\'') { s->in_chr = 1; (*pos)++; return 1; }
     
-    /* At actual code */
+    /* At actual code - undo the col++ since caller will handle this char */
+    if (c != '\n') s->col--;
+    
     return 0;
 }
 
