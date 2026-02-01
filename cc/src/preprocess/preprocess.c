@@ -4158,6 +4158,9 @@ static const char* cc__parse_stubs =
     /* Key macros: rewritten T? -> __CC_OPTIONAL(T), T!>(E) -> __CC_RESULT(T,E) */
     "#define __CC_OPTIONAL(T) __CCOptionalGeneric\n"
     "#define __CC_RESULT(T, E) __CCResultGeneric\n"
+    /* Typed optional constructors for rewriting cc_some_CCOptional_T -> __CC_OPTIONAL_SOME */
+    "#define __CC_OPTIONAL_SOME(T, v) ((void)(v), (__CCOptionalGeneric){.has = 1})\n"
+    "#define __CC_OPTIONAL_NONE(T) ((__CCOptionalGeneric){.has = 0})\n"
     /* Common optional types (direct names, for explicit CCOptional_T usage) */
     "typedef __CCOptionalGeneric CCOptional_int;\n"
     "typedef __CCOptionalGeneric CCOptional_bool;\n"
@@ -4182,17 +4185,19 @@ static const char* cc__parse_stubs =
     "#define __CC_ERROR_HELPER_DEFINED\n"
     "static inline CCError cc_error(int k, const char* m) { CCError e = {k, m}; return e; }\n"
     "#endif\n"
-    /* Result constructors - inline functions to preserve args in AST */
+    /* Result constructors - variadic macros to accept any type.
+       We use a comma expression to evaluate the arg (so it appears in AST) then return generic.
+       cccn handles the real types in codegen. */
     "#ifndef __CC_RESULT_CTORS_DEFINED\n"
     "#define __CC_RESULT_CTORS_DEFINED\n"
-    "static inline __CCResultGeneric cc_ok(long v) { __CCResultGeneric r; r.ok = 1; r.u.value = v; return r; }\n"
-    "static inline __CCResultGeneric cc_err(int k, const char* m) { __CCResultGeneric r; r.ok = 0; r.u.error.kind = k; r.u.error.message = m; return r; }\n"
+    "#define cc_ok(v) ((void)(v), (__CCResultGeneric){.ok = 1})\n"
+    "#define cc_err(...) ((__CCResultGeneric){.ok = 0})\n"
     "#endif\n"
-    /* Optional constructors */
+    /* Optional constructors - same approach */
     "#ifndef __CC_OPT_CTORS_DEFINED\n"
     "#define __CC_OPT_CTORS_DEFINED\n"
-    "static inline __CCOptionalGeneric cc_some(long v) { __CCOptionalGeneric o; o.has = 1; o.u._scalar = v; return o; }\n"
-    "static inline __CCOptionalGeneric cc_none(void) { __CCOptionalGeneric o; o.has = 0; o.u._scalar = 0; return o; }\n"
+    "#define cc_some(v) ((void)(v), (__CCOptionalGeneric){.has = 1})\n"
+    "#define cc_none() ((__CCOptionalGeneric){.has = 0})\n"
     "#endif\n"
     /* Accessor macros */
     "#define cc_is_some(opt) ((opt).has)\n"
@@ -4227,7 +4232,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     /* Chain of preprocessing passes - each takes previous output */
     const char* cur = input;
     size_t cur_len = input_len;
-    char* buffers[13] = {0};
+    char* buffers[16] = {0};
     int buf_idx = 0;
     
     /* Pass 1: Rewrite channel handle types T[~N >] -> CCChanTx, T[~N <] -> CCChanRx */
@@ -4240,6 +4245,14 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     
     /* Pass 2: Rewrite T? -> CCOptional_T */
     buffers[buf_idx] = cc__rewrite_optional_types(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 2b: Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v) */
+    buffers[buf_idx] = cc__rewrite_optional_constructors(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);
