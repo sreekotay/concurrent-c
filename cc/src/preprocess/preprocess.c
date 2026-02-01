@@ -838,7 +838,14 @@ static void cc__add_optional_type(const char* mangled) {
             return; /* Already have this type */
         }
     }
-    if (cc__optional_type_count >= 64) return;
+    if (cc__optional_type_count >= 64) {
+        static int warned = 0;
+        if (!warned) {
+            fprintf(stderr, "warning: too many optional types (limit 64), some may be ignored\n");
+            warned = 1;
+        }
+        return;
+    }
     snprintf(cc__optional_types[cc__optional_type_count++], 128, "%s", mangled);
 }
 
@@ -1850,7 +1857,14 @@ static void cc__add_result_type(const char* ok, size_t ok_len, const char* err, 
             return; /* Already have this type */
         }
     }
-    if (cc__result_type_count >= sizeof(cc__result_types)/sizeof(cc__result_types[0])) return;
+    if (cc__result_type_count >= sizeof(cc__result_types)/sizeof(cc__result_types[0])) {
+        static int warned = 0;
+        if (!warned) {
+            fprintf(stderr, "warning: too many result types (limit 64), some may be ignored\n");
+            warned = 1;
+        }
+        return;
+    }
     CCResultTypePair* p = &cc__result_types[cc__result_type_count++];
     if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
     if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
