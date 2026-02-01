@@ -1,6 +1,7 @@
 #include "cccn/passes/passes.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /*
  * UFCS Lowering Pass
@@ -15,6 +16,54 @@
 static CCNNode* lower_node(CCNNode* node);
 static void lower_list(CCNNodeList* list);
 
+/* Extract type name from TCC type string.
+ * "struct Point *" -> "Point"
+ * "struct Point"   -> "Point"
+ * "Point *"        -> "Point"
+ * "int *"          -> NULL (primitives not UFCS'd)
+ */
+static const char* extract_type_name(const char* type_str) {
+    if (!type_str) return NULL;
+    
+    /* Skip "struct " prefix */
+    const char* p = type_str;
+    if (strncmp(p, "struct ", 7) == 0) p += 7;
+    else if (strncmp(p, "union ", 6) == 0) p += 6;
+    
+    /* Skip leading whitespace */
+    while (*p == ' ') p++;
+    
+    /* Find end of type name (stop at space or *) */
+    const char* end = p;
+    while (*end && *end != ' ' && *end != '*') end++;
+    
+    if (end == p) return NULL;
+    
+    /* Check for primitive types - don't UFCS these */
+    size_t len = end - p;
+    if (len <= 8 && (
+        strncmp(p, "int", len) == 0 ||
+        strncmp(p, "char", len) == 0 ||
+        strncmp(p, "void", len) == 0 ||
+        strncmp(p, "float", len) == 0 ||
+        strncmp(p, "double", len) == 0 ||
+        strncmp(p, "long", len) == 0 ||
+        strncmp(p, "short", len) == 0)) {
+        return NULL;
+    }
+    
+    /* Return owned copy */
+    char* name = malloc(len + 1);
+    memcpy(name, p, len);
+    name[len] = '\0';
+    return name;
+}
+
+/* Check if type string indicates a pointer type */
+static int is_pointer_type(const char* type_str) {
+    return type_str && strchr(type_str, '*') != NULL;
+}
+
 /* Convert a method call to a regular function call */
 static CCNNode* lower_method_to_call(CCNNode* method) {
     if (!method || method->kind != CCN_EXPR_METHOD) return method;
@@ -26,14 +75,36 @@ static CCNNode* lower_method_to_call(CCNNode* method) {
     call->span = method->span;
     call->type = method->type;
     
-    /* Callee is the method name as an identifier */
-    call->as.expr_call.callee = ccn_make_ident(
-        method->as.expr_method.method,
-        method->span
-    );
+    /* Build function name: TypeName_method or just method */
+    const char* type_name = extract_type_name(method->as.expr_method.receiver_type);
+    const char* method_name = method->as.expr_method.method;
+    
+    if (type_name && method_name) {
+        /* Generate TypeName_method */
+        size_t len = strlen(type_name) + 1 + strlen(method_name) + 1;
+        char* full_name = malloc(len);
+        snprintf(full_name, len, "%s_%s", type_name, method_name);
+        call->as.expr_call.callee = ccn_make_ident(full_name, method->span);
+        free(full_name);
+        free((void*)type_name);
+    } else {
+        /* Just use method name */
+        call->as.expr_call.callee = ccn_make_ident(method_name, method->span);
+    }
     
     /* First argument is the receiver (lowered recursively) */
     CCNNode* receiver = lower_node(method->as.expr_method.receiver);
+    
+    /* If receiver is not already a pointer, take its address */
+    if (receiver && !is_pointer_type(method->as.expr_method.receiver_type)) {
+        CCNNode* addr = ccn_node_new(CCN_EXPR_UNARY);
+        if (addr) {
+            addr->as.expr_unary.op = CCN_OP_ADDR;
+            addr->as.expr_unary.operand = receiver;
+            addr->span = receiver->span;
+            receiver = addr;
+        }
+    }
     
     /* Build new args list: [receiver, ...original_args] */
     CCNNodeList new_args = {0};

@@ -141,6 +141,7 @@ static CCNNode* convert_tcc_node(const CCNodeView* n, const char* file) {
                     node->span = span;
                     node->as.expr_method.method = copy_str(n->aux_s1);  /* method - owned */
                     /* aux_s2 contains receiver type if known */
+                    node->as.expr_method.receiver_type = copy_str(n->aux_s2);
                 }
             } else {
                 node = ccn_node_new(CCN_EXPR_CALL);
@@ -617,6 +618,16 @@ static int link_child_to_parent(
                 CCNNode* last = parent->as.block.stmts.items[parent->as.block.stmts.len - 1];
                 if (last && (last->kind == CCN_EXPR_IDENT || last->kind == CCN_EXPR_INDEX || last->kind == CCN_EXPR_FIELD)) {
                     child->as.expr_index.array = last;
+                    parent->as.block.stmts.len--;
+                }
+            }
+            /* If child is METHOD with no receiver, adopt last stmt */
+            if (child->kind == CCN_EXPR_METHOD && !child->as.expr_method.receiver && parent->as.block.stmts.len > 0) {
+                CCNNode* last = parent->as.block.stmts.items[parent->as.block.stmts.len - 1];
+                if (last && (last->kind == CCN_EXPR_IDENT || last->kind == CCN_EXPR_FIELD ||
+                             last->kind == CCN_EXPR_CALL || last->kind == CCN_EXPR_METHOD ||
+                             last->kind == CCN_EXPR_INDEX)) {
+                    child->as.expr_method.receiver = last;
                     parent->as.block.stmts.len--;
                 }
             }

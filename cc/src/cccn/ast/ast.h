@@ -378,6 +378,7 @@ struct CCNNode {
         struct {
             CCNNode* receiver;
             const char* method;
+            const char* receiver_type;  /* TCC-provided type string for receiver */
             CCNNodeList args;
         } expr_method;
         

@@ -236,6 +236,7 @@ CCNNode* ccn_node_clone(CCNNode* node) {
         case CCN_EXPR_METHOD:
             clone->as.expr_method.receiver = ccn_node_clone(node->as.expr_method.receiver);
             clone->as.expr_method.method = clone_str(node->as.expr_method.method);
+            clone->as.expr_method.receiver_type = clone_str(node->as.expr_method.receiver_type);
             clone->as.expr_method.args = ccn_list_clone(&node->as.expr_method.args);
             break;
             
@@ -403,6 +404,7 @@ void ccn_node_free(CCNNode* node) {
         case CCN_EXPR_METHOD:
             ccn_node_free(node->as.expr_method.receiver);
             free((void*)node->as.expr_method.method);
+            free((void*)node->as.expr_method.receiver_type);
             ccn_list_free(&node->as.expr_method.args);
             break;
             
