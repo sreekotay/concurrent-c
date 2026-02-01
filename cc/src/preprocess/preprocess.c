@@ -4267,6 +4267,14 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     char* buffers[16] = {0};
     int buf_idx = 0;
     
+    /* Pass 0: Rewrite @link("lib") -> marker comments for linker */
+    buffers[buf_idx] = cc__rewrite_link_directives(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
     /* Pass 1: Rewrite channel handle types T[~N >] -> CCChanTx, T[~N <] -> CCChanRx */
     buffers[buf_idx] = cc__rewrite_chan_handle_types(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
