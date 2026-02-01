@@ -12,23 +12,23 @@
 
 /* Test function using CCRes(T, E) macro */
 static inline CCRes(bool, CCIoError) cc_io_test_func(void) {
-    return cc_ok_CCResult_bool_CCIoError(true);
+    return CCRes_ok(bool, CCIoError, true);
 }
 
 /* Test with CCRes(int, CCError) */
 static inline CCRes(int, CCError) cc_io_test_int(int x) {
     if (x < 0) {
-        return cc_err_CCResult_int_CCError(cc_error(CC_ERR_INVALID_ARG, "negative"));
+        return CCRes_err(int, CCError, cc_error(CC_ERR_INVALID_ARG, "negative"));
     }
-    return cc_ok_CCResult_int_CCError(x * 2);
+    return CCRes_ok(int, CCError, x * 2);
 }
 
 /* Test with CCOpt(int) */
 static inline CCOpt(int) cc_io_test_opt(bool has_value) {
     if (has_value) {
-        return cc_some_CCOptional_int(42);
+        return CCOpt_some(int, 42);
     }
-    return cc_none_CCOptional_int();
+    return CCOpt_none(int);
 }
 
 #endif /* CC_IO_TEST_H */

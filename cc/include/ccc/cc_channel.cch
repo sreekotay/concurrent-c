@@ -18,6 +18,7 @@
 #include <ccc/cc_exec.cch>
 #include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_optional.cch>
 #include <ccc/cc_io_error.cch>
 
 typedef struct CCAsyncHandle CCAsyncHandle;
@@ -37,13 +38,13 @@ typedef struct CCChan CCChan;
  * Convert errno-style return to bool !>(CCIoError).
  * 0 → Ok(true), EPIPE → Ok(false), other → Err(e)
  */
-static inline CCResult_bool_CCIoError cc_chan_result_from_errno(int err) {
+static inline CCRes(bool, CCIoError) cc_chan_result_from_errno(int err) {
     if (err == 0) {
-        return cc_ok_CCResult_bool_CCIoError(true);
+        return CCRes_ok(bool, CCIoError, true);
     } else if (err == EPIPE) {
-        return cc_ok_CCResult_bool_CCIoError(false);
+        return CCRes_ok(bool, CCIoError, false);
     } else {
-        return cc_err_CCResult_bool_CCIoError(cc_io_from_errno(err));
+        return CCRes_err(bool, CCIoError, cc_io_from_errno(err));
     }
 }
 
