@@ -58,14 +58,14 @@ cc_atomic_int g_pipeline_error = 0;
  * - On error: @arena cleanup frees the memory
  * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
-CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
+CompressedResultPtr !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
     // Arena sizing: CompressedResult struct + deflate output
     // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
     @arena(res_arena, arena_size) {
         CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
-        if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
+        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         
         res->seq = blk->seq;
         res->is_last = blk->is_last;
@@ -91,7 +91,7 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
                 max_out += (blk->lens.len / sizeof(size_t)) * 10; // Extra space for sync markers
             }
             unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
-            if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
+            if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
             size_t pos = 0;
 
@@ -214,7 +214,7 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
             // Stage 6: Finalize Result
             size_t deflate_len = strm->total_out;
             if (ret != (blk->is_last ? Z_STREAM_END : Z_OK)) {
-                return cc_err(CC_IO_OTHER);
+                return cc_err(cc_io_error(CC_IO_OTHER));
             }
             
             pos += deflate_len;
@@ -229,7 +229,7 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
             size_t dict_len = (g.setdict ? dict.len : 0);
             size_t in_len = dict_len + blk->data.len;
             unsigned char* z_in = arena_alloc(unsigned char, res_arena, in_len);
-            if (!z_in) return cc_err(CC_IO_OUT_OF_MEMORY);
+            if (!z_in) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
             if (dict_len) memcpy(z_in, dict.ptr, dict_len);
             memcpy(z_in + dict_len, blk->data.ptr, blk->data.len);
 
@@ -242,7 +242,7 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
                               z_in, dict_len, dict_len + blk->data.len,
                               &bits, &out, &outsize);
 
-            if (!out) return cc_err(CC_IO_OTHER);
+            if (!out) return cc_err(cc_io_error(CC_IO_OTHER));
 
             // If not last block, append markers to end on a byte boundary, and
             // add a second marker for independent blocks (matches pigz.c logic).
@@ -254,7 +254,7 @@ CompressedResult* !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSl
             unsigned char* out_buf = arena_alloc(unsigned char, res_arena, outsize + extra);
             if (!out_buf) {
                 free(out);
-                return cc_err(CC_IO_OUT_OF_MEMORY);
+                return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
             }
             memcpy(out_buf, out, outsize);
             free(out);
@@ -316,7 +316,7 @@ void* compress_block_task(void* arg) {
         strm_ptr = &strm;
     }
     
-    CompressedResult* !>(CCIoError) res = compress_block(strm_ptr, blk, blk->dict, g.level, g.strategy);
+    CompressedResultPtr !>(CCIoError) res = compress_block(strm_ptr, blk, blk->dict, g.level, g.strategy);
     
     // Cleanup z_stream
     if (strm_ptr) {
@@ -337,29 +337,29 @@ void* compress_block_task(void* arg) {
  * ============================================================================ */
 
 // decompress_block - currently unused, single-threaded decompression in decompress_file
-DecompressedResult* !> (CCIoError) decompress_block(CCSlice member, long seq) {
+DecompressedResultPtr !> (CCIoError) decompress_block(CCSlice member, long seq) {
     size_t est_size = 256 * 1024;
     @arena(res_arena, est_size + 8192) {
         DecompressedResult* res = arena_alloc1(DecompressedResult, res_arena);
-        if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
+        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         res->seq = seq;
 
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
-        if (inflateInit2(&strm, 15 + 16) != Z_OK) return cc_err(CC_IO_OTHER);
+        if (inflateInit2(&strm, 15 + 16) != Z_OK) return cc_err(cc_io_error(CC_IO_OTHER));
         @defer inflateEnd(&strm);
 
         strm.next_in = (Bytef*)member.ptr;
         strm.avail_in = (uInt)member.len;
 
         unsigned char* out_buf = arena_alloc(unsigned char, res_arena, est_size);
-        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
+        if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
         strm.next_out = out_buf;
         strm.avail_out = (uInt)est_size;
 
         int ret = inflate(&strm, Z_FINISH);
-        if (ret != Z_STREAM_END && ret != Z_OK) return cc_err(CC_IO_OTHER);
+        if (ret != Z_STREAM_END && ret != Z_OK) return cc_err(cc_io_error(CC_IO_OTHER));
 
         res->data = cc_slice_from_parts(out_buf, strm.total_out, CC_SLICE_ID_UNTRACKED, est_size);
         res->arena = cc_arena_detach(res_arena);
