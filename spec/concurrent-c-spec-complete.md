@@ -2512,6 +2512,183 @@ Capacity `N` and topology `Topo` are erased at runtime (all use the same impleme
 
 ---
 
+### 6.7 Owned Channels (Resource Pools)
+
+Owned channels extend the channel primitive with **lifecycle management**, enabling the pool pattern where resources are borrowed and returned rather than transferred.
+
+**Key distinction:**
+- **Plain channels** transfer ownership (sender → receiver, one-way flow)
+- **Owned channels** retain ownership (pool owns items, users borrow/return)
+
+#### 6.7.1 Syntax
+
+```c
+T[~N owned {
+    .create = [captures]() => create_expr,
+    .destroy = [](item) => destroy_expr,
+    .reset = [](item) => reset_expr      // optional
+}] pool;
+```
+
+**Components:**
+
+| Part | Syntax | Description |
+|------|--------|-------------|
+| `owned` | Modifier | Marks channel as resource pool |
+| `.create` | Closure | Called when pool is empty and `recv` is called |
+| `.destroy` | Closure | Called for each item when pool scope exits |
+| `.reset` | Closure | Called on each item when returned via `send` (optional) |
+
+**Grammar:**
+
+```
+owned_channel := element_type '[~' capacity 'owned' lifecycle_block ']' identifier
+lifecycle_block := '{' lifecycle_callbacks '}'
+lifecycle_callbacks := lifecycle_callback (',' lifecycle_callback)*
+lifecycle_callback := '.' ('create' | 'destroy' | 'reset') '=' closure_expr
+closure_expr := '[' capture_list? ']' '(' param_list? ')' '=>' expr
+```
+
+#### 6.7.2 Semantics
+
+**Borrow semantics:**
+
+```c
+CCArena[~4 owned {
+    .create = []() => cc_heap_arena(4096),
+    .destroy = [](a) => cc_heap_arena_free(&a),
+    .reset = [](a) => cc_arena_reset(&a)
+}] arena_pool;
+
+// Borrow: recv from pool
+CCArena arena;
+chan_recv(arena_pool, &arena);  // Creates if empty, else returns existing
+
+// Use the resource
+// ...
+
+// Return: send back to pool (auto-reset via .reset)
+chan_send(arena_pool, arena);   // Calls .reset before re-adding to pool
+```
+
+**Rule (create on empty):** When `recv` is called on an empty owned channel and capacity allows, `.create` is invoked to produce a new item. If capacity is reached and all items are borrowed, `recv` blocks until an item is returned.
+
+**Rule (reset on return):** When `send` is called on an owned channel, `.reset` (if provided) is invoked on the item before it is added back to the pool. This enables automatic cleanup between borrows.
+
+**Rule (destroy on scope exit):** When an owned channel goes out of scope, `.destroy` is called for each item in the pool. Items that are currently borrowed are **not** destroyed—the borrower retains responsibility until they return the item or the program terminates.
+
+**Rule (no direction modifier):** Owned channels are implicitly bidirectional (both send and recv). Direction modifiers (`>`, `<`) are not allowed with `owned`.
+
+#### 6.7.3 Lifetime and Ownership
+
+**Rule (pool lifetime):** An owned channel's lifetime is the lexical scope in which it is declared. The pool must outlive all borrows.
+
+**Rule (borrow tracking):** Owned channels do not track which task borrowed which item. Returning a different item than borrowed is allowed (useful for item exchange patterns). The contract is: every `recv` should be paired with a `send` of a compatible item.
+
+**Rule (capacity semantics):** Capacity `N` specifies the maximum number of items the pool can hold. The pool may contain fewer items if some are borrowed or if `.create` hasn't been called enough times.
+
+#### 6.7.4 Error Handling
+
+**Rule (create failure):** If `.create` returns a value indicating failure (e.g., null pointer, zero-initialized struct), the behavior is undefined. `.create` should allocate successfully or abort.
+
+**Rule (owned channel close):** Owned channels can be closed with `chan_close()`. After close:
+- `recv` returns immediately with the closed status
+- Items still in the pool are destroyed via `.destroy`
+- Borrowed items are not affected (borrower still holds them)
+
+#### 6.7.5 Example: Arena Pool
+
+```c
+// Pool of 4 arenas, each 4KB
+CCArena[~4 owned {
+    .create = []() => cc_heap_arena(4096),
+    .destroy = [](a) => cc_heap_arena_free(&a),
+    .reset = [](a) => cc_arena_reset(&a)
+}] arena_pool;
+
+@nursery {
+    // Worker borrows arena, uses it, returns it
+    spawn([arena_pool]() => {
+        CCArena arena;
+        chan_recv(arena_pool, &arena);  // Borrow
+        
+        // Use arena for allocations
+        void* p = cc_arena_alloc(&arena, 100);
+        
+        chan_send(arena_pool, arena);   // Return (auto-reset)
+    });
+}
+// Pool destroyed here: .destroy called for each arena
+```
+
+#### 6.7.6 Example: Connection Pool
+
+```c
+typedef struct { int fd; bool valid; } Connection;
+
+Connection[~10 owned {
+    .create = [host, port]() => {
+        Connection c = { .fd = connect_to(host, port), .valid = true };
+        return c;
+    },
+    .destroy = [](c) => { if (c.valid) close(c.fd); },
+    .reset = [](c) => { /* connections don't need reset */ }
+}] conn_pool;
+
+// Borrow connection
+Connection conn;
+chan_recv(conn_pool, &conn);
+send_request(conn.fd, req);
+Response resp = recv_response(conn.fd);
+chan_send(conn_pool, conn);  // Return to pool
+```
+
+#### 6.7.7 Comparison: Plain vs Owned Channels
+
+| Aspect | Plain Channel | Owned Channel |
+|--------|---------------|---------------|
+| Ownership | Transfers (sender → receiver) | Retained (pool owns) |
+| Item flow | One-way (pass through) | Circular (borrow/return) |
+| Cleanup | Consumer's responsibility | Pool handles via `.destroy` |
+| RAII | Not needed | Required (`.create`/`.destroy`) |
+| Direction | Required (`>` or `<`) | Forbidden (implicit bidirectional) |
+| API | `send`/`recv` | `send`/`recv` (same!) |
+
+**Rule (same API):** Owned channels use the same `chan_send`/`chan_recv` API as plain channels. The semantic difference (transfer vs borrow) is determined by the `owned` modifier at declaration time.
+
+---
+
+### 6.8 Bidirectional Error Propagation
+
+Channels support bidirectional error propagation for pipeline error handling.
+
+**Functions:**
+
+```c
+// Close with error - recv() returns this error instead of EPIPE
+void cc_chan_close_err(CCChan* ch, int err);
+
+// Close rx side with error - send() returns this error
+void cc_chan_rx_close_err(CCChan* ch, int err);
+```
+
+**Use case:** In parallel pipelines, when a worker encounters an error, it can signal both upstream (to stop producers) and downstream (to stop consumers):
+
+```c
+// Worker hits error - propagate BOTH directions:
+cc_chan_close_err(results_tx, err);   // → Writer sees error on recv
+cc_chan_rx_close_err(blocks_rx, err); // → Reader sees error on send!
+return;  // Clean exit, no manual drain needed
+```
+
+**Rule (upstream propagation):** When `cc_chan_rx_close_err(ch, err)` is called, subsequent `send()` operations on that channel return `err` instead of blocking or returning `EPIPE`.
+
+**Rule (downstream propagation):** When `cc_chan_close_err(ch, err)` is called, subsequent `recv()` operations return `err` instead of `EPIPE` after the channel is drained.
+
+**Rule (regular close unchanged):** `cc_chan_close(ch)` continues to work as before—recv returns `EPIPE` when closed and drained.
+
+---
+
 ## 7. Concurrency
 
 Concurrent-C provides a single, unified concurrency primitive: **nurseries**. A nursery is a structured concurrency construct that manages task spawning, automatic error propagation, and cooperative cancellation. For the rare case where OS-level thread control is required, low-level APIs exist but should not be used in typical application code.

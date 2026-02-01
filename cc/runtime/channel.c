@@ -312,6 +312,14 @@ struct CCChan {
     int rv_has_value;
     int rv_recv_waiters;
     
+    /* Owned channel (pool) support */
+    int is_owned;                                    /* 1 = owned channel (pool semantics) */
+    CCClosure0 on_create;                           /* Called when pool empty and recv called */
+    CCClosure1 on_destroy;                          /* Called for each item on channel free */
+    CCClosure1 on_reset;                            /* Called on item when returned via send */
+    size_t items_created;                           /* Number of items created by on_create */
+    size_t max_items;                               /* Maximum items pool can create */
+    
     /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
     CCNursery* autoclose_owner;
     int warned_autoclose_block;
@@ -629,6 +637,47 @@ CCChan* cc_chan_create_sync(size_t capacity, CCChanMode mode, bool allow_send_ta
     return cc_chan_create_internal(capacity, mode, allow_send_take, true, CC_CHAN_TOPO_DEFAULT);
 }
 
+/* Create an owned channel (resource pool) with lifecycle callbacks.
+ * - on_create: CCClosure0 called when recv on empty pool, returns created item (cast to void*)
+ * - on_destroy: CCClosure1 called for each item on channel free, arg0 is item pointer
+ * - on_reset: CCClosure1 called on item when returned via send, arg0 is item pointer (may be NULL)
+ * Returns NULL on error.
+ */
+CCChan* cc_chan_create_owned(size_t capacity,
+                             size_t elem_size,
+                             CCClosure0 on_create,
+                             CCClosure1 on_destroy,
+                             CCClosure1 on_reset) {
+    if (capacity == 0) return NULL;  /* Owned channels require capacity > 0 */
+    CCChan* ch = cc_chan_create_internal(capacity, CC_CHAN_MODE_BLOCK, false, true, CC_CHAN_TOPO_DEFAULT);
+    if (!ch) return NULL;
+    
+    int err = cc_chan_init_elem(ch, elem_size);
+    if (err != 0) {
+        cc_chan_free(ch);
+        return NULL;
+    }
+    
+    ch->is_owned = 1;
+    ch->on_create = on_create;
+    ch->on_destroy = on_destroy;
+    ch->on_reset = on_reset;
+    ch->items_created = 0;
+    ch->max_items = capacity;
+    
+    return ch;
+}
+
+/* Convenience: create owned channel and get bidirectional handle.
+ * Owned channels are implicitly bidirectional (both send and recv). */
+CCChan* cc_chan_create_owned_pool(size_t capacity,
+                                  size_t elem_size,
+                                  CCClosure0 on_create,
+                                  CCClosure1 on_destroy,
+                                  CCClosure1 on_reset) {
+    return cc_chan_create_owned(capacity, elem_size, on_create, on_destroy, on_reset);
+}
+
 void cc_chan_close(CCChan* ch) {
     if (!ch) return;
     pthread_mutex_lock(&ch->mu);
@@ -673,6 +722,36 @@ void cc_chan_rx_close_err(CCChan* ch, int err) {
 
 void cc_chan_free(CCChan* ch) {
     if (!ch) return;
+    
+    /* For owned channels, destroy remaining items in the buffer */
+    if (ch->is_owned && ch->on_destroy.fn && ch->buf && ch->elem_size > 0) {
+        pthread_mutex_lock(&ch->mu);
+        if (ch->use_lockfree) {
+            /* Lock-free path: drain queue and destroy items */
+            void* key = NULL;
+            while (lfds711_queue_bmm_dequeue(&ch->lfqueue_state, NULL, &key) == 1) {
+                size_t slot_idx = (size_t)(uintptr_t)key;
+                char* item_ptr = (char*)ch->buf + (slot_idx * ch->elem_size);
+                ch->on_destroy.fn(ch->on_destroy.env, (intptr_t)item_ptr);
+            }
+        } else {
+            /* Mutex path: iterate buffer and destroy items */
+            size_t count = ch->count;
+            size_t head = ch->head;
+            size_t slots = (ch->cap == 0) ? 1 : ch->cap;
+            for (size_t i = 0; i < count; i++) {
+                size_t idx = (head + i) % slots;
+                char* item_ptr = (char*)ch->buf + (idx * ch->elem_size);
+                ch->on_destroy.fn(ch->on_destroy.env, (intptr_t)item_ptr);
+            }
+        }
+        pthread_mutex_unlock(&ch->mu);
+        
+        /* Call drop on closure environments if provided */
+        if (ch->on_create.drop) ch->on_create.drop(ch->on_create.env);
+        if (ch->on_destroy.drop) ch->on_destroy.drop(ch->on_destroy.env);
+        if (ch->on_reset.drop) ch->on_reset.drop(ch->on_reset.env);
+    }
     
     /* Clean up lock-free queue if used */
     if (ch->use_lockfree && ch->lfqueue_elements) {
@@ -1210,6 +1289,12 @@ static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct 
 
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (!ch || !value || value_size == 0) return EINVAL;
+    
+    /* Owned channel (pool): call on_reset before returning item to pool */
+    if (ch->is_owned && ch->on_reset.fn) {
+        ch->on_reset.fn(ch->on_reset.env, (intptr_t)value);
+    }
+    
     /* Deadline scope: if caller installed a current deadline, use deadline-aware send. */
     if (cc__tls_current_deadline) {
         return cc_chan_deadline_send(ch, value, value_size, cc__tls_current_deadline);
@@ -1390,8 +1475,65 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     return 0;
 }
 
+/* Owned channel (pool) recv: try to get from pool, or create if empty and under capacity */
+static int cc_chan_recv_owned(CCChan* ch, void* out_value, size_t value_size) {
+    if (!ch || !out_value || value_size == 0) return EINVAL;
+    
+    /* First, try non-blocking recv from the pool */
+    int rc = cc_chan_try_recv(ch, out_value, value_size);
+    if (rc == 0) {
+        return 0;  /* Got item from pool */
+    }
+    
+    /* Pool is empty (EAGAIN) or closed (EPIPE) - check if we can create */
+    if (rc == EAGAIN) {
+        pthread_mutex_lock(&ch->mu);
+        
+        /* Double-check: try to dequeue under lock in case of race */
+        if (ch->use_lockfree && ch->elem_size <= sizeof(void*)) {
+            pthread_mutex_unlock(&ch->mu);
+            rc = cc_chan_try_recv(ch, out_value, value_size);
+            if (rc == 0) return 0;
+            pthread_mutex_lock(&ch->mu);
+        } else if (ch->count > 0) {
+            /* Mutex path: there are items, dequeue one */
+            cc_chan_dequeue(ch, out_value);
+            pthread_mutex_unlock(&ch->mu);
+            return 0;
+        }
+        
+        /* Still empty - can we create a new item? */
+        if (ch->items_created < ch->max_items && ch->on_create.fn) {
+            ch->items_created++;
+            pthread_mutex_unlock(&ch->mu);
+            
+            /* Call on_create to get new item - return value is pointer to created value */
+            void* created = ch->on_create.fn(ch->on_create.env);
+            if (created) {
+                memcpy(out_value, created, value_size);
+            }
+            return 0;
+        }
+        
+        pthread_mutex_unlock(&ch->mu);
+        
+        /* At capacity, must wait for item to be returned - use normal blocking recv */
+        return -1;
+    }
+    
+    /* Other error (EPIPE for closed channel) */
+    return rc;
+}
+
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (!ch || !out_value || value_size == 0) return EINVAL;
+    
+    /* Owned channel (pool) special handling */
+    if (ch->is_owned) {
+        int rc = cc_chan_recv_owned(ch, out_value, value_size);
+        if (rc != -1) return rc;  /* -1 means "use normal recv" */
+    }
+    
     /* Deadline scope: if caller installed a current deadline, use deadline-aware recv. */
     if (cc__tls_current_deadline) {
         return cc_chan_deadline_recv(ch, out_value, value_size, cc__tls_current_deadline);
