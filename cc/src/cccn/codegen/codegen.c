@@ -97,6 +97,63 @@ static void emit_generated_section(FILE* out, const char* name) {
     g_emit_state.line = 0;
 }
 
+/* Check if a function should have a forward declaration emitted */
+static int should_emit_forward_decl(CCNNode* func) {
+    if (!func || func->kind != CCN_FUNC_DECL || !func->as.func.name)
+        return 0;
+    
+    /* Skip main and internal functions */
+    if (strcmp(func->as.func.name, "main") == 0 ||
+        strcmp(func->as.func.name, "cc_error") == 0)
+        return 0;
+    
+    /* Skip functions with anonymous struct return types */
+    if (func->as.func.return_type && func->as.func.return_type->kind == CCN_TYPE_NAME &&
+        func->as.func.return_type->as.type_name.name &&
+        strstr(func->as.func.return_type->as.type_name.name, "<anonymous>"))
+        return 0;
+    
+    return 1;
+}
+
+/* Emit forward declarations for non-main functions (needed for closure bodies) */
+static void emit_function_forward_decls(const CCNFile* file, FILE* out) {
+    CCNNode* root = file->root;
+    if (!root || root->kind != CCN_FILE) return;
+    
+    for (int i = 0; i < root->as.file.items.len; i++) {
+        CCNNode* item = root->as.file.items.items[i];
+        if (!should_emit_forward_decl(item)) continue;
+        
+        if (item->as.func.is_static) fprintf(out, "static ");
+        
+        /* Return type */
+        if (item->as.func.return_type && item->as.func.return_type->kind == CCN_TYPE_NAME &&
+            item->as.func.return_type->as.type_name.name) {
+            fprintf(out, "%s ", item->as.func.return_type->as.type_name.name);
+        } else {
+            fprintf(out, "int ");
+        }
+        
+        /* Function name and parameters */
+        fprintf(out, "%s(", item->as.func.name);
+        for (int j = 0; j < item->as.func.params.len; j++) {
+            if (j > 0) fprintf(out, ", ");
+            CCNNode* param = item->as.func.params.items[j];
+            if (param && param->kind == CCN_PARAM && param->as.param.type_node &&
+                param->as.param.type_node->kind == CCN_TYPE_NAME &&
+                param->as.param.type_node->as.type_name.name) {
+                fprintf(out, "%s", param->as.param.type_node->as.type_name.name);
+            } else {
+                fprintf(out, "int");
+            }
+        }
+        if (item->as.func.params.len == 0) fprintf(out, "void");
+        fprintf(out, ");\n");
+    }
+    fprintf(out, "\n");
+}
+
 /* Emit closure definitions (env struct, drop fn, entry fn, make fn) */
 static void emit_closure_defs(const CCNFile* file, FILE* out) {
     if (!file || file->closure_count <= 0 || !file->closure_defs) return;
@@ -853,50 +910,10 @@ int cc_emit_c(const CCNFile* file, FILE* out) {
            by cc_closure.cch which is included via cc_runtime.cch above. */
     }
 
-    /* Before emitting closures, emit forward declarations for static functions.
-       This ensures functions used in closure bodies are declared. */
-    if (file->closure_count > 0) {
-        CCNNode* root = file->root;
-        if (root && root->kind == CCN_FILE) {
-            for (int i = 0; i < root->as.file.items.len; i++) {
-                CCNNode* item = root->as.file.items.items[i];
-                if (item && item->kind == CCN_FUNC_DECL && item->as.func.name &&
-                    strcmp(item->as.func.name, "main") != 0 &&
-                    strcmp(item->as.func.name, "cc_error") != 0) {
-                    /* Skip functions with anonymous struct return types */
-                    if (item->as.func.return_type && item->as.func.return_type->kind == CCN_TYPE_NAME &&
-                        item->as.func.return_type->as.type_name.name &&
-                        strstr(item->as.func.return_type->as.type_name.name, "<anonymous>")) {
-                        continue;
-                    }
-                    /* Emit forward declaration */
-                    if (item->as.func.is_static) fprintf(out, "static ");
-                    if (item->as.func.return_type && item->as.func.return_type->kind == CCN_TYPE_NAME &&
-                        item->as.func.return_type->as.type_name.name) {
-                        fprintf(out, "%s ", item->as.func.return_type->as.type_name.name);
-                    } else {
-                        fprintf(out, "int ");
-                    }
-                    fprintf(out, "%s(", item->as.func.name);
-                    for (int j = 0; j < item->as.func.params.len; j++) {
-                        if (j > 0) fprintf(out, ", ");
-                        CCNNode* param = item->as.func.params.items[j];
-                        if (param && param->kind == CCN_PARAM && param->as.param.type_node &&
-                            param->as.param.type_node->kind == CCN_TYPE_NAME &&
-                            param->as.param.type_node->as.type_name.name) {
-                            fprintf(out, "%s", param->as.param.type_node->as.type_name.name);
-                        } else {
-                            fprintf(out, "int");
-                        }
-                    }
-                    if (item->as.func.params.len == 0) fprintf(out, "void");
-                    fprintf(out, ");\n");
-                }
-            }
-            fprintf(out, "\n");
-        }
-    }
-    
+    /* Forward declarations for functions used in closure bodies */
+    if (file->closure_count > 0)
+        emit_function_forward_decls(file, out);
+
     /* Emit generated closure definitions (in generated section) */
     if (file->closure_count > 0) {
         emit_generated_section(out, "closures");
