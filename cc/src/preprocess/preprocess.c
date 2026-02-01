@@ -827,6 +827,33 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
     cc__normalize_type_alias(out);
 }
 
+/* Collect optional types (T) for typedef generation. */
+static char cc__optional_types[64][128];
+static size_t cc__optional_type_count = 0;
+
+static void cc__add_optional_type(const char* mangled) {
+    /* Check for duplicates */
+    for (size_t i = 0; i < cc__optional_type_count; i++) {
+        if (strcmp(cc__optional_types[i], mangled) == 0) {
+            return; /* Already have this type */
+        }
+    }
+    if (cc__optional_type_count >= 64) return;
+    snprintf(cc__optional_types[cc__optional_type_count++], 128, "%s", mangled);
+}
+
+/* Check if an optional type is a "known" type that's pre-defined in parse stubs */
+static int cc__is_known_optional_type(const char* mangled) {
+    static const char* known[] = {
+        "int", "bool", "char", "size_t", "voidptr", "charptr",
+        "long", "short", "float", "double", "void", NULL
+    };
+    for (int i = 0; known[i]; i++) {
+        if (strcmp(mangled, known[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Rewrite optional types:
    - `T?` -> `CCOptional_T`
    The '?' must immediately follow a type name (no space).
@@ -878,12 +905,14 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
                         cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
                         
                         if (mangled[0]) {
+                            /* Collect for typedef generation */
+                            cc__add_optional_type(mangled);
+                            
                             /* Emit everything up to ty_start */
                             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            /* Emit __CC_OPTIONAL(T) - macro handles parser vs real mode */
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_OPTIONAL(");
+                            /* Emit CCOptional_T - real type name */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCOptional_");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                             last_emit = i + 1; /* skip past '?' */
                         }
                     }
@@ -1940,13 +1969,11 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                             
                             /* Emit everything up to ty_start */
                             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                            /* Emit __CC_RESULT(T, E) macro - parser mode uses generic,
-                               codegen phase emits real type declarations and rewrites. */
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT(");
+                            /* Emit CCResult_T_E - real type name */
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "CCResult_");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
                             cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                             last_emit = j;  /* skip past ')' */
                             
                             /* Register result-typed variable for UFCS.
@@ -2255,6 +2282,44 @@ static char* cc__rewrite_try_binding(const char* src, size_t n) {
     return out;
 }
 
+/* Simple pass: rewrite @defer(err) -> @defer */
+static char* cc__rewrite_defer_syntax(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    
+    while (i + 6 < n) {
+        if (src[i] == '@' && strncmp(src + i + 1, "defer", 5) == 0) {
+            size_t j = i + 6;
+            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
+            if (j < n && src[j] == '(') {
+                /* Found @defer( - skip parenthesized part */
+                size_t k = j + 1;
+                int paren = 1;
+                while (k < n && paren > 0) {
+                    if (src[k] == '(') paren++;
+                    else if (src[k] == ')') paren--;
+                    k++;
+                }
+                if (paren == 0) {
+                    /* Rewrite @defer(...) -> @defer */
+                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
+                    last_emit = k;
+                    i = k;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+    
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Rewrite try expressions: try expr -> cc_try(expr) */
 static char* cc__rewrite_try_exprs(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
@@ -2355,15 +2420,19 @@ static char* cc__rewrite_try_exprs(const char* src, size_t n) {
 static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     
-    /* Pass 1: Collect optional variable names */
-    #define MAX_OPT_VARS 256
-    char* opt_vars[MAX_OPT_VARS];
-    int opt_var_count = 0;
+    /* Pass 1: Collect optional and result variable names */
+    #define MAX_UNWRAP_VARS 256
+    typedef struct {
+        char* name;
+        int is_optional;  /* 1 for Optional, 0 for Result */
+    } UnwrapVar;
+    UnwrapVar vars[MAX_UNWRAP_VARS];
+    int var_count = 0;
     
     size_t i = 0;
     int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
     
-    while (i < n && opt_var_count < MAX_OPT_VARS) {
+    while (i < n && var_count < MAX_UNWRAP_VARS) {
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
         
@@ -2377,54 +2446,108 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for CCOptional_ or __CC_OPTIONAL(T) type declarations */
+        /* Look for Optional types: CCOptional_ or __CC_OPTIONAL( */
         int is_cc_optional = (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0);
         int is_macro_optional = (c == '_' && i + 14 < n && strncmp(src + i, "__CC_OPTIONAL(", 14) == 0);
         
         if (is_cc_optional || is_macro_optional) {
             /* Skip to end of type name */
+            size_t type_end = i;
             if (is_cc_optional) {
-                i += 11;
-                while (i < n && cc_is_ident_char(src[i])) i++;
+                type_end += 11;
+                while (type_end < n && cc_is_ident_char(src[type_end])) type_end++;
             } else {
                 /* __CC_OPTIONAL(T) - skip to closing paren */
-                i += 14;
+                type_end += 14;
                 int paren_depth = 1;
-                while (i < n && paren_depth > 0) {
-                    if (src[i] == '(') paren_depth++;
-                    else if (src[i] == ')') paren_depth--;
-                    i++;
+                while (type_end < n && paren_depth > 0) {
+                    if (src[type_end] == '(') paren_depth++;
+                    else if (src[type_end] == ')') paren_depth--;
+                    type_end++;
                 }
             }
             /* Skip whitespace */
-            while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\n')) i++;
+            size_t ws_end = type_end;
+            while (ws_end < n && (src[ws_end] == ' ' || src[ws_end] == '\t' || src[ws_end] == '\n')) ws_end++;
             /* Check for variable name (not function) */
-            if (i < n && cc_is_ident_start(src[i])) {
-                size_t var_start = i;
-                while (i < n && cc_is_ident_char(src[i])) i++;
-                size_t var_len = i - var_start;
+            if (ws_end < n && cc_is_ident_start(src[ws_end])) {
+                size_t var_start = ws_end;
+                while (ws_end < n && cc_is_ident_char(src[ws_end])) ws_end++;
+                size_t var_len = ws_end - var_start;
                 /* Skip whitespace */
-                while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;
-                /* If followed by '=' or ';', it's a variable declaration */
-                if (i < n && (src[i] == '=' || src[i] == ';' || src[i] == ',')) {
+                size_t after_ws = ws_end;
+                while (after_ws < n && (src[after_ws] == ' ' || src[after_ws] == '\t')) after_ws++;
+                /* If followed by '=' or ';' or ',', it's a variable declaration */
+                if (after_ws < n && (src[after_ws] == '=' || src[after_ws] == ';' || src[after_ws] == ',')) {
                     char* varname = (char*)malloc(var_len + 1);
                     if (varname) {
                         memcpy(varname, src + var_start, var_len);
                         varname[var_len] = 0;
-                        opt_vars[opt_var_count++] = varname;
+                        vars[var_count].name = varname;
+                        vars[var_count].is_optional = 1;
+                        var_count++;
                     }
                 }
             }
+            i = type_end;
+            continue;
+        }
+        
+        /* Look for Result types: CCResult_ or __CC_RESULT( */
+        int is_cc_result = (c == 'C' && i + 8 < n && strncmp(src + i, "CCResult_", 9) == 0);
+        int is_macro_result = (c == '_' && i + 13 < n && strncmp(src + i, "__CC_RESULT(", 12) == 0);
+        
+        if (is_cc_result || is_macro_result) {
+            /* Skip to end of type name */
+            size_t type_end = i;
+            if (is_cc_result) {
+                type_end += 9;
+                /* CCResult_T_E - skip through identifier and underscore and another identifier */
+                while (type_end < n && (cc_is_ident_char(src[type_end]) || src[type_end] == '_')) type_end++;
+            } else {
+                /* __CC_RESULT(T, E) - skip to closing paren */
+                type_end += 12;
+                int paren_depth = 1;
+                while (type_end < n && paren_depth > 0) {
+                    if (src[type_end] == '(') paren_depth++;
+                    else if (src[type_end] == ')') paren_depth--;
+                    type_end++;
+                }
+            }
+            /* Skip whitespace */
+            size_t ws_end = type_end;
+            while (ws_end < n && (src[ws_end] == ' ' || src[ws_end] == '\t' || src[ws_end] == '\n')) ws_end++;
+            /* Check for variable name (not function) */
+            if (ws_end < n && cc_is_ident_start(src[ws_end])) {
+                size_t var_start = ws_end;
+                while (ws_end < n && cc_is_ident_char(src[ws_end])) ws_end++;
+                size_t var_len = ws_end - var_start;
+                /* Skip whitespace */
+                size_t after_ws = ws_end;
+                while (after_ws < n && (src[after_ws] == ' ' || src[after_ws] == '\t')) after_ws++;
+                /* If followed by '=' or ';' or ',', it's a variable declaration */
+                if (after_ws < n && (src[after_ws] == '=' || src[after_ws] == ';' || src[after_ws] == ',')) {
+                    char* varname = (char*)malloc(var_len + 1);
+                    if (varname) {
+                        memcpy(varname, src + var_start, var_len);
+                        varname[var_len] = 0;
+                        vars[var_count].name = varname;
+                        vars[var_count].is_optional = 0;
+                        var_count++;
+                    }
+                }
+            }
+            i = type_end;
             continue;
         }
         
         i++;
     }
     
-    /* If no optional vars found, nothing to rewrite */
-    if (opt_var_count == 0) return NULL;
+    /* If no vars found, nothing to rewrite */
+    if (var_count == 0) return NULL;
     
-    /* Pass 2: Rewrite *varname to cc_unwrap_opt(varname) */
+    /* Pass 2: Rewrite *varname to unwrap call */
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     
@@ -2446,7 +2569,7 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
         
-        /* Look for * followed by an optional variable name */
+        /* Look for * followed by an optional/result variable name */
         if (c == '*') {
             size_t star_pos = i;
             i++;
@@ -2458,33 +2581,40 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
                 while (i < n && cc_is_ident_char(src[i])) i++;
                 size_t var_len = i - var_start;
                 
-                /* Check if this identifier is in our opt_vars list */
-                int is_opt = 0;
-                for (int j = 0; j < opt_var_count; j++) {
-                    if (strlen(opt_vars[j]) == var_len && strncmp(opt_vars[j], src + var_start, var_len) == 0) {
-                        is_opt = 1;
+                /* Check if this identifier is in our vars list */
+                int found_idx = -1;
+                for (int j = 0; j < var_count; j++) {
+                    if (strlen(vars[j].name) == var_len && strncmp(vars[j].name, src + var_start, var_len) == 0) {
+                        found_idx = j;
                         break;
                     }
                 }
                 
-                if (is_opt) {
-                    /* Rewrite *varname to cc_unwrap_opt(varname) */
+                if (found_idx >= 0) {
+                    /* Rewrite *varname to unwrap call */
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, star_pos - last_emit);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap_opt(");
+                    if (vars[found_idx].is_optional) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap_opt(");
+                    } else {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap(");
+                    }
                     cc_sb_append(&out, &out_len, &out_cap, src + var_start, var_len);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
                     last_emit = i;
+                    continue;
                 }
             }
+            /* Not a match, continue normally */
+            i = star_pos + 1;
             continue;
         }
         
         i++;
     }
     
-    /* Free opt_vars */
-    for (int j = 0; j < opt_var_count; j++) {
-        free(opt_vars[j]);
+    /* Free vars */
+    for (int j = 0; j < var_count; j++) {
+        free(vars[j].name);
     }
     
     if (last_emit == 0) {
@@ -3892,3 +4022,231 @@ char* cc_preprocess_to_string(const char* input, size_t input_len, const char* i
     return cc_preprocess_to_string_ex(input, input_len, input_path, 0);
 }
 
+/* Inline parse-time stubs - minimal definitions for TCC to accept CC types.
+   Uses guard macros so real CC headers can skip their own definitions. */
+static const char* cc__parse_stubs = 
+    "#ifndef CC_PARSE_STUBS_INLINE\n"
+    "#define CC_PARSE_STUBS_INLINE 1\n"
+    "#define CC_PARSER_MODE 1\n"
+    /* Guard macros to prevent redefinition when real headers are included */
+    "#define __CC_OPTIONAL_GENERIC_VALUE_DEFINED 1\n"
+    "#define __CC_OPTIONAL_GENERIC_DEFINED 1\n"
+    "#define __CC_GENERIC_ERROR_DEFINED 1\n"
+    "#define __CC_RESULT_GENERIC_DEFINED 1\n"
+    /* Struct definitions compatible with real headers' field layout.
+       Use unsigned long instead of size_t since stddef.h may not be included yet. */
+    "typedef struct __CCOptionalGenericValue { long x,y,z,w; void* ptr; void* data; unsigned long len; int id,kind,code; long _scalar; } __CCOptionalGenericValue;\n"
+    "typedef struct __CCOptionalGeneric { int has; union { __CCOptionalGenericValue value; long _scalar; } u; } __CCOptionalGeneric;\n"
+    "typedef struct __CCGenericError { int kind; int os_errno; int os_code; const char* message; } __CCGenericError;\n"
+    "typedef struct __CCResultGeneric { int ok; union { long value; __CCGenericError error; } u; } __CCResultGeneric;\n"
+    /* Channel handle stubs */
+    "#define __CC_CHAN_TX_DEFINED 1\n"
+    "#define __CC_CHAN_RX_DEFINED 1\n"
+    "typedef struct CCChan CCChan;\n"
+    "typedef struct { CCChan* raw; } CCChanTx;\n"
+    "typedef struct { CCChan* raw; } CCChanRx;\n"
+    /* Generic container stubs - define guards so real headers skip.
+       Field counts must match real headers to allow their initializers. */
+    "#define __CC_VEC_GENERIC_DEFINED 1\n"
+    "#define __CC_MAP_GENERIC_DEFINED 1\n"
+    "typedef struct { unsigned long len; unsigned long cap; void* data; void* arena; } __CCVecGeneric;\n"
+    "typedef struct { unsigned long count; void* keys; void* vals; void* arena; } __CCMapGeneric;\n"
+    "#define __CC_VEC(T) __CCVecGeneric\n"
+    "#define __CC_MAP(K, V) __CCMapGeneric\n"
+    "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0})\n"
+    "#define __CC_MAP_INIT(K, V, arena) ((__CCMapGeneric){0, 0})\n"
+    /* Common Vec/Map types */
+    "typedef __CCVecGeneric Vec_int;\n"
+    "typedef __CCVecGeneric Vec_char;\n"
+    "typedef __CCVecGeneric Vec_float;\n"
+    "typedef __CCMapGeneric Map_int_int;\n"
+    "typedef __CCMapGeneric Map_charptr_int;\n"
+    /* Key macros: rewritten T? -> __CC_OPTIONAL(T), T!>(E) -> __CC_RESULT(T,E) */
+    "#define __CC_OPTIONAL(T) __CCOptionalGeneric\n"
+    "#define __CC_RESULT(T, E) __CCResultGeneric\n"
+    /* Common optional types (direct names, for explicit CCOptional_T usage) */
+    "typedef __CCOptionalGeneric CCOptional_int;\n"
+    "typedef __CCOptionalGeneric CCOptional_bool;\n"
+    "typedef __CCOptionalGeneric CCOptional_char;\n"
+    "typedef __CCOptionalGeneric CCOptional_size_t;\n"
+    "typedef __CCOptionalGeneric CCOptional_voidptr;\n"
+    "typedef __CCOptionalGeneric CCOptional_charptr;\n"
+    /* Common result types */
+    "typedef __CCResultGeneric CCResult_int_CCError;\n"
+    "typedef __CCResultGeneric CCResult_bool_CCError;\n"
+    "typedef __CCResultGeneric CCResult_void_CCError;\n"
+    "typedef __CCResultGeneric CCResult_size_t_CCError;\n"
+    "typedef __CCResultGeneric CCResult_charptr_CCError;\n"
+    "typedef __CCResultGeneric CCResult_voidptr_CCError;\n"
+    /* CCError type */
+    "typedef struct { int kind; const char* message; } CCError;\n"
+    /* cc_some/cc_none/cc_ok/cc_err come from headers - user must include cc_runtime.cch */
+    "#define cc_is_some(opt) ((opt).has)\n"
+    "#define cc_is_none(opt) (!(opt).has)\n"
+    "#define cc_is_ok(res) ((res).ok)\n"
+    "#define cc_is_err(res) (!(res).ok)\n"
+    "#define cc_unwrap(res) ((res).u.value)\n"
+    "#define cc_unwrap_as(res, T) (*(T*)(void*)&(res).u.value)\n"
+    "#define cc_unwrap_err(res) ((res).u.error)\n"
+    "#define cc_unwrap_err_as(res, T) (*(T*)(void*)&(res).u.error)\n"
+    "#define cc_unwrap_opt(opt) ((opt).u.value)\n"
+    /* try expressions are handled natively by TCC - no cc_try stub needed */
+    "#endif\n";
+
+// Simple preprocessing for cccn: rewrites type syntax and adds parse-time stubs.
+// Type syntax (T?, T!>(E), T[~N>], Vec<T>) is rewritten to C-compatible names.
+// Parse-time stubs provide placeholder definitions.
+// Other CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.
+char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path) {
+    if (!input || input_len == 0) return NULL;
+    
+    /* Reset type collectors */
+    cc__optional_type_count = 0;
+    cc__result_type_count = 0;
+    
+    /* Create type registry for this file (or reuse existing global) */
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!reg) {
+        reg = cc_type_registry_new();
+        cc_type_registry_set_global(reg);
+    }
+    
+    /* Chain of preprocessing passes - each takes previous output */
+    const char* cur = input;
+    size_t cur_len = input_len;
+    char* buffers[13] = {0};
+    int buf_idx = 0;
+    
+    /* Pass 1: Rewrite channel handle types T[~N >] -> CCChanTx, T[~N <] -> CCChanRx */
+    buffers[buf_idx] = cc__rewrite_chan_handle_types(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 2: Rewrite T? -> CCOptional_T */
+    buffers[buf_idx] = cc__rewrite_optional_types(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 3: Rewrite T!>(E) -> CCResult_T_E */
+    buffers[buf_idx] = cc__rewrite_result_types(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 4: Rewrite slice types T[:] -> CCSlice */
+    buffers[buf_idx] = cc__rewrite_slice_types(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 5: Normalize if @try ( -> if (try  */
+    buffers[buf_idx] = cc__normalize_if_try_syntax(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 6: Rewrite if (try T x = expr) to expanded form */
+    buffers[buf_idx] = cc__rewrite_try_binding(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Note: try expressions are handled natively by TCC (CC_AST_NODE_TRY) */
+    
+    /* Pass 7: Rewrite @defer(err) -> @defer */
+    buffers[buf_idx] = cc__rewrite_defer_syntax(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 8: Rewrite *opt_var and *result_var to unwrap calls */
+    buffers[buf_idx] = cc__rewrite_optional_unwrap(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 10: Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V */
+    buffers[buf_idx] = cc_rewrite_generic_containers(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 11: Rewrite UFCS container calls (v.push(x) -> Vec_int_push(&v, x)) */
+    buffers[buf_idx] = cc_rewrite_ufcs_container_calls(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Build output with stubs and #line directive */
+    char* out_buf = NULL;
+    size_t out_size = 0;
+    FILE* out = open_memstream(&out_buf, &out_size);
+    if (!out) {
+        for (int i = 0; i < buf_idx; i++) {
+            if (buffers[i]) free(buffers[i]);
+        }
+        return NULL;
+    }
+    
+    /* Prepend parse-time stubs (only once) */
+    fputs(cc__parse_stubs, out);
+    
+    /* Emit typedefs for user-defined Optional types */
+    for (size_t i = 0; i < cc__optional_type_count; i++) {
+        if (!cc__is_known_optional_type(cc__optional_types[i])) {
+            fprintf(out, "typedef __CCOptionalGeneric CCOptional_%s;\n", cc__optional_types[i]);
+        }
+    }
+    
+    /* Emit typedefs for user-defined Result types */
+    for (size_t i = 0; i < cc__result_type_count; i++) {
+        /* Check if not a known/pre-defined result type */
+        const char* ok = cc__result_types[i].mangled_ok;
+        const char* err = cc__result_types[i].mangled_err;
+        /* Only emit if not already covered by common result types in parse stubs */
+        if (!(strcmp(ok, "int") == 0 && strcmp(err, "CCError") == 0) &&
+            !(strcmp(ok, "bool") == 0 && strcmp(err, "CCError") == 0) &&
+            !(strcmp(ok, "void") == 0 && strcmp(err, "CCError") == 0) &&
+            !(strcmp(ok, "size_t") == 0 && strcmp(err, "CCError") == 0)) {
+            fprintf(out, "typedef __CCResultGeneric CCResult_%s_%s;\n", ok, err);
+        }
+    }
+    
+    /* Add #line directive for source mapping */
+    char rel[1024];
+    fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
+    
+    /* Output processed source */
+    fwrite(cur, 1, cur_len, out);
+    
+    fclose(out);
+    
+    /* Clean up intermediate buffers */
+    for (int i = 0; i < buf_idx; i++) {
+        if (buffers[i]) free(buffers[i]);
+    }
+    
+    return out_buf;
+}

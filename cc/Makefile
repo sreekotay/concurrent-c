@@ -55,8 +55,16 @@ DEPS := $(OBJS:.o=.d)
 REAL_BINARY := $(OUT_BINDIR)/ccc
 WRAPPER := bin/ccc
 
-# CCCN (CCC Next) refactor
-CCCN_SRCS := $(wildcard src/cccn/**/*.c) src/build/build_helpers.c src/util/*.c src/driver.c src/preprocess/preprocess.c src/comptime/symbols.c src/parser/tcc_bridge.c src/parser/cc_ext_parser.c src/visitor/pass.c src/visitor/visitor_fileutil.c src/visitor/visitor_pipeline.c src/visitor/pass_strip_markers.c src/visitor/pass_ufcs.c src/visitor/pass_closure_calls.c src/visitor/pass_autoblock.c src/visitor/pass_await_normalize.c src/visitor/async_ast.c src/visitor/checker.c src/visitor/pass_arena_ast.c src/visitor/pass_nursery_spawn_ast.c src/visitor/pass_closure_literal_ast.c src/visitor/pass_defer_syntax.c src/visitor/pass_channel_syntax.c src/visitor/pass_type_syntax.c src/visitor/pass_match_syntax.c src/visitor/pass_with_deadline_syntax.c src/visitor/edit_buffer.c src/visitor/walk.c src/visitor/visitor.c src/visitor/ufcs.c src/preprocess/type_registry.c src/visitor/visit_codegen.c src/parser/parse.c
+# CCCN (CCC Next) refactor - uses existing TCC bridge + preprocessor
+CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
+    src/parser/tcc_bridge.c \
+    src/parser/cc_ext_parser.c \
+    src/preprocess/preprocess.c \
+    src/preprocess/type_registry.c \
+    src/comptime/symbols.c \
+    src/util/io.c \
+    src/util/path.c \
+    src/visitor/visitor_fileutil.c
 CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
 CCCN_BINARY := $(OUT_BINDIR)/cccn
 CCCN_WRAPPER := bin/cccn

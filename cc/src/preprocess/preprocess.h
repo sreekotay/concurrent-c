@@ -17,6 +17,11 @@ char* cc_preprocess_to_string(const char* input, size_t input_len, const char* i
 // Use skip_checks=1 for reparse passes where checks already ran on original source.
 char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char* input_path, int skip_checks);
 
+// Simple preprocessing for cccn: only adds #line directive, no CC syntax rewrites.
+// All CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.
+// Returns malloc'd string on success, NULL on error. Caller must free().
+char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path);
+
 // Rewrite @link("lib") directives to marker comments for linker extraction.
 // Returns newly allocated string, or NULL if no rewrites needed.
 char* cc__rewrite_link_directives(const char* src, size_t n);

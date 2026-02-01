@@ -77,7 +77,10 @@ typedef int bool;
 
 /* Generic struct with common field names for parser-mode optional values.
    This allows code like opt.u.value.x or opt.u.value.len to parse correctly.
-   The actual types don't matter during parsing - they're validated at codegen. */
+   The actual types don't matter during parsing - they're validated at codegen.
+   Guard allows cccn parse stubs to predefine this. */
+#ifndef __CC_OPTIONAL_GENERIC_VALUE_DEFINED
+#define __CC_OPTIONAL_GENERIC_VALUE_DEFINED
 typedef struct __CCOptionalGenericValue {
     /* Common coordinate/geometry fields */
     long x, y, z, w;
@@ -108,10 +111,14 @@ typedef struct __CCOptionalGenericValue {
     /* Common scalar conversions (allow .x on scalars via union trick) */
     intptr_t _scalar;
 } __CCOptionalGenericValue;
+#endif
 
 /* Generic optional placeholder struct - used for ALL optional types during parsing.
    Field names match the real CC_DECL_OPTIONAL layout so user code compiles.
-   Uses named union 'u' matching the real struct layout. */
+   Uses named union 'u' matching the real struct layout.
+   Guard allows cccn parse stubs to predefine this. */
+#ifndef __CC_OPTIONAL_GENERIC_DEFINED
+#define __CC_OPTIONAL_GENERIC_DEFINED
 typedef struct __CCOptionalGeneric {
     bool has;
     union {
@@ -119,6 +126,7 @@ typedef struct __CCOptionalGeneric {
         intptr_t _scalar;                  /* For scalar types */
     } u;
 } __CCOptionalGeneric;
+#endif
 
 /* THE KEY MACRO: In parser mode, all optional types resolve to generic.
    Usage: __CC_OPTIONAL(int) expands to __CCOptionalGeneric
@@ -152,9 +160,14 @@ static inline __CCOptionalGeneric __cc_optional_generic_none(void) {
  * Simplified optional constructors for parser mode.
  * cc_some(value) and cc_none() can be inferred from context.
  * The compiler rewrites them to typed versions based on enclosing return type.
+ * Note: These are inline functions (not macros) to preserve the value in AST.
  */
-#define cc_some(v) ((void)(v), __cc_optional_generic_some())
-#define cc_none() __cc_optional_generic_none()
+static inline __CCOptionalGeneric cc_some(long __v) {
+    __CCOptionalGeneric __o; __o.has = 1; __o.u._scalar = __v; return __o;
+}
+static inline __CCOptionalGeneric cc_none(void) {
+    return __cc_optional_generic_none();
+}
 
 /* Generic function-call forms that work for any type in parser mode */
 #define cc_some_for(T, v) ((void)(v), __cc_optional_generic_some())

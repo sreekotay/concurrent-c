@@ -41,7 +41,9 @@ typedef int bool;
 #endif
 #endif
 
-/* Common error type - a simple tagged enum with message */
+/* Common error type - a simple tagged enum with message.
+ * Skipped during cccn parse phase (stubs provide placeholders). */
+#ifndef CC_PARSER_MODE
 typedef enum {
     CC_ERR_NONE = 0,
     CC_ERR_IO,
@@ -70,6 +72,7 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
     CCError e = { kind, msg };
     return e;
 }
+#endif /* CC_PARSER_MODE */
 
 /*
  * LEGACY LAYOUT: CC_DECL_RESULT
@@ -217,7 +220,10 @@ static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { retur
  */
 #ifdef CC_PARSER_MODE
 
-/* Generic error struct for parser mode - has common fields so code compiles */
+/* Generic error struct for parser mode - has common fields so code compiles.
+   Guard allows cccn parse stubs to predefine this. */
+#ifndef __CC_GENERIC_ERROR_DEFINED
+#define __CC_GENERIC_ERROR_DEFINED
 typedef struct __CCGenericError {
     int kind;
     int os_errno;
@@ -225,11 +231,15 @@ typedef struct __CCGenericError {
     const char* message;
     char __pad[48];
 } __CCGenericError;
+#endif
 
 
 /* Generic result placeholder struct - used for ALL result types during parsing.
    Field names match the real CC_DECL_RESULT_SPEC layout so user code compiles.
-   Uses named union 'u' matching the real struct layout. */
+   Uses named union 'u' matching the real struct layout.
+   Guard allows cccn parse stubs to predefine this. */
+#ifndef __CC_RESULT_GENERIC_DEFINED
+#define __CC_RESULT_GENERIC_DEFINED
 typedef struct __CCResultGeneric {
     bool ok;
     union {
@@ -237,6 +247,7 @@ typedef struct __CCResultGeneric {
         __CCGenericError error;     /* has .kind, .os_errno, .message */
     } u;
 } __CCResultGeneric;
+#endif
 
 /* In parser mode, result type declarations use generic placeholder helpers. */
 #undef CC_DECL_RESULT_SPEC
@@ -291,20 +302,20 @@ static inline intptr_t __CCResultGeneric_unwrap_or(__CCResultGeneric r, intptr_t
 #define __CC_RESULT_OK(T, E, v) ((void)(v), __cc_result_generic_ok())
 #define __CC_RESULT_ERR(T, E, e) ((void)(e), __cc_result_generic_err())
 
-/* Dummy cc_try for TCC parsing - just returns 0 as placeholder */
-#define cc_try(expr) ((void)(expr), 0)
+/* try expressions are handled natively by TCC (CC_AST_NODE_TRY) */
 
 /*
  * Simplified result constructors for parser mode.
  * cc_ok(value) and cc_err(error) are inferred from context.
  * The compiler rewrites them to typed versions based on enclosing function.
- *
- * cc_err supports two forms (handled by compiler rewrite):
- *   cc_err(error_value)      - use error value directly
- *   cc_err(KIND, "message")  - shorthand, compiler wraps in cc_error()
+ * Note: These are inline functions (not macros) to preserve the value in AST.
  */
-#define cc_ok(v) ((void)(v), __cc_result_generic_ok())
-#define cc_err(...) ((void)0, __cc_result_generic_err())
+static inline __CCResultGeneric cc_ok(long __v) {
+    __CCResultGeneric __r; __r.ok = 1; __r.u.value = __v; return __r;
+}
+static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
+    __CCResultGeneric __r; __r.ok = 0; __r.u.value = __kind; (void)__msg; return __r;
+}
 
 /* Parser-mode: common result types are aliases to __CCResultGeneric */
 typedef __CCResultGeneric CCResult_int_CCError;

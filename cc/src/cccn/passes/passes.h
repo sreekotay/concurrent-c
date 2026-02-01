@@ -1,20 +1,20 @@
-#ifndef CC_CCCN_PASSES_H
-#define CC_CCCN_PASSES_H
+#ifndef CC_PASSES_H
+#define CC_PASSES_H
 
-#include "cccn/ast/ast_new.h"
+#include "cccn/ast/ast.h"
 
 /* 
  * AST-to-AST lowering passes.
- * These modify the CCCN AST in-place or return a new lowered AST.
+ * These modify the CC AST in-place.
  */
 
 /* Lower UFCS calls: receiver.method(args) -> method(receiver, args) */
-int cccn_pass_lower_ufcs(CCCNRoot* root);
+int cc_pass_lower_ufcs(CCNFile* file);
 
 /* Lower @async functions into state machines */
-int cccn_pass_lower_async(CCCNRoot* root);
+int cc_pass_lower_async(CCNFile* file);
 
 /* Lower closure literals into structs and thunks */
-int cccn_pass_lower_closures(CCCNRoot* root);
+int cc_pass_lower_closures(CCNFile* file);
 
-#endif /* CC_CCCN_PASSES_H */
+#endif /* CC_PASSES_H */
