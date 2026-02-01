@@ -4173,8 +4173,28 @@ static const char* cc__parse_stubs =
     "typedef __CCResultGeneric CCResult_charptr_CCError;\n"
     "typedef __CCResultGeneric CCResult_voidptr_CCError;\n"
     /* CCError type */
+    "#ifndef __CC_ERROR_TYPE_DEFINED\n"
+    "#define __CC_ERROR_TYPE_DEFINED\n"
     "typedef struct { int kind; const char* message; } CCError;\n"
-    /* cc_some/cc_none/cc_ok/cc_err come from headers - user must include cc_runtime.cch */
+    "#endif\n"
+    /* cc_error helper */
+    "#ifndef __CC_ERROR_HELPER_DEFINED\n"
+    "#define __CC_ERROR_HELPER_DEFINED\n"
+    "static inline CCError cc_error(int k, const char* m) { CCError e = {k, m}; return e; }\n"
+    "#endif\n"
+    /* Result constructors - inline functions to preserve args in AST */
+    "#ifndef __CC_RESULT_CTORS_DEFINED\n"
+    "#define __CC_RESULT_CTORS_DEFINED\n"
+    "static inline __CCResultGeneric cc_ok(long v) { __CCResultGeneric r; r.ok = 1; r.u.value = v; return r; }\n"
+    "static inline __CCResultGeneric cc_err(int k, const char* m) { __CCResultGeneric r; r.ok = 0; r.u.error.kind = k; r.u.error.message = m; return r; }\n"
+    "#endif\n"
+    /* Optional constructors */
+    "#ifndef __CC_OPT_CTORS_DEFINED\n"
+    "#define __CC_OPT_CTORS_DEFINED\n"
+    "static inline __CCOptionalGeneric cc_some(long v) { __CCOptionalGeneric o; o.has = 1; o.u._scalar = v; return o; }\n"
+    "static inline __CCOptionalGeneric cc_none(void) { __CCOptionalGeneric o; o.has = 0; o.u._scalar = 0; return o; }\n"
+    "#endif\n"
+    /* Accessor macros */
     "#define cc_is_some(opt) ((opt).has)\n"
     "#define cc_is_none(opt) (!(opt).has)\n"
     "#define cc_is_ok(res) ((res).ok)\n"
@@ -4184,7 +4204,6 @@ static const char* cc__parse_stubs =
     "#define cc_unwrap_err(res) ((res).u.error)\n"
     "#define cc_unwrap_err_as(res, T) (*(T*)(void*)&(res).u.error)\n"
     "#define cc_unwrap_opt(opt) ((opt).u.value)\n"
-    /* try expressions are handled natively by TCC - no cc_try stub needed */
     "#endif\n";
 
 // Simple preprocessing for cccn: rewrites type syntax and adds parse-time stubs.

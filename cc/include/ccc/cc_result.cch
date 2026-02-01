@@ -310,12 +310,15 @@ static inline intptr_t __CCResultGeneric_unwrap_or(__CCResultGeneric r, intptr_t
  * The compiler rewrites them to typed versions based on enclosing function.
  * Note: These are inline functions (not macros) to preserve the value in AST.
  */
+#ifndef __CC_RESULT_CTORS_DEFINED
+#define __CC_RESULT_CTORS_DEFINED
 static inline __CCResultGeneric cc_ok(long __v) {
     __CCResultGeneric __r; __r.ok = 1; __r.u.value = __v; return __r;
 }
 static inline __CCResultGeneric cc_err(int __kind, const char* __msg) {
     __CCResultGeneric __r; __r.ok = 0; __r.u.value = __kind; (void)__msg; return __r;
 }
+#endif
 
 /* Parser-mode: common result types are aliases to __CCResultGeneric */
 typedef __CCResultGeneric CCResult_int_CCError;

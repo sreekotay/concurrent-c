@@ -162,12 +162,15 @@ static inline __CCOptionalGeneric __cc_optional_generic_none(void) {
  * The compiler rewrites them to typed versions based on enclosing return type.
  * Note: These are inline functions (not macros) to preserve the value in AST.
  */
+#ifndef __CC_OPT_CTORS_DEFINED
+#define __CC_OPT_CTORS_DEFINED
 static inline __CCOptionalGeneric cc_some(long __v) {
     __CCOptionalGeneric __o; __o.has = 1; __o.u._scalar = __v; return __o;
 }
 static inline __CCOptionalGeneric cc_none(void) {
     return __cc_optional_generic_none();
 }
+#endif
 
 /* Generic function-call forms that work for any type in parser mode */
 #define cc_some_for(T, v) ((void)(v), __cc_optional_generic_some())
