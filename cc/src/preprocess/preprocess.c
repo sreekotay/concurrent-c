@@ -10,6 +10,92 @@
 #include "util/path.h"
 #include "util/text.h"
 
+/* ========================================================================== */
+/* Scanner helper for skipping comments and strings                           */
+/* Reduces code duplication across cc__rewrite_* functions                    */
+/* ========================================================================== */
+
+typedef struct {
+    int in_line_comment;
+    int in_block_comment;
+    int in_str;
+    int in_chr;
+} CCScannerState;
+
+/* Initialize scanner state */
+static void cc_scanner_init(CCScannerState* s) {
+    s->in_line_comment = 0;
+    s->in_block_comment = 0;
+    s->in_str = 0;
+    s->in_chr = 0;
+}
+
+/* Process current character and advance past non-code (comments, strings).
+ * Returns 1 if we're in a comment/string (caller should continue to next char).
+ * Returns 0 if we're at actual code (caller should process the character).
+ * Updates *pos to skip multi-char sequences.
+ */
+static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n, size_t* pos) {
+    size_t i = *pos;
+    if (i >= n) return 0;
+    
+    char c = src[i];
+    char c2 = (i + 1 < n) ? src[i + 1] : 0;
+    
+    /* Inside line comment */
+    if (s->in_line_comment) {
+        if (c == '\n') s->in_line_comment = 0;
+        (*pos)++;
+        return 1;
+    }
+    
+    /* Inside block comment */
+    if (s->in_block_comment) {
+        if (c == '*' && c2 == '/') {
+            s->in_block_comment = 0;
+            *pos += 2;
+        } else {
+            (*pos)++;
+        }
+        return 1;
+    }
+    
+    /* Inside string literal */
+    if (s->in_str) {
+        if (c == '\\' && i + 1 < n) {
+            *pos += 2;  /* Skip escape sequence */
+        } else {
+            if (c == '"') s->in_str = 0;
+            (*pos)++;
+        }
+        return 1;
+    }
+    
+    /* Inside char literal */
+    if (s->in_chr) {
+        if (c == '\\' && i + 1 < n) {
+            *pos += 2;  /* Skip escape sequence */
+        } else {
+            if (c == '\'') s->in_chr = 0;
+            (*pos)++;
+        }
+        return 1;
+    }
+    
+    /* Check for start of comment/string */
+    if (c == '/' && c2 == '/') { s->in_line_comment = 1; *pos += 2; return 1; }
+    if (c == '/' && c2 == '*') { s->in_block_comment = 1; *pos += 2; return 1; }
+    if (c == '"') { s->in_str = 1; (*pos)++; return 1; }
+    if (c == '\'') { s->in_chr = 1; (*pos)++; return 1; }
+    
+    /* At actual code */
+    return 0;
+}
+
+/* ========================================================================== */
+/* End scanner helper                                                         */
+/* ========================================================================== */
+
 /* Rewrite `@match { case <hdr>: <body> ... }` into valid C using cc_chan_match_select.
    This is intentionally text-based: the construct is not valid C, so TCC must see rewritten code.
 
@@ -29,28 +115,22 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
     size_t i = 0;
     size_t last_emit = 0;
 
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
+    CCScannerState scanner;
+    cc_scanner_init(&scanner);
     int line = 1;
     int col = 1;
     unsigned long counter = 0;
 
     while (i < n) {
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
         if (c == '\n') { line++; col = 1; }
 
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+        /* Skip comments and strings using helper */
+        size_t old_i = i;
+        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) {
+            col += (int)(i - old_i);
+            continue;
+        }
 
         /* Look for "@match" */
         if (c == '@') {
