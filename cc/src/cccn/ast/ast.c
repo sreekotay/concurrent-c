@@ -68,7 +68,7 @@ CCNNode* ccn_make_string_lit(const char* value, size_t len, CCNSpan span) {
     CCNNode* node = ccn_node_new(CCN_EXPR_LITERAL_STRING);
     if (node) {
         node->span = span;
-        node->as.expr_string.value = value;  /* borrowed */
+        node->as.expr_string.value = value ? strndup(value, len) : NULL;  /* owned */
         node->as.expr_string.len = len;
     }
     return node;
@@ -89,7 +89,7 @@ CCNNode* ccn_make_method(CCNNode* receiver, const char* method, CCNNodeList args
     if (node) {
         node->span = span;
         node->as.expr_method.receiver = receiver;
-        node->as.expr_method.method = method;  /* borrowed */
+        node->as.expr_method.method = method ? strdup(method) : NULL;  /* owned */
         node->as.expr_method.args = args;
     }
     return node;
@@ -126,6 +126,11 @@ static CCNNodeList ccn_list_clone(CCNNodeList* list) {
     return result;
 }
 
+/* Helper to clone string (returns NULL if input is NULL) */
+static char* clone_str(const char* s) {
+    return s ? strdup(s) : NULL;
+}
+
 CCNNode* ccn_node_clone(CCNNode* node) {
     if (!node) return NULL;
     
@@ -137,12 +142,12 @@ CCNNode* ccn_node_clone(CCNNode* node) {
     
     switch (node->kind) {
         case CCN_FILE:
-            clone->as.file.path = node->as.file.path;
+            clone->as.file.path = clone_str(node->as.file.path);
             clone->as.file.items = ccn_list_clone(&node->as.file.items);
             break;
             
         case CCN_FUNC_DECL:
-            clone->as.func.name = node->as.func.name;
+            clone->as.func.name = clone_str(node->as.func.name);
             clone->as.func.return_type = ccn_node_clone(node->as.func.return_type);
             clone->as.func.params = ccn_list_clone(&node->as.func.params);
             clone->as.func.body = ccn_node_clone(node->as.func.body);
@@ -152,7 +157,7 @@ CCNNode* ccn_node_clone(CCNNode* node) {
             break;
             
         case CCN_VAR_DECL:
-            clone->as.var.name = node->as.var.name;
+            clone->as.var.name = clone_str(node->as.var.name);
             clone->as.var.type_node = ccn_node_clone(node->as.var.type_node);
             clone->as.var.init = ccn_node_clone(node->as.var.init);
             clone->as.var.is_static = node->as.var.is_static;
@@ -160,7 +165,7 @@ CCNNode* ccn_node_clone(CCNNode* node) {
             break;
             
         case CCN_PARAM:
-            clone->as.param.name = node->as.param.name;
+            clone->as.param.name = clone_str(node->as.param.name);
             clone->as.param.type_node = ccn_node_clone(node->as.param.type_node);
             break;
             
@@ -194,8 +199,24 @@ CCNNode* ccn_node_clone(CCNNode* node) {
             clone->as.stmt_while.body = ccn_node_clone(node->as.stmt_while.body);
             break;
             
+        case CCN_STMT_NURSERY:
+        case CCN_STMT_ARENA:
+            clone->as.stmt_scope.name = clone_str(node->as.stmt_scope.name);
+            clone->as.stmt_scope.size = ccn_node_clone(node->as.stmt_scope.size);
+            clone->as.stmt_scope.body = ccn_node_clone(node->as.stmt_scope.body);
+            clone->as.stmt_scope.closing = ccn_list_clone(&node->as.stmt_scope.closing);
+            break;
+            
+        case CCN_STMT_SPAWN:
+            clone->as.stmt_spawn.closure = ccn_node_clone(node->as.stmt_spawn.closure);
+            break;
+            
+        case CCN_STMT_DEFER:
+            clone->as.stmt_defer.stmt = ccn_node_clone(node->as.stmt_defer.stmt);
+            break;
+            
         case CCN_EXPR_IDENT:
-            clone->as.expr_ident.name = node->as.expr_ident.name;
+            clone->as.expr_ident.name = clone_str(node->as.expr_ident.name);
             break;
             
         case CCN_EXPR_LITERAL_INT:
@@ -203,7 +224,7 @@ CCNNode* ccn_node_clone(CCNNode* node) {
             break;
             
         case CCN_EXPR_LITERAL_STRING:
-            clone->as.expr_string.value = node->as.expr_string.value;
+            clone->as.expr_string.value = clone_str(node->as.expr_string.value);
             clone->as.expr_string.len = node->as.expr_string.len;
             break;
             
@@ -214,7 +235,7 @@ CCNNode* ccn_node_clone(CCNNode* node) {
             
         case CCN_EXPR_METHOD:
             clone->as.expr_method.receiver = ccn_node_clone(node->as.expr_method.receiver);
-            clone->as.expr_method.method = node->as.expr_method.method;
+            clone->as.expr_method.method = clone_str(node->as.expr_method.method);
             clone->as.expr_method.args = ccn_list_clone(&node->as.expr_method.args);
             break;
             
@@ -227,6 +248,7 @@ CCNNode* ccn_node_clone(CCNNode* node) {
         case CCN_EXPR_UNARY:
             clone->as.expr_unary.op = node->as.expr_unary.op;
             clone->as.expr_unary.operand = ccn_node_clone(node->as.expr_unary.operand);
+            clone->as.expr_unary.is_postfix = node->as.expr_unary.is_postfix;
             break;
             
         case CCN_EXPR_CLOSURE:
@@ -244,9 +266,59 @@ CCNNode* ccn_node_clone(CCNNode* node) {
             clone->as.expr_try.expr = ccn_node_clone(node->as.expr_try.expr);
             break;
             
-        /* Types - shallow copy base nodes */
+        case CCN_EXPR_FIELD:
+            clone->as.expr_field.object = ccn_node_clone(node->as.expr_field.object);
+            clone->as.expr_field.field = clone_str(node->as.expr_field.field);
+            clone->as.expr_field.is_arrow = node->as.expr_field.is_arrow;
+            break;
+            
+        case CCN_EXPR_INDEX:
+            clone->as.expr_index.array = ccn_node_clone(node->as.expr_index.array);
+            clone->as.expr_index.index = ccn_node_clone(node->as.expr_index.index);
+            break;
+            
+        case CCN_EXPR_SIZEOF:
+            clone->as.expr_sizeof.type_str = clone_str(node->as.expr_sizeof.type_str);
+            clone->as.expr_sizeof.expr = ccn_node_clone(node->as.expr_sizeof.expr);
+            break;
+            
+        case CCN_EXPR_COMPOUND:
+            clone->as.expr_compound.values = ccn_list_clone(&node->as.expr_compound.values);
+            break;
+            
+        case CCN_STRUCT_DECL:
+            clone->as.struct_decl.name = clone_str(node->as.struct_decl.name);
+            clone->as.struct_decl.fields = ccn_list_clone(&node->as.struct_decl.fields);
+            clone->as.struct_decl.is_union = node->as.struct_decl.is_union;
+            break;
+            
+        case CCN_STRUCT_FIELD:
+            clone->as.struct_field.name = clone_str(node->as.struct_field.name);
+            clone->as.struct_field.type_str = clone_str(node->as.struct_field.type_str);
+            break;
+            
+        case CCN_ENUM_DECL:
+            clone->as.enum_decl.name = clone_str(node->as.enum_decl.name);
+            clone->as.enum_decl.values = ccn_list_clone(&node->as.enum_decl.values);
+            break;
+            
+        case CCN_ENUM_VALUE:
+            clone->as.enum_value.name = clone_str(node->as.enum_value.name);
+            clone->as.enum_value.value = node->as.enum_value.value;
+            break;
+            
+        case CCN_TYPEDEF:
+            clone->as.typedef_decl.name = clone_str(node->as.typedef_decl.name);
+            clone->as.typedef_decl.type_str = clone_str(node->as.typedef_decl.type_str);
+            break;
+            
+        case CCN_INCLUDE:
+            clone->as.include.path = clone_str(node->as.include.path);
+            clone->as.include.is_system = node->as.include.is_system;
+            break;
+            
         case CCN_TYPE_NAME:
-            clone->as.type_name.name = node->as.type_name.name;
+            clone->as.type_name.name = clone_str(node->as.type_name.name);
             break;
             
         case CCN_TYPE_PTR:
@@ -271,6 +343,7 @@ void ccn_node_free(CCNNode* node) {
     
     switch (node->kind) {
         case CCN_FILE:
+            free((void*)node->as.file.path);
             ccn_list_free(&node->as.file.items);
             break;
             

@@ -1114,7 +1114,7 @@ static CCNNode* collect_file_roots(
     CCNNode* file_node = ccn_node_new(CCN_FILE);
     if (!file_node) return NULL;
     
-    file_node->as.file.path = filename;
+    file_node->as.file.path = filename ? strdup(filename) : NULL;  /* owned */
     
     for (int i = 0; i < count; i++) {
         /* Only look at file-level nodes from the source file */
