@@ -149,7 +149,11 @@ static void collect_refs(CCNNode* node, StringSet* refs) {
             break;
             
         case CCN_EXPR_CALL:
-            /* Don't count callee as a capture (it's a function name) */
+            /* Include callee in refs - if it's a local variable (closure), it needs capture.
+               If it's a global function, it won't be in local decls so won't be captured. */
+            if (node->as.expr_call.callee && node->as.expr_call.callee->kind == CCN_EXPR_IDENT) {
+                string_set_add(refs, node->as.expr_call.callee->as.expr_ident.name);
+            }
             collect_refs_list(&node->as.expr_call.args, refs);
             break;
             
@@ -344,6 +348,11 @@ static CCNNode* lower_closure(CCNNode* closure, CCClosureDefList* defs) {
     
     closure_def_list_push(defs, def);
     
+    /* If this closure is assigned to a variable, update g_type_map with correct closure type.
+       We do this by noting what __cc_closure_make_N generates - it will be assigned to a var. */
+    /* Note: The actual type mapping happens when collect_closure_vars runs, but we need
+       the info available for nested closures. We'll track closure IDs to param counts. */
+    
     /* Create call to __cc_closure_make_N(captured_values...) */
     char make_name[64];
     snprintf(make_name, sizeof(make_name), "__cc_closure_make_%d", id);
@@ -414,6 +423,26 @@ static CCNNode* lower_node(CCNNode* node, CCClosureDefList* defs) {
                                node->as.var.type_node->as.type_name.name);
             }
             node->as.var.init = lower_node(node->as.var.init, defs);
+            /* If init was lowered to __cc_closure_make_N, update type to correct CCClosureN */
+            if (node->as.var.name && node->as.var.init &&
+                node->as.var.init->kind == CCN_EXPR_CALL &&
+                node->as.var.init->as.expr_call.callee &&
+                node->as.var.init->as.expr_call.callee->kind == CCN_EXPR_IDENT) {
+                const char* callee = node->as.var.init->as.expr_call.callee->as.expr_ident.name;
+                if (callee && strncmp(callee, "__cc_closure_make_", 18) == 0) {
+                    int id = atoi(callee + 18);
+                    /* Find param count for this closure */
+                    for (int i = 0; i < defs->len; i++) {
+                        if (defs->items[i].id == id) {
+                            int pc = defs->items[i].param_count;
+                            const char* ctype = pc == 0 ? "CCClosure0" :
+                                               pc == 1 ? "CCClosure1" : "CCClosure2";
+                            string_map_set(&g_type_map, node->as.var.name, ctype);
+                            break;
+                        }
+                    }
+                }
+            }
             break;
             
         case CCN_BLOCK:
@@ -750,6 +779,32 @@ int cc_pass_lower_closures(CCNFile* file) {
         ClosureVarList closure_vars = {0};
         collect_closure_vars(file->root, &closure_vars, &defs);
         transform_closure_calls(file->root, &closure_vars);
+        
+        /* Also transform calls inside closure bodies.
+           If a closure captures another closure variable, transform calls to it. */
+        for (int i = 0; i < defs.len; i++) {
+            CCClosureDef* def = &defs.items[i];
+            if (def->body && def->captures.len > 0) {
+                /* Build list of captured closure variables */
+                ClosureVarList captured_closures = {0};
+                for (int j = 0; j < def->captures.len; j++) {
+                    CCNNode* cap = def->captures.items[j];
+                    if (cap && cap->kind == CCN_EXPR_IDENT) {
+                        /* Check if this capture is a closure variable */
+                        int pc = closure_var_find(&closure_vars, cap->as.expr_ident.name);
+                        if (pc >= 0) {
+                            closure_var_add(&captured_closures, cap->as.expr_ident.name, pc);
+                        }
+                    }
+                }
+                /* Transform calls in the closure body */
+                if (captured_closures.len > 0) {
+                    transform_closure_calls(def->body, &captured_closures);
+                }
+                closure_var_list_free(&captured_closures);
+            }
+        }
+        
         closure_var_list_free(&closure_vars);
     }
     

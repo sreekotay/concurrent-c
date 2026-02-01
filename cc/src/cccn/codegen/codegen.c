@@ -853,7 +853,51 @@ int cc_emit_c(const CCNFile* file, FILE* out) {
            by cc_closure.cch which is included via cc_runtime.cch above. */
     }
 
-    /* Emit generated closure definitions first (in generated section) */
+    /* Before emitting closures, emit forward declarations for static functions.
+       This ensures functions used in closure bodies are declared. */
+    if (file->closure_count > 0) {
+        CCNNode* root = file->root;
+        if (root && root->kind == CCN_FILE) {
+            for (int i = 0; i < root->as.file.items.len; i++) {
+                CCNNode* item = root->as.file.items.items[i];
+                if (item && item->kind == CCN_FUNC_DECL && item->as.func.name &&
+                    strcmp(item->as.func.name, "main") != 0 &&
+                    strcmp(item->as.func.name, "cc_error") != 0) {
+                    /* Skip functions with anonymous struct return types */
+                    if (item->as.func.return_type && item->as.func.return_type->kind == CCN_TYPE_NAME &&
+                        item->as.func.return_type->as.type_name.name &&
+                        strstr(item->as.func.return_type->as.type_name.name, "<anonymous>")) {
+                        continue;
+                    }
+                    /* Emit forward declaration */
+                    if (item->as.func.is_static) fprintf(out, "static ");
+                    if (item->as.func.return_type && item->as.func.return_type->kind == CCN_TYPE_NAME &&
+                        item->as.func.return_type->as.type_name.name) {
+                        fprintf(out, "%s ", item->as.func.return_type->as.type_name.name);
+                    } else {
+                        fprintf(out, "int ");
+                    }
+                    fprintf(out, "%s(", item->as.func.name);
+                    for (int j = 0; j < item->as.func.params.len; j++) {
+                        if (j > 0) fprintf(out, ", ");
+                        CCNNode* param = item->as.func.params.items[j];
+                        if (param && param->kind == CCN_PARAM && param->as.param.type_node &&
+                            param->as.param.type_node->kind == CCN_TYPE_NAME &&
+                            param->as.param.type_node->as.type_name.name) {
+                            fprintf(out, "%s", param->as.param.type_node->as.type_name.name);
+                        } else {
+                            fprintf(out, "int");
+                        }
+                    }
+                    if (item->as.func.params.len == 0) fprintf(out, "void");
+                    fprintf(out, ");\n");
+                }
+            }
+            fprintf(out, "\n");
+        }
+    }
+    
+    /* Emit generated closure definitions (in generated section) */
     if (file->closure_count > 0) {
         emit_generated_section(out, "closures");
     }
