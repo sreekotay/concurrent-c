@@ -539,7 +539,8 @@ static int link_child_to_parent(
                 CCNNode* last = parent->as.block.stmts.items[parent->as.block.stmts.len - 1];
                 if (last && (last->kind == CCN_EXPR_IDENT || last->kind == CCN_EXPR_LITERAL_INT ||
                              last->kind == CCN_EXPR_FIELD || last->kind == CCN_EXPR_INDEX ||
-                             last->kind == CCN_EXPR_CALL || last->kind == CCN_EXPR_BINARY)) {
+                             last->kind == CCN_EXPR_CALL || last->kind == CCN_EXPR_BINARY ||
+                             last->kind == CCN_EXPR_UNARY)) {
                     if (!child->as.expr_binary.lhs) {
                         child->as.expr_binary.lhs = last;
                         parent->as.block.stmts.len--;
@@ -566,6 +567,17 @@ static int link_child_to_parent(
                         const char* last_name = last->as.expr_ident.name;
                         if (lhs_name && last_name && strcmp(lhs_name, last_name) == 0) {
                             ccn_node_free(last);
+                            parent->as.block.stmts.len--;
+                        }
+                    } else if (last->kind == CCN_EXPR_UNARY && child->as.expr_binary.lhs->kind == CCN_EXPR_IDENT) {
+                        /* Handle *ptr = val: LHS recorded as "ptr" but last is deref(*ptr).
+                           If unary operand is IDENT matching LHS name, use the unary as LHS. */
+                        CCNNode* unary_op = last->as.expr_unary.operand;
+                        const char* lhs_name = child->as.expr_binary.lhs->as.expr_ident.name;
+                        if (unary_op && unary_op->kind == CCN_EXPR_IDENT && lhs_name &&
+                            unary_op->as.expr_ident.name && strcmp(lhs_name, unary_op->as.expr_ident.name) == 0) {
+                            ccn_node_free(child->as.expr_binary.lhs);
+                            child->as.expr_binary.lhs = last;
                             parent->as.block.stmts.len--;
                         }
                     }
