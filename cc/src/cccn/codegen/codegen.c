@@ -649,6 +649,50 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
             fprintf(out, ")");
             break;
 
+        case CCN_STMT_DEFER:
+            /* TODO: Proper defer lowering would track defers and emit at scope exit.
+               For now, emit as comment to indicate deferred action. */
+            fprintf(out, "/* @defer: ");
+            if (node->as.stmt_defer.stmt) {
+                emit_node_ctx(node->as.stmt_defer.stmt, out, 0, ctx);
+            }
+            fprintf(out, " */");
+            break;
+            
+        case CCN_STMT_ARENA:
+            /* Lower @arena { body } to:
+             *   { CCArena arena; cc_arena_init(&arena);
+             *     body;
+             *     cc_arena_release(&arena); }
+             */
+            emit_line_directive(node, out);
+            fprintf(out, "{\n");
+            emit_indent(indent + 1, out);
+            fprintf(out, "CCArena __cc_arena;\n");
+            emit_indent(indent + 1, out);
+            fprintf(out, "cc_arena_init(&__cc_arena, 0);\n");
+            emit_indent(indent + 1, out);
+            fprintf(out, "CCArena* arena = &__cc_arena;\n");  /* Provide 'arena' variable */
+            if (node->as.stmt_scope.body) {
+                CCNNode* body = node->as.stmt_scope.body;
+                if (body->kind == CCN_BLOCK) {
+                    for (int i = 0; i < body->as.block.stmts.len; i++) {
+                        emit_indent(indent + 1, out);
+                        emit_node_ctx(body->as.block.stmts.items[i], out, indent + 1, ctx);
+                        fprintf(out, ";\n");
+                    }
+                } else {
+                    emit_indent(indent + 1, out);
+                    emit_node_ctx(body, out, indent + 1, ctx);
+                    fprintf(out, ";\n");
+                }
+            }
+            emit_indent(indent + 1, out);
+            fprintf(out, "cc_arena_release(&__cc_arena);\n");
+            emit_indent(indent, out);
+            fprintf(out, "}");
+            break;
+
         case CCN_EXPR_BINARY: {
             static const char* op_strs[] = {
                 "+", "-", "*", "/", "%",
