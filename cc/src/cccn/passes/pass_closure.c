@@ -37,6 +37,59 @@ typedef struct {
     int cap;
 } StringSet;
 
+/* Simple string map for tracking variable types */
+typedef struct {
+    char** keys;
+    char** values;
+    int len;
+    int cap;
+} StringMap;
+
+static void string_map_set(StringMap* map, const char* key, const char* value) {
+    if (!key) return;
+    /* Check if already present */
+    for (int i = 0; i < map->len; i++) {
+        if (strcmp(map->keys[i], key) == 0) {
+            /* Update existing */
+            free(map->values[i]);
+            map->values[i] = value ? strdup(value) : NULL;
+            return;
+        }
+    }
+    /* Add new entry */
+    if (map->len >= map->cap) {
+        int new_cap = map->cap ? map->cap * 2 : 16;
+        map->keys = realloc(map->keys, new_cap * sizeof(char*));
+        map->values = realloc(map->values, new_cap * sizeof(char*));
+        map->cap = new_cap;
+    }
+    map->keys[map->len] = strdup(key);
+    map->values[map->len] = value ? strdup(value) : NULL;
+    map->len++;
+}
+
+static const char* string_map_get(const StringMap* map, const char* key) {
+    if (!key) return NULL;
+    for (int i = 0; i < map->len; i++) {
+        if (strcmp(map->keys[i], key) == 0) return map->values[i];
+    }
+    return NULL;
+}
+
+static void string_map_free(StringMap* map) {
+    for (int i = 0; i < map->len; i++) {
+        free(map->keys[i]);
+        free(map->values[i]);
+    }
+    free(map->keys);
+    free(map->values);
+    map->keys = map->values = NULL;
+    map->len = map->cap = 0;
+}
+
+/* Global type map - populated during traversal */
+static StringMap g_type_map = {0};
+
 static void string_set_add(StringSet* set, const char* name) {
     if (!name) return;
     /* Check if already present */
@@ -275,6 +328,20 @@ static CCNNode* lower_closure(CCNNode* closure, CCClosureDefList* defs) {
     def.body = closure->as.expr_closure.body;
     def.params = closure->as.expr_closure.params;
     
+    /* Look up types for each capture */
+    if (def.captures.len > 0) {
+        def.capture_types = malloc(def.captures.len * sizeof(char*));
+        for (int i = 0; i < def.captures.len; i++) {
+            CCNNode* cap = def.captures.items[i];
+            if (cap && cap->kind == CCN_EXPR_IDENT && cap->as.expr_ident.name) {
+                const char* type = string_map_get(&g_type_map, cap->as.expr_ident.name);
+                def.capture_types[i] = type ? strdup(type) : strdup("intptr_t");
+            } else {
+                def.capture_types[i] = strdup("intptr_t");
+            }
+        }
+    }
+    
     closure_def_list_push(defs, def);
     
     /* Create call to __cc_closure_make_N(captured_values...) */
@@ -339,6 +406,13 @@ static CCNNode* lower_node(CCNNode* node, CCClosureDefList* defs) {
             break;
             
         case CCN_VAR_DECL:
+            /* Track variable type for capture type lookup */
+            if (node->as.var.name && node->as.var.type_node &&
+                node->as.var.type_node->kind == CCN_TYPE_NAME &&
+                node->as.var.type_node->as.type_name.name) {
+                string_map_set(&g_type_map, node->as.var.name,
+                               node->as.var.type_node->as.type_name.name);
+            }
             node->as.var.init = lower_node(node->as.var.init, defs);
             break;
             
@@ -614,11 +688,24 @@ static void transform_closure_calls(CCNNode* node, ClosureVarList* closure_vars)
                     CCNNode* new_callee = ccn_node_new(CCN_EXPR_IDENT);
                     new_callee->as.expr_ident.name = strdup(fn_name);
                     
-                    /* Prepend old callee to args */
+                    /* Prepend old callee to args, wrap other args in (intptr_t) cast */
                     CCNNodeList new_args = {0};
                     ccn_list_push(&new_args, old_callee);
                     for (int i = 0; i < node->as.expr_call.args.len; i++) {
-                        ccn_list_push(&new_args, node->as.expr_call.args.items[i]);
+                        CCNNode* arg = node->as.expr_call.args.items[i];
+                        /* Wrap arg in (intptr_t) cast for closure call interface */
+                        CCNNode* cast = ccn_node_new(CCN_EXPR_CAST);
+                        if (cast) {
+                            CCNNode* type = ccn_node_new(CCN_TYPE_NAME);
+                            if (type) {
+                                type->as.type_name.name = strdup("intptr_t");
+                                cast->as.expr_cast.type_node = type;
+                            }
+                            cast->as.expr_cast.expr = arg;
+                            ccn_list_push(&new_args, cast);
+                        } else {
+                            ccn_list_push(&new_args, arg);
+                        }
                     }
                     
                     /* Replace callee and args */
@@ -666,8 +753,9 @@ int cc_pass_lower_closures(CCNFile* file) {
         closure_var_list_free(&closure_vars);
     }
     
-    /* Clean up globals set */
+    /* Clean up globals set and type map */
     string_set_free(&g_globals);
+    string_map_free(&g_type_map);
     
     return 0;
 }

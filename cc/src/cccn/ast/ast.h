@@ -467,6 +467,7 @@ typedef struct CCClosureDef {
     int id;
     int param_count;
     CCNNodeList captures;   /* captured variable references */
+    const char** capture_types;  /* type strings for each capture (parallel to captures) */
     CCNNode* body;          /* closure body */
     CCNNodeList params;     /* closure parameters */
 } CCClosureDef;

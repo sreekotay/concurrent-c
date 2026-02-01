@@ -118,13 +118,15 @@ static void emit_closure_defs(const CCNFile* file, FILE* out) {
         }
         
         if (has_captures) {
-            /* Emit env struct */
+            /* Emit env struct with actual capture types */
             fprintf(out, "typedef struct __cc_closure_env_%d {\n", id);
             for (int j = 0; j < def->captures.len; j++) {
                 CCNNode* cap = def->captures.items[j];
                 if (cap && cap->kind == CCN_EXPR_IDENT) {
-                    /* Use intptr_t to store captures (works for both ints and pointers) */
-                    fprintf(out, "  intptr_t %s;\n", cap->as.expr_ident.name);
+                    /* Use actual capture type if available */
+                    const char* cap_type = (def->capture_types && def->capture_types[j]) 
+                                           ? def->capture_types[j] : "intptr_t";
+                    fprintf(out, "  %s %s;\n", cap_type, cap->as.expr_ident.name);
                 }
             }
             fprintf(out, "} __cc_closure_env_%d;\n\n", id);
@@ -149,12 +151,14 @@ static void emit_closure_defs(const CCNFile* file, FILE* out) {
         /* Emit make function */
         if (has_captures) {
             fprintf(out, "static %s __cc_closure_make_%d(", closure_type, id);
-            /* Parameters for captured values - use intptr_t */
+            /* Parameters for captured values - use actual types */
             for (int j = 0; j < def->captures.len; j++) {
                 CCNNode* cap = def->captures.items[j];
                 if (cap && cap->kind == CCN_EXPR_IDENT) {
                     if (j > 0) fprintf(out, ", ");
-                    fprintf(out, "intptr_t _cap_%s", cap->as.expr_ident.name);
+                    const char* cap_type = (def->capture_types && def->capture_types[j]) 
+                                           ? def->capture_types[j] : "intptr_t";
+                    fprintf(out, "%s _cap_%s", cap_type, cap->as.expr_ident.name);
                 }
             }
             fprintf(out, ") {\n");
@@ -234,6 +238,16 @@ static void emit_closure_defs(const CCNFile* file, FILE* out) {
             }
             
             if (ctx.param_names) free((void*)ctx.param_names);
+            
+            /* Undef capture macros to prevent leaking to subsequent code */
+            if (has_captures) {
+                for (int j = 0; j < def->captures.len; j++) {
+                    CCNNode* cap = def->captures.items[j];
+                    if (cap && cap->kind == CCN_EXPR_IDENT) {
+                        fprintf(out, "  #undef %s\n", cap->as.expr_ident.name);
+                    }
+                }
+            }
             
             /* If body was an expression, we already emitted return */
             if (def->body->kind >= CCN_EXPR_IDENT && def->body->kind <= CCN_EXPR_TRY) {
@@ -468,6 +482,23 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
             }
             if (node->as.var.init) {
                 fprintf(out, " = ");
+                /* If type is a pointer and init is a closure param (will be substituted to __argN), add cast.
+                   Check by looking up the init ident name in the param context. */
+                int needs_cast = 0;
+                const char* ptr_type = NULL;
+                if (node->as.var.type_node && node->as.var.type_node->kind == CCN_TYPE_NAME &&
+                    node->as.var.type_node->as.type_name.name) {
+                    ptr_type = node->as.var.type_node->as.type_name.name;
+                    if (strchr(ptr_type, '*') != NULL &&
+                        node->as.var.init->kind == CCN_EXPR_IDENT &&
+                        node->as.var.init->as.expr_ident.name &&
+                        find_param_index(node->as.var.init->as.expr_ident.name, ctx) >= 0) {
+                        needs_cast = 1;
+                    }
+                }
+                if (needs_cast && ptr_type) {
+                    fprintf(out, "(%s)", ptr_type);
+                }
                 emit_node_ctx(node->as.var.init, out, 0, ctx);
             }
             break;
@@ -602,6 +633,17 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                 fprintf(out, "%s", op_str);
                 emit_node_ctx(node->as.expr_unary.operand, out, 0, ctx);
             }
+            break;
+        }
+
+        case CCN_EXPR_CAST: {
+            fprintf(out, "(");
+            if (node->as.expr_cast.type_node && node->as.expr_cast.type_node->kind == CCN_TYPE_NAME &&
+                node->as.expr_cast.type_node->as.type_name.name) {
+                fprintf(out, "%s", node->as.expr_cast.type_node->as.type_name.name);
+            }
+            fprintf(out, ")");
+            emit_node_ctx(node->as.expr_cast.expr, out, 0, ctx);
             break;
         }
 
