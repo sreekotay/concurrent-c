@@ -48,10 +48,26 @@ typedef enum {
     CC_BOOL_PARSE_INVALID_VALUE = 1,
 } CC_BoolParseError;
 
-CC_DECL_RESULT(CCResultI64Parse, int64_t, CC_I64ParseError)
-CC_DECL_RESULT(CCResultU64Parse, uint64_t, CC_U64ParseError)
-CC_DECL_RESULT(CCResultF64Parse, double, CC_F64ParseError)
-CC_DECL_RESULT(CCResultBoolParse, bool, CC_BoolParseError)
+CC_DECL_RESULT_SPEC(CCResult_int64_t_CC_I64ParseError, int64_t, CC_I64ParseError)
+CC_DECL_RESULT_SPEC(CCResult_uint64_t_CC_U64ParseError, uint64_t, CC_U64ParseError)
+CC_DECL_RESULT_SPEC(CCResult_double_CC_F64ParseError, double, CC_F64ParseError)
+CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
+
+/* Legacy aliases for type names */
+typedef CCResult_int64_t_CC_I64ParseError CCResultI64Parse;
+typedef CCResult_uint64_t_CC_U64ParseError CCResultU64Parse;
+typedef CCResult_double_CC_F64ParseError CCResultF64Parse;
+typedef CCResult_bool_CC_BoolParseError CCResultBoolParse;
+
+/* Legacy aliases for constructors */
+#define cc_ok_CCResultI64Parse cc_ok_CCResult_int64_t_CC_I64ParseError
+#define cc_err_CCResultI64Parse cc_err_CCResult_int64_t_CC_I64ParseError
+#define cc_ok_CCResultU64Parse cc_ok_CCResult_uint64_t_CC_U64ParseError
+#define cc_err_CCResultU64Parse cc_err_CCResult_uint64_t_CC_U64ParseError
+#define cc_ok_CCResultF64Parse cc_ok_CCResult_double_CC_F64ParseError
+#define cc_err_CCResultF64Parse cc_err_CCResult_double_CC_F64ParseError
+#define cc_ok_CCResultBoolParse cc_ok_CCResult_bool_CC_BoolParseError
+#define cc_err_CCResultBoolParse cc_err_CCResult_bool_CC_BoolParseError
 
 // ------------------------- Slice helpers ----------------------------------
 
