@@ -5,7 +5,7 @@ This document maps all compilation passes and preprocessing transforms, with con
 ## Current Stats
 
 - **Total lines**: ~21k across pass files
-- **TCC reparses**: 5 (after phases 3, 4, 5, 6, 8)
+- **TCC reparses**: 4 (down from 5 - spawn+nursery+arena now batched)
 - **Text-based passes**: 13
 - **AST-based passes**: 8
 
