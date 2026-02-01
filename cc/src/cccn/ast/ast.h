@@ -19,6 +19,12 @@
  * 1. Rich enough to represent all CC constructs before lowering.
  * 2. Supports AST-to-AST transformations (no text patching).
  * 3. Clean separation between parsing, lowering, and codegen.
+ *
+ * STRING OWNERSHIP CONVENTION:
+ * - All string fields (const char*) in CCNNode are OWNED and must be strdup'd.
+ * - ccn_node_free() is responsible for freeing all owned strings.
+ * - ccn_node_clone() must strdup all strings.
+ * - Exception: CCNSpan.file is borrowed from the input filename.
  */
 
 /* ========================================================================== */

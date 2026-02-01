@@ -53,18 +53,24 @@ typedef int bool;
 #ifdef CC_PARSER_MODE
 
 /* Generic Map placeholder struct for parser mode - any key/value types.
-   Simplified struct that just needs to compile for type checking. */
+   Simplified struct that just needs to compile for type checking.
+   Guard allows cccn parse stubs to predefine this. */
+#ifndef __CC_MAP_GENERIC_DEFINED
+#define __CC_MAP_GENERIC_DEFINED
 typedef struct __CCMapGeneric {
     size_t count;    /* Number of entries */
     void *keys;      /* Key storage */
     void *vals;      /* Value storage */
     void *arena;     /* CCArena* */
 } __CCMapGeneric;
+#endif
 
 /* THE KEY MACRO: In parser mode, all Map types resolve to generic.
    Usage: __CC_MAP(int, int) expands to __CCMapGeneric
    Codegen rewrites this to Map_int_int */
+#ifndef __CC_MAP
 #define __CC_MAP(K, V) __CCMapGeneric
+#endif
 
 /* Generic constructor - parser mode doesn't actually run,
    so just return a pointer to NULL-like value. Uses a static to have an address. */

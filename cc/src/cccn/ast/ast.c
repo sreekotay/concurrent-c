@@ -275,17 +275,20 @@ void ccn_node_free(CCNNode* node) {
             break;
             
         case CCN_FUNC_DECL:
+            free((void*)node->as.func.name);
             ccn_node_free(node->as.func.return_type);
             ccn_list_free(&node->as.func.params);
             ccn_node_free(node->as.func.body);
             break;
             
         case CCN_VAR_DECL:
+            free((void*)node->as.var.name);
             ccn_node_free(node->as.var.type_node);
             ccn_node_free(node->as.var.init);
             break;
             
         case CCN_PARAM:
+            free((void*)node->as.param.name);
             ccn_node_free(node->as.param.type_node);
             break;
             
@@ -326,6 +329,7 @@ void ccn_node_free(CCNNode* node) {
             
         case CCN_EXPR_METHOD:
             ccn_node_free(node->as.expr_method.receiver);
+            free((void*)node->as.expr_method.method);
             ccn_list_free(&node->as.expr_method.args);
             break;
             
@@ -357,8 +361,83 @@ void ccn_node_free(CCNNode* node) {
             ccn_node_free(node->as.type_ptr.base);
             break;
             
+        case CCN_STRUCT_DECL:
+            free((void*)node->as.struct_decl.name);
+            ccn_list_free(&node->as.struct_decl.fields);
+            break;
+            
+        case CCN_STRUCT_FIELD:
+            free((void*)node->as.struct_field.name);
+            free((void*)node->as.struct_field.type_str);
+            break;
+            
+        case CCN_ENUM_DECL:
+            free((void*)node->as.enum_decl.name);
+            ccn_list_free(&node->as.enum_decl.values);
+            break;
+            
+        case CCN_ENUM_VALUE:
+            free((void*)node->as.enum_value.name);
+            break;
+            
+        case CCN_TYPEDEF:
+            free((void*)node->as.typedef_decl.name);
+            free((void*)node->as.typedef_decl.type_str);
+            break;
+            
+        case CCN_INCLUDE:
+            free((void*)node->as.include.path);
+            break;
+            
+        case CCN_EXPR_FIELD:
+            ccn_node_free(node->as.expr_field.object);
+            free((void*)node->as.expr_field.field);
+            break;
+            
+        case CCN_EXPR_INDEX:
+            ccn_node_free(node->as.expr_index.array);
+            ccn_node_free(node->as.expr_index.index);
+            break;
+            
+        case CCN_EXPR_SIZEOF:
+            free((void*)node->as.expr_sizeof.type_str);
+            ccn_node_free(node->as.expr_sizeof.expr);
+            break;
+            
+        case CCN_EXPR_COMPOUND:
+            ccn_list_free(&node->as.expr_compound.values);
+            break;
+            
+        case CCN_EXPR_IDENT:
+            free((void*)node->as.expr_ident.name);
+            break;
+            
+        case CCN_EXPR_LITERAL_STRING:
+            free((void*)node->as.expr_string.value);
+            break;
+            
+        case CCN_STMT_NURSERY:
+        case CCN_STMT_ARENA:
+            free((void*)node->as.stmt_scope.name);
+            ccn_node_free(node->as.stmt_scope.size);
+            ccn_node_free(node->as.stmt_scope.body);
+            ccn_list_free(&node->as.stmt_scope.closing);
+            break;
+            
+        case CCN_STMT_SPAWN:
+            ccn_node_free(node->as.stmt_spawn.closure);
+            break;
+            
+        case CCN_STMT_DEFER:
+            ccn_node_free(node->as.stmt_defer.stmt);
+            break;
+            
+        case CCN_TYPE_NAME:
+            free((void*)node->as.type_name.name);
+            break;
+            
         default:
-            /* Leaf nodes or unhandled - nothing to free */
+            /* Leaf nodes without dynamic allocations */
             break;
     }
     

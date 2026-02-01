@@ -60,6 +60,19 @@ enum {
     CC_AST_NODE_RETURN = 15,
     CC_AST_NODE_PARAM = 16,
     CC_AST_NODE_FUNC = 17,
+    CC_AST_NODE_BINARY = 18,
+    CC_AST_NODE_TRY = 19,
+    CC_AST_NODE_IF = 20,
+    CC_AST_NODE_FOR = 21,
+    CC_AST_NODE_WHILE = 22,
+    CC_AST_NODE_UNARY = 23,
+    CC_AST_NODE_SIZEOF = 24,
+    CC_AST_NODE_STRUCT = 25,
+    CC_AST_NODE_STRUCT_FIELD = 26,
+    CC_AST_NODE_TYPEDEF = 27,
+    CC_AST_NODE_INDEX = 28,
+    CC_AST_NODE_ENUM = 29,
+    CC_AST_NODE_ENUM_VALUE = 30,
 };
 
 /* ============================================================================

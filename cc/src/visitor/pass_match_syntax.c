@@ -419,9 +419,7 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                             else if (ch == '}') { if (br2) br2--; }
                             else if (ch == ':' && par == 0 && brk2 == 0 && br2 == 0) { hdr_e = q; break; }
                         }
-                        if (hdr_e == (size_t)-1) break;
-
-                        p = hdr_e + 1;
+                        if (hdr_e == (size_t)-1) break;                        p = hdr_e + 1;
                         while (p < body_e && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) p++;
                         if (p >= body_e) break;
                         size_t cb_s = p;

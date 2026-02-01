@@ -37,18 +37,24 @@
 #ifdef CC_PARSER_MODE
 
 /* Generic Vec placeholder struct for parser mode - any element type.
-   Field names match real Vec layout so field access compiles. */
+   Field names match real Vec layout so field access compiles.
+   Guard allows cccn parse stubs to predefine this. */
+#ifndef __CC_VEC_GENERIC_DEFINED
+#define __CC_VEC_GENERIC_DEFINED
 typedef struct __CCVecGeneric {
     size_t len;
     size_t cap;
     void *data;
     void *arena;  /* CCArena* */
 } __CCVecGeneric;
+#endif
 
 /* THE KEY MACRO: In parser mode, all Vec types resolve to generic.
    Usage: __CC_VEC(int) expands to __CCVecGeneric
    Codegen rewrites this to Vec_int */
+#ifndef __CC_VEC
 #define __CC_VEC(T) __CCVecGeneric
+#endif
 
 /* Generic constructor - parser mode doesn't actually run,
    so just return a zeroed struct for type checking. */

@@ -419,7 +419,7 @@ static int cc_try_cc_spawn(void) {
 }
 
 /*
- * Parse @ statements: @arena, @arena_init, @defer, @nursery
+ * Parse @ statements: @arena, @arena_init, @defer, @nursery, @match, @with_deadline
  * Returns:
  *   0 = not handled (tok unchanged)
  *   1 = handled, caller should go to next statement
@@ -441,7 +441,9 @@ static int cc_try_cc_at_stmt(void) {
     if (strcmp(cc_at, "arena") != 0 &&
         strcmp(cc_at, "arena_init") != 0 &&
         strcmp(cc_at, "nursery") != 0 &&
-        strcmp(cc_at, "defer") != 0) {
+        strcmp(cc_at, "defer") != 0 &&
+        strcmp(cc_at, "match") != 0 &&
+        strcmp(cc_at, "with_deadline") != 0) {
         tcc_error("unknown '@%s' block", cc_at);
         return 0;
     }
@@ -455,7 +457,18 @@ static int cc_try_cc_at_stmt(void) {
         }
         next(); /* consume 'defer' */
         
-        /* Consume tokens until ';' at depth 0 */
+        /* Optional (err) for conditional defer */
+        if (tok == '(') {
+            int depth = 1;
+            next();
+            while (tok && tok != TOK_EOF && depth > 0) {
+                if (tok == '(') depth++;
+                else if (tok == ')') depth--;
+                next();
+            }
+        }
+        
+        /* Consume tokens until ';' or end of block at depth 0 */
         int par = 0, br = 0, sq = 0;
         while (tok && tok != TOK_EOF) {
             if (tok == '(') par++;
@@ -464,9 +477,15 @@ static int cc_try_cc_at_stmt(void) {
             else if (tok == '}' && br > 0) br--;
             else if (tok == '[') sq++;
             else if (tok == ']' && sq > 0) sq--;
-            else if (tok == ';' && par == 0 && br == 0 && sq == 0) {
-                next(); /* consume ';' */
-                break;
+            else if (par == 0 && br == 0 && sq == 0) {
+                if (tok == ';') {
+                    next(); /* consume ';' */
+                    break;
+                }
+                if (tok == '}') {
+                    /* End of block - don't consume, caller will */
+                    break;
+                }
             }
             next();
         }
@@ -499,6 +518,91 @@ static int cc_try_cc_at_stmt(void) {
         }
         if (tok != '{')
             tcc_error("expected '{' after @nursery");
+        return 2; /* handled, fall through to block */
+    }
+    
+    /* --- @match { ... } --- */
+    if (strcmp(cc_at, "match") == 0) {
+        cc_ast_record_start(CC_AST_NODE_STMT);
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("match");
+        }
+        next(); /* consume 'match' */
+        if (tok != '{')
+            tcc_error("expected '{' after @match");
+        
+        next(); /* consume '{' */
+        /* Parse case arms inside @match */
+        while (tok && tok != '}' && tok != TOK_EOF) {
+            if (tok == TOK_CASE) {
+                cc_ast_record_start(CC_AST_NODE_STMT);
+                if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+                    int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+                    tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("case");
+                }
+                next(); /* consume 'case' */
+                /* Consume until ':' */
+                while (tok && tok != ':' && tok != TOK_EOF) {
+                    next();
+                }
+                if (tok == ':') next();
+                
+                /* Parse case body (usually a block or stmt) */
+                if (tok == '{') {
+                    /* Fall through to TCC's block parser if we were returning 2, 
+                       but here we are inside a loop. We need to handle nested blocks. */
+                    int depth = 1;
+                    next();
+                    while (tok && tok != TOK_EOF && depth > 0) {
+                        if (tok == '{') depth++;
+                        else if (tok == '}') depth--;
+                        next();
+                    }
+                } else {
+                    /* Single statement case body - consume until ';' */
+                    while (tok && tok != ';' && tok != TOK_EOF) {
+                        next();
+                    }
+                    if (tok == ';') next();
+                }
+                cc_ast_record_end();
+            } else if (tok == TOK_DEFAULT) {
+                /* Similar to case */
+                next();
+                if (tok == ':') next();
+                /* ... consume body ... */
+            } else {
+                next();
+            }
+        }
+        if (tok == '}') next();
+        
+        cc_ast_record_end();
+        return 1; /* handled as a full block now */
+    }
+    
+    /* --- @with_deadline(expr) { ... } --- */
+    if (strcmp(cc_at, "with_deadline") == 0) {
+        cc_ast_record_start(CC_AST_NODE_STMT);
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("with_deadline");
+        }
+        next(); /* consume 'with_deadline' */
+        
+        /* Parse optional (expr) for deadline specification */
+        if (tok == '(') {
+            int depth = 1;
+            next();
+            while (tok && tok != TOK_EOF && depth > 0) {
+                if (tok == '(') depth++;
+                else if (tok == ')') depth--;
+                next();
+            }
+        }
+        if (tok != '{')
+            tcc_error("expected '{' after @with_deadline");
         return 2; /* handled, fall through to block */
     }
     
