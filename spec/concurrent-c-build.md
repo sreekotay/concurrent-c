@@ -362,6 +362,38 @@ See `<cc_atomic.cch>` documentation in the stdlib spec for full API.
 - On const binding overflow: clear error with max binding counts.
 - Build.cc parse errors: show file/line and message; fall back to defaults only if no consts emitted and no fatal error.
 
+## Debugging Environment Variables
+
+The following environment variables aid debugging compiler internals:
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `CC_DEBUG_PP_SOURCE=1` | Dump preprocessed source before TCC parsing | See what TCC receives |
+| `CC_DEBUG_STUB_NODES=1` | Dump stub AST nodes (arenas, nurseries) | Debug AST pass issues |
+| `CC_KEEP_PP=1` | Keep temporary preprocessed files | Inspect lowered C |
+
+**Example: Debugging a compilation error**
+
+```bash
+# See preprocessed output to diagnose "lvalue expected" or similar TCC errors
+CC_DEBUG_PP_SOURCE=1 ccc build myfile.ccs 2>&1 | less
+
+# Inspect arena/nursery AST nodes
+CC_DEBUG_STUB_NODES=1 ccc build myfile.ccs
+
+# Keep preprocessed temp files for inspection
+CC_KEEP_PP=1 ccc build myfile.ccs
+ls /tmp/cc_pp_*.c
+```
+
+**Common debugging scenarios:**
+
+1. **"lvalue expected" error:** Use `CC_DEBUG_PP_SOURCE=1` to see what TCC is parsing. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
+
+2. **Arena/nursery span issues:** Use `CC_DEBUG_STUB_NODES=1` to dump AST node spans. Check that `line_start`/`line_end` and `col_start`/`col_end` match your source.
+
+3. **Macro expansion issues:** Use `CC_KEEP_PP=1` to keep the preprocessed file, then inspect it directly.
+
 ## Compatibility Guidance
 - For Make/CMake integration: use `ccc --emit-c-only` to generate C and let the existing build drive compile/link, or `ccc --compile` to produce objects.
 - Use `ccc --print-cflags` and `ccc --print-libs` to get the necessary compiler and linker flags for your build system.

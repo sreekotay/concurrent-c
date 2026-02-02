@@ -85,6 +85,16 @@ Convenience macros for constructing Optional and Result type names in C (interop
 | `CCOptRes(T, E)` | `CCOptional_CCResult_T_E` | Optional containing a Result |
 | `CCResOpt(T, E)` | `CCResult_CCOptional_T_E` | Result containing an Optional |
 
+**Usage in headers vs source files:**
+
+| Context | Syntax | Example |
+|---------|--------|---------|
+| `.ccs` source files | `T !>(E)` sigil syntax | `int !>(CCIoError) read_int(...)` |
+| `.cch` header files | `CCRes(T, E)` macro | `CCRes(int, CCIoError) read_int(...)` |
+| C interop headers | Explicit type name | `CCResult_int_CCIoError read_int(...)` |
+
+The `CCRes(T, E)` macros work in both TCC parser mode (for `.cch` files) and regular C compilation.
+
 ### Result Helpers
 
 Macros for working with `T!>(E)` Result types:
@@ -93,14 +103,32 @@ Macros for working with `T!>(E)` Result types:
 |--------|---------|-------------|
 | `cc_is_ok(res)` | `bool` | True if result is success |
 | `cc_is_err(res)` | `bool` | True if result is error |
-| `cc_unwrap(res)` | `T` | Get value (aborts if error) |
-| `cc_unwrap_err(res)` | `E` | Get error (aborts if ok) |
+| `cc_unwrap(res)` | `T` | Get value (for primitives) |
+| `cc_unwrap_err(res)` | `E` | Get error (for primitives) |
+| `cc_unwrap_as(res, T)` | `T` | Get value as specific type (for structs) |
+| `cc_unwrap_err_as(res, E)` | `E` | Get error as specific type (for structs) |
 
-**Idiomatic pattern:**
+**Note:** Use `cc_unwrap(res)` for primitive types (int, pointer, etc.). For struct types, use `cc_unwrap_as(res, StructType)` to avoid type punning issues.
+
+**Result struct layout:**
+
+All Result types use a unified struct layout:
 
 ```c
-// Prefer sigil types in .ccs; use CCRes* only for C interop.
-CCSlice!>(CCIoError) res = cc_file_read(file, arena, n);
+struct CCResult_T_E {
+    bool ok;           // true = success, false = error
+    union {
+        T value;       // access via cc_unwrap(res) or res.u.value
+        E error;       // access via cc_unwrap_err(res) or res.u.error
+    } u;
+};
+```
+
+**Idiomatic patterns:**
+
+```c
+// Pattern 1: Prefer sigil types in .ccs source files
+CCSlice !>(CCIoError) res = cc_file_read(file, arena, n);
 if (cc_is_err(res)) {
     CCIoError err = cc_unwrap_err(res);
     handle_error(err);
@@ -110,7 +138,44 @@ CCSlice data = cc_unwrap(res);
 if (data.len == 0) {
     // EOF
 }
+
+// Pattern 2: For struct return types, use cc_unwrap_as
+CCProcessOutput !>(CCIoError) res = cc_process_run(arena, "ls", args);
+if (cc_is_err(res)) {
+    CCIoError err = cc_unwrap_err_as(res, CCIoError);
+    printf("Error: %s (os=%d)\n", cc_io_error_str(err), err.os_code);
+    return;
+}
+CCProcessOutput out = cc_unwrap_as(res, CCProcessOutput);
+printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
+
+// Pattern 3: Direct field access (lower-level, use helpers when possible)
+if (res.ok) {
+    T value = res.u.value;
+} else {
+    E error = res.u.error;
+}
 ```
+
+### Declaring Result Types in Headers
+
+When defining custom Result types in `.cch` header files, use the `CCRes(T, E)` macro and `CC_DECL_RESULT_SPEC` with guards:
+
+```c
+// In your_types.cch
+#include <ccc/cc_result.cch>
+
+// Use CCRes(T, E) in function signatures
+CCRes(MyData, MyError) my_function(int arg);
+
+// Declare Result type with guards (prevents redefinition if compiler auto-generates)
+#ifndef CCResult_MyData_MyError_DEFINED
+#define CCResult_MyData_MyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_MyData_MyError, MyData, MyError)
+#endif
+```
+
+**Why guards?** When you use `T !>(E)` syntax in `.ccs` files, the compiler automatically generates `CC_DECL_RESULT_SPEC` calls. The `#ifndef ..._DEFINED` guards prevent redefinition errors when explicit declarations exist in headers.
 
 ### Optional Helpers
 

@@ -116,6 +116,17 @@ Result types (`T!>(E)`) support these methods via UFCS:
 | `r.unwrap()` | Get value or abort | `int v = r.unwrap();` |
 | `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);` |
 
+**Macro helpers (for C interop/generated code):**
+
+| Macro | Purpose | Example |
+|-------|---------|---------|
+| `cc_is_ok(res)` | Check if success | `if (cc_is_ok(res)) { ... }` |
+| `cc_is_err(res)` | Check if error | `if (cc_is_err(res)) handle_err();` |
+| `cc_unwrap(res)` | Get value (primitives) | `int v = cc_unwrap(res);` |
+| `cc_unwrap_as(res, T)` | Get value (structs) | `MyStruct v = cc_unwrap_as(res, MyStruct);` |
+| `cc_unwrap_err(res)` | Get error (primitives) | `CCError e = cc_unwrap_err(res);` |
+| `cc_unwrap_err_as(res, E)` | Get error (structs) | `CCIoError e = cc_unwrap_err_as(res, CCIoError);` |
+
 **C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. Short aliases (`String`, `Arena`, etc.) are only available when the user opts in via `#include <ccc/std/prelude.cch>` and defining `CC_ENABLE_SHORT_NAMES` before inclusion. Default is prefixed-only.
 
 ---
@@ -816,8 +827,12 @@ For generated C code, these macros provide direct access without UFCS lowering:
 |-------|---------|-------------|
 | `cc_is_ok(res)` | `bool` | True if result is success |
 | `cc_is_err(res)` | `bool` | True if result is error |
-| `cc_unwrap(res)` | `T` | Get value (aborts if error) |
-| `cc_unwrap_err(res)` | `E` | Get error (aborts if ok) |
+| `cc_unwrap(res)` | `T` | Get value (for primitives) |
+| `cc_unwrap_err(res)` | `E` | Get error (for primitives) |
+| `cc_unwrap_as(res, T)` | `T` | Get value as type T (for structs) |
+| `cc_unwrap_err_as(res, E)` | `E` | Get error as type E (for structs) |
+
+**Note:** Use `cc_unwrap(res)` for primitive types (int, pointer, etc.). For struct return types, use `cc_unwrap_as(res, StructType)` to ensure correct type handling.
 
 **Type macros:**
 
@@ -858,6 +873,26 @@ int value = cc_unwrap(res);
 **Lowering:** `r.unwrap()` → `CCResult_T_E_unwrap(r)`, etc.
 
 **Rule (unwrap panic):** Calling `.unwrap()` on an error result prints an error message and aborts. Use `.unwrap_or(default)` or check `.is_ok()` first if error is possible.
+
+**Declaring custom Result types in headers:**
+
+When defining Result types in `.cch` header files, use guards to prevent redefinition:
+
+```c
+// In your_types.cch
+#include <ccc/cc_result.cch>
+
+// Declare custom Result type with guard
+#ifndef CCResult_MyData_MyError_DEFINED
+#define CCResult_MyData_MyError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_MyData_MyError, MyData, MyError)
+#endif
+
+// Use CCRes(T, E) macro in function signatures
+CCRes(MyData, MyError) my_function(int arg);
+```
+
+**Why guards?** The compiler automatically generates `CC_DECL_RESULT_SPEC` calls when you use `T !>(E)` syntax in `.ccs` source files. The `#ifndef ..._DEFINED` guards prevent redefinition errors when your header also declares the same type.
 
 ---
 
@@ -6419,6 +6454,38 @@ Task__process__0 process__init() {
 
 // ... state machine lowering with clear labels
 ```
+
+### C.9 Debugging Environment Variables
+
+The CC compiler supports environment variables for debugging compilation issues:
+
+| Variable | Purpose |
+|----------|---------|
+| `CC_DEBUG_PP_SOURCE=1` | Dump preprocessed source before TCC parsing |
+| `CC_DEBUG_STUB_NODES=1` | Dump stub AST nodes (arenas, nurseries, etc.) |
+| `CC_KEEP_PP=1` | Keep temporary preprocessed files for inspection |
+
+**Usage example:**
+
+```bash
+# See exactly what TCC receives (useful for "lvalue expected" errors)
+CC_DEBUG_PP_SOURCE=1 ccc build myfile.ccs 2>&1 | less
+
+# Inspect arena/nursery AST node spans
+CC_DEBUG_STUB_NODES=1 ccc build myfile.ccs
+
+# Keep preprocessed temp files
+CC_KEEP_PP=1 ccc build myfile.ccs
+ls /tmp/cc_pp_*.c
+```
+
+**Common debugging scenarios:**
+
+1. **"lvalue expected" errors:** Use `CC_DEBUG_PP_SOURCE=1` to inspect the preprocessed source. Look for garbled type declarations (e.g., `Tcc_unwrap(x)` instead of `T* x`).
+
+2. **Arena/nursery issues:** Use `CC_DEBUG_STUB_NODES=1` to verify AST node spans match your source.
+
+3. **Result type redefinition errors:** Ensure your `.cch` headers use `#ifndef CCResult_T_E_DEFINED` guards around `CC_DECL_RESULT_SPEC` calls.
 
 ---
 
