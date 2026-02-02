@@ -33,8 +33,9 @@ typedef struct CCNursery CCNursery;
 #if defined(CC_PARSER_MODE)
 /* TCC parse-to-stub-AST runs after preprocessing. For CC syntax like `() => {}`,
    we intentionally use a dummy type so the C parser doesn't reject otherwise-valid CC code.
-   The real ABI type is used for the final emitted C compilation. */
-typedef int CCClosure0;
+   The real ABI type is used for the final emitted C compilation.
+   Using intptr_t allows pointer return values without warnings. */
+typedef intptr_t CCClosure0;
 #define CCClosure1 CCClosure0
 #define CCClosure2 CCClosure0
 #else
