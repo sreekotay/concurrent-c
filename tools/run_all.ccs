@@ -74,23 +74,18 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 
         /* Use a fresh temp arena for each test to avoid accumulation */
         CCArena test_arena = cc_heap_arena(megabytes(4));
-        /* Use absolute path to avoid any path resolution issues */
-        char ccc_path[4096];
-        if (getcwd(ccc_path, sizeof(ccc_path) - 32)) {
-            strcat(ccc_path, "/out/cc/bin/ccc");
-        } else {
-            strcpy(ccc_path, "./out/cc/bin/ccc");
-        }
-        CCResultProcessOutputIoError res = cc_process_run(&test_arena, ccc_path, args);
+        /* Use ccc from PATH */
+        CCResultProcessOutputIoError res = cc_process_run(&test_arena, "ccc", args);
 
-        if (res.is_err) {
+        if (cc_is_err(res)) {
+            CCIoError err = cc_unwrap_err_as(res, CCIoError);
             cc_heap_arena_free(&test_arena);
-            printf("SKIP (spawn error)\n");
+            printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
             stats->skipped++;
             continue;
         }
 
-        CCProcessOutput out = res.ok;
+        CCProcessOutput out = cc_unwrap_as(res, CCProcessOutput);
         int exit_code = cc_process_output_exit_code(&out);
         
         if (exit_code == expected_exit) {

@@ -9,6 +9,7 @@
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_optional.cch>
 #include <ccc/cc_io_error.cch>
 
 /* Process handle (opaque, platform-specific internals) */
@@ -44,9 +45,33 @@ typedef struct CCProcessConfig {
 } CCProcessConfig;
 
 /* Result types */
-CC_DECL_RESULT(CCResultProcessIoError, CCProcess, CCIoError)
-CC_DECL_RESULT(CCResultStatusIoError, CCProcessStatus, CCIoError)
-CC_DECL_RESULT(CCResultIntIoError, int, CCIoError)
+#ifndef CCResult_CCProcess_CCIoError_DEFINED
+#define CCResult_CCProcess_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCProcess_CCIoError, CCProcess, CCIoError)
+#endif
+
+#ifndef CCResult_CCProcessStatus_CCIoError_DEFINED
+#define CCResult_CCProcessStatus_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCProcessStatus_CCIoError, CCProcessStatus, CCIoError)
+#endif
+
+#ifndef CCResult_int_CCIoError_DEFINED
+#define CCResult_int_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int_CCIoError, int, CCIoError)
+#endif
+
+/* Legacy aliases for type names */
+typedef CCResult_CCProcess_CCIoError CCResultProcessIoError;
+typedef CCResult_CCProcessStatus_CCIoError CCResultStatusIoError;
+typedef CCResult_int_CCIoError CCResultIntIoError;
+
+/* Legacy aliases for constructors */
+#define cc_ok_CCResultProcessIoError cc_ok_CCResult_CCProcess_CCIoError
+#define cc_err_CCResultProcessIoError cc_err_CCResult_CCProcess_CCIoError
+#define cc_ok_CCResultStatusIoError cc_ok_CCResult_CCProcessStatus_CCIoError
+#define cc_err_CCResultStatusIoError cc_err_CCResult_CCProcessStatus_CCIoError
+#define cc_ok_CCResultIntIoError cc_ok_CCResult_int_CCIoError
+#define cc_err_CCResultIntIoError cc_err_CCResult_int_CCIoError
 
 /* ============================================================================
  * Process Spawning
@@ -204,7 +229,15 @@ static inline bool cc_process_output_success(const CCProcessOutput* o) {
     return o && o->status.exited && o->status.exit_code == 0;
 }
 
-CC_DECL_RESULT(CCResultProcessOutputIoError, CCProcessOutput, CCIoError)
+#ifndef CCResult_CCProcessOutput_CCIoError_DEFINED
+#define CCResult_CCProcessOutput_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoError)
+#endif
+
+/* Legacy aliases */
+typedef CCResult_CCProcessOutput_CCIoError CCResultProcessOutputIoError;
+#define cc_ok_CCResultProcessOutputIoError cc_ok_CCResult_CCProcessOutput_CCIoError
+#define cc_err_CCResultProcessOutputIoError cc_err_CCResult_CCProcessOutput_CCIoError
 
 /*
  * Run command and capture all output (blocking).

@@ -758,16 +758,16 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
     };
 
     CCResultProcessIoError spawn_res = cc_process_spawn(&config);
-    if (spawn_res.is_err) {
-        return cc_err_CCResultProcessOutputIoError(spawn_res.err);
+    if (cc_is_err(spawn_res)) {
+        return cc_err_CCResultProcessOutputIoError(cc_unwrap_err(spawn_res));
     }
 
-    CCProcess proc = spawn_res.ok;
+    CCProcess proc = cc_unwrap(spawn_res);
 
     /* Read stdout - blocks until child closes its stdout (usually on exit) */
     CCResult_CCSlice_CCIoError stdout_res = cc_process_read_all(&proc, arena);
-    if (stdout_res.ok) {
-        output.stdout_data = stdout_res.u.value;
+    if (cc_is_ok(stdout_res)) {
+        output.stdout_data = cc_unwrap(stdout_res);
     }
     /* Close our end after reading */
     if (proc.stdout_fd >= 0) {
@@ -777,8 +777,8 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
 
     /* Read stderr */
     CCResult_CCSlice_CCIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
-    if (stderr_res.ok) {
-        output.stderr_data = stderr_res.u.value;
+    if (cc_is_ok(stderr_res)) {
+        output.stderr_data = cc_unwrap(stderr_res);
     }
     /* Close our end after reading */
     if (proc.stderr_fd >= 0) {
@@ -788,8 +788,8 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
 
     /* Wait for exit */
     CCResultStatusIoError wait_res = cc_process_wait(&proc);
-    if (!wait_res.is_err) {
-        output.status = wait_res.ok;
+    if (cc_is_ok(wait_res)) {
+        output.status = cc_unwrap(wait_res);
     }
 
     return cc_ok_CCResultProcessOutputIoError(output);

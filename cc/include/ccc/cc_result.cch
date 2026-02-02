@@ -63,32 +63,6 @@ static inline CCError cc_error(CCErrorKind kind, const char* msg) {
 #endif /* CC_PARSER_MODE */
 
 /*
- * LEGACY LAYOUT: CC_DECL_RESULT
- * Used by existing runtime code (std/io.cch, etc.)
- * Access pattern: r.is_err, r.ok, r.err
- */
-#define CC_DECL_RESULT(name, OkType, ErrType)                                       \
-    typedef struct {                                                                \
-        bool is_err;                                                                \
-        union {                                                                     \
-            OkType ok;                                                              \
-            ErrType err;                                                            \
-        };                                                                          \
-    } name;                                                                         \
-    static inline name cc_ok_##name(OkType value) {                                 \
-        name r;                                                                     \
-        r.is_err = false;                                                           \
-        r.ok = value;                                                               \
-        return r;                                                                   \
-    }                                                                               \
-    static inline name cc_err_##name(ErrType error) {                               \
-        name r;                                                                     \
-        r.is_err = true;                                                            \
-        r.err = error;                                                              \
-        return r;                                                                   \
-    }
-
-/*
  * Result type layout:
  *   r.ok       - true if success
  *   r.u.value  - the success value (when ok is true)
