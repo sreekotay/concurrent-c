@@ -17,8 +17,16 @@ make pigz      # Original (requires zlib, pthreads)
 make pigz_cc   # CC version (requires CC compiler + zlib)
 
 # 3. Run benchmark
-./benchmark.sh 100 4 3   # 100MB, 4 workers, 3 runs
+./benchmark.sh 200 8 3   # <size_mb> <workers> <runs>
 ```
+
+## Benchmark Data (auto-downloaded, not checked in)
+
+`benchmark.sh` uses a **real multi-file corpus** (Silesia corpus) and generates a single input file by concatenating corpus files until it reaches the requested size.
+
+- **Downloaded/extracted to**: `testdata/silesia/` (and `testdata/silesia.zip`)
+- **Generated input**: `testdata/text_<size_mb>mb.bin`
+- **Not checked in**: benchmark inputs are ignored via `.gitignore`
 
 ## Architecture Comparison
 
@@ -128,9 +136,9 @@ for (int w = 0; w < num_workers; w++) {
 |------|-------------|
 | `setup.sh` | Downloads original pigz source |
 | `Makefile` | Builds both versions |
-| `benchmark.sh` | Performance comparison |
-| `pigz_cc.ccs` | **CC implementation** |
-| `build.cc` | CC build script |
+| `benchmark.sh` | Main benchmark (auto-downloads corpus + prints summary table) |
+| `pigz_cc.ccs` | Legacy prototype (not built by the Makefile) |
+| `pigz_cc/pigz_cc.ccs` | **CC implementation used by the Makefile** |
 | `pigz.c` | Original (downloaded) |
 | `yarn.c/h` | Original thread layer |
 | `try.c/h` | Original error handling |

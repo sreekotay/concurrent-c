@@ -1,6 +1,6 @@
 #!/bin/bash
 # Benchmark script using REAL compressible data (not random)
-# Downloads Silesia corpus or uses existing test files
+# Auto-downloads a real corpus if missing, and generates a sized input file.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,15 +8,17 @@ OUT_DIR="$SCRIPT_DIR/out"
 DATA_DIR="$SCRIPT_DIR/testdata"
 
 # Configuration
-WORKERS=${1:-8}
-RUNS=${2:-3}
+SIZE_MB=${1:-200}
+WORKERS=${2:-8}
+RUNS=${3:-3}
 
 echo "=============================================="
 echo "pigz Benchmark: Real Compressible Data"
 echo "=============================================="
 echo ""
-echo "Workers: ${WORKERS}"
-echo "Runs: ${RUNS}"
+echo "Input size: ${SIZE_MB} MB"
+echo "Workers:    ${WORKERS}"
+echo "Runs:       ${RUNS}"
 echo ""
 
 # Check binaries exist
@@ -38,38 +40,97 @@ cd "$DATA_DIR"
 PIGZ_ORIG="$OUT_DIR/pigz"
 PIGZ_CC="$OUT_DIR/pigz_cc"
 
-# Generate enwik8 alternative (text-like data that compresses well)
+download_silesia() {
+    # We keep the extracted corpus under testdata/silesia/ to avoid cluttering testdata/.
+    if [ -d "silesia" ] && [ -n "$(ls -A silesia 2>/dev/null)" ]; then
+        return 0
+    fi
+
+    local url="http://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip"
+    echo "Downloading Silesia corpus from $url ..."
+
+    rm -rf silesia
+    mkdir -p silesia
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -L --fail -o silesia.zip "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O silesia.zip "$url"
+    else
+        echo "Error: need curl or wget to download silesia.zip"
+        exit 1
+    fi
+
+    echo "Extracting silesia.zip ..."
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q -o silesia.zip -d silesia
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY'
+import zipfile, os
+os.makedirs("silesia", exist_ok=True)
+with zipfile.ZipFile("silesia.zip") as z:
+    z.extractall("silesia")
+PY
+    else
+        echo "Error: need unzip or python3 to extract silesia.zip"
+        exit 1
+    fi
+
+    # Some zips contain a nested directory; normalize to silesia/*files*
+    if [ -d "silesia/silesia" ] && [ -n "$(ls -A silesia/silesia 2>/dev/null)" ]; then
+        rm -rf silesia.tmp
+        mv silesia/silesia silesia.tmp
+        rm -rf silesia
+        mv silesia.tmp silesia
+    fi
+
+    if [ ! -d "silesia" ] || [ -z "$(ls -A silesia 2>/dev/null)" ]; then
+        echo "Error: extraction failed (silesia directory is empty)"
+        exit 1
+    fi
+}
+
+# Generate sized data by concatenating real corpus files (more realistic than repeating one file)
 generate_text_data() {
     local size_mb=$1
     local outfile="text_${size_mb}mb.bin"
     
     if [ ! -f "$outfile" ]; then
-        echo "Generating ${size_mb}MB of compressible text data..."
-        # Download enwik8 (100MB Wikipedia dump) - classic benchmark
-        if [ ! -f "enwik8" ]; then
-            curl -L -o enwik8.zip "https://mattmahoney.net/dc/enwik8.zip"
-            unzip -q enwik8.zip
+        echo "Generating ${size_mb}MB of real corpus data (concatenated)..."
+        download_silesia
+
+        local target_bytes=$((size_mb * 1000000))
+        : > "$outfile"
+
+        # Deterministic order for reproducibility.
+        # Use only regular files; skip directories/metadata.
+        local files
+        files=$(find silesia -type f -print | LC_ALL=C sort)
+
+        if [ -z "$files" ]; then
+            echo "Error: no files found under testdata/silesia/"
+            exit 1
         fi
-        # Use enwik8 repeated or truncated to desired size
-        if [ "$size_mb" -le 100 ]; then
-            head -c ${size_mb}000000 enwik8 > "$outfile"
-        else
-            # Repeat enwik8 to get larger sizes
-            local copies=$((size_mb / 100 + 1))
-            for i in $(seq 1 $copies); do
-                cat enwik8
-            done | head -c ${size_mb}000000 > "$outfile"
-        fi
+
+        # Append corpus files repeatedly until target size reached, then truncate.
+        while [ "$(wc -c < "$outfile")" -lt "$target_bytes" ]; do
+            # shellcheck disable=SC2086
+            cat $files >> "$outfile"
+        done
+        head -c "$target_bytes" "$outfile" > "${outfile}.tmp" && mv "${outfile}.tmp" "$outfile"
+
         echo "Text data ready: $(du -h $outfile | cut -f1)"
     fi
 }
 
 # Function to run compression benchmark
 run_compress() {
-    local name=$1
-    local cmd=$2
-    local input=$3
+    local key=$1
+    local name=$2
+    local cmd=$3
+    local input=$4
     local total_time=0
+    local total_out=0
     
     local input_size=$(wc -c < "$input")
     echo "=== $name (Compression) ==="
@@ -96,22 +157,31 @@ run_compress() {
         rm -f bench_test.bin bench_test.bin.gz
         
         total_time=$(python3 -c "print($total_time + $elapsed)")
+        total_out=$(python3 -c "print($total_out + $output_size)")
     done
     
     avg=$(python3 -c "print(f'{$total_time / $RUNS:.3f}')")
     avg_throughput=$(python3 -c "print(f'{$input_size / 1024 / 1024 / ($total_time / $RUNS):.1f}')")
-    echo "  Average: ${avg}s (${avg_throughput} MB/s)"
+    avg_out=$(python3 -c "print(int($total_out / $RUNS))")
+    avg_ratio=$(python3 -c "print(f'{$avg_out / $input_size * 100:.1f}%')")
+    echo "  Average: ${avg}s (${avg_throughput} MB/s), avg ratio ${avg_ratio}"
     echo ""
+
+    # Export summary numbers for the final table (keys are expected to be small/simple)
+    eval "COMP_${key}_AVG_S=${avg}"
+    eval "COMP_${key}_AVG_MBPS=${avg_throughput}"
+    eval "COMP_${key}_AVG_RATIO=${avg_ratio}"
 }
 
 # Function to run decompression benchmark
 run_decompress() {
-    local name=$1
-    local cmd=$2
-    local compressed=$3
+    local key=$1
+    local name=$2
+    local cmd=$3
+    local compressed=$4
     local total_time=0
+    local total_out=0
     
-    local compressed_size=$(wc -c < "$compressed")
     echo "=== $name (Decompression) ==="
     
     for run in $(seq 1 $RUNS); do
@@ -134,18 +204,24 @@ run_decompress() {
         rm -f bench_test.gz bench_test
         
         total_time=$(python3 -c "print($total_time + $elapsed)")
+        total_out=$(python3 -c "print($total_out + $output_size)")
     done
     
     avg=$(python3 -c "print(f'{$total_time / $RUNS:.3f}')")
-    echo "  Average: ${avg}s"
+    avg_out=$(python3 -c "print(int($total_out / $RUNS))")
+    avg_throughput=$(python3 -c "print(f'{$avg_out / 1024 / 1024 / ($total_time / $RUNS):.1f}')")
+    echo "  Average: ${avg}s (${avg_throughput} MB/s)"
     echo ""
+
+    eval "DECOMP_${key}_AVG_S=${avg}"
+    eval "DECOMP_${key}_AVG_MBPS=${avg_throughput}"
 }
 
 # Download/generate test data
 echo "=== Preparing Test Data ==="
-generate_text_data 200  # 200MB of enwik8 (Wikipedia XML)
+generate_text_data "$SIZE_MB"
 
-INPUT_FILE="text_200mb.bin"
+INPUT_FILE="text_${SIZE_MB}mb.bin"
 echo ""
 
 # Run compression benchmarks
@@ -154,8 +230,8 @@ echo "COMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_compress "Original pigz (pthread)" "$PIGZ_ORIG -k -p $WORKERS" "$INPUT_FILE"
-run_compress "CC pigz (Concurrent-C)"  "$PIGZ_CC -k -p $WORKERS" "$INPUT_FILE"
+run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG -k -p $WORKERS" "$INPUT_FILE"
+run_compress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC -k -p $WORKERS" "$INPUT_FILE"
 
 # Create compressed files for decompression benchmarks
 echo "=== Preparing Compressed Files ==="
@@ -176,8 +252,8 @@ echo "DECOMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_decompress "Original pigz (pthread)" "$PIGZ_ORIG -d -k -p $WORKERS" "bench_orig.gz"
-run_decompress "CC pigz (Concurrent-C)"  "$PIGZ_CC -d -k -p $WORKERS" "bench_cc.gz"
+run_decompress orig "Original pigz (pthread)" "$PIGZ_ORIG -d -k -p $WORKERS" "bench_orig.gz"
+run_decompress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC -d -k -p $WORKERS" "bench_cc.gz"
 
 # Verify correctness
 echo "=== Correctness Check ==="
@@ -215,6 +291,19 @@ cc_ratio=$(python3 -c "print(f'{$cc_compressed / $orig_size * 100:.2f}%')")
 echo "Input:          $(du -h $INPUT_FILE | cut -f1) ($orig_size bytes)"
 echo "Original pigz:  $(du -h orig.gz | cut -f1) ($orig_compressed bytes) - ${orig_ratio}"
 echo "CC pigz:        $(du -h cc.gz | cut -f1) ($cc_compressed bytes) - ${cc_ratio}"
+
+# Consolidated summary (easy to paste into issues/PRs)
+echo ""
+echo "=== Benchmark Summary (avg over ${RUNS} runs) ==="
+printf "%-24s  %10s  %12s  %10s  %10s  %12s\n" "Implementation" "Comp(s)" "Comp(MB/s)" "Ratio" "Decomp(s)" "Decomp(MB/s)"
+printf "%-24s  %10s  %12s  %10s  %10s  %12s\n" \
+  "pigz (pthread)" \
+  "${COMP_orig_AVG_S:-?}" "${COMP_orig_AVG_MBPS:-?}" "${COMP_orig_AVG_RATIO:-?}" \
+  "${DECOMP_orig_AVG_S:-?}" "${DECOMP_orig_AVG_MBPS:-?}"
+printf "%-24s  %10s  %12s  %10s  %10s  %12s\n" \
+  "pigz_cc (Concurrent-C)" \
+  "${COMP_cc_AVG_S:-?}" "${COMP_cc_AVG_MBPS:-?}" "${COMP_cc_AVG_RATIO:-?}" \
+  "${DECOMP_cc_AVG_S:-?}" "${DECOMP_cc_AVG_MBPS:-?}"
 
 # Cleanup temp files
 rm -f verify_input.bin orig.gz cc.gz orig_decomp.bin cc_decomp.bin
