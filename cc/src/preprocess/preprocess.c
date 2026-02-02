@@ -13,7 +13,8 @@
 
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
-/* Format: file:line:col: error: message                                      */
+/* Format: file:line:col: error: [category:] message                          */
+/* Categories: syntax, channel, type, async, closure, slice                   */
 /* ========================================================================== */
 
 static void cc_pp_error(const char* file, int line, int col, const char* fmt, ...) {
@@ -21,6 +22,20 @@ static void cc_pp_error(const char* file, int line, int col, const char* fmt, ..
     int l = (line > 0) ? line : 1;
     int c = (col > 0) ? col : 1;
     fprintf(stderr, "%s:%d:%d: error: ", f, l, c);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+/* Categorized error for grep-friendly output */
+static void cc_pp_error_cat(const char* file, int line, int col, 
+                            const char* category, const char* fmt, ...) {
+    const char* f = file ? file : "<input>";
+    int l = (line > 0) ? line : 1;
+    int c = (col > 0) ? col : 1;
+    fprintf(stderr, "%s:%d:%d: error: %s: ", f, l, c, category);
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
@@ -1334,9 +1349,9 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
                                 var_name[vlen] = '\0';
                                 
                                 char rel[1024];
-                                fprintf(stderr, "%s:%d:%d: error: '%s?' looks like optional unwrap of variable '%s'\n",
-                                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                        scan.line, scan.col, var_name, var_name);
+                                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        scan.line, scan.col, "syntax",
+                                        "'%s?' looks like optional unwrap of variable '%s'", var_name, var_name);
                                 fprintf(stderr, "  hint: to unwrap an optional, use '*%s' instead of '%s?'\n", var_name, var_name);
                                 fprintf(stderr, "  hint: '%s?' syntax is for declaring optional TYPES (e.g., 'int? maybe_value')\n", var_name);
                                 free(out);
@@ -2365,9 +2380,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
             if (j >= n || src[j] != '(') {
                 /* ERROR: !> without error type */
                 char rel[1024];
-                fprintf(stderr, "%s:%d:%d: error: '!>' requires error type in parentheses\n",
-                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                        scan.line, scan.col);
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                        scan.line, scan.col, "type", "'!>' requires error type in parentheses");
                 fprintf(stderr, "  hint: use 'T !> (ErrorType)' syntax, e.g., 'int !> (Error)'\n");
                 fprintf(stderr, "  hint: for simple error results, use 'int !> (int)' for error codes\n");
                 free(out);
