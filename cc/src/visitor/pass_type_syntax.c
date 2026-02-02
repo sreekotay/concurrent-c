@@ -648,10 +648,10 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             while (j < n && cc__is_ident_char_local(src[j])) j++;
             size_t err_end = j;
             
-            /* Check if this looks like a method call (CCResult_T_E_method).
-               If so, trim off the method suffix by scanning backwards for underscore
-               followed by known method names. */
-            static const char* methods[] = {"_unwrap_or", "_unwrap", "_is_ok", "_is_err", NULL};
+            /* Check if this looks like a method call (CCResult_T_E_method) or a guard macro.
+               If so, trim off the suffix by scanning backwards for underscore
+               followed by known method names or guard patterns. */
+            static const char* methods[] = {"_unwrap_or", "_unwrap", "_is_ok", "_is_err", "_DEFINED", NULL};
             for (int m = 0; methods[m]; m++) {
                 size_t mlen = strlen(methods[m]);
                 if (err_end - err_start > mlen) {

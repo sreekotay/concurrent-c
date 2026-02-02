@@ -58,8 +58,15 @@ typedef DecompressedResult* DecompressedResultPtr;
 typedef CompressedResult* CompressedResultPtr;
 
 /* Result types for compression and decompression */
+#ifndef CCResult_CompressedResultPtr_CCIoError_DEFINED
+#define CCResult_CompressedResultPtr_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_CompressedResultPtr_CCIoError, CompressedResultPtr, CCIoError)
+#endif
+
+#ifndef CCResult_DecompressedResultPtr_CCIoError_DEFINED
+#define CCResult_DecompressedResultPtr_CCIoError_DEFINED 1
 CC_DECL_RESULT_SPEC(CCResult_DecompressedResultPtr_CCIoError, DecompressedResultPtr, CCIoError)
+#endif
 
 /* Global configuration and state */
 struct {
