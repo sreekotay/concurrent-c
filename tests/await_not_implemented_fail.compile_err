@@ -1,2 +1,1 @@
-CC: await is only valid inside @async functions
-
+'await' is only valid inside @async functions

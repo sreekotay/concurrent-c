@@ -1209,7 +1209,9 @@ static int cc__walk(int idx,
         if (cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
         if (cc__closure_is_under_return(nodes, idx)) {
             if (cc__closure_captures_stack_slice_view(idx, nodes, kids, scopes, *io_scope_n)) {
-                cc__emit_err(ctx, n, "CC: cannot capture stack slice in escaping closure");
+                cc__emit_err(ctx, n, "cannot capture stack slice in escaping closure");
+                cc__emit_note(ctx, n, "the closure outlives the slice's stack frame");
+                cc__emit_note(ctx, n, "consider: pass slice as parameter, or allocate with heap/arena");
                 ctx->errors++;
                 return -1;
             }
@@ -1313,7 +1315,7 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         sn.file = ctx->input_path;
                         sn.line_start = 1;
                         sn.col_start = 1;
-                        cc__emit_err(ctx, &sn, "CC: await is only valid inside @async functions");
+                        cc__emit_err(ctx, &sn, "'await' is only valid inside @async functions");
                         ctx->errors++;
                         free(buf);
                         fclose(f);
@@ -1368,7 +1370,7 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                             sn.file = ctx->input_path;
                             sn.line_start = 1;
                             sn.col_start = 1;
-                            cc__emit_err(ctx, &sn, "CC: await is only valid inside @async functions");
+                            cc__emit_err(ctx, &sn, "'await' is only valid inside @async functions");
                             ctx->errors++;
                             fclose(f);
                             return -1;
@@ -1451,7 +1453,7 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             cur = pn->parent;
         }
         if (!ok) {
-            cc__emit_err(ctx, an, "CC: await is only valid inside @async functions");
+            cc__emit_err(ctx, an, "'await' is only valid inside @async functions");
             ctx->errors++;
             free(idx_map);
             free(owned_nodes);
@@ -1637,7 +1639,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             if (!closure_escapes[i]) continue;
             /* Nursery-spawn does not make escaping safe; once it escapes, forbid stack-slice capture. */
             if (cc__closure_captures_stack_slice_view(i, nodes, kids, scopes, scope_n)) {
-                cc__emit_err(ctx, &nodes[i], "CC: cannot capture stack slice in escaping closure");
+                cc__emit_err(ctx, &nodes[i], "cannot capture stack slice in escaping closure");
+                cc__emit_note(ctx, &nodes[i], "closure escapes via spawn/return/assignment");
+                cc__emit_note(ctx, &nodes[i], "consider: pass slice as parameter, or allocate with heap/arena");
                 ctx->errors++;
                 break;
             }
