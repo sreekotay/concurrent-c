@@ -13,23 +13,10 @@
 
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
-/* Format: file:line:col: error: [category:] message                          */
+/* Format: file:line:col: error: category: message                            */
 /* Categories: syntax, channel, type, async, closure, slice                   */
 /* ========================================================================== */
 
-static void cc_pp_error(const char* file, int line, int col, const char* fmt, ...) {
-    const char* f = file ? file : "<input>";
-    int l = (line > 0) ? line : 1;
-    int c = (col > 0) ? col : 1;
-    fprintf(stderr, "%s:%d:%d: error: ", f, l, c);
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
-    fprintf(stderr, "\n");
-}
-
-/* Categorized error for grep-friendly output */
 static void cc_pp_error_cat(const char* file, int line, int col, 
                             const char* category, const char* fmt, ...) {
     const char* f = file ? file : "<input>";
@@ -264,8 +251,8 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                     }
                     if (m >= n || br != 0) {
                         char rel[1024];
-                        cc_pp_error(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                    line, col, "unterminated @match block");
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                    line, col, "syntax", "unterminated @match block");
                         free(out);
                         return NULL;
                     }
@@ -387,8 +374,8 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                                 int is_send = (send != NULL);
                                 if (!dot || (!is_recv && !is_send)) {
                                     char rel[1024];
-                                    cc_pp_error(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                                line, col, "@match case header must be <chan>.recv(ptr) or <chan>.send(value) or is_cancelled()");
+                                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                                line, col, "syntax", "@match case header must be <chan>.recv(ptr) or <chan>.send(value) or is_cancelled()");
                                     free(out);
                                     return NULL;
                                 }
@@ -403,8 +390,8 @@ static char* cc__rewrite_match_syntax(const char* src, size_t n, const char* inp
                                 const char* rp = lp ? strrchr(dot, ')') : NULL;
                                 if (!lp || !rp || rp <= lp) {
                                     char rel[1024];
-                                    cc_pp_error(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                                line, col, "malformed @match case header");
+                                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                                line, col, "syntax", "malformed @match case header");
                                     free(out);
                                     return NULL;
                                 }

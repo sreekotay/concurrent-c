@@ -161,8 +161,8 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
    - Note: P16 must stay separate (runs after try passes)
    - Decision: Not worth the refactoring effort
    
-3. **Dead code**: visitor_pipeline.c is marked as dead (not called by compiler)
-   - The Phase 3 consolidation shown there has been applied to visit_codegen.c
+3. **Dead code removed**: visitor_pipeline.c was deleted (2026-02-01)
+   - The Phase 3 consolidation from there was already applied to visit_codegen.c
 
 ## Summary
 
