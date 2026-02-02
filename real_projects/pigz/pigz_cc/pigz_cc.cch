@@ -30,7 +30,7 @@ typedef struct {
     CCSlice dict;  // Copy of previous block's tail
     CCSlice lens;  // Optional: list of rsyncable segment lengths (size_t)
     bool is_last;
-    CCArena arena; // Owns data, dict, and lens
+    CCArena* arena; // Pointer to arena (borrowed from pool or heap-allocated)
 } Block;
 
 typedef struct {
@@ -103,6 +103,9 @@ extern cc_atomic_int g_blocks_done;
 
 /* Global error flag - when set, all tasks should exit ASAP */
 extern cc_atomic_int g_pipeline_error;
+
+/* Global arena pool for input block arenas (set during compress_file) */
+extern CCChan* g_input_arena_pool;
 
 /* ============================================================================
  * Helper Functions

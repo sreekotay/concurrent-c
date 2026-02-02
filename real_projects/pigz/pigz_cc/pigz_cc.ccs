@@ -45,6 +45,9 @@ cc_atomic_int g_blocks_done = 0;
 /* Global error flag - when set, all tasks should exit ASAP */
 cc_atomic_int g_pipeline_error = 0;
 
+/* Global arena pool for input block arenas (set during compress_file) */
+CCChan* g_input_arena_pool = NULL;
+
 /* ============================================================================
  * Compression Worker
  * ============================================================================ */
@@ -299,6 +302,18 @@ CompressedResultPtr !> (CCIoError) compress_block(z_stream* strm, Block* blk, CC
     }
 }
 
+/* Return input arena to pool (or free if no pool) */
+static inline void return_input_arena(CCArena* arena) {
+    if (g_input_arena_pool) {
+        // Send pointer back to pool (pool stores void* which is CCArena*)
+        cc_chan_send(g_input_arena_pool, &arena, sizeof(arena));
+    } else {
+        // No pool - free the arena and its wrapper
+        cc_heap_arena_free(arena);
+        free(arena);
+    }
+}
+
 /* Wrapper for task-handle pattern: spawns as independent task */
 void* compress_block_task(void* arg) {
     Block* blk = (Block*)arg;
@@ -310,7 +325,7 @@ void* compress_block_task(void* arg) {
         memset(&strm, 0, sizeof(strm));
         int ret = deflateInit2(&strm, g.level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
         if (ret != Z_OK) {
-            cc_heap_arena_free(&blk->arena);
+            return_input_arena(blk->arena);
             return NULL;
         }
         strm_ptr = &strm;
@@ -323,8 +338,8 @@ void* compress_block_task(void* arg) {
         deflateEnd(strm_ptr);
     }
     
-    // Free input block arena
-    cc_heap_arena_free(&blk->arena);
+    // Return input arena to pool (works for both success and error)
+    return_input_arena(blk->arena);
     
     if (cc_is_err(res)) {
         return NULL;
@@ -595,6 +610,33 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
     CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
     @defer cc_chan_free(tasks_ch);
+
+    // Input arena pool - reuse arenas instead of malloc/free each block
+    size_t arena_size = block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t));
+    
+    // Arena pool using owned channel pattern - reuses arenas instead of malloc/free per block
+    // Note: closure return warnings are expected in CC_PARSER_MODE (intptr_t/void* mismatch)
+    void*[~80 owned {
+        .create = [arena_size]() => {
+            CCArena* a = (CCArena*)malloc(sizeof(CCArena));
+            *a = cc_heap_arena(arena_size);
+            return a;
+        },
+        .destroy = [](intptr_t r) => {
+            CCArena* a = (CCArena*)r;
+            cc_heap_arena_free(a);
+            free(a);
+            return NULL;
+        },
+        .reset = [](intptr_t r) => {
+            CCArena* a = (CCArena*)r;
+            cc_arena_reset(a);
+            return NULL;
+        }
+    }] arena_pool;
+    
+    g_input_arena_pool = arena_pool;
+    @defer cc_chan_free(arena_pool);
 
     // Pointers for closure capture
     CCFile* in_ptr = &in_file;
@@ -943,22 +985,30 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // Check if pipeline is shutting down due to error
                     if (cc_atomic_load(&g_pipeline_error)) break;
                     
-                    // Arena needs space for data, Block struct, dictionary copy, and rsync hits
-                    CCArena blk_arena = cc_heap_arena(block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t)));
+                    // Borrow arena from pool (or create if no pool)
+                    CCArena* blk_arena = NULL;
+                    if (g_input_arena_pool) {
+                        cc_chan_recv(g_input_arena_pool, &blk_arena, sizeof(blk_arena));
+                    } else {
+                        // No pool - create fresh arena
+                        blk_arena = (CCArena*)malloc(sizeof(CCArena));
+                        size_t arena_size = block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t));
+                        *blk_arena = cc_heap_arena(arena_size);
+                    }
                     
                     // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
                     CCSlice data;
-                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, block_size, &data);
+                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, blk_arena, block_size, &data);
                     if (cc_is_err(read_res)) {
                         fprintf(stderr, "Read error\n");
                         cc_atomic_store(&g_pipeline_error, 1);
-                        cc_heap_arena_free(&blk_arena);
+                        return_input_arena(blk_arena);
                         break;
                     }
 
                     if (!cc_io_avail(read_res)) {
                         // EOF
-                        cc_heap_arena_free(&blk_arena);
+                        return_input_arena(blk_arena);
                         if (prev_blk) {
                             prev_blk->is_last = true;
                             // Spawn task for pending block and send handle
@@ -973,10 +1023,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     }
                     
                     // Block struct also lives in the arena
-                    Block* blk = arena_alloc1(Block, &blk_arena);
+                    Block* blk = arena_alloc1(Block, blk_arena);
                     if (!blk) {
                         cc_atomic_store(&g_pipeline_error, 1);
-                        cc_heap_arena_free(&blk_arena);
+                        return_input_arena(blk_arena);
                         break;
                     }
                     
@@ -991,11 +1041,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     if (g.rsync) {
                         // Max hits in a block: block_size / 5 (shortest possible block is 5 bytes)
                         size_t max_hits = block_size / 5;
-                        size_t* hits = arena_alloc(size_t, &blk_arena, max_hits);
+                        size_t* hits = arena_alloc(size_t, blk_arena, max_hits);
                         if (!hits) {
                             fprintf(stderr, "Failed to allocate hits array\n");
                             cc_atomic_store(&g_pipeline_error, 1);
-                            cc_heap_arena_free(&blk_arena);
+                            return_input_arena(blk_arena);
                             break;
                         }
                         size_t n_hits = 0;
@@ -1024,10 +1074,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                     // Dictionary Chaining: Copying Strategy
                     if (g.setdict && last_tail_len > 0) {
-                        unsigned char* dict_mem = arena_alloc(unsigned char, &blk_arena, last_tail_len);
+                        unsigned char* dict_mem = arena_alloc(unsigned char, blk_arena, last_tail_len);
                         if (!dict_mem) {
                             cc_atomic_store(&g_pipeline_error, 1);
-                            cc_heap_arena_free(&blk_arena);
+                            return_input_arena(blk_arena);
                             break;
                         }
                         memcpy(dict_mem, last_tail_buf, last_tail_len);
@@ -1045,7 +1095,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         if (!cc_io_avail(chan_send(tasks_tx, task))) {
                             // Writer closed channel (error) - cleanup and exit
                             cc_task_free(&task);
-                            cc_heap_arena_free(&blk_arena);
+                            return_input_arena(blk_arena);
                             break;
                         }
                     }
