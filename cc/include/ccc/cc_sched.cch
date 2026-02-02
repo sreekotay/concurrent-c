@@ -21,6 +21,10 @@ CCDeadline cc_deadline_after_ms(uint64_t ms);
 bool cc_deadline_expired(const CCDeadline* d);
 const struct timespec* cc_deadline_as_timespec(const CCDeadline* d, struct timespec* out);
 
+/* Scheduler configuration - call before any spawn/fiber operations */
+void cc_sched_set_num_workers(size_t n);
+size_t cc_sched_get_num_workers(void);
+
 /* Forward declaration for CCSpawnTask (internal handle for OS-thread spawned tasks) */
 struct CCSpawnTask;
 

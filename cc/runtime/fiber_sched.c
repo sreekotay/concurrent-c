@@ -366,6 +366,20 @@ static fiber_sched g_sched = {0};
 static _Atomic int g_initialized = 0;
 static _Atomic int g_deadlock_reported = 0;
 static _Atomic uint64_t g_deadlock_first_seen = 0;  /* Timestamp when deadlock state first seen */
+static _Atomic size_t g_requested_workers = 0;  /* User-requested worker count (0 = auto) */
+
+/* Set the number of worker threads before scheduler init */
+void cc_sched_set_num_workers(size_t n) {
+    atomic_store(&g_requested_workers, n);
+}
+
+/* Get the current number of workers (0 if scheduler not initialized) */
+size_t cc_sched_get_num_workers(void) {
+    if (atomic_load_explicit(&g_initialized, memory_order_acquire) == 2) {
+        return g_sched.num_workers;
+    }
+    return 0;
+}
 static _Atomic uintptr_t g_next_fiber_id = 1;       /* Counter for unique fiber IDs */
 
 /* Parked fibers list for debugging (protected by mutex for simplicity) */
@@ -1081,9 +1095,13 @@ int cc_fiber_sched_init(size_t num_workers) {
     }
     
     if (num_workers == 0) {
-        const char* env = getenv("CC_WORKERS");
-        if (env) {
-            num_workers = (size_t)strtoul(env, NULL, 10);
+        /* Check user-requested count first (via cc_sched_set_num_workers) */
+        num_workers = atomic_load(&g_requested_workers);
+        if (num_workers == 0) {
+            const char* env = getenv("CC_WORKERS");
+            if (env) {
+                num_workers = (size_t)strtoul(env, NULL, 10);
+            }
         }
         if (num_workers == 0) {
             #if CC_FIBER_WORKERS > 0

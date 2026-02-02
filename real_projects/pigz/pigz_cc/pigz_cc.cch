@@ -31,6 +31,7 @@ typedef struct {
     CCSlice lens;  // Optional: list of rsyncable segment lengths (size_t)
     bool is_last;
     CCArena* arena; // Pointer to arena (borrowed from pool or heap-allocated)
+    CCChan* pool;   // Pool to return arena to (NULL if heap-allocated)
 } Block;
 
 typedef struct {
@@ -105,7 +106,7 @@ extern cc_atomic_int g_blocks_done;
 extern cc_atomic_int g_pipeline_error;
 
 /* Global arena pool for input block arenas (set during compress_file) */
-extern CCChan* g_input_arena_pool;
+// Pool is now stored in Block.pool instead of global
 
 /* ============================================================================
  * Helper Functions
