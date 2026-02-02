@@ -8,6 +8,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "visitor/pass_common.h"
 
 // Slice flag tracking scaffold. As the parser starts emitting CC AST nodes,
 // populate flags on expressions and enforce send_take eligibility.
@@ -168,12 +169,32 @@ static void cc__child_push(ChildList* cl, int idx) {
     cl->child[cl->len++] = idx;
 }
 
-static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
+static void cc__emit_err_cat(const CCCheckerCtx* ctx, const StubNodeView* n,
+                              const char* category, const char* msg) {
     const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
     int line = n ? n->line_start : 0;
     int col = n ? n->col_start : 0;
     if (col <= 0) col = 1;
-    fprintf(stderr, "%s:%d:%d: error: %s\n", path, line, col, msg);
+    cc_pass_error_cat(path, line, col, category, "%s", msg);
+}
+
+static void cc__emit_err_cat_fmt(const CCCheckerCtx* ctx, const StubNodeView* n,
+                                  const char* category, const char* fmt, ...) {
+    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
+    int line = n ? n->line_start : 0;
+    int col = n ? n->col_start : 0;
+    if (col <= 0) col = 1;
+    fprintf(stderr, "%s:%d:%d: error: %s: ", path, line, col, category);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+/* Legacy wrappers - use cc__emit_err_cat for new code */
+static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
+    cc__emit_err_cat(ctx, n, "check", msg);
 }
 
 static void cc__emit_err_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, const char* fmt, ...) {
@@ -181,7 +202,7 @@ static void cc__emit_err_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, con
     int line = n ? n->line_start : 0;
     int col = n ? n->col_start : 0;
     if (col <= 0) col = 1;
-    fprintf(stderr, "%s:%d:%d: error: ", path, line, col);
+    fprintf(stderr, "%s:%d:%d: error: check: ", path, line, col);
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
@@ -313,7 +334,7 @@ static int cc__body_has_await_recv(const char* buf, size_t len, const char* chna
 static void cc__emit_deadlock_diag(const CCCheckerCtx* ctx, const StubNodeView* sn,
                                    const char* warn_msg, const char* note_msg) {
     if (cc__deadlock_warn_as_error()) {
-        cc__emit_err(ctx, sn, warn_msg);
+        cc__emit_err_cat(ctx, sn, CC_ERR_CHANNEL, warn_msg);
         if (note_msg) cc__emit_note(ctx, sn, note_msg);
         if (ctx) ((CCCheckerCtx*)ctx)->errors++;
     } else {
@@ -539,10 +560,10 @@ static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const cha
                     sn.file = ctx->input_path;
                     sn.line_start = nur_line;
                     sn.col_start = nur_col;
-                    cc__emit_err(ctx, &sn,
-                                 "CC: deadlock: `@nursery closing(ch)` closes channels only after all children exit; "
-                                 "`while (cc_chan_recv(ch, ...) == 0)` inside the same nursery can wait forever. "
-                                 "Move the draining loop outside the nursery, or close explicitly / send a sentinel.");
+                    cc__emit_err_cat(ctx, &sn, CC_ERR_CHANNEL,
+                                 "deadlock: `@nursery closing(ch)` closes channels only after all children exit; "
+                                 "`while (cc_chan_recv(ch, ...) == 0)` inside the same nursery can wait forever");
+                    fprintf(stderr, "  hint: move the draining loop outside the nursery, or close explicitly / send a sentinel\n");
                     cc__emit_note(ctx, &sn, "Set CC_ALLOW_NURSERY_CLOSING_DRAIN=1 to bypass this heuristic check.");
                     ctx->errors++;
                     return;
@@ -1028,8 +1049,8 @@ static int cc__walk_assign(int idx,
             /* Only treat as a slice copy/move when RHS isn't being projected via member access. */
             if (!saw_member) {
                 if (rhs_v->move_only && !has_move_marker) {
-                    cc__emit_err_fmt(ctx, n, "cannot copy unique slice '%s' (type T[:!])", rhs_v->name ? rhs_v->name : "?");
-                    cc__emit_note(ctx, n, "unique slices have move-only semantics; use cc_move(x) to transfer ownership");
+                    cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE, "cannot copy unique slice '%s' (type T[:!])", rhs_v->name ? rhs_v->name : "?");
+                    fprintf(stderr, "  hint: unique slices have move-only semantics; use cc_move(x) to transfer ownership\n");
                     ctx->errors++;
                     return -1;
                 }
@@ -1068,8 +1089,8 @@ static int cc__walk_return(int idx,
             int saw_member = cc__subtree_has_kind(nodes, kids, idx, CC_STUB_MEMBER);
             int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
             if (v->move_only && !has_move_marker && !saw_member) {
-                cc__emit_err_fmt(ctx, n, "cannot return unique slice '%s' without move", name);
-                cc__emit_note(ctx, n, "unique slices (T[:!]) require explicit ownership transfer; use: return cc_move(x)");
+                cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE, "cannot return unique slice '%s' without move", name);
+                fprintf(stderr, "  hint: unique slices (T[:!]) require explicit ownership transfer; use: return cc_move(x)\n");
                 ctx->errors++;
                 return -1;
             }
@@ -1172,8 +1193,8 @@ static int cc__walk(int idx,
                 int has_move_marker = cc__subtree_has_call_named(nodes, kids, idx, "cc__move_marker_impl");
                 int is_simple_copy = cc__subtree_should_apply_slice_copy_rule(nodes, kids, idx, v->name, copy_from);
                 if (rhs && rhs->is_slice && rhs->move_only && !has_move_marker && is_simple_copy) {
-                    cc__emit_err_fmt(ctx, n, "cannot copy unique slice '%s' (type T[:!])", copy_from);
-                    cc__emit_note(ctx, n, "unique slices have move-only semantics; use cc_move(x) to transfer ownership");
+                    cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE, "cannot copy unique slice '%s' (type T[:!])", copy_from);
+                    fprintf(stderr, "  hint: unique slices have move-only semantics; use cc_move(x) to transfer ownership\n");
                     ctx->errors++;
                     return -1;
                 }
@@ -1188,14 +1209,14 @@ static int cc__walk(int idx,
     if (n->kind == CC_STUB_IDENT && n->aux_s1) {
         CCSliceVar* v = cc__scopes_lookup(scopes, *io_scope_n, n->aux_s1);
         if (v && v->is_slice && v->moved) {
-            cc__emit_err_fmt(ctx, n, "use of moved slice '%s'", n->aux_s1);
+            cc__emit_err_cat_fmt(ctx, n, CC_ERR_SLICE, "use of moved slice '%s'", n->aux_s1);
             if (v->decl_line > 0) {
                 StubNodeView decl_node = {0};
                 decl_node.line_start = v->decl_line;
                 decl_node.col_start = v->decl_col;
                 cc__emit_note_fmt(ctx, &decl_node, "'%s' was declared here and has been moved", n->aux_s1);
             }
-            cc__emit_note(ctx, n, "after cc_move(x), the source variable is no longer valid");
+            fprintf(stderr, "  note: after cc_move(x), the source variable is no longer valid\n");
             ctx->errors++;
             return -1;
         }
@@ -1209,9 +1230,9 @@ static int cc__walk(int idx,
         if (cc__walk_closure(idx, nodes, kids, scopes, io_scope_n, ctx) != 0) return -1;
         if (cc__closure_is_under_return(nodes, idx)) {
             if (cc__closure_captures_stack_slice_view(idx, nodes, kids, scopes, *io_scope_n)) {
-                cc__emit_err(ctx, n, "cannot capture stack slice in escaping closure");
-                cc__emit_note(ctx, n, "the closure outlives the slice's stack frame");
-                cc__emit_note(ctx, n, "consider: pass slice as parameter, or allocate with heap/arena");
+                cc__emit_err_cat(ctx, n, CC_ERR_CLOSURE, "cannot capture stack slice in escaping closure");
+                fprintf(stderr, "  note: the closure outlives the slice's stack frame\n");
+                fprintf(stderr, "  hint: pass slice as parameter, or allocate with heap/arena\n");
                 ctx->errors++;
                 return -1;
             }
@@ -1315,7 +1336,8 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         sn.file = ctx->input_path;
                         sn.line_start = 1;
                         sn.col_start = 1;
-                        cc__emit_err(ctx, &sn, "'await' is only valid inside @async functions");
+                        cc__emit_err_cat(ctx, &sn, CC_ERR_ASYNC, "'await' is only valid inside @async functions");
+                        fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
                         ctx->errors++;
                         free(buf);
                         fclose(f);
@@ -1370,7 +1392,8 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                             sn.file = ctx->input_path;
                             sn.line_start = 1;
                             sn.col_start = 1;
-                            cc__emit_err(ctx, &sn, "'await' is only valid inside @async functions");
+                            cc__emit_err_cat(ctx, &sn, CC_ERR_ASYNC, "'await' is only valid inside @async functions");
+                            fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
                             ctx->errors++;
                             fclose(f);
                             return -1;
@@ -1453,7 +1476,8 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             cur = pn->parent;
         }
         if (!ok) {
-            cc__emit_err(ctx, an, "'await' is only valid inside @async functions");
+            cc__emit_err_cat(ctx, an, CC_ERR_ASYNC, "'await' is only valid inside @async functions");
+            fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
             ctx->errors++;
             free(idx_map);
             free(owned_nodes);
@@ -1639,9 +1663,9 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
             if (!closure_escapes[i]) continue;
             /* Nursery-spawn does not make escaping safe; once it escapes, forbid stack-slice capture. */
             if (cc__closure_captures_stack_slice_view(i, nodes, kids, scopes, scope_n)) {
-                cc__emit_err(ctx, &nodes[i], "cannot capture stack slice in escaping closure");
-                cc__emit_note(ctx, &nodes[i], "closure escapes via spawn/return/assignment");
-                cc__emit_note(ctx, &nodes[i], "consider: pass slice as parameter, or allocate with heap/arena");
+                cc__emit_err_cat(ctx, &nodes[i], CC_ERR_CLOSURE, "cannot capture stack slice in escaping closure");
+                fprintf(stderr, "  note: closure escapes via spawn/return/assignment\n");
+                fprintf(stderr, "  hint: pass slice as parameter, or allocate with heap/arena\n");
                 ctx->errors++;
                 break;
             }

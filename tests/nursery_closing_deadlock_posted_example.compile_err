@@ -1,1 +1,1 @@
-CC: deadlock: `@nursery closing(ch)` closes channels only after all children exit
+error: channel: deadlock: `@nursery closing(ch)` closes channels only after all children exit

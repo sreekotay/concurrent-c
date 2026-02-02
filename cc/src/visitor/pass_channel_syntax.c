@@ -571,10 +571,9 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 } else if (tx_cap >= 1 && rx_cap >= 1 && tx_cap == rx_cap) {
                     snprintf(cap_expr, sizeof(cap_expr), "%lld", tx_cap);
                 } else {
-                    char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair capacity mismatch at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(ctx && ctx->input_path ? ctx->input_path : "<input>",
+                            line, col, CC_ERR_CHANNEL,
+                            "channel_pair capacity mismatch (tx=%lld, rx=%lld)", tx_cap, rx_cap);
                     free(out);
                     return NULL;
                 }
