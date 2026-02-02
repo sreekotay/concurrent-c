@@ -2803,21 +2803,14 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
     int var_count = 0;
     
     size_t i = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     
     while (i < n && var_count < MAX_UNWRAP_VARS) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         
         /* Look for Optional types: CCOptional_ or __CC_OPTIONAL( */
         int is_cc_optional = (c == 'C' && i + 10 < n && strncmp(src + i, "CCOptional_", 11) == 0);
@@ -2926,21 +2919,13 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
     
     i = 0;
     size_t last_emit = 0;
-    in_line_comment = 0; in_block_comment = 0; in_str = 0; in_chr = 0;
+    cc_scanner_init(&scan);  /* Reset scanner for pass 2 */
     
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         
         /* Look for * followed by an optional/result variable name */
         if (c == '*') {
