@@ -15,6 +15,7 @@
 #include "util/path.h"
 #include "visitor/async_ast.h"
 #include "visitor/checker.h"
+#include "visitor/edit_buffer.h"
 #include "visitor/pass_autoblock.h"
 #include "visitor/pass_await_normalize.h"
 #include "visitor/pass_closure_calls.h"
@@ -60,47 +61,26 @@ int cc_visit_pipeline(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outp
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
 
-    /* PASS 1: UFCS rewriting (collect spans from stub AST) */
-    if (root && root->nodes && root->node_count > 0) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        if (cc__rewrite_ufcs_spans_with_nodes(root, ctx, src_all, src_len, &rewritten, &rewritten_len)) {
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
-    }
-
-    /* PASS 2: Closure call rewriting */
-    if (root && root->nodes && root->node_count > 0) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        if (cc__rewrite_all_closure_calls_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
-    }
-
-    /* PASS 3: Auto-blocking (first cut) */
+    /* UNIFIED Phase 3: Collect all AST-driven edits via EditBuffer, apply once.
+       This replaces 4 sequential rewrite passes with a single edit collection + apply. */
     if (root && root->nodes && root->node_count > 0 && ctx->symbols) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        if (cc__rewrite_autoblocking_calls_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
+        CCEditBuffer eb;
+        cc_edit_buffer_init(&eb, src_all, src_len);
+        
+        /* Collect edits from all Phase 3 passes */
+        cc__collect_ufcs_edits(root, ctx, &eb);
+        cc__collect_closure_calls_edits(root, ctx, &eb);
+        cc__collect_autoblocking_edits(root, ctx, &eb);
+        cc__collect_await_normalize_edits(root, ctx, &eb);
+        
+        /* Apply all edits at once if any were collected */
+        if (eb.count > 0) {
+            char* rewritten = cc_edit_buffer_apply(&eb, &src_ufcs_len);
+            if (rewritten) {
+                src_ufcs = rewritten;
+            }
         }
-    }
-
-    /* PASS 4: Normalize await <expr> so the async state machine can lower it */
-    if (root && root->nodes && root->node_count > 0) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        if (cc__rewrite_await_exprs_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
+        cc_edit_buffer_free(&eb);
     }
 
     /* PASS 5: AST-driven @async lowering (state machine). IMPORTANT: reparse after earlier rewrites */

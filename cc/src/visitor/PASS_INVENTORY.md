@@ -60,7 +60,7 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | 3 | pass_with_deadline_syntax.c | 430 | `with_deadline(ms)` → CCDeadline + @defer |
 | 4 | pass_match_syntax.c | 600 | `@match` → switch + cc_chan_match_select |
 
-### Phase 3: Initial AST Passes (sequential, REPARSE #1)
+### Phase 3: Initial AST Passes (UNIFIED via EditBuffer, REPARSE #1)
 
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
@@ -68,6 +68,9 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | 6 | pass_closure_calls.c | 748 | `c(x)` → `c.fn(c.env, x)` |
 | 7 | pass_autoblock.c | 1,260 | Insert cc_block() wrappers |
 | 8 | pass_await_normalize.c | 529 | `await expr` → temp binding |
+
+**Note**: These 4 passes now use unified CCEditBuffer collection - edits are
+collected from all passes, then applied once (instead of 4 sequential rewrites).
 
 ### Phase 4: Channel Syntax (text, REPARSE #2)
 
@@ -112,10 +115,10 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 ### High Value (reduces reparses)
 
-1. **Merge Phase 3 passes** — UFCS, closure_calls, autoblock, await_normalize
-   - All are AST-based, sequential
-   - Could share single AST traversal
-   - Saves: 0 reparses but cleaner code
+1. ✅ **Merge Phase 3 passes** — UFCS, closure_calls, autoblock, await_normalize
+   - All are AST-based, now use unified CCEditBuffer
+   - Edits collected once, applied once (vs 4 sequential rewrites)
+   - Done: 2026-02-01
 
 2. **Merge Phase 4 + early Phase 5** — channel_syntax + type_syntax + closure_literals
    - Reparse #2 and #3 could become one
@@ -132,31 +135,22 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
    - Target: ~12 scans (merge related passes)
    - Note: P10 must stay separate (ordering constraint)
 
-5. **Clean up pass chaining** in cc_preprocess_to_string_ex
-   - Current: 18 repetitive 3-line blocks
-   - Target: Helper macro for cleaner code
+5. ✅ **Clean up pass chaining** in cc_preprocess_to_string_ex
+   - Done: CCPassChain helper + CC_CHAIN macro (2026-02-01)
 
 ### Low Value (cleanup)
 
 6. **Inline small passes** — strip_markers (104 lines) into visit_codegen.c
 7. **Extract reparse helper** — common pattern used 5 times
 
-## Immediate Cleanup: Pass Chaining Helper
+## Completed Improvements
 
-Current pattern (repeated 18 times):
-```c
-char* rewritten_X = cc__rewrite_X(cur, cur_n, input_path);
-const char* curN = rewritten_X ? rewritten_X : cur;
-size_t curN_n = rewritten_X ? strlen(rewritten_X) : cur_n;
-```
-
-Target: Clean helper that tracks allocations for cleanup.
+1. ✅ Update this inventory to match reality (2026-02-01)
+2. ✅ Pass chaining helper in preprocess.c - CCPassChain + CC_CHAIN macro (2026-02-01)
+3. ✅ Phase 3 passes unified via CCEditBuffer (2026-02-01)
 
 ## Next Steps
 
-1. ✅ Update this inventory to match reality
-2. Create pass chaining helper in preprocess.c
-3. Refactor cc_preprocess_to_string_ex to use helper
-4. Run tests to verify no regressions
-5. Then: Consider merging P8+P9+P16 (optional passes)
-6. Then: Consider merging P11+P12 (result passes)
+1. Consider merging P8+P9+P16 (optional passes) - may not be worth complexity
+2. Consider merging P11+P12 (result passes) - may not be worth complexity
+3. Consider Phase 4+5 merge to eliminate one TCC reparse (higher value)
