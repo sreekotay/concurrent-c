@@ -3,12 +3,13 @@
  *
  * Demonstrates:
  *   - Declaring T? optional types
- *   - Creating some/none values
- *   - Checking presence with .has
- *   - Unwrapping with *opt (panics if none)
+ *   - Creating values with cc_some(v) / cc_none() (type inferred)
+ *   - Helper macros: cc_is_some(), cc_is_none(), cc_unwrap_opt()
  *
  * Key insight: Optionals are for "maybe present" values.
  * Use T!>(E) for errors, T? for legitimate absence.
+ *
+ * See spec §2.1 for complete Optional type documentation.
  */
 #include <ccc/std/prelude.cch>
 
@@ -16,37 +17,37 @@
 int? find_index(int* arr, int len, int target) {
     for (int i = 0; i < len; i++) {
         if (arr[i] == target) {
-            return cc_some_CCOptional_int(i);
+            return cc_some(i);
         }
     }
-    return cc_none_CCOptional_int();
+    return cc_none();
 }
 
 /* Find the first even number in an array. */
 int? find_first_even(int* arr, int len) {
     for (int i = 0; i < len; i++) {
         if (arr[i] % 2 == 0) {
-            return cc_some_CCOptional_int(arr[i]);
+            return cc_some(arr[i]);
         }
     }
-    return cc_none_CCOptional_int();
+    return cc_none();
 }
 
 int main(void) {
     int numbers[] = {1, 3, 5, 7, 9, 10, 12};
     int len = sizeof(numbers) / sizeof(numbers[0]);
     
-    /* Test 1: Find existing element */
+    /* Test 1: Find existing element using cc_is_some() */
     int? idx = find_index(numbers, len, 7);
-    if (!idx.has) {
+    if (cc_is_none(idx)) {
         printf("FAIL: expected to find 7\n");
         return 1;
     }
-    printf("found 7 at index %d\n", *idx);
+    printf("found 7 at index %d\n", cc_unwrap_opt(idx));
     
-    /* Test 2: Element not found */
+    /* Test 2: Element not found using cc_is_some() */
     int? missing = find_index(numbers, len, 100);
-    if (missing.has) {
+    if (cc_is_some(missing)) {
         printf("FAIL: should not find 100\n");
         return 1;
     }
@@ -54,23 +55,23 @@ int main(void) {
     
     /* Test 3: Find first even */
     int? even = find_first_even(numbers, len);
-    if (!even.has) {
+    if (cc_is_none(even)) {
         printf("FAIL: expected to find an even number\n");
         return 1;
     }
-    printf("first even: %d\n", *even);
+    printf("first even: %d\n", cc_unwrap_opt(even));
     
-    /* Test 4: Safe access pattern with .has check */
+    /* Test 4: Safe access pattern with cc_is_some() */
     int? maybe_val = find_index(numbers, len, 5);
-    if (maybe_val.has) {
-        printf("5 is at index: %d\n", maybe_val.u.value);
+    if (cc_is_some(maybe_val)) {
+        printf("5 is at index: %d\n", cc_unwrap_opt(maybe_val));
     } else {
         printf("5 not found\n");
     }
     
     /* Test 5: Default value pattern */
     int? found = find_index(numbers, len, 999);
-    int result = found.has ? *found : -1;
+    int result = cc_is_some(found) ? cc_unwrap_opt(found) : -1;
     printf("find 999: %d (default -1 if not found)\n", result);
     
     printf("\nAll optional tests passed!\n");

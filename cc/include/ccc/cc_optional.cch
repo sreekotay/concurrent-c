@@ -274,10 +274,10 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 /* Real mode cc_some/cc_none - these are placeholder definitions.
    The codegen pass rewrites cc_some(v) and cc_none() to typed versions
    based on the enclosing function's return type.
-   Using compound literal with intptr_t cast as fallback. */
+   Fallback uses CCOptional_int for simple int values. */
 #define cc_some(v) ({ \
     __auto_type __cc_some_v = (v); \
-    (CCOptional_int){ .has = true, .u.value = (int)(intptr_t)&__cc_some_v }; \
+    (CCOptional_int){ .has = true, .u.value = (int)__cc_some_v }; \
 })
 #define cc_none() ((CCOptional_int){ .has = false })
 #define cc_unwrap_opt(opt) ({                                                   \
