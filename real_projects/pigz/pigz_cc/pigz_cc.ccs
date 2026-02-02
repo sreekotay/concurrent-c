@@ -329,7 +329,7 @@ void* compress_block_task(void* arg) {
     if (cc_is_err(res)) {
         return NULL;
     }
-    return cc_unwrap(res);
+    return cc_unwrap_as(res, CompressedResult*);
 }
 
 /* ============================================================================
@@ -766,9 +766,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 // Use Result-based I/O for writing data (unless testing/listing)
                 if (!g.list && !g.test) {
                     size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
-                    if (cc_is_ok(wr)) {
-                        // Block written successfully
-                    } else {
+                    if (cc_is_err(wr)) {
                         fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
                         cc_atomic_store(&g_pipeline_error, 1);
                         write_failed = true;
@@ -1094,7 +1092,7 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
         @arena(dir_arena, megabytes(1)) {
             CCDirIter* !> (CCIoError) iter_res = cc_dir_open(dir_arena, path);
             if (cc_is_ok(iter_res)) {
-                CCDirIter* iter = cc_unwrap(iter_res);
+                CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);
                 @defer cc_dir_close(iter);
 
                 int ret = 0;

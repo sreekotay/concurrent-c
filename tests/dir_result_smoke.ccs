@@ -4,13 +4,13 @@
 
 int main(void) {
     @arena(a, kilobytes(64)) {
-        // Test 1: open directory (pointer result, can use cc_unwrap)
+        // Test 1: open directory (pointer result, use cc_unwrap_as)
         CCDirIter*!>(CCIoError) iter_res = cc_dir_open(a, ".");
         if (cc_is_err(iter_res)) {
             printf("Failed to open directory\n");
             return 1;
         }
-        CCDirIter* iter = cc_unwrap(iter_res);
+        CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);
         
         // Test 2: iterate (struct result, need cc_unwrap_as)
         int count = 0;

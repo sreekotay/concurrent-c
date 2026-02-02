@@ -32,7 +32,7 @@ void func_with_result_var(void) {
 int main(void) {
     MyStruct* !>(CCIoError) r = func_with_arena();
     if (cc_is_ok(r)) {
-        MyStruct* p = cc_unwrap(r);
+        MyStruct* p = cc_unwrap_as(r, MyStruct*);
         printf("ok: x=%d\n", p->x);
     }
     return 0;

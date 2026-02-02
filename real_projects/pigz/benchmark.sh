@@ -8,9 +8,9 @@ OUT_DIR="$SCRIPT_DIR/out"
 DATA_DIR="$SCRIPT_DIR/testdata"
 
 # Configuration
-SIZE_MB=${1:-200}
+SIZE_MB=${1:-100}
 WORKERS=${2:-8}
-RUNS=${3:-3}
+RUNS=${3:-4}
 
 echo "=============================================="
 echo "pigz Benchmark: Real Compressible Data"

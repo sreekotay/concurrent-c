@@ -103,12 +103,20 @@ Macros for working with `T!>(E)` Result types:
 |--------|---------|-------------|
 | `cc_is_ok(res)` | `bool` | True if result is success |
 | `cc_is_err(res)` | `bool` | True if result is error |
-| `cc_unwrap(res)` | `T` | Get value (for primitives) |
-| `cc_unwrap_err(res)` | `E` | Get error (for primitives) |
-| `cc_unwrap_as(res, T)` | `T` | Get value as specific type (for structs) |
-| `cc_unwrap_err_as(res, E)` | `E` | Get error as specific type (for structs) |
+| `cc_unwrap(res)` | `T` | Get value (for scalar types: int, size_t, bool) |
+| `cc_unwrap_err(res)` | `E` | Get error (for scalar error types) |
+| `cc_unwrap_as(res, T)` | `T` | Get value as specific type (for structs and pointers) |
+| `cc_unwrap_err_as(res, E)` | `E` | Get error as specific type (for struct error types) |
 
-**Note:** Use `cc_unwrap(res)` for primitive types (int, pointer, etc.). For struct types, use `cc_unwrap_as(res, StructType)` to avoid type punning issues.
+**When to use which:**
+
+| Value Type | Use | Example |
+|------------|-----|---------|
+| Scalar (int, size_t, bool) | `cc_unwrap(res)` | `int n = cc_unwrap(res);` |
+| Pointer (`T*`) | `cc_unwrap_as(res, T*)` | `MyData* p = cc_unwrap_as(res, MyData*);` |
+| Struct | `cc_unwrap_as(res, T)` | `CCDirEntry e = cc_unwrap_as(res, CCDirEntry);` |
+
+**Note:** Pointer result types require `cc_unwrap_as` to avoid compiler warnings. This is a known limitation; future versions may infer the type automatically.
 
 **Result struct layout:**
 
@@ -127,34 +135,36 @@ struct CCResult_T_E {
 **Idiomatic patterns:**
 
 ```c
-// Pattern 1: Prefer sigil types in .ccs source files
-CCSlice !>(CCIoError) res = cc_file_read(file, arena, n);
+// Pattern 1: Scalar result - use cc_unwrap
+size_t !>(CCIoError) res = cc_file_write(file, data);
 if (cc_is_err(res)) {
-    CCIoError err = cc_unwrap_err(res);
-    handle_error(err);
+    handle_error(cc_unwrap_err_as(res, CCIoError));
     return;
 }
-CCSlice data = cc_unwrap(res);
-if (data.len == 0) {
-    // EOF
-}
+size_t bytes_written = cc_unwrap(res);
 
-// Pattern 2: For struct return types, use cc_unwrap_as
-CCProcessOutput !>(CCIoError) res = cc_process_run(arena, "ls", args);
-if (cc_is_err(res)) {
-    CCIoError err = cc_unwrap_err_as(res, CCIoError);
-    printf("Error: %s (os=%d)\n", cc_io_error_str(err), err.os_code);
+// Pattern 2: Pointer result - use cc_unwrap_as with pointer type
+CCDirIter* !>(CCIoError) iter_res = cc_dir_open(arena, ".");
+if (cc_is_err(iter_res)) {
+    CCIoError err = cc_unwrap_err_as(iter_res, CCIoError);
+    printf("Error: %s\n", cc_io_error_str(err));
     return;
 }
-CCProcessOutput out = cc_unwrap_as(res, CCProcessOutput);
-printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
+CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);
 
-// Pattern 3: Direct field access (lower-level, use helpers when possible)
-if (res.ok) {
-    T value = res.u.value;
-} else {
-    E error = res.u.error;
+// Pattern 3: Struct result - use cc_unwrap_as with struct type
+CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, arena);
+if (cc_is_err(entry_res)) {
+    CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);
+    if (err.kind == CC_IO_OTHER && err.os_code == 0) {
+        // EOF - not an error
+    } else {
+        handle_error(err);
+    }
+    return;
 }
+CCDirEntry entry = cc_unwrap_as(entry_res, CCDirEntry);
+printf("Found: %s\n", (const char*)entry.name.ptr);
 ```
 
 ### Declaring Result Types in Headers

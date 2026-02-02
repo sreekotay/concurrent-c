@@ -49,7 +49,7 @@ int main(void) {
         printf("FAIL: res1 should be ok\n");
         return 1;
     }
-    MyData* p = cc_unwrap(res1);
+    MyData* p = cc_unwrap_as(res1, MyData*);
     if (p->x != 100 || p->y != 200) {
         printf("FAIL: res1 data wrong\n");
         return 1;
