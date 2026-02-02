@@ -29,9 +29,9 @@ clean:
 #
 # The installed layout:
 #   $PREFIX/bin/ccc                   - compiler binary
-#   $PREFIX/include/ccc/*.cch         - standard library headers
+#   $PREFIX/include/ccc/*.cch         - standard library headers (ccc lowers to .h when compiling)
 #   $PREFIX/include/ccc/std/*.cch     - std module headers
-#   $PREFIX/lib/ccc/runtime/*.c       - runtime source (compiled per-project)
+#   $PREFIX/lib/ccc/runtime/*.c,.h    - runtime source and internal headers
 
 PREFIX ?= /usr/local
 
@@ -46,6 +46,9 @@ install: cc
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
 	install -m 644 cc/include/ccc/vendor/*.h $(DESTDIR)$(PREFIX)/include/ccc/vendor/
 	install -m 644 cc/runtime/*.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
+	@if [ -n "$$(ls cc/runtime/*.h 2>/dev/null)" ]; then \
+		install -m 644 cc/runtime/*.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
+	fi
 	@echo "Installed. Add $(DESTDIR)$(PREFIX)/bin to PATH if needed."
 
 uninstall:

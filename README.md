@@ -114,6 +114,23 @@ The compiler auto-detects its include/runtime paths from the binary location. Yo
 CC_HOME=/opt/ccc ccc run myfile.ccs
 ```
 
+#### Install with Homebrew
+
+**From a clone (recommended):** clone the repo, then run the install script at repo root:
+```bash
+git clone --recurse-submodules https://github.com/sreekotay/concurrent-c.git
+cd concurrent-c
+./install.sh
+```
+If you cloned without `--recurse-submodules`, `install.sh` will init the `third_party/tcc` submodule and then run `brew install --formula Formula/ccc.rb`.
+
+**From anywhere (tap):** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
+```bash
+brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
+brew install sreekotay/concurrent-c/ccc
+```
+After the tap is added, later updates are `brew update && brew upgrade sreekotay/concurrent-c/ccc`. Plain `brew install ccc` would only work if the formula were in Homebrew’s main repo (homebrew-core); this tap keeps the formula in your repo instead.
+
 ---
 
 ### Run examples, stress tests, and benchmarks
