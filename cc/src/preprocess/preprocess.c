@@ -1275,28 +1275,15 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
     
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
-    /* line/col tracked for potential future error reporting */
-    int line = 1; (void)line;
-    int col = 1; (void)col;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (c == '\n') { line++; col = 1; }
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
         
         /* Detect T? pattern: identifier followed by '?' (not '?:' ternary) */
         if (c == '?' && c2 != ':' && c2 != '?') {
@@ -1355,7 +1342,7 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
             }
         }
         
-        i++; col++;
+        i++;
     }
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -2298,29 +2285,15 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
     
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
-    /* line/col tracked for potential future error reporting */
-    int line = 1; (void)line;
-    int col = 1; (void)col;
-
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (c == '\n') { line++; col = 1; }
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
         
         /* Detect `T!>(E)` pattern: type followed by '!>' followed by '(' error type ')' */
         if (c == '!' && c2 == '>') {
@@ -2430,7 +2403,7 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
             }
         }
         
-        i++; col++;
+        i++;
     }
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -2454,27 +2427,14 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
 
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
-    int line = 1;
-    int col = 1;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
 
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (c == '\n') { line++; col = 1; }
-
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
 
         if (c == '[') {
             size_t j = i + 1;
@@ -2488,7 +2448,7 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
                     fprintf(stderr, "CC: error: unterminated slice type (missing ']') at %s:%d:%d\n",
-                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), scan.line, scan.col);
                     free(out);
                     return NULL;
                 }
@@ -2508,13 +2468,12 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                 }
 
                 /* advance scan to after ']' */
-                size_t end = k + 1;
-                while (i < end) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
+                i = k + 1;
                 continue;
             }
         }
 
-        i++; col++;
+        i++;
     }
 
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -2749,21 +2708,14 @@ static char* cc__rewrite_try_exprs(const char* src, size_t n) {
     
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
     
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
         
         /* Detect 'try' keyword followed by expression (not try { block } form) */
         if (c == 't' && i + 2 < n && src[i+1] == 'r' && src[i+2] == 'y') {
