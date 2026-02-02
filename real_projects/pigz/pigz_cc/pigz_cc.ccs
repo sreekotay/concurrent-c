@@ -1264,7 +1264,7 @@ int main(int argc, char *argv[]) {
     g.mtime = 0;
     g.block = BLOCK_SIZE; // Default block size
     ZopfliInitOptions(&g.zopts);
-    int num_workers = 4;
+    int num_workers = 0; // 0 = use runtime default (CC_FIBER_WORKERS or CPU count)
     int level = 6;
     int strategy = Z_DEFAULT_STRATEGY;
     

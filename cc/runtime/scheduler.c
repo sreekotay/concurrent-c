@@ -51,7 +51,11 @@ static size_t cc__default_workers(void) {
 static CCExec* cc__sched_exec_lazy(void) {
     pthread_mutex_lock(&g_sched_mu);
     if (!g_sched_exec) {
-        size_t workers = cc__env_size("CC_WORKERS", cc__default_workers());
+        /* Unify with fiber scheduler: check programmatic setting first, then env */
+        size_t workers = cc_sched_get_num_workers();
+        if (workers == 0) {
+            workers = cc__env_size("CC_WORKERS", cc__default_workers());
+        }
         size_t qcap = cc__env_size("CC_SPAWN_QUEUE_CAP", 1024);
         g_sched_exec = cc_exec_create(workers, qcap);
     }

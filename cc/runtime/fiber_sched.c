@@ -373,12 +373,12 @@ void cc_sched_set_num_workers(size_t n) {
     atomic_store(&g_requested_workers, n);
 }
 
-/* Get the current number of workers (0 if scheduler not initialized) */
+/* Get the current number of workers (returns requested count if not yet initialized) */
 size_t cc_sched_get_num_workers(void) {
     if (atomic_load_explicit(&g_initialized, memory_order_acquire) == 2) {
         return g_sched.num_workers;
     }
-    return 0;
+    return atomic_load(&g_requested_workers);
 }
 static _Atomic uintptr_t g_next_fiber_id = 1;       /* Counter for unique fiber IDs */
 
@@ -1118,6 +1118,10 @@ int cc_fiber_sched_init(size_t num_workers) {
     g_sched.num_workers = num_workers;
     atomic_store(&g_sched.running, 1);
     wake_primitive_init(&g_sched.wake_prim);
+    
+    if (getenv("CC_FIBER_STATS") || getenv("CC_VERBOSE")) {
+        fprintf(stderr, "[cc] fiber scheduler initialized with %zu workers\n", num_workers);
+    }
     
     for (size_t i = 0; i < num_workers; i++) {
         pthread_create(&g_sched.workers[i], NULL, worker_main, (void*)i);
