@@ -1679,7 +1679,6 @@ static int cc__find_matching_angle(const char* b, size_t bl, size_t langle, size
    - map_new<K, V>(...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
    Also tracks variable declarations for UFCS resolution. */
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
-    (void)input_path;
     if (!src || n == 0) return NULL;
     
     char* out = NULL;
@@ -1687,6 +1686,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     size_t i = 0;
     size_t last_emit = 0;
     int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    int line = 1, col = 1;
     
     CCTypeRegistry* reg = cc_type_registry_get_global();
     
@@ -1694,15 +1694,17 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
         
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '\n') { line++; col = 1; }
         
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+        
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
         
         /* Look for Vec< or Map< or vec_new< or map_new< */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
@@ -1737,8 +1739,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             size_t angle_end = 0;
             
             if (!cc__find_matching_angle(src, n, angle_start, &angle_end)) {
-                i++;
-                continue;
+                /* ERROR: unclosed generic type */
+                const char* what = is_vec_type ? "Vec<" : is_map_type ? "Map<" : is_vec_new ? "vec_new<" : "map_new<";
+                char rel[1024];
+                fprintf(stderr, "%s:%d:%d: error: unclosed '%s' - missing '>'\n",
+                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                        line, col, what);
+                fprintf(stderr, "  hint: generic syntax is '%sType>' e.g., 'Vec<int>'\n", what);
+                free(out);
+                return NULL;
             }
             
             /* Extract type parameters */
@@ -1920,6 +1929,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         }
         
         i++;
+        col++;
     }
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -2351,7 +2361,18 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
             /* Skip whitespace */
             while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
             
-            /* Must find '(' */
+            /* Must find '(' - VALIDATE */
+            if (j >= n || src[j] != '(') {
+                /* ERROR: !> without error type */
+                char rel[1024];
+                fprintf(stderr, "%s:%d:%d: error: '!>' requires error type in parentheses\n",
+                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                        scan.line, scan.col);
+                fprintf(stderr, "  hint: use 'T !> (ErrorType)' syntax, e.g., 'int !> (Error)'\n");
+                fprintf(stderr, "  hint: for simple error results, use 'int !> (int)' for error codes\n");
+                free(out);
+                return NULL;
+            }
             if (j < n && src[j] == '(') {
                 size_t paren_open = j;
                 j++;  /* skip '(' */
@@ -2374,6 +2395,17 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     if (paren_depth > 0) j++;
                 }
                 
+                if (paren_depth != 0) {
+                    /* ERROR: unclosed paren in error type */
+                    char rel[1024];
+                    fprintf(stderr, "%s:%d:%d: error: unclosed '(' in result error type\n",
+                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            scan.line, scan.col);
+                    fprintf(stderr, "  hint: result type syntax is 'T !> (ErrorType)'\n");
+                    free(out);
+                    return NULL;
+                }
+                
                 if (paren_depth == 0) {
                     /* Found matching ')' at position j */
                     size_t err_end = j;
@@ -2384,7 +2416,19 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                         err_end--;
                     }
                     
+                    /* VALIDATE: error type cannot be empty */
+                    if (err_end <= err_start) {
+                        char rel[1024];
+                        fprintf(stderr, "%s:%d:%d: error: empty error type in '!> ()'\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                scan.line, scan.col);
+                        fprintf(stderr, "  hint: specify an error type, e.g., 'int !> (Error)' or 'int !> (int)'\n");
+                        free(out);
+                        return NULL;
+                    }
+                    
                     size_t paren_close = j;
+                    (void)paren_close;  /* unused but kept for clarity */
                     j++;  /* skip ')' */
                     
                     /* Scan back from '!>' to find the ok type start */
@@ -2393,6 +2437,17 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t')) ty_end--;
                     
                     size_t ty_start = cc__scan_back_to_delim(src, ty_end);
+                    
+                    /* VALIDATE: ok type cannot be empty */
+                    if (ty_start >= ty_end) {
+                        char rel[1024];
+                        fprintf(stderr, "%s:%d:%d: error: missing ok type before '!>'\n",
+                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                scan.line, scan.col);
+                        fprintf(stderr, "  hint: result type syntax is 'T !> (ErrorType)', where T is the success type\n");
+                        free(out);
+                        return NULL;
+                    }
                     
                     if (ty_start < ty_end && err_start < err_end) {
                         size_t ty_len = ty_end - ty_start;
@@ -3827,6 +3882,16 @@ static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
                 /* Extract channel names from (ch1, ch2, ...) */
                 size_t chans_start = paren_start + 1;
                 size_t chans_end = paren_end;
+                
+                /* VALIDATION: check if channel list is empty */
+                size_t cs = chans_start;
+                while (cs < chans_end && (src[cs] == ' ' || src[cs] == '\t' || src[cs] == '\n')) cs++;
+                if (cs >= chans_end) {
+                    fprintf(stderr, "@closing() error: requires channel argument(s)\n");
+                    fprintf(stderr, "  hint: use '@closing(ch) { ... }' where ch is the channel to close\n");
+                    free(out);
+                    return NULL;
+                }
                 
                 /* Skip whitespace after ) */
                 while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
