@@ -12,6 +12,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "visitor/pass_common.h"
 
 /* Local aliases for shared helpers */
 #define cc__sb_append_local cc_sb_append
@@ -407,9 +408,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 p = cc__skip_ws_local2(p);
                 if (*p != '&') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair expects `&tx, &rx` at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair expects '&tx, &rx'");
                     free(out);
                     return NULL;
                 }
@@ -458,9 +458,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 
                 if (!is_expression && *after != ';') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair must be used as statement or expression at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair must be used as statement or expression");
                     free(out);
                     return NULL;
                 }
@@ -475,9 +474,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (!cc__find_chan_decl_before(src, len, call_start, tx_name, &tx_lbr, &tx_rbr, &tx_ts) ||
                     !cc__find_chan_decl_before(src, len, call_start, rx_name, &rx_lbr, &rx_rbr, &rx_ts)) {
                     char rel[1024];
-                    fprintf(stderr, "%s:%d:%d: error: channel_pair could not find declarations for '%s' and '%s'\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, tx_name, rx_name);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair could not find declarations for '%s' and '%s'", tx_name, rx_name);
                     fprintf(stderr, "  note: ensure both channel handles are declared before this call\n");
                     fprintf(stderr, "  hint: use 'T[~N >] %s; T[~N <] %s;' to declare send/recv handles\n", tx_name, rx_name);
                     free(out);
@@ -508,9 +506,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
 
                 if (!tx_is_tx || tx_is_rx || !rx_is_rx || rx_is_tx) {
                     char rel[1024];
-                    fprintf(stderr, "%s:%d:%d: error: channel_pair requires send handle (>) first, then recv handle (<)\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair requires send handle (>) first, then recv handle (<)");
                     fprintf(stderr, "  note: '%s' is %s, '%s' is %s\n",
                             tx_name, tx_is_tx ? "send (>)" : tx_is_rx ? "recv (<)" : "unknown",
                             rx_name, rx_is_rx ? "recv (<)" : rx_is_tx ? "send (>)" : "unknown");
@@ -521,9 +518,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
 
                 if (tx_unknown || rx_unknown) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair unknown token in spec at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair unknown token in spec");
                     free(out);
                     return NULL;
                 }
@@ -532,9 +528,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (rx_mode == -1) rx_mode = 0;
                 if (tx_mode != rx_mode) {
                     char rel[1024];
-                    fprintf(stderr, "%s:%d:%d: error: channel_pair mode mismatch: tx=%d, rx=%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, tx_mode, rx_mode);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair mode mismatch (tx=%d, rx=%d)", tx_mode, rx_mode);
                     fprintf(stderr, "  hint: both handles must have the same mode specifier\n");
                     free(out);
                     return NULL;
@@ -542,9 +537,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 
                 if (tx_has_topo != rx_has_topo || (tx_has_topo && strcmp(tx_topo, rx_topo) != 0)) {
                     char rel[1024];
-                    fprintf(stderr, "%s:%d:%d: error: channel_pair topology mismatch: tx='%s', rx='%s'\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, tx_has_topo ? tx_topo : "(none)", rx_has_topo ? rx_topo : "(none)");
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair topology mismatch (tx='%s', rx='%s')", tx_has_topo ? tx_topo : "(none)", rx_has_topo ? rx_topo : "(none)");
                     fprintf(stderr, "  hint: both handles must have the same topology (mpmc, spsc, etc.)\n");
                     free(out);
                     return NULL;
@@ -554,9 +548,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (rx_bp == -1) rx_bp = 0;
                 if (tx_bp != rx_bp) {
                     char rel[1024];
-                    fprintf(stderr, "%s:%d:%d: error: channel_pair backpressure mismatch: tx=%d, rx=%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, tx_bp, rx_bp);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel_pair backpressure mismatch (tx=%d, rx=%d)", tx_bp, rx_bp);
                     fprintf(stderr, "  hint: both handles must have the same backpressure setting\n");
                     free(out);
                     return NULL;
@@ -569,9 +562,8 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 } else if (tx_cap == -2 && rx_cap == -2) {
                     if (strcmp(tx_cap_expr, rx_cap_expr) != 0) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: channel_pair capacity mismatch at %s:%d:%d\n",
-                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                line, col);
+                        cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col, CC_ERR_CHANNEL, "channel_pair capacity mismatch");
                         free(out);
                         return NULL;
                     }
@@ -696,9 +688,8 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                                 owned_end = cc__scan_matching_brace(src, n, scan);
                                 if (owned_end == (size_t)-1) {
                                     char rel[1024];
-                                    fprintf(stderr, "CC: error: unterminated owned block at %s:%d:%d\n",
-                                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                            line, col);
+                                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                            line, col, CC_ERR_CHANNEL, "unterminated owned block");
                                     free(out);
                                     return NULL;
                                 }
@@ -717,9 +708,8 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                     while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
                     if (k >= n || src[k] != ']') {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: expected ] after owned block at %s:%d:%d\n",
-                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                line, col);
+                        cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col, CC_ERR_CHANNEL, "expected ']' after owned block");
                         free(out);
                         return NULL;
                     }
@@ -731,9 +721,8 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                 
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: unterminated channel handle type at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "unterminated channel handle type");
                     free(out);
                     return NULL;
                 }
@@ -747,9 +736,8 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                                                destroy_closure, sizeof(destroy_closure),
                                                reset_closure, sizeof(reset_closure))) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: owned block requires .create and .destroy at %s:%d:%d\n",
-                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                line, col);
+                        cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col, CC_ERR_CHANNEL, "owned block requires .create and .destroy");
                         free(out);
                         return NULL;
                     }
@@ -803,9 +791,8 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                     while (semi < n && src[semi] != ';') semi++;
                     if (semi >= n) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: expected ; after owned channel declaration at %s:%d:%d\n",
-                                cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                line, col);
+                        cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                                line, col, CC_ERR_CHANNEL, "expected ';' after owned channel declaration");
                         free(out);
                         return NULL;
                     }
@@ -859,17 +846,15 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                 }
                 if (saw_gt && saw_lt) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel type cannot be both > and < at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel type cannot be both '>' and '<'");
                     free(out);
                     return NULL;
                 }
                 if (!saw_gt && !saw_lt) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel type requires > or < at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "channel type requires '>' or '<'");
                     free(out);
                     return NULL;
                 }

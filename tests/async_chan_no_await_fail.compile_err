@@ -1,1 +1,1 @@
-error: channel operation 'chan_send' must be awaited in @async function
+error: async: channel operation 'chan_send' must be awaited in @async function

@@ -840,8 +840,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     
                     if (scan >= n || src[scan] != '{') {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: owned channel requires { ... } block at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "channel", "owned channel requires { ... } block");
                         free(out);
                         return NULL;
                     }
@@ -866,8 +866,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     
                     if (brace_depth != 0) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: unterminated owned block at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "channel", "unterminated owned block");
                         free(out);
                         return NULL;
                     }
@@ -877,8 +877,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
                     if (k >= n || src[k] != ']') {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: expected ] after owned block at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "channel", "expected ']' after owned block");
                         free(out);
                         return NULL;
                     }
@@ -892,8 +892,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     
                     if (var_end == var_start) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: expected variable name after owned channel type at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "channel", "expected variable name after owned channel type");
                         free(out);
                         return NULL;
                     }
@@ -903,8 +903,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     while (semi < n && src[semi] != ';') semi++;
                     if (semi >= n) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: expected ; after owned channel declaration at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "channel", "expected ';' after owned channel declaration");
                         free(out);
                         return NULL;
                     }
@@ -1054,8 +1054,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 while (k < n && src[k] != ']' && src[k] != '\n') k++;
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: unterminated channel handle type (missing ']') at %s:%d:%d\n",
-                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            line, col, "channel", "unterminated channel handle type (missing ']')");
                     free(out);
                     return NULL;
                 }
@@ -1067,15 +1067,15 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 }
                 if (saw_gt && saw_lt) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel handle type cannot be both send ('>') and recv ('<') at %s:%d:%d\n",
-                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            line, col, "channel", "channel handle type cannot be both send ('>') and recv ('<')");
                     free(out);
                     return NULL;
                 }
                 if (!saw_gt && !saw_lt) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel handle type requires direction: use `T[~ ... >]` or `T[~ ... <]` at %s:%d:%d\n",
-                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), line, col);
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            line, col, "channel", "channel handle type requires direction: use 'T[~ ... >]' or 'T[~ ... <]'");
                     free(out);
                     return NULL;
                 }
@@ -1757,9 +1757,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 /* ERROR: unclosed generic type */
                 const char* what = is_vec_type ? "Vec<" : is_map_type ? "Map<" : is_vec_new ? "vec_new<" : "map_new<";
                 char rel[1024];
-                fprintf(stderr, "%s:%d:%d: error: unclosed '%s' - missing '>'\n",
-                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                        line, col, what);
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                        line, col, "type", "unclosed '%s' - missing '>'", what);
                 fprintf(stderr, "  hint: generic syntax is '%sType>' e.g., 'Vec<int>'\n", what);
                 free(out);
                 return NULL;
@@ -2412,9 +2411,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                 if (paren_depth != 0) {
                     /* ERROR: unclosed paren in error type */
                     char rel[1024];
-                    fprintf(stderr, "%s:%d:%d: error: unclosed '(' in result error type\n",
-                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                            scan.line, scan.col);
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            scan.line, scan.col, "type", "unclosed '(' in result error type");
                     fprintf(stderr, "  hint: result type syntax is 'T !> (ErrorType)'\n");
                     free(out);
                     return NULL;
@@ -2433,9 +2431,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     /* VALIDATE: error type cannot be empty */
                     if (err_end <= err_start) {
                         char rel[1024];
-                        fprintf(stderr, "%s:%d:%d: error: empty error type in '!> ()'\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                scan.line, scan.col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                scan.line, scan.col, "type", "empty error type in '!> ()'");
                         fprintf(stderr, "  hint: specify an error type, e.g., 'int !> (Error)' or 'int !> (int)'\n");
                         free(out);
                         return NULL;
@@ -2455,9 +2452,8 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                     /* VALIDATE: ok type cannot be empty */
                     if (ty_start >= ty_end) {
                         char rel[1024];
-                        fprintf(stderr, "%s:%d:%d: error: missing ok type before '!>'\n",
-                                cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                scan.line, scan.col);
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                scan.line, scan.col, "type", "missing ok type before '!>'");
                         fprintf(stderr, "  hint: result type syntax is 'T !> (ErrorType)', where T is the success type\n");
                         free(out);
                         return NULL;
@@ -2563,8 +2559,8 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                 while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: unterminated slice type (missing ']') at %s:%d:%d\n",
-                            cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)), scan.line, scan.col);
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            scan.line, scan.col, "type", "unterminated slice type (missing ']')");
                     free(out);
                     return NULL;
                 }
@@ -3322,9 +3318,8 @@ static int cc__check_async_chan_await(const char* src, size_t n, const char* inp
                 if (!has_await) {
                     char rel[1024];
                     cc_path_rel_to_repo(input_path, rel, sizeof(rel));
-                    fprintf(stderr, "%s:%d:%d: error: channel operation '%s' must be awaited in @async function\n",
-                            rel, line, col, op_name);
-                    fprintf(stderr, "%s:%d:%d: note: add 'await' before this call\n", rel, line, col);
+                    cc_pp_error_cat(rel, line, col, "async", "channel operation '%s' must be awaited in @async function", op_name);
+                    fprintf(stderr, "  hint: add 'await' before this call\n");
                     errors++;
                 }
                 i += op_len - 1; /* Skip past the op name */
@@ -3901,7 +3896,7 @@ static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
                 size_t cs = chans_start;
                 while (cs < chans_end && (src[cs] == ' ' || src[cs] == '\t' || src[cs] == '\n')) cs++;
                 if (cs >= chans_end) {
-                    fprintf(stderr, "@closing() error: requires channel argument(s)\n");
+                    cc_pp_error_cat("<input>", 0, 0, "syntax", "@closing() requires channel argument(s)");
                     fprintf(stderr, "  hint: use '@closing(ch) { ... }' where ch is the channel to close\n");
                     free(out);
                     return NULL;
@@ -4037,7 +4032,7 @@ static char* cc__rewrite_cc_concurrent(const char* src, size_t n) {
             if (i > 0 && cc_is_ident_char(src[i - 1])) continue;
             if (i + 13 < n && cc_is_ident_char(src[i + 13])) continue;
 
-            fprintf(stderr, "line %d: error: 'cc_concurrent' syntax is not supported\n", line);
+            cc_pp_error_cat("<input>", line, 1, "syntax", "'cc_concurrent' syntax is deprecated (use cc_block_all instead)");
             fprintf(stderr, "  note: use cc_block_all() instead:\n");
             fprintf(stderr, "    CCTaskIntptr tasks[] = { task1(), task2() };\n");
             fprintf(stderr, "    intptr_t results[2];\n");

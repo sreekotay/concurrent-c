@@ -7,6 +7,7 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "visitor/edit_buffer.h"
+#include "visitor/pass_common.h"
 
 int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             const char* src,
@@ -77,8 +78,8 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                     }
                     if (m >= n || br != 0) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: unterminated @match block at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col);
+                        cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                CC_ERR_SYNTAX, "unterminated @match block");
                         free(out);
                         return -1;
                     }
@@ -191,8 +192,8 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             int is_send = (send != NULL);
                             if (!dot || (!is_recv && !is_send)) {
                                 char rel[1024];
-                                fprintf(stderr, "%s:%d:%d: error: invalid @match case: '%s'\n",
-                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col, hdr);
+                                cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                        CC_ERR_SYNTAX, "invalid @match case: '%s'", hdr);
                                 fprintf(stderr, "  expected: <chan>.recv(ptr), <chan>.send(value), or is_cancelled()\n");
                                 fprintf(stderr, "  example: case ch.recv(&msg): ... or case ch.send(42): ...\n");
                                 free(out);
@@ -208,8 +209,8 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             const char* rp = lp ? strrchr(dot, ')') : NULL;
                             if (!lp || !rp || rp <= lp) {
                                 char rel[1024];
-                                fprintf(stderr, "%s:%d:%d: error: malformed @match case: '%s'\n",
-                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col, hdr);
+                                cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                        CC_ERR_SYNTAX, "malformed @match case: '%s'", hdr);
                                 fprintf(stderr, "  note: missing or mismatched parentheses in .recv() or .send()\n");
                                 free(out);
                                 return -1;
@@ -373,8 +374,8 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                     }
                     if (m >= n || br != 0) {
                         char rel[1024];
-                        fprintf(stderr, "CC: error: unterminated @match block at %s:%d:%d\n",
-                                cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col);
+                        cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                CC_ERR_SYNTAX, "unterminated @match block");
                         return -1;
                     }
                     size_t body_e = m + 1;
@@ -484,8 +485,8 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                             int is_send = (send != NULL);
                             if (!dot || (!is_recv && !is_send)) {
                                 char rel[1024];
-                                fprintf(stderr, "CC: error: @match case header must be <chan>.recv(ptr) or <chan>.send(value) or is_cancelled() at %s:%d:%d\n",
-                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col);
+                                cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                        CC_ERR_SYNTAX, "@match case must be <chan>.recv(ptr), <chan>.send(value), or is_cancelled()");
                                 return -1;
                             }
                             size_t cn = (size_t)(dot - hdr);
@@ -498,8 +499,8 @@ int cc__collect_match_edits(const CCVisitorCtx* ctx, CCEditBuffer* eb) {
                             const char* rp = lp ? strrchr(dot, ')') : NULL;
                             if (!lp || !rp || rp <= lp) {
                                 char rel[1024];
-                                fprintf(stderr, "CC: error: malformed @match case header at %s:%d:%d\n",
-                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col);
+                                cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                        CC_ERR_SYNTAX, "malformed @match case header");
                                 return -1;
                             }
                             size_t an = (size_t)(rp - (lp + 1));

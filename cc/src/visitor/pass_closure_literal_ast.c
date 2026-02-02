@@ -1547,7 +1547,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         }
         if (pr == -2) {
             const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            fprintf(stderr, "%s:%d: error: capture-all [&] is not allowed\n", f, n[i].line_start);
+            cc_pass_error_cat(f, n[i].line_start, 1, CC_ERR_CLOSURE, "capture-all [&] is not allowed");
             cc__free_closure_desc(d);
             free(descs);
             free(idxs);
@@ -1556,7 +1556,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         }
         if (pr == -3) {
             const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            fprintf(stderr, "%s:%d: error: capture-all [=] is not allowed\n", f, n[i].line_start);
+            cc_pass_error_cat(f, n[i].line_start, 1, CC_ERR_CLOSURE, "capture-all [=] is not allowed");
             cc__free_closure_desc(d);
             free(descs);
             free(idxs);
@@ -1598,10 +1598,9 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             char** caps = cc__dup_string_list(d->explicit_cap_names, d->explicit_cap_count);
             int cap_n = d->explicit_cap_count;
             if (!caps && d->explicit_cap_count > 0) {
-                fprintf(stderr, "%s:%d:%d: error: CC: out of memory while building closure captures\n",
-                        ctx->input_path ? ctx->input_path : "<input>",
-                        d->start_line,
-                        (d->start_col >= 0 ? (d->start_col + 1) : 1));
+                cc_pass_error_cat(ctx->input_path ? ctx->input_path : "<input>",
+                        d->start_line, (d->start_col >= 0 ? (d->start_col + 1) : 1),
+                        CC_ERR_CLOSURE, "out of memory while building captures");
                 for (int q = 0; q < idx_n; q++) cc__free_closure_desc(&descs[q]);
                 free(descs);
                 for (int dd = 0; dd < 256; dd++) {

@@ -108,8 +108,8 @@ static int cc__stmt_marker_start_off(const CCASTRoot* root,
     size_t found = 0;
     if (!cc__find_substr_in_range(in_src, span_start, span_end, marker, marker_len, &found)) {
         const char* f = (n[node_i].file && n[node_i].file[0]) ? n[node_i].file : (ctx->input_path ? ctx->input_path : "<input>");
-        fprintf(stderr, "%s:%d:1: error: could not locate '%.*s' in source (lines %d-%d)\n",
-                f, n[node_i].line_start, (int)marker_len, marker, n[node_i].line_start, le);
+        cc_pass_error_cat(f, n[node_i].line_start, 1, CC_ERR_ASYNC,
+                "could not locate '%.*s' in source (lines %d-%d)", (int)marker_len, marker, n[node_i].line_start, le);
         fprintf(stderr, "  note: this may indicate a syntax error or unsupported construct\n");
         return -1;
     }
@@ -187,7 +187,7 @@ static int cc__parse_closing_clause(const CCVisitorCtx* ctx,
     i = cc__skip_ws(src, i, end);
     if (i >= end || src[i] != '(') {
         const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
-        fprintf(stderr, "%s:%d:1: error: expected '(' after @nursery closing\n", f, (n ? n[nursery_node_i].line_start : 1));
+        cc_pass_error_cat(f, (n ? n[nursery_node_i].line_start : 1), 1, CC_ERR_ASYNC, "expected '(' after @nursery closing");
         return -1;
     }
     i++; /* consume '(' */
@@ -198,7 +198,7 @@ static int cc__parse_closing_clause(const CCVisitorCtx* ctx,
         if (src[i] == ')') { i++; break; }
         if (!cc__is_ident_start(src[i])) {
             const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
-            fprintf(stderr, "%s:%d:1: error: expected identifier in @nursery closing(...)\n", f, (n ? n[nursery_node_i].line_start : 1));
+            cc_pass_error_cat(f, (n ? n[nursery_node_i].line_start : 1), 1, CC_ERR_ASYNC, "expected identifier in @nursery closing(...)");
             return -1;
         }
         size_t s0 = i;
@@ -207,8 +207,8 @@ static int cc__parse_closing_clause(const CCVisitorCtx* ctx,
         size_t sl = i - s0;
         if (nn >= cap) {
             const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
-            fprintf(stderr, "%s:%d:1: error: too many channels in @nursery closing(...) (max %d)\n",
-                    f, (n ? n[nursery_node_i].line_start : 1), cap);
+            cc_pass_error_cat(f, (n ? n[nursery_node_i].line_start : 1), 1, CC_ERR_ASYNC,
+                    "too many channels in @nursery closing(...) (max %d)", cap);
             return -1;
         }
         if (sl >= 64) sl = 63;
@@ -220,12 +220,12 @@ static int cc__parse_closing_clause(const CCVisitorCtx* ctx,
         if (i < end && src[i] == ')') { i++; break; }
         /* Anything else is malformed. */
         const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
-        fprintf(stderr, "%s:%d:1: error: malformed @nursery closing(...) clause\n", f, (n ? n[nursery_node_i].line_start : 1));
+        cc_pass_error_cat(f, (n ? n[nursery_node_i].line_start : 1), 1, CC_ERR_ASYNC, "malformed @nursery closing(...) clause");
         return -1;
     }
     if (nn == 0) {
         const char* f = (n && n[nursery_node_i].file) ? n[nursery_node_i].file : "<input>";
-        fprintf(stderr, "%s:%d:1: error: @nursery closing(...) requires at least one channel\n", f, (n ? n[nursery_node_i].line_start : 1));
+        cc_pass_error_cat(f, (n ? n[nursery_node_i].line_start : 1), 1, CC_ERR_ASYNC, "@nursery closing(...) requires at least one channel");
         return -1;
     }
     return nn;
@@ -489,8 +489,8 @@ int cc__rewrite_spawn_stmts_with_nodes(const CCASTRoot* root,
         int nid = (nursery_i >= 0 && nursery_i < root->node_count) ? id_by_node[nursery_i] : 0;
         if (nid == 0) {
             const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            fprintf(stderr, "%s:%d:%d: error: CC: 'spawn' must be inside an '@nursery { ... }' block\n",
-                    f, n[i].line_start, col1);
+            cc_pass_error_cat(f, n[i].line_start, col1, CC_ERR_ASYNC,
+                    "'spawn' must be inside an '@nursery { ... }' block");
             free(id_by_node);
             return -1;
         }
@@ -927,11 +927,12 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
         int nid = (nursery_i >= 0 && nursery_i < root->node_count) ? id_by_node[nursery_i] : 0;
         if (nid == 0) {
             const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            fprintf(stderr, "%s:%d:%d: error: CC: 'spawn' must be inside an '@nursery { ... }' block\n",
-                    f, n[i].line_start, col1);
+            cc_pass_error_cat(f, n[i].line_start, col1, CC_ERR_ASYNC,
+                    "'spawn' must be inside an '@nursery { ... }' block");
             free(id_by_node);
             return -1;
-        }        size_t end = cc__infer_spawn_stmt_end_off(in_src, in_len, start);
+        }
+        size_t end = cc__infer_spawn_stmt_end_off(in_src, in_len, start);
         if (end == 0) {
             if (n[i].col_end > 0) {
                 end = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);

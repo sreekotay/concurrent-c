@@ -7,6 +7,7 @@
 
 #include "util/text.h"
 #include "visitor/edit_buffer.h"
+#include "visitor/pass_common.h"
 
 typedef enum {
     DEFER_ALWAYS = 0,  /* @defer - always runs */
@@ -197,7 +198,7 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
         /* `cancel ...;` is not implemented: hard error. */
         if (cc__token_is(in_src, in_len, i, "cancel")) {
             const char* f = ctx->input_path ? ctx->input_path : "<input>";
-            fprintf(stderr, "%s:%d:1: error: CC: 'cancel' is not implemented (use structured scopes instead)\n", f, line_no);
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX, "'cancel' is not implemented (use structured scopes instead)");
             for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
             free(out);
             return -1;
@@ -208,7 +209,7 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             size_t stmt_end = 0;
             if (!cc__scan_stmt_end_semicolon(in_src, in_len, i, &stmt_end)) {
                 const char* f = ctx->input_path ? ctx->input_path : "<input>";
-                fprintf(stderr, "%s:%d:1: error: CC: malformed 'return' (expected ';')\n", f, line_no);
+                cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX, "malformed 'return' (expected ';')");
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
                 return -1;
@@ -374,7 +375,7 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
             size_t stmt_end = 0;
             if (!cc__scan_stmt_end_semicolon(in_src, in_len, stmt_start, &stmt_end)) {
                 const char* f = ctx->input_path ? ctx->input_path : "<input>";
-                fprintf(stderr, "%s:%d:1: error: CC: malformed '@defer' (expected ';')\n", f, defer_line);
+                cc_pass_error_cat(f, defer_line, 1, CC_ERR_SYNTAX, "malformed '@defer' (expected ';')");
                 for (int d = 0; d < 256; d++) cc__free_defer_list(defers[d], defer_counts[d]);
                 free(out);
                 return -1;

@@ -12,6 +12,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "visitor/pass_common.h"
 
 /* Local aliases for shared helpers */
 #define cc__sb_append_local cc_sb_append
@@ -80,9 +81,8 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
                 while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: unterminated slice type (missing ']') at %s:%d:%d\n",
-                            cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_TYPE, "unterminated slice type (missing ']')");
                     free(out);
                     return NULL;
                 }
