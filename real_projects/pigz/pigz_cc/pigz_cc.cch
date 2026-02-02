@@ -6,6 +6,40 @@
 #define PIGZ_CC_H
 
 /* ============================================================================
+ * Includes
+ * ============================================================================ */
+
+// Work around TCC's bundled stdarg.h conflicting with system headers
+#include "stdarg.h"
+#define _STDARG_H
+
+// CC runtime
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_sched.cch>
+
+// Standard C headers
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <signal.h>
+#include <errno.h>
+#include <dirent.h>
+
+// Compression libraries
+#include <zlib.h>
+// zopfli requires passing --cc-flags "-I/opt/homebrew/include" (or install location)
+#include <zopfli.h>
+
+// Manual declaration for ZopfliDeflatePart (matches pigz.c:435-438)
+void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,
+                       const unsigned char* in, size_t instart, size_t inend,
+                       unsigned char* bp, unsigned char** out, size_t* outsize);
+
+/* ============================================================================
  * Configuration
  * ============================================================================ */
 
