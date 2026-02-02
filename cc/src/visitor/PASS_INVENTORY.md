@@ -156,8 +156,19 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
    - Current: whole-file edit can't batch with spawn/nursery/arena
    - Effort: Medium-high (significant refactoring)
    
-2. **Optional/Result pass merging** (P8+P9+P16, P11+P12): Low priority
-   - Would reduce text scans but minimal real-world impact
+2. **Optional/Result pass merging** (P8+P9, P11+P12): DEFERRED
+   - Analysis: 19 → 17 scans = ~10% reduction, minimal real impact
+   - Note: P16 must stay separate (runs after try passes)
+   - Decision: Not worth the refactoring effort
    
 3. **Dead code**: visitor_pipeline.c is marked as dead (not called by compiler)
    - The Phase 3 consolidation shown there has been applied to visit_codegen.c
+
+## Summary
+
+The major consolidation wins have been achieved:
+- ✅ CCPassChain helper (cleaner pass chaining)
+- ✅ Phase 3 EditBuffer batching (4 passes → 1 apply)
+- ✅ Documentation updated
+
+Remaining opportunities are either blocked (reparse reduction) or low-value (pass merging).

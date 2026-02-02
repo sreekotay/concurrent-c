@@ -70,6 +70,12 @@ incrementally adopted in `ccc` to improve code quality.
 
 ## Recommendation
 
-1. **Copy `string_set.h`** to `util/` - immediately useful
-2. **Adopt pass context pattern** - cleaner state management
+1. ✅ **Copy `string_set.h`** to `util/` - Done (2026-02-01)
+2. **Adopt pass context pattern** - cleaner state management (when needed)
 3. **Keep cccn as reference** - design patterns, not code
+
+## Status
+
+Major consolidation work complete. Remaining improvements are either:
+- **Blocked**: Reparse reduction needs fine-grained edit refactoring
+- **Low-value**: Pass merging saves ~10% scans, not worth effort
