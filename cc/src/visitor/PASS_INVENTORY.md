@@ -120,9 +120,10 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
    - Edits collected once, applied once (vs 4 sequential rewrites)
    - Done: 2026-02-01
 
-2. **Merge Phase 4 + early Phase 5** — channel_syntax + type_syntax + closure_literals
-   - Reparse #2 and #3 could become one
-   - Saves: 1 reparse
+2. **Merge closure_literals + spawn/nursery/arena** — share one reparse
+   - BLOCKED: closure_literals uses coarse-grained whole-file edit
+   - Would require refactoring to fine-grained edits
+   - Could save: 1 reparse (3→2)
 
 3. **Merge Phase 6** — spawn/nursery + arena
    - Already batched, but could be single pass
@@ -151,6 +152,12 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 
 ## Next Steps
 
-1. Consider merging P8+P9+P16 (optional passes) - may not be worth complexity
-2. Consider merging P11+P12 (result passes) - may not be worth complexity
-3. Consider Phase 4+5 merge to eliminate one TCC reparse (higher value)
+1. **Reparse reduction (3→2)**: Requires refactoring closure_literals to fine-grained edits
+   - Current: whole-file edit can't batch with spawn/nursery/arena
+   - Effort: Medium-high (significant refactoring)
+   
+2. **Optional/Result pass merging** (P8+P9+P16, P11+P12): Low priority
+   - Would reduce text scans but minimal real-world impact
+   
+3. **Dead code**: visitor_pipeline.c is marked as dead (not called by compiler)
+   - The Phase 3 consolidation shown there has been applied to visit_codegen.c

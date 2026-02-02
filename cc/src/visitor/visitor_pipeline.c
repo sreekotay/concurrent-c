@@ -1,3 +1,21 @@
+/* ============================================================================
+ * DEAD CODE - NOT USED IN PRODUCTION
+ * 
+ * This file is an EXPERIMENTAL alternative visitor pipeline that is NOT called
+ * by the compiler. The actual pipeline is in visit_codegen.c (called via
+ * visitor.c -> cc_visit -> cc_visit_codegen).
+ * 
+ * This code demonstrates the EditBuffer-based approach but lacks many passes:
+ * - No with_deadline_syntax
+ * - No match_syntax
+ * - No channel_pair/chan_handle_types
+ * - No closure_literals
+ * - No spawn/nursery/arena
+ * 
+ * The Phase 3 consolidation shown here has been applied to visit_codegen.c.
+ * This file is kept for reference only.
+ * ============================================================================ */
+
 #include "visitor_pipeline.h"
 
 #include <errno.h>
