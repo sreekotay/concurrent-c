@@ -40,8 +40,11 @@ ifeq ($(TCC_EXT),1)
   ifneq ($(suffix $(TCC_LIB)),.a)
     LDFLAGS += -L$(TCC_LIB)
     LDLIBS  += -ltcc
+    # Track libtcc.a as dependency - relink if TCC is rebuilt
+    TCC_LIB_DEP := $(TCC_LIB)/libtcc.a
   else
     LDLIBS  += $(TCC_LIB)
+    TCC_LIB_DEP := $(TCC_LIB)
   endif
 endif
 
@@ -89,7 +92,7 @@ test-build-stub: $(WRAPPER)
 	@echo "Running build stub test..."
 	@sh ../examples/build_stub/test-build-stub.sh
 
-$(REAL_BINARY): $(OBJS)
+$(REAL_BINARY): $(OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LDLIBS)
 
@@ -101,7 +104,7 @@ $(WRAPPER): $(REAL_BINARY)
 	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/ccc" "$$@"' >> $@
 	@chmod +x $@
 
-$(CCCN_BINARY): $(CCCN_OBJS)
+$(CCCN_BINARY): $(CCCN_OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(CCCN_OBJS) $(LDLIBS)
 
