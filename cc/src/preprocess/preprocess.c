@@ -128,51 +128,57 @@ static int cc_scanner_skip_non_code(CCScannerState* s, const char* src, size_t n
 /* ========================================================================== */
 
 /* ========================================================================== */
-/* Rewrite chain helper - reduces boilerplate in sequential transforms        */
+/* Pass chain helper - tracks allocations for cleanup                         */
 /* ========================================================================== */
 
-/* Apply a rewrite function and update the current buffer.
- * If the rewrite returns a new buffer, frees the old one and updates cur/cur_n.
- * Returns 0 on success, -1 on error (rewrite returned (char*)-1).
+#define CC_PASS_CHAIN_MAX 32
+
+typedef struct {
+    const char* src;      /* Current source buffer */
+    size_t len;           /* Current source length */
+    char* allocs[CC_PASS_CHAIN_MAX];  /* Tracked allocations */
+    int n_allocs;         /* Number of tracked allocations */
+} CCPassChain;
+
+/* Initialize chain with source buffer (buffer is NOT owned by chain) */
+static inline void cc_pass_chain_init(CCPassChain* c, const char* src, size_t len) {
+    c->src = src;
+    c->len = len;
+    c->n_allocs = 0;
+}
+
+/* Apply a pass result to the chain.
+ * - If result is NULL: no change, chain continues with current buffer
+ * - If result is (char*)-1: error, returns -1 (caller should cleanup)
+ * - Otherwise: result becomes new source, tracked for later cleanup
+ * Returns 0 on success, -1 on error.
  */
-static int cc__chain_rewrite(
-    char** cur,           /* Current buffer (may be updated) */
-    size_t* cur_n,        /* Current length (may be updated) */
-    char* (*rewrite_fn)(const char*, size_t),
-    char** allocated      /* Track for cleanup; set to new buffer if allocated */
-) {
-    char* result = rewrite_fn(*cur, *cur_n);
+static inline int cc_pass_chain_apply(CCPassChain* c, char* result) {
     if (result == (char*)-1) return -1;  /* Error sentinel */
     if (result) {
-        if (*allocated) free(*allocated);  /* Free previous in chain */
-        *allocated = result;
-        *cur = result;
-        *cur_n = strlen(result);
+        if (c->n_allocs < CC_PASS_CHAIN_MAX) {
+            c->allocs[c->n_allocs++] = result;
+        }
+        c->src = result;
+        c->len = strlen(result);
     }
     return 0;
 }
 
-/* Same but for rewrite functions that take input_path */
-static int cc__chain_rewrite_path(
-    char** cur,
-    size_t* cur_n,
-    char* (*rewrite_fn)(const char*, size_t, const char*),
-    const char* input_path,
-    char** allocated
-) {
-    char* result = rewrite_fn(*cur, *cur_n, input_path);
-    if (result == (char*)-1) return -1;
-    if (result) {
-        if (*allocated) free(*allocated);
-        *allocated = result;
-        *cur = result;
-        *cur_n = strlen(result);
+/* Free all tracked allocations */
+static inline void cc_pass_chain_free(CCPassChain* c) {
+    for (int i = 0; i < c->n_allocs; i++) {
+        free(c->allocs[i]);
     }
-    return 0;
+    c->n_allocs = 0;
 }
+
+/* Convenience macros for common patterns */
+#define CC_CHAIN(c, call) \
+    do { if (cc_pass_chain_apply(&(c), call) < 0) goto chain_cleanup; } while(0)
 
 /* ========================================================================== */
-/* End rewrite chain helper                                                   */
+/* End pass chain helper                                                      */
 /* ========================================================================== */
 
 /* Rewrite `@match { case <hdr>: <body> ... }` into valid C using cc_chan_match_select.
@@ -4042,105 +4048,50 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
         cc__check_block_on_nonblocking(buf, got, input_path);
     }
 
-    char* rewritten_deadline = cc__rewrite_with_deadline_syntax(buf, got);
-    const char* cur = rewritten_deadline ? rewritten_deadline : buf;
-    size_t cur_n = rewritten_deadline ? strlen(rewritten_deadline) : got;
-
-    char* rewritten_match = cc__rewrite_match_syntax(cur, cur_n, input_path);
-    const char* cur_m = rewritten_match ? rewritten_match : cur;
-    size_t cur_m_n = rewritten_match ? strlen(rewritten_match) : cur_n;
-
-    char* rewritten_slice = cc__rewrite_slice_types(cur_m, cur_m_n, input_path);
-    const char* cur2 = rewritten_slice ? rewritten_slice : cur_m;
-    size_t cur2_n = rewritten_slice ? strlen(rewritten_slice) : cur_m_n;
-
-    char* rewritten_chan = cc__rewrite_chan_handle_types(cur2, cur2_n, input_path);
-    const char* cur3 = rewritten_chan ? rewritten_chan : cur2;
-    size_t cur3_n = rewritten_chan ? strlen(rewritten_chan) : cur2_n;
-
-    /* Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V and vec_new<T>/map_new<K,V> -> init calls */
-    char* rewritten_generic = cc_rewrite_generic_containers(cur3, cur3_n, input_path);
-    const char* cur3g = rewritten_generic ? rewritten_generic : cur3;
-    size_t cur3g_n = rewritten_generic ? strlen(rewritten_generic) : cur3_n;
-
-    /* Rewrite container UFCS: v.push(x) -> Vec_T_push(&v, x) */
-    char* rewritten_ufcs = cc_rewrite_ufcs_container_calls(cur3g, cur3g_n, input_path);
-    const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3g;
-    size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3g_n;
-
-    /* Rewrite std_out.write()/std_err.write() UFCS patterns */
-    char* rewritten_stdio = cc_rewrite_std_io_ufcs(cur3u, cur3u_n);
-    const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3u;
-    size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3u_n;
-
-    /* Rewrite T? -> __CC_OPTIONAL(T) */
-    char* rewritten_opt = cc__rewrite_optional_types(cur3s, cur3s_n, input_path);
-    const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
-    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
-
-    /* Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v)
-       and cc_none_CCOptional_T() -> __CC_OPTIONAL_NONE(T) for parser mode */
-    char* rewritten_opt_ctor = cc__rewrite_optional_constructors(cur4, cur4_n);
-    const char* cur4c = rewritten_opt_ctor ? rewritten_opt_ctor : cur4;
-    size_t cur4c_n = rewritten_opt_ctor ? strlen(rewritten_opt_ctor) : cur4_n;
-
-    /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on function return type.
-       This MUST run BEFORE type rewriting so it can detect T!>(E) syntax. */
-    char* rewritten_infer = cc__rewrite_inferred_result_ctors(cur4c, cur4c_n);
-    const char* cur4i = rewritten_infer ? rewritten_infer : cur4c;
-    size_t cur4i_n = rewritten_infer ? strlen(rewritten_infer) : cur4c_n;
-
-    /* Rewrite T!>(E) -> CCResult_T_E */
-    char* rewritten_res = cc__rewrite_result_types(cur4i, cur4i_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4i;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4i_n;
-
-    /* Rewrite cc_ok_CCResult_T_E / cc_err_CCResult_T_E for parser mode */
-    char* rewritten_res_ctor = cc__rewrite_result_constructors(cur5, cur5_n);
-    const char* cur5c = rewritten_res_ctor ? rewritten_res_ctor : cur5;
-    size_t cur5c_n = rewritten_res_ctor ? strlen(rewritten_res_ctor) : cur5_n;
-
-    /* Normalize `if @try (` to `if (try ` so both syntaxes work */
-    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5c, cur5c_n);
-    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5c;
-    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5c_n;
-
-    /* Rewrite if (try T x = expr) -> expanded form (must come before try expr rewrite) */
-    char* rewritten_try_bind = cc__rewrite_try_binding(cur5a, cur5a_n);
-    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5c;
-    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5c_n;
-
-    /* Rewrite try expr -> cc_try(expr) */
-    char* rewritten_try = cc__rewrite_try_exprs(cur5b, cur5b_n);
-    const char* cur6 = rewritten_try ? rewritten_try : cur5b;
-    size_t cur6_n = rewritten_try ? strlen(rewritten_try) : cur5b_n;
-
-    /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
-    char* rewritten_unwrap = cc__rewrite_optional_unwrap(cur6, cur6_n);
-    const char* cur7 = rewritten_unwrap ? rewritten_unwrap : cur6;
-    size_t cur7_n = rewritten_unwrap ? strlen(rewritten_unwrap) : cur6_n;
-
-    /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
-    char* rewritten_closing = cc__rewrite_closing_annotation(cur7, cur7_n);
-    const char* cur7a = rewritten_closing ? rewritten_closing : cur7;
-    size_t cur7a_n = rewritten_closing ? strlen(rewritten_closing) : cur7_n;
-
-    /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
-    char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
-    if (rewritten_conc == (char*)-1) {
-        free(rewritten_closing);
-        free(rewritten_unwrap); free(rewritten_try); free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_infer); free(rewritten_res); free(rewritten_opt_ctor); free(rewritten_opt);
-        free(rewritten_stdio); free(rewritten_ufcs);
-        free(rewritten_generic); free(rewritten_chan); free(rewritten_slice); free(rewritten_match); free(rewritten_deadline); free(buf);
-        fclose(in); fclose(out); unlink(tmp_path);
-        return -1;
-    }
-    const char* cur8 = rewritten_conc ? rewritten_conc : cur7a;
-    size_t cur8_n = rewritten_conc ? strlen(rewritten_conc) : cur7a_n;
-
-    // Rewrite @link("lib") -> marker comments for linker
-    char* rewritten_link = cc__rewrite_link_directives(cur8, cur8_n);
-    const char* use = rewritten_link ? rewritten_link : cur8;
+    /* --- Apply preprocessing passes using chain helper --- */
+    CCPassChain chain;
+    cc_pass_chain_init(&chain, buf, got);
+    
+    /* P1: with_deadline syntax */
+    CC_CHAIN(chain, cc__rewrite_with_deadline_syntax(chain.src, chain.len));
+    /* P2: @match syntax */
+    CC_CHAIN(chain, cc__rewrite_match_syntax(chain.src, chain.len, input_path));
+    /* P3: slice types T[:] -> CCSlice_T */
+    CC_CHAIN(chain, cc__rewrite_slice_types(chain.src, chain.len, input_path));
+    /* P4: channel handle types int[~4 >] -> CCChanTx_int */
+    CC_CHAIN(chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path));
+    /* P5: generic containers Vec<T> -> Vec_T */
+    CC_CHAIN(chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path));
+    /* P6: container UFCS v.push(x) -> Vec_T_push(&v, x) */
+    CC_CHAIN(chain, cc_rewrite_ufcs_container_calls(chain.src, chain.len, input_path));
+    /* P7: std I/O UFCS std_out.write() -> printf */
+    CC_CHAIN(chain, cc_rewrite_std_io_ufcs(chain.src, chain.len));
+    /* P8: optional types T? -> CCOptional_T */
+    CC_CHAIN(chain, cc__rewrite_optional_types(chain.src, chain.len, input_path));
+    /* P9: optional constructors for parser mode */
+    CC_CHAIN(chain, cc__rewrite_optional_constructors(chain.src, chain.len));
+    /* P10: inferred result constructors (MUST run before P11) */
+    CC_CHAIN(chain, cc__rewrite_inferred_result_ctors(chain.src, chain.len));
+    /* P11: result types T!>(E) -> CCResult_T_E */
+    CC_CHAIN(chain, cc__rewrite_result_types(chain.src, chain.len, input_path));
+    /* P12: result constructors for parser mode */
+    CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
+    /* P13: normalize if @try ( -> if (try */
+    CC_CHAIN(chain, cc__normalize_if_try_syntax(chain.src, chain.len));
+    /* P14: if (try T x = expr) -> expanded form */
+    CC_CHAIN(chain, cc__rewrite_try_binding(chain.src, chain.len));
+    /* P15: try expr -> cc_try(expr) */
+    CC_CHAIN(chain, cc__rewrite_try_exprs(chain.src, chain.len));
+    /* P16: optional unwrap *opt -> cc_unwrap_opt(opt) */
+    CC_CHAIN(chain, cc__rewrite_optional_unwrap(chain.src, chain.len));
+    /* P17: @closing(ch) -> sub-nursery */
+    CC_CHAIN(chain, cc__rewrite_closing_annotation(chain.src, chain.len));
+    /* P18: cc_concurrent { } -> closure exec */
+    CC_CHAIN(chain, cc__rewrite_cc_concurrent(chain.src, chain.len));
+    /* P19: @link("lib") -> linker comments */
+    CC_CHAIN(chain, cc__rewrite_link_directives(chain.src, chain.len));
+    
+    const char* use = chain.src;
 
     /* Emit container type declarations from type registry */
     {
@@ -4228,33 +4179,23 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path, rel, sizeof(rel)));
     fputs(use, out);
 
-    free(rewritten_if_try_norm);
-    free(rewritten_link);
-    free(rewritten_conc);
-    free(rewritten_closing);
-    free(rewritten_unwrap);
-    free(rewritten_try);
-    free(rewritten_try_bind);
-    free(rewritten_res_ctor);
-    free(rewritten_infer);
-    free(rewritten_res);
-    free(rewritten_opt_ctor);
-    free(rewritten_opt);
-    free(rewritten_stdio);
-    free(rewritten_ufcs);
-    free(rewritten_generic);
-    free(rewritten_chan);
-    free(rewritten_slice);
-    free(rewritten_match);
-    free(rewritten_deadline);
+    cc_pass_chain_free(&chain);
     free(buf);
-
     fclose(in);
     fclose(out);
 
     strncpy(out_path, tmp_path, out_path_sz - 1);
     out_path[out_path_sz - 1] = '\0';
     return 0;
+
+chain_cleanup:
+    /* Error path - cleanup allocations and return failure */
+    cc_pass_chain_free(&chain);
+    free(buf);
+    fclose(in);
+    fclose(out);
+    unlink(tmp_path);
+    return -1;
 }
 
 // Preprocess source string to output string (no temp files).
@@ -4295,118 +4236,59 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         }
     }
 
-    char* rewritten_deadline = cc__rewrite_with_deadline_syntax(buf, got);
-    const char* cur = rewritten_deadline ? rewritten_deadline : buf;
-    size_t cur_n = rewritten_deadline ? strlen(rewritten_deadline) : got;
-
-    char* rewritten_match = cc__rewrite_match_syntax(cur, cur_n, input_path);
-    const char* cur_m = rewritten_match ? rewritten_match : cur;
-    size_t cur_m_n = rewritten_match ? strlen(rewritten_match) : cur_n;
-
-    char* rewritten_slice = cc__rewrite_slice_types(cur_m, cur_m_n, input_path);
-    const char* cur2 = rewritten_slice ? rewritten_slice : cur_m;
-    size_t cur2_n = rewritten_slice ? strlen(rewritten_slice) : cur_m_n;
-
-    char* rewritten_chan = cc__rewrite_chan_handle_types(cur2, cur2_n, input_path);
-    const char* cur3 = rewritten_chan ? rewritten_chan : cur2;
-    size_t cur3_n = rewritten_chan ? strlen(rewritten_chan) : cur2_n;
-
-    /* Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V and vec_new<T>/map_new<K,V> -> init calls */
-    char* rewritten_generic = cc_rewrite_generic_containers(cur3, cur3_n, input_path);
-    const char* cur3g = rewritten_generic ? rewritten_generic : cur3;
-    size_t cur3g_n = rewritten_generic ? strlen(rewritten_generic) : cur3_n;
-
-    /* Rewrite container UFCS: v.push(x) -> Vec_T_push(&v, x) */
-    char* rewritten_ufcs = cc_rewrite_ufcs_container_calls(cur3g, cur3g_n, input_path);
-    const char* cur3u = rewritten_ufcs ? rewritten_ufcs : cur3g;
-    size_t cur3u_n = rewritten_ufcs ? strlen(rewritten_ufcs) : cur3g_n;
-
-    /* Rewrite std_out.write()/std_err.write() UFCS patterns */
-    char* rewritten_stdio = cc_rewrite_std_io_ufcs(cur3u, cur3u_n);
-    const char* cur3s = rewritten_stdio ? rewritten_stdio : cur3u;
-    size_t cur3s_n = rewritten_stdio ? strlen(rewritten_stdio) : cur3u_n;
-
-    /* Rewrite T? -> CCOptional_T with inline typedef */
-    char* rewritten_opt = cc__rewrite_optional_types(cur3s, cur3s_n, input_path);
-    const char* cur4 = rewritten_opt ? rewritten_opt : cur3s;
-    size_t cur4_n = rewritten_opt ? strlen(rewritten_opt) : cur3s_n;
-
-    /* Rewrite cc_some_CCOptional_T(v)/cc_none_CCOptional_T() for parser mode */
-    char* rewritten_opt_ctor = cc__rewrite_optional_constructors(cur4, cur4_n);
-    const char* cur4c = rewritten_opt_ctor ? rewritten_opt_ctor : cur4;
-    size_t cur4c_n = rewritten_opt_ctor ? strlen(rewritten_opt_ctor) : cur4_n;
-
-    /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on function return type.
-       This MUST run BEFORE type rewriting so it can detect T!>(E) syntax. */
-    char* rewritten_infer2 = cc__rewrite_inferred_result_ctors(cur4c, cur4c_n);
-    const char* cur4i = rewritten_infer2 ? rewritten_infer2 : cur4c;
-    size_t cur4i_n = rewritten_infer2 ? strlen(rewritten_infer2) : cur4c_n;
-
-    /* Rewrite T!>(E) -> CCResult_T_E */
-    char* rewritten_res = cc__rewrite_result_types(cur4i, cur4i_n, input_path);
-    const char* cur5 = rewritten_res ? rewritten_res : cur4i;
-    size_t cur5_n = rewritten_res ? strlen(rewritten_res) : cur4i_n;
-
-    /* Rewrite cc_ok_CCResult_T_E / cc_err_CCResult_T_E for parser mode */
-    char* rewritten_res_ctor = cc__rewrite_result_constructors(cur5, cur5_n);
-    const char* cur5c = rewritten_res_ctor ? rewritten_res_ctor : cur5;
-    size_t cur5c_n = rewritten_res_ctor ? strlen(rewritten_res_ctor) : cur5_n;
-
-    /* Normalize `if @try (` to `if (try ` so both syntaxes work */
-    char* rewritten_if_try_norm = cc__normalize_if_try_syntax(cur5c, cur5c_n);
-    const char* cur5a = rewritten_if_try_norm ? rewritten_if_try_norm : cur5c;
-    size_t cur5a_n = rewritten_if_try_norm ? strlen(rewritten_if_try_norm) : cur5c_n;
-
-    /* Rewrite if (try T x = expr) -> expanded form (must come before try expr rewrite) */
-    char* rewritten_try_bind = cc__rewrite_try_binding(cur5a, cur5a_n);
-    const char* cur5b = rewritten_try_bind ? rewritten_try_bind : cur5c;
-    size_t cur5b_n = rewritten_try_bind ? strlen(rewritten_try_bind) : cur5c_n;
-
-    /* Rewrite try expr -> cc_try(expr) */
-    char* rewritten_try = cc__rewrite_try_exprs(cur5b, cur5b_n);
-    const char* cur6 = rewritten_try ? rewritten_try : cur5b;
-    size_t cur6_n = rewritten_try ? strlen(rewritten_try) : cur5b_n;
-
-    /* Rewrite *opt -> cc_unwrap_opt(opt) for optional variables */
-    char* rewritten_unwrap = cc__rewrite_optional_unwrap(cur6, cur6_n);
-    const char* cur7 = rewritten_unwrap ? rewritten_unwrap : cur6;
-    size_t cur7_n = rewritten_unwrap ? strlen(rewritten_unwrap) : cur6_n;
-
-    /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
-    char* rewritten_closing = cc__rewrite_closing_annotation(cur7, cur7_n);
-    const char* cur7a = rewritten_closing ? rewritten_closing : cur7;
-    size_t cur7a_n = rewritten_closing ? strlen(rewritten_closing) : cur7_n;
-
-    /* Rewrite cc_concurrent { ... } -> closure-based concurrent execution */
-    char* rewritten_conc = cc__rewrite_cc_concurrent(cur7a, cur7a_n);
-    if (rewritten_conc == (char*)-1) {
-        free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
-        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_infer2); free(rewritten_res); free(rewritten_opt_ctor);
-        free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
-        free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
-        free(rewritten_match); free(rewritten_deadline); free(buf);
-        return NULL;
-    }
-    const char* cur8 = rewritten_conc ? rewritten_conc : cur7a;
-    size_t cur8_n = rewritten_conc ? strlen(rewritten_conc) : cur7a_n;
-
-    // Rewrite @link("lib") -> marker comments for linker
-    char* rewritten_link = cc__rewrite_link_directives(cur8, cur8_n);
-    const char* use = rewritten_link ? rewritten_link : cur8;
-    size_t use_n = strlen(use);
+    /* --- Apply preprocessing passes using chain helper --- */
+    CCPassChain chain;
+    cc_pass_chain_init(&chain, buf, got);
+    
+    /* P1: with_deadline syntax */
+    CC_CHAIN(chain, cc__rewrite_with_deadline_syntax(chain.src, chain.len));
+    /* P2: @match syntax */
+    CC_CHAIN(chain, cc__rewrite_match_syntax(chain.src, chain.len, input_path));
+    /* P3: slice types T[:] -> CCSlice_T */
+    CC_CHAIN(chain, cc__rewrite_slice_types(chain.src, chain.len, input_path));
+    /* P4: channel handle types int[~4 >] -> CCChanTx_int */
+    CC_CHAIN(chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path));
+    /* P5: generic containers Vec<T> -> Vec_T */
+    CC_CHAIN(chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path));
+    /* P6: container UFCS v.push(x) -> Vec_T_push(&v, x) */
+    CC_CHAIN(chain, cc_rewrite_ufcs_container_calls(chain.src, chain.len, input_path));
+    /* P7: std I/O UFCS std_out.write() -> printf */
+    CC_CHAIN(chain, cc_rewrite_std_io_ufcs(chain.src, chain.len));
+    /* P8: optional types T? -> CCOptional_T */
+    CC_CHAIN(chain, cc__rewrite_optional_types(chain.src, chain.len, input_path));
+    /* P9: optional constructors for parser mode */
+    CC_CHAIN(chain, cc__rewrite_optional_constructors(chain.src, chain.len));
+    /* P10: inferred result constructors (MUST run before P11) */
+    CC_CHAIN(chain, cc__rewrite_inferred_result_ctors(chain.src, chain.len));
+    /* P11: result types T!>(E) -> CCResult_T_E */
+    CC_CHAIN(chain, cc__rewrite_result_types(chain.src, chain.len, input_path));
+    /* P12: result constructors for parser mode */
+    CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
+    /* P13: normalize if @try ( -> if (try */
+    CC_CHAIN(chain, cc__normalize_if_try_syntax(chain.src, chain.len));
+    /* P14: if (try T x = expr) -> expanded form */
+    CC_CHAIN(chain, cc__rewrite_try_binding(chain.src, chain.len));
+    /* P15: try expr -> cc_try(expr) */
+    CC_CHAIN(chain, cc__rewrite_try_exprs(chain.src, chain.len));
+    /* P16: optional unwrap *opt -> cc_unwrap_opt(opt) */
+    CC_CHAIN(chain, cc__rewrite_optional_unwrap(chain.src, chain.len));
+    /* P17: @closing(ch) -> sub-nursery */
+    CC_CHAIN(chain, cc__rewrite_closing_annotation(chain.src, chain.len));
+    /* P18: cc_concurrent { } -> closure exec */
+    CC_CHAIN(chain, cc__rewrite_cc_concurrent(chain.src, chain.len));
+    /* P19: @link("lib") -> linker comments */
+    CC_CHAIN(chain, cc__rewrite_link_directives(chain.src, chain.len));
+    
+    const char* use = chain.src;
+    (void)chain.len;  /* use_n not needed here */
 
     /* Build output string using open_memstream (POSIX) */
     char* out_buf = NULL;
     size_t out_size = 0;
     FILE* out = open_memstream(&out_buf, &out_size);
     if (!out) {
-        /* Fallback: estimate size and manually build */
-        free(rewritten_if_try_norm); free(rewritten_link); free(rewritten_conc);
-        free(rewritten_closing); free(rewritten_unwrap); free(rewritten_try);
-        free(rewritten_try_bind); free(rewritten_res_ctor); free(rewritten_infer2); free(rewritten_res); free(rewritten_opt_ctor);
-        free(rewritten_opt); free(rewritten_stdio); free(rewritten_ufcs);
-        free(rewritten_generic); free(rewritten_chan); free(rewritten_slice);
-        free(rewritten_match); free(rewritten_deadline); free(buf);
+        cc_pass_chain_free(&chain);
+        free(buf);
         return NULL;
     }
 
@@ -4498,29 +4380,15 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     fputs(use, out);
     fclose(out);
 
-    /* Cleanup intermediate buffers */
-    free(rewritten_if_try_norm);
-    free(rewritten_link);
-    free(rewritten_conc);
-    free(rewritten_closing);
-    free(rewritten_unwrap);
-    free(rewritten_try);
-    free(rewritten_try_bind);
-    free(rewritten_res_ctor);
-    free(rewritten_infer2);
-    free(rewritten_res);
-    free(rewritten_opt_ctor);
-    free(rewritten_opt);
-    free(rewritten_stdio);
-    free(rewritten_ufcs);
-    free(rewritten_generic);
-    free(rewritten_chan);
-    free(rewritten_slice);
-    free(rewritten_match);
-    free(rewritten_deadline);
+    cc_pass_chain_free(&chain);
     free(buf);
-
     return out_buf;
+
+chain_cleanup:
+    /* Error path - cleanup allocations and return failure */
+    cc_pass_chain_free(&chain);
+    free(buf);
+    return NULL;
 }
 
 // Wrapper that runs all checks (default behavior for initial parse).

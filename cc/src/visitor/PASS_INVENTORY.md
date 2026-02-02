@@ -2,32 +2,47 @@
 
 This document maps all compilation passes and preprocessing transforms, with consolidation candidates.
 
+**Last updated**: 2026-02-01
+
 ## Current Stats
 
 - **Total lines**: ~21k across pass files
-- **TCC reparses**: 4 (down from 5 - spawn+nursery+arena now batched)
-- **Text-based passes**: 13
+- **TCC reparses**: 4 (spawn+nursery+arena batched)
+- **Text-based passes in preprocess.c**: 19 functions
 - **AST-based passes**: 8
 
-## Preprocessing (preprocess.c) — 4,785 lines
+## Preprocessing (preprocess.c) — ~4,800 lines
 
-Text transforms applied BEFORE TCC parsing:
+Text transforms applied BEFORE TCC parsing. Listed in execution order:
 
 | # | Function | Transform | Lines | Notes |
 |---|----------|-----------|-------|-------|
-| P1 | cc__rewrite_optional_types | `T?` → `CCOptional_T` | ~200 | Type syntax |
-| P2 | cc__rewrite_result_types | `T!>(E)` → `CCResult_T_E` | ~250 | Type syntax |
-| P3 | cc__rewrite_inferred_optional_ctors | `cc_some(v)` → `cc_some_CCOptional_T(v)` | ~200 | Constructor inference |
-| P4 | cc__rewrite_inferred_result_ctors | `cc_ok(v)` → `cc_ok_CCResult_T_E(v)` | ~300 | Constructor inference |
-| P5 | cc__rewrite_optional_constructors | `cc_some_CCOptional_T(v)` → compound literal | ~150 | Parse stub |
-| P6 | cc__rewrite_result_constructors | `cc_ok_CCResult_T_E(v)` → compound literal | ~150 | Parse stub |
-| P7 | cc__rewrite_arena_syntax | `@arena(...)` prologue | ~100 | Scope syntax |
-| P8 | cc__expand_optional_decls | Inline typedef expansion | ~100 | Type expansion |
-| P9 | cc__expand_result_decls | Inline typedef expansion | ~100 | Type expansion |
+| P1 | cc__rewrite_with_deadline_syntax | `with_deadline(ms)` → CCDeadline scope | ~240 | Control flow |
+| P2 | cc__rewrite_match_syntax | `@match` → switch + cc_chan_match_select | ~310 | Channel select |
+| P3 | cc__rewrite_slice_types | `T[:]` → CCSlice_T | ~110 | Type syntax |
+| P4 | cc__rewrite_chan_handle_types | `int[~4 >]` → CCChanTx_int | ~510 | Channel types |
+| P5 | cc_rewrite_generic_containers | `Vec<T>` → Vec_T | ~250 | Generic types |
+| P6 | cc_rewrite_ufcs_container_calls | `v.push(x)` → Vec_T_push | ~160 | Container UFCS |
+| P7 | cc_rewrite_std_io_ufcs | `std_out.write()` → printf | ~230 | I/O UFCS |
+| P8 | cc__rewrite_optional_types | `T?` → CCOptional_T | ~100 | Type syntax |
+| P9 | cc__rewrite_optional_constructors | `cc_some_CCOptional_T(v)` → macro | ~120 | Parse stub |
+| P10 | cc__rewrite_inferred_result_ctors | `cc_ok(v)` → `cc_ok_CCResult_T_E(v)` | ~260 | Constructor inference ⚠️ BEFORE P11 |
+| P11 | cc__rewrite_result_types | `T!>(E)` → CCResult_T_E | ~155 | Type syntax |
+| P12 | cc__rewrite_result_constructors | `cc_ok_CCResult_T_E(v)` → macro | ~70 | Parse stub |
+| P13 | cc__normalize_if_try_syntax | `if @try (` → `if (try ` | ~25 | Syntax normalize |
+| P14 | cc__rewrite_try_binding | `if (try T x = expr)` → expanded | ~150 | Result unwrap |
+| P15 | cc__rewrite_try_exprs | `try expr` → `cc_try(expr)` | ~95 | Result unwrap |
+| P16 | cc__rewrite_optional_unwrap | `*opt` → `cc_unwrap_opt(opt)` | ~230 | Optional unwrap |
+| P17 | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery | ~150 | Channel lifecycle |
+| P18 | cc__rewrite_cc_concurrent | `cc_concurrent { }` → closure exec | ~70 | Concurrency |
+| P19 | cc__rewrite_link_directives | `@link("lib")` → linker comment | ~460 | Link directives |
+
+**Note**: P10 must run before P11 (needs to see `T!>(E)` syntax for type inference).
 
 **Consolidation candidates:**
-- P1+P3+P5+P8 → single "optional types" pass
-- P2+P4+P6+P9 → single "result types" pass
+- P8+P9+P16 → single "optional pass" (3 scans → 1)
+- P11+P12 → single "result types pass" (2 scans → 1, P10 stays separate due to ordering)
+- P3+P4+P5 → single "type syntax pass" (potential, needs analysis)
 
 ## visit_codegen.c Pipeline — 1,214 lines
 
@@ -112,58 +127,36 @@ Text transforms applied BEFORE TCC parsing:
 
 ### Medium Value (reduces complexity)
 
-4. **Consolidate preprocessor type transforms** (P1-P9)
-   - 9 separate text scans → 2 unified scans
-   - One for optionals, one for results
+4. **Consolidate preprocessor type transforms** (P8+P9+P16, P11+P12)
+   - Currently: 19 separate text scans
+   - Target: ~12 scans (merge related passes)
+   - Note: P10 must stay separate (ordering constraint)
 
-5. **Merge text phases 2+7** — with_deadline + match + defer
-   - All produce/consume @defer
-   - Could share scanner state
+5. **Clean up pass chaining** in cc_preprocess_to_string_ex
+   - Current: 18 repetitive 3-line blocks
+   - Target: Helper macro for cleaner code
 
 ### Low Value (cleanup)
 
 6. **Inline small passes** — strip_markers (104 lines) into visit_codegen.c
 7. **Extract reparse helper** — common pattern used 5 times
 
-## Proposed New Pass Structure
+## Immediate Cleanup: Pass Chaining Helper
 
-```
-Phase A: Preprocessing (text, 1 scan each)
-  - optional_types (P1+P3+P5+P8)
-  - result_types (P2+P4+P6+P9)
-  - arena_syntax
-
-Phase B: CC Syntax (text, batched)
-  - closing_annotation
-  - if_try_syntax
-  - with_deadline
-  - match_syntax
-
-Phase C: Core AST (single reparse)
-  - ufcs + closure_calls + autoblock + await_normalize
-
-Phase D: Channel + Types (text, then reparse)
-  - channel_pair + channel_types + slice/opt/result types
-
-Phase E: Closures (reparse)
-  - closure_literals
-
-Phase F: Concurrency (batched, reparse)
-  - spawn + nursery + arena
-
-Phase G: Control Flow (text)
-  - defer
-
-Phase H: Async (final reparse)
-  - async state machine
+Current pattern (repeated 18 times):
+```c
+char* rewritten_X = cc__rewrite_X(cur, cur_n, input_path);
+const char* curN = rewritten_X ? rewritten_X : cur;
+size_t curN_n = rewritten_X ? strlen(rewritten_X) : cur_n;
 ```
 
-**Target: 4 reparses (down from 5), ~30% fewer text scans**
+Target: Clean helper that tracks allocations for cleanup.
 
 ## Next Steps
 
-1. Verify baseline (DONE: 177 tests pass)
-2. Consolidate preprocessor type passes (P1-P9)
-3. Merge Phase 3 AST passes
-4. Merge Phase 4+5 to eliminate one reparse
-5. Clean up pass ordering and dependencies
+1. ✅ Update this inventory to match reality
+2. Create pass chaining helper in preprocess.c
+3. Refactor cc_preprocess_to_string_ex to use helper
+4. Run tests to verify no regressions
+5. Then: Consider merging P8+P9+P16 (optional passes)
+6. Then: Consider merging P11+P12 (result passes)
