@@ -529,64 +529,32 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* closure_defs = NULL;
     size_t closure_defs_len = 0;
 
-#ifdef CC_TCC_EXT_AVAILABLE
-    if (src_ufcs && root && root->nodes && root->node_count > 0) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        if (cc__rewrite_ufcs_spans_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
-    }
-#endif
-
-    /* Rewrite closure calls anywhere (including nested + multiline) using stub CALL nodes. */
-#ifdef CC_TCC_EXT_AVAILABLE
-    char* src_calls = NULL;
-    size_t src_calls_len = 0;
-    if (src_ufcs && root && root->nodes && root->node_count > 0) {
-        if (cc__rewrite_all_closure_calls_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &src_calls, &src_calls_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = src_calls;
-            src_ufcs_len = src_calls_len;
-        }
-    }
-#endif
-
-    /* Auto-blocking (first cut): inside @async functions, wrap statement-form calls to known
-       non-@async/non-@noblock functions in cc_run_blocking_closure0(() => { ... }). */
+    /* UNIFIED Phase 3: Collect all AST-driven edits (UFCS, closure_calls, autoblock, await_normalize)
+       via CCEditBuffer, apply once. Replaces 4 sequential rewrite passes. */
 #ifdef CC_TCC_EXT_AVAILABLE
     if (src_ufcs && root && root->nodes && root->node_count > 0 && ctx->symbols) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        int r = cc__rewrite_autoblocking_calls_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
-        if (r < 0) {
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            free(closure_protos);
-            free(closure_defs);
-            return EINVAL;
+        CCEditBuffer eb;
+        cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
+        
+        /* Collect edits from all Phase 3 passes */
+        cc__collect_ufcs_edits(root, ctx, &eb);
+        cc__collect_closure_calls_edits(root, ctx, &eb);
+        cc__collect_autoblocking_edits(root, ctx, &eb);
+        cc__collect_await_normalize_edits(root, ctx, &eb);
+        
+        /* Apply all edits at once if any were collected */
+        if (eb.count > 0) {
+            size_t new_len = 0;
+            char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = new_len;
+            }
         }
-        if (r > 0) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
-    }
-#endif
-
-    /* Normalize `await <expr>` used inside larger expressions into temp hoists so the
-       text-based async state machine can lower it (AST-driven span rewrite). */
-#ifdef CC_TCC_EXT_AVAILABLE
-    if (src_ufcs && root && root->nodes && root->node_count > 0) {
-        char* rewritten = NULL;
-        size_t rewritten_len = 0;
-        if (cc__rewrite_await_exprs_with_nodes(root, ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len)) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = rewritten_len;
-        }
+        cc_edit_buffer_free(&eb);
+        
+        /* Debug output for await rewrite */
         if (getenv("CC_DEBUG_AWAIT_REWRITE") && src_ufcs) {
             const char* needle = "@async int f";
             const char* p = strstr(src_ufcs, needle);
