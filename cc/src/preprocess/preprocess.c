@@ -1258,12 +1258,26 @@ static int cc__is_known_optional_type(const char* mangled) {
     return 0;
 }
 
+/* Check if a token is a known C base type (for error detection) */
+static int cc__is_known_base_type(const char* s, size_t len) {
+    static const char* types[] = {
+        "int", "char", "void", "bool", "float", "double",
+        "long", "short", "unsigned", "signed", "size_t",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "intptr_t", "uintptr_t", "ptrdiff_t", NULL
+    };
+    for (int i = 0; types[i]; i++) {
+        if (strlen(types[i]) == len && strncmp(s, types[i], len) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Rewrite optional types:
    - `T?` -> `CCOptional_T`
    The '?' must immediately follow a type name (no space).
    We detect: identifier? or )? or ]? or >? patterns. */
 static char* cc__rewrite_optional_types(const char* src, size_t n, const char* input_path) {
-    (void)input_path; /* Reserved for future error reporting */
     if (!src || n == 0) return NULL;
     
     /* Reset optional type tracking for each preprocessing call.
@@ -1297,6 +1311,39 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
                     if (ty_start < i) {
                         /* Extract the type name */
                         size_t ty_len = i - ty_start;
+                        
+                        /* VALIDATION: Check if this looks like a variable, not a type.
+                           Get just the identifier immediately before '?' (not the whole scanned type) */
+                        size_t ident_end = i;
+                        size_t ident_start = ident_end;
+                        while (ident_start > 0 && cc_is_ident_char(src[ident_start - 1])) ident_start--;
+                        size_t ident_len = ident_end - ident_start;
+                        
+                        /* Types typically: start uppercase, or are known types (int, char, etc.)
+                           Variables typically: start lowercase, single word */
+                        if (ident_len > 0 && ident_len < 32) {
+                            char first_char = src[ident_start];
+                            int looks_like_variable = (first_char >= 'a' && first_char <= 'z') &&
+                                                      !cc__is_known_base_type(src + ident_start, ident_len);
+                            
+                            if (looks_like_variable) {
+                                /* Emit helpful error */
+                                char var_name[64];
+                                size_t vlen = ident_len < sizeof(var_name) - 1 ? ident_len : sizeof(var_name) - 1;
+                                memcpy(var_name, src + ident_start, vlen);
+                                var_name[vlen] = '\0';
+                                
+                                char rel[1024];
+                                fprintf(stderr, "%s:%d:%d: error: '%s?' looks like optional unwrap of variable '%s'\n",
+                                        cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        scan.line, scan.col, var_name, var_name);
+                                fprintf(stderr, "  hint: to unwrap an optional, use '*%s' instead of '%s?'\n", var_name, var_name);
+                                fprintf(stderr, "  hint: '%s?' syntax is for declaring optional TYPES (e.g., 'int? maybe_value')\n", var_name);
+                                free(out);
+                                return NULL;
+                            }
+                        }
+                        
                         char mangled[256];
                         cc__mangle_type_name(src + ty_start, ty_len, mangled, sizeof(mangled));
                         
