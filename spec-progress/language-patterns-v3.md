@@ -102,16 +102,55 @@ To move from global "Smoke Alarms" to precise "Fire Marshalling," we propose nur
 
 ---
 
-## 6. Summary of Scaling & Safety Idioms
+## 6. Pipelined Channels: Seamless Ordered Parallelism
+
+To eliminate the "Task-Handle Crutch" (manually passing `CCTaskPtr` through channels), we introduce **Pipelined Channels**. This pattern allows the **Circulatory System** to natively manage the execution order of tasks.
+
+### The Idiom
+```c
+// The 'pipelined' modifier tells the compiler this channel manages task handles
+CompressedResult*[~16 pipelined] results_ch;
+
+@nursery {
+    // 'spawn into' creates a task and pushes its handle into the channel FIFO
+    spawn into(results_ch) () => compress(blk);
+
+    // IDIOMATIC RECV:
+    // 1. results_ch.recv(&r) returns bool !> (CCIoError)
+    // 2. 'await' suspends until the task at the head of the FIFO is DONE
+    // 3. '?' propagates any channel or task errors
+    CompressedResult* r;
+    while (await results_ch.recv(&r)?) {
+        write_block(r);
+    }
+}
+```
+
+### The Lowering (Transparent Transformer)
+The `pipelined` modifier is a directive for the compiler's lowering phase:
+1.  **Storage:** The underlying `CCChan` is allocated to hold `CCTaskPtr` (task handles) instead of raw `T*`.
+2.  **Verb (`spawn into`):** Lowers to `cc_spawn` followed immediately by a `chan_send` of the resulting handle.
+3.  **Verb (`await recv`):** Lowers to a `chan_recv` of the handle, followed by a **Wait Node** suspension on that specific task's completion.
+
+### Why This Fits CC
+- **Type Safety:** The compiler ensures you only `spawn into` a pipelined channel and only `await` its results.
+- **Composition:** It fuses **Ordering** (Channel FIFO) with **Parallelism** (Spawn) and **Synchronization** (Await) into a single, non-magical flow.
+- **Zero-Cost:** By using the **Wait Node** pattern (Section 2), the `await` on `recv()` is $O(1)$ and avoids global broadcasts.
+
+---
+
+## 7. Summary of Scaling & Safety Idioms
 
 | Pattern | Complexity | Scalability | Philosophy |
 | :--- | :--- | :--- | :--- |
 | **Wait Nodes** | High | High | Zero-cost abstraction |
 | **Poll Groups** | Medium | High | Explicit orchestration |
+| **Pipelined Channels** | Medium | High | Seamless composition |
 | **Nursery Health** | Medium | N/A | Structured safety |
 | **Stall Watchdog** | Low | N/A | Performance transparency |
 
 ### Recommendation for Phase 1.1
 1. Implement **Wait Nodes** as the normative lowering for `@match`.
-2. Integrate **Stall Watchdog** into the base fiber scheduler to identify "leaky" synchronous calls.
-3. Add **Nursery Health** checks to `cc_nursery_wait` to catch partial deadlocks in complex pipelines.
+2. Implement **Pipelined Channels** (`pipelined` modifier + `spawn into`) to eliminate manual task-handle management.
+3. Integrate **Stall Watchdog** into the base fiber scheduler to identify "leaky" synchronous calls.
+4. Add **Nursery Health** checks to `cc_nursery_wait` to catch partial deadlocks in complex pipelines.
