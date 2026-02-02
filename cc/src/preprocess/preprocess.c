@@ -2987,6 +2987,25 @@ static char* cc__rewrite_optional_unwrap(const char* src, size_t n) {
         /* Look for * followed by an optional/result variable name */
         if (c == '*') {
             size_t star_pos = i;
+            
+            /* Skip if this looks like a pointer type declaration (preceded by identifier).
+               E.g. "S* res" should NOT be rewritten, but "*res" or "= *res" should be. */
+            int is_ptr_type_decl = 0;
+            if (star_pos > 0) {
+                size_t prev = star_pos - 1;
+                /* Skip whitespace before the * */
+                while (prev > 0 && (src[prev] == ' ' || src[prev] == '\t')) prev--;
+                /* If preceded by identifier char, it's likely a type like "S*" or "int*" */
+                if (prev < n && cc_is_ident_char(src[prev])) {
+                    is_ptr_type_decl = 1;
+                }
+            }
+            
+            if (is_ptr_type_decl) {
+                i++;
+                continue;
+            }
+            
             i++;
             /* Skip whitespace */
             while (i < n && (src[i] == ' ' || src[i] == '\t')) i++;

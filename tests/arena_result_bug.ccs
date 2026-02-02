@@ -1,0 +1,39 @@
+// Regression test for @arena + T!>(E) variable name collision bug (fixed)
+//
+// Previously, when a variable name (e.g. 'res') was used in BOTH:
+//   1. A function with @arena block (as a local pointer variable)
+//   2. Another function with T!>(E) syntax (as a Result variable)
+// The preprocessor incorrectly rewrote "T* res" as "Tcc_unwrap(res)"
+// because it thought the * was dereferencing a Result variable.
+//
+// Fix: cc__rewrite_optional_unwrap() now skips *varname when the *
+// is preceded by an identifier (indicating a pointer type declaration).
+
+#include <ccc/std/prelude.cch>
+
+typedef struct { int x; } MyStruct;
+
+// Function 1: Has @arena with local variable named 'res'
+MyStruct* !>(CCIoError) func_with_arena(void) {
+    @arena(a, 4096) {
+        MyStruct* res = arena_alloc1(MyStruct, a);  // ERROR occurs here
+        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+        res->x = 42;
+        return cc_ok(res);
+    }
+}
+
+// Function 2: Has Result variable also named 'res' - triggers the bug!
+void func_with_result_var(void) {
+    MyStruct* !>(CCIoError) res;  // Same name 'res' causes collision
+    (void)res;
+}
+
+int main(void) {
+    MyStruct* !>(CCIoError) r = func_with_arena();
+    if (cc_is_ok(r)) {
+        MyStruct* p = cc_unwrap(r);
+        printf("ok: x=%d\n", p->x);
+    }
+    return 0;
+}
