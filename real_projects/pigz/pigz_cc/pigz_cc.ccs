@@ -24,8 +24,8 @@
 #include <signal.h>
 #include <errno.h>
 #include <dirent.h>
-// TODO: Add zopfli to third_party/ for portability (hardcoded path for macOS Homebrew)
-#include "/opt/homebrew/include/zopfli.h"
+// zopfli requires passing --cc-flags "-I/opt/homebrew/include" (or install location)
+#include <zopfli.h>
 
 // Manual declaration for ZopfliDeflatePart (matches pigz.c:435-438)
 void ZopfliDeflatePart(const ZopfliOptions* options, int datamode, int final,

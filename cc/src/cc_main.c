@@ -842,8 +842,57 @@ static void cc__apply_deadlock_env(const CCBuildOptions* opt) {
     }
 }
 
+/* Extract -I paths from cc_flags and set CC_USER_INCLUDE_PATH (colon-separated).
+   This allows TCC parsing to find user-specified include directories. */
+static void cc__apply_user_include_env(const char* cc_flags) {
+    if (!cc_flags || !cc_flags[0]) {
+        unsetenv("CC_USER_INCLUDE_PATH");
+        return;
+    }
+    static char include_paths[4096];
+    include_paths[0] = '\0';
+    size_t pos = 0;
+    const char* p = cc_flags;
+    while (*p) {
+        /* Skip whitespace */
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+        /* Check for -I */
+        if (p[0] == '-' && p[1] == 'I') {
+            const char* path_start = p + 2;
+            /* -I may be followed by space or directly by path */
+            if (*path_start == ' ' || *path_start == '\t') {
+                path_start++;
+                while (*path_start && (*path_start == ' ' || *path_start == '\t')) path_start++;
+            }
+            if (*path_start && *path_start != '-') {
+                /* Find end of path (space or end of string) */
+                const char* path_end = path_start;
+                while (*path_end && *path_end != ' ' && *path_end != '\t') path_end++;
+                size_t len = (size_t)(path_end - path_start);
+                if (len > 0 && pos + len + 2 < sizeof(include_paths)) {
+                    if (pos > 0) include_paths[pos++] = ':';
+                    memcpy(include_paths + pos, path_start, len);
+                    pos += len;
+                    include_paths[pos] = '\0';
+                }
+                p = path_end;
+                continue;
+            }
+        }
+        /* Skip to next whitespace or end */
+        while (*p && *p != ' ' && *p != '\t') p++;
+    }
+    if (include_paths[0]) {
+        setenv("CC_USER_INCLUDE_PATH", include_paths, 1);
+    } else {
+        unsetenv("CC_USER_INCLUDE_PATH");
+    }
+}
+
 static int cc__compile_with_env(const CCBuildOptions* opt, const char* in_path, const char* out_path, const CCCompileConfig* cfg) {
     cc__apply_deadlock_env(opt);
+    cc__apply_user_include_env(opt ? opt->cc_flags : NULL);
     return cc_compile_with_config(in_path, out_path, cfg);
 }
 
