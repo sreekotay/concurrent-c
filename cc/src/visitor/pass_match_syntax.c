@@ -191,8 +191,10 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             int is_send = (send != NULL);
                             if (!dot || (!is_recv && !is_send)) {
                                 char rel[1024];
-                                fprintf(stderr, "CC: error: @match case header must be <chan>.recv(ptr) or <chan>.send(value) or is_cancelled() at %s:%d:%d\n",
-                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col);
+                                fprintf(stderr, "%s:%d:%d: error: invalid @match case: '%s'\n",
+                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col, hdr);
+                                fprintf(stderr, "  expected: <chan>.recv(ptr), <chan>.send(value), or is_cancelled()\n");
+                                fprintf(stderr, "  example: case ch.recv(&msg): ... or case ch.send(42): ...\n");
                                 free(out);
                                 return -1;
                             }
@@ -206,8 +208,9 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             const char* rp = lp ? strrchr(dot, ')') : NULL;
                             if (!lp || !rp || rp <= lp) {
                                 char rel[1024];
-                                fprintf(stderr, "CC: error: malformed @match case header at %s:%d:%d\n",
-                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col);
+                                fprintf(stderr, "%s:%d:%d: error: malformed @match case: '%s'\n",
+                                        cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col, hdr);
+                                fprintf(stderr, "  note: missing or mismatched parentheses in .recv() or .send()\n");
                                 free(out);
                                 return -1;
                             }

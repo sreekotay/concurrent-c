@@ -475,10 +475,11 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (!cc__find_chan_decl_before(src, len, call_start, tx_name, &tx_lbr, &tx_rbr, &tx_ts) ||
                     !cc__find_chan_decl_before(src, len, call_start, rx_name, &rx_lbr, &rx_rbr, &rx_ts)) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair could not find declarations for '%s'/'%s' at %s:%d:%d\n",
-                            tx_name, rx_name,
+                    fprintf(stderr, "%s:%d:%d: error: channel_pair could not find declarations for '%s' and '%s'\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                            line, col, tx_name, rx_name);
+                    fprintf(stderr, "  note: ensure both channel handles are declared before this call\n");
+                    fprintf(stderr, "  hint: use 'T[~N >] %s; T[~N <] %s;' to declare send/recv handles\n", tx_name, rx_name);
                     free(out);
                     return NULL;
                 }
@@ -507,9 +508,13 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
 
                 if (!tx_is_tx || tx_is_rx || !rx_is_rx || rx_is_tx) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair requires send (>) then recv (<) at %s:%d:%d\n",
+                    fprintf(stderr, "%s:%d:%d: error: channel_pair requires send handle (>) first, then recv handle (<)\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col);
+                    fprintf(stderr, "  note: '%s' is %s, '%s' is %s\n",
+                            tx_name, tx_is_tx ? "send (>)" : tx_is_rx ? "recv (<)" : "unknown",
+                            rx_name, rx_is_rx ? "recv (<)" : rx_is_tx ? "send (>)" : "unknown");
+                    fprintf(stderr, "  hint: use channel_pair(&tx, &rx) where tx is T[~N >] and rx is T[~N <]\n");
                     free(out);
                     return NULL;
                 }
@@ -527,18 +532,20 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (rx_mode == -1) rx_mode = 0;
                 if (tx_mode != rx_mode) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair mode mismatch at %s:%d:%d\n",
+                    fprintf(stderr, "%s:%d:%d: error: channel_pair mode mismatch: tx=%d, rx=%d\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                            line, col, tx_mode, rx_mode);
+                    fprintf(stderr, "  hint: both handles must have the same mode specifier\n");
                     free(out);
                     return NULL;
                 }
                 
                 if (tx_has_topo != rx_has_topo || (tx_has_topo && strcmp(tx_topo, rx_topo) != 0)) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair topology mismatch at %s:%d:%d\n",
+                    fprintf(stderr, "%s:%d:%d: error: channel_pair topology mismatch: tx='%s', rx='%s'\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                            line, col, tx_has_topo ? tx_topo : "(none)", rx_has_topo ? rx_topo : "(none)");
+                    fprintf(stderr, "  hint: both handles must have the same topology (mpmc, spsc, etc.)\n");
                     free(out);
                     return NULL;
                 }
@@ -547,9 +554,10 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (rx_bp == -1) rx_bp = 0;
                 if (tx_bp != rx_bp) {
                     char rel[1024];
-                    fprintf(stderr, "CC: error: channel_pair backpressure mismatch at %s:%d:%d\n",
+                    fprintf(stderr, "%s:%d:%d: error: channel_pair backpressure mismatch: tx=%d, rx=%d\n",
                             cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col);
+                            line, col, tx_bp, rx_bp);
+                    fprintf(stderr, "  hint: both handles must have the same backpressure setting\n");
                     free(out);
                     return NULL;
                 }

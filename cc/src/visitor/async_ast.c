@@ -1937,14 +1937,17 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
         if (!cc__is_async_owner(root, ctx, n, n[i].parent)) {
             const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            fprintf(stderr, "CC: await is only valid inside @async functions\n");
-            fprintf(stderr, "CC: note: at %s:%d:%d\n", f, n[i].line_start, n[i].col_start);
+            fprintf(stderr, "%s:%d:%d: error: 'await' is only valid inside @async functions\n",
+                    f, n[i].line_start, n[i].col_start > 0 ? n[i].col_start : 1);
+            fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
             return -1;
         }
         if (cc__is_inside_arena(root, ctx, n, n[i].parent)) {
             const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            fprintf(stderr, "CC: error: await inside @arena is not supported yet\n");
-            fprintf(stderr, "CC: note: at %s:%d:%d\n", f, n[i].line_start, n[i].col_start);
+            fprintf(stderr, "%s:%d:%d: error: 'await' inside @arena blocks is not supported\n",
+                    f, n[i].line_start, n[i].col_start > 0 ? n[i].col_start : 1);
+            fprintf(stderr, "  note: arena-allocated memory cannot be preserved across await points\n");
+            fprintf(stderr, "  hint: move the await outside the @arena block, or use heap allocation instead\n");
             return -1;
         }
     }

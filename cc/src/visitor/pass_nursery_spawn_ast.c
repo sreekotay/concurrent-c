@@ -108,8 +108,9 @@ static int cc__stmt_marker_start_off(const CCASTRoot* root,
     size_t found = 0;
     if (!cc__find_substr_in_range(in_src, span_start, span_end, marker, marker_len, &found)) {
         const char* f = (n[node_i].file && n[node_i].file[0]) ? n[node_i].file : (ctx->input_path ? ctx->input_path : "<input>");
-        fprintf(stderr, "%s:%d:1: error: CC: internal: stmt marker '%.*s' not found within stub-AST span (lines %d..%d)\n",
+        fprintf(stderr, "%s:%d:1: error: could not locate '%.*s' in source (lines %d-%d)\n",
                 f, n[node_i].line_start, (int)marker_len, marker, n[node_i].line_start, le);
+        fprintf(stderr, "  note: this may indicate a syntax error or unsupported construct\n");
         return -1;
     }
 
