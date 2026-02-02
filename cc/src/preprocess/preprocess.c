@@ -772,47 +772,14 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
 
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0;
-    int in_block_comment = 0;
-    int in_str = 0;
-    int in_chr = 0;
-    int line = 1;
-    int col = 1;
+    CCScannerState scanner;
+    cc_scanner_init(&scanner);
 
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
+
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-
-        if (c == '\n') { line++; col = 1; }
-
-        if (in_line_comment) {
-            if (c == '\n') in_line_comment = 0;
-            i++; col++;
-            continue;
-        }
-        if (in_block_comment) {
-            if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; }
-            i++; col++;
-            continue;
-        }
-        if (in_str) {
-            if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; }
-            if (c == '"') in_str = 0;
-            i++; col++;
-            continue;
-        }
-        if (in_chr) {
-            if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; }
-            if (c == '\'') in_chr = 0;
-            i++; col++;
-            continue;
-        }
-
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
-
         if (c == '[') {
             size_t j = i + 1;
             while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
@@ -841,7 +808,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     if (scan >= n || src[scan] != '{') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "channel", "owned channel requires { ... } block");
+                                scanner.line, scanner.col, "channel", "owned channel requires { ... } block");
                         free(out);
                         return NULL;
                     }
@@ -867,7 +834,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     if (brace_depth != 0) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "channel", "unterminated owned block");
+                                scanner.line, scanner.col, "channel", "unterminated owned block");
                         free(out);
                         return NULL;
                     }
@@ -878,7 +845,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     if (k >= n || src[k] != ']') {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "channel", "expected ']' after owned block");
+                                scanner.line, scanner.col, "channel", "expected ']' after owned block");
                         free(out);
                         return NULL;
                     }
@@ -893,7 +860,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     if (var_end == var_start) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "channel", "expected variable name after owned channel type");
+                                scanner.line, scanner.col, "channel", "expected variable name after owned channel type");
                         free(out);
                         return NULL;
                     }
@@ -904,7 +871,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     if (semi >= n) {
                         char rel[1024];
                         cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                                line, col, "channel", "expected ';' after owned channel declaration");
+                                scanner.line, scanner.col, "channel", "expected ';' after owned channel declaration");
                         free(out);
                         return NULL;
                     }
@@ -1042,8 +1009,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     /* Advance past the semicolon */
                     last_emit = semi;  /* Leave ; to be emitted */
                     while (i <= semi) {
-                        if (src[i] == '\n') { line++; col = 1; }
-                        else col++;
+                        if (src[i] == '\n') { scanner.line++; scanner.col = 1; }
+                        else scanner.col++;
                         i++;
                     }
                     continue;
@@ -1055,7 +1022,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                            line, col, "channel", "unterminated channel handle type (missing ']')");
+                            scanner.line, scanner.col, "channel", "unterminated channel handle type (missing ']')");
                     free(out);
                     return NULL;
                 }
@@ -1068,14 +1035,14 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 if (saw_gt && saw_lt) {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                            line, col, "channel", "channel handle type cannot be both send ('>') and recv ('<')");
+                            scanner.line, scanner.col, "channel", "channel handle type cannot be both send ('>') and recv ('<')");
                     free(out);
                     return NULL;
                 }
                 if (!saw_gt && !saw_lt) {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                            line, col, "channel", "channel handle type requires direction: use 'T[~ ... >]' or 'T[~ ... <]'");
+                            scanner.line, scanner.col, "channel", "channel handle type requires direction: use 'T[~ ... >]' or 'T[~ ... <]'");
                     free(out);
                     return NULL;
                 }
@@ -1089,17 +1056,17 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     last_emit = k + 1; /* skip past ']' */
                 }
 
-                /* advance scan to k+1 */
+                /* advance to k+1 */
                 while (i < k + 1) {
-                    if (src[i] == '\n') { line++; col = 1; }
-                    else col++;
+                    if (src[i] == '\n') { scanner.line++; scanner.col = 1; }
+                    else scanner.col++;
                     i++;
                 }
                 continue;
             }
         }
 
-        i++; col++;
+        i++; scanner.col++;
     }
 
     if (last_emit < n) {
@@ -1700,26 +1667,14 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    int line = 1, col = 1;
+    CCScannerState scanner;
+    cc_scanner_init(&scanner);
     
     CCTypeRegistry* reg = cc_type_registry_get_global();
     
     while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (c == '\n') { line++; col = 1; }
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; col++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
-        if (c == '"') { in_str = 1; i++; col++; continue; }
-        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
         
         /* Look for Vec< or Map< or vec_new< or map_new< */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
@@ -1758,7 +1713,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 const char* what = is_vec_type ? "Vec<" : is_map_type ? "Map<" : is_vec_new ? "vec_new<" : "map_new<";
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                        line, col, "type", "unclosed '%s' - missing '>'", what);
+                        scanner.line, scanner.col, "type", "unclosed '%s' - missing '>'", what);
                 fprintf(stderr, "  hint: generic syntax is '%sType>' e.g., 'Vec<int>'\n", what);
                 free(out);
                 return NULL;
@@ -1942,8 +1897,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             continue;
         }
         
-        i++;
-        col++;
+        i++; scanner.col++;
     }
     
     if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
@@ -1970,23 +1924,14 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    CCScannerState scanner;
+    cc_scanner_init(&scanner);
     
     while (i < n) {
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
+        
         char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        /* Track comment/string state */
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
         /* Look for identifier followed by '.' or '->' - potential UFCS call */
         if (cc_is_ident_start(c)) {
             size_t ident_start = i;
@@ -2126,22 +2071,12 @@ char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
     size_t out_len = 0, out_cap = 0;
     size_t i = 0;
     size_t last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    CCScannerState scanner;
+    cc_scanner_init(&scanner);
     
     while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        /* Track comment/string state */
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
+        /* Skip comments and strings using shared helper */
+        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
         
         /* Look for cc_std_out or cc_std_err */
         if (i + 10 <= n && (strncmp(src + i, "cc_std_out", 10) == 0 || strncmp(src + i, "cc_std_err", 10) == 0)) {

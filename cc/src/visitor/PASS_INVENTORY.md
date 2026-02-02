@@ -174,21 +174,23 @@ The major consolidation wins have been achieved:
 
 ### CCScannerState Refactoring Status
 
-Converted to shared helper (cleaner, less duplication):
+All suitable passes have been converted to use the shared `CCScannerState` helper:
+
+**Converted (12 passes):**
 - `cc__rewrite_optional_types` (P8)
 - `cc__rewrite_result_types` (P11)
 - `cc__rewrite_slice_types` (P3)
 - `cc__rewrite_try_exprs` (P15)
 - `cc__rewrite_optional_unwrap` (P16)
-- `cc__rewrite_match_syntax` (already used it)
-- `cc__rewrite_optional_constructors` (P9, already used it)
-- `cc__rewrite_result_constructors` (P12, already used it)
+- `cc__rewrite_match_syntax` (P2)
+- `cc__rewrite_optional_constructors` (P9)
+- `cc__rewrite_result_constructors` (P12)
+- `cc__rewrite_chan_handle_types` (P4) ✅ 2026-02-01
+- `cc_rewrite_generic_containers` (P5) ✅ 2026-02-01
+- `cc_rewrite_ufcs_container_calls` (P6) ✅ 2026-02-01
+- `cc_rewrite_std_io_ufcs` (P7) ✅ 2026-02-01
 
-Remaining manual scanning (6 instances):
-- `cc__rewrite_with_deadline_syntax` - streaming output, not suitable for helper
-- `cc__rewrite_chan_handle_types` - could be converted
-- `cc_rewrite_generic_containers` - public API, lower priority
-- `cc_rewrite_ufcs_container_calls` - public API, lower priority
-- `cc_rewrite_std_io_ufcs` - public API, lower priority
+**Not suitable (1 instance):**
+- `cc__rewrite_with_deadline_syntax` - streaming output architecture incompatible
 
 Remaining opportunities are either blocked (reparse reduction) or low-value (pass merging).
