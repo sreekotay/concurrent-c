@@ -621,12 +621,12 @@ int cc__rewrite_spawn_stmts_with_nodes(const CCASTRoot* root,
                     cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
                 }
             } else {
-                /* CCClosure0 */
+                /* CCClosure0 - use __cc_ns_c prefix so async pass can skip hoisting */
                 cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
-                cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure0 __c = ");
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "{ CCClosure0 __cc_ns_c%d = ", nid);
                 cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
                 cc__append_fmt(&repl, &repl_len, &repl_cap,
-                               "; cc_nursery_spawn_closure0(__cc_nursery%d, __c); }\n", nid);
+                               "; cc_nursery_spawn_closure0(__cc_nursery%d, __cc_ns_c%d); }\n", nid, nid);
             }
         }
 
@@ -1051,11 +1051,12 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
                     cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
                 }
             } else {
+                /* CCClosure0 - use __cc_ns_c prefix so async pass can skip hoisting */
                 cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
-                cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure0 __c = ");
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "{ CCClosure0 __cc_ns_c%d = ", nid);
                 cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
                 cc__append_fmt(&repl, &repl_len, &repl_cap,
-                               "; cc_nursery_spawn_closure0(__cc_nursery%d, __c); }\n", nid);
+                               "; cc_nursery_spawn_closure0(__cc_nursery%d, __cc_ns_c%d); }\n", nid, nid);
             }
         }
 

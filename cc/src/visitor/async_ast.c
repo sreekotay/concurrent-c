@@ -2178,7 +2178,8 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                 }
             }
             /* Avoid hoisting compiler-introduced temporaries / closure locals; keep them as locals in the current state. */
-            if (strncmp(n[i].aux_s1, "__cc_ab_", 7) == 0) continue;
+            if (strncmp(n[i].aux_s1, "__cc_ab_", 8) == 0) continue;
+            if (strncmp(n[i].aux_s1, "__cc_ns_c", 9) == 0) continue;  /* nursery spawn closure temps */
             if (i == fn->decl_item_idx) continue;
             /* ensure in subtree */
             int p = n[i].parent;
