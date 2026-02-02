@@ -169,6 +169,26 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 The major consolidation wins have been achieved:
 - ✅ CCPassChain helper (cleaner pass chaining)
 - ✅ Phase 3 EditBuffer batching (4 passes → 1 apply)
+- ✅ CCScannerState refactoring (5 passes converted)
 - ✅ Documentation updated
+
+### CCScannerState Refactoring Status
+
+Converted to shared helper (cleaner, less duplication):
+- `cc__rewrite_optional_types` (P8)
+- `cc__rewrite_result_types` (P11)
+- `cc__rewrite_slice_types` (P3)
+- `cc__rewrite_try_exprs` (P15)
+- `cc__rewrite_optional_unwrap` (P16)
+- `cc__rewrite_match_syntax` (already used it)
+- `cc__rewrite_optional_constructors` (P9, already used it)
+- `cc__rewrite_result_constructors` (P12, already used it)
+
+Remaining manual scanning (6 instances):
+- `cc__rewrite_with_deadline_syntax` - streaming output, not suitable for helper
+- `cc__rewrite_chan_handle_types` - could be converted
+- `cc_rewrite_generic_containers` - public API, lower priority
+- `cc_rewrite_ufcs_container_calls` - public API, lower priority
+- `cc_rewrite_std_io_ufcs` - public API, lower priority
 
 Remaining opportunities are either blocked (reparse reduction) or low-value (pass merging).
