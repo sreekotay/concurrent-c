@@ -602,7 +602,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
     @nursery {
         /* Writer Task - awaits task handles in FIFO order (no reorder buffer needed) */
-        spawn([out_ptr, block_size, out_path, tasks_rx]() => {
+        spawn([out_ptr, block_size, out_path, tasks_rx, tasks_ch]() => {
             bool write_failed = false;
 
             // gzip + zip use CRC32 init 0; zlib uses Adler-32 init 1
@@ -914,6 +914,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 }
             }
 
+            // If we failed, signal Reader to stop sending via upstream error propagation
+            if (write_failed) {
+                cc_chan_rx_close_err(tasks_ch, EIO);
+            }
+
             // If we failed or were interrupted, delete the partial file (matches pigz.c:3600)
             if (write_failed || cc_atomic_load(&g_pipeline_error)) {
                 if (out_path && strcmp(out_path, "/dev/stdout") != 0) {
@@ -958,7 +963,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             prev_blk->is_last = true;
                             // Spawn task for pending block and send handle
                             CCTask task = cc_spawn(compress_block_task, prev_blk);
-                            (void)chan_send(tasks_tx, task);
+                            if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                                // Writer closed channel (error) - cleanup and exit
+                                cc_task_free(&task);
+                            }
                             prev_blk = NULL;
                         }
                         break;  // EOF with no data
@@ -1034,14 +1042,22 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // If we already have a pending block, spawn task and send handle
                     if (prev_blk) {
                         CCTask task = cc_spawn(compress_block_task, prev_blk);
-                        (void)chan_send(tasks_tx, task);
+                        if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                            // Writer closed channel (error) - cleanup and exit
+                            cc_task_free(&task);
+                            cc_heap_arena_free(&blk_arena);
+                            break;
+                        }
                     }
 
                     // If this was a short read, it's the last block.
                     if (data.len < block_size) {
                         blk->is_last = true;
                         CCTask task = cc_spawn(compress_block_task, blk);
-                        (void)chan_send(tasks_tx, task);
+                        if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                            // Writer closed channel (error) - cleanup and exit
+                            cc_task_free(&task);
+                        }
                         prev_blk = NULL;
                         hit_eof = true;
                         break;
