@@ -274,11 +274,12 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 /* Real mode cc_some/cc_none - these are placeholder definitions.
    The codegen pass rewrites cc_some(v) and cc_none() to typed versions
    based on the enclosing function's return type.
-   Fallback uses CCOptional_int for simple int values. */
-#define cc_some(v) ({ \
-    __auto_type __cc_some_v = (v); \
-    (CCOptional_int){ .has = true, .u.value = (int)__cc_some_v }; \
-})
+   Fallback uses CCOptional_int for simple int values.
+   
+   NOTE: Keep cc_some() as a simple expression - do NOT use __auto_type temp
+   variable pattern here. A previous bug had `&temp` instead of `temp` which
+   caused garbage values. The simpler form has no such footgun. */
+#define cc_some(v) ((CCOptional_int){ .has = true, .u.value = (int)(v) })
 #define cc_none() ((CCOptional_int){ .has = false })
 #define cc_unwrap_opt(opt) ({                                                   \
     __auto_type __cc_opt_tmp = (opt);                                           \
