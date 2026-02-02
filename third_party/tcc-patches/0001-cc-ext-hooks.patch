@@ -146,7 +146,7 @@ index 44c83679..4a3579b4 100644
      int *cc_call_stack;
      int cc_call_stack_top;
 diff --git a/tccgen.c b/tccgen.c
-index ee5d51a4..32f95038 100644
+index ee5d51a4..2be163c4 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,43 @@ ST_DATA SValue *vtop;
@@ -213,7 +213,40 @@ index ee5d51a4..32f95038 100644
          else
              pstrcat(buf, buf_size, get_tok_str(v, NULL));
          break;
-@@ -9677,6 +9724,18 @@ static int decl(int l)
+@@ -3395,6 +3442,10 @@ error:
+         if (ds == ss && ds >= 4)
+             goto done;
+         if (dbt_bt == VT_PTR || sbt_bt == VT_PTR) {
++#ifdef CONFIG_CC_EXT
++            /* Suppress in CC closure bodies - returns will be lowered with proper casts */
++            if (!(tcc_state && tcc_state->cc_in_closure_body > 0))
++#endif
+             tcc_warning("cast between pointer and integer of different size");
+             if (sbt_bt == VT_PTR) {
+                 /* put integer type to allow logical operations below */
+@@ -3618,6 +3669,10 @@ static void verify_assign_cast(CType *dt)
+             break;
+         /* accept implicit pointer to integer cast with warning */
+         if (is_integer_btype(sbt)) {
++#ifdef CONFIG_CC_EXT
++            /* Suppress in CC closure bodies - returns will be lowered with proper casts */
++            if (!(tcc_state && tcc_state->cc_in_closure_body > 0))
++#endif
+             tcc_warning("assignment makes pointer from integer without a cast");
+             break;
+         }
+@@ -3686,6 +3741,10 @@ static void verify_assign_cast(CType *dt)
+     case VT_INT:
+     case VT_LLONG:
+         if (sbt == VT_PTR || sbt == VT_FUNC) {
++#ifdef CONFIG_CC_EXT
++            /* Suppress in CC closure bodies - returns will be lowered with proper casts */
++            if (!(tcc_state && tcc_state->cc_in_closure_body > 0))
++#endif
+             tcc_warning("assignment makes integer from pointer without a cast");
+         } else if (sbt == VT_STRUCT) {
+             goto case_VT_STRUCT;
+@@ -9677,6 +9736,18 @@ static int decl(int l)
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
  #ifdef CONFIG_CC_EXT
