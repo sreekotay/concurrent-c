@@ -599,25 +599,23 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     // Input arena pool - reuse arenas instead of malloc/free each block
     size_t arena_size = block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t));
     
-    // Arena pool using owned channel pattern - pool size matches channel capacity
-    // Using runtime API for dynamic capacity (syntax requires literal)
-    CCClosure0 pool_create = [arena_size]() => {
-        CCArena* a = (CCArena*)malloc(sizeof(CCArena));
-        *a = cc_heap_arena(arena_size);
-        return a;
-    };
-    CCClosure1 pool_destroy = [](intptr_t r) => {
-        CCArena* a = (CCArena*)r;
-        cc_heap_arena_free(a);
-        free(a);
-        return NULL;
-    };
-    CCClosure1 pool_reset = [](intptr_t r) => {
-        CCArena* a = (CCArena*)r;
-        cc_arena_reset(a);
-        return NULL;
-    };
-    CCChan* arena_pool = cc_chan_create_owned(chan_cap + 16, sizeof(void*), pool_create, pool_destroy, pool_reset);
+    // Arena pool using owned channel syntax - capacity can now be an expression
+    CCArena*[~(chan_cap + 16) owned {
+        .create = [arena_size]() => {
+            CCArena* a = (CCArena*)malloc(sizeof(CCArena));
+            *a = cc_heap_arena(arena_size);
+            return a;
+        },
+        .destroy = [](CCArena* a) => {
+            cc_heap_arena_free(a);
+            free(a);
+            return NULL;
+        },
+        .reset = [](CCArena* a) => {
+            cc_arena_reset(a);
+            return NULL;
+        }
+    }] arena_pool;
     @defer cc_chan_free(arena_pool);
 
     // Pointers for closure capture

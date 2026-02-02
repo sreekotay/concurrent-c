@@ -249,19 +249,15 @@ Fix: Move consumer **outside** the nursery.
 
 #### Runtime: Real deadlock detection
 
-Enable runtime deadlock detection for fuzzy patterns:
+Concurrent-C includes a runtime deadlock detector that triggers when all worker threads are blocked and no progress is being made.
 
-```bash
-CC_DEADLOCK_DETECT=0 ./my_program   # disable watchdog (default is enabled)
-```
+When a deadlock is detected:
+- Prints detailed diagnostics (which fibers are parked, why, and where)
+- Exits with code 124 (like `timeout`) by default
 
-When all threads are blocked with no progress for 10+ seconds:
-- Prints detailed diagnostics (which threads are blocked, why)
-- Exits with code 124 (like `timeout`)
-
-Configure:
-- `CC_DEADLOCK_TIMEOUT=5` — detect after 5 seconds (default: 10)
-- `CC_DEADLOCK_ABORT=0` — warn but don't exit
+Configure via environment variables:
+- `CC_DEADLOCK_ABORT=0` — warn but don't exit (continues hanging)
+- `CC_WORKERS=n` — set number of worker threads (default: CPU count)
 
 Escape hatch for compile-time check:
 - `CC_ALLOW_NURSERY_CLOSING_DRAIN=1`

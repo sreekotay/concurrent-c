@@ -4,6 +4,7 @@ A C preprocessor that extends C syntax with first-class concurrency, desugaring 
 
 The key concept: lifetime of memory and the lifetime of tasks are explicitly bound to the structure of the code.
 
+
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
@@ -11,6 +12,12 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 **Last Updated:** 2026-01-07
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
+
+## The Principle of Orthogonal Concerns
+The key goal: (as much as possible) the compiler enforces the Shape of the program (Memory/Tasks), while the runtime monitors the Flow of the program (Channels).
+
+* The Skeleton (Structure): Nurseries and Arenas are hierarchical. They define the Ownership Tree. Their lifetimes are lexical and enforced by the compiler.
+* The Circulatory System (Flow): Channels are a graph. They define the Communication Topology. Their lifetimes are dynamic and can "cross-cut" the ownership tree.
 
 ---
 

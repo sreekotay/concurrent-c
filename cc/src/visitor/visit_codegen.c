@@ -571,23 +571,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 #endif
 
-    /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
-       (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
-    if (src_ufcs && ctx && ctx->symbols) {
-        CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
-        if (!root3) {
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            return EINVAL;
-        }
-
+    /* Text-based rewrites that must happen BEFORE creating root3 AST, so AST positions
+       match the transformed source. These are text-based and don't need AST. */
+    if (src_ufcs && ctx) {
         /* Lower `channel_pair(&tx, &rx);` BEFORE channel type rewrite (it needs `[~]` patterns). */
         {
             size_t rp_len = 0;
             char* rp = cc__rewrite_channel_pair_calls_text(ctx, src_ufcs, src_ufcs_len, &rp_len);
             if (!rp) {
-                cc_tcc_bridge_free_ast(root3);
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
                 free(src_all);
@@ -598,8 +589,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = rp_len;
         }
 
-        /* Rewrite channel handle types BEFORE closure pass so captured CCChanTx/CCChanRx variables
-           are correctly recognized. This rewrites `int[~4 >]` -> `CCChanTx`, etc. */
+        /* Rewrite channel handle types (including owned channels) BEFORE creating AST.
+           This transforms `int[~4 >]` -> `CCChanTx`, and `T[~N owned {...}]` -> `cc_chan_create_owned(...)`.
+           Must happen before AST creation so closure positions are correct. */
         {
             char* rew = cc__rewrite_chan_handle_types_text(ctx, src_ufcs, src_ufcs_len);
             if (rew) {
@@ -607,6 +599,18 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs = rew;
                 src_ufcs_len = strlen(src_ufcs);
             }
+        }
+    }
+
+    /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
+       (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
+    if (src_ufcs && ctx && ctx->symbols) {
+        CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+        if (!root3) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return EINVAL;
         }
 
         /* 1) closure literals -> __cc_closure_make_N(...) + generated closure defs */

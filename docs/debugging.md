@@ -54,9 +54,7 @@ Use the provided scripts for regular race detection:
 
 - Quick TSan run: `./scripts/test_tsan.sh`
 - Full TSan run: `./scripts/test_tsan.sh --all`
-- Stress tests under TSan: `./scripts/stress_sanitize.sh tsan`
-
-Notes:
+- Stress tests under TSan: `./scripts/stress_sanitize.sh tsan`Notes:
 - On macOS, TSan requires `clang`.
 - TSan runs are slower; keep them focused on stress/race tests.
 

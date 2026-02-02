@@ -6,11 +6,19 @@ static int g_create_count = 0;
 static int g_destroy_count = 0;
 static int g_reset_count = 0;
 
+// Custom type for Test 3 - must be at file scope for closures
+typedef struct {
+    int id;
+    char data[60];
+} PoolItem;
+
+static int g_next_id = 1;
+
 int main(void) {
     printf("Test 1: Basic owned channel syntax\n");
     fflush(stdout);
     {
-        // Declare owned channel with lifecycle closures
+        // Declare owned channel with lifecycle closures - using typed parameters
         void*[~4 owned {
             .create = []() => {
                 g_create_count++;
@@ -18,15 +26,15 @@ int main(void) {
                 printf("  create: p=%p\n", p);
                 return p;
             },
-            .destroy = [](intptr_t r) => {
+            .destroy = [](void* p) => {
                 g_destroy_count++;
-                printf("  destroy: r=%p\n", (void*)r);
-                free((void*)r);
+                printf("  destroy: p=%p\n", p);
+                free(p);
                 return NULL;
             },
-            .reset = [](intptr_t r) => {
+            .reset = [](void* p) => {
                 g_reset_count++;
-                printf("  reset: r=%p\n", (void*)r);
+                printf("  reset: p=%p\n", p);
                 return NULL;
             }
         }] pool;
@@ -73,6 +81,98 @@ int main(void) {
         fflush(stdout);
         
         printf("Test 1: PASSED\n");
+    }
+    
+    printf("Test 2: Expression capacity with typed parameters\n");
+    fflush(stdout);
+    {
+        int cap = 2;
+        int extra = 2;
+        
+        // Test expression capacity like (cap + extra)
+        void*[~(cap + extra) owned {
+            .create = []() => {
+                return malloc(64);
+            },
+            .destroy = [](void* p) => {
+                free(p);
+                return NULL;
+            },
+            .reset = [](void* p) => {
+                memset(p, 0, 64);
+                return NULL;
+            }
+        }] item_pool;
+        
+        // Get item from pool
+        void* item = NULL;
+        cc_chan_recv(item_pool, &item, sizeof(item));
+        assert(item != NULL);
+        printf("  got item: %p\n", item);
+        
+        // Return to pool
+        cc_chan_send(item_pool, &item, sizeof(item));
+        
+        // Get again
+        cc_chan_recv(item_pool, &item, sizeof(item));
+        printf("  got item again: %p\n", item);
+        
+        cc_chan_send(item_pool, &item, sizeof(item));
+        cc_chan_free(item_pool);
+        
+        printf("Test 2: PASSED\n");
+    }
+    
+    printf("Test 3: Custom struct type with typed closures\n");
+    fflush(stdout);
+    {
+        // Pool of PoolItem* with fully typed closures - no intptr_t casts needed!
+        PoolItem*[~4 owned {
+            .create = []() => {
+                PoolItem* item = (PoolItem*)malloc(sizeof(PoolItem));
+                item->id = g_next_id++;
+                memset(item->data, 0, sizeof(item->data));
+                printf("  create: item id=%d\n", item->id);
+                return item;
+            },
+            .destroy = [](PoolItem* item) => {
+                printf("  destroy: item id=%d\n", item->id);
+                free(item);
+                return NULL;
+            },
+            .reset = [](PoolItem* item) => {
+                printf("  reset: item id=%d\n", item->id);
+                memset(item->data, 0, sizeof(item->data));
+                return NULL;
+            }
+        }] item_pool;
+        
+        // Get items
+        PoolItem* a = NULL;
+        PoolItem* b = NULL;
+        cc_chan_recv(item_pool, &a, sizeof(a));
+        cc_chan_recv(item_pool, &b, sizeof(b));
+        assert(a->id == 1);
+        assert(b->id == 2);
+        printf("  got items: a.id=%d, b.id=%d\n", a->id, b->id);
+        
+        // Use them
+        strcpy(a->data, "hello");
+        strcpy(b->data, "world");
+        
+        // Return to pool
+        cc_chan_send(item_pool, &a, sizeof(a));
+        cc_chan_send(item_pool, &b, sizeof(b));
+        
+        // Get again - should be reset
+        cc_chan_recv(item_pool, &a, sizeof(a));
+        assert(a->data[0] == 0);  // Data was reset
+        printf("  got item again: id=%d, data reset=%s\n", a->id, a->data[0] == 0 ? "yes" : "no");
+        
+        cc_chan_send(item_pool, &a, sizeof(a));
+        cc_chan_free(item_pool);
+        
+        printf("Test 3: PASSED\n");
     }
     
     printf("\nowned_channel_syntax_smoke: ALL TESTS PASSED\n");

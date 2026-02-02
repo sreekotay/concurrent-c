@@ -752,6 +752,98 @@ static size_t cc__scan_back_to_delim(const char* s, size_t from) {
 
    Requires explicit direction ('>' or '<'). Hard errors otherwise.
    Text-based: not valid C, so TCC must see rewritten code. */
+
+/* Helper: wrap a closure with typed parameter for CCClosure1.
+   Transforms: [captures](Type param) => body
+   Into:       [captures](intptr_t __arg) => { Type param = (Type)__arg; body }
+   
+   If param is already intptr_t, returns the original unchanged. */
+static void cc__wrap_typed_closure1(const char* closure, char* out, size_t out_cap) {
+    if (!closure || !out || out_cap == 0) return;
+    out[0] = 0;
+    
+    /* Find '[' (captures start) */
+    const char* p = closure;
+    while (*p && *p != '[') p++;
+    if (!*p) { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    
+    /* Find '](' to get to params */
+    const char* cap_start = p;
+    while (*p && !(*p == ']' && *(p + 1) == '(')) p++;
+    if (!*p) { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    
+    size_t cap_len = p - cap_start + 1;  /* include ] */
+    p++;  /* skip ] */
+    if (*p != '(') { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    p++;  /* skip ( */
+    
+    /* Skip whitespace */
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    
+    /* Extract parameter type */
+    const char* type_start = p;
+    /* Scan type - handle pointers like "CCArena*" */
+    while (*p && *p != ')' && *p != ' ' && *p != '\t') {
+        if (*p == '*') { p++; break; }  /* pointer type ends at * */
+        p++;
+    }
+    size_t type_len = p - type_start;
+    
+    /* Check if it's already intptr_t */
+    if (type_len == 8 && strncmp(type_start, "intptr_t", 8) == 0) {
+        strncpy(out, closure, out_cap - 1);
+        out[out_cap - 1] = 0;
+        return;
+    }
+    
+    /* Skip whitespace to parameter name */
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    
+    /* Extract parameter name */
+    const char* name_start = p;
+    while (*p && *p != ')' && *p != ' ' && *p != '\t') p++;
+    size_t name_len = p - name_start;
+    
+    if (name_len == 0) {
+        /* No param name, type might BE the name (e.g., just "r") - don't wrap */
+        strncpy(out, closure, out_cap - 1);
+        out[out_cap - 1] = 0;
+        return;
+    }
+    
+    /* Find => and body */
+    while (*p && !(*p == '=' && *(p + 1) == '>')) p++;
+    if (!*p) { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    p += 2;  /* skip => */
+    while (*p && (*p == ' ' || *p == '\t')) p++;
+    
+    /* Rest is body */
+    const char* body = p;
+    
+    /* Build wrapped closure:
+       [captures](intptr_t __arg) => { Type name = (Type)__arg; body } */
+    char type_buf[128], name_buf[64];
+    if (type_len >= sizeof(type_buf)) type_len = sizeof(type_buf) - 1;
+    if (name_len >= sizeof(name_buf)) name_len = sizeof(name_buf) - 1;
+    memcpy(type_buf, type_start, type_len);
+    type_buf[type_len] = 0;
+    memcpy(name_buf, name_start, name_len);
+    name_buf[name_len] = 0;
+    
+    /* Check if body is already a block */
+    int body_is_block = (*body == '{');
+    
+    if (body_is_block) {
+        /* Body is { ... }, insert declaration after { */
+        snprintf(out, out_cap, "%.*s(intptr_t __arg) => { %s %s = (%s)__arg; %s",
+                 (int)cap_len, cap_start, type_buf, name_buf, type_buf, body + 1);
+    } else {
+        /* Body is expression, wrap in block */
+        snprintf(out, out_cap, "%.*s(intptr_t __arg) => { %s %s = (%s)__arg; return %s; }",
+                 (int)cap_len, cap_start, type_buf, name_buf, type_buf, body);
+    }
+}
+
 static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -775,7 +867,40 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 int is_owned = 0;
                 {
                     size_t scan = j + 1;
-                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t' || (src[scan] >= '0' && src[scan] <= '9'))) scan++;
+                    /* Skip capacity expression - can be:
+                     * - digits: 4, 16
+                     * - expressions: (cap + 2), cap * 2
+                     * - identifiers: my_cap
+                     * Stop when we hit 'owned', '>', '<', or ']' */
+                    while (scan < n && src[scan] != ']') {
+                        char sc = src[scan];
+                        /* Skip whitespace */
+                        if (sc == ' ' || sc == '\t') { scan++; continue; }
+                        /* Check for 'owned' keyword before processing identifiers */
+                        if (scan + 5 <= n && memcmp(src + scan, "owned", 5) == 0) {
+                            char next = (scan + 5 < n) ? src[scan + 5] : 0;
+                            int is_ident = (next == '_' || (next >= 'A' && next <= 'Z') || 
+                                           (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9'));
+                            if (!is_ident) break;  /* Found 'owned' keyword */
+                        }
+                        /* Skip digits, identifiers, operators */
+                        if ((sc >= '0' && sc <= '9') || sc == '_' ||
+                            (sc >= 'a' && sc <= 'z') || (sc >= 'A' && sc <= 'Z') ||
+                            sc == '+' || sc == '-' || sc == '*' || sc == '/') { scan++; continue; }
+                        /* Skip parenthesized expressions */
+                        if (sc == '(') {
+                            int depth = 1;
+                            scan++;
+                            while (scan < n && depth > 0) {
+                                if (src[scan] == '(') depth++;
+                                else if (src[scan] == ')') depth--;
+                                scan++;
+                            }
+                            continue;
+                        }
+                        break;  /* Hit something else (like '>' or '<') */
+                    }
+                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t')) scan++;
                     if (scan + 5 <= n && memcmp(src + scan, "owned", 5) == 0) {
                         char next = (scan + 5 < n) ? src[scan + 5] : 0;
                         int is_ident = (next == '_' || (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9'));
@@ -787,8 +912,34 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 
                 if (is_owned) {
                     /* Transform owned channel: T[~N owned { ... }] varname; */
+                    /* Skip capacity expression (may include parentheses) to find 'owned' */
                     size_t scan = j + 1;
-                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t' || (src[scan] >= '0' && src[scan] <= '9'))) scan++;
+                    while (scan < n && src[scan] != ']') {
+                        char sc = src[scan];
+                        if (sc == ' ' || sc == '\t') { scan++; continue; }
+                        /* Check for 'owned' keyword */
+                        if (scan + 5 <= n && memcmp(src + scan, "owned", 5) == 0) {
+                            char next = (scan + 5 < n) ? src[scan + 5] : 0;
+                            int is_kw = !(next == '_' || (next >= 'A' && next <= 'Z') || 
+                                         (next >= 'a' && next <= 'z') || (next >= '0' && next <= '9'));
+                            if (is_kw) break;
+                        }
+                        if ((sc >= '0' && sc <= '9') || sc == '_' ||
+                            (sc >= 'a' && sc <= 'z') || (sc >= 'A' && sc <= 'Z') ||
+                            sc == '+' || sc == '-' || sc == '*' || sc == '/') { scan++; continue; }
+                        if (sc == '(') {
+                            int depth = 1;
+                            scan++;
+                            while (scan < n && depth > 0) {
+                                if (src[scan] == '(') depth++;
+                                else if (src[scan] == ')') depth--;
+                                scan++;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                    while (scan < n && (src[scan] == ' ' || src[scan] == '\t')) scan++;
                     scan += 5;  /* Skip "owned" */
                     while (scan < n && (src[scan] == ' ' || src[scan] == '\t')) scan++;
                     
@@ -872,13 +1023,30 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     elem_ty[elem_len] = 0;
                     while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) elem_ty[--elem_len] = 0;
                     
-                    /* Extract capacity (between ~ and owned) */
+                    /* Extract capacity (between ~ and owned) - handles expressions like (cap + 2) */
                     char cap_expr[128] = "0";
                     {
                         size_t cs = j + 1;
                         while (cs < brace_start && (src[cs] == ' ' || src[cs] == '\t')) cs++;
                         size_t ce = cs;
-                        while (ce < brace_start && src[ce] != ' ' && src[ce] != '\t' && memcmp(src + ce, "owned", 5) != 0) ce++;
+                        /* Scan capacity expression, handling parentheses */
+                        int paren_depth = 0;
+                        while (ce < brace_start) {
+                            char ec = src[ce];
+                            if (ec == '(') { paren_depth++; ce++; continue; }
+                            if (ec == ')') { paren_depth--; ce++; continue; }
+                            if (paren_depth > 0) { ce++; continue; }  /* Inside parens, include everything */
+                            /* Outside parens: stop at whitespace before 'owned' */
+                            if (ec == ' ' || ec == '\t') {
+                                size_t peek = ce;
+                                while (peek < brace_start && (src[peek] == ' ' || src[peek] == '\t')) peek++;
+                                if (peek + 5 <= brace_start && memcmp(src + peek, "owned", 5) == 0) break;
+                            }
+                            if (memcmp(src + ce, "owned", 5) == 0) break;
+                            ce++;
+                        }
+                        /* Trim trailing whitespace */
+                        while (ce > cs && (src[ce - 1] == ' ' || src[ce - 1] == '\t')) ce--;
                         if (ce > cs) {
                             size_t cl = ce - cs;
                             if (cl >= sizeof(cap_expr)) cl = sizeof(cap_expr) - 1;
@@ -977,6 +1145,12 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                         }
                     }
                     
+                    /* Wrap destroy/reset closures to handle typed parameters.
+                       Converts [](CCArena* a) => ... to [](intptr_t __arg) => { CCArena* a = (CCArena*)__arg; ... } */
+                    char destroy_wrapped[2048], reset_wrapped[2048];
+                    cc__wrap_typed_closure1(destroy_c, destroy_wrapped, sizeof(destroy_wrapped));
+                    cc__wrap_typed_closure1(reset_c, reset_wrapped, sizeof(reset_wrapped));
+                    
                     /* Generate code with closure variables and channel creation */
                     snprintf(buf, sizeof(buf),
                              "/* owned channel %s */\n"
@@ -987,8 +1161,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                              "__cc_owned_%d_create, __cc_owned_%d_destroy, __cc_owned_%d_reset)",
                              var_name,
                              id, create_c,
-                             id, destroy_c,
-                             id, reset_c,
+                             id, destroy_wrapped,
+                             id, reset_wrapped,
                              var_name, cap_expr, elem_ty,
                              id, id, id);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, buf);
