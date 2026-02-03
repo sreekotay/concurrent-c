@@ -12,13 +12,17 @@ SIZE_MB=${1:-100}
 WORKERS=${2:-8}
 RUNS=${3:-4}
 
+# For fiber-based pigz_cc, use 2x CPU workers for CPU-bound compression
+export CC_WORKERS=${CC_WORKERS:-16}
+
 echo "=============================================="
 echo "pigz Benchmark: Real Compressible Data"
 echo "=============================================="
 echo ""
-echo "Input size: ${SIZE_MB} MB"
-echo "Workers:    ${WORKERS}"
-echo "Runs:       ${RUNS}"
+echo "Input size:   ${SIZE_MB} MB"
+echo "pigz workers: ${WORKERS}"
+echo "CC_WORKERS:   ${CC_WORKERS} (fiber scheduler)"
+echo "Runs:         ${RUNS}"
 echo ""
 
 # Check binaries exist

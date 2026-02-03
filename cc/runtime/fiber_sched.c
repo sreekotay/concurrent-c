@@ -342,7 +342,11 @@ typedef struct {
     fiber_task* _Atomic free_list;
     
     wake_primitive wake_prim;       /* Fast worker wake (futex/ulock instead of condvar) */
+    char _pad_wake[CACHE_LINE_SIZE];  /* Isolate wake_prim from pending */
+    
+    /* HIGHLY CONTENDED: updated on every spawn and complete - needs own cache line */
     _Atomic size_t pending;
+    char _pad_pending[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
     
     /* Track worker states for smarter waking - cache line padded to avoid false sharing */
     _Atomic size_t active;      /* Workers currently executing fibers */
@@ -354,8 +358,23 @@ typedef struct {
     _Atomic size_t spinning;    /* Workers actively polling (not sleeping yet) */
     char _pad_spinning[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
     
+    /* Per-worker parked counts - avoids global mutex and cache line bouncing */
+    _Atomic size_t worker_parked[MAX_WORKERS];
+    
+    /* Hybrid promotion (sysmon): per-worker heartbeat updated once per batch loop.
+     * Sysmon detects stuck workers by checking if heartbeat hasn't updated.
+     * Cache-line aligned so sysmon reads don't false-share with worker writes. */
+    struct { _Atomic uint64_t heartbeat; char _pad[CACHE_LINE_SIZE - sizeof(_Atomic uint64_t)]; } worker_heartbeat[MAX_WORKERS];
+    
+    /* Sysmon thread: spawns temp workers when CPU-bound fibers stall */
+    pthread_t sysmon_thread;
+    int sysmon_started;  /* 1 if pthread_create succeeded (shutdown joins only then) */
+    _Atomic int sysmon_running;
+    _Atomic size_t temp_worker_count;
+    _Atomic uint64_t last_promotion_cycles;  /* rdtsc of last temp worker spawn (rate limit) */
+    _Atomic size_t promotion_count;         /* Stats: total temp workers ever spawned */
+    
     /* Stats - less hot, can share cache lines */
-    _Atomic size_t parked;
     _Atomic size_t blocked_threads;  /* Threads blocked in cc_block_on (not fiber parking) */
     _Atomic size_t completed;
     _Atomic size_t coro_reused;
@@ -382,9 +401,20 @@ size_t cc_sched_get_num_workers(void) {
 }
 static _Atomic uintptr_t g_next_fiber_id = 1;       /* Counter for unique fiber IDs */
 
-/* Parked fibers list for debugging (protected by mutex for simplicity) */
+/* Parked fibers list for debugging - only used when CC_DEBUG_DEADLOCK is set */
+#ifdef CC_DEBUG_DEADLOCK
 static pthread_mutex_t g_parked_list_mu = PTHREAD_MUTEX_INITIALIZER;
 static fiber_task* g_parked_list_head = NULL;
+#endif
+
+/* Helper: sum per-worker parked counts */
+static inline size_t get_total_parked(void) {
+    size_t total = 0;
+    for (size_t i = 0; i < g_sched.num_workers; i++) {
+        total += atomic_load_explicit(&g_sched.worker_parked[i], memory_order_relaxed);
+    }
+    return total;
+}
 
 /* Get monotonic time in milliseconds */
 static uint64_t cc__monotonic_ms(void) {
@@ -403,7 +433,7 @@ static uint64_t cc__monotonic_ms(void) {
 static void cc__fiber_check_deadlock(void) {
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
     size_t blocked = atomic_load_explicit(&g_sched.blocked_threads, memory_order_acquire);
-    size_t parked = atomic_load_explicit(&g_sched.parked, memory_order_acquire);
+    size_t parked = get_total_parked();
     
     /* Potential deadlock: all workers unavailable + parked fibers waiting */
     size_t unavailable = sleeping + blocked;
@@ -434,7 +464,8 @@ static void cc__fiber_check_deadlock(void) {
                     parked, (size_t)atomic_load(&g_sched.completed));
             fprintf(stderr, "\n");
             
-            /* Dump parked fibers */
+#ifdef CC_DEBUG_DEADLOCK
+            /* Dump parked fibers - only available with CC_DEBUG_DEADLOCK */
             fprintf(stderr, "Parked fibers (waiting for unpark that will never come):\n");
             pthread_mutex_lock(&g_parked_list_mu);
             fiber_task* f = g_parked_list_head;
@@ -455,6 +486,9 @@ static void cc__fiber_check_deadlock(void) {
                 fprintf(stderr, "  ... and %zu more\n", parked - 20);
             }
             pthread_mutex_unlock(&g_parked_list_mu);
+#else
+            fprintf(stderr, "(Compile with -DCC_DEBUG_DEADLOCK for detailed fiber info)\n");
+#endif
             
             fprintf(stderr, "\n");
             fprintf(stderr, "Common causes:\n");
@@ -625,7 +659,7 @@ void cc_fiber_dump_state(const char* reason) {
             atomic_load(&g_sched.pending),
             atomic_load(&g_sched.active),
             atomic_load(&g_sched.sleeping),
-            atomic_load(&g_sched.parked),
+            get_total_parked(),
             atomic_load(&g_sched.completed));
     fprintf(stderr, "  run_queue: head=%zu tail=%zu (approx %zu items)\n",
             atomic_load(&g_sched.run_queue.head),
@@ -648,6 +682,7 @@ void cc_fiber_dump_spawn_stats(void) {
     fprintf(stderr, "\n=== SPAWN STATS (%zu spawns) ===\n", total);
     fprintf(stderr, "  coro reused: %zu (%.1f%%)\n", reused, 100.0 * reused / total);
     fprintf(stderr, "  coro created: %zu (%.1f%%)\n", created, 100.0 * created / total);
+    fprintf(stderr, "  hybrid promotion temp workers spawned: %zu\n", (size_t)atomic_load(&g_sched.promotion_count));
     fprintf(stderr, "================================\n\n");
 }
 
@@ -869,7 +904,7 @@ static void fiber_resume(fiber_task* f) {
     }
 }
 
-#define WORKER_BATCH_SIZE 16
+#define WORKER_BATCH_SIZE 16  /* Standard batch size */
 #define STEAL_BATCH_SIZE (LOCAL_QUEUE_SIZE / 2)  /* Steal up to half the victim's queue */
 
 /* Simple xorshift64 PRNG for randomized victim selection */
@@ -880,6 +915,155 @@ static inline uint64_t xorshift64(uint64_t* state) {
     x ^= x << 17;
     *state = x;
     return x;
+}
+
+/* ============================================================================
+ * Hybrid Promotion (Orphan Model)
+ * 
+ * When a worker gets stuck on a CPU-bound fiber, we "orphan" it:
+ * - The stuck worker keeps running its fiber 1:1 until completion
+ * - We spawn a permanent replacement worker to handle the queue
+ * - When the orphaned worker's fiber completes, it exits
+ * 
+ * Detection via sysmon thread - zero hot-path cost on workers.
+ * ============================================================================ */
+
+#define SYSMON_CHECK_US 250                  /* check every 250us (0.25ms) - faster detection */
+#define ORPHAN_THRESHOLD_CYCLES 750000       /* ~0.25ms at 3GHz - faster stuck detection */
+#define MAX_EXTRA_WORKERS 8                  /* scale up to 2x cores max */
+#define ORPHAN_COOLDOWN_CYCLES 250000        /* ~0.08ms between batch spawns */
+
+/* Check if there's work in global queue (not local - local is "owned" by workers) */
+static int sysmon_has_global_pending(void) {
+    return fq_peek(&g_sched.run_queue) != NULL;
+}
+
+static int sysmon_has_pending_work(void) {
+    if (fq_peek(&g_sched.run_queue)) return 1;
+    for (size_t i = 0; i < g_sched.num_workers; i++) {
+        if (lq_peek(&g_sched.local_queues[i])) return 1;
+    }
+    return 0;
+}
+
+/* Count total pending tasks across all queues (for predictive scaling) */
+static size_t sysmon_count_pending(void) {
+    size_t count = 0;
+    /* Global queue: approximate by checking if non-empty */
+    if (fq_peek(&g_sched.run_queue)) count += 8; /* assume decent batch */
+    /* Local queues: count actual tasks */
+    for (size_t i = 0; i < g_sched.num_workers; i++) {
+        local_queue* q = &g_sched.local_queues[i];
+        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+        size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
+        if (tail > head) count += (tail - head);
+    }
+    return count;
+}
+
+/* Replacement worker: same as regular worker but uses global queue only.
+ * Permanent - sleeps when idle (doesn't burn CPU competing). */
+static void* replacement_worker(void* arg) {
+    (void)arg;
+    if (!tls_tsan_sched_fiber) {
+        tls_tsan_sched_fiber = TSAN_FIBER_CREATE();
+        TSAN_FIBER_SWITCH(tls_tsan_sched_fiber);
+    }
+    uint64_t rng_state = rdtsc();
+
+    while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
+        fiber_task* f = fq_pop(&g_sched.run_queue);
+        
+        /* Try stealing from any worker */
+        if (!f && g_sched.num_workers > 0) {
+            size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
+            f = lq_steal(&g_sched.local_queues[victim]);
+        }
+        
+        if (f) {
+            tls_current_fiber = f;
+            fiber_resume(f);
+            tls_current_fiber = NULL;
+        } else {
+            /* Brief spin then short sleep - balance responsiveness vs CPU burn */
+            for (int spin = 0; spin < 64; spin++) {
+                f = fq_pop(&g_sched.run_queue);
+                if (f) goto got_work;
+                cpu_pause();
+            }
+            /* Short sleep - wake primitive wakes us when work arrives */
+            atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
+            uint32_t wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
+            if (!fq_peek(&g_sched.run_queue)) {
+                wake_primitive_wait_timeout(&g_sched.wake_prim, wake_val, 5);
+            }
+            atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
+            continue;
+        got_work:
+            tls_current_fiber = f;
+            fiber_resume(f);
+            tls_current_fiber = NULL;
+        }
+    }
+    atomic_fetch_sub(&g_sched.temp_worker_count, 1);
+    return NULL;
+}
+
+static void* sysmon_main(void* arg) {
+    (void)arg;
+    while (atomic_load_explicit(&g_sched.sysmon_running, memory_order_acquire)) {
+        usleep(SYSMON_CHECK_US);
+
+        size_t current = atomic_load(&g_sched.temp_worker_count);
+        if (current >= MAX_EXTRA_WORKERS) continue;
+        
+        /* Scale up if there's pending work in ANY queue (auto-scale for CPU-bound) */
+        if (!sysmon_has_pending_work()) continue;
+        
+        /* Check for stuck workers */
+        uint64_t now = rdtsc();
+        size_t stuck = 0;
+        for (size_t i = 0; i < g_sched.num_workers; i++) {
+            uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[i].heartbeat, memory_order_acquire);
+            if (hb != 0 && (now - hb) >= ORPHAN_THRESHOLD_CYCLES)
+                stuck++;
+        }
+        
+        if (stuck == 0) continue;
+        
+        /* Exponential growth: add 50% of current total each scale event */
+        size_t total_workers = g_sched.num_workers + current;
+        size_t to_spawn = total_workers / 2;  /* grow by 50% */
+        if (to_spawn < 1) to_spawn = 1;
+        if (to_spawn > (MAX_EXTRA_WORKERS - current))
+            to_spawn = MAX_EXTRA_WORKERS - current;
+        
+        if (to_spawn == 0) continue;
+        
+        /* Rate limit overall scaling bursts */
+        uint64_t last = atomic_load_explicit(&g_sched.last_promotion_cycles, memory_order_acquire);
+        if ((now - last) < ORPHAN_COOLDOWN_CYCLES) continue;
+        if (!atomic_compare_exchange_strong(&g_sched.last_promotion_cycles, &last, now))
+            continue;
+        
+        /* Spawn all needed workers at once */
+        for (size_t s = 0; s < to_spawn; s++) {
+            if (!atomic_compare_exchange_strong(&g_sched.temp_worker_count, &current, current + 1))
+                break;
+            current++;
+            
+            pthread_t tid;
+            pthread_attr_t attr;
+            pthread_attr_init(&attr);
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+            if (pthread_create(&tid, &attr, replacement_worker, NULL) == 0)
+                atomic_fetch_add(&g_sched.promotion_count, 1);
+            else
+                atomic_fetch_sub(&g_sched.temp_worker_count, 1);
+            pthread_attr_destroy(&attr);
+        }
+    }
+    return NULL;
 }
 
 static void* worker_main(void* arg) {
@@ -946,6 +1130,9 @@ static void* worker_main(void* arg) {
         }
         
         if (count > 0) {
+            /* Update heartbeat when executing work (sysmon checks for stuck workers) */
+            atomic_store_explicit(&g_sched.worker_heartbeat[worker_id].heartbeat, rdtsc(), memory_order_relaxed);
+            
             /* Batch execute */
             for (size_t i = 0; i < count; i++) {
                 fiber_task* f = batch[i];
@@ -1108,7 +1295,8 @@ int cc_fiber_sched_init(size_t num_workers) {
             num_workers = CC_FIBER_WORKERS;
             #else
             long n = sysconf(_SC_NPROCESSORS_ONLN);
-            num_workers = n > 0 ? (size_t)n : 4;
+            /* Start at 2x cores for better CPU-bound parallelism */
+            num_workers = n > 0 ? (size_t)(n * 2) : 8;
             #endif
         }
     }
@@ -1126,6 +1314,11 @@ int cc_fiber_sched_init(size_t num_workers) {
     for (size_t i = 0; i < num_workers; i++) {
         pthread_create(&g_sched.workers[i], NULL, worker_main, (void*)i);
     }
+
+    atomic_store_explicit(&g_sched.sysmon_running, 1, memory_order_release);
+    g_sched.sysmon_started = (pthread_create(&g_sched.sysmon_thread, NULL, sysmon_main, NULL) == 0);
+    if (!g_sched.sysmon_started)
+        atomic_store_explicit(&g_sched.sysmon_running, 0, memory_order_release);
     
     atomic_store_explicit(&g_initialized, 2, memory_order_release);
     return 0;
@@ -1144,8 +1337,13 @@ void cc_fiber_sched_shutdown(void) {
     }
     
     atomic_store_explicit(&g_sched.running, 0, memory_order_release);
+    atomic_store_explicit(&g_sched.sysmon_running, 0, memory_order_release);
     wake_primitive_wake_all(&g_sched.wake_prim);
-    
+
+    if (g_sched.sysmon_started) {
+        pthread_join(g_sched.sysmon_thread, NULL);
+        g_sched.sysmon_started = 0;
+    }
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         pthread_join(g_sched.workers[i], NULL);
     }
@@ -1274,15 +1472,16 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     if (timing) t2 = rdtsc();
     
-    /* Try local queue first if we're inside a worker thread */
+    /* Round-robin distribution to local queues for even spread (always) */
+    static _Atomic size_t spawn_counter = 0;
+    size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+    
     int pushed_local = 0;
-    if (tls_worker_id >= 0) {
-        if (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
-            pushed_local = 1;
-        }
+    if (lq_push(&g_sched.local_queues[target], f) == 0) {
+        pushed_local = 1;
     }
     
-    /* Fallback to global queue */
+    /* Fallback to global queue if local is full */
     if (!pushed_local) {
         if (fq_push(&g_sched.run_queue, f) != 0) {
             fiber_free(f);
@@ -1294,19 +1493,13 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     atomic_fetch_add_explicit(&g_sched.pending, 1, memory_order_relaxed);
     
-    /* Wake a sleeping worker only if:
-     * - We pushed to global queue (local queue will be picked up by owner)
-     * - No workers are spinning */
-    if (!pushed_local) {
-        size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
-        if (spinning == 0) {
-            size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-            if (sleeping > 0) {
-                wake_primitive_wake_one(&g_sched.wake_prim);
-                if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
-            } else {
-                if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
-            }
+    /* Wake a sleeping worker if any are sleeping and none are spinning */
+    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
+    if (spinning == 0) {
+        size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+        if (sleeping > 0) {
+            wake_primitive_wake_one(&g_sched.wake_prim);
+            if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
         } else {
             if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
         }
@@ -1488,9 +1681,15 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
                 break;
             }
             
-            atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
+            /* Per-worker parked count - no global contention */
+            int wid = tls_worker_id;
+            if (wid >= 0) {
+                atomic_fetch_add_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
+            }
             mco_yield(current->coro);
-            atomic_fetch_sub_explicit(&g_sched.parked, 1, memory_order_relaxed);
+            if (wid >= 0) {
+                atomic_fetch_sub_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
+            }
             atomic_store_explicit(&current->state, FIBER_RUNNING, memory_order_release);
         }
     } else {
@@ -1559,6 +1758,7 @@ void* cc__fiber_current(void) {
     return tls_current_fiber;
 }
 
+#ifdef CC_DEBUG_DEADLOCK
 /* Internal: add fiber to parked list for debugging */
 static void parked_list_add(fiber_task* f) {
     pthread_mutex_lock(&g_parked_list_mu);
@@ -1581,6 +1781,7 @@ static void parked_list_remove(fiber_task* f) {
     }
     pthread_mutex_unlock(&g_parked_list_mu);
 }
+#endif
 
 void cc__fiber_park_reason(const char* reason, const char* file, int line) {
     fiber_task* f = tls_current_fiber;
@@ -1604,15 +1805,25 @@ void cc__fiber_park_reason(const char* reason, const char* file, int line) {
         return;
     }
 
-    atomic_fetch_add_explicit(&g_sched.parked, 1, memory_order_relaxed);
+    /* Per-worker parked count - no global contention */
+    int wid = tls_worker_id;
+    if (wid >= 0) {
+        atomic_fetch_add_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
+    }
+#ifdef CC_DEBUG_DEADLOCK
     parked_list_add(f);
+#endif
     
     /* Yield back to worker */
     mco_yield(f->coro);
     
     /* Resumed by unpark */
+#ifdef CC_DEBUG_DEADLOCK
     parked_list_remove(f);
-    atomic_fetch_sub_explicit(&g_sched.parked, 1, memory_order_relaxed);
+#endif
+    if (wid >= 0) {
+        atomic_fetch_sub_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
+    }
     atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
     f->park_reason = NULL;
     f->park_file = NULL;

@@ -552,7 +552,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 int process_path(const char* path, int num_workers, int level, int strategy);
 
 int compress_file(const char* in_path, const char* out_path, int num_workers, int level, int strategy) {
-    (void)num_workers;  // Not used with task-handle pattern
+    /* num_workers used for round-robin worker affinity */
     
     // Store level and strategy in globals for task wrapper access
     g.level = level;
@@ -984,8 +984,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         return_input_arena(blk_arena, arena_pool);
                         if (prev_blk) {
                             prev_blk->is_last = true;
-                            // Spawn task for pending block and send handle
-                            CCTask task = cc_spawn(compress_block_task, prev_blk);
+                            // Spawn task - scheduler auto-distributes via round-robin
+                            CCTask task = cc_fiber_spawn_task(compress_block_task, prev_blk);
                             if (!cc_io_avail(chan_send(tasks_tx, task))) {
                                 // Writer closed channel (error) - cleanup and exit
                                 cc_task_free(&task);
@@ -1063,9 +1063,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     memcpy(last_tail_buf, (const unsigned char*)data.ptr + data.len - tail_len, tail_len);
                     last_tail_len = tail_len;
 
-                    // If we already have a pending block, spawn task and send handle
+                    // If we already have a pending block, spawn task
                     if (prev_blk) {
-                        CCTask task = cc_spawn(compress_block_task, prev_blk);
+                        CCTask task = cc_fiber_spawn_task(compress_block_task, prev_blk);
                         if (!cc_io_avail(chan_send(tasks_tx, task))) {
                             // Writer closed channel (error) - cleanup and exit
                             cc_task_free(&task);
@@ -1077,7 +1077,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // If this was a short read, it's the last block.
                     if (data.len < block_size) {
                         blk->is_last = true;
-                        CCTask task = cc_spawn(compress_block_task, blk);
+                        CCTask task = cc_fiber_spawn_task(compress_block_task, blk);
                         if (!cc_io_avail(chan_send(tasks_tx, task))) {
                             // Writer closed channel (error) - cleanup and exit
                             cc_task_free(&task);
@@ -1374,8 +1374,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    /* Configure scheduler thread count */
-    cc_sched_set_num_workers(num_workers);
+    /* Let scheduler use default 2x cores; affinity distributes across all workers */
+    /* (previously: cc_sched_set_num_workers(num_workers)) */
     
     /* Process path recursively for each input file (matches pigz.c:4600-4620) */
     int ret = 0;

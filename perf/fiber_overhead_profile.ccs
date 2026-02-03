@@ -1,0 +1,144 @@
+// Profile: isolate fiber overhead vs direct execution
+// Measures: spawn, queue, context switch, join
+
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <stdint.h>
+
+#define WORK_ITERATIONS 1000000  // CPU work per task (~1ms like pigz)
+#define NUM_TASKS 400            // Number of tasks (~pigz block count)
+#define RUNS 5                   // Runs for averaging
+
+// Simulate CPU-bound work (like compression)
+static volatile uint64_t sink;
+static void* cpu_work(void* arg) {
+    uint64_t x = (uint64_t)(uintptr_t)arg;
+    for (int i = 0; i < WORK_ITERATIONS; i++) {
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+        x ^= x >> 33;
+    }
+    sink = x;
+    return (void*)(uintptr_t)x;
+}
+
+static void* minimal_work(void* arg) {
+    uint64_t x = (uint64_t)(uintptr_t)arg;
+    for (int i = 0; i < 10; i++) {
+        x = x * 6364136223846793005ULL + 1;
+    }
+    sink = x;
+    return (void*)(uintptr_t)x;
+}
+
+static inline uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+int main(void) {
+    printf("=== Fiber Overhead Profile ===\n");
+    printf("Tasks: %d, Work iterations per task: %d\n\n", NUM_TASKS, WORK_ITERATIONS);
+    
+    // Warmup
+    for (int i = 0; i < 100; i++) {
+        cpu_work((void*)(uintptr_t)i);
+    }
+    
+    // 1. Baseline: Direct sequential calls (no threading overhead)
+    {
+        uint64_t total = 0;
+        for (int run = 0; run < RUNS; run++) {
+            uint64_t t0 = now_ns();
+            for (int i = 0; i < NUM_TASKS; i++) {
+                cpu_work((void*)(uintptr_t)i);
+            }
+            uint64_t t1 = now_ns();
+            total += (t1 - t0);
+        }
+        double avg_ms = (double)total / RUNS / 1000000.0;
+        double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
+        printf("1. Sequential (baseline):    %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+    }
+    
+    // 2. cc_spawn (OS threads via thread pool)
+    {
+        uint64_t total = 0;
+        for (int run = 0; run < RUNS; run++) {
+            CCTask tasks[NUM_TASKS];
+            uint64_t t0 = now_ns();
+            for (int i = 0; i < NUM_TASKS; i++) {
+                tasks[i] = cc_spawn(cpu_work, (void*)(uintptr_t)i);
+            }
+            for (int i = 0; i < NUM_TASKS; i++) {
+                cc_block_on_intptr(tasks[i]);
+            }
+            uint64_t t1 = now_ns();
+            total += (t1 - t0);
+        }
+        double avg_ms = (double)total / RUNS / 1000000.0;
+        double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
+        printf("2. cc_spawn (threads):       %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+    }
+    
+    // 3. cc_fiber_spawn_task (fibers)
+    {
+        uint64_t total = 0;
+        for (int run = 0; run < RUNS; run++) {
+            CCTask tasks[NUM_TASKS];
+            uint64_t t0 = now_ns();
+            for (int i = 0; i < NUM_TASKS; i++) {
+                tasks[i] = cc_fiber_spawn_task(cpu_work, (void*)(uintptr_t)i);
+            }
+            for (int i = 0; i < NUM_TASKS; i++) {
+                cc_block_on_intptr(tasks[i]);
+            }
+            uint64_t t1 = now_ns();
+            total += (t1 - t0);
+        }
+        double avg_ms = (double)total / RUNS / 1000000.0;
+        double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
+        printf("3. cc_fiber_spawn_task:      %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+    }
+    
+    // 4. Spawn-only overhead (spawn + immediate join, minimal work)
+    printf("\n--- Spawn/Join Overhead (minimal work) ---\n");
+    
+    {
+        uint64_t total_spawn = 0, total_fiber = 0;
+        for (int run = 0; run < RUNS; run++) {
+            CCTask tasks[NUM_TASKS];
+            
+            uint64_t t0 = now_ns();
+            for (int i = 0; i < NUM_TASKS; i++) {
+                tasks[i] = cc_spawn(minimal_work, (void*)(uintptr_t)i);
+            }
+            for (int i = 0; i < NUM_TASKS; i++) {
+                cc_block_on_intptr(tasks[i]);
+            }
+            uint64_t t1 = now_ns();
+            total_spawn += (t1 - t0);
+            
+            t0 = now_ns();
+            for (int i = 0; i < NUM_TASKS; i++) {
+                tasks[i] = cc_fiber_spawn_task(minimal_work, (void*)(uintptr_t)i);
+            }
+            for (int i = 0; i < NUM_TASKS; i++) {
+                cc_block_on_intptr(tasks[i]);
+            }
+            t1 = now_ns();
+            total_fiber += (t1 - t0);
+        }
+        double spawn_us = (double)total_spawn / RUNS / NUM_TASKS / 1000.0;
+        double fiber_us = (double)total_fiber / RUNS / NUM_TASKS / 1000.0;
+        printf("cc_spawn overhead:           %6.2f us/task\n", spawn_us);
+        printf("cc_fiber overhead:           %6.2f us/task\n", fiber_us);
+        printf("Fiber overhead delta:        %6.2f us/task\n", fiber_us - spawn_us);
+    }
+    
+    printf("\nDone.\n");
+    return 0;
+}
