@@ -1047,6 +1047,10 @@ static void* sysmon_main(void* arg) {
             continue;
         
         /* Spawn all needed workers at once */
+#ifdef CC_DEBUG_SYSMON
+        fprintf(stderr, "[sysmon] scaling: stuck=%zu, spawning %zu (total will be %zu)\n",
+                stuck, to_spawn, total_workers + to_spawn);
+#endif
         for (size_t s = 0; s < to_spawn; s++) {
             if (!atomic_compare_exchange_strong(&g_sched.temp_worker_count, &current, current + 1))
                 break;
@@ -1295,8 +1299,8 @@ int cc_fiber_sched_init(size_t num_workers) {
             num_workers = CC_FIBER_WORKERS;
             #else
             long n = sysconf(_SC_NPROCESSORS_ONLN);
-            /* Start at 2x cores for better CPU-bound parallelism */
-            num_workers = n > 0 ? (size_t)(n * 2) : 8;
+            /* Start at 1x cores, auto-scale to 2x for CPU-bound work */
+            num_workers = n > 0 ? (size_t)n : 4;
             #endif
         }
     }

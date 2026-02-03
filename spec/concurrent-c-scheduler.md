@@ -7,7 +7,7 @@ The Concurrent-C fiber scheduler provides M:N scheduling of user-space fibers on
 ## Design Goals
 
 1. **Unified API**: Users write `@async` functions without choosing thread vs fiber
-2. **Automatic scaling**: Start with 2x cores, scale more if needed
+2. **Automatic scaling**: Start lean (1x cores), scale to 2x for CPU-bound work
 3. **Zero overhead for I/O**: Work stealing handles yielding tasks efficiently
 4. **Pthread parity for CPU-bound**: Match thread performance for compute workloads
 5. **Zero user tuning**: Round-robin distribution happens automatically
@@ -16,8 +16,8 @@ The Concurrent-C fiber scheduler provides M:N scheduling of user-space fibers on
 
 ### Worker Pool
 
-- **Initial workers**: 2x CPU cores (good for both I/O and CPU workloads)
-- **Maximum workers**: 3x CPU cores (auto-scale limit via sysmon)
+- **Initial workers**: 1x CPU cores (lean start for I/O workloads)
+- **Maximum workers**: 2x CPU cores (auto-scale limit via sysmon)
 - **Growth rate**: 50% per scale event (exponential growth)
 
 ### Queue Structure
@@ -147,13 +147,18 @@ Both I/O-bound and CPU-bound work handled optimally with the same API.
 - `CC_FIBER_WORKERS`: Fixed worker count (disables auto-detection)
 - `CC_FIBER_STACK_SIZE`: Per-fiber stack size (default: platform-dependent)
 
+### Debug Flags
+
+- `CC_DEBUG_DEADLOCK`: Enable detailed fiber dump on deadlock detection
+- `CC_DEBUG_SYSMON`: Log sysmon scaling decisions to stderr
+
 ## How It Works
 
 ### The Key Insights
 
 1. **Round-robin distribution**: Spread spawns evenly across workers, don't pile onto one queue
 2. **Always wake**: After every spawn, wake a sleeping worker (critical for latency!)
-3. **2x workers by default**: More workers than cores handles CPU burst better
+3. **Auto-scale to 2x**: Sysmon detects CPU-bound work and scales up 50% at a time
 4. **Work stealing**: Automatic load balancing when distribution isn't perfect
 
 ### Why Round-Robin + Wake Wins

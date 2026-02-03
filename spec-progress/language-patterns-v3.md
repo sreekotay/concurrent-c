@@ -22,7 +22,7 @@ Currently, `@match` uses a single global broadcast condition variable (`g_chan_b
 
 ---
 
-## 2. Proposed Pattern: The "Wait Node" (Go-style)
+## 3. Proposed Pattern: The "Wait Node" (Go-style)
 
 To achieve $O(1)$ wakeups, we must move the waiting state from a global variable to the specific channels involved in the operation.
 
@@ -47,7 +47,7 @@ To achieve $O(1)$ wakeups, we must move the waiting state from a global variable
 
 ---
 
-## 3. The "Sharded Broadcast" (The Middle Ground)
+## 4. The "Sharded Broadcast" (The Middle Ground)
 
 If the Wait Node pattern is too complex for immediate implementation, **Sharding** provides a massive scalability boost with minimal code changes.
 
@@ -62,7 +62,7 @@ pthread_cond_t g_chan_shards[128];
 
 ---
 
-## 4. Pattern: Explicit Poll Groups
+## 5. Pattern: Explicit Poll Groups
 
 For systems with thousands of channels (e.g., a web server), we can introduce **Poll Groups** to give the developer control over the broadcast scope.
 
@@ -82,18 +82,18 @@ cc_chan_set_poll_group(rx2, pg);
 
 ---
 
-## 5. Advanced Deadlock & Stall Detection
+## 6. Advanced Deadlock & Stall Detection
 
 To move from global "Smoke Alarms" to precise "Fire Marshalling," we propose nursery-local and yield-aware monitoring.
 
-### 5.1 Local Nursery Health Monitoring
+### 6.1 Local Nursery Health Monitoring
 **Problem:** Global detection misses partial deadlocks where some workers are still making progress.
 **Pattern:** Nurseries monitor their own children for internal circular dependencies.
 - **Mechanism:** When `cc_nursery_wait()` is called, it enters a monitoring state. If all children of that nursery are `PARKED` on channels that the nursery itself is registered to close (`closing(ch)`), it triggers a **Local Deadlock Error**.
 - **Diagnostic Philosophy:** This uses the **Skeleton** (the nursery hierarchy) to diagnose a stall in the **Flow** (the channel graph).
 - **Implementation Note:** Requires `fiber_task` to store a pointer to its parent nursery. `cc_nursery_wait` can then scan its task list and check the `park_reason` and channel provenance.
 
-### 5.2 The "Synchronous Bridge" Watchdog
+### 6.2 The "Synchronous Bridge" Watchdog
 **Problem:** Fibers calling legacy C code can block OS threads (e.g., `pthread_mutex_lock`), making the worker unavailable to the scheduler without the runtime knowing.
 **Pattern:** Track "Time Since Last Yield" per worker.
 - **Mechanism:** Each worker thread updates a `last_yield_ns` timestamp in its core loop. A background watchdog thread periodically scans all workers. If `now - last_yield_ns > 500ms`, it emits a **Stall Warning** with a backtrace of the offending worker.
@@ -102,44 +102,226 @@ To move from global "Smoke Alarms" to precise "Fire Marshalling," we propose nur
 
 ---
 
-## 6. Pipelined Channels: Seamless Ordered Parallelism
+## 7. Ordered Channels: Seamless Ordered Parallelism
 
-To eliminate the "Task-Handle Crutch" (manually passing `CCTaskPtr` through channels), we introduce **Pipelined Channels**. This pattern allows the **Circulatory System** to natively manage the execution order of tasks.
+To eliminate the "Task-Handle Crutch" (manually passing `CCTask` through channels), we introduce **Ordered Channels**. This pattern allows the **Circulatory System** to natively manage execution order while preserving Result-based error propagation.
 
-### The Idiom
+### The Problem: Manual Task-Handle Plumbing
+
+Consider the compression pipeline in `pigz_cc.ccs`. The current pattern requires:
+
 ```c
-// The 'pipelined' modifier tells the compiler this channel manages task handles
-CompressedResult*[~16 pipelined] results_ch;
+// 1. Wrapper function to convert Result to void*
+void* compress_block_task(void* arg) {
+    Block* blk = (Block*)arg;
+    CompressedResultPtr !>(CCIoError) res = compress_block(...);
+    if (cc_is_err(res)) return NULL;  // Error information lost!
+    return cc_unwrap_as(res, CompressedResult*);
+}
+
+// 2. Channel of task handles (not results)
+CCTask[~chan_cap >] tasks_tx;
+CCTask[~chan_cap <] tasks_rx;
+CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+
+// 3. Producer: spawn task, get handle, send handle
+CCTask task = cc_fiber_spawn_task(compress_block_task, blk);
+chan_send(tasks_tx, task);
+
+// 4. Consumer: receive handle, await completion, null-check for errors
+CCTask task;
+while (cc_io_avail(chan_recv(tasks_rx, &task))) {
+    void* result = (void*)cc_block_on_intptr(task);
+    if (!result) { /* error - but which error? */ }
+    CompressedResult* r = (CompressedResult*)result;
+    write_block(r);
+}
+```
+
+This pattern has three problems:
+1. **Boilerplate:** ~40 lines of plumbing for a simple producer-consumer flow.
+2. **Error Erasure:** The wrapper converts `T!>(E)` to `void*`, losing error type information.
+3. **Manual Coordination:** The developer must remember to spawn-then-send and recv-then-await.
+
+### The Idiom: Ordered Channels
+
+The `ordered` modifier eliminates this ceremony:
+
+```c
+// Declaration: user thinks in results, compiler manages handles internally
+CompressedResult*[~16 ordered] results;
+
+@nursery closing(results) {
+    // Producer: 'spawn into' fuses spawn + send handle
+    for each block {
+        spawn into(results) () => compress_block(blk);
+    }
+}
+
+// Consumer: 'await recv' fuses recv + await + error propagation
+CompressedResult* r;
+while (await results.recv(&r)?) {
+    write_block(r);
+}
+```
+
+### Error Propagation Semantics
+
+The `await ch.recv(&r)` operation returns `bool !> (E)` with three outcomes:
+
+| Return Value | Meaning | Action |
+| :--- | :--- | :--- |
+| `Ok(true)` | Value received | `r` is valid, continue loop |
+| `Ok(false)` | Channel closed | Normal EOF, exit loop |
+| `Err(e)` | Task failed | Propagate via `?` operator |
+
+This matches CC's existing I/O patterns (e.g., `cc_io_avail()`), where `bool !> (E)` cleanly separates "done" from "error."
+
+### The Lowering (Transparent Transformer)
+
+The `ordered` modifier is a directive for the compiler's lowering phase:
+
+**Storage:**
+```c
+// User declares:
+T*[~cap ordered] results;
+
+// Compiler generates:
+struct {
+    CCChan* _handle_chan;  // Holds CCTask, not T*
+} results;
+results._handle_chan = cc_chan_create(cap, sizeof(CCTask));
+```
+
+**Verb (`spawn into`):**
+
+When the spawned closure returns `T* !> (E)`:
+```c
+// User writes:
+spawn into(results) () => compress_block(blk);
+
+// Compiler generates:
+{
+    // 1. Capture closure and spawn fiber
+    __closure_t* cap = ...;  // captures blk, etc.
+    CCTask task = cc_fiber_spawn_task(__ordered_wrapper, cap);
+    
+    // 2. Send handle through internal channel
+    chan_send(results._handle_chan, &task);
+}
+
+// Generated wrapper preserves error information:
+intptr_t __ordered_wrapper(void* arg) {
+    __closure_t* cap = (__closure_t*)arg;
+    T* !> (E) res = user_closure(cap);
+    if (cc_is_err(res)) {
+        return cc_task_result_err(cc_unwrap_err(res));
+    }
+    return cc_task_result_ok(cc_unwrap(res));
+}
+```
+
+**Verb (`await recv`):**
+
+```c
+// User writes:
+T* r;
+bool !> (E) ok = await results.recv(&r);
+
+// Compiler generates:
+CCTask task;
+if (!cc_chan_recv(results._handle_chan, &task, sizeof(task))) {
+    return cc_ok(false);  // Channel closed
+}
+CCTaskResult res = cc_task_await(task);
+if (res.is_err) {
+    return cc_err(res.error);  // Propagate task error
+}
+*r = (T*)res.value;
+return cc_ok(true);
+```
+
+### Full Example: pigz Compression Pipeline
+
+**Before (manual task-handle pattern):** ~50 lines
+
+```c
+// Wrapper function (error erasure)
+void* compress_block_task(void* arg) {
+    Block* blk = (Block*)arg;
+    CompressedResultPtr !>(CCIoError) res = compress_block(strm, blk, ...);
+    return_input_arena(blk->arena, blk->pool);
+    if (cc_is_err(res)) return NULL;
+    return cc_unwrap_as(res, CompressedResult*);
+}
+
+// Pipeline setup
+CCTask[~chan_cap >] tasks_tx;
+CCTask[~chan_cap <] tasks_rx;
+CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
 
 @nursery {
-    // 'spawn into' creates a task and pushes its handle into the channel FIFO
-    spawn into(results_ch) () => compress(blk);
-
-    // IDIOMATIC RECV:
-    // 1. results_ch.recv(&r) returns bool !> (CCIoError)
-    // 2. 'await' suspends until the task at the head of the FIFO is DONE
-    // 3. '?' propagates any channel or task errors
-    CompressedResult* r;
-    while (await results_ch.recv(&r)?) {
-        write_block(r);
+    // Writer task
+    spawn([tasks_rx]() => {
+        CCTask task;
+        while (cc_io_avail(chan_recv(tasks_rx, &task))) {
+            void* result = (void*)cc_block_on_intptr(task);
+            if (!result) { write_failed = true; break; }
+            CompressedResult* r = (CompressedResult*)result;
+            cc_file_write(out, r->data);
+            cc_heap_arena_free(&r->arena);
+        }
+    });
+    
+    // Reader task
+    @nursery closing(tasks_tx) {
+        spawn([tasks_tx]() => {
+            while (read_block(&blk)) {
+                CCTask task = cc_fiber_spawn_task(compress_block_task, blk);
+                chan_send(tasks_tx, task);
+            }
+        });
     }
 }
 ```
 
-### The Lowering (Transparent Transformer)
-The `pipelined` modifier is a directive for the compiler's lowering phase:
-1.  **Storage:** The underlying `CCChan` is allocated to hold `CCTaskPtr` (task handles) instead of raw `T*`.
-2.  **Verb (`spawn into`):** Lowers to `cc_thread_spawn` followed immediately by a `chan_send` of the resulting handle.
-3.  **Verb (`await recv`):** Lowers to a `chan_recv` of the handle, followed by a **Wait Node** suspension on that specific task's completion.
+**After (ordered channels):** ~15 lines
+
+```c
+CompressedResult*[~chan_cap ordered] results;
+
+@nursery {
+    // Writer task
+    spawn([results]() => {
+        CompressedResult* r;
+        while (await results.recv(&r)?) {
+            cc_file_write(out, r->data)?;
+            cc_heap_arena_free(&r->arena);
+        }
+    });
+    
+    // Reader task
+    @nursery closing(results) {
+        spawn([results]() => {
+            while (read_block(&blk)?) {
+                spawn into(results) () => compress_block(blk);
+            }
+        });
+    }
+}
+```
 
 ### Why This Fits CC
-- **Type Safety:** The compiler ensures you only `spawn into` a pipelined channel and only `await` its results.
-- **Composition:** It fuses **Ordering** (Channel FIFO) with **Parallelism** (Spawn) and **Synchronization** (Await) into a single, non-magical flow.
-- **Zero-Cost:** By using the **Wait Node** pattern (Section 2), the `await` on `recv()` is $O(1)$ and avoids global broadcasts.
+
+- **Type Safety:** The compiler ensures you only `spawn into` an ordered channel and only `await` its results. Misuse is a compile error.
+- **Error Preservation:** Task errors flow through the Result type system instead of being erased to `NULL`.
+- **Composition:** Fuses **Ordering** (Channel FIFO) with **Parallelism** (Spawn) and **Synchronization** (Await) into a single, non-magical flow.
+- **Zero-Cost:** By using the **Wait Node** pattern (Section 3), the `await` on `recv()` is $O(1)$ and avoids global broadcasts.
+- **Local Reasoning:** The `ordered` modifier is visible at declaration, making the channel's semantics clear without tracing through code.
 
 ---
 
-## 7. Unified Spawn Verbs: Fibers vs. Threads
+## 8. Unified Spawn Verbs: Fibers vs. Threads
 
 To maintain the **Principle of Orthogonal Concerns**, Concurrent-C provides explicit verbs for choosing the underlying execution mechanism.
 
@@ -153,7 +335,7 @@ spawn () => { ... };
 // Lowers to: cc_thread_spawn()
 spawn_thread () => { ... };
 
-// 3. Pipelined Spawn (The Ordered Flow)
+// 3. Ordered Spawn (The Ordered Flow)
 // Lowers to: cc_fiber_spawn_task() + chan_send()
 spawn into(results_ch) () => { ... };
 ```
@@ -170,19 +352,19 @@ spawn into(results_ch) () => { ... };
 
 ---
 
-## 8. Summary of Scaling & Safety Idioms
+## 9. Summary of Scaling & Safety Idioms
 
 | Pattern | Complexity | Scalability | Philosophy |
 | :--- | :--- | :--- | :--- |
 | **Wait Nodes** | High | High | Zero-cost abstraction |
 | **Poll Groups** | Medium | High | Explicit orchestration |
-| **Pipelined Channels** | Medium | High | Seamless composition |
+| **Ordered Channels** | Medium | High | Seamless composition |
 | **Spawn Verbs** | Low | N/A | Explicit mechanism |
 | **Nursery Health** | Medium | N/A | Structured safety |
 | **Stall Watchdog** | Low | N/A | Performance transparency |
 
 ### Recommendation for Phase 1.1
 1. Implement **Wait Nodes** as the normative lowering for `@match`.
-2. Implement **Pipelined Channels** (`pipelined` modifier + `spawn into`).
+2. Implement **Ordered Channels** (`ordered` modifier + `spawn into` + `await recv`).
 3. Unify **Spawn Verbs** using `cc_thread_spawn` for OS threads and `cc_fiber_spawn_task` for fibers.
 4. Integrate **Stall Watchdog** and **Nursery Health** checks for structural diagnostics.
