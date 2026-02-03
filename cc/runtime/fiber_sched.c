@@ -1535,6 +1535,18 @@ void cc_fiber_task_free(fiber_task* f) {
     }
 }
 
+/* Non-blocking poll: check if fiber is done without blocking */
+int cc_fiber_poll_done(fiber_task* f) {
+    if (!f) return 1;  /* NULL fiber is "done" */
+    return atomic_load_explicit(&f->done, memory_order_acquire);
+}
+
+/* Get result from a completed fiber (only valid after poll_done returns true) */
+void* cc_fiber_get_result(fiber_task* f) {
+    if (!f) return NULL;
+    return f->result;
+}
+
 /* ============================================================================
  * Fiber Parking (for channel blocking)
  * ============================================================================ */

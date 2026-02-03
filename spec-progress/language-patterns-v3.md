@@ -139,18 +139,50 @@ The `pipelined` modifier is a directive for the compiler's lowering phase:
 
 ---
 
-## 7. Summary of Scaling & Safety Idioms
+## 7. Unified Spawn Verbs: Fibers vs. Threads
+
+To maintain the **Principle of Orthogonal Concerns**, Concurrent-C provides explicit verbs for choosing the underlying execution mechanism.
+
+### The Idioms
+```c
+// 1. Fiber Spawn (The Default)
+// Lowers to: cc_spawn_fiber()
+spawn () => { ... };
+
+// 2. Thread Spawn (The OS Offload)
+// Lowers to: cc_spawn_thread()
+spawn_thread () => { ... };
+
+// 3. Pipelined Spawn (The Ordered Flow)
+// Lowers to: cc_spawn_fiber() + chan_send()
+spawn into(results_ch) () => { ... };
+```
+
+### The Lowering (Transparent Transformer)
+1.  **`spawn`**: Targets the high-performance M:N fiber scheduler. Use for 99% of concurrent logic.
+2.  **`spawn_thread`**: Targets a dedicated OS-thread pool. Use for offloading legacy C code, blocking syscalls, or thread-sensitive FFI.
+3.  **`spawn into`**: Fuses a spawn with a channel push to preserve execution order in a pipeline.
+
+### Why This Fits CC
+- **Explicitness:** The developer chooses the "weight" of the task (`fiber` vs `thread`) based on the nature of the work.
+- **Symmetry:** All verbs start with `spawn`, making the "Skeleton" of the program easy to scan.
+- **ABI Clarity:** The "naked" C functions (`cc_spawn_fiber` and `cc_spawn_thread`) provide a stable, searchable interface for the generated code.
+
+---
+
+## 8. Summary of Scaling & Safety Idioms
 
 | Pattern | Complexity | Scalability | Philosophy |
 | :--- | :--- | :--- | :--- |
 | **Wait Nodes** | High | High | Zero-cost abstraction |
 | **Poll Groups** | Medium | High | Explicit orchestration |
 | **Pipelined Channels** | Medium | High | Seamless composition |
+| **Spawn Verbs** | Low | N/A | Explicit mechanism |
 | **Nursery Health** | Medium | N/A | Structured safety |
 | **Stall Watchdog** | Low | N/A | Performance transparency |
 
 ### Recommendation for Phase 1.1
 1. Implement **Wait Nodes** as the normative lowering for `@match`.
-2. Implement **Pipelined Channels** (`pipelined` modifier + `spawn into`) to eliminate manual task-handle management.
-3. Integrate **Stall Watchdog** into the base fiber scheduler to identify "leaky" synchronous calls.
-4. Add **Nursery Health** checks to `cc_nursery_wait` to catch partial deadlocks in complex pipelines.
+2. Implement **Pipelined Channels** (`pipelined` modifier + `spawn into`).
+3. Unify **Spawn Verbs** by renaming `cc_spawn` to `cc_spawn_thread` and providing the `spawn_thread` keyword.
+4. Integrate **Stall Watchdog** and **Nursery Health** checks for structural diagnostics.

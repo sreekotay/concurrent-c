@@ -44,6 +44,7 @@ typedef int CCTaskIntptrKind;
 #define CC_TASK_KIND_SPAWN   1
 #define CC_TASK_KIND_FUTURE  2
 #define CC_TASK_KIND_POLL    3
+#define CC_TASK_KIND_FIBER   4
 #define CC_TASK_INTPTR_KIND_INVALID 0
 #define CC_TASK_INTPTR_KIND_FUTURE  2
 #define CC_TASK_INTPTR_KIND_POLL    3
@@ -54,6 +55,7 @@ typedef enum {
     CC_TASK_KIND_SPAWN = 1,   /* OS thread (from cc_spawn) */
     CC_TASK_KIND_FUTURE = 2,  /* Executor pool */
     CC_TASK_KIND_POLL = 3,    /* State machine (from @async) */
+    CC_TASK_KIND_FIBER = 4,   /* M:N fiber (from cc_fiber_spawn_task) */
 } CCTaskKind;
 
 /* Opaque CCTask struct - the actual layout is implementation detail.
@@ -93,6 +95,14 @@ void cc_scheduler_shutdown(void);
 CCTask cc_spawn(void* (*fn)(void*), void* arg);
 /* Spawn a 0-arg closure (env freed via drop, if provided). */
 CCTask cc_spawn_closure0(CCClosure0 c);
+
+/* Spawn an M:N fiber task. Returns a CCTask value with kind=CC_TASK_KIND_FIBER.
+   Fibers are lightweight cooperative tasks multiplexed onto worker threads.
+   Use cc_block_on_intptr(task) to wait and get the result.
+   On failure, returns CCTask with kind=CC_TASK_KIND_INVALID. */
+CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg);
+/* Spawn a fiber from a 0-arg closure. */
+CCTask cc_fiber_spawn_closure0(CCClosure0 c);
 
 /* ============================================================================
  * DEPRECATED legacy API (pointer-based, for backward compatibility)

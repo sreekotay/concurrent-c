@@ -1,0 +1,132 @@
+/* Smoke test for cc_task_poll - non-blocking poll for all task kinds */
+
+#include <ccc/cc_sched.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+static void* slow_compute(void* arg) {
+    int x = (int)(intptr_t)arg;
+    cc_sleep_ms(50);  /* Simulate work */
+    return (void*)(intptr_t)(x * 2);
+}
+
+static void* fast_compute(void* arg) {
+    int x = (int)(intptr_t)arg;
+    return (void*)(intptr_t)(x + 1);
+}
+
+int main(void) {
+    printf("Test 1: Poll SPAWN task (OS thread)\n");
+    {
+        CCTask task = cc_spawn(slow_compute, (void*)21);
+        
+        /* Poll should return PENDING initially */
+        intptr_t val = 0;
+        int err = 0;
+        CCFutureStatus st = cc_task_poll(&task, &val, &err);
+        if (st != CC_FUTURE_PENDING) {
+            printf("FAIL: expected PENDING initially, got %d\n", st);
+            return 1;
+        }
+        printf("  Poll returned PENDING (correct)\n");
+        
+        /* Wait for completion via block_on */
+        intptr_t result = cc_block_on_intptr(task);
+        if (result != 42) {
+            printf("FAIL: expected 42, got %ld\n", (long)result);
+            return 1;
+        }
+        printf("  OK: result = %ld\n", (long)result);
+    }
+
+    printf("Test 2: Poll FIBER task\n");
+    {
+        CCTask task = cc_fiber_spawn_task(slow_compute, (void*)50);
+        
+        /* Poll should return PENDING initially */
+        intptr_t val = 0;
+        int err = 0;
+        CCFutureStatus st = cc_task_poll(&task, &val, &err);
+        if (st != CC_FUTURE_PENDING) {
+            printf("FAIL: expected PENDING initially, got %d\n", st);
+            return 1;
+        }
+        printf("  Poll returned PENDING (correct)\n");
+        
+        /* Wait for completion */
+        intptr_t result = cc_block_on_intptr(task);
+        if (result != 100) {
+            printf("FAIL: expected 100, got %ld\n", (long)result);
+            return 1;
+        }
+        printf("  OK: result = %ld\n", (long)result);
+    }
+
+    printf("Test 3: Poll fast task until ready\n");
+    {
+        CCTask task = cc_fiber_spawn_task(fast_compute, (void*)99);
+        
+        /* Poll loop until ready */
+        intptr_t val = 0;
+        int err = 0;
+        CCFutureStatus st;
+        int polls = 0;
+        do {
+            st = cc_task_poll(&task, &val, &err);
+            polls++;
+            if (st == CC_FUTURE_PENDING) {
+                cc_sleep_ms(1);  /* Brief yield */
+            }
+        } while (st == CC_FUTURE_PENDING && polls < 1000);
+        
+        if (st != CC_FUTURE_READY) {
+            printf("FAIL: expected READY, got %d after %d polls\n", st, polls);
+            return 1;
+        }
+        if (val != 100) {
+            printf("FAIL: expected 100, got %ld\n", (long)val);
+            return 1;
+        }
+        printf("  OK: poll returned READY with value %ld after %d polls\n", (long)val, polls);
+        
+        /* Clean up - still need to block_on to free resources */
+        cc_block_on_intptr(task);
+    }
+
+    printf("Test 4: Multiple tasks with polling\n");
+    {
+        CCTask t1 = cc_fiber_spawn_task(fast_compute, (void*)1);
+        CCTask t2 = cc_spawn(fast_compute, (void*)2);
+        CCTask t3 = cc_fiber_spawn_task(fast_compute, (void*)3);
+        
+        /* Poll all until ready */
+        int done1 = 0, done2 = 0, done3 = 0;
+        intptr_t r1 = 0, r2 = 0, r3 = 0;
+        int err = 0;
+        
+        for (int i = 0; i < 1000 && !(done1 && done2 && done3); i++) {
+            if (!done1 && cc_task_poll(&t1, &r1, &err) == CC_FUTURE_READY) done1 = 1;
+            if (!done2 && cc_task_poll(&t2, &r2, &err) == CC_FUTURE_READY) done2 = 1;
+            if (!done3 && cc_task_poll(&t3, &r3, &err) == CC_FUTURE_READY) done3 = 1;
+            if (!(done1 && done2 && done3)) cc_sleep_ms(1);
+        }
+        
+        if (!done1 || !done2 || !done3) {
+            printf("FAIL: not all tasks completed (done: %d %d %d)\n", done1, done2, done3);
+            return 1;
+        }
+        if (r1 != 2 || r2 != 3 || r3 != 4) {
+            printf("FAIL: expected 2,3,4 got %ld,%ld,%ld\n", (long)r1, (long)r2, (long)r3);
+            return 1;
+        }
+        printf("  OK: all tasks polled to completion: %ld, %ld, %ld\n", (long)r1, (long)r2, (long)r3);
+        
+        /* Clean up */
+        cc_block_on_intptr(t1);
+        cc_block_on_intptr(t2);
+        cc_block_on_intptr(t3);
+    }
+
+    printf("All task_poll tests passed!\n");
+    return 0;
+}

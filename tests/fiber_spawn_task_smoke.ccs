@@ -1,0 +1,57 @@
+/* Smoke test for cc_fiber_spawn_task - unified CCTask API for fibers */
+
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+
+static void* compute_value(void* arg) {
+    int x = (int)(intptr_t)arg;
+    return (void*)(intptr_t)(x * 2);
+}
+
+int main(void) {
+    printf("Test 1: cc_fiber_spawn_task basic\n");
+    {
+        CCTask task = cc_fiber_spawn_task(compute_value, (void*)21);
+        intptr_t result = cc_block_on_intptr(task);
+        if (result != 42) {
+            printf("FAIL: expected 42, got %ld\n", (long)result);
+            return 1;
+        }
+        printf("  OK: got result %ld\n", (long)result);
+    }
+
+    printf("Test 2: Multiple fiber tasks\n");
+    {
+        CCTask t1 = cc_fiber_spawn_task(compute_value, (void*)10);
+        CCTask t2 = cc_fiber_spawn_task(compute_value, (void*)20);
+        CCTask t3 = cc_fiber_spawn_task(compute_value, (void*)30);
+        
+        intptr_t r1 = cc_block_on_intptr(t1);
+        intptr_t r2 = cc_block_on_intptr(t2);
+        intptr_t r3 = cc_block_on_intptr(t3);
+        
+        if (r1 != 20 || r2 != 40 || r3 != 60) {
+            printf("FAIL: expected 20,40,60 got %ld,%ld,%ld\n", 
+                   (long)r1, (long)r2, (long)r3);
+            return 1;
+        }
+        printf("  OK: got results %ld, %ld, %ld\n", (long)r1, (long)r2, (long)r3);
+    }
+
+    printf("Test 3: cc_fiber_spawn_closure0\n");
+    {
+        int captured = 100;
+        CCTask task = cc_fiber_spawn_closure0([captured]() => {
+            return (void*)(intptr_t)(captured + 23);
+        });
+        intptr_t result = cc_block_on_intptr(task);
+        if (result != 123) {
+            printf("FAIL: expected 123, got %ld\n", (long)result);
+            return 1;
+        }
+        printf("  OK: closure got result %ld\n", (long)result);
+    }
+
+    printf("All fiber_spawn_task tests passed!\n");
+    return 0;
+}

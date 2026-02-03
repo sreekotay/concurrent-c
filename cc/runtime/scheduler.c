@@ -216,6 +216,24 @@ void cc_spawn_task_free(struct CCSpawnTask* task) {
     pthread_mutex_unlock(&task->mu);
 }
 
+/* Non-blocking poll: check if spawn task is done without blocking */
+int cc_spawn_task_poll_done(struct CCSpawnTask* task) {
+    if (!task) return 0;
+    pthread_mutex_lock(&task->mu);
+    int done = task->done;
+    pthread_mutex_unlock(&task->mu);
+    return done;
+}
+
+/* Get result from a completed spawn task (caller must ensure task is done) */
+void* cc_spawn_task_get_result(struct CCSpawnTask* task) {
+    if (!task) return NULL;
+    pthread_mutex_lock(&task->mu);
+    void* result = task->result;
+    pthread_mutex_unlock(&task->mu);
+    return result;
+}
+
 int cc_sleep_ms(unsigned int ms) {
     struct timespec ts;
     ts.tv_sec = ms / 1000;

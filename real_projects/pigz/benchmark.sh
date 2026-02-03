@@ -230,20 +230,20 @@ echo "COMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG -k -p $WORKERS" "$INPUT_FILE"
 run_compress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC -k -p $WORKERS" "$INPUT_FILE"
+run_compress orig "Original pigz (pthread)" "$PIGZ_ORIG -k -p $WORKERS" "$INPUT_FILE"
 
 # Create compressed files for decompression benchmarks
 echo "=== Preparing Compressed Files ==="
-cp "$INPUT_FILE" bench_orig.bin
-$PIGZ_ORIG -k -p $WORKERS bench_orig.bin
-mv bench_orig.bin.gz bench_orig.gz
-echo "Original pigz compressed: $(du -h bench_orig.gz | cut -f1)"
-
 cp "$INPUT_FILE" bench_cc.bin
 $PIGZ_CC -k -p $WORKERS bench_cc.bin
 mv bench_cc.bin.gz bench_cc.gz
 echo "CC pigz compressed: $(du -h bench_cc.gz | cut -f1)"
+
+cp "$INPUT_FILE" bench_orig.bin
+$PIGZ_ORIG -k -p $WORKERS bench_orig.bin
+mv bench_orig.bin.gz bench_orig.gz
+echo "Original pigz compressed: $(du -h bench_orig.gz | cut -f1)"
 echo ""
 
 # Run decompression benchmarks
@@ -252,8 +252,8 @@ echo "DECOMPRESSION BENCHMARKS"
 echo "=============================================="
 echo ""
 
-run_decompress orig "Original pigz (pthread)" "$PIGZ_ORIG -d -k -p $WORKERS" "bench_orig.gz"
 run_decompress cc   "CC pigz (Concurrent-C)"  "$PIGZ_CC -d -k -p $WORKERS" "bench_cc.gz"
+run_decompress orig "Original pigz (pthread)" "$PIGZ_ORIG -d -k -p $WORKERS" "bench_orig.gz"
 
 # Verify correctness
 echo "=== Correctness Check ==="
