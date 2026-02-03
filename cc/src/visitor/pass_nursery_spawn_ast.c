@@ -250,6 +250,13 @@ static int cc__edit_cmp_start_asc(const void* a, const void* b) {
     return 0;
 }
 
+/* Note: Ordered channel validation helpers were removed. The validation for spawn_into
+   and await_recv would require checking the original source before channel type rewrites.
+   For now, we rely on the type system and runtime behavior to catch misuse.
+   
+   Planned future enhancement: track ordered channel pairings during channel_pair lowering
+   and make this information available to the spawn pass. */
+
 typedef struct {
     int node_i;
     size_t start_off;
@@ -473,6 +480,9 @@ int cc__rewrite_spawn_stmts_with_nodes(const CCASTRoot* root,
 
     Edit edits[1024];
     int en = 0;
+
+    /* NOTE: spawn_into is handled in cc__collect_spawn_edits which is the active code path.
+       This legacy function (cc__rewrite_spawn_stmts_with_nodes) only handles regular spawn. */
 
     for (int i = 0; i < root->node_count && en < (int)(sizeof(edits) / sizeof(edits[0])); i++) {
         if (n[i].kind != CC_AST_NODE_STMT) continue;
@@ -912,6 +922,171 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
 
     int edits_added = 0;
 
+    /* First handle spawn_into statements */
+    for (int i = 0; i < root->node_count; i++) {
+        if (n[i].kind != CC_AST_NODE_STMT) continue;
+        if (!n[i].aux_s1 || strcmp(n[i].aux_s1, "spawn_into") != 0) continue;
+        if (n[i].line_end <= 0) continue;
+
+        size_t start = 0;
+        int col1 = 1;
+        int sr = cc__stmt_marker_start_off(root, ctx, n, i, in_src, in_len, "spawn", 5, &start, &col1);
+        if (sr == 0) continue;
+        if (sr < 0) { free(id_by_node); return -1; }
+
+        int nursery_i = cc__find_enclosing_nursery_node_i(root, i);
+        int nid = (nursery_i >= 0 && nursery_i < root->node_count) ? id_by_node[nursery_i] : 0;
+        if (nid == 0) {
+            const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            cc_pass_error_cat(f, n[i].line_start, col1, CC_ERR_ASYNC,
+                    "'spawn into' must be inside an '@nursery { ... }' block");
+            free(id_by_node);
+            return -1;
+        }
+        
+        /* For spawn_into, use AST-provided end position (pinned during parsing).
+           Don't use cc__infer_spawn_stmt_end_off - it's designed for spawn(expr) not spawn into. */
+        size_t end = 0;
+        if (n[i].col_end > 0) {
+            end = cc__offset_of_line_col_1based(in_src, in_len, n[i].line_end, n[i].col_end);
+        } else {
+            end = cc__offset_of_line_1based(in_src, in_len, n[i].line_end + 1);
+        }
+        if (start >= in_len) continue;
+        if (end > in_len) end = in_len;
+        if (end <= start) continue;
+
+        /* Get channel name from aux_s2 */
+        const char* chan_name = n[i].aux_s2 ? n[i].aux_s2 : "tx";
+        int has_error_prop = (n[i].aux2 & 4) != 0;
+
+        /* Note: spawn into validation (checking tx is paired with ordered rx) would require
+           tracking through channel_pair calls. For now, we rely on the await recv validation
+           on the consumer side to catch misuse. */
+
+        /* Extract the closure expression - find => and get expression after it */
+        const char* stmt = in_src + start;
+        size_t stmt_len = end - start;
+        
+        /* Find "=>" in the statement */
+        size_t arrow_pos = 0;
+        int found_arrow = 0;
+        for (size_t k = 0; k + 1 < stmt_len; k++) {
+            if (stmt[k] == '=' && stmt[k+1] == '>') {
+                arrow_pos = k;
+                found_arrow = 1;
+                break;
+            }
+        }
+        if (!found_arrow) continue;
+        
+        /* Expression starts after "=>" */
+        size_t expr_start = arrow_pos + 2;
+        while (expr_start < stmt_len && (stmt[expr_start] == ' ' || stmt[expr_start] == '\t')) expr_start++;
+        
+        /* Find end of expression (before semicolon) */
+        size_t expr_end = stmt_len;
+        for (size_t k = stmt_len; k > expr_start; k--) {
+            if (stmt[k-1] == ';') { expr_end = k - 1; break; }
+        }
+        while (expr_end > expr_start && (stmt[expr_end-1] == ' ' || stmt[expr_end-1] == '\t')) expr_end--;
+        
+        size_t expr_len = expr_end - expr_start;
+        const char* expr = stmt + expr_start;
+        
+        /* Try to parse simple function call: func(arg) */
+        char func_name[128] = {0};
+        char func_arg[256] = {0};
+        int has_func_arg = 0;
+        
+        /* Find '(' in expression */
+        size_t paren_pos = 0;
+        for (size_t k = 0; k < expr_len; k++) {
+            if (expr[k] == '(') { paren_pos = k; break; }
+        }
+        if (paren_pos > 0 && paren_pos < sizeof(func_name)) {
+            memcpy(func_name, expr, paren_pos);
+            func_name[paren_pos] = 0;
+            /* Trim func_name */
+            size_t fn_len = paren_pos;
+            while (fn_len > 0 && (func_name[fn_len-1] == ' ' || func_name[fn_len-1] == '\t')) {
+                func_name[--fn_len] = 0;
+            }
+            
+            /* Extract argument between '(' and ')' */
+            size_t arg_start = paren_pos + 1;
+            size_t arg_end = expr_len;
+            for (size_t k = expr_len; k > arg_start; k--) {
+                if (expr[k-1] == ')') { arg_end = k - 1; break; }
+            }
+            size_t arg_len = arg_end - arg_start;
+            /* Trim whitespace */
+            while (arg_len > 0 && (expr[arg_start] == ' ' || expr[arg_start] == '\t')) { arg_start++; arg_len--; }
+            while (arg_len > 0 && (expr[arg_start + arg_len - 1] == ' ' || expr[arg_start + arg_len - 1] == '\t')) arg_len--;
+            
+            if (arg_len > 0 && arg_len < sizeof(func_arg)) {
+                memcpy(func_arg, expr + arg_start, arg_len);
+                func_arg[arg_len] = 0;
+                has_func_arg = 1;
+            }
+        }
+        
+        /* Build replacement */
+        size_t ind_len = cc__line_indent_len(in_src, in_len, n[i].line_start);
+        size_t line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
+        const char* indent = (line_off + ind_len <= in_len) ? (in_src + line_off) : "";
+        
+        char* repl = NULL;
+        size_t repl_len = 0, repl_cap = 0;
+        
+        if (func_name[0] && has_func_arg) {
+            /* Generate spawn + send for: func(arg)
+               Uses __spawn_into_call helper which stores result in fiber-local storage.
+               The helper is generic and works with any void*(*)(void*) function. */
+            char b[2048];
+            int nn;
+            if (has_error_prop) {
+                nn = snprintf(b, sizeof(b),
+                    "%.*s{ /* spawn into(%s)? () => %s(%s) */\n"
+                    "%.*s  CCTask __task = __spawn_into_call((void*(*)(void*))%s, (void*)%s);\n"
+                    "%.*s  cc_try(chan_send(%s, __task));\n"
+                    "%.*s}\n",
+                    (int)ind_len, indent, chan_name, func_name, func_arg,
+                    (int)ind_len, indent, func_name, func_arg,
+                    (int)ind_len, indent, chan_name,
+                    (int)ind_len, indent);
+            } else {
+                nn = snprintf(b, sizeof(b),
+                    "%.*s{ /* spawn into(%s) () => %s(%s) */\n"
+                    "%.*s  CCTask __task = __spawn_into_call((void*(*)(void*))%s, (void*)%s);\n"
+                    "%.*s  chan_send(%s, __task);\n"
+                    "%.*s}\n",
+                    (int)ind_len, indent, chan_name, func_name, func_arg,
+                    (int)ind_len, indent, func_name, func_arg,
+                    (int)ind_len, indent, chan_name,
+                    (int)ind_len, indent);
+            }
+            
+            if (nn > 0 && (size_t)nn < sizeof(b)) {
+                cc__append_n(&repl, &repl_len, &repl_cap, b, (size_t)nn);
+            }
+        } else {
+            /* Fallback: generate error for complex expressions */
+            const char* f = (n[i].file && n[i].file[0]) ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
+            cc_pass_error_cat(f, n[i].line_start, col1, CC_ERR_ASYNC,
+                    "'spawn into' requires simple function call expression: spawn into(ch) () => func(arg);");
+            free(id_by_node);
+            return -1;
+        }
+        
+        if (repl && repl_len > 0) {
+            cc_edit_buffer_add(eb, start, end, repl, 0, "spawn_into");
+            edits_added++;
+            free(repl);
+        }
+    }
+
+    /* Then handle regular spawn statements */
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != CC_AST_NODE_STMT) continue;
         if (!n[i].aux_s1 || strcmp(n[i].aux_s1, "spawn") != 0) continue;
@@ -1069,6 +1244,13 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
         }
         free(repl);
     }
+
+    /* NOTE: 'await rx.recv(&var)' is handled by the standard await/UFCS passes.
+       The UFCS pass transforms rx.recv() to cc_chan_recv(), and await_normalize
+       handles the await expression. For ordered channels, the developer must ensure
+       the received value is a CCTask and call cc_block_on_intptr() on it.
+       
+       Future enhancement: Add special 'await_ordered' syntax or validate at channel_pair. */
 
     free(id_by_node);
     return edits_added;

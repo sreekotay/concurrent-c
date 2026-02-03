@@ -309,7 +309,8 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                                        int* out_has_topology,
                                        int* out_unknown_token,
                                        int* out_allow_take,
-                                       const char** out_elem_size_expr) {
+                                       const char** out_elem_size_expr,
+                                       int* out_is_ordered) {
     if (!src || lbr >= len || rbr >= len || rbr <= lbr) return 0;
     if (out_is_tx) *out_is_tx = 0;
     if (out_is_rx) *out_is_rx = 0;
@@ -322,6 +323,7 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
     if (out_unknown_token) *out_unknown_token = 0;
     if (out_allow_take) *out_allow_take = 0;
     if (out_elem_size_expr) *out_elem_size_expr = "0";
+    if (out_is_ordered) *out_is_ordered = 0;
 
     int saw_gt = 0, saw_lt = 0;
     for (size_t i = lbr; i <= rbr && i < len; i++) {
@@ -412,6 +414,8 @@ static int cc__parse_chan_bracket_spec(const CCVisitorCtx* ctx,
                 if (out_bp_mode) *out_bp_mode = 1;
             } else if (strcmp(wlow, "dropold") == 0 || strcmp(wlow, "drop_old") == 0) {
                 if (out_bp_mode) *out_bp_mode = 2;
+            } else if (strcmp(wlow, "ordered") == 0) {
+                if (out_is_ordered) *out_is_ordered = 1;
             } else {
                 if (out_cap_int && *out_cap_int == -1 && 
                     out_cap_expr && out_cap_expr_cap > 0 && out_cap_expr[0] == 0) {
@@ -583,17 +587,20 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 int tx_unknown=0, rx_unknown=0;
                 int dummy_allow=0;
                 const char* dummy_sz="0";
+                int tx_ordered=0, rx_ordered=0;
                 
                 cc__parse_chan_bracket_spec(ctx, src, len, tx_lbr, tx_rbr,
                                             &tx_is_tx, &tx_is_rx, &tx_cap,
                                             tx_cap_expr, sizeof(tx_cap_expr),
                                             &tx_bp, &tx_mode, tx_topo, sizeof(tx_topo),
-                                            &tx_has_topo, &tx_unknown, &dummy_allow, &dummy_sz);
+                                            &tx_has_topo, &tx_unknown, &dummy_allow, &dummy_sz,
+                                            &tx_ordered);
                 cc__parse_chan_bracket_spec(ctx, src, len, rx_lbr, rx_rbr,
                                             &rx_is_tx, &rx_is_rx, &rx_cap,
                                             rx_cap_expr, sizeof(rx_cap_expr),
                                             &rx_bp, &rx_mode, rx_topo, sizeof(rx_topo),
-                                            &rx_has_topo, &rx_unknown, &dummy_allow, &dummy_sz);
+                                            &rx_has_topo, &rx_unknown, &dummy_allow, &dummy_sz,
+                                            &rx_ordered);
 
                 if (!tx_is_tx || tx_is_rx || !rx_is_rx || rx_is_tx) {
                     char rel[1024];
@@ -611,6 +618,16 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
                             line, col, CC_ERR_CHANNEL, "channel_pair unknown token in spec");
+                    free(out);
+                    return NULL;
+                }
+                
+                /* Validate 'ordered' modifier - only allowed on rx (receive) channels */
+                if (tx_ordered) {
+                    char rel[1024];
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "'ordered' modifier only allowed on receive (<) channel");
+                    fprintf(stderr, "  hint: use T[~N ordered <] for the receive handle, not the send handle\n");
                     free(out);
                     return NULL;
                 }
@@ -692,22 +709,30 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (tx_bp == 1) bp_enum = "CC_CHAN_MODE_DROP_NEW";
                 else if (tx_bp == 2) bp_enum = "CC_CHAN_MODE_DROP_OLD";
 
+                /* For ordered channels, cast CCChanRxOrdered* to CCChanRx* (layout-compatible) */
+                char rx_arg[256];
+                if (rx_ordered) {
+                    snprintf(rx_arg, sizeof(rx_arg), "(CCChanRx*)&%s", rx_name);
+                } else {
+                    snprintf(rx_arg, sizeof(rx_arg), "&%s", rx_name);
+                }
+
                 char repl[1024];
                 if (is_expression) {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, &%s, &%s);",
+                             "/* channel_pair */ cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, &%s, %s);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, tx_name, rx_name);
+                             (tx_mode == 1) ? 1 : 0, topo_enum, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ do { int __cc_err = cc_chan_pair_create_full(%s, %s, %d, %s, %d, %s, &%s, &%s); "
+                             "/* channel_pair */ do { int __cc_err = cc_chan_pair_create_full(%s, %s, %d, %s, %d, %s, &%s, %s); "
                              "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, tx_name, rx_name);
+                             (tx_mode == 1) ? 1 : 0, topo_enum, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 }
 
@@ -970,10 +995,18 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                     continue;
                 }
                 
-                int saw_gt = 0, saw_lt = 0;
+                int saw_gt = 0, saw_lt = 0, saw_ordered = 0;
                 for (size_t t = j; t < k; t++) {
                     if (src[t] == '>') saw_gt = 1;
                     if (src[t] == '<') saw_lt = 1;
+                    /* Check for 'ordered' keyword */
+                    if (t + 7 <= k && memcmp(src + t, "ordered", 7) == 0) {
+                        char before = (t == j) ? ' ' : src[t - 1];
+                        char after = (t + 7 < k) ? src[t + 7] : ' ';
+                        if (!cc__is_ident_char_local2(before) && !cc__is_ident_char_local2(after)) {
+                            saw_ordered = 1;
+                        }
+                    }
                 }
                 if (saw_gt && saw_lt) {
                     char rel[1024];
@@ -989,6 +1022,14 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                     free(out);
                     return NULL;
                 }
+                /* Validate: 'ordered' only allowed on rx channels */
+                if (saw_ordered && saw_gt) {
+                    char rel[1024];
+                    cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
+                            line, col, CC_ERR_CHANNEL, "'ordered' modifier only allowed on receive (<) channel");
+                    free(out);
+                    return NULL;
+                }
                 
                 size_t ty_start = i;
                 while (ty_start > 0) {
@@ -1000,7 +1041,12 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
 
                 if (ty_start >= last_emit) {
                     cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
+                    /* Emit CCChanRxOrdered for ordered channels, CCChanRx/CCChanTx otherwise */
+                    if (saw_lt && saw_ordered) {
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCChanRxOrdered");
+                    } else {
+                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
+                    }
                     last_emit = k + 1;
                 }
                 while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }

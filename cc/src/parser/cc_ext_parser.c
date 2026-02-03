@@ -373,7 +373,7 @@ static int cc_try_cc_closure_single_param(int ident_tok, int start_line, int sta
 }
 
 /*
- * Parse spawn statement: spawn(expr, ...);
+ * Parse spawn statement: spawn(expr, ...); or spawn into(channel)? () => expr;
  * Returns: 1 = handled, 0 = not handled
  */
 static int cc_try_thread_spawn(void) {
@@ -387,6 +387,98 @@ static int cc_try_thread_spawn(void) {
     }
     
     next(); /* consume 'spawn' */
+    
+    /* Check for 'spawn into(channel)' syntax */
+    if (tok >= TOK_IDENT && strcmp(get_tok_str(tok, NULL), "into") == 0) {
+        /* Record as 'spawn_into' to distinguish from regular spawn */
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("spawn_into");
+        }
+        
+        next(); /* consume 'into' */
+        if (tok != '(') {
+            tcc_error("expected '(' after 'into'");
+            return 0;
+        }
+        next(); /* consume '(' */
+        
+        /* Parse channel name - store in aux_s2 */
+        if (tok < TOK_IDENT) {
+            tcc_error("expected channel name in spawn into()");
+            return 0;
+        }
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux_s2 = tcc_strdup(get_tok_str(tok, NULL));
+        }
+        next(); /* consume channel name */
+        
+        skip(')'); /* consume ')' after channel */
+        
+        /* Check for optional '?' for send error propagation */
+        if (tok == '?') {
+            if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+                int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+                tcc_state->cc_nodes[idx].aux2 |= 4;  /* bit 2: has error prop */
+            }
+            next(); /* consume '?' */
+        }
+        
+        /* Now expect closure: () => expr or [captures]() => expr */
+        /* Parse-only mode for the rest */
+        {
+            int saved_ncw = nocode_wanted;
+            ++nocode_wanted;
+            
+            /* Parse closure captures if present */
+            if (tok == '[') {
+                /* Skip captures */
+                int bracket_depth = 1;
+                next();
+                while (bracket_depth > 0 && tok != TOK_EOF) {
+                    if (tok == '[') bracket_depth++;
+                    else if (tok == ']') bracket_depth--;
+                    next();
+                }
+            }
+            
+            /* Expect () */
+            if (tok != '(') {
+                tcc_error("expected '()' in spawn into closure");
+                return 0;
+            }
+            next();
+            skip(')');
+            
+            /* Expect => */
+            if (tok != TOK_CC_ARROW) {
+                tcc_error("expected '=>' in spawn into closure");
+                return 0;
+            }
+            next();
+            
+            /* Parse the expression */
+            expr_eq();
+            vpop();
+            
+            nocode_wanted = saved_ncw;
+        }
+        
+        /* Record end position at ';' before consuming it */
+        if (tcc_state && tok == ';' && file && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].line_end = file->line_num;
+            tcc_state->cc_nodes[idx].col_end = tok_col + 1;
+            tcc_state->cc_nodes[idx].aux2 |= (int)(1U << 31);
+        }
+        
+        skip(';');
+        cc_ast_record_end();
+        return 1;
+    }
+    
+    /* Regular spawn(expr, ...) */
     if (tok != '(') {
         tcc_error("expected '(' after spawn");
         return 0;

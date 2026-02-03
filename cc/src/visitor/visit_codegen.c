@@ -591,6 +591,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* Rewrite channel handle types (including owned channels) BEFORE creating AST.
            This transforms `int[~4 >]` -> `CCChanTx`, and `T[~N owned {...}]` -> `cc_chan_create_owned(...)`.
+           T[~N ordered <] becomes CCChanRxOrdered.
            Must happen before AST creation so closure positions are correct. */
         {
             char* rew = cc__rewrite_chan_handle_types_text(ctx, src_ufcs, src_ufcs_len);
@@ -806,6 +807,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     fprintf(out, "  if (a && a->fn) a->fn(a->arg);\n");
     fprintf(out, "  free(a);\n");
     fprintf(out, "  return NULL;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "/* --- spawn into helpers (ordered channels) --- */\n");
+    fprintf(out, "typedef struct { void* (*fn)(void*); void* arg; } __spawn_into_arg;\n");
+    fprintf(out, "static void* __spawn_into_thunk(void* p) {\n");
+    fprintf(out, "  __spawn_into_arg* a = (__spawn_into_arg*)p;\n");
+    fprintf(out, "  typedef struct { intptr_t __result; } __caps_t;\n");
+    fprintf(out, "  __caps_t* cap = (__caps_t*)cc_task_result_ptr(sizeof(__caps_t));\n");
+    fprintf(out, "  cap->__result = (intptr_t)(a->fn ? a->fn(a->arg) : 0);\n");
+    fprintf(out, "  free(a);\n");
+    fprintf(out, "  return cap;\n");
+    fprintf(out, "}\n");
+    fprintf(out, "static CCTask __spawn_into_call(void* (*fn)(void*), void* arg) {\n");
+    fprintf(out, "  __spawn_into_arg* a = (__spawn_into_arg*)malloc(sizeof(__spawn_into_arg));\n");
+    fprintf(out, "  if (!a) abort();\n");
+    fprintf(out, "  a->fn = fn; a->arg = arg;\n");
+    fprintf(out, "  return cc_fiber_spawn_task(__spawn_into_thunk, a);\n");
     fprintf(out, "}\n");
     fprintf(out, "/* --- end spawn helpers --- */\n\n");
 

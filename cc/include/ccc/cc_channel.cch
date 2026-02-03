@@ -11,6 +11,7 @@
 
 #include <ccc/cc_compat.cch>
 #include <time.h>
+#include <errno.h>
 
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_slice.cch>
@@ -20,6 +21,7 @@
 #include <ccc/cc_result.cch>
 #include <ccc/cc_optional.cch>
 #include <ccc/cc_io_error.cch>
+#include <ccc/std/task.cch>
 
 typedef struct CCAsyncHandle CCAsyncHandle;
 #include <ccc/std/future.cch>
@@ -57,6 +59,30 @@ static inline CCRes(bool, CCIoError) cc_chan_result_from_errno(int err) {
  */
 static inline bool cc_io_avail(CCResult_bool_CCIoError res) {
     return res.ok && res.u.value;
+}
+
+/* Ordered receive: receives a CCTask from channel, blocks on it, extracts result.
+ * For use with ordered channels (CCChanRxOrdered).
+ * Returns: 1 = value received, 0 = channel closed, -1 = error
+ * 
+ * Usage:
+ *   void* result;
+ *   int rc;
+ *   while ((rc = ordered_recv(rx, &result)) == 1) { use result }
+ *   if (rc < 0) { handle error }
+ */
+static inline int ordered_recv(CCChanRxOrdered rx, void** out) {
+    CCTask task;
+    int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
+    if (rc == 0) {
+        /* Successfully received task - block on it and extract result */
+        *out = (void*)cc_block_on_intptr(task);
+        return 1;  /* value received */
+    } else if (rc == EPIPE) {
+        return 0;  /* channel closed */
+    } else {
+        return -1;  /* error */
+    }
 }
 
 typedef enum {

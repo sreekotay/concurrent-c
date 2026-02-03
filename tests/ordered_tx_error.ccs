@@ -1,0 +1,11 @@
+// Test that 'ordered' on tx channel is rejected
+#include <ccc/std/prelude.cch>
+
+int main() {
+    // This should fail: 'ordered' only allowed on rx (<) channels
+    CCTask[~4 ordered >] tx;
+    CCTask[~4 <] rx;
+    channel_pair(&tx, &rx);
+    
+    return 0;
+}

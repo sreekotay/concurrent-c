@@ -23,6 +23,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                                           size_t* out_len);
 
 /* Rewrite channel handle types `T[~ ... >]` / `T[~ ... <]` to CCChanTx/CCChanRx.
+ * T[~ ... ordered <] becomes CCChanRxOrdered.
  * Returns newly allocated string, or NULL on error. */
 char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                                          const char* src,

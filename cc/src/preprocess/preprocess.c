@@ -1188,10 +1188,23 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     return NULL;
                 }
 
-                int saw_gt = 0, saw_lt = 0;
+                int saw_gt = 0, saw_lt = 0, saw_ordered = 0;
                 for (size_t t = j; t < k; t++) {
                     if (src[t] == '>') saw_gt = 1;
                     if (src[t] == '<') saw_lt = 1;
+                    /* Check for 'ordered' keyword */
+                    if (t + 7 <= k && memcmp(src + t, "ordered", 7) == 0) {
+                        char before = (t == j) ? ' ' : src[t - 1];
+                        char after = (t + 7 < k) ? src[t + 7] : ' ';
+                        /* Inline ident check to avoid forward declaration */
+                        int before_is_ident = (before == '_' || (before >= 'A' && before <= 'Z') || 
+                                               (before >= 'a' && before <= 'z') || (before >= '0' && before <= '9'));
+                        int after_is_ident = (after == '_' || (after >= 'A' && after <= 'Z') || 
+                                              (after >= 'a' && after <= 'z') || (after >= '0' && after <= '9'));
+                        if (!before_is_ident && !after_is_ident) {
+                            saw_ordered = 1;
+                        }
+                    }
                 }
                 if (saw_gt && saw_lt) {
                     char rel[1024];
@@ -1207,13 +1220,26 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     free(out);
                     return NULL;
                 }
+                /* Validate: 'ordered' only allowed on rx channels */
+                if (saw_ordered && saw_gt) {
+                    char rel[1024];
+                    cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                            scanner.line, scanner.col, "channel", "'ordered' modifier only allowed on receive (<) channel");
+                    free(out);
+                    return NULL;
+                }
 
                 size_t ty_start = cc__scan_back_to_delim(src, i);
                 if (ty_start < last_emit) {
                     /* overlapping/odd context; just ignore and continue */
                 } else {
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
+                    /* Emit CCChanRxOrdered for ordered channels */
+                    if (saw_lt && saw_ordered) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "CCChanRxOrdered");
+                    } else {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
+                    }
                     last_emit = k + 1; /* skip past ']' */
                 }
 
