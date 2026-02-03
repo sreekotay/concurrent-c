@@ -104,6 +104,12 @@ CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg);
 /* Spawn a fiber from a 0-arg closure. */
 CCTask cc_fiber_spawn_closure0(CCClosure0 c);
 
+/* Get pointer to fiber-local result buffer (48 bytes max).
+   Use this to store struct results without malloc - the buffer is valid
+   until the task completes and cc_block_on_intptr returns.
+   Returns NULL if not in fiber context or size > 48. */
+void* cc_task_result_ptr(size_t size);
+
 /* ============================================================================
  * DEPRECATED legacy API (pointer-based, for backward compatibility)
  * ============================================================================ */

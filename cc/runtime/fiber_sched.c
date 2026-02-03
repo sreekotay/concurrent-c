@@ -225,6 +225,7 @@ typedef struct fiber_task {
     void* (*fn)(void*);       /* User function */
     void* arg;                /* User argument */
     void* result;             /* Return value */
+    char result_buf[48];      /* Fiber-local storage for struct results (avoids malloc) */
     _Atomic int state;
     _Atomic int done;
     _Atomic int running_lock; /* Serialize resume/unpark */
@@ -1760,6 +1761,16 @@ int cc__fiber_in_context(void) {
 
 void* cc__fiber_current(void) {
     return tls_current_fiber;
+}
+
+/* Get pointer to fiber-local result buffer (48 bytes).
+ * Use this to store task results without malloc.
+ * Returns NULL if not in fiber context. */
+void* cc_task_result_ptr(size_t size) {
+    if (!tls_current_fiber || size > sizeof(tls_current_fiber->result_buf)) {
+        return NULL;
+    }
+    return tls_current_fiber->result_buf;
 }
 
 #ifdef CC_DEBUG_DEADLOCK

@@ -1,0 +1,15 @@
+# pigz Benchmark Baseline Snapshot
+# Date: $(date)
+# Purpose: Pre-ordered-channels baseline
+# Config: 50MB input, 8 workers, 3 runs, CC_WORKERS=16
+
+=== Benchmark Summary (avg over 3 runs) ===
+Implementation               Comp(s)    Comp(MB/s)       Ratio   Decomp(s)  Decomp(MB/s)
+pigz (pthread)                 0.319         149.6       37.9%       0.088         543.9
+pigz_cc (Concurrent-C)         0.326         146.1       37.9%       0.074         644.4
+
+Notes:
+- Compression: CC ~2% slower than pthread version
+- Decompression: CC ~18% faster than pthread version  
+- Correctness: Both pass
+- This is the baseline BEFORE implementing ordered channels

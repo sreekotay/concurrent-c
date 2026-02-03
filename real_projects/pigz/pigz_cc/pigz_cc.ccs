@@ -299,10 +299,21 @@ static inline void return_input_arena(CCArena* arena, CCChan* pool) {
     }
 }
 
-/* Wrapper for task-handle pattern: spawns as independent task */
-void* compress_block_task(void* arg) {
-    Block* blk = (Block*)arg;
-    
+/* ============================================================================
+ * Ordered Channel Pattern (Manual Lowering)
+ * 
+ * This implements the "ordered channels" pattern manually to validate the design.
+ * The key insight: __result at offset 0 preserves Result type information.
+ * ============================================================================ */
+
+/* Captures struct for ordered channel pattern - __result MUST be at offset 0 */
+typedef struct {
+    CompressedResultPtr !>(CCIoError) __result;  // offset 0 - Result type preserved!
+    Block* blk;                                   // user captures follow
+} OrderedCompressCaptures;
+
+/* The actual compression work - called from wrapper */
+CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
     // Initialize z_stream for this task if needed (level <= 9)
     z_stream strm;
     z_stream* strm_ptr = NULL;
@@ -310,27 +321,39 @@ void* compress_block_task(void* arg) {
         memset(&strm, 0, sizeof(strm));
         int ret = deflateInit2(&strm, g.level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
         if (ret != Z_OK) {
-            return_input_arena(blk->arena, blk->pool);
-            return NULL;
+            return cc_err(cc_io_error(CC_IO_OTHER));
         }
         strm_ptr = &strm;
     }
     
-    CompressedResultPtr !>(CCIoError) res = compress_block(strm_ptr, blk, blk->dict, g.level, g.strategy);
+    CompressedResultPtr !>(CCIoError) result = compress_block(strm_ptr, blk, blk->dict, g.level, g.strategy);
     
     // Cleanup z_stream
     if (strm_ptr) {
         deflateEnd(strm_ptr);
     }
     
+    return result;
+}
+
+/* Wrapper for ordered channel pattern: stores Result in fiber-local storage */
+void* ordered_compress_wrapper(void* arg) {
+    Block* blk = (Block*)arg;
+    
+    // Use fiber-local storage instead of malloc'd captures struct
+    OrderedCompressCaptures* cap = (OrderedCompressCaptures*)cc_task_result_ptr(sizeof(OrderedCompressCaptures));
+    cap->blk = blk;  // For debugging/consistency
+    
+    // Store Result at offset 0 - preserves error type!
+    cap->__result = do_compress_work(blk);
+    
     // Return input arena to pool (works for both success and error)
     return_input_arena(blk->arena, blk->pool);
     
-    if (cc_is_err(res)) {
-        return NULL;
-    }
-    return cc_unwrap_as(res, CompressedResult*);
+    return (void*)cap;
 }
+
+/* Note: ordered_spawn and ordered_recv are inlined at use sites (lowered code) */
 
 /* ============================================================================
  * Decompression Engine (matches pigz.c:2700-2750)
@@ -751,7 +774,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 }
             }
             
-            // Task-handle pattern: await tasks in FIFO order (no reorder buffer!)
+            // Ordered channel pattern: await recv in FIFO order (no reorder buffer!)
+            // [LOWERED from: while (await tasks_rx.recv(&r)?)]
+            CompressedResult* r = NULL;
+            CCIoError recv_err = {0};
+            bool recv_ok = true;
             CCTask task;
             while (!write_failed && cc_io_avail(chan_recv(tasks_rx, &task))) {
                 // Check for global error (e.g. SIGINT)
@@ -760,17 +787,22 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     cc_task_free(&task);
                     break;
                 }
-
-                // Await this task - blocks until compression is done (cc_block_on_intptr consumes the task)
-                void* result = (void*)cc_block_on_intptr(task);
-                CompressedResult* r = (CompressedResult*)result;
                 
-                if (!r) {
-                    fprintf(stderr, "Compression task failed\n");
-                    cc_atomic_store(&g_pipeline_error, 1);
-                    write_failed = true;
+                // Await task and extract Result from fiber-local storage
+                // NOTE: cap points to fiber-local buffer, valid until next spawn on same fiber
+                OrderedCompressCaptures* cap = (OrderedCompressCaptures*)(void*)cc_block_on_intptr(task);
+                
+                // Copy result immediately (fiber-local storage may be reused)
+                CompressedResultPtr !>(CCIoError) task_result = cap->__result;
+                // cap is now unsafe to access - fiber may be reused
+                
+                if (cc_is_err(task_result)) {
+                    // Task error - preserve error type!
+                    recv_err = cc_unwrap_err_as(task_result, CCIoError);
+                    recv_ok = false;
                     break;
                 }
+                r = cc_unwrap_as(task_result, CompressedResult*);
                 
                 // Accumulate global checksum and total length
                 if (first_block) {
@@ -796,6 +828,13 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 }
                 
                 cc_heap_arena_free(&r->arena);
+            }
+            
+            // Handle task errors (ordered channel preserves error type!)
+            if (!recv_ok) {
+                fprintf(stderr, "Compression task failed: error kind %d\n", recv_err.kind);
+                cc_atomic_store(&g_pipeline_error, 1);
+                write_failed = true;
             }
 
             // Write gzip/zlib trailer (matches pigz.c:1180-1210)
@@ -984,11 +1023,13 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         return_input_arena(blk_arena, arena_pool);
                         if (prev_blk) {
                             prev_blk->is_last = true;
-                            // Spawn task - scheduler auto-distributes via round-robin
-                            CCTask task = cc_fiber_spawn_task(compress_block_task, prev_blk);
-                            if (!cc_io_avail(chan_send(tasks_tx, task))) {
-                                // Writer closed channel (error) - cleanup and exit
-                                cc_task_free(&task);
+                            // [LOWERED from: spawn into(tasks_tx)? () => compress(...)]
+                            {
+                                // No malloc needed - wrapper uses cc_task_result_ptr
+                                CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
+                                if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                                    cc_task_free(&task);
+                                }
                             }
                             prev_blk = NULL;
                         }
@@ -1065,22 +1106,28 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                     // If we already have a pending block, spawn task
                     if (prev_blk) {
-                        CCTask task = cc_fiber_spawn_task(compress_block_task, prev_blk);
-                        if (!cc_io_avail(chan_send(tasks_tx, task))) {
-                            // Writer closed channel (error) - cleanup and exit
-                            cc_task_free(&task);
-                            return_input_arena(blk_arena, arena_pool);
-                            break;
+                        // [LOWERED from: spawn into(tasks_tx)? () => compress(...)]
+                        {
+                            // No malloc needed - wrapper uses cc_task_result_ptr
+                            CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
+                            if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                                cc_task_free(&task);
+                                return_input_arena(blk_arena, arena_pool);
+                                break;
+                            }
                         }
                     }
 
                     // If this was a short read, it's the last block.
                     if (data.len < block_size) {
                         blk->is_last = true;
-                        CCTask task = cc_fiber_spawn_task(compress_block_task, blk);
-                        if (!cc_io_avail(chan_send(tasks_tx, task))) {
-                            // Writer closed channel (error) - cleanup and exit
-                            cc_task_free(&task);
+                        // [LOWERED from: spawn into(tasks_tx)? () => compress(...)]
+                        {
+                            // No malloc needed - wrapper uses cc_task_result_ptr
+                            CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, blk);
+                            if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                                cc_task_free(&task);
+                            }
                         }
                         prev_blk = NULL;
                         hit_eof = true;
