@@ -935,7 +935,7 @@ static inline uint64_t xorshift64(uint64_t* state) {
 
 /* Check if there's work in global queue (not local - local is "owned" by workers) */
 static int sysmon_has_global_pending(void) {
-    return fq_peek(&g_sched.run_queue) != NULL;
+    return fq_peek(&g_sched.run_queue);
 }
 
 static int sysmon_has_pending_work(void) {
