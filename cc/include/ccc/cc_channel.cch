@@ -65,6 +65,9 @@ static inline bool cc_io_avail(CCResult_bool_CCIoError res) {
  * For use with ordered channels (CCChanRxOrdered).
  * Returns: 1 = value received, 0 = channel closed, -1 = error
  * 
+ * The spawned task stores its result in fiber-local storage via cc_task_result_ptr.
+ * The result struct has __result at offset 0, so we dereference to get the value.
+ * 
  * Usage:
  *   void* result;
  *   int rc;
@@ -75,8 +78,10 @@ static inline int ordered_recv(CCChanRxOrdered rx, void** out) {
     CCTask task;
     int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
     if (rc == 0) {
-        /* Successfully received task - block on it and extract result */
-        *out = (void*)cc_block_on_intptr(task);
+        /* Successfully received task - block on it and extract result.
+           The thunk returns a pointer to fiber-local storage where __result is at offset 0. */
+        void* cap = (void*)cc_block_on_intptr(task);
+        *out = *(void**)cap;  /* __result is at offset 0 */
         return 1;  /* value received */
     } else if (rc == EPIPE) {
         return 0;  /* channel closed */

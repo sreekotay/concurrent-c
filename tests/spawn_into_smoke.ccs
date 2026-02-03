@@ -1,22 +1,22 @@
-// Smoke test for ordered channels with spawn into pattern
+// Smoke test for spawn into syntax
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-void* return_value(void* arg) {
-    return arg;
+void* double_value(void* arg) {
+    return (void*)((intptr_t)arg * 2);
 }
 
 int main() {
-    // Test 1: Basic ordered channel type declaration
     CCTask[~4 >] tx;
     CCTask[~4 ordered <] rx;
     channel_pair(&tx, &rx);
     
-    // Test 2: Use spawn into to send task and receive with ordered_recv
+    // Use spawn into to spawn task and send CCTask to channel
     @nursery closing(tx) {
-        spawn into(tx) () => return_value((void*)42);
+        spawn into(tx) () => double_value((void*)21);
     }
     
+    // Receive and verify
     void* result;
     int rc = ordered_recv(rx, &result);
     
@@ -26,11 +26,11 @@ int main() {
     }
     
     if ((intptr_t)result != 42) {
-        printf("FAIL: expected result=42, got %ld\n", (long)(intptr_t)result);
+        printf("FAIL: expected 42, got %ld\n", (long)(intptr_t)result);
         return 1;
     }
     
-    // Test 3: Verify channel closed returns 0
+    // Verify channel closed
     rc = ordered_recv(rx, &result);
     if (rc != 0) {
         printf("FAIL: expected rc=0 (closed), got %d\n", rc);
@@ -39,6 +39,6 @@ int main() {
     
     chan_free(rx);
     
-    printf("ordered_channel_smoke: PASS\n");
+    printf("spawn_into_smoke: PASS\n");
     return 0;
 }
