@@ -71,8 +71,8 @@ int cc_fiber_poll_done(fiber_task* f);
 void* cc_fiber_get_result(fiber_task* f);
 
 /* Spawn task poll functions (defined in scheduler.c) */
-int cc_spawn_task_poll_done(struct CCSpawnTask* task);
-void* cc_spawn_task_get_result(struct CCSpawnTask* task);
+int cc_thread_task_poll_done(struct CCSpawnTask* task);
+void* cc_thread_task_get_result(struct CCSpawnTask* task);
 
 static CCExec* g_task_exec = NULL;
 static pthread_mutex_t g_task_exec_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -191,8 +191,8 @@ CCFutureStatus cc_task_poll(CCTask* t, intptr_t* out_val, int* out_err) {
     if (t->kind == CC_TASK_KIND_SPAWN) {
         CCTaskSpawnInternal* s = TASK_SPAWN(t);
         if (!s->spawn) return CC_FUTURE_ERR;
-        if (cc_spawn_task_poll_done(s->spawn)) {
-            if (out_val) *out_val = (intptr_t)cc_spawn_task_get_result(s->spawn);
+        if (cc_thread_task_poll_done(s->spawn)) {
+            if (out_val) *out_val = (intptr_t)cc_thread_task_get_result(s->spawn);
             if (out_err) *out_err = 0;
             return CC_FUTURE_READY;
         }
@@ -258,7 +258,7 @@ void cc_task_free(CCTask* t) {
     } else if (t->kind == CC_TASK_KIND_SPAWN) {
         CCTaskSpawnInternal* s = TASK_SPAWN(t);
         if (s->spawn) {
-            cc_spawn_task_free(s->spawn);
+            cc_thread_task_free(s->spawn);
         }
     } else if (t->kind == CC_TASK_KIND_FIBER) {
         CCTaskFiberInternal* fi = TASK_FIBER(t);
@@ -346,9 +346,9 @@ intptr_t cc_block_on_intptr(CCTask t) {
         CCTaskSpawnInternal* s = TASK_SPAWN(&t);
         if (s->spawn) {
             void* result = NULL;
-            cc_spawn_task_join_result(s->spawn, &result);
+            cc_thread_task_join_result(s->spawn, &result);
             r = (intptr_t)result;
-            cc_spawn_task_free(s->spawn);
+            cc_thread_task_free(s->spawn);
         }
         cc__deadlock_thread_unblock();
         return r;

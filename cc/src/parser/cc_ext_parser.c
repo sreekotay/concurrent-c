@@ -42,7 +42,7 @@ static int cc_try_cc_decl(void);
 static int cc_try_cc_stmt(void);
 static int cc_try_cc_at_stmt(void);
 static int cc_try_cc_unary(void);
-static int cc_try_cc_spawn(void);
+static int cc_try_thread_spawn(void);
 static int cc_try_cc_closure(void);
 static int cc_try_cc_closure_single_param(int ident_tok, int start_line, int start_col);
 
@@ -51,7 +51,7 @@ const struct TCCExtParser cc_ext_parser = {
     .try_cc_stmt = cc_try_cc_stmt,
     .try_cc_at_stmt = cc_try_cc_at_stmt,
     .try_cc_unary = cc_try_cc_unary,
-    .try_cc_spawn = cc_try_cc_spawn,
+    .try_cc_spawn = cc_try_thread_spawn,
     .try_cc_closure = cc_try_cc_closure,
     .try_cc_closure_single_param = cc_try_cc_closure_single_param,
 };
@@ -376,7 +376,7 @@ static int cc_try_cc_closure_single_param(int ident_tok, int start_line, int sta
  * Parse spawn statement: spawn(expr, ...);
  * Returns: 1 = handled, 0 = not handled
  */
-static int cc_try_cc_spawn(void) {
+static int cc_try_thread_spawn(void) {
     if (tok < TOK_IDENT || strcmp(get_tok_str(tok, NULL), "spawn") != 0)
         return 0;
     

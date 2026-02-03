@@ -58,7 +58,7 @@ int main(void) {
                 Item* item = malloc(sizeof(Item));
                 item->id = i;
                 
-                CCTask task = cc_spawn(process_item, item);
+                CCTask task = cc_thread_spawn(process_item, item);
                 (void)chan_send(tasks_tx, task);
                 printf("[producer] spawned task for item %d\n", i);
             }

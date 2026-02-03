@@ -52,7 +52,7 @@ typedef int CCTaskIntptrKind;
 
 typedef enum {
     CC_TASK_KIND_INVALID = 0,
-    CC_TASK_KIND_SPAWN = 1,   /* OS thread (from cc_spawn) */
+    CC_TASK_KIND_SPAWN = 1,   /* OS thread (from cc_thread_spawn) */
     CC_TASK_KIND_FUTURE = 2,  /* Executor pool */
     CC_TASK_KIND_POLL = 3,    /* State machine (from @async) */
     CC_TASK_KIND_FIBER = 4,   /* M:N fiber (from cc_fiber_spawn_task) */
@@ -92,9 +92,9 @@ void cc_scheduler_shutdown(void);
 /* Spawn an OS-thread task. Returns a CCTask value with kind=CC_TASK_KIND_SPAWN.
    Use cc_block_on_intptr(task) to wait and get the result.
    On failure, returns CCTask with kind=CC_TASK_KIND_INVALID. */
-CCTask cc_spawn(void* (*fn)(void*), void* arg);
+CCTask cc_thread_spawn(void* (*fn)(void*), void* arg);
 /* Spawn a 0-arg closure (env freed via drop, if provided). */
-CCTask cc_spawn_closure0(CCClosure0 c);
+CCTask cc_thread_spawn_closure0(CCClosure0 c);
 
 /* Spawn an M:N fiber task. Returns a CCTask value with kind=CC_TASK_KIND_FIBER.
    Fibers are lightweight cooperative tasks multiplexed onto worker threads.
@@ -108,18 +108,18 @@ CCTask cc_fiber_spawn_closure0(CCClosure0 c);
  * DEPRECATED legacy API (pointer-based, for backward compatibility)
  * ============================================================================ */
 
-// Legacy spawn returning task via out-pointer (deprecated, use cc_spawn() instead)
-int cc_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg);
-int cc_spawn_closure0_legacy(struct CCSpawnTask** out_task, CCClosure0 c);
+// Legacy spawn returning task via out-pointer (deprecated, use cc_thread_spawn() instead)
+int cc_thread_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg);
+int cc_thread_spawn_closure0_legacy(struct CCSpawnTask** out_task, CCClosure0 c);
 
-// Join a legacy spawn task; returns 0 on success.
-int cc_spawn_task_join(struct CCSpawnTask* task);
+// Join a legacy thread task; returns 0 on success.
+int cc_thread_task_join(struct CCSpawnTask* task);
 
-// Join a legacy spawn task and retrieve its return value.
-int cc_spawn_task_join_result(struct CCSpawnTask* task, void** out_result);
+// Join a legacy thread task and retrieve its return value.
+int cc_thread_task_join_result(struct CCSpawnTask* task, void** out_result);
 
-// Free legacy spawn task handle.
-void cc_spawn_task_free(struct CCSpawnTask* task);
+// Free legacy thread task handle.
+void cc_thread_task_free(struct CCSpawnTask* task);
 
 // Snapshot scheduler stats; returns 0 on success.
 int cc_scheduler_stats(CCSchedulerStats* out);

@@ -18,7 +18,7 @@ static void* fast_compute(void* arg) {
 int main(void) {
     printf("Test 1: Poll SPAWN task (OS thread)\n");
     {
-        CCTask task = cc_spawn(slow_compute, (void*)21);
+        CCTask task = cc_thread_spawn(slow_compute, (void*)21);
         
         /* Poll should return PENDING initially */
         intptr_t val = 0;
@@ -96,7 +96,7 @@ int main(void) {
     printf("Test 4: Multiple tasks with polling\n");
     {
         CCTask t1 = cc_fiber_spawn_task(fast_compute, (void*)1);
-        CCTask t2 = cc_spawn(fast_compute, (void*)2);
+        CCTask t2 = cc_thread_spawn(fast_compute, (void*)2);
         CCTask t3 = cc_fiber_spawn_task(fast_compute, (void*)3);
         
         /* Poll all until ready */

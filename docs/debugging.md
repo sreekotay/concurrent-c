@@ -65,9 +65,7 @@ Some functions use `__attribute__((no_sanitize("thread")))` to suppress TSan che
 2. There are no real data races (suppression only hides false positives)To validate a suppression is safe:
 1. Create a stress test that calls the suppressed function concurrently from multiple threads/fibers
 2. Run with TSan: `CC=clang CFLAGS="-fsanitize=thread" ./cc/bin/ccc run <test>`
-3. If TSan reports races, investigate: either the suppression is masking a real race, or the suppression mechanism needs adjustment
-
-Example: `tests/tsan_closure_make_stress.c` validates that `cc_closure*_make` suppressions are safe (these functions only write to thread-local stack structs).
+3. If TSan reports races, investigate: either the suppression is masking a real race, or the suppression mechanism needs adjustmentExample: `tests/tsan_closure_make_stress.c` validates that `cc_closure*_make` suppressions are safe (these functions only write to thread-local stack structs).
 
 ## Scheduler synchronization invariants (fiber scheduler)
 

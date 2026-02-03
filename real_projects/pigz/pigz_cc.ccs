@@ -239,17 +239,20 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
     @defer cc_file_close(&g_out_file);
     
-    /* Channel types for pipeline - use pointers for lock-free fast path (8 bytes) 
-     * Larger buffers reduce contention with multiple workers */
-    Block*[~64 >] blocks_tx;
-    Block*[~64 <] blocks_rx;
+    /* Per-worker channels for even distribution (like pthread pigz) */
+    Block*[~8 >] worker_tx[MAX_WORKERS];
+    Block*[~8 <] worker_rx[MAX_WORKERS];
+    CCChan* worker_ch[MAX_WORKERS];
+    
+    for (int i = 0; i < num_workers; i++) {
+        worker_ch[i] = channel_pair(&worker_tx[i], &worker_rx[i]);
+    }
+    @defer for (int i = 0; i < num_workers; i++) cc_chan_free(worker_ch[i]);
+    
+    /* Results channel (shared - writer is single consumer) */
     Result*[~64 >] results_tx;
     Result*[~64 <] results_rx;
-    
-    /* Create channels */
-    CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
     CCChan* results_ch = channel_pair(&results_tx, &results_rx);
-    @defer cc_chan_free(blocks_ch);
     @defer cc_chan_free(results_ch);
     
     /* Each compressed block now includes its own gzip header/trailer,
@@ -327,11 +330,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         
         /* Workers + Reader in nested nurseries */
         @nursery closing(results_tx) {
-            /* Spawn compression workers */
+            /* Spawn compression workers - each has dedicated input channel */
             for (int w = 0; w < num_workers; w++) {
-                spawn([level]() => {
+                int worker_id = w;
+                spawn([level, worker_id]() => {
                     Block* blk;
-                    while (cc_io_avail(chan_recv(blocks_rx, &blk))) {
+                    while (cc_io_avail(chan_recv(worker_rx[worker_id], &blk))) {
                         Result* res = compress_block(blk, level);
                         (void)chan_send(results_tx, res);
                         cc_heap_arena_free(&blk->arena);
@@ -340,10 +344,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                 });
             }
             
-            /* Reader: produces blocks */
-            @nursery closing(blocks_tx) {
+            /* Reader: produces blocks, distributes round-robin to workers */
+            @nursery {
                 void* in_ptr = (void*)&in_file;
-                spawn([in_ptr]() => {
+                spawn([in_ptr, num_workers]() => {
                     CCFile* in_f = (CCFile*)in_ptr;
                     long seq = 0;
                     
@@ -366,7 +370,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             break;
                         }
                         memset(blk, 0, sizeof(Block));
-                        blk->seq = seq++;
+                        blk->seq = seq;
                         blk->data = data;
                         blk->arena = arena;
                         
@@ -379,16 +383,23 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             fseek(in_f->handle, -1, SEEK_CUR);
                         }
                         
-                        /* Send block pointer to workers - ownership transfers */
-                        (void)chan_send(blocks_tx, blk);
+                        /* Round-robin to worker channels - even distribution */
+                        int target = (int)(seq % num_workers);
+                        (void)chan_send(worker_tx[target], blk);
+                        seq++;
                         
                         if (blk->last) {
                             break;
                         }
                     }
+                    
+                    /* Close all worker channels when done reading */
+                    for (int i = 0; i < num_workers; i++) {
+                        cc_chan_close_tx(worker_ch[i]);
+                    }
                 });
             }
-            /* blocks_tx closed -> workers drain and exit */
+            /* worker channels closed -> workers drain and exit */
         }
         /* results_tx closed -> writer drains and exits */
     }

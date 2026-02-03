@@ -114,8 +114,8 @@ static void cc__spawn_task_job(void* arg) {
     }
 }
 
-/* NEW unified API: cc_spawn returns CCTask value */
-CCTask cc_spawn(void* (*fn)(void*), void* arg) {
+/* NEW unified API: cc_thread_spawn returns CCTask value */
+CCTask cc_thread_spawn(void* (*fn)(void*), void* arg) {
     CCTask out;
     memset(&out, 0, sizeof(out));
     if (!fn) return out;
@@ -146,8 +146,8 @@ static void* cc__closure0_wrapper(void* arg) {
     return result;
 }
 
-/* NEW unified API: cc_spawn_closure0 returns CCTask value */
-CCTask cc_spawn_closure0(CCClosure0 c) {
+/* NEW unified API: cc_thread_spawn_closure0 returns CCTask value */
+CCTask cc_thread_spawn_closure0(CCClosure0 c) {
     /* Wrap closure in a simple function that calls the closure */
     /* For simplicity, we allocate and pass the closure as arg */
     CCTask out;
@@ -159,11 +159,11 @@ CCTask cc_spawn_closure0(CCClosure0 c) {
     if (!heap_c) return out;
     *heap_c = c;
     
-    return cc_spawn(cc__closure0_wrapper, heap_c);
+    return cc_thread_spawn(cc__closure0_wrapper, heap_c);
 }
 
 /* Legacy API for backward compatibility */
-int cc_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg) {
+int cc_thread_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg) {
     if (!out_task || !fn) return EINVAL;
     *out_task = NULL;
     CCExec* ex = cc__sched_exec_lazy();
@@ -183,7 +183,7 @@ int cc_spawn_legacy(struct CCSpawnTask** out_task, void* (*fn)(void*), void* arg
     return 0;
 }
 
-int cc_spawn_task_join(struct CCSpawnTask* task) {
+int cc_thread_task_join(struct CCSpawnTask* task) {
     if (!task) return EINVAL;
     pthread_mutex_lock(&task->mu);
     while (!task->done) {
@@ -193,7 +193,7 @@ int cc_spawn_task_join(struct CCSpawnTask* task) {
     return 0;
 }
 
-int cc_spawn_task_join_result(struct CCSpawnTask* task, void** out_result) {
+int cc_thread_task_join_result(struct CCSpawnTask* task, void** out_result) {
     if (!task) return EINVAL;
     pthread_mutex_lock(&task->mu);
     while (!task->done) {
@@ -204,7 +204,7 @@ int cc_spawn_task_join_result(struct CCSpawnTask* task, void** out_result) {
     return 0;
 }
 
-void cc_spawn_task_free(struct CCSpawnTask* task) {
+void cc_thread_task_free(struct CCSpawnTask* task) {
     if (!task) return;
     pthread_mutex_lock(&task->mu);
     if (task->done) {
@@ -216,8 +216,8 @@ void cc_spawn_task_free(struct CCSpawnTask* task) {
     pthread_mutex_unlock(&task->mu);
 }
 
-/* Non-blocking poll: check if spawn task is done without blocking */
-int cc_spawn_task_poll_done(struct CCSpawnTask* task) {
+/* Non-blocking poll: check if thread task is done without blocking */
+int cc_thread_task_poll_done(struct CCSpawnTask* task) {
     if (!task) return 0;
     pthread_mutex_lock(&task->mu);
     int done = task->done;
@@ -225,8 +225,8 @@ int cc_spawn_task_poll_done(struct CCSpawnTask* task) {
     return done;
 }
 
-/* Get result from a completed spawn task (caller must ensure task is done) */
-void* cc_spawn_task_get_result(struct CCSpawnTask* task) {
+/* Get result from a completed thread task (caller must ensure task is done) */
+void* cc_thread_task_get_result(struct CCSpawnTask* task) {
     if (!task) return NULL;
     pthread_mutex_lock(&task->mu);
     void* result = task->result;

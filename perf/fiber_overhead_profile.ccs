@@ -64,14 +64,14 @@ int main(void) {
         printf("1. Sequential (baseline):    %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
     }
     
-    // 2. cc_spawn (OS threads via thread pool)
+    // 2. cc_thread_spawn (OS threads via thread pool)
     {
         uint64_t total = 0;
         for (int run = 0; run < RUNS; run++) {
             CCTask tasks[NUM_TASKS];
             uint64_t t0 = now_ns();
             for (int i = 0; i < NUM_TASKS; i++) {
-                tasks[i] = cc_spawn(cpu_work, (void*)(uintptr_t)i);
+                tasks[i] = cc_thread_spawn(cpu_work, (void*)(uintptr_t)i);
             }
             for (int i = 0; i < NUM_TASKS; i++) {
                 cc_block_on_intptr(tasks[i]);
@@ -81,7 +81,7 @@ int main(void) {
         }
         double avg_ms = (double)total / RUNS / 1000000.0;
         double per_task_us = (double)total / RUNS / NUM_TASKS / 1000.0;
-        printf("2. cc_spawn (threads):       %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
+        printf("2. cc_thread_spawn:       %8.2f ms total, %6.2f us/task\n", avg_ms, per_task_us);
     }
     
     // 3. cc_fiber_spawn_task (fibers)
@@ -114,7 +114,7 @@ int main(void) {
             
             uint64_t t0 = now_ns();
             for (int i = 0; i < NUM_TASKS; i++) {
-                tasks[i] = cc_spawn(minimal_work, (void*)(uintptr_t)i);
+                tasks[i] = cc_thread_spawn(minimal_work, (void*)(uintptr_t)i);
             }
             for (int i = 0; i < NUM_TASKS; i++) {
                 cc_block_on_intptr(tasks[i]);
@@ -134,7 +134,7 @@ int main(void) {
         }
         double spawn_us = (double)total_spawn / RUNS / NUM_TASKS / 1000.0;
         double fiber_us = (double)total_fiber / RUNS / NUM_TASKS / 1000.0;
-        printf("cc_spawn overhead:           %6.2f us/task\n", spawn_us);
+        printf("cc_thread_spawn overhead:           %6.2f us/task\n", spawn_us);
         printf("cc_fiber overhead:           %6.2f us/task\n", fiber_us);
         printf("Fiber overhead delta:        %6.2f us/task\n", fiber_us - spawn_us);
     }

@@ -115,7 +115,7 @@ int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_
 
 int cc_run_blocking_closure0(CCClosure0 c) {
     if (!c.fn) return EINVAL;
-    CCTask t = cc_spawn_closure0(c);
+    CCTask t = cc_thread_spawn_closure0(c);
     if (t.kind == CC_TASK_KIND_INVALID) return ENOMEM;
     (void)cc_block_on_intptr(t);  /* blocks until done and frees task */
     return 0;
@@ -123,7 +123,7 @@ int cc_run_blocking_closure0(CCClosure0 c) {
 
 void* cc_run_blocking_closure0_ptr(CCClosure0 c) {
     if (!c.fn) return NULL;
-    CCTask t = cc_spawn_closure0(c);
+    CCTask t = cc_thread_spawn_closure0(c);
     if (t.kind == CC_TASK_KIND_INVALID) return NULL;
     return (void*)cc_block_on_intptr(t);  /* blocks until done and frees task */
 }
