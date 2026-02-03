@@ -129,7 +129,7 @@ CompressedResult*[~16 pipelined] results_ch;
 ### The Lowering (Transparent Transformer)
 The `pipelined` modifier is a directive for the compiler's lowering phase:
 1.  **Storage:** The underlying `CCChan` is allocated to hold `CCTaskPtr` (task handles) instead of raw `T*`.
-2.  **Verb (`spawn into`):** Lowers to `cc_spawn` followed immediately by a `chan_send` of the resulting handle.
+2.  **Verb (`spawn into`):** Lowers to `cc_thread_spawn` followed immediately by a `chan_send` of the resulting handle.
 3.  **Verb (`await recv`):** Lowers to a `chan_recv` of the handle, followed by a **Wait Node** suspension on that specific task's completion.
 
 ### Why This Fits CC
@@ -146,15 +146,15 @@ To maintain the **Principle of Orthogonal Concerns**, Concurrent-C provides expl
 ### The Idioms
 ```c
 // 1. Fiber Spawn (The Default)
-// Lowers to: cc_spawn_fiber()
+// Lowers to: cc_fiber_spawn_task()
 spawn () => { ... };
 
 // 2. Thread Spawn (The OS Offload)
-// Lowers to: cc_spawn_thread()
+// Lowers to: cc_thread_spawn()
 spawn_thread () => { ... };
 
 // 3. Pipelined Spawn (The Ordered Flow)
-// Lowers to: cc_spawn_fiber() + chan_send()
+// Lowers to: cc_fiber_spawn_task() + chan_send()
 spawn into(results_ch) () => { ... };
 ```
 
@@ -166,7 +166,7 @@ spawn into(results_ch) () => { ... };
 ### Why This Fits CC
 - **Explicitness:** The developer chooses the "weight" of the task (`fiber` vs `thread`) based on the nature of the work.
 - **Symmetry:** All verbs start with `spawn`, making the "Skeleton" of the program easy to scan.
-- **ABI Clarity:** The "naked" C functions (`cc_spawn_fiber` and `cc_spawn_thread`) provide a stable, searchable interface for the generated code.
+- **ABI Clarity:** The "naked" C functions (`cc_fiber_spawn_task` and `cc_thread_spawn`) provide a stable, searchable interface for the generated code.
 
 ---
 
@@ -184,5 +184,5 @@ spawn into(results_ch) () => { ... };
 ### Recommendation for Phase 1.1
 1. Implement **Wait Nodes** as the normative lowering for `@match`.
 2. Implement **Pipelined Channels** (`pipelined` modifier + `spawn into`).
-3. Unify **Spawn Verbs** by renaming `cc_spawn` to `cc_spawn_thread` and providing the `spawn_thread` keyword.
+3. Unify **Spawn Verbs** using `cc_thread_spawn` for OS threads and `cc_fiber_spawn_task` for fibers.
 4. Integrate **Stall Watchdog** and **Nursery Health** checks for structural diagnostics.

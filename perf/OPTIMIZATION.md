@@ -150,7 +150,7 @@ The heart of the optimization:
 | spawn_baseline | 408 K/s | - | - | Current |
 | trivial_async | 10.5 M/s | - | - | Current |
 
-**Note**: Implemented true M:N model by switching nursery from thread-per-task (`cc_spawn`) to fiber scheduler (`cc_fiber_spawn`). This eliminates per-task mutex/cond overhead and provides work-stealing task queues. The remaining 93% gap to Go is due to Go's highly optimized runtime with true goroutine context switching.
+**Note**: Implemented true M:N model by switching nursery from thread-per-task (`cc_thread_spawn`) to fiber scheduler (`cc_fiber_spawn_task`). This eliminates per-task mutex/cond overhead and provides work-stealing task queues. The remaining 93% gap to Go is due to Go's highly optimized runtime with true goroutine context switching.
 
 ### What Changed
 
