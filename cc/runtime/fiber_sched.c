@@ -288,6 +288,13 @@ static int fq_push(fiber_queue* q, fiber_task* f) {
     return -1;
 }
 
+static inline void fq_push_blocking(fiber_queue* q, fiber_task* f) {
+    while (fq_push(q, f) != 0) {
+        sched_yield();
+    }
+}
+
+
 /* Check if global queue has items (non-destructive peek) */
 static int fq_peek(fiber_queue* q) {
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
@@ -583,6 +590,28 @@ static inline fiber_task* lq_pop(local_queue* q) {
         return f;
     }
     return NULL;  /* Too much contention, let caller try global queue */
+}
+
+static inline void wake_one_if_sleeping(int timing) {
+    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
+    if (spinning == 0) {
+        size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+        if (sleeping > 0) {
+            wake_primitive_wake_one(&g_sched.wake_prim);
+            if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
+        } else {
+            if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
+        }
+    } else {
+        if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
+    }
+}
+
+static inline void wake_one_if_sleeping_unconditional(void) {
+    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+    if (sleeping > 0) {
+        wake_primitive_wake_one(&g_sched.wake_prim);
+    }
 }
 
 /* Work stealing: steal from another worker's queue.
@@ -1071,6 +1100,19 @@ static void* sysmon_main(void* arg) {
     return NULL;
 }
 
+static inline void worker_run_fiber(fiber_task* f) {
+    tls_current_fiber = f;
+    fiber_resume(f);
+    tls_current_fiber = NULL;
+}
+
+static inline fiber_task* worker_try_steal_one(int worker_id, uint64_t* rng_state) {
+    if (g_sched.num_workers <= 1) return NULL;
+    size_t victim = (size_t)(xorshift64(rng_state) % g_sched.num_workers);
+    if ((int)victim == worker_id) return NULL;
+    return lq_steal(&g_sched.local_queues[victim]);
+}
+
 static void* worker_main(void* arg) {
     int worker_id = (int)(size_t)arg;
     tls_worker_id = worker_id;
@@ -1140,11 +1182,8 @@ static void* worker_main(void* arg) {
             
             /* Batch execute */
             for (size_t i = 0; i < count; i++) {
-                fiber_task* f = batch[i];
-                tls_current_fiber = f;
-                fiber_resume(f);
+                worker_run_fiber(batch[i]);
             }
-            tls_current_fiber = NULL;
             continue;
         }
         
@@ -1156,17 +1195,12 @@ static void* worker_main(void* arg) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = fq_pop(&g_sched.run_queue);
             /* Try to steal every 16 spins */
-            if (!f && (spin & 15) == 15 && g_sched.num_workers > 1) {
-                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-                if ((int)victim != worker_id) {
-                    f = lq_steal(&g_sched.local_queues[victim]);
-                }
+            if (!f && (spin & 15) == 15) {
+                f = worker_try_steal_one(worker_id, &rng_state);
             }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-                tls_current_fiber = f;
-                fiber_resume(f);
-                tls_current_fiber = NULL;
+                worker_run_fiber(f);
                 goto next_iteration;
             }
             cpu_pause();
@@ -1178,17 +1212,12 @@ static void* worker_main(void* arg) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = fq_pop(&g_sched.run_queue);
             /* Try to steal every 4 yields */
-            if (!f && (y & 3) == 3 && g_sched.num_workers > 1) {
-                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-                if ((int)victim != worker_id) {
-                    f = lq_steal(&g_sched.local_queues[victim]);
-                }
+            if (!f && (y & 3) == 3) {
+                f = worker_try_steal_one(worker_id, &rng_state);
             }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-                tls_current_fiber = f;
-                fiber_resume(f);
-                tls_current_fiber = NULL;
+                worker_run_fiber(f);
                 goto next_iteration;
             }
         }
@@ -1198,15 +1227,10 @@ static void* worker_main(void* arg) {
         /* One last steal attempt before sleeping */
         if (g_sched.num_workers > 1) {
             for (size_t j = 0; j < g_sched.num_workers; j++) {
-                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-                if ((int)victim != worker_id) {
-                    fiber_task* f = lq_steal(&g_sched.local_queues[victim]);
-                    if (f) {
-                        tls_current_fiber = f;
-                        fiber_resume(f);
-                        tls_current_fiber = NULL;
-                        goto next_iteration;
-                    }
+                fiber_task* f = worker_try_steal_one(worker_id, &rng_state);
+                if (f) {
+                    worker_run_fiber(f);
+                    goto next_iteration;
                 }
             }
         }
@@ -1501,18 +1525,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     atomic_fetch_add_explicit(&g_sched.pending, 1, memory_order_relaxed);
     
     /* Wake a sleeping worker if any are sleeping and none are spinning */
-    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
-    if (spinning == 0) {
-        size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-        if (sleeping > 0) {
-            wake_primitive_wake_one(&g_sched.wake_prim);
-            if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
-        } else {
-            if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
-        }
-    } else {
-        if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
-    }
+    wake_one_if_sleeping(timing);
     
     if (timing) {
         t4 = rdtsc();
@@ -1908,19 +1921,14 @@ void cc__fiber_unpark(void* fiber_ptr) {
     
     /* Fallback to global queue if not in worker context or local queue is full */
     if (!pushed_local) {
-        while (fq_push(&g_sched.run_queue, f) != 0) {
-            sched_yield();
-        }
+        fq_push_blocking(&g_sched.run_queue, f);
     }
     
     /* Wake ONE sleeping worker - work stealing will naturally distribute load.
      * Using wake_one instead of wake_all reduces wake overhead and avoids
      * thundering herd. If more workers are needed, they'll wake when they
      * find stealable work in other queues. */
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    if (sleeping > 0) {
-        wake_primitive_wake_one(&g_sched.wake_prim);
-    }
+    wake_one_if_sleeping_unconditional();
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {
@@ -1942,14 +1950,10 @@ void cc__fiber_yield(void) {
     if (tls_worker_id >= 0) {
         if (lq_push(&g_sched.local_queues[tls_worker_id], current) != 0) {
             /* Local queue full, use global */
-            while (fq_push(&g_sched.run_queue, current) != 0) {
-                sched_yield();
-            }
+            fq_push_blocking(&g_sched.run_queue, current);
         }
     } else {
-        while (fq_push(&g_sched.run_queue, current) != 0) {
-            sched_yield();
-        }
+        fq_push_blocking(&g_sched.run_queue, current);
     }
     
     /* Yield to scheduler - will pick up next runnable fiber */
