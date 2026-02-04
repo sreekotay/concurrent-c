@@ -14,10 +14,10 @@ index d21f1cad..cfff431b 100644
  
 diff --git a/cc_ast_record.h b/cc_ast_record.h
 new file mode 100644
-index 00000000..1d4d9769
+index 00000000..0a4c7655
 --- /dev/null
 +++ b/cc_ast_record.h
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,133 @@
 +/* CC AST Recording - included by tccgen.c when CONFIG_CC_EXT is defined */
 +#ifndef CC_AST_RECORD_H
 +#define CC_AST_RECORD_H
@@ -104,10 +104,13 @@ index 00000000..1d4d9769
 +    }
 +    if (tcc_state->cc_call_stack) {
 +        if (tcc_state->cc_call_stack_top + 1 >= tcc_state->cc_call_stack_cap) {
-+            tcc_state->cc_call_stack_cap *= 2;
-+            tcc_state->cc_call_stack = tcc_realloc(tcc_state->cc_call_stack, tcc_state->cc_call_stack_cap * sizeof(int));
++            int new_cap = tcc_state->cc_call_stack_cap * 2;
++            int *new_stack = tcc_realloc(tcc_state->cc_call_stack, new_cap * sizeof(int));
++            if (!new_stack) return; /* realloc failed, bail out safely */
++            tcc_state->cc_call_stack = new_stack;
++            tcc_state->cc_call_stack_cap = new_cap;
 +        }
-+        if (tcc_state->cc_call_stack) tcc_state->cc_call_stack[++tcc_state->cc_call_stack_top] = idx;
++        tcc_state->cc_call_stack[++tcc_state->cc_call_stack_top] = idx;
 +    }
 +}
 +
@@ -149,10 +152,10 @@ index 00000000..1d4d9769
 +
 +#endif /* CC_AST_RECORD_H */
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..c26d7f12 100644
+index 171e3622..e1694143 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,393 @@
+@@ -66,6 +66,399 @@
  
  #include "tcc.h"
  
@@ -223,12 +226,15 @@ index 171e3622..c26d7f12 100644
 +    if (user_inc_env && user_inc_env[0]) {
 +        char* paths = tcc_strdup(user_inc_env);
 +        char* p = paths;
-+        char* tok;
-+        while ((tok = strsep(&p, ":")) != NULL) {
-+            if (tok[0]) {
-+                tcc_add_include_path(s, tok);
-+                tcc_add_sysinclude_path(s, tok);
++        char* sep;
++        while (p && *p) {
++            sep = strchr(p, ':');
++            if (sep) *sep = '\0';
++            if (*p) {
++                tcc_add_include_path(s, p);
++                tcc_add_sysinclude_path(s, p);
 +            }
++            p = sep ? sep + 1 : NULL;
 +        }
 +        tcc_free(paths);
 +    }
@@ -432,12 +438,15 @@ index 171e3622..c26d7f12 100644
 +    if (user_inc_env && user_inc_env[0]) {
 +        char* paths = tcc_strdup(user_inc_env);
 +        char* p = paths;
-+        char* tok;
-+        while ((tok = strsep(&p, ":")) != NULL) {
-+            if (tok[0]) {
-+                tcc_add_include_path(s, tok);
-+                tcc_add_sysinclude_path(s, tok);
++        char* sep;
++        while (p && *p) {
++            sep = strchr(p, ':');
++            if (sep) *sep = '\0';
++            if (*p) {
++                tcc_add_include_path(s, p);
++                tcc_add_sysinclude_path(s, p);
 +            }
++            p = sep ? sep + 1 : NULL;
 +        }
 +        tcc_free(paths);
 +    }
@@ -546,7 +555,7 @@ index 171e3622..c26d7f12 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1125,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1131,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -554,7 +563,7 @@ index 171e3622..c26d7f12 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1347,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1353,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
@@ -570,19 +579,6 @@ index 171e3622..c26d7f12 100644
      tcc_free(s1);
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
-diff --git a/tcc.c b/tcc.c
-index e1819239..efc85a32 100644
---- a/tcc.c
-+++ b/tcc.c
-@@ -426,3 +426,8 @@ redo:
-         fclose(ppfp);
-     return ret;
- }
-+
-+#ifdef CONFIG_CC_EXT
-+/* Default no-op token registrar; can be overridden by CC runtime. */
-+__attribute__((weak)) void tcc_ext_register_tokens(void) {}
-+#endif
 diff --git a/tcc.h b/tcc.h
 index 1c2f6949..4a3579b4 100644
 --- a/tcc.h
@@ -793,7 +789,7 @@ index 1c2f6949..4a3579b4 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 6d42de67..2be163c4 100644
+index 6d42de67..b1ad5491 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,43 @@ ST_DATA SValue *vtop;
@@ -1489,10 +1485,10 @@ index 6d42de67..2be163c4 100644
 +                        int v = s->v;
 +                        /* The struct's v value has SYM_STRUCT flag for named structs. */
 +                        if (v & SYM_STRUCT) {
-+                            int tok = v & ~SYM_STRUCT & ~SYM_FIELD;
-+                            if (tok < SYM_FIRST_ANOM) {
++                            int struct_tok = v & ~SYM_STRUCT & ~SYM_FIELD;
++                            if (struct_tok < SYM_FIRST_ANOM) {
 +                                /* Named struct tag - use it as the type prefix */
-+                                const char *name = get_tok_str(tok, NULL);
++                                const char *name = get_tok_str(struct_tok, NULL);
 +                                if (name) {
 +                                    strncpy(tcc_state->cc_last_recv_type, name, sizeof(tcc_state->cc_last_recv_type) - 1);
 +                                    tcc_state->cc_last_recv_type[sizeof(tcc_state->cc_last_recv_type) - 1] = '\0';
