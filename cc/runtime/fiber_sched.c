@@ -333,6 +333,8 @@ static fiber_task* fq_pop(fiber_queue* q) {
 
 /* Per-worker local queue for spawn locality */
 #define LOCAL_QUEUE_SIZE 256
+/* Per-worker inbox for cross-thread spawns */
+#define INBOX_QUEUE_SIZE 1024
 
 typedef struct {
     fiber_task* _Atomic slots[LOCAL_QUEUE_SIZE];
@@ -341,12 +343,73 @@ typedef struct {
 } local_queue;
 
 typedef struct {
+    fiber_task* _Atomic slots[INBOX_QUEUE_SIZE];
+    _Atomic size_t head;
+    _Atomic size_t tail;
+} inbox_queue;
+
+static int iq_push(inbox_queue* q, fiber_task* f) {
+    int pause_round = 0;
+    for (int retry = 0; retry < 1000; retry++) {
+        size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
+        size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
+        if (tail - head >= INBOX_QUEUE_SIZE) {
+            if (++pause_round >= 16) {
+                pause_round = 0;
+                sched_yield();
+            } else {
+                cpu_pause();
+            }
+            continue;
+        }
+        if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
+                                                   memory_order_release,
+                                                   memory_order_relaxed)) {
+            atomic_store_explicit(&q->slots[tail % INBOX_QUEUE_SIZE], f, memory_order_release);
+            return 0;
+        }
+        pause_round = 0;
+        cpu_pause();
+    }
+    sched_yield();
+    return -1;
+}
+
+static int iq_peek(inbox_queue* q) {
+    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    return head < tail;
+}
+
+static fiber_task* iq_pop(inbox_queue* q) {
+    for (int retry = 0; retry < 100; retry++) {
+        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+        if (head >= tail) return NULL;
+        size_t idx = head % INBOX_QUEUE_SIZE;
+        fiber_task* f = atomic_load_explicit(&q->slots[idx], memory_order_acquire);
+        if (!f) {
+            for (int i = 0; i < 10; i++) cpu_pause();
+            continue;
+        }
+        if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
+                                                   memory_order_release,
+                                                   memory_order_relaxed)) {
+            atomic_store_explicit(&q->slots[idx], NULL, memory_order_relaxed);
+            return f;
+        }
+    }
+    return NULL;
+}
+
+typedef struct {
     pthread_t workers[MAX_WORKERS];
     size_t num_workers;
     _Atomic int running;
     
     fiber_queue run_queue;          /* Global queue for overflow and cross-worker */
     local_queue local_queues[MAX_WORKERS];  /* Per-worker local queues */
+    inbox_queue inbox_queues[MAX_WORKERS];  /* Per-worker MPMC inbox queues */
     fiber_task* _Atomic free_list;
     
     wake_primitive wake_prim;       /* Fast worker wake (futex/ulock instead of condvar) */
@@ -607,10 +670,13 @@ static inline void wake_one_if_sleeping(int timing) {
     }
 }
 
-static inline void wake_one_if_sleeping_unconditional(void) {
+static inline void wake_one_if_sleeping_unconditional(int timing) {
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     if (sleeping > 0) {
         wake_primitive_wake_one(&g_sched.wake_prim);
+        if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
+    } else {
+        if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
     }
 }
 
@@ -972,6 +1038,7 @@ static int sysmon_has_pending_work(void) {
     if (fq_peek(&g_sched.run_queue)) return 1;
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         if (lq_peek(&g_sched.local_queues[i])) return 1;
+        if (iq_peek(&g_sched.inbox_queues[i])) return 1;
     }
     return 0;
 }
@@ -1007,7 +1074,10 @@ static void* replacement_worker(void* arg) {
         /* Try stealing from any worker */
         if (!f && g_sched.num_workers > 0) {
             size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-            f = lq_steal(&g_sched.local_queues[victim]);
+            f = iq_pop(&g_sched.inbox_queues[victim]);
+            if (!f) {
+                f = lq_steal(&g_sched.local_queues[victim]);
+            }
         }
         
         if (f) {
@@ -1110,6 +1180,8 @@ static inline fiber_task* worker_try_steal_one(int worker_id, uint64_t* rng_stat
     if (g_sched.num_workers <= 1) return NULL;
     size_t victim = (size_t)(xorshift64(rng_state) % g_sched.num_workers);
     if ((int)victim == worker_id) return NULL;
+    fiber_task* f = iq_pop(&g_sched.inbox_queues[victim]);
+    if (f) return f;
     return lq_steal(&g_sched.local_queues[victim]);
 }
 
@@ -1139,14 +1211,21 @@ static void* worker_main(void* arg) {
             batch[count++] = f;
         }
         
-        /* Priority 2: Pop from global queue */
+        /* Priority 2: Pop from inbox queue */
+        while (count < WORKER_BATCH_SIZE) {
+            fiber_task* f = iq_pop(&g_sched.inbox_queues[worker_id]);
+            if (!f) break;
+            batch[count++] = f;
+        }
+        
+        /* Priority 3: Pop from global queue */
         while (count < WORKER_BATCH_SIZE) {
             fiber_task* f = fq_pop(&g_sched.run_queue);
             if (!f) break;
             batch[count++] = f;
         }
         
-        /* Priority 3: Batch steal from other workers with randomized victim selection */
+        /* Priority 4: Batch steal from other workers with randomized victim selection */
         if (count == 0 && g_sched.num_workers > 1) {
             /* Randomize starting victim to avoid thundering herd */
             size_t start = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
@@ -1154,6 +1233,12 @@ static void* worker_main(void* arg) {
             for (size_t j = 0; j < g_sched.num_workers; j++) {
                 size_t victim = (start + j) % g_sched.num_workers;
                 if ((int)victim == worker_id) continue;
+                
+                fiber_task* inbox_task = iq_pop(&g_sched.inbox_queues[victim]);
+                if (inbox_task) {
+                    batch[count++] = inbox_task;
+                    break;  /* Got work, stop stealing */
+                }
                 
                 /* Batch steal: take up to half the victim's queue */
                 size_t stolen = lq_steal_batch(&g_sched.local_queues[victim], 
@@ -1193,6 +1278,7 @@ static void* worker_main(void* arg) {
         /* Spin briefly checking local, global, and stealing */
         for (int spin = 0; spin < SPIN_FAST_ITERS; spin++) {
             fiber_task* f = lq_pop(my_queue);
+            if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
             if (!f) f = fq_pop(&g_sched.run_queue);
             /* Try to steal every 16 spins */
             if (!f && (spin & 15) == 15) {
@@ -1210,6 +1296,7 @@ static void* worker_main(void* arg) {
         for (int y = 0; y < SPIN_YIELD_ITERS; y++) {
             sched_yield();
             fiber_task* f = lq_pop(my_queue);
+            if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
             if (!f) f = fq_pop(&g_sched.run_queue);
             /* Try to steal every 4 yields */
             if (!f && (y & 3) == 3) {
@@ -1249,11 +1336,12 @@ static void* worker_main(void* arg) {
          * Periodically wake to check for deadlock (every ~500ms). */
         while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
             /* Check if there's runnable work */
-            if (lq_peek(my_queue) || fq_peek(&g_sched.run_queue)) break;
+            if (lq_peek(my_queue) || iq_peek(&g_sched.inbox_queues[worker_id]) || fq_peek(&g_sched.run_queue)) break;
             /* Check for stealable work in other queues */
             int found_stealable = 0;
             for (size_t i = 0; i < g_sched.num_workers; i++) {
-                if ((int)i != worker_id && lq_peek(&g_sched.local_queues[i])) {
+                if ((int)i != worker_id &&
+                    (lq_peek(&g_sched.local_queues[i]) || iq_peek(&g_sched.inbox_queues[i]))) {
                     found_stealable = 1;
                     break;
                 }
@@ -1501,13 +1589,19 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     if (timing) t2 = rdtsc();
     
-    /* Workers use round-robin to local queues for even spread.
-     * Non-workers (main thread) use global queue - workers always check it. */
+    /* Workers use round-robin to inbox queues for even spread.
+     * If target is self, use local queue for the fast path. */
     int pushed_local = 0;
-    if (tls_worker_id >= 0) {
-        static _Atomic size_t spawn_counter = 0;
-        size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+    int pushed_inbox = 0;
+    static _Atomic size_t spawn_counter = 0;
+    size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+    if (tls_worker_id >= 0 && (size_t)tls_worker_id == target) {
         if (lq_push(&g_sched.local_queues[target], f) == 0) {
+            pushed_local = 1;
+        }
+    } else {
+        if (iq_push(&g_sched.inbox_queues[target], f) == 0) {
+            pushed_inbox = 1;
             pushed_local = 1;
         }
     }
@@ -1525,7 +1619,12 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     atomic_fetch_add_explicit(&g_sched.pending, 1, memory_order_relaxed);
     
     /* Wake a sleeping worker if any are sleeping and none are spinning */
-    wake_one_if_sleeping(timing);
+    if (pushed_inbox) {
+        /* Inbox enqueue may target a sleeping worker; wake unconditionally. */
+        wake_one_if_sleeping_unconditional(timing);
+    } else {
+        wake_one_if_sleeping(timing);
+    }
     
     if (timing) {
         t4 = rdtsc();
@@ -1928,7 +2027,7 @@ void cc__fiber_unpark(void* fiber_ptr) {
      * Using wake_one instead of wake_all reduces wake overhead and avoids
      * thundering herd. If more workers are needed, they'll wake when they
      * find stealable work in other queues. */
-    wake_one_if_sleeping_unconditional();
+    wake_one_if_sleeping_unconditional(0);
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {
