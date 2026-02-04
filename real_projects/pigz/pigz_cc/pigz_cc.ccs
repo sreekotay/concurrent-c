@@ -46,7 +46,7 @@ static inline bool write_slice(CCFile* f, CCSlice data, const char* what) {
  * - On error: @arena cleanup frees the memory
  * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
-CompressedResultPtr !> (CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
+CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
     // Arena sizing: CompressedResult struct + deflate output
     // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
@@ -360,7 +360,7 @@ void* ordered_compress_wrapper(void* arg) {
  * ============================================================================ */
 
 // decompress_block - currently unused, single-threaded decompression in decompress_file
-DecompressedResultPtr !> (CCIoError) decompress_block(CCSlice member, long seq) {
+DecompressedResultPtr !>(CCIoError) decompress_block(CCSlice member, long seq) {
     size_t est_size = 256 * 1024;
     @arena(res_arena, est_size + 8192) {
         DecompressedResult* res = arena_alloc1(DecompressedResult, res_arena);
@@ -463,7 +463,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 
     @nursery {
         /* Writer Task - writes decompressed data (runs behind) */
-        spawn([out_ptr, decompressed_rx, p_total_out]() => {
+        spawn(() => [out_ptr, decompressed_rx, p_total_out] {
             DecompChunk chunk;
                 while (cc_io_avail(chan_recv(decompressed_rx, &chunk))) {
                 if (chunk.data.len > 0 && !g.test && !g.list) {
@@ -479,7 +479,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 
         @nursery closing(decompressed_tx) {
             /* Decompressor Task - CPU work in the middle */
-            spawn([compressed_rx, decompressed_tx]() => {
+            spawn(() => [compressed_rx, decompressed_tx] {
                 z_stream strm;
                 memset(&strm, 0, sizeof(strm));
                 if (inflateInit2(&strm, 15 + 16) != Z_OK) {
@@ -530,7 +530,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 
             /* Reader Task - reads compressed data ahead */
             @nursery closing(compressed_tx) {
-                spawn([in_ptr, compressed_tx, p_total_in]() => {
+                spawn(() => [in_ptr, compressed_tx, p_total_in] {
                     while (true) {
                         // Allocate chunk for this read
                         CCArena chunk_arena = cc_heap_arena(BLOCK_SIZE + 256);
@@ -624,17 +624,17 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     
     // Arena pool using owned channel syntax - capacity can now be an expression
     CCArena*[~(chan_cap + 16) owned {
-        .create = [arena_size]() => {
+        .create = () => [arena_size] {
             CCArena* a = (CCArena*)malloc(sizeof(CCArena));
             *a = cc_heap_arena(arena_size);
             return a;
         },
-        .destroy = [](CCArena* a) => {
+        .destroy = (CCArena* a) => {
             cc_heap_arena_free(a);
             free(a);
             return NULL;
         },
-        .reset = [](CCArena* a) => {
+        .reset = (CCArena* a) => {
             cc_arena_reset(a);
             return NULL;
         }
@@ -647,7 +647,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
     @nursery {
         /* Writer Task - awaits task handles in FIFO order (no reorder buffer needed) */
-        spawn([out_ptr, block_size, out_path, tasks_rx, tasks_ch]() => {
+        spawn(() => [out_ptr, block_size, out_path, tasks_rx, tasks_ch] {
             bool write_failed = false;
 
             // gzip + zip use CRC32 init 0; zlib uses Adler-32 init 1
@@ -691,7 +691,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         (unsigned char)(g.level >= 9 ? 2 : g.level == 1 ? 4 : 0), // Extra flags
                         0x03         // OS = Unix
                     };
-                    size_t !> (CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10));
+                    size_t !>(CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10));
                     if (cc_is_err(hdr_wr)) {
                         fprintf(stderr, "Error: failed to write gzip header\n");
                         cc_atomic_store(&g_pipeline_error, 1);
@@ -701,7 +701,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // Write filename if present
                     if (!write_failed && g.name != NULL) {
                         size_t nlen = strlen(g.name) + 1;
-                        size_t !> (CCIoError) name_wr = cc_file_write(out_ptr, cc_slice_from_parts(g.name, nlen, CC_SLICE_ID_UNTRACKED, nlen));
+                        size_t !>(CCIoError) name_wr = cc_file_write(out_ptr, cc_slice_from_parts(g.name, nlen, CC_SLICE_ID_UNTRACKED, nlen));
                         if (cc_is_err(name_wr)) {
                             fprintf(stderr, "Error: failed to write filename to header\n");
                             cc_atomic_store(&g_pipeline_error, 1);
@@ -712,7 +712,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // Write comment if present
                     if (!write_failed && g.comment != NULL) {
                         size_t clen = strlen(g.comment) + 1;
-                        size_t !> (CCIoError) comm_wr = cc_file_write(out_ptr, cc_slice_from_parts(g.comment, clen, CC_SLICE_ID_UNTRACKED, clen));
+                        size_t !>(CCIoError) comm_wr = cc_file_write(out_ptr, cc_slice_from_parts(g.comment, clen, CC_SLICE_ID_UNTRACKED, clen));
                         if (cc_is_err(comm_wr)) {
                             fprintf(stderr, "Error: failed to write comment to header\n");
                             cc_atomic_store(&g_pipeline_error, 1);
@@ -730,7 +730,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     unsigned char header[2];
                     header[0] = (head >> 8) & 0xff;
                     header[1] = head & 0xff;
-                    size_t !> (CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 2, CC_SLICE_ID_UNTRACKED, 2));
+                    size_t !>(CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 2, CC_SLICE_ID_UNTRACKED, 2));
                     if (cc_is_err(hdr_wr)) {
                         fprintf(stderr, "Error: failed to write zlib header\n");
                         cc_atomic_store(&g_pipeline_error, 1);
@@ -757,14 +757,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     header[13] = (unsigned char)((zip_mdate >> 8) & 0xff);
                     header[26] = (unsigned char)(zip_name_len & 0xff);
                     header[27] = (unsigned char)((zip_name_len >> 8) & 0xff);
-                    size_t !> (CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 30, CC_SLICE_ID_UNTRACKED, 30));
+                    size_t !>(CCIoError) hdr_wr = cc_file_write(out_ptr, cc_slice_from_parts(header, 30, CC_SLICE_ID_UNTRACKED, 30));
                     if (cc_is_err(hdr_wr)) {
                         fprintf(stderr, "Error: failed to write zip header\n");
                         cc_atomic_store(&g_pipeline_error, 1);
                         write_failed = true;
                     }
                     if (!write_failed && zip_name_len) {
-                        size_t !> (CCIoError) nm_wr = cc_file_write(out_ptr, cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len));
+                        size_t !>(CCIoError) nm_wr = cc_file_write(out_ptr, cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len));
                         if (cc_is_err(nm_wr)) {
                             fprintf(stderr, "Error: failed to write zip filename\n");
                             cc_atomic_store(&g_pipeline_error, 1);
@@ -819,7 +819,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                 // Use Result-based I/O for writing data (unless testing/listing)
                 if (!g.list && !g.test) {
-                    size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
+                    size_t !>(CCIoError) wr = cc_file_write(out_ptr, r->data);
                     if (cc_is_err(wr)) {
                         fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
                         cc_atomic_store(&g_pipeline_error, 1);
@@ -851,7 +851,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     trailer[6] = (total_len >> 16) & 0xff;
                     trailer[7] = (total_len >> 24) & 0xff;
                     
-                    size_t !> (CCIoError) tr_wr = cc_file_write(out_ptr, cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8));
+                    size_t !>(CCIoError) tr_wr = cc_file_write(out_ptr, cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8));
                     if (cc_is_err(tr_wr)) {
                         fprintf(stderr, "Error: failed to write gzip trailer\n");
                         cc_atomic_store(&g_pipeline_error, 1);
@@ -864,7 +864,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     trailer[1] = (global_crc >> 16) & 0xff;
                     trailer[2] = (global_crc >> 8) & 0xff;
                     trailer[3] = global_crc & 0xff;
-                    size_t !> (CCIoError) tr_wr = cc_file_write(out_ptr, cc_slice_from_parts(trailer, 4, CC_SLICE_ID_UNTRACKED, 4));
+                    size_t !>(CCIoError) tr_wr = cc_file_write(out_ptr, cc_slice_from_parts(trailer, 4, CC_SLICE_ID_UNTRACKED, 4));
                     if (cc_is_err(tr_wr)) {
                         fprintf(stderr, "Error: failed to write zlib trailer\n");
                         cc_atomic_store(&g_pipeline_error, 1);
@@ -896,7 +896,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         dd[14] = (unsigned char)((usize >> 16) & 0xff);
                         dd[15] = (unsigned char)((usize >> 24) & 0xff);
 
-                        size_t !> (CCIoError) dd_wr = cc_file_write(out_ptr, cc_slice_from_parts(dd, 16, CC_SLICE_ID_UNTRACKED, 16));
+                        size_t !>(CCIoError) dd_wr = cc_file_write(out_ptr, cc_slice_from_parts(dd, 16, CC_SLICE_ID_UNTRACKED, 16));
                         if (cc_is_err(dd_wr)) {
                             fprintf(stderr, "Error: failed to write zip data descriptor\n");
                             cc_atomic_store(&g_pipeline_error, 1);
@@ -932,14 +932,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             // extra len, comment len = 0
                             // relative offset of local header = 0
 
-                            size_t !> (CCIoError) cd_wr = cc_file_write(out_ptr, cc_slice_from_parts(cd, 46, CC_SLICE_ID_UNTRACKED, 46));
+                            size_t !>(CCIoError) cd_wr = cc_file_write(out_ptr, cc_slice_from_parts(cd, 46, CC_SLICE_ID_UNTRACKED, 46));
                             if (cc_is_err(cd_wr)) {
                                 fprintf(stderr, "Error: failed to write zip central directory\n");
                                 cc_atomic_store(&g_pipeline_error, 1);
                                 write_failed = true;
                             }
                             if (!write_failed && zip_name_len) {
-                                size_t !> (CCIoError) nm2_wr = cc_file_write(out_ptr, cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len));
+                                size_t !>(CCIoError) nm2_wr = cc_file_write(out_ptr, cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len));
                                 if (cc_is_err(nm2_wr)) {
                                     fprintf(stderr, "Error: failed to write zip central directory name\n");
                                     cc_atomic_store(&g_pipeline_error, 1);
@@ -963,7 +963,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                                 eocd[18] = (unsigned char)((cd_off >> 16) & 0xff);
                                 eocd[19] = (unsigned char)((cd_off >> 24) & 0xff);
 
-                                size_t !> (CCIoError) eocd_wr = cc_file_write(out_ptr, cc_slice_from_parts(eocd, 22, CC_SLICE_ID_UNTRACKED, 22));
+                                size_t !>(CCIoError) eocd_wr = cc_file_write(out_ptr, cc_slice_from_parts(eocd, 22, CC_SLICE_ID_UNTRACKED, 22));
                                 if (cc_is_err(eocd_wr)) {
                                     fprintf(stderr, "Error: failed to write zip end record\n");
                                     cc_atomic_store(&g_pipeline_error, 1);
@@ -990,7 +990,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
         /* Reader Task - spawns compression tasks and sends handles through channel */
         @nursery closing(tasks_tx) {
-            spawn([in_ptr, tasks_tx, arena_pool]() => {
+            spawn(() => [in_ptr, tasks_tx, arena_pool] {
                 long seq = 0;
                 bool hit_eof = false;
                 Block* prev_blk = NULL;
@@ -1177,14 +1177,14 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
         }
 
         @arena(dir_arena, megabytes(1)) {
-            CCDirIter* !> (CCIoError) iter_res = cc_dir_open(dir_arena, path);
+            CCDirIter* !>(CCIoError) iter_res = cc_dir_open(dir_arena, path);
             if (cc_is_ok(iter_res)) {
                 CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);
                 @defer cc_dir_close(iter);
 
                 int ret = 0;
                 while (true) {
-                    CCDirEntry !> (CCIoError) entry_res = cc_dir_next(iter, dir_arena);
+                    CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, dir_arena);
                     if (cc_is_err(entry_res)) {
                         // CCIoError is a struct, need _as variant
                         CCIoError err = cc_unwrap_err_as(entry_res, CCIoError);

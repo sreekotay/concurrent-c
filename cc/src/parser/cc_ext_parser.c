@@ -60,29 +60,95 @@ static int cc_try_cc_decl(void) { return 0; }
 static int cc_try_cc_stmt(void) { return 0; }
 static int cc_try_cc_unary(void) { return 0; }
 
-/* Helper: parse closure body (block or expression) and record AST */
-static void cc_parse_closure_body(void) {
+/* Helper: parse optional captures [x, y, ...] after => and closure body.
+ * New syntax: () => [captures] { body }  or  () => [captures] expr
+ * Captures are now parsed AFTER the arrow, not before the params.
+ */
+/* Skip closure body by counting braces/parens, for closures with typed params
+ * where TCC can't type-check without knowing the param types. */
+static void cc_skip_closure_body(int is_block) {
+    if (is_block) {
+        /* Skip { ... } by matching braces */
+        int depth = 1;
+        next(); /* consume '{' */
+        while (tok != TOK_EOF && depth > 0) {
+            if (tok == '{') depth++;
+            else if (tok == '}') depth--;
+            if (depth > 0) next();
+        }
+        if (tok == '}') next(); /* consume final '}' */
+    } else {
+        /* Skip expression: stop at , or ) or ; at depth 0 */
+        int paren = 0, brace = 0, bracket = 0;
+        while (tok != TOK_EOF) {
+            if (tok == '(') paren++;
+            else if (tok == ')') { if (paren == 0) break; paren--; }
+            else if (tok == '{') brace++;
+            else if (tok == '}') { if (brace == 0) break; brace--; }
+            else if (tok == '[') bracket++;
+            else if (tok == ']') { if (bracket == 0) break; bracket--; }
+            else if (tok == ',' && paren == 0 && brace == 0 && bracket == 0) break;
+            else if (tok == ';' && paren == 0 && brace == 0 && bracket == 0) break;
+            next();
+        }
+    }
+}
+
+static void cc_parse_closure_body_ex(int has_typed_params) {
     int saved_ncw = nocode_wanted;
     ++nocode_wanted;
     if (tcc_state) tcc_state->cc_in_closure_body++;
     
-    if (tok == '{') {
+    /* NEW: Parse optional captures [x, y, ...] after => */
+    if (tok == '[') {
+        /* Mark that this closure has captures (aux2 bit 3) */
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux2 |= 8;  /* bit 3: has captures after arrow */
+        }
+        next(); /* consume '[' */
+        int sq = 1;
+        while (tok != TOK_EOF && sq > 0) {
+            if (tok == '[') sq++;
+            else if (tok == ']') sq--;
+            if (sq > 0) next();
+        }
+        if (tok == ']') {
+            next(); /* consume ']' */
+        }
+    }
+    
+    int is_block = (tok == '{');
+    
+    if (has_typed_params) {
+        /* Skip body without type-checking - TCC doesn't know param types */
+        cc_skip_closure_body(is_block);
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux2 |= (is_block ? 1 : 2);
+        }
+    } else if (is_block) {
         block(0);
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
             int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux2 = 1; /* body is block */
+            tcc_state->cc_nodes[idx].aux2 |= 1; /* body is block */
         }
     } else {
         expr_eq();
         vpop();
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
             int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux2 = 2; /* body is expr */
+            tcc_state->cc_nodes[idx].aux2 |= 2; /* body is expr */
         }
     }
     
     if (tcc_state) tcc_state->cc_in_closure_body--;
     nocode_wanted = saved_ncw;
+}
+
+/* Backward-compatible wrapper for closures without typed params */
+static void cc_parse_closure_body(void) {
+    cc_parse_closure_body_ex(0);
     
     /* Pin end span */
     if (tcc_state && file && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
@@ -95,58 +161,47 @@ static void cc_parse_closure_body(void) {
 
 /*
  * Parse closure literal. Handles:
- *   - [@unsafe] [captures](...) => body  (when tok is '@' or '[')
  *   - () => body                          (when tok is ')')
+ *   - () => [captures] body               (captures parsed by cc_parse_closure_body)
  *   - (x) => body, (x, y) => body         (when tok is identifier)
  *   - (int x) => body                     (when tok is type keyword)
+ *   - @unsafe () => [captures] body       (when tok is '@')
  * 
- * Called after '(' has been consumed (tok is first token inside parens)
- * or when tok is '@' or '['.
+ * NEW SYNTAX (v3): Captures come AFTER the arrow:
+ *   - () => [x, y] { body }               (explicit captures)
+ *   - (a) => [x] expr                     (one param with capture)
+ *   - @unsafe () => [&x] { body }         (@unsafe allows mutation of ref captures)
+ * 
+ * Called after '(' has been consumed (tok is first token inside parens),
+ * OR when tok is '@' for @unsafe closures.
  * 
  * Returns: 1 = closure parsed, 0 = not a closure
  */
 static int cc_try_cc_closure(void) {
-    /* Use saved position from before '(' was consumed, or current position for '@'/'[' */
-    int start_line = (tok == '@' || tok == '[') ? (file ? file->line_num : 0) : tcc_state->cc_paren_start_line;
-    int start_col = (tok == '@' || tok == '[') ? tok_col : tcc_state->cc_paren_start_col;
+    /* Use saved position from before '(' was consumed, or current position for '@' */
+    int start_line = (tok == '@') ? (file ? file->line_num : 0) : tcc_state->cc_paren_start_line;
+    int start_col = (tok == '@') ? tok_col : tcc_state->cc_paren_start_col;
     
-    /* Case 1: @unsafe [...] or [...] closure with capture list */
-    if (tok == '@' || tok == '[') {
-        if (tok == '@') {
-            next(); /* consume '@' */
-            const char* kw = get_tok_str(tok, NULL);
-            if (!kw || strcmp(kw, "unsafe") != 0) {
-                tcc_error("unexpected '@' in expression (expected '@unsafe')");
-                return 0;
-            }
-            next(); /* consume 'unsafe' */
-            if (tok != '[') {
-                tcc_error("expected '[' after '@unsafe' in closure");
-                return 0;
-            }
-        }
-        
-        /* Parse capture list */
-        next(); /* consume '[' */
-        int sq = 1;
-        while (tok != TOK_EOF && sq > 0) {
-            if (tok == '[') sq++;
-            else if (tok == ']') sq--;
-            if (sq > 0) next();
-        }
-        if (tok != ']') {
-            tcc_error("unmatched '[' in closure capture list");
+    /* Handle @unsafe prefix: @unsafe () => [captures] body */
+    int is_unsafe = 0;
+    if (tok == '@') {
+        next(); /* consume '@' */
+        const char* kw = get_tok_str(tok, NULL);
+        if (!kw || strcmp(kw, "unsafe") != 0) {
+            tcc_error("unexpected '@' in expression (expected '@unsafe')");
             return 0;
         }
-        next(); /* consume ']' */
+        is_unsafe = 1;
+        next(); /* consume 'unsafe' */
         
+        /* Now expect '(' for the closure params */
         if (tok != '(') {
-            tcc_error("expected '(' after capture list in closure");
+            tcc_error("expected '(' after '@unsafe' in closure");
             return 0;
         }
         next(); /* consume '(' */
         
-        /* Count params (comma-separated, accounting for nesting) */
+        /* Parse the closure params (empty or with params) */
         int cap_param_count = 0;
         int par = 1;
         int saw_content = 0;
@@ -175,7 +230,7 @@ static int cc_try_cc_closure(void) {
             tcc_state->cc_nodes[idx].line_start = start_line;
             tcc_state->cc_nodes[idx].col_start = start_col;
             tcc_state->cc_nodes[idx].aux1 = cap_param_count;
-            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("closure");
+            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("closure_unsafe");
         }
         next(); /* consume '=>' */
         
@@ -183,6 +238,12 @@ static int cc_try_cc_closure(void) {
         cc_ast_record_end();
         vpushi(0);
         return 1;
+    }
+    
+    /* OLD SYNTAX DEPRECATION: [captures]() => body is no longer supported */
+    if (tok == '[') {
+        tcc_error("closure syntax changed: use '() => [captures] body' instead of '[captures]() => body'");
+        return 0;
     }
     
     /* Case 2: () => body (empty params, tok is ')' after '(' was consumed) */
@@ -243,12 +304,48 @@ static int cc_try_cc_closure(void) {
                 cc_param_n = pi + 1;
                 CC_CONSUME_TOK();
             } else if (tok >= TOK_UIDENT) {
-                cc_param_tok[pi] = tok;
-                cc_param_line[pi] = file ? file->line_num : 0;
-                cc_param_col[pi] = tok_col;
-                cc_param_ty[pi] = NULL;
-                cc_param_n = pi + 1;
+                /* Could be: (x) untyped param, or (Type* x) typed param, or (Type x) typed param */
+                int first_tok = tok;
+                int first_line = file ? file->line_num : 0;
+                int first_col = tok_col;
+                const char* first_name = get_tok_str(tok, NULL);
                 CC_CONSUME_TOK();
+                
+                /* Check if this is a type name: look for '*' or another identifier */
+                if (tok == '*' || tok >= TOK_UIDENT) {
+                    /* This is a type name - build type string */
+                    char tybuf[128];
+                    tybuf[0] = 0;
+                    if (first_name) strncpy(tybuf, first_name, sizeof(tybuf) - 1);
+                    tybuf[sizeof(tybuf) - 1] = 0;
+                    
+                    /* Consume pointer stars */
+                    while (tok == '*') {
+                        size_t L = strlen(tybuf);
+                        if (L + 1 < sizeof(tybuf)) { tybuf[L] = '*'; tybuf[L + 1] = 0; }
+                        CC_CONSUME_TOK();
+                    }
+                    
+                    /* Now expect parameter name */
+                    if (tok >= TOK_UIDENT) {
+                        cc_param_tok[pi] = tok;
+                        cc_param_line[pi] = file ? file->line_num : 0;
+                        cc_param_col[pi] = tok_col;
+                        cc_param_ty[pi] = tcc_strdup(tybuf);
+                        cc_param_n = pi + 1;
+                        CC_CONSUME_TOK();
+                    } else {
+                        /* Type without param name - not valid for closure */
+                        break;
+                    }
+                } else {
+                    /* Just an identifier - untyped param name */
+                    cc_param_tok[pi] = first_tok;
+                    cc_param_line[pi] = first_line;
+                    cc_param_col[pi] = first_col;
+                    cc_param_ty[pi] = NULL;
+                    cc_param_n = pi + 1;
+                }
             } else {
                 break;
             }
@@ -284,7 +381,10 @@ static int cc_try_cc_closure(void) {
                 tcc_state->cc_nodes[cidx].aux_s1 = tcc_strdup("closure");
             }
 
+            /* Check if any param has a type annotation */
+            int has_typed_params = 0;
             for (int pi = 0; pi < cc_param_n; pi++) {
+                if (cc_param_ty[pi]) has_typed_params = 1;
                 cc_ast_record_start(CC_AST_NODE_PARAM);
                 if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
                     int pidx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
@@ -299,7 +399,7 @@ static int cc_try_cc_closure(void) {
                 cc_ast_record_end();
             }
 
-            cc_parse_closure_body();
+            cc_parse_closure_body_ex(has_typed_params);
             cc_ast_record_end();
             vpushi(0);
             return 1;
@@ -425,23 +525,11 @@ static int cc_try_thread_spawn(void) {
             next(); /* consume '?' */
         }
         
-        /* Now expect closure: () => expr or [captures]() => expr */
+        /* Now expect closure: () => expr or () => [captures] expr */
         /* Parse-only mode for the rest */
         {
             int saved_ncw = nocode_wanted;
             ++nocode_wanted;
-            
-            /* Parse closure captures if present */
-            if (tok == '[') {
-                /* Skip captures */
-                int bracket_depth = 1;
-                next();
-                while (bracket_depth > 0 && tok != TOK_EOF) {
-                    if (tok == '[') bracket_depth++;
-                    else if (tok == ']') bracket_depth--;
-                    next();
-                }
-            }
             
             /* Expect () */
             if (tok != '(') {
@@ -458,9 +546,24 @@ static int cc_try_thread_spawn(void) {
             }
             next();
             
-            /* Parse the expression */
-            expr_eq();
-            vpop();
+            /* Skip optional captures [x, y] after => */
+            if (tok == '[') {
+                int bracket_depth = 1;
+                next();
+                while (bracket_depth > 0 && tok != TOK_EOF) {
+                    if (tok == '[') bracket_depth++;
+                    else if (tok == ']') bracket_depth--;
+                    next();
+                }
+            }
+            
+            /* Parse the expression/body */
+            if (tok == '{') {
+                block(0);
+            } else {
+                expr_eq();
+                vpop();
+            }
             
             nocode_wanted = saved_ncw;
         }

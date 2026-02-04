@@ -42,22 +42,22 @@ int test_consumer_outside(void) {
     
     /* Producers inside nursery - channel closed when they all finish */
     @nursery closing(tx) {
-        spawn([tx]() => {
+        spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 0 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        spawn([tx]() => {
+        spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 1 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        spawn([tx]() => {
+        spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 2 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        spawn([tx]() => {
+        spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 3 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }

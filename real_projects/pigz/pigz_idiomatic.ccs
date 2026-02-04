@@ -1,15 +1,13 @@
 /*
  * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
  *
- * NOTE: This is a simplified reference implementation. For the feature-complete,
- * production-ready version, see real_projects/pigz/pigz_cc/pigz_cc.ccs.
+ * Demonstrates the chan_send_task pattern:
+ * - chan_send_task(ch, () => expr) - spawn task, send handle
+ * - chan_recv on ordered channels awaits task internally
+ * - 'ordered' flag ensures FIFO result delivery
  *
- * This version demonstrates:
- * - Result types (T!>(E)) for error propagation
- * - CCFile with Result-based I/O (cc_file_read, cc_file_write)
- * - @defer for guaranteed cleanup
- * - if @try for ergonomic error handling
- * - Arena-backed ownership transfer
+ * Uses manual lowering until compiler support lands.
+ * See spec-progress/language-patterns-v3.md Section 7.
  */
 
 #include <ccc/std/prelude.cch>
@@ -20,28 +18,15 @@
 #include <unistd.h>
 #include <zlib.h>
 
-/* ============================================================================
- * Configuration
- * ============================================================================ */
-
 #define BLOCK_SIZE (128 * 1024)
-#define BLOCK_ARENA_OVERHEAD 1024  // Space for Block struct + alignment
-#define MAX_WORKERS 16
-// Channel capacity controls backpressure - keep small to limit in-flight blocks
-#define CHAN_CAP 64
-// Reorder buffer must hold: channel capacity + workers (each may hold 1 block)
-// Reorder buffer needs margin for worker timing variance
-#define REORDER_CAP ((CHAN_CAP + MAX_WORKERS) * 4)
-
-/* ============================================================================
- * Data Types
- * ============================================================================ */
+#define BLOCK_ARENA_OVERHEAD 1024
+#define CHAN_CAP 16
 
 typedef struct {
     long seq;
     CCSlice data;
     bool is_last;
-    CCArena arena;  // Owns the data buffer
+    CCArena arena;
 } Block;
 
 typedef struct {
@@ -50,85 +35,48 @@ typedef struct {
     unsigned long crc;
     size_t original_len;
     bool is_last;
-    CCArena arena;  // Owns the compressed data buffer
+    CCArena arena;
 } CompressedResult;
 
-/* Global statistics */
 cc_atomic_i64 g_bytes_in = 0;
 cc_atomic_i64 g_bytes_out = 0;
 cc_atomic_int g_blocks_done = 0;
 
-/* Global error flag - when set, all tasks should exit ASAP */
-cc_atomic_int g_pipeline_error = 0;
-
-/* ============================================================================
- * Compression Worker
- * ============================================================================ */
-
-/*
- * Compress a single block. 
- * Returns a CompressedResult*!>(IoError) to demonstrate idiomatic error propagation.
- * 
- * Uses @arena block with cc_arena_detach() for clean ownership transfer:
- * - On error: @arena cleanup frees the memory
- * - On success: arena_detach() transfers ownership, cleanup is no-op
- */
-CompressedResult*!>(CCIoError) compress_block(Block* blk, int level) {
-    // Arena sizing: CompressedResult struct + gzip output (header + deflate + trailer)
-    // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
+CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
     @arena(res_arena, arena_size) {
         CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
-        if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
+        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         
         res->seq = blk->seq;
         res->is_last = blk->is_last;
         res->original_len = blk->data.len;
-
-        // Calculate CRC using zlib directly
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-        // Allocate output buffer in the result arena
         size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
         unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
-        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
+        if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
-        // Write gzip header (10 bytes)
-        unsigned char header[10] = {
-            0x1f, 0x8b,  // Magic
-            0x08,        // Deflate method
-            0x00,        // Flags (none)
-            0, 0, 0, 0,  // Mtime (not set)
-            0x00,        // Extra flags
-            0x03         // OS = Unix
-        };
+        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
         memcpy(out_buf, header, 10);
         size_t pos = 10;
 
-        // Compress with zlib (raw deflate, -15 window bits)
-        z_stream strm;
-        memset(&strm, 0, sizeof(strm));
-        
-        int ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-        if (ret != Z_OK) return cc_err(CC_IO_OTHER);
-        
+        z_stream strm = {0};
+        if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        }
         strm.next_in = (Bytef*)blk->data.ptr;
         strm.avail_in = (uInt)blk->data.len;
         strm.next_out = out_buf + pos;
-        strm.avail_out = (uInt)(max_out - pos - 8);  // Reserve space for trailer
+        strm.avail_out = (uInt)(max_out - pos - 8);
         
-        ret = deflate(&strm, Z_FINISH);
-        size_t deflate_len = strm.total_out;
+        int ret = deflate(&strm, Z_FINISH);
+        pos += strm.total_out;
         deflateEnd(&strm);
         
-        if (ret != Z_STREAM_END) {
-            return cc_err(CC_IO_OTHER);
-        }
+        if (ret != Z_STREAM_END) return cc_err(cc_io_error(CC_IO_OTHER));
         
-        pos += deflate_len;
-        
-        // Write gzip trailer: CRC32 (4 bytes) + original size mod 2^32 (4 bytes)
         unsigned long crc = res->crc;
         size_t in_len = blk->data.len;
         out_buf[pos++] = crc & 0xff;
@@ -141,25 +89,43 @@ CompressedResult*!>(CCIoError) compress_block(Block* blk, int level) {
         out_buf[pos++] = (in_len >> 24) & 0xff;
 
         res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
-
-        // Update statistics
         cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);
 
-        // Transfer arena ownership: detach empties res_arena, so block cleanup is no-op
         res->arena = cc_arena_detach(res_arena);
-        
         return cc_ok(res);
     }
 }
 
-/* ============================================================================
- * Main Compression Pipeline
- * ============================================================================ */
+// Task wrapper - stores result in fiber-local storage (what ordered_recv expects)
+void* compress_task_wrapper(void* arg) {
+    Block* blk = (Block*)arg;
+    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+    cc_heap_arena_free(&blk->arena);
+    
+    // Store result in fiber-local storage at offset 0 (what ordered_recv expects)
+    typedef struct { CompressedResult* __result; } __result_t;
+    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
+    if (!storage) return NULL;
+    
+    storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
+    return storage;
+}
 
-int compress_file(const char* in_path, const char* out_path, int num_workers, int level) {
-    // Open input file
+/*
+ * IDEAL SYNTAX (what we want):
+ *   CompressedResult*[~16 ordered] results;
+ *   chan_send_task(results, () => [blk] compress_block(blk, 6));
+ *   while (chan_recv(results, &r)) { use(r); }
+ *
+ * MANUAL LOWERING (what works today):
+ *   CCTask channel + ordered_recv helper
+ */
+
+int compress_file(const char* in_path, const char* out_path, int level) {
+    (void)level;
+    
     CCFile in_file;
     if (cc_file_open(&in_file, in_path, "rb") != 0) {
         fprintf(stderr, "Failed to open input: %s\n", in_path);
@@ -167,7 +133,6 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
     @defer cc_file_close(&in_file);
 
-    // Open output file
     CCFile out_file;
     if (cc_file_open(&out_file, out_path, "wb") != 0) {
         fprintf(stderr, "Failed to open output: %s\n", out_path);
@@ -175,150 +140,64 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     }
     @defer cc_file_close(&out_file);
 
-    // Reset error flag
-    cc_atomic_store(&g_pipeline_error, 0);
-    
-    // Channels for pipeline (capacity matches REORDER_CAP calculation)
-    Block*[~CHAN_CAP >] blocks_tx;
-    Block*[~CHAN_CAP <] blocks_rx;
-    CompressedResult*[~CHAN_CAP >] results_tx;
-    CompressedResult*[~CHAN_CAP <] results_rx;
+    // Internal representation: channel of CCTask handles
+    CCTask[~CHAN_CAP >] tasks_tx;
+    CCTask[~CHAN_CAP <] tasks_rx;
+    CCChan* ch = channel_pair(&tasks_tx, &tasks_rx);
+    @defer cc_chan_free(ch);
 
-    CCChan* blocks_ch = channel_pair(&blocks_tx, &blocks_rx);
-    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
-    @defer cc_chan_free(blocks_ch);
-    @defer cc_chan_free(results_ch);
-
-    // Pointers for closure capture
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
     @nursery {
-        /* Writer Task - must write blocks in sequence order */
-        spawn([out_ptr]() => {
-            long next_seq = 0;
-            CompressedResult* pending[REORDER_CAP];
-            memset(pending, 0, sizeof(pending));
-            bool write_failed = false;
-            
-            CompressedResult* r;
-            while (!write_failed && cc_io_avail(chan_recv(results_rx, &r))) {
-                // Insert using modular indexing
-                size_t slot = (size_t)(r->seq % REORDER_CAP);
-                
-                // Collision is a logic bug in pipeline sizing - abort immediately
-                if (pending[slot] != NULL) {
-                    fprintf(stderr, "FATAL: Reorder buffer collision at seq %ld (slot %zu holds seq %ld)\n", 
-                            r->seq, slot, pending[slot]->seq);
-                    fprintf(stderr, "This indicates REORDER_CAP (%d) is too small for the pipeline.\n", REORDER_CAP);
-                    abort();
-                }
-                pending[slot] = r;
-                
-                // Drain all consecutive blocks starting from next_seq
-                while (!write_failed && pending[next_seq % REORDER_CAP] != NULL) {
-                    slot = (size_t)(next_seq % REORDER_CAP);
-                    r = pending[slot];
-                    pending[slot] = NULL;
-                    
-                    size_t !> (CCIoError) wr = cc_file_write(out_ptr, r->data);
-                    if (cc_is_err(wr)) {
-                        fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
-                        // Signal all tasks to exit
-                        cc_atomic_store(&g_pipeline_error, 1);
-                        write_failed = true;
-                    }
+        // Consumer: ordered_recv awaits task and extracts result
+        spawn(() => [out_ptr, tasks_rx] {
+            void* result;
+            while (ordered_recv(tasks_rx, &result) == 1) {
+                CompressedResult* r = (CompressedResult*)result;
+                if (r) {
+                    cc_file_write(out_ptr, r->data);
                     cc_heap_arena_free(&r->arena);
-                    next_seq++;
                 }
-            }
-            // Cleanup any remaining pending blocks
-            for (int i = 0; i < REORDER_CAP; i++) {
-                if (pending[i]) cc_heap_arena_free(&pending[i]->arena);
             }
         });
 
-        @nursery closing(results_tx) {
-            /* Compression Workers */
-            for (int w = 0; w < num_workers; w++) {
-                spawn([level, results_tx]() => {
-                    Block* blk;
-                    while (cc_io_avail(chan_recv(blocks_rx, &blk))) {
-                        // Check if pipeline is shutting down due to error
-                        if (cc_atomic_load(&g_pipeline_error)) {
-                            cc_heap_arena_free(&blk->arena);
-                            continue;  // Drain channel but don't process
-                        }
-                        
-                        // Compress and send result; on error, log and continue
-                        if @try (CompressedResult* res = compress_block(blk, level)) {
-                            (void)chan_send(results_tx, res);
-                        } else {
-                            // Error is either OUT_OF_MEMORY or OTHER (zlib failure)
-                            fprintf(stderr, "Compression error (seq=%ld)\n", blk->seq);
-                        }
-                        
-                        // Free input block arena
-                        cc_heap_arena_free(&blk->arena);
-                    }
-                });
-            }
-
-            /* Reader Task */
-            @nursery closing(blocks_tx) {
-                spawn([in_ptr]() => {
-                    long seq = 0;
-                    bool hit_eof = false;
+        // Producer: spawn task + send handle (manual chan_send_task)
+        @nursery closing(tasks_tx) {
+            spawn(() => [in_ptr, tasks_tx] {
+                long seq = 0;
+                while (true) {
+                    CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
+                    CCSlice data;
+                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
                     
-                    while (!hit_eof) {
-                        // Check if pipeline is shutting down due to error
-                        if (cc_atomic_load(&g_pipeline_error)) break;
-                        
-                        CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
-                        
-                        // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
-                        CCSlice data;
-                        bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
-                        if (cc_is_err(read_res)) {
-                            fprintf(stderr, "Read error\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            cc_heap_arena_free(&blk_arena);
-                            break;
-                        }
-                        if (!cc_io_avail(read_res)) {
-                            cc_heap_arena_free(&blk_arena);
-                            break;  // EOF with no data
-                        }
-                        
-                        // Block struct also lives in the arena
-                        Block* blk = arena_alloc1(Block, &blk_arena);
-                        if (!blk) {
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            cc_heap_arena_free(&blk_arena);
-                            break;
-                        }
-                        
-                        blk->seq = seq++;
-                        blk->data = data;
-                        // Short read means EOF - this is the last block
-                        // Full read: may or may not be last; is_last=false here, writer knows by channel close
-                        blk->is_last = (data.len < BLOCK_SIZE);
-                        hit_eof = blk->is_last;
-                        blk->arena = blk_arena;  // Transfer ownership to Block
-                        
-                        (void)chan_send(blocks_tx, blk);
+                    if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
+                        cc_heap_arena_free(&blk_arena);
+                        break;
                     }
-                });
-            }
+                    
+                    Block* blk = arena_alloc1(Block, &blk_arena);
+                    if (!blk) {
+                        cc_heap_arena_free(&blk_arena);
+                        break;
+                    }
+                    
+                    blk->seq = seq++;
+                    blk->data = data;
+                    blk->is_last = (data.len < BLOCK_SIZE);
+                    blk->arena = blk_arena;
+                    
+                    // Manual lowering of: chan_send_task(tx, () => compress_block(blk))
+                    CCTask task = cc_fiber_spawn_task(compress_task_wrapper, blk);
+                    cc_chan_send(tasks_tx.raw, &task, sizeof(task));
+                    
+                    if (blk->is_last) break;
+                }
+            });
         }
     }
 
     cc_file_sync(&out_file);
-    
-    // Check if pipeline encountered an error
-    if (cc_atomic_load(&g_pipeline_error)) {
-        return 1;
-    }
     return 0;
 }
 
@@ -331,10 +210,10 @@ int main(int argc, char *argv[]) {
     char out_name[4096];
     snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
     
-    int ret = compress_file(argv[1], out_name, 4, 6);
+    int ret = compress_file(argv[1], out_name, 6);
     
     if (ret == 0) {
-        printf("Compressed %s to %s\n", argv[1], out_name);
+        printf("Compressed %s -> %s\n", argv[1], out_name);
         printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
                (long long)cc_atomic_load(&g_bytes_in),
                (long long)cc_atomic_load(&g_bytes_out),

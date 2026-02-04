@@ -6,7 +6,7 @@ int main(void) {
     
     @nursery {
         /* ERROR: capture-all [&] is not allowed */
-        spawn([&]() => {
+        spawn(() => [&] {
             x++;
         });
     }

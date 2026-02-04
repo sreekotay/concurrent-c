@@ -84,7 +84,7 @@ void test_defer_spawn_immediate(void) {
     cc_atomic_store(&g_worker_count, 0);
     
     @nursery {
-        spawn([]() => {
+        spawn(() => {
             Resource r;
             resource_init(&r, 300);
             @defer resource_cleanup(&r);  // This now works!
@@ -115,7 +115,7 @@ void test_defer_spawn_multiple_workers(void) {
     @nursery {
         for (int idx = 0; idx < 3; idx++) {
             int worker_id = idx;  // capture-friendly local
-            spawn([worker_id]() => {
+            spawn(() => [worker_id] {
                 Resource r;
                 resource_init(&r, 400 + worker_id);
                 @defer resource_cleanup(&r);  // This now works!

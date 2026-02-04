@@ -120,7 +120,7 @@ Auto-close channels when producers finish:
 No thread management - structured lifetime:
 ```c
 for (int w = 0; w < num_workers; w++) {
-    spawn([level]() => {
+    spawn(() => [level] {
         Block blk;
         while (chan_recv(blocks_rx, &blk) == 0) {
             Result res = compress_block(&blk, level);

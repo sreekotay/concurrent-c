@@ -16,7 +16,7 @@ int main(void) {
     
     @nursery {
         // Capture 10 variables by value
-        spawn([a, b, c, d, e, f, g, h, i, j]() => {
+        spawn(() => [a, b, c, d, e, f, g, h, i, j] {
             int sum = a + b + c + d + e + f + g + h + i + j;
             printf("sum = %d\n", sum);  // 1+2+...+10 = 55
         });

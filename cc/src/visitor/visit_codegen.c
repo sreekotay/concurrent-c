@@ -589,9 +589,21 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = rp_len;
         }
 
+        /* Rewrite chan_send_task(ch, closure) BEFORE channel type rewrite.
+           This wraps the closure body to store result in fiber-local storage. */
+        {
+            size_t st_len = 0;
+            char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
+            if (st) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = st;
+                src_ufcs_len = st_len;
+            }
+        }
+
         /* Rewrite channel handle types (including owned channels) BEFORE creating AST.
            This transforms `int[~4 >]` -> `CCChanTx`, and `T[~N owned {...}]` -> `cc_chan_create_owned(...)`.
-           T[~N ordered <] becomes CCChanRxOrdered.
+           T[~N ordered <] becomes CCChanRx (ordered is a flag on the channel).
            Must happen before AST creation so closure positions are correct. */
         {
             char* rew = cc__rewrite_chan_handle_types_text(ctx, src_ufcs, src_ufcs_len);
@@ -922,6 +934,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rp;
             src_ufcs_len = rp_len;
+        }
+        /* Rewrite chan_send_task(ch, closure) */
+        {
+            size_t st_len = 0;
+            char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
+            if (st) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = st;
+                src_ufcs_len = st_len;
+            }
         }
         /* Final safety: ensure invalid surface syntax like `T[~ ... >]` does not reach the C compiler. */
         {

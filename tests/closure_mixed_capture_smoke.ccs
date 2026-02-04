@@ -6,7 +6,7 @@
 void test_param_capture(int level, const char* name) {
     @nursery {
         /* Capture function parameters directly */
-        spawn([level, name]() => {
+        spawn(() => [level, name] {
             printf("param capture: level=%d, name=%s\n", level, name);
         });
     }
@@ -18,7 +18,7 @@ int main(void) {
     
     @nursery {
         /* x by value (copied), y by reference (shared, read-only) */
-        spawn([x, &y]() => {
+        spawn(() => [x, &y] {
             printf("value x=%d, ref y=%d\n", x, y);
         });
     }

@@ -29,7 +29,7 @@ int main(void) {
         /* Workers */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            spawn([worker_id]() => {
+            spawn(() => [worker_id] {
                 Item item;
                 int count = 0;
                 while (cc_io_avail(chan_recv(rx, &item))) {

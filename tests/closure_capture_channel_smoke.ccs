@@ -8,7 +8,7 @@ int main(void) {
     CCChan* ch = channel_pair(&tx, &rx);
     
     // Capture channel handle in closure
-    CCClosure0 producer = [tx]() => {
+    CCClosure0 producer = () => [tx] {
         for (int i = 0; i < 3; i++) {
             (void)chan_send(tx, i * 10);
         }

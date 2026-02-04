@@ -47,7 +47,7 @@ int main(void) {
     printf("before: counter = %d\n", counter);
     
     @nursery {
-        spawn([&counter]() => {
+        spawn(() => [&counter] {
             printf("task C reads counter = %d (via reference)\n", counter);
         });
     }
@@ -58,14 +58,14 @@ int main(void) {
     /*
      * Mutation with reference capture is NOT allowed by default:
      *
-     *   spawn([&counter]() => { counter++; });
+     *   spawn(() => [&counter] { counter++; });
      *   // error: mutation of shared reference 'counter' in spawned task
      *   // help: use Atomic<int>, Mutex<int>, or @unsafe [&counter]
      *
      * This prevents accidental data races. Safe alternatives:
      *   1. @atomic int counter;         — hardware atomic ops
      *   2. Mutex<int> counter;          — lock-based safety
-     *   3. @unsafe [&counter]           — opt-out (you own the race)
+     *   3. @unsafe () => [&counter]     — opt-out (you own the race)
      *   4. Channels                     — message passing instead of sharing
      *   5. Result array                 — each task owns its slot
      */

@@ -6,7 +6,7 @@ int main(void) {
     
     @nursery {
         /* ERROR: mutation of shared reference */
-        spawn([&counter]() => {
+        spawn(() => [&counter] {
             counter++;  /* This should produce a compile error */
         });
     }

@@ -7,7 +7,7 @@ int main(void) {
     
     @nursery {
         /* @unsafe bypasses mutation check - you own this race */
-        spawn(@unsafe [&counter]() => {
+        spawn(@unsafe () => [&counter] {
             counter++;
         });
     }

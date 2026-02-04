@@ -11,7 +11,7 @@
 
 void test_apostrophe_in_comment(int level) {
     @nursery {
-        spawn([level]() => {  /* Test comment with apostrophe - it's fine */
+        spawn(() => [level] {  /* Test comment with apostrophe - it's fine */
             printf("level=%d\n", level);
         });
     }
@@ -19,7 +19,7 @@ void test_apostrophe_in_comment(int level) {
 
 void test_multiple_comments(int x) {
     @nursery {
-        spawn([x]() => {
+        spawn(() => [x] {
             /* It's a test */
             int y = x;
             /* Don't forget this */
@@ -31,7 +31,7 @@ void test_multiple_comments(int x) {
 
 void test_line_comment_apostrophe(int val) {
     @nursery {
-        spawn([val]() => {
+        spawn(() => [val] {
             // This comment's apostrophe shouldn't break parsing
             printf("val=%d\n", val);
         });

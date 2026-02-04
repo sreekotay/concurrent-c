@@ -98,7 +98,7 @@ static void bench_spawn_overhead(void) {
     
     @nursery {
         for (int i = 0; i < ITERATIONS; i++) {
-            spawn([counter_ptr]() => {
+            spawn(() => [counter_ptr] {
                 cc_atomic_fetch_add(counter_ptr, 1);
             });
         }

@@ -23,8 +23,9 @@ typedef struct { struct CCChan* raw; } CCChanTx;
 typedef struct { struct CCChan* raw; } CCChanRx;
 #endif
 
-/* Ordered channel rx handle - carries same data as CCChanRx but uses
-   ordered_recv() to receive CCTask, block on it, and extract result. */
+/* DEPRECATED: CCChanRxOrdered is no longer used - ordered is now a flag on CCChan.
+   The compiler emits CCChanRx for all receive channels, and ordered_recv()
+   checks the channel's is_ordered flag at runtime. Kept for API compatibility. */
 #ifndef __CC_CHAN_RX_ORDERED_DEFINED
 #define __CC_CHAN_RX_ORDERED_DEFINED
 typedef struct { struct CCChan* raw; } CCChanRxOrdered;

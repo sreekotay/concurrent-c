@@ -56,9 +56,7 @@ Use the provided scripts for regular race detection:
 - Full TSan run: `./scripts/test_tsan.sh --all`
 - Stress tests under TSan: `./scripts/stress_sanitize.sh tsan`Notes:
 - On macOS, TSan requires `clang`.
-- TSan runs are slower; keep them focused on stress/race tests.
-
-### Validating TSan suppressions
+- TSan runs are slower; keep them focused on stress/race tests.### Validating TSan suppressions
 
 Some functions use `__attribute__((no_sanitize("thread")))` to suppress TSan checking. This is safe only when:
 1. The function only accesses thread-local memory (e.g., local stack variables)

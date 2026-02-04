@@ -1234,12 +1234,8 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     /* overlapping/odd context; just ignore and continue */
                 } else {
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                    /* Emit CCChanRxOrdered for ordered channels */
-                    if (saw_lt && saw_ordered) {
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "CCChanRxOrdered");
-                    } else {
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
-                    }
+                    /* Emit CCChanTx for send, CCChanRx for recv (ordered is a flag, not a type) */
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
                     last_emit = k + 1; /* skip past ']' */
                 }
 

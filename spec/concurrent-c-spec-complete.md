@@ -8,8 +8,8 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 **Full name:** Concurrent-C  
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
-**Draft Version:** 1.0-draft.10  
-**Last Updated:** 2026-01-07
+**Draft Version:** 1.0-draft.11  
+**Last Updated:** 2026-02-04
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
@@ -1729,19 +1729,19 @@ void   Thread.join();                    // wait for completion
 int x = 0;
 
 // Value capture (default): x is copied, immutable in closure
-spawn(() => { printf("%d", x); });     // ✅ OK
-spawn(() => { x++; });                 // ❌ ERROR: value capture is immutable
+spawn(() => { printf("%d", x); });       // ✅ OK
+spawn(() => { x++; });                   // ❌ ERROR: value capture is immutable
 
 // Reference capture: explicit sharing with mutation check
-spawn([&x]() => { printf("%d", x); }); // ✅ OK: read-only
-spawn([&x]() => { x++; });             // ❌ ERROR: mutation of shared ref
+spawn(() => [&x] { printf("%d", x); });  // ✅ OK: read-only
+spawn(() => [&x] { x++; });              // ❌ ERROR: mutation of shared ref
 
 // Safe wrappers: mutation allowed
 Atomic<int> counter = atomic_new(0);
-spawn([&counter]() => { counter++; }); // ✅ OK: Atomic is thread-safe
+spawn(() => [&counter] { counter++; }); // ✅ OK: Atomic is thread-safe
 
 // Escape hatch: @unsafe bypasses check
-spawn(@unsafe [&x]() => { x++; });     // ⚠️ OK: explicit unsafe
+spawn(@unsafe () => [&x] { x++; });     // ⚠️ OK: explicit unsafe
 ```
 
 This prevents data races while allowing explicit shared state through safe wrappers.
@@ -2566,9 +2566,9 @@ Owned channels extend the channel primitive with **lifecycle management**, enabl
 
 ```c
 T[~N owned {
-    .create = [captures]() => create_expr,
-    .destroy = [](item) => destroy_expr,
-    .reset = [](item) => reset_expr      // optional
+    .create = () => create_expr,
+    .destroy = (T item) => destroy_expr,
+    .reset = (T item) => reset_expr      // optional
 }] pool;
 ```
 
@@ -2588,7 +2588,7 @@ owned_channel := element_type '[~' capacity 'owned' lifecycle_block ']' identifi
 lifecycle_block := '{' lifecycle_callbacks '}'
 lifecycle_callbacks := lifecycle_callback (',' lifecycle_callback)*
 lifecycle_callback := '.' ('create' | 'destroy' | 'reset') '=' closure_expr
-closure_expr := '[' capture_list? ']' '(' param_list? ')' '=>' expr
+closure_expr := '(' param_list? ')' '=>' ('[' capture_list ']')? expr
 ```
 
 #### 6.7.2 Semantics
@@ -2597,9 +2597,9 @@ closure_expr := '[' capture_list? ']' '(' param_list? ')' '=>' expr
 
 ```c
 CCArena[~4 owned {
-    .create = []() => cc_heap_arena(4096),
-    .destroy = [](a) => cc_heap_arena_free(&a),
-    .reset = [](a) => cc_arena_reset(&a)
+    .create = () => cc_heap_arena(4096),
+    .destroy = (CCArena a) => cc_heap_arena_free(&a),
+    .reset = (CCArena a) => cc_arena_reset(&a)
 }] arena_pool;
 
 // Borrow: recv from pool
@@ -2643,14 +2643,14 @@ chan_send(arena_pool, arena);   // Calls .reset before re-adding to pool
 ```c
 // Pool of 4 arenas, each 4KB
 CCArena[~4 owned {
-    .create = []() => cc_heap_arena(4096),
-    .destroy = [](a) => cc_heap_arena_free(&a),
-    .reset = [](a) => cc_arena_reset(&a)
+    .create = () => cc_heap_arena(4096),
+    .destroy = (CCArena a) => cc_heap_arena_free(&a),
+    .reset = (CCArena a) => cc_arena_reset(&a)
 }] arena_pool;
 
 @nursery {
     // Worker borrows arena, uses it, returns it
-    spawn([arena_pool]() => {
+    spawn(() => [arena_pool] {
         CCArena arena;
         chan_recv(arena_pool, &arena);  // Borrow
         
@@ -2669,12 +2669,12 @@ CCArena[~4 owned {
 typedef struct { int fd; bool valid; } Connection;
 
 Connection[~10 owned {
-    .create = [host, port]() => {
+    .create = () => [host, port] {
         Connection c = { .fd = connect_to(host, port), .valid = true };
         return c;
     },
-    .destroy = [](c) => { if (c.valid) close(c.fd); },
-    .reset = [](c) => { /* connections don't need reset */ }
+    .destroy = (Connection c) => { if (c.valid) close(c.fd); },
+    .reset = (Connection c) => { /* connections don't need reset */ }
 }] conn_pool;
 
 // Borrow connection
@@ -5419,15 +5419,15 @@ char[:] s = "hello";  // static slice, always valid
 Closures use arrow syntax with optional capture list:
 
 ```c
-() => { stmt; }              // no parameters, implicit value capture
-(x) => { stmt; }             // one parameter (type inferred)
-(int x, int y) => { stmt; }  // typed parameters
-x => expr                    // single parameter, expression body
+() => { stmt; }               // no parameters, implicit value capture
+(x) => { stmt; }              // one parameter (type inferred)
+(int x, int y) => { stmt; }   // typed parameters
+x => expr                     // single parameter, expression body
 
-// Explicit capture list (optional)
-[x]() => { stmt; }           // explicit value capture (same as implicit)
-[&x]() => { stmt; }          // reference capture (explicit sharing)
-[x, &y]() => { stmt; }       // mixed: x by value, y by reference
+// Explicit capture list (after arrow, v3 syntax)
+() => [x] { stmt; }           // explicit value capture
+() => [&x] { stmt; }          // reference capture (explicit sharing)
+() => [x, &y] { stmt; }       // mixed: x by value, y by reference
 ```
 
 **Capture semantics:**
@@ -5459,19 +5459,19 @@ spawn(() => { counter++; });
 // help: use [&counter] for reference capture
 
 // ✅ OK: read-only reference capture
-spawn([&counter]() => { printf("%d", counter); });
+spawn(() => [&counter] { printf("%d", counter); });
 
 // ❌ ERROR: mutation of shared reference
-spawn([&counter]() => { counter++; });
+spawn(() => [&counter] { counter++; });
 // error: mutation of shared reference 'counter' in spawned task
 // help: use Atomic<int>, Mutex<int>, or @unsafe [&counter]
 
 // ✅ OK: safe wrapper
 Atomic<int> safe_counter = atomic_new(0);
-spawn([&safe_counter]() => { safe_counter++; });
+spawn(() => [&safe_counter] { safe_counter++; });
 
 // ⚠️ OK: explicit unsafe (you own this race)
-spawn(@unsafe [&counter]() => { counter++; });
+spawn(@unsafe () => [&counter] { counter++; });
 ```
 
 **Mutation patterns detected:**
@@ -6345,24 +6345,24 @@ Lowers to:
 @async void bad_race() {
     int counter = 0;
     nursery {
-        spawn ([&counter]() => { counter++; });  // ❌ ERROR: mutation of shared ref
-        spawn ([&counter]() => { counter++; });
+        spawn (() => [&counter] { counter++; });  // ❌ ERROR: mutation of shared ref
+        spawn (() => [&counter] { counter++; });
     }
 }
 
 @async void ok_atomic() {
     Atomic<int> counter = atomic_new(0);
     nursery {
-        spawn ([&counter]() => { counter++; });  // ✅ OK: Atomic is thread-safe
-        spawn ([&counter]() => { counter++; });
+        spawn (() => [&counter] { counter++; });  // ✅ OK: Atomic is thread-safe
+        spawn (() => [&counter] { counter++; });
     }
 }
 
 @async void ok_readonly() {
     int config = 42;
     nursery {
-        spawn ([&config]() => { printf("%d", config); });  // ✅ OK: read-only
-        spawn ([&config]() => { printf("%d", config); });
+        spawn (() => [&config] { printf("%d", config); });  // ✅ OK: read-only
+        spawn (() => [&config] { printf("%d", config); });
     }
 }
 ```

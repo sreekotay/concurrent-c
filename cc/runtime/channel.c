@@ -220,6 +220,68 @@ bool cc_is_cancelled_current(void) {
 /* Forward declarations */
 static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool allow_take, bool is_sync, CCChanTopology topology);
 
+/* Global broadcast condvar for multi-channel select (@match).
+   Simple approach: any channel activity signals this global condvar.
+   Waiters in @match wait on this. Spurious wakeups are handled by retrying. */
+static pthread_mutex_t g_chan_broadcast_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_chan_broadcast_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic int g_select_waiters = 0;  /* Count of threads waiting in select */
+
+struct CCChan {
+    size_t cap;
+    size_t count;              /* Only used for unbuffered (cap==0) and mutex fallback */
+    size_t head;               /* Only used for unbuffered (cap==0) and mutex fallback */
+    size_t tail;               /* Only used for unbuffered (cap==0) and mutex fallback */
+    void *buf;                 /* Data buffer: ring buffer for mutex path, slot array for lock-free */
+    size_t elem_size;
+    int closed;
+    int tx_error_code;         /* Error code when tx closed with error (downstream propagation) */
+    int rx_error_closed;       /* Flag: rx side was error-closed */
+    int rx_error_code;         /* Error code from rx side (upstream propagation to senders) */
+    CCChanMode mode;
+    int allow_take;
+    int is_sync;               /* 1 = sync (blocks OS thread), 0 = async (cooperative) */
+    CCChanTopology topology;
+    /* Rendezvous (unbuffered) support: cap==0 */
+    int rv_has_value;
+    int rv_recv_waiters;
+    
+    /* Ordered channel (task channel) support */
+    int is_ordered;                                  /* 1 = ordered (recv awaits CCTask, extracts result) */
+    
+    /* Owned channel (pool) support */
+    int is_owned;                                    /* 1 = owned channel (pool semantics) */
+    CCClosure0 on_create;                           /* Called when pool empty and recv called */
+    CCClosure1 on_destroy;                          /* Called for each item on channel free */
+    CCClosure1 on_reset;                            /* Called on item when returned via send */
+    size_t items_created;                           /* Number of items created by on_create */
+    size_t max_items;                               /* Maximum items pool can create */
+    
+    /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
+    CCNursery* autoclose_owner;
+    int warned_autoclose_block;
+    pthread_mutex_t mu;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
+    /* Fiber wait queues for fiber-aware blocking */
+    cc__fiber_wait_node* send_waiters_head;
+    cc__fiber_wait_node* send_waiters_tail;
+    cc__fiber_wait_node* recv_waiters_head;
+    cc__fiber_wait_node* recv_waiters_tail;
+    
+    /* Lock-free MPMC queue for buffered channels (cap > 0) */
+    int use_lockfree;                               /* 1 = use lock-free queue, 0 = use mutex */
+    size_t lfqueue_cap;                             /* Actual capacity (rounded up to power of 2) */
+    struct lfds711_queue_bmm_state lfqueue_state;   /* liblfds queue state */
+    struct lfds711_queue_bmm_element *lfqueue_elements; /* Pre-allocated element array */
+    _Atomic int lfqueue_count;                      /* Approximate count for fast full/empty check */
+    _Atomic size_t slot_counter;                    /* Per-channel slot counter for large elements */
+    _Atomic int recv_fairness_ctr;                  /* For yield-every-N fairness */
+};
+
+static inline void cc_chan_lock(CCChan* ch) { pthread_mutex_lock(&ch->mu); }
+static inline void cc_chan_unlock(CCChan* ch) { pthread_mutex_unlock(&ch->mu); }
+
 int cc_chan_pair_create(size_t capacity,
                         CCChanMode mode,
                         bool allow_send_take,
@@ -269,6 +331,7 @@ CCChan* cc_chan_pair_create_returning(size_t capacity,
                                       size_t elem_size,
                                       bool is_sync,
                                       int topology,
+                                      bool is_ordered,
                                       CCChanTx* out_tx,
                                       CCChanRx* out_rx) {
     if (!out_tx || !out_rx) return NULL;
@@ -277,6 +340,7 @@ CCChan* cc_chan_pair_create_returning(size_t capacity,
     CCChanTopology topo = (CCChanTopology)topology;
     CCChan* ch = cc_chan_create_internal(capacity, mode, allow_send_take, is_sync, topo);
     if (!ch) return NULL;
+    ch->is_ordered = is_ordered ? 1 : 0;
     if (elem_size != 0) {
         int e = cc_chan_init_elem(ch, elem_size);
         if (e != 0) { cc_chan_free(ch); return NULL; }
@@ -284,66 +348,6 @@ CCChan* cc_chan_pair_create_returning(size_t capacity,
     out_tx->raw = ch;
     out_rx->raw = ch;
     return ch;
-}
-
-/* Global broadcast condvar for multi-channel select (@match).
-   Simple approach: any channel activity signals this global condvar.
-   Waiters in @match wait on this. Spurious wakeups are handled by retrying. */
-static pthread_mutex_t g_chan_broadcast_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_chan_broadcast_cv = PTHREAD_COND_INITIALIZER;
-static _Atomic int g_select_waiters = 0;  /* Count of threads waiting in select */
-
-struct CCChan {
-    size_t cap;
-    size_t count;              /* Only used for unbuffered (cap==0) and mutex fallback */
-    size_t head;               /* Only used for unbuffered (cap==0) and mutex fallback */
-    size_t tail;               /* Only used for unbuffered (cap==0) and mutex fallback */
-    void *buf;                 /* Data buffer: ring buffer for mutex path, slot array for lock-free */
-    size_t elem_size;
-    int closed;
-    int tx_error_code;         /* Error code when tx closed with error (downstream propagation) */
-    int rx_error_closed;       /* Flag: rx side was error-closed */
-    int rx_error_code;         /* Error code from rx side (upstream propagation to senders) */
-    CCChanMode mode;
-    int allow_take;
-    int is_sync;               /* 1 = sync (blocks OS thread), 0 = async (cooperative) */
-    CCChanTopology topology;
-    /* Rendezvous (unbuffered) support: cap==0 */
-    int rv_has_value;
-    int rv_recv_waiters;
-    
-    /* Owned channel (pool) support */
-    int is_owned;                                    /* 1 = owned channel (pool semantics) */
-    CCClosure0 on_create;                           /* Called when pool empty and recv called */
-    CCClosure1 on_destroy;                          /* Called for each item on channel free */
-    CCClosure1 on_reset;                            /* Called on item when returned via send */
-    size_t items_created;                           /* Number of items created by on_create */
-    size_t max_items;                               /* Maximum items pool can create */
-    
-    /* Debug/guard: if set, this channel is auto-closed by this nursery on scope exit. */
-    CCNursery* autoclose_owner;
-    int warned_autoclose_block;
-    pthread_mutex_t mu;
-    pthread_cond_t not_empty;
-    pthread_cond_t not_full;
-    /* Fiber wait queues for fiber-aware blocking */
-    cc__fiber_wait_node* send_waiters_head;
-    cc__fiber_wait_node* send_waiters_tail;
-    cc__fiber_wait_node* recv_waiters_head;
-    cc__fiber_wait_node* recv_waiters_tail;
-    
-    /* Lock-free MPMC queue for buffered channels (cap > 0) */
-    int use_lockfree;                               /* 1 = use lock-free queue, 0 = use mutex */
-    size_t lfqueue_cap;                             /* Actual capacity (rounded up to power of 2) */
-    struct lfds711_queue_bmm_state lfqueue_state;   /* liblfds queue state */
-    struct lfds711_queue_bmm_element *lfqueue_elements; /* Pre-allocated element array */
-    _Atomic int lfqueue_count;                      /* Approximate count for fast full/empty check */
-    _Atomic size_t slot_counter;                    /* Per-channel slot counter for large elements */
-    _Atomic int recv_fairness_ctr;                  /* For yield-every-N fairness */
-};
-
-static inline void cc_chan_lock(CCChan* ch) {
-    pthread_mutex_lock(&ch->mu);
 }
 
 /* ============================================================================
@@ -676,6 +680,10 @@ CCChan* cc_chan_create_owned_pool(size_t capacity,
                                   CCClosure1 on_destroy,
                                   CCClosure1 on_reset) {
     return cc_chan_create_owned(capacity, elem_size, on_create, on_destroy, on_reset);
+}
+
+int cc_chan_is_ordered(CCChan* ch) {
+    return ch ? ch->is_ordered : 0;
 }
 
 void cc_chan_close(CCChan* ch) {

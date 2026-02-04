@@ -102,35 +102,35 @@ To move from global "Smoke Alarms" to precise "Fire Marshalling," we propose nur
 
 ---
 
-## 7. Ordered Channels: Seamless Ordered Parallelism
+## 7. Sending Tasks to Channels
 
-To eliminate the "Task-Handle Crutch" (manually passing `CCTask` through channels), we introduce **Ordered Channels**. This pattern allows the **Circulatory System** to natively manage execution order while preserving Result-based error propagation.
+Any channel can receive tasks (closures) in addition to values. Use `chan_send_task` to spawn work and queue its result. The `ordered` flag on the channel controls whether results arrive in submission order or completion order.
 
 ### The Problem: Manual Task-Handle Plumbing
 
-Consider the compression pipeline in `pigz_cc.ccs`. The current pattern requires:
+Consider a compression pipeline. The manual pattern requires:
 
 ```c
 // 1. Wrapper function to convert Result to void*
 void* compress_block_task(void* arg) {
     Block* blk = (Block*)arg;
-    CompressedResultPtr !>(CCIoError) res = compress_block(...);
+    CompressedResult* !>(CCIoError) res = compress_block(...);
     if (cc_is_err(res)) return NULL;  // Error information lost!
     return cc_unwrap_as(res, CompressedResult*);
 }
 
 // 2. Channel of task handles (not results)
-CCTask[~chan_cap >] tasks_tx;
-CCTask[~chan_cap <] tasks_rx;
-CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+CCTask[~16 >] tasks_tx;
+CCTask[~16 <] tasks_rx;
+channel_pair(&tasks_tx, &tasks_rx);
 
 // 3. Producer: spawn task, get handle, send handle
 CCTask task = cc_fiber_spawn_task(compress_block_task, blk);
 chan_send(tasks_tx, task);
 
-// 4. Consumer: receive handle, await completion, null-check for errors
+// 4. Consumer: receive handle, await completion, null-check
 CCTask task;
-while (cc_io_avail(chan_recv(tasks_rx, &task))) {
+while (chan_recv(tasks_rx, &task)) {
     void* result = (void*)cc_block_on_intptr(task);
     if (!result) { /* error - but which error? */ }
     CompressedResult* r = (CompressedResult*)result;
@@ -138,261 +138,197 @@ while (cc_io_avail(chan_recv(tasks_rx, &task))) {
 }
 ```
 
-This pattern has three problems:
-1. **Boilerplate:** ~40 lines of plumbing for a simple producer-consumer flow.
-2. **Error Erasure:** The wrapper converts `T!>(E)` to `void*`, losing error type information.
-3. **Manual Coordination:** The developer must remember to spawn-then-send and recv-then-await.
+Problems:
+1. **Boilerplate:** ~40 lines for a simple producer-consumer flow
+2. **Error Erasure:** The wrapper converts `T!>(E)` to `void*`, losing type info
+3. **Manual Coordination:** Must remember spawn-then-send and recv-then-await
 
-### The Idiom: Ordered Channels
-
-The `ordered` modifier eliminates this ceremony:
+### The Solution: `chan_send_task`
 
 ```c
-// Declaration: tx/rx split - only rx can be 'ordered'
-CompressedResult*[~16 >] results_tx;
+// Channel of results (not task handles)
+CompressedResult*[~16 ordered >] results_tx;
 CompressedResult*[~16 ordered <] results_rx;
-CCChan* results = channel_pair(&results_tx, &results_rx);  // pair enforces compatibility
+channel_pair(&results_tx, &results_rx);
 
-@nursery closing(results_tx) {
-    // Producer: 'spawn into' fuses spawn + send handle
-    while (read_block(&blk)?) {
-        spawn into(results_tx)? () => compress_block(blk);  // ? for send error
-    }
-}
+// Producer: send a task (spawns immediately, async)
+chan_send_task(results_tx, () => compress_block(blk));
 
-// Consumer: 'await recv' fuses recv + await + error propagation
+// Consumer: recv gets the result (awaits internally)
 CompressedResult* r;
-while (await results_rx.recv(&r)?) {
+while (chan_recv(results_rx, &r)) {
     write_block(r);
 }
 ```
 
-### Error Propagation Semantics
+### How It Works
 
-The `await ch.recv(&r)` operation returns `bool !> (E)` with three outcomes:
+1. **`chan_send_task(ch, () => expr)`** spawns a fiber immediately to execute the closure
+2. The task handle is queued internally in the channel
+3. **`chan_recv(ch, &result)`** receives the next task handle, awaits it, and extracts the result
 
-| Return Value | Meaning | Action |
+The `ordered` flag controls result delivery:
+
+| Channel Declaration | Task Execution | Result Delivery |
 | :--- | :--- | :--- |
-| `Ok(true)` | Value received | `r` is valid, continue loop |
-| `Ok(false)` | Channel closed | Normal EOF, exit loop |
-| `Err(e)` | Task failed | Propagate via `?` operator |
+| `T[~N]` | Immediate, async | Completion order (first done, first out) |
+| `T[~N ordered]` | Immediate, async | Submission order (FIFO) |
 
-This matches CC's existing I/O patterns (e.g., `cc_io_avail()`), where `bool !> (E)` cleanly separates "done" from "error."
+Both execute tasks immediately. The difference is purely in `recv` sequencing.
 
-### The Lowering (Transparent Transformer)
+### Fan-In and Fan-Out Semantics
 
-The `ordered` modifier is a directive for the compiler's lowering phase:
+The `ordered` flag uses simple FIFO semantics based on send order:
 
-**Storage:**
+**Fan-In (N producers → 1 consumer):**
 ```c
-// User declares:
-T*[~cap >] results_tx;
-T*[~cap ordered <] results_rx;  // only rx has 'ordered' modifier
-CCChan* results = channel_pair(&results_tx, &results_rx);
-
-// Compiler generates:
-// channel_pair validates that tx is paired with an ordered rx
-// The channel stores CCTask handles internally, not T* values
-CCChan* results = cc_chan_create(cap, sizeof(CCTask));
+// Producer A sends A1, A2, A3
+// Producer B sends B1, B2, B3
+// Channel sees interleaved stream based on send timing: [A1, B1, A2, B2, A3, B3]
+// Consumer receives in that order (each producer's results are FIFO)
 ```
 
-The `channel_pair` call enforces that `spawn into` can only be used on a tx end that is paired with an `ordered` rx. The `ordered` modifier on rx enables `await recv` semantics.
+- Per-sender FIFO is naturally preserved (each sender's sends complete in order)
+- Inter-sender ordering is determined by the natural race (when sends complete)
+- No artificial serialization - producers remain fully concurrent
 
-**Type Validation:**
+**Fan-Out (1 producer → N consumers):**
+```c
+// Producer sends 1, 2, 3, 4, 5
+// Consumer A might get 1, 3, 5
+// Consumer B might get 2, 4
+// Each consumer sees their subset in submission order
+```
 
-The `channel_pair(&tx, &rx)` call, where `rx` is declared with `ordered`, propagates type information to `tx` at compile time. At each `spawn into(tx)` site, the compiler validates that the closure returns `T*` or `T* !>(E)`, matching the rx's declared element type.
+- Global submission order is maintained
+- Each consumer receives items in the order they were submitted
+- Which consumer gets which item depends on scheduling
 
-**Verb (`spawn into`):**
+**Key insight:** The channel is simply a FIFO queue of task handles. "Ordered" means `recv` awaits tasks in queue order rather than completion order. The queue order is determined by when `chan_send_task` calls complete.
 
-When the spawned closure returns `T* !> (E)`, the compiler generates a wrapper that uses fiber-local storage for the result:
+### Mixing Values and Tasks
+
+The same channel can receive both values and tasks:
+
+```c
+int[~16 >] tx;
+int[~16 <] rx;
+channel_pair(&tx, &rx);
+
+chan_send(tx, 42);                      // send a value
+chan_send_task(tx, () => compute());    // send a task
+
+int x;
+chan_recv(rx, &x);  // gets 42
+chan_recv(rx, &x);  // gets compute() result (awaited internally)
+```
+
+### Error Propagation
+
+When the closure returns `T !>(E)`, errors flow through:
+
+```c
+// Task returns Result type
+chan_send_task(results_tx, () => {
+    CompressedResult* !>(CCIoError) res = compress_block(blk);
+    return res;  // Error preserved!
+});
+
+// Consumer can propagate errors with ?
+CompressedResult* r;
+while (chan_recv(results_rx, &r)?) {
+    use(r);
+}
+```
+
+`chan_recv` returns `bool !>(E)`:
+- `Ok(true)` — value received
+- `Ok(false)` — channel closed (EOF)
+- `Err(e)` — task failed with error `e`
+
+### The Lowering
+
+**`chan_send_task`:**
 
 ```c
 // User writes:
-spawn into(results_tx)? () => compress_block(blk);
+chan_send_task(tx, () => compress_block(blk));
 
 // Compiler generates:
 {
-    // Pass captures directly as arg (no allocation needed)
-    CCTask task = cc_fiber_spawn_task(__ordered_wrapper, blk);
-    if (!cc_io_avail(chan_send(results_tx, &task))) {
-        cc_task_free(&task);
-        // ? propagates send error
-    }
+    CCTask task = cc_fiber_spawn_task(__wrapper, captures);
+    cc_chan_send(tx.raw, &task, sizeof(task));
 }
 
-// Generated wrapper uses fiber-local storage:
-void* __ordered_wrapper(void* arg) {
-    Block* blk = (Block*)arg;
-    
-    // Result struct stored in fiber-local buffer (no malloc)
-    // __result is ALWAYS at offset 0 for multi-producer support
-    typedef struct {
-        T* !>(E) __result;  // offset 0 - fixed location
-        Block* blk;         // captures (optional, for debugging)
-    } __captures_t;
-    
-    __captures_t* cap = (__captures_t*)cc_task_result_ptr(sizeof(__captures_t));
-    cap->__result = compress_block(blk);
-    return cap;
+void* __wrapper(void* arg) {
+    __captures_t* c = (__captures_t*)arg;
+    typedef struct { T __result; } __result_t;
+    __result_t* r = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
+    r->__result = compress_block(c->blk);
+    return r;
 }
 ```
 
-**Verb (`await recv`):**
-
-The recv lowering retrieves the Result from offset 0, without needing to know the full captures struct layout. This enables multiple producers with different captures:
+**`chan_recv` (when channel has pending tasks):**
 
 ```c
 // User writes:
-T* r;
-bool !>(E) ok = await results_rx.recv(&r);
+T r;
+chan_recv(rx, &r);
 
-// Compiler generates:
+// Compiler generates (simplified):
 CCTask task;
-if (!cc_io_avail(cc_chan_recv(results_rx, &task, sizeof(task)))) {
-    return cc_ok(false);  // Channel closed
-}
-
-// Await task and retrieve result from fiber-local storage
-void* cap = (void*)cc_block_on_intptr(task);
-
-// IMPORTANT: Copy result immediately - fiber may be reused after this point
-T* !>(E) task_result = *(T* !>(E)*)cap;  // __result is at offset 0
-
-// Use standard Result machinery
-if (cc_is_err(task_result)) {
-    return cc_err(cc_unwrap_err(task_result));  // Propagate task error
-}
-*r = cc_unwrap(task_result);
-return cc_ok(true);
+cc_chan_recv(rx.raw, &task, sizeof(task));
+void* storage = (void*)cc_block_on_intptr(task);
+r = *(T*)storage;  // __result at offset 0
 ```
 
-**Result Storage Lifetime:**
+For `ordered` channels, the runtime ensures tasks are awaited in submission order.
 
-The result is stored in fiber-local storage (48 bytes, via `cc_task_result_ptr`). This storage is valid until `cc_block_on_intptr` returns, after which the fiber may be reused. The generated `await recv` code copies the Result value immediately, so the consumer only sees the extracted `T*` value. This eliminates malloc/free overhead (~77% performance improvement in benchmarks).
+### Backpressure
 
-**Backpressure:**
+Standard channel semantics apply:
+- `chan_send_task` spawns immediately
+- If channel is full, blocks until space available
+- Provides parallelism up to channel capacity, then natural backpressure
 
-Backpressure follows standard CC channel semantics: `spawn into` spawns the fiber first, then blocks on the internal `chan_send` if the channel is full. This provides parallelism up to the channel capacity, then backpressure naturally limits further spawning.
+### Full Example
 
-**Send Error Propagation (PROPOSAL):**
+**Before:** ~50 lines of manual plumbing
 
-When the channel is closed (e.g., consumer cancelled), the internal `chan_send` fails. The proposed syntax places `?` after the channel to clarify what can fail:
-
-```c
-spawn into(results_tx)? () => compress_block(blk);
-//                    ^ send error propagates here (channel closed)
-```
-
-This distinguishes send errors (propagated via `?`) from task errors (propagated through the channel to the consumer's `await recv`).
-
-### Cancellation Semantics
-
-Cancellation in ordered channels uses standard CC channel error propagation—no special mechanism is needed:
-
-**Consumer cancels (stops receiving):**
-```c
-// Consumer encounters error and closes rx end
-if (cc_is_err(write_result)) {
-    cc_chan_rx_close_err(results, EIO);  // signal upstream
-    return cc_err(write_result);
-}
-```
-
-The producer's next `spawn into(results_tx)` will fail when the internal `chan_send` returns a channel error. The `?` operator propagates this naturally:
+**After:**
 
 ```c
-// Producer side - channel error propagates via ?
-spawn into(results_tx)? () => compress_block(blk);  // send fails, error propagates
-```
-
-**Producer cancels (stops sending):**
-
-When the producer's nursery exits (via `closing(results_tx)`), the channel closes normally. The consumer's `await results_rx.recv(&r)` returns `Ok(false)`, exiting the loop cleanly.
-
-**In-flight tasks on cancellation:**
-
-Tasks already spawned continue to completion, but their results are discarded when `chan_send` fails. The spawning nursery still waits for all its children before exiting, maintaining structured concurrency guarantees.
-
-### Full Example: pigz Compression Pipeline
-
-**Before (manual task-handle pattern):** ~50 lines
-
-```c
-// Wrapper function (error erasure)
-void* compress_block_task(void* arg) {
-    Block* blk = (Block*)arg;
-    CompressedResultPtr !>(CCIoError) res = compress_block(strm, blk, ...);
-    return_input_arena(blk->arena, blk->pool);
-    if (cc_is_err(res)) return NULL;
-    return cc_unwrap_as(res, CompressedResult*);
-}
-
-// Pipeline setup
-CCTask[~chan_cap >] tasks_tx;
-CCTask[~chan_cap <] tasks_rx;
-CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+CompressedResult*[~16 ordered >] results_tx;
+CompressedResult*[~16 ordered <] results_rx;
+channel_pair(&results_tx, &results_rx);
 
 @nursery {
-    // Writer task
-    spawn([tasks_rx]() => {
-        CCTask task;
-        while (cc_io_avail(chan_recv(tasks_rx, &task))) {
-            void* result = (void*)cc_block_on_intptr(task);
-            if (!result) { write_failed = true; break; }
-            CompressedResult* r = (CompressedResult*)result;
-            cc_file_write(out, r->data);
-            cc_heap_arena_free(&r->arena);
-        }
-    });
-    
-    // Reader task
-    @nursery closing(tasks_tx) {
-        spawn([tasks_tx]() => {
-            while (read_block(&blk)) {
-                CCTask task = cc_fiber_spawn_task(compress_block_task, blk);
-                chan_send(tasks_tx, task);
-            }
-        });
-    }
-}
-```
-
-**After (ordered channels):** ~20 lines
-
-```c
-CompressedResult*[~chan_cap >] results_tx;
-CompressedResult*[~chan_cap ordered <] results_rx;
-CCChan* results = channel_pair(&results_tx, &results_rx);
-
-@nursery {
-    // Writer task (consumer)
-    spawn([results_rx]() => {
+    // Consumer
+    spawn(() => [results_rx] {
         CompressedResult* r;
-        while (await results_rx.recv(&r)?) {
+        while (chan_recv(results_rx, &r)?) {
             cc_file_write(out, r->data)?;
             cc_heap_arena_free(&r->arena);
         }
     });
     
-    // Reader task (producer)
+    // Producer
     @nursery closing(results_tx) {
-        spawn([results_tx]() => {
-            while (read_block(&blk)?) {
-                spawn into(results_tx)? () => compress_block(blk);
-            }
-        });
+        while (read_block(&blk)?) {
+            chan_send_task(results_tx, () => [blk] compress_block(blk));
+        }
     }
 }
 ```
 
 ### Why This Fits CC
 
-- **Type Safety:** The compiler ensures you only `spawn into` a tx paired with an ordered rx, and only `await recv` on an ordered rx. Misuse is a compile error.
-- **Error Preservation:** Task errors flow through the Result type system instead of being erased to `NULL`.
-- **Multi-Producer Support:** Since `ordered` is on rx only, multiple producers can `spawn into` the same tx. Results arrive in submission order (channel FIFO), enabling work distribution patterns.
-- **Composition:** Fuses **Ordering** (Channel FIFO) with **Parallelism** (Spawn) and **Synchronization** (Await) into a single, non-magical flow.
-- **Zero-Cost:** By using the **Wait Node** pattern (Section 3), the `await` on `recv()` is $O(1)$ and avoids global broadcasts.
-- **Local Reasoning:** The `ordered` modifier is visible at the rx declaration, making the channel's semantics clear without tracing through code.
+- **Explicit:** `chan_send_task` clearly indicates task spawning (vs `chan_send` for values)
+- **No Magic:** Compiler detects the API, not closure types
+- **Error Preservation:** Task errors flow through Result types unchanged
+- **Orthogonal:** `ordered` flag is independent—works with values or tasks
+- **Local Reasoning:** Channel declaration shows ordering; send/recv sites are uniform
 
 ---
 
@@ -410,36 +346,107 @@ spawn () => { ... };
 // Lowers to: cc_thread_spawn()
 spawn_thread () => { ... };
 
-// 3. Ordered Spawn (The Ordered Flow)
-// Lowers to: cc_fiber_spawn_task() + chan_send()
-spawn into(results_tx)? () => { ... };  // ? for send error (PROPOSAL)
+// 3. Channel Task Send (Parallel Pipeline)
+// Lowers to: cc_fiber_spawn_task() + cc_chan_send()
+chan_send_task(ch, () => { ... });
 ```
 
 ### The Lowering (Transparent Transformer)
 1.  **`spawn`**: Targets the high-performance M:N fiber scheduler. Use for 99% of concurrent logic.
 2.  **`spawn_thread`**: Targets a dedicated OS-thread pool. Use for offloading legacy C code, blocking syscalls, or thread-sensitive FFI.
-3.  **`spawn into`**: Fuses a spawn with a channel push to preserve execution order in a pipeline.
+3.  **`chan_send_task`**: Spawns a fiber task and queues its handle in the channel. `chan_recv` awaits internally.
 
 ### Why This Fits CC
 - **Explicitness:** The developer chooses the "weight" of the task (`fiber` vs `thread`) based on the nature of the work.
-- **Symmetry:** All verbs start with `spawn`, making the "Skeleton" of the program easy to scan.
+- **Explicit Task Send:** `chan_send_task` clearly indicates spawning—no compiler magic to detect closures.
 - **ABI Clarity:** The "naked" C functions (`cc_fiber_spawn_task` and `cc_thread_spawn`) provide a stable, searchable interface for the generated code.
 
 ---
 
-## 9. Summary of Scaling & Safety Idioms
+## 9. Closure Syntax (v3)
+
+Concurrent-C closures use a syntax designed to be unambiguous in all contexts, especially as function arguments.
+
+### The Syntax
+
+```c
+// No captures, no params
+() => expr
+() => { body }
+
+// With parameters (up to 2)
+(x) => expr
+(int x, int y) => { body }
+
+// With explicit captures (after the arrow)
+() => [x, y] expr
+() => [x, &y] { body }
+(a) => [x] a + x
+
+// Single-param shorthand (no parens)
+x => x * 2
+```
+
+### Capture Syntax
+
+Captures are specified in `[...]` **after** the `=>` arrow:
+
+| Syntax | Meaning |
+| :--- | :--- |
+| `[x]` | Capture `x` by value (copy) |
+| `[&x]` | Capture `x` by reference (read-only) |
+| `[x, &y]` | Mixed: `x` by value, `y` by reference |
+
+**Important:** Capture-all forms (`[&]` and `[=]`) are **not allowed**. All captures must be explicit.
+
+### Why Captures After Arrow?
+
+The original syntax `[captures](params) => body` was ambiguous when closures appeared as function arguments:
+
+```c
+// AMBIGUOUS: Is [x] array subscript or capture list?
+foo(bar[x](y) => z);  // Error: TCC parses [x] as subscript
+```
+
+By placing captures after `=>`, the syntax is unambiguous:
+
+```c
+// UNAMBIGUOUS: () => clearly starts a closure
+foo(bar, (y) => [x] z);  // OK: captures after arrow
+```
+
+### Reference Capture Safety
+
+Reference captures (`[&x]`) are checked for mutation at compile time:
+
+```c
+int shared = 0;
+spawn(() => [&shared] {
+    shared++;  // ERROR: mutation of shared reference
+});
+```
+
+**Safe alternatives:**
+- Use `@atomic int shared` for atomic operations
+- Use `Mutex<int>` for synchronized access
+- Use `@unsafe [&x]` to bypass checks (expert mode)
+
+---
+
+## 10. Summary of Scaling & Safety Idioms
 
 | Pattern | Complexity | Scalability | Philosophy |
 | :--- | :--- | :--- | :--- |
 | **Wait Nodes** | High | High | Zero-cost abstraction |
 | **Poll Groups** | Medium | High | Explicit orchestration |
-| **Ordered Channels** | Medium | High | Seamless composition |
+| **`chan_send_task`** | Low | High | Explicit task spawning |
+| **`ordered` flag** | Low | N/A | FIFO result delivery |
 | **Spawn Verbs** | Low | N/A | Explicit mechanism |
 | **Nursery Health** | Medium | N/A | Structured safety |
 | **Stall Watchdog** | Low | N/A | Performance transparency |
 
 ### Recommendation for Phase 1.1
 1. Implement **Wait Nodes** as the normative lowering for `@match`.
-2. Implement **Ordered Channels** (`ordered` modifier + `spawn into` + `await recv`).
+2. Implement **`chan_send_task`** (spawn + send) and `ordered` flag for FIFO recv.
 3. Unify **Spawn Verbs** using `cc_thread_spawn` for OS threads and `cc_fiber_spawn_task` for fibers.
 4. Integrate **Stall Watchdog** and **Nursery Health** checks for structural diagnostics.

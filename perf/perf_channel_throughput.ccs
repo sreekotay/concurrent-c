@@ -24,14 +24,14 @@ static void bench_buffered(void) {
     
     @nursery closing(tx) {
         /* Producer */
-        spawn([tx]() => {
+        spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
                 tx.send(i);
             }
         });
         
         /* Consumer */
-        spawn([rx]() => {
+        spawn(() => {
             int v;
             for (int i = 0; i < ITERATIONS; i++) {
                 rx.recv(&v);
@@ -56,13 +56,13 @@ static void bench_unbuffered(void) {
     double start = time_now_ms();
     
     @nursery closing(tx) {
-        spawn([tx, iterations]() => {
+        spawn(() => [iterations] {
             for (int i = 0; i < iterations; i++) {
                 tx.send(i);
             }
         });
         
-        spawn([rx, iterations]() => {
+        spawn(() => [iterations] {
             int v;
             for (int i = 0; i < iterations; i++) {
                 rx.recv(&v);

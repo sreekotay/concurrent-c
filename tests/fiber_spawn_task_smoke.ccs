@@ -41,7 +41,7 @@ int main(void) {
     printf("Test 3: cc_fiber_spawn_closure0\n");
     {
         int captured = 100;
-        CCTask task = cc_fiber_spawn_closure0([captured]() => {
+        CCTask task = cc_fiber_spawn_closure0(() => [captured] {
             return (void*)(intptr_t)(captured + 23);
         });
         intptr_t result = cc_block_on_intptr(task);

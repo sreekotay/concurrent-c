@@ -19,7 +19,7 @@ int main(void) {
         int y = i * 2;
         
         @nursery {
-            spawn ([x, y]() => {
+            spawn(() => [x, y] {
                 /* Read captured values - this should synchronize properly */
                 cc_atomic_fetch_add(&sum, x + y);
             });

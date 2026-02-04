@@ -66,8 +66,9 @@ static int cc__closure_start_off_best_effort(const char* src, size_t len,
         if (cand < line_hi) {
             size_t j = cand;
             while (j < line_hi && (src[j] == ' ' || src[j] == '\t')) j++;
-            /* Heuristic: closure literal starts at '(' (paren params), '[' (capture list), '@' (@unsafe), or an identifier (single-param form). */
-            if (j < line_hi && (src[j] == '(' || src[j] == '[' || src[j] == '@' || cc__is_ident_start_char(src[j]))) {
+            /* Heuristic: closure literal starts at '(' (paren params), '@' (@unsafe), or an identifier (single-param form).
+               NOTE: v3 syntax no longer has '[' captures before params - they come after '=>'. */
+            if (j < line_hi && (src[j] == '(' || src[j] == '@' || cc__is_ident_start_char(src[j]))) {
             *out_off = cand;
             if (out_col_1based) *out_col_1based = col_start;
             return 1;
@@ -951,6 +952,163 @@ typedef struct {
     char* body_text; /* original body (includes braces for block bodies) */
 } CCClosureDesc;
 
+/* Rewrite calls to captured closure variables within a closure body.
+   E.g., if 'inc' is captured as CCClosure1, rewrite `inc(x)` to `cc_closure1_call(inc, (intptr_t)(x))`. */
+static char* cc__rewrite_captured_closure_calls_in_body(const char* body, const CCClosureDesc* d) {
+    if (!body || !d || d->cap_count == 0) return NULL;
+
+    /* Build list of captured closure names and their arities. */
+    int closure_cap_n = 0;
+    for (int i = 0; i < d->cap_count; i++) {
+        if (!d->cap_types || !d->cap_types[i]) continue;
+        if (strstr(d->cap_types[i], "CCClosure1") || strstr(d->cap_types[i], "CCClosure2")) {
+            closure_cap_n++;
+        }
+    }
+    if (closure_cap_n == 0) return NULL;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t n = strlen(body);
+    size_t pos = 0;
+
+    while (pos < n) {
+        /* Try to find a call to a captured closure. */
+        int found_call = 0;
+        size_t best_start = n;
+        int best_cap_idx = -1;
+
+        for (int i = 0; i < d->cap_count; i++) {
+            if (!d->cap_names || !d->cap_names[i]) continue;
+            if (!d->cap_types || !d->cap_types[i]) continue;
+            if (!strstr(d->cap_types[i], "CCClosure1") && !strstr(d->cap_types[i], "CCClosure2")) continue;
+
+            const char* name = d->cap_names[i];
+            size_t name_len = strlen(name);
+            if (name_len == 0) continue;
+
+            /* Search for name followed by '(' */
+            for (size_t j = pos; j + name_len < n; j++) {
+                if (memcmp(body + j, name, name_len) != 0) continue;
+                /* Check word boundary before */
+                if (j > 0 && (cc_is_ident_char(body[j - 1]))) continue;
+                /* Check word boundary after (next char is whitespace or '(') */
+                size_t after = j + name_len;
+                while (after < n && (body[after] == ' ' || body[after] == '\t' || body[after] == '\n' || body[after] == '\r')) after++;
+                if (after >= n || body[after] != '(') continue;
+                /* Found a call */
+                if (j < best_start) {
+                    best_start = j;
+                    best_cap_idx = i;
+                    found_call = 1;
+                }
+                break;
+            }
+        }
+
+        if (!found_call) {
+            /* No more calls, copy the rest. */
+            cc__append_n(&out, &out_len, &out_cap, body + pos, n - pos);
+            break;
+        }
+
+        /* Copy text before the call. */
+        if (best_start > pos) {
+            cc__append_n(&out, &out_len, &out_cap, body + pos, best_start - pos);
+        }
+
+        /* Parse and rewrite the call. */
+        const char* name = d->cap_names[best_cap_idx];
+        size_t name_len = strlen(name);
+        int is_arity2 = (strstr(d->cap_types[best_cap_idx], "CCClosure2") != NULL);
+
+        size_t after_name = best_start + name_len;
+        while (after_name < n && (body[after_name] == ' ' || body[after_name] == '\t' || body[after_name] == '\n' || body[after_name] == '\r')) after_name++;
+        if (after_name >= n || body[after_name] != '(') {
+            /* Shouldn't happen, just copy name and continue. */
+            cc__append_n(&out, &out_len, &out_cap, body + best_start, name_len);
+            pos = best_start + name_len;
+            continue;
+        }
+
+        size_t lparen = after_name;
+        /* Find matching ')' */
+        int par = 0, brk = 0, br = 0;
+        int ins = 0; char q = 0;
+        size_t rparen = n;
+        for (size_t k = lparen + 1; k < n; k++) {
+            char ch = body[k];
+            if (ins) {
+                if (ch == '\\' && k + 1 < n) { k++; continue; }
+                if (ch == q) ins = 0;
+                continue;
+            }
+            if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+            if (ch == '(') par++;
+            else if (ch == ')') {
+                if (par == 0 && brk == 0 && br == 0) { rparen = k; break; }
+                if (par) par--;
+            } else if (ch == '[') brk++;
+            else if (ch == ']') { if (brk) brk--; }
+            else if (ch == '{') br++;
+            else if (ch == '}') { if (br) br--; }
+        }
+
+        if (rparen >= n) {
+            /* Malformed, just copy as-is. */
+            cc__append_n(&out, &out_len, &out_cap, body + best_start, name_len + 1);
+            pos = lparen + 1;
+            continue;
+        }
+
+        /* Extract args */
+        size_t args_start = lparen + 1;
+        size_t args_end = rparen;
+
+        if (is_arity2) {
+            /* Find comma at top level. */
+            size_t comma = 0;
+            par = 0; brk = 0; br = 0; ins = 0; q = 0;
+            for (size_t k = args_start; k < args_end; k++) {
+                char ch = body[k];
+                if (ins) {
+                    if (ch == '\\' && k + 1 < args_end) { k++; continue; }
+                    if (ch == q) ins = 0;
+                    continue;
+                }
+                if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+                if (ch == '(') par++;
+                else if (ch == ')') { if (par) par--; }
+                else if (ch == '[') brk++;
+                else if (ch == ']') { if (brk) brk--; }
+                else if (ch == '{') br++;
+                else if (ch == '}') { if (br) br--; }
+                else if (ch == ',' && par == 0 && brk == 0 && br == 0) { comma = k; break; }
+            }
+            if (comma) {
+                cc__append_fmt(&out, &out_len, &out_cap, "cc_closure2_call(%s, (intptr_t)(", name);
+                cc__append_n(&out, &out_len, &out_cap, body + args_start, comma - args_start);
+                cc__append_str(&out, &out_len, &out_cap, "), (intptr_t)(");
+                cc__append_n(&out, &out_len, &out_cap, body + comma + 1, args_end - comma - 1);
+                cc__append_str(&out, &out_len, &out_cap, "))");
+            } else {
+                /* No comma found, emit as arity-1 fallback. */
+                cc__append_fmt(&out, &out_len, &out_cap, "cc_closure1_call(%s, (intptr_t)(", name);
+                cc__append_n(&out, &out_len, &out_cap, body + args_start, args_end - args_start);
+                cc__append_str(&out, &out_len, &out_cap, "))");
+            }
+        } else {
+            cc__append_fmt(&out, &out_len, &out_cap, "cc_closure1_call(%s, (intptr_t)(", name);
+            cc__append_n(&out, &out_len, &out_cap, body + args_start, args_end - args_start);
+            cc__append_str(&out, &out_len, &out_cap, "))");
+        }
+
+        pos = rparen + 1;
+    }
+
+    return out;
+}
+
 typedef struct { size_t start; size_t end; char* repl; } Edit;
 
 static int cc__edit_cmp_start_desc(const void* a, const void* b) {
@@ -1080,7 +1238,7 @@ static int cc__parse_closure_from_src(const char* src,
     while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
     while (l1 > l0 && (s[l1 - 1] == ' ' || s[l1 - 1] == '\t')) l1--;
 
-    /* Skip `@unsafe` when parsing capture list/params. */
+    /* Skip `@unsafe` when parsing params. */
     if (l0 + 7 <= l1 && s[l0] == '@' && memcmp(s + l0 + 1, "unsafe", 6) == 0) {
         size_t u1 = l0 + 7;
         if (u1 == l1 || !cc__is_ident_char2(s[u1])) {
@@ -1090,86 +1248,11 @@ static int cc__parse_closure_from_src(const char* src,
         }
     }
 
-    /* Optional capture list: `[x, &y] ( ... ) => ...` */
+    /* OLD SYNTAX DEPRECATION: [captures] before params is no longer supported.
+       NEW SYNTAX (v3): captures come AFTER the arrow: () => [x, y] body */
     if (l0 < l1 && s[l0] == '[') {
-        size_t j = l0 + 1;
-        while (j < l1 && (s[j] == ' ' || s[j] == '\t')) j++;
-        /* Disallow capture-all sugar: `[&]` and `[=]` */
-        if (j + 1 < l1 && s[j] == '&' && s[j + 1] == ']') return -2; /* capture-all [&] banned */
-        if (j < l1 && s[j] == '=' && (j + 1 == l1 || s[j + 1] == ']')) return -3; /* capture-all [=] banned */
-
-        /* Find matching ']' */
-        int sq = 1;
-        size_t k = l0 + 1;
-        for (; k < l1; k++) {
-            if (s[k] == '[') sq++;
-            else if (s[k] == ']') { sq--; if (sq == 0) break; }
-        }
-        if (k >= l1 || s[k] != ']') return 0;
-        size_t cap_l = l0 + 1;
-        size_t cap_r = k;
-
-        /* Parse entries: (&)? ident, comma-separated */
-        {
-            char** names = NULL;
-            unsigned char* flags = NULL;
-            int nn = 0;
-            size_t p = cap_l;
-            while (p < cap_r) {
-                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
-                if (p >= cap_r) break;
-                if (s[p] == ',') { p++; continue; }
-                if (s[p] == '=') {
-                    /* capture-all not allowed */
-                    for (int i = 0; i < nn; i++) free(names[i]);
-                    free(names); free(flags);
-                    return 0;
-                }
-                int is_ref = 0;
-                if (s[p] == '&') { is_ref = 1; p++; }
-                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
-                if (p >= cap_r || !cc__is_ident_start_char(s[p])) {
-                    /* capture-all like `[&]` or malformed */
-                    for (int i = 0; i < nn; i++) free(names[i]);
-                    free(names); free(flags);
-                    return 0;
-                }
-                size_t ns = p;
-                p++;
-                while (p < cap_r && cc__is_ident_char2(s[p])) p++;
-                size_t nl = p - ns;
-                char* nm = (char*)malloc(nl + 1);
-                if (!nm) { for (int i = 0; i < nn; i++) free(names[i]); free(names); free(flags); return 0; }
-                memcpy(nm, s + ns, nl);
-                nm[nl] = 0;
-                /* dedupe */
-                int dup = 0;
-                for (int q = 0; q < nn; q++) if (names[q] && strcmp(names[q], nm) == 0) { dup = 1; break; }
-                if (dup) { free(nm); continue; }
-                char** nnames = (char**)realloc(names, (size_t)(nn + 1) * sizeof(char*));
-                unsigned char* nflags = (unsigned char*)realloc(flags, (size_t)(nn + 1) * sizeof(unsigned char));
-                if (!nnames || !nflags) {
-                    free(nm);
-                    free(nnames); free(nflags);
-                    for (int i = 0; i < nn; i++) free(names[i]);
-                    free(names); free(flags);
-                    return 0;
-                }
-                names = nnames;
-                flags = nflags;
-                names[nn] = nm;
-                flags[nn] = (unsigned char)(is_ref ? 1 : 0);
-                nn++;
-            }
-            out->explicit_cap_names = names;
-            out->explicit_cap_flags = flags;
-            out->explicit_cap_count = nn;
-        }
-
-        l0 = k + 1;
-        while (l0 < l1 && (s[l0] == ' ' || s[l0] == '\t')) l0++;
-        /* Capture list form requires paren params per spec. */
-        if (l0 >= l1 || s[l0] != '(') return 0;
+        /* Error: old syntax used */
+        return 0;
     }
 
     if (l0 < l1 && s[l0] == '(') {
@@ -1252,6 +1335,89 @@ static int cc__parse_closure_from_src(const char* src,
     size_t b0 = arrow + 2;
     while (b0 < n && (s[b0] == ' ' || s[b0] == '\t' || s[b0] == '\r' || s[b0] == '\n')) b0++;
     if (b0 >= n) return 0;
+
+    /* NEW SYNTAX (v3): Optional capture list `[x, &y]` comes AFTER the arrow */
+    if (s[b0] == '[') {
+        size_t j = b0 + 1;
+        while (j < n && (s[j] == ' ' || s[j] == '\t')) j++;
+        /* Disallow capture-all sugar: `[&]` and `[=]` */
+        if (j + 1 < n && s[j] == '&' && s[j + 1] == ']') return -2; /* capture-all [&] banned */
+        if (j < n && s[j] == '=' && (j + 1 == n || s[j + 1] == ']')) return -3; /* capture-all [=] banned */
+
+        /* Find matching ']' */
+        int sq = 1;
+        size_t k = b0 + 1;
+        for (; k < n; k++) {
+            if (s[k] == '[') sq++;
+            else if (s[k] == ']') { sq--; if (sq == 0) break; }
+        }
+        if (k >= n || s[k] != ']') return 0;
+        size_t cap_l = b0 + 1;
+        size_t cap_r = k;
+
+        /* Parse entries: (&)? ident, comma-separated */
+        {
+            char** names = NULL;
+            unsigned char* flags = NULL;
+            int nn = 0;
+            size_t p = cap_l;
+            while (p < cap_r) {
+                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
+                if (p >= cap_r) break;
+                if (s[p] == ',') { p++; continue; }
+                if (s[p] == '=') {
+                    /* capture-all not allowed */
+                    for (int i = 0; i < nn; i++) free(names[i]);
+                    free(names); free(flags);
+                    return 0;
+                }
+                int is_ref = 0;
+                if (s[p] == '&') { is_ref = 1; p++; }
+                while (p < cap_r && (s[p] == ' ' || s[p] == '\t')) p++;
+                if (p >= cap_r || !cc__is_ident_start_char(s[p])) {
+                    /* capture-all like `[&]` or malformed */
+                    for (int i = 0; i < nn; i++) free(names[i]);
+                    free(names); free(flags);
+                    return 0;
+                }
+                size_t ns = p;
+                p++;
+                while (p < cap_r && cc__is_ident_char2(s[p])) p++;
+                size_t nl = p - ns;
+                char* nm = (char*)malloc(nl + 1);
+                if (!nm) { for (int i = 0; i < nn; i++) free(names[i]); free(names); free(flags); return 0; }
+                memcpy(nm, s + ns, nl);
+                nm[nl] = 0;
+                /* dedupe */
+                int dup = 0;
+                for (int q = 0; q < nn; q++) if (names[q] && strcmp(names[q], nm) == 0) { dup = 1; break; }
+                if (dup) { free(nm); continue; }
+                char** nnames = (char**)realloc(names, (size_t)(nn + 1) * sizeof(char*));
+                unsigned char* nflags = (unsigned char*)realloc(flags, (size_t)(nn + 1) * sizeof(unsigned char));
+                if (!nnames || !nflags) {
+                    free(nm);
+                    free(nnames); free(nflags);
+                    for (int i = 0; i < nn; i++) free(names[i]);
+                    free(names); free(flags);
+                    return 0;
+                }
+                names = nnames;
+                flags = nflags;
+                names[nn] = nm;
+                flags[nn] = (unsigned char)(is_ref ? 1 : 0);
+                nn++;
+            }
+            out->explicit_cap_names = names;
+            out->explicit_cap_flags = flags;
+            out->explicit_cap_count = nn;
+        }
+
+        /* Move past capture list to find body */
+        b0 = k + 1;
+        while (b0 < n && (s[b0] == ' ' || s[b0] == '\t' || s[b0] == '\r' || s[b0] == '\n')) b0++;
+        if (b0 >= n) return 0;
+    }
+
     size_t body_start = b0;
     size_t body_end = n;
     if (s[body_start] == '{') {
@@ -1963,10 +2129,24 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             size_t lowered4_len = 0;
             const char* src_for_defer = lowered3 ? lowered3 : lowered2;
             if (cc__rewrite_defer_syntax(ctx, src_for_defer, strlen(src_for_defer), &lowered4, &lowered4_len) > 0 && lowered4) {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered4);
+                /* Rewrite captured closure calls in the body */
+                char* lowered5 = cc__rewrite_captured_closure_calls_in_body(lowered4, d);
+                if (lowered5) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered5);
+                    free(lowered5);
+                } else {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered4);
+                }
                 free(lowered4);
             } else {
-                cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", src_for_defer);
+                /* Rewrite captured closure calls in the body */
+                char* lowered5 = cc__rewrite_captured_closure_calls_in_body(src_for_defer, d);
+                if (lowered5) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", lowered5);
+                    free(lowered5);
+                } else {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", src_for_defer);
+                }
             }
             free(lowered3);
             free(lowered2);

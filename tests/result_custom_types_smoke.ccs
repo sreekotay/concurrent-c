@@ -97,7 +97,7 @@ int main(void) {
     // (pigz_cc.ccs declares result vars inside spawn, doesn't capture them)
     int spawn_ok = 0;
     @nursery {
-        spawn(@unsafe [&spawn_ok]() => {
+        spawn(@unsafe () => [&spawn_ok] {
             // Result type declared and used inside the spawn closure
             MyData*!>(MyError) res_in_spawn = create_data_ptr(1);
             if (cc_is_ok(res_in_spawn)) {
@@ -119,7 +119,7 @@ int main(void) {
     // Step 5b test: Same thing INSIDE spawn
     int spawn_stdlib = 0;
     @nursery {
-        spawn(@unsafe [&spawn_stdlib]() => {
+        spawn(@unsafe () => [&spawn_stdlib] {
             // Try sigil syntax instead of CCRes macro
             size_t !> (CCIoError) res_stdlib = create_size_result_typed();
             if (cc_is_ok(res_stdlib)) {

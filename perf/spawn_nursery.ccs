@@ -25,7 +25,7 @@ int main(void) {
     for (int batch = 0; batch < ITERATIONS / 1000; batch++) {
         @nursery {
             for (int i = 0; i < 1000; i++) {
-                spawn([counter_ptr]() => {
+                spawn(() => [counter_ptr] {
                     cc_atomic_fetch_add(counter_ptr, 1);
                 });
             }

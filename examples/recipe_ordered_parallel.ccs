@@ -53,7 +53,7 @@ int main(void) {
 
     @nursery {
         /* Producer: spawn tasks, send handles in order, then close channel. */
-        spawn([tasks_tx]() => {
+        spawn(() => [tasks_tx] {
             for (int i = 1; i <= NUM_ITEMS; i++) {
                 Item* item = malloc(sizeof(Item));
                 item->id = i;
@@ -66,7 +66,7 @@ int main(void) {
         });
 
         /* Consumer: await handles in FIFO order → ordered output! */
-        spawn([tasks_rx]() => {
+        spawn(() => [tasks_rx] {
             printf("\n[consumer] receiving results in order:\n");
             CCTask task;
             while (cc_io_avail(chan_recv(tasks_rx, &task))) {

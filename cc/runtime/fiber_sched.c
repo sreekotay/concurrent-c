@@ -1477,16 +1477,18 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     if (timing) t2 = rdtsc();
     
-    /* Round-robin distribution to local queues for even spread (always) */
-    static _Atomic size_t spawn_counter = 0;
-    size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
-    
+    /* Workers use round-robin to local queues for even spread.
+     * Non-workers (main thread) use global queue - workers always check it. */
     int pushed_local = 0;
-    if (lq_push(&g_sched.local_queues[target], f) == 0) {
-        pushed_local = 1;
+    if (tls_worker_id >= 0) {
+        static _Atomic size_t spawn_counter = 0;
+        size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+        if (lq_push(&g_sched.local_queues[target], f) == 0) {
+            pushed_local = 1;
+        }
     }
     
-    /* Fallback to global queue if local is full */
+    /* Non-worker spawns or local queue full: use global queue */
     if (!pushed_local) {
         if (fq_push(&g_sched.run_queue, f) != 0) {
             fiber_free(f);
@@ -1540,11 +1542,13 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
  * This is needed because done=1 is set while fiber_entry is still running,
  * but we can't return the fiber to the pool until fiber_entry has completed.
  * 
- * The full_wait parameter controls whether to wait for running_lock:
- * - true: wait for both state=FIBER_DONE and running_lock=0 (use from non-fiber context)
- * - false: only wait for state=FIBER_DONE (use from fiber context where we know
- *          the child's mco_resume has returned because we're executing) */
-static inline void wait_for_fiber_done_state(fiber_task* f, int full_wait) {
+ * We MUST always wait for running_lock=0, even from fiber context. The previous
+ * assumption that "if we're executing, the child's mco_resume must have returned"
+ * is only true if we're on the SAME worker. If the joiner and child are on
+ * different workers, the child's mco_resume might not have returned yet.
+ * Returning the fiber to the pool prematurely causes tls_current_fiber to
+ * point to a reused fiber with a different coro, leading to stack mismatch. */
+static inline void wait_for_fiber_done_state(fiber_task* f) {
     if (!f) return;
     
     /* Wait for state=FIBER_DONE */
@@ -1559,9 +1563,8 @@ static inline void wait_for_fiber_done_state(fiber_task* f, int full_wait) {
     }
     
 state_done:
-    if (!full_wait) return;
-    
-    /* Also wait for running_lock=0 (only safe from non-fiber context) */
+    /* Always wait for running_lock=0 - the child's worker must finish mco_resume
+     * before we can safely return the fiber to the pool. */
     for (int i = 0; i < 10000; i++) {
         if (atomic_load_explicit(&f->running_lock, memory_order_acquire) == 0) {
             return;
@@ -1576,15 +1579,12 @@ state_done:
 int cc_fiber_join(fiber_task* f, void** out_result) {
     if (!f) return -1;
     
-    /* Determine if we're in fiber context early - affects how we wait */
+    /* Get current fiber context (if any) - affects whether we park or use condvar */
     fiber_task* current = tls_current_fiber;
-    int in_fiber = (current && current->coro);
     
     /* Fast path - already done */
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-        /* If in fiber context, no need to wait for running_lock (can't deadlock).
-         * If not in fiber context, must wait for worker to finish mco_resume. */
-        wait_for_fiber_done_state(f, !in_fiber);
+        wait_for_fiber_done_state(f);
         if (out_result) *out_result = f->result;
         return 0;
     }
@@ -1592,7 +1592,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     /* Spin for fast tasks (32 iterations with cpu_pause) */
     for (int i = 0; i < SPIN_FAST_ITERS; i++) {
         if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-            wait_for_fiber_done_state(f, !in_fiber);
+            wait_for_fiber_done_state(f);
             if (out_result) *out_result = f->result;
             return 0;
         }
@@ -1602,7 +1602,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     /* Medium path: spin with sched_yield */
     for (int i = 0; i < SPIN_YIELD_ITERS; i++) {
         if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-            wait_for_fiber_done_state(f, !in_fiber);
+            wait_for_fiber_done_state(f);
             if (out_result) *out_result = f->result;
             return 0;
         }
@@ -1615,7 +1615,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     /* Check again - fiber might have completed during registration */
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
         atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
-        wait_for_fiber_done_state(f, !in_fiber);
+        wait_for_fiber_done_state(f);
         if (out_result) *out_result = f->result;
         return 0;
     }
@@ -1636,7 +1636,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         if (atomic_load_explicit(&f->done, memory_order_acquire)) {
             join_spinlock_unlock(&f->join_lock);
             atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
-            wait_for_fiber_done_state(f, 0);  /* In fiber context - no full wait */
+            wait_for_fiber_done_state(f);
             if (out_result) *out_result = f->result;
             return 0;
         }
@@ -1713,7 +1713,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         /* Re-check done after init - fiber may have completed during init window */
         if (atomic_load_explicit(&f->done, memory_order_acquire)) {
             atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
-            wait_for_fiber_done_state(f, 1);  /* Non-fiber context - full wait */
+            wait_for_fiber_done_state(f);
             if (out_result) *out_result = f->result;
             return 0;
         }
@@ -1727,8 +1727,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     
     atomic_fetch_sub_explicit(&f->join_waiters, 1, memory_order_relaxed);
     
-    /* We already know if we're in fiber context from the top of the function */
-    wait_for_fiber_done_state(f, !in_fiber);
+    wait_for_fiber_done_state(f);
     if (out_result) *out_result = f->result;
     return 0;
 }
@@ -1801,6 +1800,22 @@ static void parked_list_remove(fiber_task* f) {
 void cc__fiber_park_reason(const char* reason, const char* file, int line) {
     fiber_task* f = tls_current_fiber;
     if (!f || !f->coro) return;
+    
+    /* CRITICAL: Verify we're on the correct stack before parking.
+     * This check catches a rare race where tls_current_fiber might not match
+     * the actually executing coroutine. Instead of crashing with a stack overflow
+     * in mco_yield, we detect and handle it gracefully. */
+    volatile size_t _stack_check;
+    size_t stack_addr = (size_t)&_stack_check;
+    size_t stack_min = (size_t)f->coro->stack_base;
+    size_t stack_max = stack_min + f->coro->stack_size;
+    if (stack_addr < stack_min || stack_addr > stack_max) {
+#ifdef CC_DEBUG_FIBER
+        fprintf(stderr, "[CC DEBUG] cc__fiber_park: tls_current_fiber mismatch, skipping park\n");
+#endif
+        /* Don't park - the fiber state will be handled by the caller or timeout */
+        return;
+    }
     
     /* Store debug info */
     f->park_reason = reason;

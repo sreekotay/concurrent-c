@@ -18,15 +18,15 @@ int main(void) {
 
     @nursery closing(tx) {
         /* 2 senders, each sends 10 messages */
-        spawn([tx]() => {
+        spawn(() => [tx] {
             for (int i = 0; i < 10; i++) tx.send(i);
         });
-        spawn([tx]() => {
+        spawn(() => [tx] {
             for (int i = 0; i < 10; i++) tx.send(100 + i);
         });
         
         /* 1 receiver, receives all 20 messages */
-        spawn([rx]() => {
+        spawn(() => [rx] {
             int v;
             for (int i = 0; i < 20; i++) rx.recv(&v);
         });

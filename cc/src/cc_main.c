@@ -2199,9 +2199,19 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         return 0;
     }
     
-    // Warn if prebuilt exists but is stale
+    // ABORT if prebuilt exists but is stale - force explicit rebuild
     if (file_exists(g_cc_runtime_o) && cc__runtime_obj_is_stale(g_cc_runtime_o)) {
-        fprintf(stderr, "cc: warning: prebuilt runtime is stale, rebuilding (run 'make -C cc' to update)\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "================================================================================\n");
+        fprintf(stderr, "STALE RUNTIME DETECTED\n");
+        fprintf(stderr, "================================================================================\n");
+        fprintf(stderr, "Runtime source files are newer than the prebuilt runtime object.\n");
+        fprintf(stderr, "This can cause hard-to-debug issues with stale code.\n");
+        fprintf(stderr, "\n");
+        fprintf(stderr, "To fix, run:  make -C cc\n");
+        fprintf(stderr, "================================================================================\n");
+        fprintf(stderr, "\n");
+        return -1;
     }
 
     // Build a runtime object under out/obj/runtime.o

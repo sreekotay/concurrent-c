@@ -9,7 +9,7 @@ int main(void) {
     int x = 7;
 
     @nursery {
-        spawn([&x]() => {
+        spawn(() => [&x] {
             /* ERROR: callee takes int* (not const) */
             maybe_write_i32(&x);
         });

@@ -25,43 +25,60 @@
 static int g_owned_channel_id = 0;
 
 /* Helper: wrap a closure with typed parameter for CCClosure1.
-   Transforms: [captures](Type param) => body
-   Into:       [captures](intptr_t __arg) => { Type param = (Type)__arg; body }
+   v3 syntax: (Type param) => [captures] body
+   Transforms to: (intptr_t __arg) => [captures] { Type param = (Type)__arg; body }
    
    If param is already intptr_t, returns the original unchanged. */
 static void cc__wrap_typed_closure1_local(const char* closure, char* out, size_t out_cap) {
     if (!closure || !out || out_cap == 0) return;
     out[0] = 0;
     
-    /* Find '[' (captures start) */
     const char* p = closure;
-    while (*p && *p != '[') p++;
-    if (!*p) { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
     
-    /* Find '](' to get to params */
-    const char* cap_start = p;
-    while (*p && !(*p == ']' && *(p + 1) == '(')) p++;
-    if (!*p) { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    /* Skip leading whitespace */
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
     
-    size_t cap_len = (size_t)(p - cap_start + 1);  /* include ] */
-    p++;  /* skip ] */
+    /* Expect '(' for parameter list */
     if (*p != '(') { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
     p++;  /* skip ( */
     
     /* Skip whitespace */
     while (*p && (*p == ' ' || *p == '\t')) p++;
     
-    /* Extract parameter type */
+    /* Extract parameter type - scan until we hit space or ) or another identifier */
     const char* type_start = p;
-    /* Scan type - handle pointers like "CCArena*" */
-    while (*p && *p != ')' && *p != ' ' && *p != '\t') {
-        if (*p == '*') { p++; break; }  /* pointer type ends at * */
+    char type_buf[128];
+    size_t type_len = 0;
+    
+    /* Scan the type part - could be "PoolItem*" or "int" or "void*" etc. */
+    while (*p && *p != ')') {
+        if (*p == '*') { 
+            /* Include the * and any following * */
+            while (*p == '*') p++;
+            break;
+        }
+        if (*p == ' ' || *p == '\t') {
+            /* Space means we might have "Type name" - check if next non-ws is identifier */
+            const char* check = p;
+            while (*check && (*check == ' ' || *check == '\t')) check++;
+            if (*check && ((*check >= 'a' && *check <= 'z') || (*check >= 'A' && *check <= 'Z') || *check == '_')) {
+                /* Next is identifier, so type ends here */
+                break;
+            }
+        }
         p++;
     }
-    size_t type_len = (size_t)(p - type_start);
+    type_len = (size_t)(p - type_start);
     
-    /* Check if it's already intptr_t */
-    if (type_len == 8 && strncmp(type_start, "intptr_t", 8) == 0) {
+    /* Skip trailing whitespace from type */
+    while (type_len > 0 && (type_start[type_len-1] == ' ' || type_start[type_len-1] == '\t')) type_len--;
+    
+    if (type_len >= sizeof(type_buf)) type_len = sizeof(type_buf) - 1;
+    memcpy(type_buf, type_start, type_len);
+    type_buf[type_len] = 0;
+    
+    /* Check if it's already intptr_t - no need to wrap */
+    if (strcmp(type_buf, "intptr_t") == 0) {
         strncpy(out, closure, out_cap - 1);
         out[out_cap - 1] = 0;
         return;
@@ -76,42 +93,76 @@ static void cc__wrap_typed_closure1_local(const char* closure, char* out, size_t
     size_t name_len = (size_t)(p - name_start);
     
     if (name_len == 0) {
-        /* No param name, type might BE the name (e.g., just "r") - don't wrap */
+        /* No param name - might just be a type or untyped param, don't wrap */
         strncpy(out, closure, out_cap - 1);
         out[out_cap - 1] = 0;
         return;
     }
     
-    /* Find => and body */
-    while (*p && !(*p == '=' && *(p + 1) == '>')) p++;
-    if (!*p) { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    char name_buf[64];
+    if (name_len >= sizeof(name_buf)) name_len = sizeof(name_buf) - 1;
+    memcpy(name_buf, name_start, name_len);
+    name_buf[name_len] = 0;
+    
+    /* Skip to closing paren */
+    while (*p && *p != ')') p++;
+    if (*p != ')') { strncpy(out, closure, out_cap - 1); out[out_cap - 1] = 0; return; }
+    p++;  /* skip ) */
+    
+    /* Skip whitespace */
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    
+    /* Find => arrow */
+    if (!(*p == '=' && *(p + 1) == '>')) { 
+        strncpy(out, closure, out_cap - 1); 
+        out[out_cap - 1] = 0; 
+        return; 
+    }
     p += 2;  /* skip => */
-    while (*p && (*p == ' ' || *p == '\t')) p++;
+    
+    /* Skip whitespace */
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    
+    /* Check for captures [captures] after arrow (v3 syntax) */
+    const char* captures = "";
+    char captures_buf[256];
+    captures_buf[0] = 0;
+    
+    if (*p == '[') {
+        const char* cap_start = p;
+        int depth = 1;
+        p++;
+        while (*p && depth > 0) {
+            if (*p == '[') depth++;
+            else if (*p == ']') depth--;
+            p++;
+        }
+        size_t cap_len = (size_t)(p - cap_start);
+        if (cap_len < sizeof(captures_buf)) {
+            memcpy(captures_buf, cap_start, cap_len);
+            captures_buf[cap_len] = 0;
+            captures = captures_buf;
+        }
+        /* Skip whitespace after captures */
+        while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    }
     
     /* Rest is body */
     const char* body = p;
     
-    /* Build wrapped closure:
-       [captures](intptr_t __arg) => { Type name = (Type)__arg; body } */
-    char type_buf[128], name_buf[64];
-    if (type_len >= sizeof(type_buf)) type_len = sizeof(type_buf) - 1;
-    if (name_len >= sizeof(name_buf)) name_len = sizeof(name_buf) - 1;
-    memcpy(type_buf, type_start, type_len);
-    type_buf[type_len] = 0;
-    memcpy(name_buf, name_start, name_len);
-    name_buf[name_len] = 0;
-    
     /* Check if body is already a block */
     int body_is_block = (*body == '{');
     
+    /* Build wrapped closure:
+       (intptr_t __arg) => [captures] { Type name = (Type)__arg; body } */
     if (body_is_block) {
         /* Body is { ... }, insert declaration after { */
-        snprintf(out, out_cap, "%.*s(intptr_t __arg) => { %s %s = (%s)__arg; %s",
-                 (int)cap_len, cap_start, type_buf, name_buf, type_buf, body + 1);
+        snprintf(out, out_cap, "(intptr_t __arg) => %s { %s %s = (%s)__arg; %s",
+                 captures, type_buf, name_buf, type_buf, body + 1);
     } else {
         /* Body is expression, wrap in block */
-        snprintf(out, out_cap, "%.*s(intptr_t __arg) => { %s %s = (%s)__arg; return %s; }",
-                 (int)cap_len, cap_start, type_buf, name_buf, type_buf, body);
+        snprintf(out, out_cap, "(intptr_t __arg) => %s { %s %s = (%s)__arg; return %s; }",
+                 captures, type_buf, name_buf, type_buf, body);
     }
 }
 
@@ -146,15 +197,19 @@ static size_t cc__scan_matching_brace(const char* src, size_t len, size_t open_b
 
 /* Parse the owned block to extract closure texts.
  * Expected format: { .create = <closure>, .destroy = <closure>, .reset = <closure> }
- * Returns 1 on success, 0 on failure. */
+ * Returns 1 on success, 0 on failure.
+ * On failure, out_error_field is set to the field name that failed (if non-NULL). */
 static int cc__parse_owned_block(const char* src, size_t start, size_t end,
                                   char* out_create, size_t create_cap,
                                   char* out_destroy, size_t destroy_cap,
-                                  char* out_reset, size_t reset_cap) {
+                                  char* out_reset, size_t reset_cap,
+                                  const char** out_error_field, const char** out_error_hint) {
     if (!src || start >= end) return 0;
     out_create[0] = 0;
     out_destroy[0] = 0;
     out_reset[0] = 0;
+    if (out_error_field) *out_error_field = NULL;
+    if (out_error_hint) *out_error_hint = NULL;
     
     size_t i = start;
     while (i < end) {
@@ -180,7 +235,7 @@ static int cc__parse_owned_block(const char* src, size_t start, size_t end,
         i++;
         while (i < end && (src[i] == ' ' || src[i] == '\t')) i++;
         
-        /* Find the closure: [captures](params) => body */
+        /* Find the closure: v3 syntax is (params) => [captures] body */
         size_t closure_start = i;
         
         /* Find '=>' to locate the closure body */
@@ -190,9 +245,26 @@ static int cc__parse_owned_block(const char* src, size_t start, size_t end,
         }
         if (arrow == (size_t)-1) continue;
         
-        /* Find the end of the closure body */
-        size_t body_start = arrow + 2;
-        while (body_start < end && (src[body_start] == ' ' || src[body_start] == '\t' || src[body_start] == '\n')) body_start++;
+        /* Find the end of the closure body.
+           v3 syntax: after '=>' may have optional [captures] then body.
+           Body is either { ... } block or expression. */
+        size_t after_arrow = arrow + 2;
+        while (after_arrow < end && (src[after_arrow] == ' ' || src[after_arrow] == '\t' || src[after_arrow] == '\n')) after_arrow++;
+        
+        /* Skip optional capture list [captures] */
+        size_t body_start = after_arrow;
+        if (body_start < end && src[body_start] == '[') {
+            /* Find matching ] for capture list */
+            int bracket_depth = 1;
+            body_start++;
+            while (body_start < end && bracket_depth > 0) {
+                if (src[body_start] == '[') bracket_depth++;
+                else if (src[body_start] == ']') bracket_depth--;
+                body_start++;
+            }
+            /* Skip whitespace after captures */
+            while (body_start < end && (src[body_start] == ' ' || src[body_start] == '\t' || src[body_start] == '\n')) body_start++;
+        }
         
         size_t closure_end;
         if (body_start < end && src[body_start] == '{') {
@@ -217,8 +289,15 @@ static int cc__parse_owned_block(const char* src, size_t start, size_t end,
             }
         }
         
-        /* Copy closure text to appropriate output */
+        /* Validate closure looks reasonable */
         size_t closure_len = closure_end - closure_start;
+        if (closure_len == 0 || closure_end <= closure_start) {
+            if (out_error_field) *out_error_field = field;
+            if (out_error_hint) *out_error_hint = "closure body not found (check => syntax)";
+            return 0;
+        }
+        
+        /* Copy closure text to appropriate output */
         char* dest = NULL;
         size_t dest_cap = 0;
         if (strcmp(field, "create") == 0) { dest = out_create; dest_cap = create_cap; }
@@ -228,12 +307,27 @@ static int cc__parse_owned_block(const char* src, size_t start, size_t end,
         if (dest && closure_len < dest_cap) {
             memcpy(dest, src + closure_start, closure_len);
             dest[closure_len] = 0;
+        } else if (dest) {
+            if (out_error_field) *out_error_field = field;
+            if (out_error_hint) *out_error_hint = "closure too long for buffer";
+            return 0;
         }
         
         i = closure_end;
     }
     
-    return (out_create[0] != 0 && out_destroy[0] != 0);  /* create and destroy are required */
+    /* Check required fields */
+    if (out_create[0] == 0) {
+        if (out_error_field) *out_error_field = "create";
+        if (out_error_hint) *out_error_hint = ".create closure is required";
+        return 0;
+    }
+    if (out_destroy[0] == 0) {
+        if (out_error_field) *out_error_field = "destroy";
+        if (out_error_hint) *out_error_hint = ".destroy closure is required";
+        return 0;
+    }
+    return 1;
 }
 
 /* Find channel declaration before a given offset.
@@ -709,22 +803,18 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (tx_bp == 1) bp_enum = "CC_CHAN_MODE_DROP_NEW";
                 else if (tx_bp == 2) bp_enum = "CC_CHAN_MODE_DROP_OLD";
 
-                /* For ordered channels, cast CCChanRxOrdered* to CCChanRx* (layout-compatible) */
+                /* For ordered channels, use CCChanRx (ordered is now a flag, not a type) */
                 char rx_arg[256];
-                if (rx_ordered) {
-                    snprintf(rx_arg, sizeof(rx_arg), "(CCChanRx*)&%s", rx_name);
-                } else {
-                    snprintf(rx_arg, sizeof(rx_arg), "&%s", rx_name);
-                }
+                snprintf(rx_arg, sizeof(rx_arg), "&%s", rx_name);
 
                 char repl[1024];
                 if (is_expression) {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, &%s, %s);",
+                             "/* channel_pair */ cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, tx_name, rx_arg);
+                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
@@ -867,13 +957,24 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                 if (is_owned && owned_brace != 0 && owned_end != (size_t)-1) {
                     /* Parse owned channel */
                     char create_closure[2048], destroy_closure[2048], reset_closure[2048];
+                    const char* err_field = NULL;
+                    const char* err_hint = NULL;
                     if (!cc__parse_owned_block(src, owned_brace + 1, owned_end,
                                                create_closure, sizeof(create_closure),
                                                destroy_closure, sizeof(destroy_closure),
-                                               reset_closure, sizeof(reset_closure))) {
+                                               reset_closure, sizeof(reset_closure),
+                                               &err_field, &err_hint)) {
                         char rel[1024];
+                        char msg[512];
+                        if (err_field && err_hint) {
+                            snprintf(msg, sizeof(msg), "owned channel .%s: %s", err_field, err_hint);
+                        } else if (err_field) {
+                            snprintf(msg, sizeof(msg), "owned channel .%s closure failed to parse", err_field);
+                        } else {
+                            snprintf(msg, sizeof(msg), "owned block requires .create and .destroy closures");
+                        }
                         cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                line, col, CC_ERR_CHANNEL, "owned block requires .create and .destroy");
+                                line, col, CC_ERR_CHANNEL, msg);
                         free(out);
                         return NULL;
                     }
@@ -1041,12 +1142,8 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
 
                 if (ty_start >= last_emit) {
                     cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
-                    /* Emit CCChanRxOrdered for ordered channels, CCChanRx/CCChanTx otherwise */
-                    if (saw_lt && saw_ordered) {
-                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, "CCChanRxOrdered");
-                    } else {
-                        cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
-                    }
+                    /* Emit CCChanTx for send, CCChanRx for recv (ordered is a flag, not a type) */
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
                     last_emit = k + 1;
                 }
                 while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
@@ -1059,6 +1156,213 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
 
     if (last_emit < n) {
         cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    }
+    return out;
+}
+
+/* ============================================================================
+ * chan_send_task rewriting (v3 syntax: captures AFTER arrow)
+ * ============================================================================
+ * 
+ * Transforms: chan_send_task(ch, () => [captures] body)
+ * Into: { CCClosure0 c = () => [captures] { wrapper(body) }; spawn; send; }
+ */
+
+static int g_send_task_id = 0;
+
+/* Find matching delimiter, handling nesting and strings/comments. */
+static size_t cc__find_matching_delim(const char* src, size_t len, size_t start, char open, char close) {
+    if (start >= len || src[start] != open) return 0;
+    int depth = 0;
+    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    for (size_t i = start; i < len; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < len) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < len) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == open) depth++;
+        else if (c == close) { depth--; if (depth == 0) return i; }
+    }
+    return 0;
+}
+
+/* Find '=>' arrow in source, return offset or 0 if not found. */
+static size_t cc__find_arrow(const char* src, size_t start, size_t end) {
+    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    for (size_t i = start; i + 1 < end; i++) {
+        char c = src[i];
+        char c2 = src[i + 1];
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '=' && c2 == '>') return i;
+    }
+    return 0;
+}
+
+char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
+                                      const char* src,
+                                      size_t len,
+                                      size_t* out_len) {
+    (void)ctx;
+    if (!src || !out_len) return NULL;
+    *out_len = 0;
+    
+    char* out = NULL;
+    size_t o_len = 0, o_cap = 0;
+    size_t last_emit = 0;
+    
+    for (size_t i = 0; i + 14 < len; i++) {
+        /* Look for chan_send_task( */
+        if (memcmp(src + i, "chan_send_task", 14) != 0) continue;
+        if (i > 0 && cc__is_ident_char_local2(src[i - 1])) continue;
+        if (i + 14 < len && cc__is_ident_char_local2(src[i + 14])) continue;
+        
+        size_t call_start = i;
+        const char* p = src + i + 14;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (*p != '(') continue;
+        
+        size_t paren_start = (size_t)(p - src);
+        size_t paren_end = cc__find_matching_delim(src, len, paren_start, '(', ')');
+        if (paren_end == 0) continue;
+        
+        /* Parse: chan_send_task(channel, closure) */
+        p++;  /* skip ( */
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        
+        /* Find comma separating channel from closure */
+        size_t comma = 0;
+        int depth = 0;
+        for (size_t j = (size_t)(p - src); j < paren_end; j++) {
+            char c = src[j];
+            if (c == '(' || c == '[' || c == '{') depth++;
+            else if (c == ')' || c == ']' || c == '}') depth--;
+            else if (c == ',' && depth == 0) { comma = j; break; }
+        }
+        if (comma == 0) continue;
+        
+        /* Extract channel expression */
+        size_t ch_start = (size_t)(p - src);
+        size_t ch_end = comma;
+        while (ch_end > ch_start && (src[ch_end-1] == ' ' || src[ch_end-1] == '\t')) ch_end--;
+        
+        /* Extract closure */
+        size_t closure_start = comma + 1;
+        while (closure_start < paren_end && (src[closure_start] == ' ' || src[closure_start] == '\t' || 
+               src[closure_start] == '\n' || src[closure_start] == '\r')) closure_start++;
+        size_t closure_end = paren_end;
+        while (closure_end > closure_start && (src[closure_end-1] == ' ' || src[closure_end-1] == '\t' ||
+               src[closure_end-1] == '\n' || src[closure_end-1] == '\r')) closure_end--;
+        
+        /* Find => arrow */
+        size_t arrow = cc__find_arrow(src, closure_start, closure_end);
+        if (arrow == 0) continue;
+        
+        /* NEW v3 syntax: () => [captures] body
+         * - params_part: everything before =>  (e.g., "()")
+         * - after_arrow: everything after =>   (e.g., "[v] compute(v)")
+         * 
+         * We need to find where captures end and body begins.
+         * If after_arrow starts with '[', parse to matching ']' for captures.
+         */
+        size_t params_end = arrow;
+        while (params_end > closure_start && (src[params_end-1] == ' ' || src[params_end-1] == '\t')) params_end--;
+        
+        size_t after_arrow = arrow + 2;
+        while (after_arrow < closure_end && (src[after_arrow] == ' ' || src[after_arrow] == '\t' ||
+               src[after_arrow] == '\n' || src[after_arrow] == '\r')) after_arrow++;
+        
+        /* Check for captures [...]  after arrow */
+        size_t captures_start = 0, captures_end_bracket = 0;
+        size_t body_start = after_arrow;
+        
+        if (after_arrow < closure_end && src[after_arrow] == '[') {
+            captures_start = after_arrow;
+            /* Find matching ] */
+            int sq = 1;
+            size_t j = after_arrow + 1;
+            while (j < closure_end && sq > 0) {
+                if (src[j] == '[') sq++;
+                else if (src[j] == ']') sq--;
+                j++;
+            }
+            captures_end_bracket = j;  /* points past ] */
+            body_start = j;
+            while (body_start < closure_end && (src[body_start] == ' ' || src[body_start] == '\t' ||
+                   src[body_start] == '\n' || src[body_start] == '\r')) body_start++;
+        }
+        
+        /* Emit up to call_start */
+        cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
+        
+        /* Generate replacement */
+        int tid = g_send_task_id++;
+        char id_buf[32];
+        snprintf(id_buf, sizeof(id_buf), "%d", tid);
+        
+        /* { CCClosure0 __cc_st_cN = */
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ CCClosure0 __cc_st_c");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = ");
+        
+        /* Emit params (before =>) */
+        cc__sb_append_local(&out, &o_len, &o_cap, src + closure_start, params_end - closure_start);
+        
+        /* => */
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " => ");
+        
+        /* Emit captures if present */
+        if (captures_start > 0) {
+            cc__sb_append_local(&out, &o_len, &o_cap, src + captures_start, captures_end_bracket - captures_start);
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, " ");
+        }
+        
+        /* Emit wrapper block - simplified to avoid typedef inside closure */
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ ");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "intptr_t* __cc_st_r = (intptr_t*)cc_task_result_ptr(sizeof(intptr_t)); ");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (intptr_t)(");
+        
+        /* Emit body (the actual expression/block) */
+        cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
+        
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = cc_fiber_spawn_closure0(__cc_st_c");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); cc_chan_send((");
+        
+        /* Emit channel */
+        cc__sb_append_local(&out, &o_len, &o_cap, src + ch_start, ch_end - ch_start);
+        
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ").raw, &__cc_st_t");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ", sizeof(__cc_st_t");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); }");
+        
+        last_emit = paren_end + 1;
+        i = paren_end;
+    }
+    
+    /* Emit remainder */
+    if (last_emit < len) {
+        cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, len - last_emit);
+    }
+    
+    if (out) {
+        *out_len = o_len;
     }
     return out;
 }

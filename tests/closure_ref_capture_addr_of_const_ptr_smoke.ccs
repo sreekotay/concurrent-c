@@ -10,7 +10,7 @@ int main(void) {
     int x = 7;
 
     @nursery {
-        spawn([&x]() => {
+        spawn(() => [&x] {
             /* Allowed: callee takes const int* */
             read_only_i32(&x);
         });

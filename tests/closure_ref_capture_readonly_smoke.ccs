@@ -9,7 +9,7 @@ int main(void) {
     @nursery {
         /* Reference capture: closure shares x with outer scope.
            Read-only access is allowed. */
-        spawn([&x]() => {
+        spawn(() => [&x] {
             printf("ref captured x=%d\n", x);
             /* Reading x is fine */
         });

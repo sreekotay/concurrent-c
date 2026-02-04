@@ -8,7 +8,7 @@ int main(void) {
     
     @nursery {
         /* Explicit value capture: x is copied into closure */
-        spawn([x]() => {
+        spawn(() => [x] {
             printf("captured x=%d\n", x);
             /* x is a copy, original is unaffected */
         });

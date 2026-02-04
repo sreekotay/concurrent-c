@@ -21,7 +21,7 @@ int main(void) {
     cc_atomic_store(&g_cleanup_count, 0);
     
     @nursery {
-        spawn([]() => {
+        spawn(() => {
             printf("Worker starting\n");
             @defer cleanup_fn();  // <-- THIS IS THE PROBLEM
             printf("Worker doing work\n");

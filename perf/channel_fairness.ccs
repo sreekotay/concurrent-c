@@ -80,7 +80,7 @@ void run_test_large_buffer(void) {
         /* Workers receive until channel closed */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int wid = w;
-            spawn([wid]() => {
+            spawn(() => {
                 Item item;
                 while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);
@@ -117,7 +117,7 @@ void run_test_small_buffer(void) {
         
         for (int w = 0; w < NUM_WORKERS; w++) {
             int wid = w;
-            spawn([wid]() => {
+            spawn(() => {
                 Item item;
                 while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);

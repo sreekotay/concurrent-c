@@ -6,12 +6,12 @@ int main(void) {
     int outer = 100;
     
     @nursery {
-        spawn([outer]() => {
+        spawn(() => [outer] {
             int middle = 50;
             
             // Inner nursery with nested closure
             @nursery {
-                spawn([outer, middle]() => {
+                spawn(() => [outer, middle] {
                     int inner = 25;
                     printf("outer=%d middle=%d inner=%d\n", outer, middle, inner);
                     printf("sum=%d\n", outer + middle + inner);

@@ -16,16 +16,16 @@ int main(void) {
 
     @nursery closing(tx) {
         /* 1 sender, sends 20 messages */
-        spawn([tx]() => {
+        spawn(() => [tx] {
             for (int i = 0; i < 20; i++) tx.send(i);
         });
         
         /* 2 receivers, each receives 10 messages */
-        spawn([rx]() => {
+        spawn(() => [rx] {
             int v;
             for (int i = 0; i < 10; i++) rx.recv(&v);
         });
-        spawn([rx]() => {
+        spawn(() => [rx] {
             int v;
             for (int i = 0; i < 10; i++) rx.recv(&v);
         });

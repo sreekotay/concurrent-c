@@ -42,6 +42,17 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
         return -1;
     }
 
+    /* Debug: dump preprocessed output if requested */
+    if (getenv("CC_DUMP_LOWERED")) {
+        const char* dump_path = getenv("CC_DUMP_LOWERED");
+        FILE* df = fopen(dump_path, "w");
+        if (df) {
+            fputs(pp_buf, df);
+            fclose(df);
+            fprintf(stderr, "cc: dumped lowered source to %s\n", dump_path);
+        }
+    }
+
     /* Parse from string (no temp file).
        Use same relative path for virtual filename that #line directive uses. */
     char rel_path[1024];

@@ -62,7 +62,7 @@ static inline bool cc_io_avail(CCResult_bool_CCIoError res) {
 }
 
 /* Ordered receive: receives a CCTask from channel, blocks on it, extracts result.
- * For use with ordered channels (CCChanRxOrdered).
+ * For use with ordered (task) channels.
  * Returns: 1 = value received, 0 = channel closed, -1 = error
  * 
  * The spawned task stores its result in fiber-local storage via cc_task_result_ptr.
@@ -74,7 +74,7 @@ static inline bool cc_io_avail(CCResult_bool_CCIoError res) {
  *   while ((rc = ordered_recv(rx, &result)) == 1) { use result }
  *   if (rc < 0) { handle error }
  */
-static inline int ordered_recv(CCChanRxOrdered rx, void** out) {
+static inline int ordered_recv(CCChanRx rx, void** out) {
     CCTask task;
     int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
     if (rc == 0) {
@@ -143,12 +143,14 @@ int cc_chan_pair_create_full(size_t capacity,
 
 // Same as cc_chan_pair_create_full but returns CCChan* for assignment.
 // Returns NULL on error. Used by channel_pair() language construct.
+// is_ordered: if true, chan_recv awaits CCTask and extracts result (task channel semantics)
 CCChan* cc_chan_pair_create_returning(size_t capacity,
                                       CCChanMode mode,
                                       bool allow_send_take,
                                       size_t elem_size,
                                       bool is_sync,
                                       int topology,
+                                      bool is_ordered,
                                       CCChanTx* out_tx,
                                       CCChanRx* out_rx);
 
@@ -172,6 +174,9 @@ CCChan* cc_chan_create_owned_pool(size_t capacity,
                                   CCClosure0 on_create,
                                   CCClosure1 on_destroy,
                                   CCClosure1 on_reset);
+
+// Check if channel is an ordered (task) channel.
+int cc_chan_is_ordered(CCChan* ch);
 
 // Close the channel: unblocks waiters. Further sends fail with EPIPE.
 void cc_chan_close(CCChan* ch);

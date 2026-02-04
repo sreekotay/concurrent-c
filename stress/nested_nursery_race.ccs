@@ -20,9 +20,9 @@ int main(void) {
         int x = i;
         
         @nursery {
-            spawn ([x]() => {
+            spawn (() => [x] {
                 @nursery {
-                    spawn ([x]() => { 
+                    spawn (() => [x] { 
                         cc_atomic_store(&g, x); 
                     });
                 }

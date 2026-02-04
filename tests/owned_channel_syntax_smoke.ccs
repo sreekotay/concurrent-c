@@ -20,19 +20,19 @@ int main(void) {
     {
         // Declare owned channel with lifecycle closures - using typed parameters
         void*[~4 owned {
-            .create = []() => {
+            .create = () => {
                 g_create_count++;
                 void* p = malloc(64);
                 printf("  create: p=%p\n", p);
                 return p;
             },
-            .destroy = [](void* p) => {
+            .destroy = (void* p) => {
                 g_destroy_count++;
                 printf("  destroy: p=%p\n", p);
                 free(p);
                 return NULL;
             },
-            .reset = [](void* p) => {
+            .reset = (void* p) => {
                 g_reset_count++;
                 printf("  reset: p=%p\n", p);
                 return NULL;
@@ -91,14 +91,14 @@ int main(void) {
         
         // Test expression capacity like (cap + extra)
         void*[~(cap + extra) owned {
-            .create = []() => {
+            .create = () => {
                 return malloc(64);
             },
-            .destroy = [](void* p) => {
+            .destroy = (void* p) => {
                 free(p);
                 return NULL;
             },
-            .reset = [](void* p) => {
+            .reset = (void* p) => {
                 memset(p, 0, 64);
                 return NULL;
             }
@@ -128,19 +128,19 @@ int main(void) {
     {
         // Pool of PoolItem* with fully typed closures - no intptr_t casts needed!
         PoolItem*[~4 owned {
-            .create = []() => {
+            .create = () => {
                 PoolItem* item = (PoolItem*)malloc(sizeof(PoolItem));
                 item->id = g_next_id++;
                 memset(item->data, 0, sizeof(item->data));
                 printf("  create: item id=%d\n", item->id);
                 return item;
             },
-            .destroy = [](PoolItem* item) => {
+            .destroy = (PoolItem* item) => {
                 printf("  destroy: item id=%d\n", item->id);
                 free(item);
                 return NULL;
             },
-            .reset = [](PoolItem* item) => {
+            .reset = (PoolItem* item) => {
                 printf("  reset: item id=%d\n", item->id);
                 memset(item->data, 0, sizeof(item->data));
                 return NULL;
