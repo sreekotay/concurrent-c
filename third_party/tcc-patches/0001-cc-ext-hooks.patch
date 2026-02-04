@@ -152,10 +152,10 @@ index 00000000..0a4c7655
 +
 +#endif /* CC_AST_RECORD_H */
 diff --git a/libtcc.c b/libtcc.c
-index 171e3622..e1694143 100644
+index 171e3622..7061a988 100644
 --- a/libtcc.c
 +++ b/libtcc.c
-@@ -66,6 +66,399 @@
+@@ -66,6 +66,289 @@
  
  #include "tcc.h"
  
@@ -170,17 +170,14 @@ index 171e3622..e1694143 100644
 +    cc_ext_parser_global = p;
 +}
 +
-+/* CC extension stubs exposed via libtcc when CONFIG_CC_EXT is on. */
-+PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, struct CCSymbolTable* symbols) {
-+    (void)symbols; /* reserved for future constexpr tables */
-+    if (!preprocessed_path) return NULL;
++/* ---- CC parser state initialization (shared by file and string parsers) ---- */
 +
-+    TCCState *s = tcc_new();
-+    if (!s) return NULL;
-+#ifdef CONFIG_CC_EXT
++/* Initialize CC extension state fields and configure parser mode. */
++static void cc_init_parser_state(TCCState *s, const char *original_path) {
 +    /* Install optional parser hooks (decl/stmt extensions). */
 +    s->ext_parser = cc_ext_parser_global;
-+    /* Ensure CC recorder state is initialized (defensive even if tcc_new() zeroes). */
++    
++    /* Initialize CC recorder state (defensive even if tcc_new() zeroes). */
 +    s->cc_nodes = NULL;
 +    s->cc_nodes_count = 0;
 +    s->cc_nodes_cap = 0;
@@ -202,25 +199,21 @@ index 171e3622..e1694143 100644
 +    s->cc_call_stack_top = -1;
 +    s->cc_call_stack_cap = 0;
 +    s->cc_pending_fn_attrs = 0;
-+#endif
++    
++    /* Configure parser mode. */
 +    tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
 +    s->filetype = AFF_TYPE_C;
-+    /* Suppress warnings for __cc_closure_make_N etc. which are generated later. */
 +    s->warn_implicit_function_declaration = 0;
-+    /* Parser-only mode: allow CC headers to expose helpers (e.g. move markers) that
-+       should be visible to the stub recorder but not necessarily to the final C backend. */
 +    tcc_define_symbol(s, "CC_PARSER_MODE", "1");
-+#ifdef CONFIG_CC_EXT
 +    s->cc_parser_mode = 1;
-+#endif
-+    /* Add basic include paths for CC std headers.
-+       Priority 1: CC_INCLUDE_PATH env var (set by driver for external projects).
-+       Priority 2: Relative paths (work when running from CC repo). */
++    
++    /* Add include paths from environment variables. */
 +    const char* cc_inc_env = getenv("CC_INCLUDE_PATH");
 +    if (cc_inc_env && cc_inc_env[0]) {
 +        tcc_add_include_path(s, cc_inc_env);
 +        tcc_add_sysinclude_path(s, cc_inc_env);
 +    }
++    
 +    /* User include paths from --cc-flags -I... (colon-separated). */
 +    const char* user_inc_env = getenv("CC_USER_INCLUDE_PATH");
 +    if (user_inc_env && user_inc_env[0]) {
@@ -238,6 +231,8 @@ index 171e3622..e1694143 100644
 +        }
 +        tcc_free(paths);
 +    }
++    
++    /* Static include paths for CC headers. */
 +    tcc_add_include_path(s, ".");
 +    tcc_add_include_path(s, "include");
 +    tcc_add_include_path(s, "cc/include");
@@ -248,20 +243,20 @@ index 171e3622..e1694143 100644
 +    tcc_add_sysinclude_path(s, "cc/include");
 +    tcc_add_sysinclude_path(s, "./cc/include");
 +    tcc_add_sysinclude_path(s, "../cc/include");
-+    /* TCC's builtin headers (stdarg.h, stddef.h, etc.) - needed for parsing code that
-+       includes system headers like zlib.h that depend on these. */
++    
++    /* TCC's builtin headers (stdarg.h, stddef.h, etc.). */
 +    tcc_add_sysinclude_path(s, "third_party/tcc/include");
 +    tcc_add_sysinclude_path(s, "../third_party/tcc/include");
 +    tcc_add_sysinclude_path(s, "../../third_party/tcc/include");
++    
 +#ifdef __APPLE__
 +    /* macOS SDK paths for std headers. */
 +    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
 +    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include");
 +#endif
 +    tcc_add_sysinclude_path(s, "/usr/include");
-+
-+    /* Ensure local includes like `#include "foo.h"` work even if we are parsing a temp file:
-+       add the directory of the original source file (if provided). */
++    
++    /* Add directory of original source file for local includes. */
 +    if (original_path && original_path[0]) {
 +        const char* slash = strrchr(original_path, '/');
 +        if (slash && slash != original_path) {
@@ -275,16 +270,14 @@ index 171e3622..e1694143 100644
 +            }
 +        }
 +    }
-+
-+    /* Disable code emission side effects where possible. */
++    
++    /* Disable code emission side effects. */
 +    s->nostdinc = 0;
 +    s->nostdlib = 1;
++}
 +
-+    if (tcc_add_file(s, preprocessed_path) != 0) {
-+        tcc_delete(s);
-+        return NULL;
-+    }
-+
++/* Extract AST result from TCCState and clean up. Returns NULL on allocation failure. */
++static struct CCASTStubRoot* cc_extract_ast_result(TCCState *s) {
 +    struct CCASTStubRoot *root = tcc_mallocz(sizeof(struct CCASTStubRoot));
 +    if (!root) {
 +        tcc_delete(s);
@@ -293,7 +286,7 @@ index 171e3622..e1694143 100644
 +    root->nodes = s->cc_nodes;
 +    root->count = s->cc_nodes_count;
 +    root->side = NULL;
-+
++    
 +    /* Detach ownership so tcc_delete doesn't free the node slab. */
 +    s->cc_nodes = NULL;
 +    s->cc_nodes_count = 0;
@@ -305,6 +298,26 @@ index 171e3622..e1694143 100644
 +    s->cc_call_stack = NULL;
 +    tcc_delete(s);
 +    return root;
++}
++
++/* ---- Public CC parsing APIs ---- */
++
++/* Parse preprocessed file to AST. */
++PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_to_ast(const char* preprocessed_path, const char* original_path, struct CCSymbolTable* symbols) {
++    (void)symbols; /* reserved for future constexpr tables */
++    if (!preprocessed_path) return NULL;
++    
++    TCCState *s = tcc_new();
++    if (!s) return NULL;
++    
++    cc_init_parser_state(s, original_path);
++    
++    if (tcc_add_file(s, preprocessed_path) != 0) {
++        tcc_delete(s);
++        return NULL;
++    }
++    
++    return cc_extract_ast_result(s);
 +}
 +
 +/* CC error handler state - captures errors for better diagnostics. */
@@ -373,152 +386,29 @@ index 171e3622..e1694143 100644
 +    cc_enhance_error_message(ctx, msg);
 +}
 +
-+/* CC extension: parse source string to AST (in-memory, no temp files). */
++/* Parse source string to AST (in-memory, no temp files). */
 +PUB_FUNC struct CCASTStubRoot* cc_tcc_parse_string_to_ast(const char* source_code, const char* virtual_filename, const char* original_path, struct CCSymbolTable* symbols) {
 +    (void)symbols; /* reserved for future constexpr tables */
 +    if (!source_code) return NULL;
-+
++    
 +    /* Set up error context for better diagnostics. */
 +    CCErrorContext err_ctx = {0};
 +    err_ctx.source_code = source_code;
 +    err_ctx.original_path = original_path;
-+
++    
 +    TCCState *s = tcc_new();
 +    if (!s) return NULL;
 +    
-+    /* Install custom error handler for better CC diagnostics. */
 +    tcc_set_error_func(s, &err_ctx, cc_error_handler);
++    cc_init_parser_state(s, original_path);
 +    
-+#ifdef CONFIG_CC_EXT
-+    /* Install optional parser hooks (decl/stmt extensions). */
-+    s->ext_parser = cc_ext_parser_global;
-+    /* Ensure CC recorder state is initialized (defensive even if tcc_new() zeroes). */
-+    s->cc_nodes = NULL;
-+    s->cc_nodes_count = 0;
-+    s->cc_nodes_cap = 0;
-+    s->cc_node_stack = NULL;
-+    s->cc_node_stack_top = -1;
-+    s->cc_node_stack_cap = 0;
-+    s->cc_last_member_tok = 0;
-+    s->cc_last_member_flags = 0;
-+    s->cc_last_member_line = 0;
-+    s->cc_last_member_col = 0;
-+    s->cc_last_rparen_line = 0;
-+    s->cc_last_rparen_col = 0;
-+    s->cc_typedef_map = NULL;
-+    s->cc_typedef_map_count = 0;
-+    s->cc_typedef_map_cap = 0;
-+    s->cc_ufcs_seq_line = 0;
-+    s->cc_ufcs_seq_count = 0;
-+    s->cc_call_stack = NULL;
-+    s->cc_call_stack_top = -1;
-+    s->cc_call_stack_cap = 0;
-+    s->cc_pending_fn_attrs = 0;
-+#endif
-+    tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
-+    s->filetype = AFF_TYPE_C;
-+    /* Suppress warnings for __cc_closure_make_N etc. which are generated later. */
-+    s->warn_implicit_function_declaration = 0;
-+    /* Parser-only mode: allow CC headers to expose helpers (e.g. move markers) that
-+       should be visible to the stub recorder but not necessarily to the final C backend. */
-+    tcc_define_symbol(s, "CC_PARSER_MODE", "1");
-+#ifdef CONFIG_CC_EXT
-+    s->cc_parser_mode = 1;
-+#endif
-+    /* Add basic include paths for CC std headers.
-+       Priority 1: CC_INCLUDE_PATH env var (set by driver for external projects).
-+       Priority 2: Relative paths (work when running from CC repo). */
-+    const char* cc_inc_env = getenv("CC_INCLUDE_PATH");
-+    if (cc_inc_env && cc_inc_env[0]) {
-+        tcc_add_include_path(s, cc_inc_env);
-+        tcc_add_sysinclude_path(s, cc_inc_env);
-+    }
-+    /* User include paths from --cc-flags -I... (colon-separated). */
-+    const char* user_inc_env = getenv("CC_USER_INCLUDE_PATH");
-+    if (user_inc_env && user_inc_env[0]) {
-+        char* paths = tcc_strdup(user_inc_env);
-+        char* p = paths;
-+        char* sep;
-+        while (p && *p) {
-+            sep = strchr(p, ':');
-+            if (sep) *sep = '\0';
-+            if (*p) {
-+                tcc_add_include_path(s, p);
-+                tcc_add_sysinclude_path(s, p);
-+            }
-+            p = sep ? sep + 1 : NULL;
-+        }
-+        tcc_free(paths);
-+    }
-+    tcc_add_include_path(s, ".");
-+    tcc_add_include_path(s, "include");
-+    tcc_add_include_path(s, "cc/include");
-+    tcc_add_include_path(s, "./cc/include");
-+    tcc_add_include_path(s, "../cc/include");
-+    tcc_add_sysinclude_path(s, ".");
-+    tcc_add_sysinclude_path(s, "include");
-+    tcc_add_sysinclude_path(s, "cc/include");
-+    tcc_add_sysinclude_path(s, "./cc/include");
-+    tcc_add_sysinclude_path(s, "../cc/include");
-+    /* TCC's builtin headers (stdarg.h, stddef.h, etc.) - needed for parsing code that
-+       includes system headers like zlib.h that depend on these. */
-+    tcc_add_sysinclude_path(s, "third_party/tcc/include");
-+    tcc_add_sysinclude_path(s, "../third_party/tcc/include");
-+    tcc_add_sysinclude_path(s, "../../third_party/tcc/include");
-+#ifdef __APPLE__
-+    /* macOS SDK paths for std headers. */
-+    tcc_add_sysinclude_path(s, "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
-+    tcc_add_sysinclude_path(s, "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include");
-+#endif
-+    tcc_add_sysinclude_path(s, "/usr/include");
-+
-+    /* Ensure local includes like `#include "foo.h"` work:
-+       add the directory of the original source file (if provided). */
-+    if (original_path && original_path[0]) {
-+        const char* slash = strrchr(original_path, '/');
-+        if (slash && slash != original_path) {
-+            size_t n = (size_t)(slash - original_path);
-+            if (n < 1023) {
-+                char dir[1024];
-+                memcpy(dir, original_path, n);
-+                dir[n] = '\0';
-+                tcc_add_include_path(s, dir);
-+                tcc_add_sysinclude_path(s, dir);
-+            }
-+        }
-+    }
-+
-+    /* Disable code emission side effects where possible. */
-+    s->nostdinc = 0;
-+    s->nostdlib = 1;
-+
-+    /* Parse from in-memory string instead of file. */
 +    const char* fname = virtual_filename ? virtual_filename : "<string>";
 +    if (tcc_compile_string_file(s, source_code, fname) != 0) {
 +        tcc_delete(s);
 +        return NULL;
 +    }
-+
-+    struct CCASTStubRoot *root = tcc_mallocz(sizeof(struct CCASTStubRoot));
-+    if (!root) {
-+        tcc_delete(s);
-+        return NULL;
-+    }
-+    root->nodes = s->cc_nodes;
-+    root->count = s->cc_nodes_count;
-+    root->side = NULL;
-+
-+    /* Detach ownership so tcc_delete doesn't free the node slab. */
-+    s->cc_nodes = NULL;
-+    s->cc_nodes_count = 0;
-+    if (s->cc_node_stack)
-+        tcc_free(s->cc_node_stack);
-+    s->cc_node_stack = NULL;
-+    if (s->cc_call_stack)
-+        tcc_free(s->cc_call_stack);
-+    s->cc_call_stack = NULL;
-+    tcc_delete(s);
-+    return root;
++    
++    return cc_extract_ast_result(s);
 +}
 +
 +PUB_FUNC void cc_tcc_free_ast(struct CCASTStubRoot* root) {
@@ -555,7 +445,7 @@ index 171e3622..e1694143 100644
  /********************************************************/
  /* global variables */
  
-@@ -738,6 +1131,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
+@@ -738,6 +1021,7 @@ ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen)
      bf->buf_ptr = bf->buffer;
      bf->buf_end = bf->buffer + initlen;
      bf->buf_end[0] = CH_EOB; /* put eob symbol */
@@ -563,7 +453,7 @@ index 171e3622..e1694143 100644
      pstrcpy(bf->filename, sizeof(bf->filename), filename);
  #ifdef _WIN32
      normalize_slashes(bf->filename);
-@@ -959,6 +1353,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
+@@ -959,6 +1243,15 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
  #endif
      /* free loaded dlls array */
      dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
