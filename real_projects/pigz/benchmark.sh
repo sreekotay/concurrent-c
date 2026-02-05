@@ -1,6 +1,18 @@
 #!/bin/bash
 # Benchmark script using REAL compressible data (not random)
 # Auto-downloads a real corpus if missing, and generates a sized input file.
+#
+# Usage:
+#   ./benchmark.sh <size_mb> <workers> <runs> <mem_limit_mb>
+#
+# Examples:
+#   Standard:      ./benchmark.sh 100 8 4
+#   Neckbeard OOM: ./benchmark.sh 100 8 4 64    (Limits address space to 64MB)
+#   Metadata Storm: ./benchmark.sh 100 128 1 0   (Many workers, tiny blocks)
+#
+# To test backpressure (Slow Consumer):
+#   ./out/pigz_cc -p 8 -k <input> | pv -L 1M > /dev/null
+#   (Monitor RSS to ensure it stays flat)
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,6 +23,7 @@ DATA_DIR="$SCRIPT_DIR/testdata"
 SIZE_MB=${1:-100}
 WORKERS=${2:-8}
 RUNS=${3:-4}
+MEM_LIMIT_MB=${4:-0}  # 0 = no limit
 
 # For fiber-based pigz_cc, use 2x CPU workers for CPU-bound compression
 export CC_WORKERS=${CC_WORKERS:-16}
@@ -23,6 +36,9 @@ echo "Input size:   ${SIZE_MB} MB"
 echo "pigz workers: ${WORKERS}"
 echo "CC_WORKERS:   ${CC_WORKERS} (fiber scheduler)"
 echo "Runs:         ${RUNS}"
+if [ "$MEM_LIMIT_MB" -gt 0 ]; then
+    echo "Memory Limit: ${MEM_LIMIT_MB} MB"
+fi
 echo ""
 
 # Check binaries exist
@@ -149,7 +165,15 @@ run_compress() {
         
         # Time compression
         start=$(python3 -c 'import time; print(time.time())')
-        $cmd bench_test.bin
+        
+        if [ "$MEM_LIMIT_MB" -gt 0 ]; then
+            # Use ulimit to restrict virtual memory (approximate memory limit)
+            # 1024 * MEM_LIMIT_MB
+            (ulimit -v $((MEM_LIMIT_MB * 1024)); $cmd bench_test.bin)
+        else
+            $cmd bench_test.bin
+        fi
+        
         end=$(python3 -c 'import time; print(time.time())')
         
         elapsed=$(python3 -c "print(f'{$end - $start:.3f}')")
@@ -197,7 +221,13 @@ run_decompress() {
         
         # Time decompression
         start=$(python3 -c 'import time; print(time.time())')
-        $cmd bench_test.gz
+        
+        if [ "$MEM_LIMIT_MB" -gt 0 ]; then
+            (ulimit -v $((MEM_LIMIT_MB * 1024)) 2>/dev/null || true; $cmd bench_test.gz)
+        else
+            $cmd bench_test.gz
+        fi
+        
         end=$(python3 -c 'import time; print(time.time())')
         
         elapsed=$(python3 -c "print(f'{$end - $start:.3f}')")

@@ -1,0 +1,90 @@
+=================================================================
+NECKBEARD CHALLENGE: Concurrent-C vs Original pigz
+Date: Wed Feb  4 21:21:24 EST 2026
+OS: Darwin Srees-Laptop.local 25.0.0 Darwin Kernel Version 25.0.0: Mon Aug 25 21:17:36 PDT 2025; root:xnu-12377.1.9~3/RELEASE_ARM64_T8122 arm64
+=================================================================
+
+--- TEST 1: BASELINE PERFORMANCE (100MB, 8 workers) ---
+==============================================
+pigz Benchmark: Real Compressible Data
+==============================================
+
+Input size:   100 MB
+pigz workers: 8
+CC_WORKERS:   16 (fiber scheduler)
+Runs:         2
+
+=== Preparing Test Data ===
+
+==============================================
+COMPRESSION BENCHMARKS
+==============================================
+
+=== CC pigz (Concurrent-C) (Compression) ===
+Input:  95M ( 100000000 bytes)
+  Run 1: 0.425s,  29314038 bytes (29.3%), 224.4 MB/s
+  Run 2: 0.414s,  29314038 bytes (29.3%), 230.4 MB/s
+  Average: 0.419s (227.3 MB/s), avg ratio 29.3%
+
+=== Original pigz (pthread) (Compression) ===
+Input:  95M ( 100000000 bytes)
+  Run 1: 0.421s,  29314034 bytes (29.3%), 226.5 MB/s
+  Run 2: 0.409s,  29314034 bytes (29.3%), 233.2 MB/s
+  Average: 0.415s (229.8 MB/s), avg ratio 29.3%
+
+=== Preparing Compressed Files ===
+CC pigz compressed:  28M
+Original pigz compressed:  28M
+
+==============================================
+DECOMPRESSION BENCHMARKS
+==============================================
+
+=== CC pigz (Concurrent-C) (Decompression) ===
+  Run 1: 0.118s,  100000000 bytes decompressed, 808.2 MB/s
+  Run 2: 0.120s,  100000000 bytes decompressed, 794.7 MB/s
+  Average: 0.119s (801.4 MB/s)
+
+=== Original pigz (pthread) (Decompression) ===
+  Run 1: 0.132s,  100000000 bytes decompressed, 722.5 MB/s
+  Run 2: 0.142s,  100000000 bytes decompressed, 671.6 MB/s
+  Average: 0.137s (696.1 MB/s)
+
+=== Correctness Check ===
+Original pigz: PASS
+CC pigz:       PASS
+
+=== Compression Summary ===
+Input:           95M ( 100000000 bytes)
+Original pigz:   28M ( 29314036 bytes) - 29.31%
+CC pigz:         28M ( 29314040 bytes) - 29.31%
+
+=== Benchmark Summary (avg over 2 runs) ===
+Implementation               Comp(s)    Comp(MB/s)       Ratio   Decomp(s)  Decomp(MB/s)
+pigz (pthread)                 0.415         229.8       29.3%       0.137         696.1
+pigz_cc (Concurrent-C)         0.419         227.3       29.3%       0.119         801.4
+
+Done.
+
+--- TEST 2: METADATA STORM (32KB blocks, 128 workers) ---
+This tests fiber/arena overhead vs OS thread overhead.
+CC pigz (Metadata Storm):
+            20004864  maximum resident set size
+         18211197423  instructions retired
+          9798929511  cycles elapsed
+            19595720  peak memory footprint
+
+Original pigz (Metadata Storm):
+            53755904  maximum resident set size
+         17927305612  instructions retired
+          9822039727  cycles elapsed
+            53330304  peak memory footprint
+
+--- TEST 3: BACKPRESSURE (Slow Consumer) ---
+This tests channel bounding and buffer bloat.
+CC pigz RSS over 5s (Slow Consumer):
+RSS: 0.296875 MB
+RSS: 14.4688 MB
+RSS: 14.5469 MB
+RSS: 14.6562 MB
+RSS: 14.6719 MB
