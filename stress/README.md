@@ -19,6 +19,9 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `defer_cleanup_storm` | 100 tasks with nested defers | Defer cleanup under concurrency |
 | `unbuffered_rendezvous` | 50 producer/consumer pairs (sync) | Unbuffered channel rendezvous |
 | `arena_concurrent` | 10 tasks allocating from shared arena | Arena thread safety |
+| `join_handoff_storm` | Deep join chains on one worker | Join handshake ordering |
+| `park_unpark_storm` | Single-worker unbuffered receive storm | Park/unpark correctness |
+| `inbox_cross_worker_storm` | Nested spawns across workers | Inbox routing + stealing |
 
 ## Demos (Manual Run)
 

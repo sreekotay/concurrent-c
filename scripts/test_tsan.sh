@@ -136,6 +136,9 @@ TSAN_TESTS=(
     stress/work_stealing_race.ccs
     stress/fanout_join_race.ccs
     stress/fiber_spawn_join_tight.ccs
+    stress/join_handoff_storm.ccs
+    stress/park_unpark_storm.ccs
+    stress/inbox_cross_worker_storm.ccs
 )
 
 failed=0

@@ -1,0 +1,53 @@
+/*
+ * Stress Test: Join Handoff Storm
+ *
+ * Deep nested join chains on a single worker to hammer join registration
+ * and unpark handoff ordering without relying on pthread scheduling.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define ITERATIONS 400
+#define DEPTH 32
+
+cc_atomic_int g_completed = 0;
+
+void* chain_task(void* arg) {
+    int depth = (int)(intptr_t)arg;
+    if (depth <= 0) return NULL;
+
+    CCNursery* n = cc_nursery_create();
+    cc_nursery_spawn(n, chain_task, (void*)(intptr_t)(depth - 1));
+    cc_nursery_wait(n);
+    cc_nursery_free(n);
+
+    cc_atomic_fetch_add(&g_completed, 1);
+    return NULL;
+}
+
+int main(void) {
+    /* Single worker maximizes join handoff determinism. */
+    setenv("CC_WORKERS", "1", 1);
+
+    printf("join_handoff_storm: iterations=%d depth=%d\n", ITERATIONS, DEPTH);
+
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        cc_atomic_store(&g_completed, 0);
+        CCNursery* n = cc_nursery_create();
+        cc_nursery_spawn(n, chain_task, (void*)(intptr_t)DEPTH);
+        cc_nursery_wait(n);
+        cc_nursery_free(n);
+
+        int got = cc_atomic_load(&g_completed);
+        int expected = DEPTH;
+        if (got != expected) {
+            fprintf(stderr, "FAIL: iter %d: completed %d/%d\n", iter, got, expected);
+            return 1;
+        }
+    }
+
+    printf("join_handoff_storm: PASS\n");
+    return 0;
+}

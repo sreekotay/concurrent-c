@@ -8,6 +8,7 @@
  * Note: Uses a smaller pipeline due to channel array syntax limitations.
  */
 #include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define NUM_ITEMS 1000
@@ -21,8 +22,8 @@ CCChan* g_ch2;
 CCChan* g_ch3;
 CCChan* g_ch4;
 
-int g_output_count = 0;
-int g_output_sum = 0;
+cc_atomic_int g_output_count = 0;
+cc_atomic_int g_output_sum = 0;
 
 int main(void) {
     printf("pipeline_long: 5 stages, %d items\n", NUM_ITEMS);
@@ -82,8 +83,8 @@ int main(void) {
         spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx4, &v))) {
-                g_output_count++;
-                g_output_sum += v;
+                cc_atomic_fetch_add(&g_output_count, 1);
+                cc_atomic_fetch_add(&g_output_sum, v);
             }
         });
     }
@@ -98,7 +99,9 @@ int main(void) {
     /* Sum of (i + 4) for i=0..NUM_ITEMS-1 = sum(i) + 4*NUM_ITEMS */
     int expected_sum = (NUM_ITEMS * (NUM_ITEMS - 1)) / 2 + 4 * NUM_ITEMS;
 
+    int out_count = cc_atomic_load(&g_output_count);
+    int out_sum = cc_atomic_load(&g_output_sum);
     printf("pipeline_long: output %d items, sum %d (expected %d)\n",
-           g_output_count, g_output_sum, expected_sum);
-    return (g_output_count == NUM_ITEMS && g_output_sum == expected_sum) ? 0 : 1;
+           out_count, out_sum, expected_sum);
+    return (out_count == NUM_ITEMS && out_sum == expected_sum) ? 0 : 1;
 }

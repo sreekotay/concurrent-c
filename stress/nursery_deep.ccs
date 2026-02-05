@@ -5,12 +5,12 @@
  * Tests nursery stack and structured concurrency semantics.
  */
 #include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 
 #define MAX_DEPTH 20
 
-int g_completed[MAX_DEPTH] = {0};
-int g_current_depth = 0;
+cc_atomic_int g_completed[MAX_DEPTH];
 
 void nested_spawn(int depth) {
     if (depth >= MAX_DEPTH) return;
@@ -21,7 +21,7 @@ void nested_spawn(int depth) {
 
         /* Task at this depth */
         spawn(() => {
-            g_completed[my_depth] = 1;
+            cc_atomic_store(&g_completed[my_depth], 1);
         });
 
         /* Recurse deeper (not in closure, direct call) */
@@ -36,7 +36,7 @@ int main(void) {
 
     int completed = 0;
     for (int i = 0; i < MAX_DEPTH; i++) {
-        if (g_completed[i]) completed++;
+        if (cc_atomic_load(&g_completed[i])) completed++;
     }
 
     printf("nursery_deep: completed %d/%d levels\n", completed, MAX_DEPTH);

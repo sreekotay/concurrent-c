@@ -1,0 +1,42 @@
+/*
+ * Stress Test: Inbox Cross-Worker Storm
+ *
+ * Multiple workers spawning nested tasks to exercise inbox routing,
+ * stealing, and queue draining under cross-worker pressure.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define OUTER_TASKS 8
+#define INNER_TASKS 256
+
+cc_atomic_int g_total = 0;
+
+int main(void) {
+    setenv("CC_WORKERS", "4", 1);
+
+    printf("inbox_cross_worker_storm: outer=%d inner=%d\n", OUTER_TASKS, INNER_TASKS);
+
+    @nursery {
+        for (int i = 0; i < OUTER_TASKS; i++) {
+            spawn(() => {
+                /* Busy loop to keep this worker occupied briefly. */
+                for (volatile int spin = 0; spin < 2000; spin++) {}
+                @nursery {
+                    for (int j = 0; j < INNER_TASKS; j++) {
+                        spawn(() => {
+                            cc_atomic_fetch_add(&g_total, 1);
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    int expected = OUTER_TASKS * INNER_TASKS;
+    int got = cc_atomic_load(&g_total);
+    printf("inbox_cross_worker_storm: completed %d/%d\n", got, expected);
+    return (got == expected) ? 0 : 1;
+}

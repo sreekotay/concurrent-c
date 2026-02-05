@@ -1,0 +1,55 @@
+/*
+ * Stress Test: Park/Unpark Storm
+ *
+ * Many senders to a single unbuffered receiver on a single worker.
+ * This repeatedly parks/unparks the receiver fiber without pthread reliance.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define SENDERS 32
+#define MSGS_PER_SENDER 200
+
+cc_atomic_int g_received = 0;
+
+int main(void) {
+    setenv("CC_WORKERS", "1", 1);
+
+    int total = SENDERS * MSGS_PER_SENDER;
+    printf("park_unpark_storm: senders=%d msgs=%d total=%d\n",
+           SENDERS, MSGS_PER_SENDER, total);
+
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+
+    @nursery {
+        /* Receiver */
+        spawn(() => {
+            int v = 0;
+            while (cc_io_avail(chan_recv(rx, &v))) {
+                cc_atomic_fetch_add(&g_received, 1);
+            }
+        });
+
+        /* Senders */
+        @nursery closing(tx) {
+            for (int s = 0; s < SENDERS; s++) {
+                int n = MSGS_PER_SENDER;
+                spawn(() => [n] {
+                    for (int i = 0; i < n; i++) {
+                        (void)chan_send(tx, i);
+                    }
+                });
+            }
+        }
+    }
+
+    cc_chan_free(ch);
+
+    int got = cc_atomic_load(&g_received);
+    printf("park_unpark_storm: received %d/%d\n", got, total);
+    return (got == total) ? 0 : 1;
+}

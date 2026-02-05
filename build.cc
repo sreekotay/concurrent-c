@@ -57,6 +57,9 @@ CC_TARGET stress_fiber_join exe stress/fiber_join_race.ccs
 CC_TARGET stress_fiber_multi exe stress/fiber_multi_joiner_race.ccs
 CC_TARGET stress_fiber_tight exe stress/fiber_spawn_join_tight.ccs
 CC_TARGET stress_join_init exe stress/join_init_race.ccs
+CC_TARGET stress_join_handoff exe stress/join_handoff_storm.ccs
+CC_TARGET stress_park_unpark exe stress/park_unpark_storm.ccs
+CC_TARGET stress_inbox_cross exe stress/inbox_cross_worker_storm.ccs
 CC_TARGET stress_nested_deep exe stress/nested_nursery_deep.ccs
 CC_TARGET stress_nested_race exe stress/nested_nursery_race.ccs
 CC_TARGET stress_nested_debug exe stress/nested_nursery_race_debug.ccs
