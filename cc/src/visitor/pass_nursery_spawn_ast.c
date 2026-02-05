@@ -734,10 +734,12 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
         cc__append_fmt(&pro, &pro_len, &pro_cap,
                        "%.*s{\n"
                        "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
-                       "%.*sif (!__cc_nursery%d) abort();\n",
+                       "%.*sif (!__cc_nursery%d) abort();\n"
+                       "#define nursery_cancel() cc_nursery_cancel(__cc_nursery%d)\n",
                        (int)ind_len, indent,
                        (int)ind_len, indent, id,
-                       (int)ind_len, indent, id);
+                       (int)ind_len, indent, id,
+                       id);
         if (!pro) continue;
 
         /* Optional: closing(ch1, ch2) clause -> register channels for auto-close. */
@@ -762,8 +764,9 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
             size_t close_line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_end);
             size_t close_ind_len = cc__line_indent_len(in_src, in_len, n[i].line_end);
             const char* cindent = (close_line_off + close_ind_len <= in_len) ? (in_src + close_line_off) : "";
-            char epi[256];
+            char epi[512];
             int en2 = snprintf(epi, sizeof(epi),
+                               "#undef nursery_cancel\n"
                                "%.*s  cc_nursery_wait(__cc_nursery%d);\n"
                                "%.*s  cc_nursery_free(__cc_nursery%d);\n",
                                (int)close_ind_len, cindent, id,
@@ -860,10 +863,12 @@ int cc__collect_nursery_edits(const CCASTRoot* root,
         cc__append_fmt(&pro, &pro_len, &pro_cap,
                        "%.*s{\n"
                        "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
-                       "%.*sif (!__cc_nursery%d) abort();\n",
+                       "%.*sif (!__cc_nursery%d) abort();\n"
+                       "#define nursery_cancel() cc_nursery_cancel(__cc_nursery%d)\n",
                        (int)ind_len, indent,
                        (int)ind_len, indent, id,
-                       (int)ind_len, indent, id);
+                       (int)ind_len, indent, id,
+                       id);
         if (!pro) continue;
 
         /* Optional: closing(ch1, ch2) clause */
@@ -888,8 +893,9 @@ int cc__collect_nursery_edits(const CCASTRoot* root,
         size_t close_line_off = cc__offset_of_line_1based(in_src, in_len, n[i].line_end);
         size_t close_ind_len = cc__line_indent_len(in_src, in_len, n[i].line_end);
         const char* cindent = (close_line_off + close_ind_len <= in_len) ? (in_src + close_line_off) : "";
-        char epi[256];
+        char epi[512];
         int en2 = snprintf(epi, sizeof(epi),
+                           "#undef nursery_cancel\n"
                            "%.*s  cc_nursery_wait(__cc_nursery%d);\n"
                            "%.*s  cc_nursery_free(__cc_nursery%d);\n",
                            (int)close_ind_len, cindent, id,

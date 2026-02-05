@@ -8,6 +8,8 @@
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_channel.cch>
 
+#include "wake_primitive.h"
+
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -78,6 +80,7 @@ typedef struct fiber_task fiber_task;
 fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
 int cc_fiber_join(fiber_task* t, void** out_result);
 void cc_fiber_task_free(fiber_task* t);
+void cc__fiber_unpark(void* fiber_ptr);  /* Wake a parked fiber */
 
 /* Thread-local: current nursery for code running inside nursery-spawned tasks.
    Used by optional runtime deadlock guard in channel.c. */
@@ -93,6 +96,7 @@ struct CCNursery {
     size_t closing_count;
     size_t closing_cap;
     pthread_mutex_t mu;
+    wake_primitive cancel_wake;  /* Broadcast on cancel for O(1) wake */
 };
 
 /* Defined in channel.c (same translation unit via runtime/concurrent_c.c). */
@@ -144,6 +148,13 @@ static void* cc__nursery_task_trampoline(void* p) {
     void* (*ff)(void*) = th->fn;
     void* aa = th->arg;
     thunk_free(th);  /* Return to pool instead of free */
+    
+    /* Pattern: (cancelled && no_work) => exit
+     * If nursery is cancelled, don't start new work - exit immediately. */
+    if (cc_nursery_is_cancelled(nn)) {
+        return NULL;
+    }
+    
     cc__tls_current_nursery = nn;
     void* r = ff ? ff(aa) : NULL;
     cc__tls_current_nursery = NULL;
@@ -161,6 +172,7 @@ CCNursery* cc_nursery_create(void) {
         return NULL;
     }
     pthread_mutex_init(&n->mu, NULL);
+    wake_primitive_init(&n->cancel_wake);
     n->deadline.tv_sec = 0;
     n->deadline.tv_nsec = 0;
     n->closing = NULL;
@@ -173,7 +185,32 @@ void cc_nursery_cancel(CCNursery* n) {
     if (!n) return;
     pthread_mutex_lock(&n->mu);
     n->cancelled = 1;
+    /* Snapshot tasks while holding lock */
+    size_t task_count = n->count;
+    fiber_task** tasks_snapshot = NULL;
+    if (task_count > 0) {
+        tasks_snapshot = (fiber_task**)malloc(task_count * sizeof(fiber_task*));
+        if (tasks_snapshot) {
+            for (size_t i = 0; i < task_count; i++) {
+                tasks_snapshot[i] = n->tasks[i];
+            }
+        }
+    }
     pthread_mutex_unlock(&n->mu);
+    
+    /* Broadcast to wake any fibers waiting on this nursery's cancel primitive */
+    wake_primitive_wake_all(&n->cancel_wake);
+    
+    /* Unpark all tasks in this nursery so they can check cancellation.
+     * This is O(n) but ensures no fiber stays parked after cancel. */
+    if (tasks_snapshot) {
+        for (size_t i = 0; i < task_count; i++) {
+            if (tasks_snapshot[i]) {
+                cc__fiber_unpark(tasks_snapshot[i]);
+            }
+        }
+        free(tasks_snapshot);
+    }
 }
 
 void cc_nursery_set_deadline(CCNursery* n, struct timespec abs_deadline) {
@@ -206,6 +243,25 @@ bool cc_nursery_is_cancelled(const CCNursery* n) {
     if (now.tv_sec > n->deadline.tv_sec) return true;
     if (now.tv_sec == n->deadline.tv_sec && now.tv_nsec >= n->deadline.tv_nsec) return true;
     return false;
+}
+
+/* Check if current fiber's nursery is cancelled (convenience for user code). */
+bool cc_cancelled(void) {
+    return cc_nursery_is_cancelled(cc__tls_current_nursery);
+}
+
+/* Get the cancel wake generation for the current nursery (0 if none).
+ * Used by channel waits to detect cancellation. */
+uint32_t cc_nursery_cancel_gen(const CCNursery* n) {
+    if (!n) return 0;
+    return atomic_load_explicit(&n->cancel_wake.value, memory_order_acquire);
+}
+
+/* Wait on the nursery's cancel primitive with timeout (ms).
+ * Returns immediately if cancel_gen changed (i.e., cancelled). */
+void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeout_ms) {
+    if (!n) return;
+    wake_primitive_wait_timeout(&n->cancel_wake, expected_gen, timeout_ms);
 }
 
 static int cc_nursery_grow(CCNursery* n) {
@@ -273,7 +329,9 @@ int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
     int first_err = 0;
     
-    /* Join all tasks - spec: join children first, then close channels */
+    /* Join all tasks - spec: join children first, then close channels.
+     * If cancelled, fibers should exit promptly when they check cc_cancelled()
+     * or when channel operations return ECANCELED. */
     for (size_t i = 0; i < n->count; ++i) {
         if (!n->tasks[i]) continue;
         int err = cc_fiber_join(n->tasks[i], NULL);
@@ -306,6 +364,7 @@ void cc_nursery_free(CCNursery* n) {
     free(n->tasks);
     free(n->closing);
     pthread_mutex_destroy(&n->mu);
+    wake_primitive_destroy(&n->cancel_wake);
     free(n);
 }
 

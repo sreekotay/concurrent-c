@@ -38,6 +38,16 @@ int cc_nursery_add_closing_tx(CCNursery* n, CCChanTx tx);
 // Check cancellation flag.
 bool cc_nursery_is_cancelled(const CCNursery* n);
 
+// Check if current fiber's nursery is cancelled (convenience for user code).
+// Returns true if cancelled or no nursery context.
+bool cc_cancelled(void);
+
+// Get cancel wake generation (for cancel-aware waits). Returns 0 if no nursery.
+uint32_t cc_nursery_cancel_gen(const CCNursery* n);
+
+// Wait on nursery's cancel primitive with timeout (ms). Returns if cancelled or timeout.
+void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeout_ms);
+
 // Spawn a task owned by the nursery. Returns 0 on success.
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg);
 // Spawn a CCClosure0 (env freed via drop, if provided). Returns 0 on success.
