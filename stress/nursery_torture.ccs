@@ -1,0 +1,48 @@
+/*
+ * nursery_torture.ccs - The "Deep Nursery" Challenge
+ * 
+ * This test pushes Concurrent-C's structured concurrency to the limit by
+ * creating a recursive tree of nurseries. 
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define TORTURE_DEPTH 2000
+
+cc_atomic_int g_completed_levels = 0;
+
+void torture_nesting(int depth) {
+    if (depth >= TORTURE_DEPTH) return;
+
+    @nursery {
+        spawn(() => {
+            cc_atomic_fetch_add(&g_completed_levels, 1);
+        });
+
+        // Recurse! Each level is a new nursery scope.
+        torture_nesting(depth + 1);
+    }
+}
+
+int main(void) {
+    printf("=================================================================\n");
+    printf("NURSERY TORTURE: Nesting %d levels of nurseries\n", TORTURE_DEPTH);
+    printf("=================================================================\n\n");
+
+    torture_nesting(0);
+
+    int total = cc_atomic_load(&g_completed_levels);
+    printf("\nFinal Result: %d/%d levels completed.\n", total, TORTURE_DEPTH);
+
+    if (total == TORTURE_DEPTH) {
+        printf("RESULT: PASS - The runtime handled extreme nesting!\n");
+    } else {
+        printf("RESULT: FAIL - Some levels were lost or the runtime crashed.\n");
+    }
+    printf("=================================================================\n");
+
+    return 0;
+}
