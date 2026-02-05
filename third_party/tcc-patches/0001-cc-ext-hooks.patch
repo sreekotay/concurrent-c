@@ -14,26 +14,39 @@ index d21f1cad..cfff431b 100644
  
 diff --git a/cc_ast_record.h b/cc_ast_record.h
 new file mode 100644
-index 00000000..3e6c9436
+index 00000000..c57088a4
 --- /dev/null
 +++ b/cc_ast_record.h
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,186 @@
 +/* CC AST Recording - included by tccgen.c when CONFIG_CC_EXT is defined */
 +#ifndef CC_AST_RECORD_H
 +#define CC_AST_RECORD_H
 +
++/* ---- Configuration constants ---- */
++#define CC_AST_INITIAL_NODES_CAP    64
++#define CC_AST_INITIAL_STACK_CAP    64
++#define CC_AST_INITIAL_CALL_CAP     32
++#define CC_AST_TYPE_BUF_SIZE        256
++#define CC_AST_STRING_BUF_SIZE      1024
++
 +/* Flag bit for aux2: if set, line_end was explicitly set and shouldn't be overwritten */
 +#define CC_AST_FLAG_LINE_END_SET (1U << 31)
++
++/* Macro to safely access and update current AST node.
++ * Usage: CC_AST_WITH_NODE(node->aux1 = 42; node->aux_s1 = tcc_strdup("foo");)
++ * Expands to: { struct CCASTStubNode *node = cc_ast_current_node(); if (node) { ... } } */
++#define CC_AST_WITH_NODE(code) \
++    do { struct CCASTStubNode *node = cc_ast_current_node(); if (node) { code } } while(0)
 +
 +static void cc_ast_ensure_tables(void) {
 +    if (!tcc_state) return;
 +    if (!tcc_state->cc_nodes) {
-+        tcc_state->cc_nodes_cap = 64;
++        tcc_state->cc_nodes_cap = CC_AST_INITIAL_NODES_CAP;
 +        tcc_state->cc_nodes_count = 0;
 +        tcc_state->cc_nodes = tcc_mallocz(tcc_state->cc_nodes_cap * sizeof(struct CCASTStubNode));
 +    }
 +    if (!tcc_state->cc_node_stack) {
-+        tcc_state->cc_node_stack_cap = 64;
++        tcc_state->cc_node_stack_cap = CC_AST_INITIAL_STACK_CAP;
 +        tcc_state->cc_node_stack_top = -1;
 +        tcc_state->cc_node_stack = tcc_mallocz(tcc_state->cc_node_stack_cap * sizeof(int));
 +    }
@@ -98,9 +111,6 @@ index 00000000..3e6c9436
 +    if (!tcc_state || !tcc_state->cc_nodes || !tcc_state->cc_node_stack) return;
 +    cc_ast_record_start(CC_AST_NODE_CALL);
 +    
-+    struct CCASTStubNode *node = cc_ast_current_node();
-+    if (!node) return;
-+    
 +    int callee_tok = (vtop && vtop->sym) ? (vtop->sym->v & ~SYM_FIELD) : 0;
 +    const char *callee_name = callee_tok ? get_tok_str(callee_tok, NULL) : NULL;
 +    int is_ufcs = (tcc_state->cc_last_member_tok != 0);
@@ -113,22 +123,24 @@ index 00000000..3e6c9436
 +        }
 +        occ = ++tcc_state->cc_ufcs_seq_count;
 +    }
-+    node->aux1 = callee_tok;
-+    node->aux2 = (flags & 1) | (is_ufcs ? 2 : 0) | (occ << 8);
-+    node->aux_s1 = callee_name ? tcc_strdup(callee_name) : NULL;
-+    node->aux_s2 = (is_ufcs && tcc_state->cc_last_recv_type[0]) ? tcc_strdup(tcc_state->cc_last_recv_type) : NULL;
-+    if (is_ufcs && tcc_state->cc_last_member_line) {
-+        node->line_start = tcc_state->cc_last_member_line;
-+        node->col_start = tcc_state->cc_last_member_col;
-+    } else {
-+        node->col_start = tok_col;
-+    }
++    CC_AST_WITH_NODE(
++        node->aux1 = callee_tok;
++        node->aux2 = (flags & 1) | (is_ufcs ? 2 : 0) | (occ << 8);
++        node->aux_s1 = callee_name ? tcc_strdup(callee_name) : NULL;
++        node->aux_s2 = (is_ufcs && tcc_state->cc_last_recv_type[0]) ? tcc_strdup(tcc_state->cc_last_recv_type) : NULL;
++        if (is_ufcs && tcc_state->cc_last_member_line) {
++            node->line_start = tcc_state->cc_last_member_line;
++            node->col_start = tcc_state->cc_last_member_col;
++        } else {
++            node->col_start = tok_col;
++        }
++    );
 +    tcc_state->cc_last_member_tok = tcc_state->cc_last_member_flags = 0;
 +    tcc_state->cc_last_member_col = tcc_state->cc_last_member_line = 0;
 +    
 +    /* Initialize call stack if needed */
 +    if (!tcc_state->cc_call_stack) {
-+        tcc_state->cc_call_stack_cap = 32;
++        tcc_state->cc_call_stack_cap = CC_AST_INITIAL_CALL_CAP;
 +        tcc_state->cc_call_stack_top = -1;
 +        tcc_state->cc_call_stack = tcc_mallocz(tcc_state->cc_call_stack_cap * sizeof(int));
 +    }
@@ -148,28 +160,24 @@ index 00000000..3e6c9436
 +static void cc_ast_record_assign_start(int op_tok) {
 +    if (!tcc_state) return;
 +    cc_ast_record_start(CC_AST_NODE_ASSIGN);
-+    
-+    struct CCASTStubNode *node = cc_ast_current_node();
-+    if (!node) return;
-+    
 +    const char *lhs = (vtop && vtop->sym) ? get_tok_str(vtop->sym->v & ~SYM_FIELD, NULL) : NULL;
 +    const char *op = get_tok_str(op_tok, NULL);
-+    node->aux1 = op_tok;
-+    node->aux_s1 = lhs ? tcc_strdup(lhs) : NULL;
-+    node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by cccn parser */
-+    node->col_start = tok_col;
-+    if (op) node->col_end = tok_col + (int)strlen(op);
++    CC_AST_WITH_NODE(
++        node->aux1 = op_tok;
++        node->aux_s1 = lhs ? tcc_strdup(lhs) : NULL;
++        node->aux_s2 = op ? tcc_strdup(op) : NULL; /* needed by cccn parser */
++        node->col_start = tok_col;
++        if (op) node->col_end = tok_col + (int)strlen(op);
++    );
 +}
 +
 +static void cc_ast_record_return_start(void) {
 +    if (!tcc_state) return;
 +    cc_ast_record_start(CC_AST_NODE_RETURN);
-+    
-+    struct CCASTStubNode *node = cc_ast_current_node();
-+    if (!node) return;
-+    
-+    node->col_start = tok_col;
-+    node->col_end = tok_col + 6; /* "return" is 6 chars */
++    CC_AST_WITH_NODE(
++        node->col_start = tok_col;
++        node->col_end = tok_col + 6; /* "return" is 6 chars */
++    );
 +}
 +
 +/* Record a binary expression. Call BEFORE parsing the RHS.
@@ -177,13 +185,10 @@ index 00000000..3e6c9436
 +static void cc_ast_record_binary_start(int op_tok) {
 +    if (!tcc_state) return;
 +    cc_ast_record_start(CC_AST_NODE_BINARY);
-+    
-+    struct CCASTStubNode *node = cc_ast_current_node();
-+    if (!node) return;
-+    
-+    node->aux1 = op_tok;
-+    /* aux_s1 not needed - op_tok identifies the operator, use get_tok_str() if string needed */
-+    node->col_start = tok_col;
++    CC_AST_WITH_NODE(
++        node->aux1 = op_tok;
++        node->col_start = tok_col;
++    );
 +}
 +
 +/* Record a unary expression.
@@ -192,13 +197,10 @@ index 00000000..3e6c9436
 +static void cc_ast_record_unary(int op_tok, int is_postfix) {
 +    if (!tcc_state) return;
 +    cc_ast_record_start(CC_AST_NODE_UNARY);
-+    
-+    struct CCASTStubNode *node = cc_ast_current_node();
-+    if (!node) return;
-+    
-+    node->aux1 = op_tok;      /* operator token */
-+    node->aux2 = is_postfix;  /* 0=prefix, 1=postfix */
-+    /* aux_s1 not needed - use get_tok_str(op_tok, NULL) if string representation needed */
++    CC_AST_WITH_NODE(
++        node->aux1 = op_tok;      /* operator token */
++        node->aux2 = is_postfix;  /* 0=prefix, 1=postfix */
++    );
 +}
 +
 +#endif /* CC_AST_RECORD_H */
@@ -521,7 +523,7 @@ index 171e3622..7061a988 100644
  #ifdef MEM_DEBUG
      tcc_memcheck(-1);
 diff --git a/tcc.h b/tcc.h
-index 1c2f6949..4a3579b4 100644
+index 1c2f6949..8d54321b 100644
 --- a/tcc.h
 +++ b/tcc.h
 @@ -452,6 +452,93 @@ typedef struct TokenSym {
@@ -550,12 +552,12 @@ index 1c2f6949..4a3579b4 100644
 +    CC_AST_NODE_RETURN    = 15,
 +    CC_AST_NODE_PARAM     = 16,
 +    CC_AST_NODE_FUNC      = 17, /* function decl/def: aux_s1=name, aux_s2=return type, aux1=attrs */
-+    CC_AST_NODE_BINARY    = 18, /* binary expr: aux1=operator token, aux_s1=operator string */
++    CC_AST_NODE_BINARY    = 18, /* binary expr: aux1=operator token */
 +    CC_AST_NODE_TRY       = 19, /* try expr: unwrap Result or propagate error */
 +    CC_AST_NODE_IF        = 20, /* if statement: children are cond, then, [else] */
 +    CC_AST_NODE_FOR       = 21, /* for statement: init, cond, incr, body */
 +    CC_AST_NODE_WHILE     = 22, /* while statement: cond, body */
-+    CC_AST_NODE_UNARY     = 23, /* unary expr: aux_s1=operator (++, --, !, ~, etc), aux1=1 if postfix */
++    CC_AST_NODE_UNARY     = 23, /* unary expr: aux1=operator token, aux2=is_postfix (0=prefix, 1=postfix) */
 +    CC_AST_NODE_SIZEOF    = 24, /* sizeof expr: aux_s1=type string (if type), child=expr (if expr) */
 +    CC_AST_NODE_STRUCT    = 25, /* struct/union def: aux_s1=name, aux1=VT_STRUCT/VT_UNION, children=fields */
 +    CC_AST_NODE_STRUCT_FIELD = 26, /* struct field: aux_s1=name, aux_s2=type */
@@ -730,10 +732,10 @@ index 1c2f6949..4a3579b4 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 6d42de67..6fa3fadb 100644
+index 6d42de67..947be910 100644
 --- a/tccgen.c
 +++ b/tccgen.c
-@@ -49,6 +49,43 @@ ST_DATA SValue *vtop;
+@@ -49,6 +49,45 @@ ST_DATA SValue *vtop;
  static SValue _vstack[1 + VSTACK_SIZE];
  #define vstack (_vstack + 1)
  
@@ -750,11 +752,13 @@ index 6d42de67..6fa3fadb 100644
 +            return;
 +        }
 +    }
-+    /* Add new entry */
++    /* Add new entry - safe realloc pattern */
 +    if (tcc_state->cc_typedef_map_count >= tcc_state->cc_typedef_map_cap) {
 +        int new_cap = tcc_state->cc_typedef_map_cap ? tcc_state->cc_typedef_map_cap * 2 : 64;
-+        tcc_state->cc_typedef_map = tcc_realloc(tcc_state->cc_typedef_map, 
++        void *new_map = tcc_realloc(tcc_state->cc_typedef_map, 
 +            new_cap * sizeof(tcc_state->cc_typedef_map[0]));
++        if (!new_map) return; /* realloc failed, bail out safely */
++        tcc_state->cc_typedef_map = new_map;
 +        tcc_state->cc_typedef_map_cap = new_cap;
 +    }
 +    tcc_state->cc_typedef_map[tcc_state->cc_typedef_map_count].ref = ref;
@@ -777,7 +781,7 @@ index 6d42de67..6fa3fadb 100644
  ST_DATA int nocode_wanted; /* no code generation wanted */
  #define NODATA_WANTED (nocode_wanted > 0) /* no static data output wanted either */
  #define DATA_ONLY_WANTED 0x80000000 /* ON outside of functions and for static initializers */
-@@ -58,6 +95,11 @@ ST_DATA int nocode_wanted; /* no code generation wanted */
+@@ -58,6 +97,11 @@ ST_DATA int nocode_wanted; /* no code generation wanted */
  #define CODE_OFF() if(!nocode_wanted)(nocode_wanted |= CODE_OFF_BIT)
  #define CODE_ON() (nocode_wanted &= ~CODE_OFF_BIT)
  
@@ -789,7 +793,7 @@ index 6d42de67..6fa3fadb 100644
  /* no code output when parsing sizeof()/typeof() etc. (using nocode_wanted++/--) */
  #define NOEVAL_MASK 0x0000FFFF
  #define NOEVAL_WANTED (nocode_wanted & NOEVAL_MASK)
-@@ -128,9 +170,10 @@ typedef struct {
+@@ -128,9 +172,10 @@ typedef struct {
  static void init_prec(void);
  #endif
  
@@ -801,7 +805,7 @@ index 6d42de67..6fa3fadb 100644
  
  static void gen_cast(CType *type);
  static void gen_cast_s(int t);
-@@ -143,7 +186,7 @@ static void init_putv(init_params *p, CType *type, unsigned long c);
+@@ -143,7 +188,7 @@ static void init_putv(init_params *p, CType *type, unsigned long c);
  static void decl_initializer(init_params *p, CType *type, unsigned long c, int flags);
  static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r, int has_init, int v, int scope);
  static int decl(int l);
@@ -810,7 +814,7 @@ index 6d42de67..6fa3fadb 100644
  static void vpush_type_size(CType *type, int *a);
  static int is_compatible_unqualified_types(CType *type1, CType *type2);
  static inline int64_t expr_const64(void);
-@@ -158,6 +201,9 @@ static int get_temp_local_var(int size,int align,int *r2);
+@@ -158,6 +203,9 @@ static int get_temp_local_var(int size,int align,int *r2);
  static void cast_error(CType *st, CType *dt);
  static void end_switch(void);
  static void do_Static_assert(void);
@@ -820,7 +824,7 @@ index 6d42de67..6fa3fadb 100644
  
  /* ------------------------------------------------------------------------- */
  /* Automagical code suppression */
-@@ -2727,8 +2773,18 @@ static void type_to_str(char *buf, int buf_size,
+@@ -2727,8 +2775,18 @@ static void type_to_str(char *buf, int buf_size,
      tstruct:
          pstrcat(buf, buf_size, tstr);
          v = type->ref->v & ~SYM_STRUCT;
@@ -840,7 +844,7 @@ index 6d42de67..6fa3fadb 100644
          else
              pstrcat(buf, buf_size, get_tok_str(v, NULL));
          break;
-@@ -3386,6 +3442,10 @@ error:
+@@ -3386,6 +3444,10 @@ error:
          if (ds == ss && ds >= 4)
              goto done;
          if (dbt_bt == VT_PTR || sbt_bt == VT_PTR) {
@@ -851,7 +855,7 @@ index 6d42de67..6fa3fadb 100644
              tcc_warning("cast between pointer and integer of different size");
              if (sbt_bt == VT_PTR) {
                  /* put integer type to allow logical operations below */
-@@ -3589,7 +3649,8 @@ static void cast_error(CType *st, CType *dt)
+@@ -3589,7 +3651,8 @@ static void cast_error(CType *st, CType *dt)
  static void verify_assign_cast(CType *dt)
  {
      CType *st, *type1, *type2;
@@ -861,7 +865,7 @@ index 6d42de67..6fa3fadb 100644
  
      st = &vtop->type; /* source type */
      dbt = dt->t & VT_BTYPE;
-@@ -3608,6 +3669,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3608,6 +3671,10 @@ static void verify_assign_cast(CType *dt)
              break;
          /* accept implicit pointer to integer cast with warning */
          if (is_integer_btype(sbt)) {
@@ -872,7 +876,7 @@ index 6d42de67..6fa3fadb 100644
              tcc_warning("assignment makes pointer from integer without a cast");
              break;
          }
-@@ -3643,8 +3708,29 @@ static void verify_assign_cast(CType *dt)
+@@ -3643,8 +3710,29 @@ static void verify_assign_cast(CType *dt)
  		   base types, though, in particular for unsigned enums
  		   and signed int targets.  */
              } else {
@@ -904,7 +908,7 @@ index 6d42de67..6fa3fadb 100644
              }
          }
          if (qualwarn)
-@@ -3655,6 +3741,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3655,6 +3743,10 @@ static void verify_assign_cast(CType *dt)
      case VT_INT:
      case VT_LLONG:
          if (sbt == VT_PTR || sbt == VT_FUNC) {
@@ -915,7 +919,7 @@ index 6d42de67..6fa3fadb 100644
              tcc_warning("assignment makes integer from pointer without a cast");
          } else if (sbt == VT_STRUCT) {
              goto case_VT_STRUCT;
-@@ -4493,6 +4583,26 @@ do_decl:
+@@ -4493,6 +4585,24 @@ do_decl:
          if (s->c != -1
              && !(u == VT_ENUM && s->c == 0)) /* not yet defined typed enum */
              tcc_error("struct/union/enum already defined");
@@ -923,40 +927,40 @@ index 6d42de67..6fa3fadb 100644
 +        /* Record struct/union definition (not enums) */
 +        if (u != VT_ENUM) {
 +            cc_ast_record_start(CC_AST_NODE_STRUCT);
-+            { struct CCASTStubNode *node = cc_ast_current_node();
-+              if (node) {
-+                  const char *struct_name = (v >= TOK_IDENT) ? get_tok_str(v, NULL) : NULL;
-+                  node->aux_s1 = struct_name ? tcc_strdup(struct_name) : NULL;
-+                  node->aux1 = u;  /* VT_STRUCT or VT_UNION */
-+              } }
++            CC_AST_WITH_NODE(
++                const char *struct_name = (v >= TOK_IDENT) ? get_tok_str(v, NULL) : NULL;
++                node->aux_s1 = struct_name ? tcc_strdup(struct_name) : NULL;
++                node->aux1 = u;  /* VT_STRUCT or VT_UNION */
++            );
 +        } else {
 +            /* Record enum definition */
 +            cc_ast_record_start(CC_AST_NODE_ENUM);
-+            { struct CCASTStubNode *node = cc_ast_current_node();
-+              if (node) {
-+                  const char *enum_name = (v >= TOK_IDENT) ? get_tok_str(v, NULL) : NULL;
-+                  node->aux_s1 = enum_name ? tcc_strdup(enum_name) : NULL;
-+              } }
++            CC_AST_WITH_NODE(
++                const char *enum_name = (v >= TOK_IDENT) ? get_tok_str(v, NULL) : NULL;
++                node->aux_s1 = enum_name ? tcc_strdup(enum_name) : NULL;
++            );
 +        }
 +#endif
          s->c = -2;
          /* cannot be empty */
          /* non empty enums are not allowed */
-@@ -4521,6 +4631,13 @@ do_decl:
+@@ -4521,6 +4631,15 @@ do_decl:
                  ss = sym_push(v, &t, VT_CONST, 0);
                  ss->enum_val = ll;
                  *ps = ss, ps = &ss->next;
 +#ifdef CONFIG_CC_EXT
 +                /* Record enum value */
 +                cc_ast_record_start(CC_AST_NODE_ENUM_VALUE);
-+                { struct CCASTStubNode *node = cc_ast_current_node();
-+                  if (node) { node->aux_s1 = tcc_strdup(get_tok_str(v, NULL)); node->aux2 = (int)ll; } }
++                CC_AST_WITH_NODE(
++                    node->aux_s1 = tcc_strdup(get_tok_str(v, NULL));
++                    node->aux2 = (int)ll;
++                );
 +                cc_ast_record_end();
 +#endif
                  if (ll < nl)
                      nl = ll;
                  if (ll > pl)
-@@ -4534,6 +4651,9 @@ do_decl:
+@@ -4534,6 +4653,9 @@ do_decl:
                      break;
              }
              skip('}');
@@ -966,7 +970,7 @@ index 6d42de67..6fa3fadb 100644
  
              if (bt) {
                  t.t = bt;
-@@ -4668,6 +4788,20 @@ do_decl:
+@@ -4668,6 +4790,20 @@ do_decl:
                          ss->a = ad1.a;
                          *ps = ss;
                          ps = &ss->next;
@@ -976,7 +980,7 @@ index 6d42de67..6fa3fadb 100644
 +                            cc_ast_record_start(CC_AST_NODE_STRUCT_FIELD);
 +                            { struct CCASTStubNode *node = cc_ast_current_node();
 +                              if (node) {
-+                                  char type_buf[256];
++                                  char type_buf[CC_AST_TYPE_BUF_SIZE];
 +                                  type_to_str(type_buf, sizeof(type_buf), &type1, NULL);
 +                                  node->aux_s1 = tcc_strdup(get_tok_str(v, NULL));
 +                                  node->aux_s2 = tcc_strdup(type_buf);
@@ -987,7 +991,7 @@ index 6d42de67..6fa3fadb 100644
                      }
                      if (tok == ';' || tok == TOK_EOF)
                          break;
-@@ -4676,6 +4810,12 @@ do_decl:
+@@ -4676,6 +4812,12 @@ do_decl:
                  skip(';');
              }
              skip('}');
@@ -1000,7 +1004,7 @@ index 6d42de67..6fa3fadb 100644
  	    parse_attribute(&ad);
              if (ad.cleanup_func) {
                  tcc_warning("attribute '__cleanup__' ignored on type");
-@@ -4724,6 +4864,33 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
+@@ -4724,6 +4866,33 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
  
      while(1) {
          switch(tok) {
@@ -1034,7 +1038,7 @@ index 6d42de67..6fa3fadb 100644
          case TOK_EXTENSION:
              /* currently, we really ignore extension */
              next();
-@@ -5602,6 +5769,19 @@ ST_FUNC void unary(void)
+@@ -5602,6 +5771,19 @@ ST_FUNC void unary(void)
      case TOK_CCHAR: 
  	t = VT_INT;
   push_tokc:
@@ -1054,34 +1058,33 @@ index 6d42de67..6fa3fadb 100644
  	type.t = t;
  	vsetc(&type, VT_CONST, &tokc);
          next();
-@@ -5657,6 +5837,26 @@ ST_FUNC void unary(void)
+@@ -5657,6 +5839,25 @@ ST_FUNC void unary(void)
          /* string parsing */
          t = char_type.t;
      str_init:
 +#ifdef CONFIG_CC_EXT
 +        /* Record string literal as CONST node */
 +        cc_ast_record_start(CC_AST_NODE_CONST);
-+        { struct CCASTStubNode *node = cc_ast_current_node();
-+          if (node) {
-+              /* Format as quoted string */
-+              char buf[1024];
-+              int len = tokc.str.size > 0 ? tokc.str.size - 1 : 0;  /* exclude null terminator */
-+              if (len > (int)sizeof(buf) - 3) len = sizeof(buf) - 3;
-+              buf[0] = '"';
-+              memcpy(buf + 1, tokc.str.data, len);
-+              buf[len + 1] = '"';
-+              buf[len + 2] = '\0';
-+              node->aux1 = TOK_STR;
-+              node->aux_s1 = tcc_strdup(buf);
-+              node->col_start = tok_col;
-+              node->col_end = tok_col + len + 2;
-+          } }
++        CC_AST_WITH_NODE(
++            /* Format as quoted string */
++            char buf[CC_AST_STRING_BUF_SIZE];
++            int len = tokc.str.size > 0 ? tokc.str.size - 1 : 0;  /* exclude null terminator */
++            if (len > (int)sizeof(buf) - 3) len = sizeof(buf) - 3;
++            buf[0] = '"';
++            memcpy(buf + 1, tokc.str.data, len);
++            buf[len + 1] = '"';
++            buf[len + 2] = '\0';
++            node->aux1 = TOK_STR;
++            node->aux_s1 = tcc_strdup(buf);
++            node->col_start = tok_col;
++            node->col_end = tok_col + len + 2;
++        );
 +        cc_ast_record_end();
 +#endif
          if (tcc_state->warn_write_strings & WARN_ON)
              t |= VT_CONSTANT;
          type.t = t;
-@@ -5666,10 +5866,34 @@ ST_FUNC void unary(void)
+@@ -5666,10 +5867,34 @@ ST_FUNC void unary(void)
          ad.section = rodata_section;
          decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
          break;
@@ -1116,7 +1119,7 @@ index 6d42de67..6fa3fadb 100644
          /* cast ? */
          if (parse_btype(&type, &ad, 0)) {
              type_decl(&type, &ad, &n, TYPE_ABSTRACT);
-@@ -5722,11 +5946,20 @@ ST_FUNC void unary(void)
+@@ -5722,11 +5947,20 @@ ST_FUNC void unary(void)
          }
          break;
      case '*':
@@ -1137,7 +1140,7 @@ index 6d42de67..6fa3fadb 100644
          next();
          unary();
          /* functions names must be treated as function pointers,
-@@ -5741,17 +5974,32 @@ ST_FUNC void unary(void)
+@@ -5741,17 +5975,32 @@ ST_FUNC void unary(void)
            vtop->sym->a.addrtaken = 1;
          mk_pointer(&vtop->type);
          gaddrof();
@@ -1170,7 +1173,7 @@ index 6d42de67..6fa3fadb 100644
          break;
      case '+':
          next();
-@@ -5771,13 +6019,32 @@ ST_FUNC void unary(void)
+@@ -5771,13 +6020,32 @@ ST_FUNC void unary(void)
      case TOK_ALIGNOF2:
      case TOK_ALIGNOF3:
          t = tok;
@@ -1203,7 +1206,7 @@ index 6d42de67..6fa3fadb 100644
          } else {
              type_size(&type, &align);
              s = NULL;
-@@ -5976,6 +6243,9 @@ ST_FUNC void unary(void)
+@@ -5976,6 +6244,9 @@ ST_FUNC void unary(void)
          inc(0, t);
          break;
      case '-':
@@ -1213,7 +1216,7 @@ index 6d42de67..6fa3fadb 100644
          next();
          unary();
  	if (is_float(vtop->type.t)) {
-@@ -5985,6 +6255,9 @@ ST_FUNC void unary(void)
+@@ -5985,6 +6256,9 @@ ST_FUNC void unary(void)
              vswap();
              gen_op('-');
          }
@@ -1223,7 +1226,7 @@ index 6d42de67..6fa3fadb 100644
          break;
      case TOK_LAND:
          if (!gnu_ext)
-@@ -6090,13 +6363,101 @@ special_math_val:
+@@ -6090,13 +6364,101 @@ special_math_val:
  
      default:
      tok_identifier:
@@ -1326,7 +1329,7 @@ index 6d42de67..6fa3fadb 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6136,17 +6497,104 @@ special_math_val:
+@@ -6136,17 +6498,104 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -1435,7 +1438,7 @@ index 6d42de67..6fa3fadb 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6165,13 +6613,33 @@ special_math_val:
+@@ -6165,13 +6614,33 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -1470,7 +1473,7 @@ index 6d42de67..6fa3fadb 100644
          } else if (tok == '(') {
              SValue ret;
              Sym *sa;
-@@ -6179,6 +6647,10 @@ special_math_val:
+@@ -6179,6 +6648,10 @@ special_math_val:
              TokenString *p, *p2;
  
              /* function call  */
@@ -1481,7 +1484,7 @@ index 6d42de67..6fa3fadb 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6187,6 +6659,53 @@ special_math_val:
+@@ -6187,6 +6660,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -1535,7 +1538,7 @@ index 6d42de67..6fa3fadb 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6261,8 +6780,13 @@ special_math_val:
+@@ -6261,8 +6781,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -1550,7 +1553,7 @@ index 6d42de67..6fa3fadb 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6279,10 +6803,39 @@ special_math_val:
+@@ -6279,10 +6804,39 @@ special_math_val:
                  vrev(n);
              }
  
@@ -1590,7 +1593,7 @@ index 6d42de67..6fa3fadb 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6363,9 +6916,15 @@ static void expr_prod(void)
+@@ -6363,9 +6917,15 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -1606,7 +1609,7 @@ index 6d42de67..6fa3fadb 100644
      }
  }
  
-@@ -6375,9 +6934,15 @@ static void expr_sum(void)
+@@ -6375,9 +6935,15 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -1622,7 +1625,7 @@ index 6d42de67..6fa3fadb 100644
      }
  }
  
-@@ -6506,11 +7071,17 @@ static void expr_infix(int p)
+@@ -6506,11 +7072,17 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -1640,7 +1643,7 @@ index 6d42de67..6fa3fadb 100644
          }
          t = tok;
      }
-@@ -6700,12 +7271,15 @@ static void expr_cond(void)
+@@ -6700,12 +7272,15 @@ static void expr_cond(void)
      }
  }
  
@@ -1657,7 +1660,7 @@ index 6d42de67..6fa3fadb 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6716,6 +7290,9 @@ static void expr_eq(void)
+@@ -6716,6 +7291,9 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -1667,7 +1670,7 @@ index 6d42de67..6fa3fadb 100644
      }
  }
  
-@@ -7116,7 +7693,26 @@ static void lblock(int *bsym, int *csym)
+@@ -7116,7 +7694,26 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -1694,7 +1697,7 @@ index 6d42de67..6fa3fadb 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7139,14 +7735,76 @@ static void gexpr_decl(void)
+@@ -7139,14 +7736,76 @@ static void gexpr_decl(void)
      }
  }
  
@@ -1772,7 +1775,7 @@ index 6d42de67..6fa3fadb 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7157,24 +7815,52 @@ again:
+@@ -7157,24 +7816,52 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -1825,7 +1828,7 @@ index 6d42de67..6fa3fadb 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7187,12 +7873,35 @@ again:
+@@ -7187,12 +7874,35 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -1861,7 +1864,7 @@ index 6d42de67..6fa3fadb 100644
          /* handle local labels declarations */
          while (tok == TOK_LABEL) {
              do {
-@@ -7208,7 +7917,27 @@ again:
+@@ -7208,7 +7918,27 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -1889,7 +1892,7 @@ index 6d42de67..6fa3fadb 100644
              }
          }
  
-@@ -7220,7 +7949,21 @@ again:
+@@ -7220,7 +7950,21 @@ again:
          else if (!nocode_wanted)
              check_func_return();
  
@@ -1911,7 +1914,7 @@ index 6d42de67..6fa3fadb 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7239,6 +7982,9 @@ again:
+@@ -7239,6 +7983,9 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -1921,7 +1924,7 @@ index 6d42de67..6fa3fadb 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7266,6 +8012,9 @@ again:
+@@ -7266,6 +8013,9 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -1931,7 +1934,7 @@ index 6d42de67..6fa3fadb 100644
          new_scope(&o);
  
          skip('(');
-@@ -7299,6 +8048,9 @@ again:
+@@ -7299,6 +8049,9 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -1941,7 +1944,7 @@ index 6d42de67..6fa3fadb 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7485,6 +8237,9 @@ again:
+@@ -7485,6 +8238,9 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -1951,7 +1954,7 @@ index 6d42de67..6fa3fadb 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7815,6 +8570,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7815,6 +8571,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -1961,7 +1964,7 @@ index 6d42de67..6fa3fadb 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8669,6 +9427,15 @@ static int decl(int l)
+@@ -8669,6 +9428,15 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -1977,7 +1980,7 @@ index 6d42de67..6fa3fadb 100644
      while (1) {
  
          oldint = 0;
-@@ -8684,6 +9451,44 @@ static int decl(int l)
+@@ -8684,6 +9452,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -2022,7 +2025,7 @@ index 6d42de67..6fa3fadb 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8720,8 +9525,69 @@ static int decl(int l)
+@@ -8720,8 +9526,69 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2093,7 +2096,7 @@ index 6d42de67..6fa3fadb 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8829,6 +9695,32 @@ static int decl(int l)
+@@ -8829,6 +9696,32 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2126,7 +2129,7 @@ index 6d42de67..6fa3fadb 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8860,6 +9752,11 @@ static int decl(int l)
+@@ -8860,6 +9753,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2138,7 +2141,7 @@ index 6d42de67..6fa3fadb 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8900,14 +9797,26 @@ static int decl(int l)
+@@ -8900,14 +9798,26 @@ static int decl(int l)
                  }
                  if (tok != ',') {
                      if (l == VT_JMP)
