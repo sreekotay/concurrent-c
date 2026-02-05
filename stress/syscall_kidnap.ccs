@@ -1,0 +1,95 @@
+/*
+ * syscall_kidnap.ccs - The "Neckbeard Challenge" for M:N Scheduling
+ * 
+ * This test simulates "rude" blocking IO that doesn't use the CC runtime's
+ * async IO wrappers. It tests if the scheduler can survive when its OS threads
+ * are kidnapped by blocking syscalls.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <stdatomic.h>
+
+#define NUM_KIDNAPPERS 100    // Total bricking attempt: 100 kidnappers on 16 workers
+#define HEARTBEAT_INTERVAL_MS 100
+#define TEST_DURATION_SEC 3
+
+atomic_int g_heartbeats = 0;
+atomic_int g_kidnappers_active = 0;
+
+/* A "Heartbeat" fiber that should keep ticking if the scheduler is healthy */
+void heartbeat_fiber() {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("[Heartbeat] Started\n");
+    while (1) {
+        usleep(HEARTBEAT_INTERVAL_MS * 1000);
+        atomic_fetch_add(&g_heartbeats, 1);
+        printf("[Heartbeat] Tick %d\n", atomic_load(&g_heartbeats));
+    }
+}
+
+/* A "Kidnapper" fiber that uses a RAW blocking syscall (sleep) */
+void kidnapper_fiber(int id) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    atomic_fetch_add(&g_kidnappers_active, 1);
+    printf("[Kidnapper %d] Kidnapping an OS thread for 2 seconds...\n", id);
+    
+    sleep(2); 
+    
+    printf("[Kidnapper %d] Released OS thread\n", id);
+    atomic_fetch_sub(&g_kidnappers_active, 1);
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    // Ensure we have a fixed number of workers for the test
+    setenv("CC_FIBER_WORKERS", "16", 1);
+    
+    printf("=================================================================\n");
+    printf("KIDNAPPING CHALLENGE: Can the CC Scheduler survive rude IO?\n");
+    printf("Workers: 16 | Kidnappers: %d\n", NUM_KIDNAPPERS);
+    printf("=================================================================\n\n");
+
+    @nursery {
+        // 1. Start the heartbeat
+        spawn(() => { heartbeat_fiber(); });
+
+        // 2. Wait a bit to see healthy heartbeats
+        usleep(500 * 1000);
+        int initial_beats = atomic_load(&g_heartbeats);
+        printf("Initial heartbeats: %d (Healthy)\n", initial_beats);
+
+        // 3. Unleash the kidnappers
+        printf("\n!!! Unleashing Kidnappers !!!\n");
+        for (int i = 0; i < NUM_KIDNAPPERS; i++) {
+            int id = i;
+            spawn(() => [id] { kidnapper_fiber(id); });
+        }
+
+        // 4. Monitor heartbeats while kidnappers are active
+        for (int i = 0; i < TEST_DURATION_SEC; i++) {
+            usleep(1000 * 1000);
+            int beats = atomic_load(&g_heartbeats);
+            int active = atomic_load(&g_kidnappers_active);
+            printf("T+%ds: Heartbeats=%d | Active Kidnappers=%d\n", i+1, beats, active);
+        }
+    }
+
+    int final_beats = atomic_load(&g_heartbeats);
+    printf("\n=================================================================\n");
+    printf("FINAL RESULTS\n");
+    printf("Total Heartbeats: %d\n", final_beats);
+    
+    if (final_beats > (TEST_DURATION_SEC * (1000/HEARTBEAT_INTERVAL_MS)) * 0.8) {
+        printf("RESULT: PASS - The scheduler survived the kidnapping!\n");
+    } else {
+        printf("RESULT: FAIL - The scheduler was bricked by blocking IO.\n");
+    }
+    printf("=================================================================\n");
+
+    return 0;
+}
