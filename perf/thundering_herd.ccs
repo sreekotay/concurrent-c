@@ -1,0 +1,70 @@
+/*
+ * thundering_herd.ccs - Test wake-up efficiency with many waiters
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define NUM_WAITERS 1000
+#define NUM_SAMPLES 5
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+cc_atomic_int g_count = 0;
+
+void waiter(CCChanRx rx) {
+    int v;
+    (void)chan_recv(rx, &v);
+    cc_atomic_fetch_add(&g_count, 1);
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    
+    int[~ >] tx_h; int[~ <] rx_h; CCChan* ch = channel_pair(&tx_h, &rx_h);
+    CCChanRx rx = rx_h;
+    CCChanTx tx = tx_h;
+
+    printf("=================================================================\n");
+    printf("THUNDERING HERD TEST: Wake-up latency with %d waiters\n", NUM_WAITERS);
+    printf("=================================================================\n\n");
+
+    for (int sample = 1; sample <= NUM_SAMPLES; sample++) {
+        cc_atomic_store(&g_count, 0);
+        
+        @nursery {
+            for (int i = 0; i < NUM_WAITERS; i++) {
+                spawn(() => [rx] { waiter(rx); });
+            }
+            
+            // Give them time to all block
+            cc_sleep_ms(100);
+
+            double start = time_now_ms();
+            // Send one item. Only ONE should wake up.
+            (void)chan_send(tx, 42);
+            
+            // Wait for one to finish
+            while (cc_atomic_load(&g_count) < 1) {
+                cc_sleep_ms(1);
+            }
+            double latency_ms = time_now_ms() - start;
+            printf("Sample %d: Latency to wake 1st waiter: %8.4f ms\n", sample, latency_ms);
+            
+            // Now flush the rest so we can repeat
+            for (int i = 1; i < NUM_WAITERS; i++) {
+                (void)chan_send(tx, i);
+            }
+        }
+    }
+
+    cc_chan_free(ch);
+    return 0;
+}

@@ -1,118 +1,78 @@
-# Concurrent-C Performance Benchmarks
+# Concurrent-C Performance & Robustness Benchmarks
 
-Focused benchmarks that measure throughput and latency. Use these to catch performance regressions.
+This directory contains a suite of benchmarks and stress tests designed to measure the performance, scalability, and robustness of the Concurrent-C runtime.
 
-## Benchmarks
+## 🚀 Core Performance Benchmarks
 
-| Benchmark | What it measures |
-|-----------|------------------|
-| `perf_channel_throughput` | Channel ops/sec: buffered, unbuffered, single-thread |
-| `perf_async_overhead` | Async task creation, state machine transitions, cc_block_all |
-| `perf_match_select` | @match multi-channel select latency |
-| `perf_zero_copy` | Slice copy throughput by payload size |
-| `perf_gobench_blocking_pressure` | GoBench-derived scheduler + auto-blocking pressure |
-| `spawn_nursery` | Nursery-based spawn throughput benchmark |
-| `spawn_sequential` | Sequential spawn+join throughput benchmark |
+These benchmarks measure the raw throughput and latency of Concurrent-C primitives.
 
-### Go Benchmarks (`perf/go/`)
+| Benchmark | Description |
+|-----------|-------------|
+| `perf_channel_throughput` | Measures channel operations per second (buffered, unbuffered, single-threaded). |
+| `perf_async_overhead` | Measures the cost of async task creation and state machine transitions. |
+| `perf_match_select` | Measures the latency and throughput of multi-channel `@match` selection. |
+| `perf_zero_copy` | Measures memory throughput when passing slices of various sizes through channels. |
+| `spawn_nursery` | Benchmarks high-concurrency fiber spawning within nurseries. |
+| `spawn_sequential` | Benchmarks sequential spawn+join overhead (optimized via `@async`). |
 
-| Benchmark | What it measures |
-|-----------|------------------|
-| `spawn_nursery.go` | Nursery-based goroutine spawn throughput |
-| `spawn_sequential.go` | Sequential goroutine spawn+join throughput |
-| `channel_throughput.go` | Channel operations throughput (single-thread, buffered, unbuffered) |
-| `perf_gobench_async_pressure` | GoBench-derived async scheduler pressure |
-
-## Running
-
+**Run all core benchmarks:**
 ```bash
-# Run all Concurrent-C benchmarks
 ./perf/run_benchmarks.sh
-
-# Run all Go benchmarks
-./perf/run_go_benchmarks.sh
-
-# Run comparison between Concurrent-C and Go
-./perf/compare_benchmarks.sh
-
-# Run a specific benchmark
-./cc/bin/ccc run perf/perf_channel_throughput.ccs
-
-# Compare before/after a change
-./cc/bin/ccc run perf/perf_channel_throughput.ccs > before.txt
-# ... make changes ...
-./cc/bin/ccc run perf/perf_channel_throughput.ccs > after.txt
-diff before.txt after.txt
 ```
 
-## Expected Baselines
+---
 
-These are rough baselines on typical hardware (M1/M2 Mac, Linux x64). Actual numbers vary.
+## 🧔 The "Neckbeard Challenges" (Robustness & Fairness)
 
-### Channel Throughput
-- Single-thread (no contention): **40M+** ops/sec
-- Buffered (cap=1000): **20M+** ops/sec
-- Unbuffered (rendezvous): **750K+** ops/sec
+These tests compare Concurrent-C against traditional Pthread-based C implementations to evaluate the M:N scheduler's resilience and efficiency in real-world "rude" scenarios.
 
-### Async Overhead  
-- Trivial async (no yields): **15M+** tasks/sec
-- Compute async (100 iter): **300K+** tasks/sec
-- cc_block_all (batch=10): **100K+** tasks/sec
-- spawn baseline: **15K+** spawns/sec
+| Challenge | Script | What it tries to break | The CC Flex |
+|-----------|--------|------------------------|-------------|
+| **Syscall Kidnapping** | `compare_syscall.sh` | Scheduler responsiveness when OS threads are blocked by raw C syscalls (like `usleep`). | `sysmon` detects stalled workers and spawns replacement threads on the fly. |
+| **Thundering Herd** | `compare_herd.sh` | Wake-up efficiency when 1,000+ fibers are waiting on a single event. | Surgical `wake_batch` wakes exactly one fiber, avoiding OS context-switch storms. |
+| **Cache-Line Contention** | `compare_contention.sh` | Memory layout efficiency and false sharing between adjacent channel structs. | Beefy 592-byte `CCChan` struct naturally spans ~10 cache lines, making false sharing impossible. |
+| **Noisy Neighbor** | `compare_preemption.sh` | Scheduler fairness when "greedy" fibers run tight CPU loops without yielding. | `sysmon` enforces fairness by ensuring latency-sensitive fibers always get an OS thread. |
+| **Arena Contention** | `compare_arena.sh` | Allocation throughput of the atomic `CCArena` CAS loop vs. system `malloc`. | Idiomatic per-fiber arenas use simple bump-pointer math that consistently beats `malloc`. |
+| **Work Stealing** | `work_stealing_efficiency.ccs` | Load balancing overhead when 100,000 tasks are queued on a single worker. | Measures how fast idle workers can "steal" work to keep all cores saturated. |
+| **Binary Bloat** | (Manual) | Executable size of a "Hello World" with a full fiber runtime. | `--release` triggers `-Wl,-dead_strip`, resulting in a tiny **12.8 KB** (compressed) binary. |
 
-### Match Select
-- Single channel: **10M+** ops/sec
-- 2-channel select: **8M+** ops/sec
-- 4-channel select: **6M+** ops/sec
-
-### Payload Size Impact
-- int (4 bytes): **18M+** ops/sec
-- Small (16 bytes): **19M+** ops/sec, ~300 MB/sec
-- Medium (256 bytes): **18M+** ops/sec, ~4 GB/sec
-- Large (1KB): **11M+** ops/sec, ~11 GB/sec
-
-**Note:** These numbers reflect our optimized signal-based implementation (no 1ms polling).
-
-## Go Comparison
-
-Use `./perf/compare_benchmarks.sh` to run equivalent benchmarks in Go and compare performance:
-
+**Run a specific challenge:**
 ```bash
-$ ./perf/compare_benchmarks.sh
-Performance Comparison: Concurrent-C vs Go
-==========================================
-
-Benchmark            Concurrent-C       Go                 C/Go
-------------------------------------------------------------------------------------------
-spawn_nursery        424951 spawns/sec  6050400 spawns/sec 0.07
-spawn_sequential     24691360 spawns/sec 4336227 spawns/sec 5.69
-channel_throughput   61368517 ops/sec   114221974 ops/sec  0.53
-
-✓ Comparison completed
-
-Ratio: Concurrent-C performance relative to Go (higher = better)
-Note: Comparisons use primary metric from each benchmark
+./perf/compare_syscall.sh
+./perf/compare_herd.sh
+# ... etc
 ```
 
-**Current Status (M:N Fiber Scheduler Implemented):**
-- **Channel throughput**: Competitive with Go (0.53x = 47% of Go performance)
-- **Sequential spawns**: Much faster than Go (5.69x) - due to @async optimization
-- **Nursery spawns**: Using reliable thread-per-task executor (fiber scheduler attempt failed)
+**Run all robustness challenges:**
+```bash
+./perf/run_neckbeard_challenges.sh
+```
 
-*Outcome: M:N fiber scheduler experiment revealed fundamental performance challenges. Nursery uses proven thread-per-task approach. True M:N requires assembly-level runtime integration.*
+---
 
-## Red Flags
+## 🐹 Go Comparison
 
-If you see:
-- **>50% drop** in ops/sec → likely regression
-- **Order of magnitude slower** → something is very wrong
-- **Inconsistent numbers** between runs → likely contention or timing issue
+Concurrent-C is designed to provide Go-like concurrency with C-like control. Use these scripts to see how we stack up against the Go runtime.
 
-## Adding New Benchmarks
+| Script | Description |
+|--------|-------------|
+| `compare_benchmarks.sh` | Runs equivalent CC and Go benchmarks and reports the performance ratio. |
+| `run_go_benchmarks.sh` | Runs only the Go-based benchmarks in `perf/go/`. |
 
-Good benchmarks should:
-1. Measure ONE thing clearly
-2. Report ops/sec or latency
-3. Be deterministic
-4. Complete in <5 seconds
-5. Use `clock_gettime(CLOCK_MONOTONIC)` for timing
+---
+
+## 🛠 How to Benchmark Correctly
+
+1.  **Use Release Mode:** Always build with `--release` to enable dead-code stripping and optimizations.
+    ```bash
+    ./cc/bin/ccc build --release my_test.ccs
+    ```
+2.  **Strip Binaries:** For size comparisons, use `strip` to remove debug symbols.
+3.  **Isolate Hardware:** Close browser tabs and background processes.
+4.  **Check CC_WORKERS:** The number of OS worker threads can be tuned via the `CC_WORKERS` environment variable (defaults to CPU count).
+
+## 📊 Interpreting Results
+
+*   **Negative Throughput Drop:** In contention tests, a negative drop means the system scaled well across multiple cores (total throughput increased).
+*   **Latency Jitter:** High variance in `compare_herd.sh` usually indicates OS-level scheduling overhead (which CC aims to minimize).
+*   **Binary Size:** A release-mode "Hello World" should be around **12-13KB** (compressed), proving the efficiency of the dead-code stripper.

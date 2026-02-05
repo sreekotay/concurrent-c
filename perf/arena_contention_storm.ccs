@@ -1,0 +1,79 @@
+/*
+ * arena_contention_storm.ccs - Concurrent Arena Allocation Test
+ *
+ * This test spawns 10,000 fibers that all hammer a single shared arena
+ * with small allocations. This measures the contention on the atomic CAS
+ * in cc_arena_alloc.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_arena.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define NUM_FIBERS 16
+#define ALLOCS_PER_FIBER 62500
+#define ARENA_SIZE (128 * 1024 * 1024) // 128MB
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+cc_atomic_int g_success = 0;
+cc_atomic_int g_fail = 0;
+
+void arena_worker(CCArena* arena) {
+    for (int i = 0; i < ALLOCS_PER_FIBER; i++) {
+        // Allocate 16 bytes with 8-byte alignment
+        void* ptr = cc_arena_alloc(arena, 16, 8);
+        if (ptr) {
+            cc_atomic_fetch_add(&g_success, 1);
+        } else {
+            cc_atomic_fetch_add(&g_fail, 1);
+        }
+    }
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    
+    void* buffer = malloc(ARENA_SIZE);
+    CCArena arena;
+    cc_arena_init(&arena, buffer, ARENA_SIZE);
+
+    printf("=================================================================\n");
+    printf("ARENA CONTENTION STORM: %d fibers x %d allocs\n", NUM_FIBERS, ALLOCS_PER_FIBER);
+    printf("Total intended allocations: %d\n", NUM_FIBERS * ALLOCS_PER_FIBER);
+    printf("=================================================================\n\n");
+
+    double start = time_now_ms();
+    @nursery {
+        for (int i = 0; i < NUM_FIBERS; i++) {
+            spawn(() => { 
+                CCArena local_arena;
+                void* local_buf = malloc(1024 * 1024);
+                cc_arena_init(&local_arena, local_buf, 1024 * 1024);
+                arena_worker(&local_arena); 
+                free(local_buf);
+            });
+        }
+    }
+    double duration = time_now_ms() - start;
+
+    int success = cc_atomic_load(&g_success);
+    int fail = cc_atomic_load(&g_fail);
+
+    printf("Results:\n");
+    printf("  Success: %d\n", success);
+    printf("  Fail:    %d\n", fail);
+    printf("  Time:    %.2f ms\n", duration);
+    printf("  Throughput: %.2f M allocs/sec\n", (double)success / duration / 1000.0);
+    printf("=================================================================\n");
+
+    free(buffer);
+    return 0;
+}

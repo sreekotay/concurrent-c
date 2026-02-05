@@ -442,13 +442,13 @@ static fiber_task* iq_pop(inbox_queue* q) {
 }
 
 typedef struct {
-    pthread_t workers[MAX_WORKERS];
+    pthread_t* workers;
     size_t num_workers;
     _Atomic int running;
     
-    fiber_queue run_queue;          /* Global queue for overflow and cross-worker */
-    local_queue local_queues[MAX_WORKERS];  /* Per-worker local queues */
-    inbox_queue inbox_queues[MAX_WORKERS];  /* Per-worker MPMC inbox queues */
+    fiber_queue* run_queue;         /* Global queue for overflow and cross-worker */
+    local_queue* local_queues;      /* Per-worker local queues */
+    inbox_queue* inbox_queues;      /* Per-worker MPMC inbox queues */
     fiber_task* _Atomic free_list;
     
     wake_primitive wake_prim;       /* Fast worker wake (futex/ulock instead of condvar) */
@@ -469,12 +469,12 @@ typedef struct {
     char _pad_spinning[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
     
     /* Per-worker parked counts - avoids global mutex and cache line bouncing */
-    _Atomic size_t worker_parked[MAX_WORKERS];
+    _Atomic size_t* worker_parked;
     
     /* Hybrid promotion (sysmon): per-worker heartbeat updated once per batch loop.
      * Sysmon detects stuck workers by checking if heartbeat hasn't updated.
      * Cache-line aligned so sysmon reads don't false-share with worker writes. */
-    struct { _Atomic uint64_t heartbeat; char _pad[CACHE_LINE_SIZE - sizeof(_Atomic uint64_t)]; } worker_heartbeat[MAX_WORKERS];
+    struct { _Atomic uint64_t heartbeat; char _pad[CACHE_LINE_SIZE - sizeof(_Atomic uint64_t)]; }* worker_heartbeat;
     
     /* Sysmon thread: spawns temp workers when CPU-bound fibers stall */
     pthread_t sysmon_thread;
@@ -520,6 +520,7 @@ static fiber_task* g_parked_list_head = NULL;
 /* Helper: sum per-worker parked counts */
 static inline size_t get_total_parked(void) {
     size_t total = 0;
+    if (!g_sched.worker_parked) return 0;
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         total += atomic_load_explicit(&g_sched.worker_parked[i], memory_order_relaxed);
     }
@@ -724,6 +725,7 @@ static inline void wake_one_if_sleeping_unconditional(int timing) {
 
 static void cc__fiber_dump_queue_state(void) {
     if (!inbox_dump_enabled()) return;
+    if (!g_sched.run_queue) return;
     fprintf(stderr, "\n[cc] Queue state dump:\n");
     fprintf(stderr, "  pending=%zu active=%zu sleeping=%zu spinning=%zu parked=%zu\n",
             (size_t)atomic_load(&g_sched.pending),
@@ -735,8 +737,8 @@ static void cc__fiber_dump_queue_state(void) {
             g_sched.num_workers,
             (size_t)atomic_load_explicit(&g_sched.temp_worker_count, memory_order_relaxed));
     fprintf(stderr, "  run_queue: head=%zu tail=%zu\n",
-            atomic_load(&g_sched.run_queue.head),
-            atomic_load(&g_sched.run_queue.tail));
+            atomic_load(&g_sched.run_queue->head),
+            atomic_load(&g_sched.run_queue->tail));
     fprintf(stderr, "  inbox_overflow=%zu\n",
             (size_t)atomic_load(&g_inbox_overflow));
     for (size_t i = 0; i < g_sched.num_workers; i++) {
@@ -830,10 +832,14 @@ void cc_fiber_dump_state(const char* reason) {
             atomic_load(&g_sched.sleeping),
             get_total_parked(),
             atomic_load(&g_sched.completed));
-    fprintf(stderr, "  run_queue: head=%zu tail=%zu (approx %zu items)\n",
-            atomic_load(&g_sched.run_queue.head),
-            atomic_load(&g_sched.run_queue.tail),
-            (atomic_load(&g_sched.run_queue.tail) - atomic_load(&g_sched.run_queue.head)) % CC_FIBER_QUEUE_SIZE);
+    if (g_sched.run_queue) {
+        size_t head = atomic_load(&g_sched.run_queue->head);
+        size_t tail = atomic_load(&g_sched.run_queue->tail);
+        fprintf(stderr, "  run_queue: head=%zu tail=%zu (approx %zu items)\n",
+                head, tail, (tail - head) % CC_FIBER_QUEUE_SIZE);
+    } else {
+        fprintf(stderr, "  run_queue: (uninitialized)\n");
+    }
     fprintf(stderr, "================================\n\n");
 }
 
@@ -1113,11 +1119,11 @@ static inline uint64_t xorshift64(uint64_t* state) {
 
 /* Check if there's work in global queue (not local - local is "owned" by workers) */
 static int sysmon_has_global_pending(void) {
-    return fq_peek(&g_sched.run_queue);
+    return g_sched.run_queue ? fq_peek(g_sched.run_queue) : 0;
 }
 
 static int sysmon_has_pending_work(void) {
-    if (fq_peek(&g_sched.run_queue)) return 1;
+    if (g_sched.run_queue && fq_peek(g_sched.run_queue)) return 1;
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         if (lq_peek(&g_sched.local_queues[i])) return 1;
         if (iq_peek(&g_sched.inbox_queues[i])) return 1;
@@ -1129,7 +1135,7 @@ static int sysmon_has_pending_work(void) {
 static size_t sysmon_count_pending(void) {
     size_t count = 0;
     /* Global queue: approximate by checking if non-empty */
-    if (fq_peek(&g_sched.run_queue)) count += 8; /* assume decent batch */
+    if (g_sched.run_queue && fq_peek(g_sched.run_queue)) count += 8; /* assume decent batch */
     /* Local queues: count actual tasks */
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         local_queue* q = &g_sched.local_queues[i];
@@ -1151,7 +1157,7 @@ static void* replacement_worker(void* arg) {
     uint64_t rng_state = rdtsc();
 
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
-        fiber_task* f = fq_pop(&g_sched.run_queue);
+        fiber_task* f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
         
         /* Try stealing from any worker */
         if (!f && g_sched.num_workers > 0) {
@@ -1169,14 +1175,14 @@ static void* replacement_worker(void* arg) {
         } else {
             /* Brief spin then short sleep - balance responsiveness vs CPU burn */
             for (int spin = 0; spin < 64; spin++) {
-                f = fq_pop(&g_sched.run_queue);
+                f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
                 if (f) goto got_work;
                 cpu_pause();
             }
             /* Short sleep - wake primitive wakes us when work arrives */
             atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
             uint32_t wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
-            if (!fq_peek(&g_sched.run_queue)) {
+            if (!g_sched.run_queue || !fq_peek(g_sched.run_queue)) {
                 wake_primitive_wait_timeout(&g_sched.wake_prim, wake_val, 5);
             }
             atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
@@ -1302,7 +1308,7 @@ static void* worker_main(void* arg) {
         
         /* Priority 3: Pop from global queue */
         while (count < WORKER_BATCH_SIZE) {
-            fiber_task* f = fq_pop(&g_sched.run_queue);
+            fiber_task* f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
             if (!f) break;
             batch[count++] = f;
         }
@@ -1335,7 +1341,7 @@ static void* worker_main(void* arg) {
                     for (size_t s = count; s < stolen; s++) {
                         if (lq_push(my_queue, steal_buf[s]) != 0) {
                             /* Local queue full, put overflow in global */
-                            fq_push(&g_sched.run_queue, steal_buf[s]);
+                            fq_push(g_sched.run_queue, steal_buf[s]);
                         }
                     }
                     break;  /* Got work, stop stealing */
@@ -1361,7 +1367,7 @@ static void* worker_main(void* arg) {
         for (int spin = 0; spin < SPIN_FAST_ITERS; spin++) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
-            if (!f) f = fq_pop(&g_sched.run_queue);
+            if (!f && g_sched.run_queue) f = fq_pop(g_sched.run_queue);
             /* Try to steal every 16 spins */
             if (!f && (spin & 15) == 15) {
                 f = worker_try_steal_one(worker_id, &rng_state);
@@ -1379,7 +1385,7 @@ static void* worker_main(void* arg) {
             sched_yield();
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
-            if (!f) f = fq_pop(&g_sched.run_queue);
+            if (!f && g_sched.run_queue) f = fq_pop(g_sched.run_queue);
             /* Try to steal every 4 yields */
             if (!f && (y & 3) == 3) {
                 f = worker_try_steal_one(worker_id, &rng_state);
@@ -1418,7 +1424,8 @@ static void* worker_main(void* arg) {
          * Periodically wake to check for deadlock (every ~500ms). */
         while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
             /* Check if there's runnable work */
-            if (lq_peek(my_queue) || iq_peek(&g_sched.inbox_queues[worker_id]) || fq_peek(&g_sched.run_queue)) break;
+            if (lq_peek(my_queue) || iq_peek(&g_sched.inbox_queues[worker_id]) ||
+                (g_sched.run_queue && fq_peek(g_sched.run_queue))) break;
             /* Check for stealable work in other queues */
             int found_stealable = 0;
             for (size_t i = 0; i < g_sched.num_workers; i++) {
@@ -1504,6 +1511,24 @@ int cc_fiber_sched_init(size_t num_workers) {
     memset(&g_sched, 0, sizeof(g_sched));
     g_sched.num_workers = num_workers;
     atomic_store(&g_sched.running, 1);
+    g_sched.run_queue = (fiber_queue*)calloc(1, sizeof(fiber_queue));
+    g_sched.local_queues = (local_queue*)calloc(num_workers, sizeof(local_queue));
+    g_sched.inbox_queues = (inbox_queue*)calloc(num_workers, sizeof(inbox_queue));
+    g_sched.workers = (pthread_t*)calloc(num_workers, sizeof(pthread_t));
+    g_sched.worker_parked = (_Atomic size_t*)calloc(num_workers, sizeof(_Atomic size_t));
+    g_sched.worker_heartbeat = (typeof(g_sched.worker_heartbeat))calloc(
+        num_workers, sizeof(*g_sched.worker_heartbeat));
+    if (!g_sched.run_queue || !g_sched.local_queues || !g_sched.inbox_queues ||
+        !g_sched.workers || !g_sched.worker_parked || !g_sched.worker_heartbeat) {
+        free(g_sched.run_queue);
+        free(g_sched.local_queues);
+        free(g_sched.inbox_queues);
+        free(g_sched.workers);
+        free(g_sched.worker_parked);
+        free(g_sched.worker_heartbeat);
+        fprintf(stderr, "[cc] fiber scheduler init failed: out of memory\n");
+        abort();
+    }
     wake_primitive_init(&g_sched.wake_prim);
     
     if (getenv("CC_FIBER_STATS") || getenv("CC_VERBOSE")) {
@@ -1552,6 +1577,19 @@ void cc_fiber_sched_shutdown(void) {
         pthread_join(g_sched.workers[i], NULL);
     }
     
+    free(g_sched.workers);
+    free(g_sched.local_queues);
+    free(g_sched.inbox_queues);
+    free(g_sched.worker_parked);
+    free(g_sched.worker_heartbeat);
+    free(g_sched.run_queue);
+    g_sched.workers = NULL;
+    g_sched.local_queues = NULL;
+    g_sched.inbox_queues = NULL;
+    g_sched.worker_parked = NULL;
+    g_sched.worker_heartbeat = NULL;
+    g_sched.run_queue = NULL;
+
     /* Free pooled fibers (including their coros and join_cvs) */
     fiber_task* f = atomic_load(&g_sched.free_list);
     while (f) {
@@ -1695,7 +1733,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     /* Non-worker spawns or local queue full: use global queue */
     if (!pushed_local) {
-        if (fq_push(&g_sched.run_queue, f) != 0) {
+        if (fq_push(g_sched.run_queue, f) != 0) {
             fiber_free(f);
             return NULL;
         }
@@ -2153,7 +2191,7 @@ void cc__fiber_unpark(void* fiber_ptr) {
     
     /* Fallback to global queue if not in worker context or local queue is full */
     if (!pushed_local) {
-        fq_push_blocking(&g_sched.run_queue, f);
+        fq_push_blocking(g_sched.run_queue, f);
     }
     
     /* Wake ONE sleeping worker - work stealing will naturally distribute load.
@@ -2182,10 +2220,10 @@ void cc__fiber_yield(void) {
     if (tls_worker_id >= 0) {
         if (lq_push(&g_sched.local_queues[tls_worker_id], current) != 0) {
             /* Local queue full, use global */
-            fq_push_blocking(&g_sched.run_queue, current);
+            fq_push_blocking(g_sched.run_queue, current);
         }
     } else {
-        fq_push_blocking(&g_sched.run_queue, current);
+        fq_push_blocking(g_sched.run_queue, current);
     }
     
     /* Yield to scheduler - will pick up next runnable fiber */

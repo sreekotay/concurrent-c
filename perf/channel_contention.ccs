@@ -1,0 +1,83 @@
+/*
+ * channel_contention.ccs - Cache-line contention test for channels
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define ITERATIONS 1000000
+#define NUM_TRIALS 3
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+void producer(CCChanTx tx, int count) {
+    for (int i = 0; i < count; i++) {
+        (void)chan_send(tx, i);
+    }
+}
+
+void consumer(CCChanRx rx, int count) {
+    int v;
+    for (int i = 0; i < count; i++) {
+        (void)chan_recv(rx, &v);
+    }
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    
+    // Idiomatic channel syntax
+    int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = channel_pair(&tx1_h, &rx1_h);
+    int[~1024 >] tx2_h; int[~1024 <] rx2_h; CCChan* ch2 = channel_pair(&tx2_h, &rx2_h);
+
+    // Use simple handle types for capture to avoid inference issues
+    CCChanTx tx1 = tx1_h;
+    CCChanRx rx1 = rx1_h;
+    CCChanTx tx2 = tx2_h;
+    CCChanRx rx2 = rx2_h;
+
+    printf("=================================================================\n");
+    printf("CHANNEL CONTENTION TEST: Cache-line interference\n");
+    printf("Iterations: %d | Trials: %d\n", ITERATIONS, NUM_TRIALS);
+    printf("=================================================================\n\n");
+
+    for (int trial = 1; trial <= NUM_TRIALS; trial++) {
+        printf("Trial %d:\n", trial);
+
+        double start = time_now_ms();
+        @nursery {
+            spawn(() => [tx1] { producer(tx1, ITERATIONS); });
+            spawn(() => [rx1] { consumer(rx1, ITERATIONS); });
+        }
+        double baseline_ms = time_now_ms() - start;
+        printf("  Baseline (Ch1 only):  %8.2f ms (%8.0f ops/sec)\n", 
+               baseline_ms, (double)ITERATIONS * 1000.0 / baseline_ms);
+
+        start = time_now_ms();
+        @nursery {
+            spawn(() => [tx1] { producer(tx1, ITERATIONS); });
+            spawn(() => [rx1] { consumer(rx1, ITERATIONS); });
+            spawn(() => [tx2] { producer(tx2, ITERATIONS); });
+            spawn(() => [rx2] { consumer(rx2, ITERATIONS); });
+        }
+        double contention_ms = time_now_ms() - start;
+        printf("  Contention (Ch1+Ch2): %8.2f ms (%8.0f ops/sec total)\n", 
+               contention_ms, (double)ITERATIONS * 2.0 * 1000.0 / contention_ms);
+        
+        double baseline_ops_sec = (double)ITERATIONS * 1000.0 / baseline_ms;
+        double contention_ops_sec = (double)ITERATIONS * 2.0 * 1000.0 / contention_ms;
+        double throughput_drop = (baseline_ops_sec - contention_ops_sec) / baseline_ops_sec * 100.0;
+        printf("  Throughput Drop:      %8.2f%%\n\n", throughput_drop);
+    }
+
+    cc_chan_free(ch1);
+    cc_chan_free(ch2);
+    return 0;
+}
