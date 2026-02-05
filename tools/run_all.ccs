@@ -22,6 +22,43 @@ typedef struct {
     int skipped;
 } Stats;
 
+static const char* LOG_DIR = "tmp/run_all_logs";
+
+static inline CCSlice slice_from_cstr(const char* s) {
+    return cc_slice_from_buffer((void*)s, strlen(s));
+}
+
+static void ensure_log_dir(CCArena* arena) {
+    const char* args[4];
+    int argc = 0;
+    args[argc++] = "mkdir";
+    args[argc++] = "-p";
+    args[argc++] = LOG_DIR;
+    args[argc] = NULL;
+    (void)cc_process_run(arena, "mkdir", args);
+}
+
+static void write_log(CCArena* arena, const char* path, const char* suffix,
+                      const char* data, size_t len) {
+    if (!data || len == 0) return;
+    CCSlice base = cc_path_basename(arena, slice_from_cstr(path));
+    // Build "<log_dir>/<basename><suffix>"
+    CCString full = cc_string_new(arena);
+    cc_string_push(&full, slice_from_cstr(LOG_DIR));
+    if (full.len > 0 && ((char*)full.data)[full.len - 1] != cc_path_sep()) {
+        cc_string_push_char(&full, cc_path_sep());
+    }
+    cc_string_push(&full, base);
+    cc_string_push(&full, slice_from_cstr(suffix));
+
+    CCFile f;
+    if (cc_file_open(&f, (const char*)full.data, "w") == 0) {
+        CCSlice slice = cc_slice_from_parts((void*)data, len, CC_SLICE_ID_UNTRACKED, len);
+        (void)cc_file_write(&f, slice);
+        cc_file_close(&f);
+    }
+}
+
 /* Returns the expected exit code for a given test path.
  * Most tests expect 0, but some (like deadlock demos) expect 1.
  * Returns -1 if the test should be skipped entirely (like servers). */
@@ -33,6 +70,8 @@ static int get_expected_exit_code(const char* path) {
 
 static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats, int timeout_sec) {
     printf("\n=== %s ===\n", label);
+
+    ensure_log_dir(arena);
 
     CCGlobResult files = cc_glob(arena, pattern);
     size_t n = cc_glob_result_len(&files);
@@ -94,19 +133,31 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         } else if (exit_code == 124 && expected_exit != 124) {
             /* 124 = timeout (like GNU timeout) */
             printf("TIMEOUT (>%ds)\n", timeout_sec);
+            const char* out_str = cc_process_output_stdout_str(&out);
+            size_t out_len = cc_process_output_stdout_len(&out);
+            const char* err_str = cc_process_output_stderr_str(&out);
+            size_t err_len = cc_process_output_stderr_len(&out);
+            write_log(&test_arena, path, ".stdout.txt", out_str, out_len);
+            write_log(&test_arena, path, ".stderr.txt", err_str, err_len);
+            CCSlice base = cc_path_basename(&test_arena, slice_from_cstr(path));
+            printf("    logs: %s/%s.stdout.txt, %s/%s.stderr.txt\n",
+                   LOG_DIR, (const char*)base.ptr,
+                   LOG_DIR, (const char*)base.ptr);
             stats->failed++;
         } else {
             printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
             /* Print stdout/stderr on failure for debugging */
             const char* out_str = cc_process_output_stdout_str(&out);
             size_t out_len = cc_process_output_stdout_len(&out);
+            const char* err_str = cc_process_output_stderr_str(&out);
+            size_t err_len = cc_process_output_stderr_len(&out);
+            write_log(&test_arena, path, ".stdout.txt", out_str, out_len);
+            write_log(&test_arena, path, ".stderr.txt", err_str, err_len);
             if (out_len > 0 && out_str) {
                 printf("    stdout: %.*s", (int)(out_len > 200 ? 200 : out_len), out_str);
                 if (out_len > 200) printf("...(truncated)");
                 printf("\n");
             }
-            const char* err_str = cc_process_output_stderr_str(&out);
-            size_t err_len = cc_process_output_stderr_len(&out);
             if (err_len > 0 && err_str) {
                 printf("    stderr: %.*s", (int)(err_len > 200 ? 200 : err_len), err_str);
                 if (err_len > 200) printf("...(truncated)");
@@ -115,6 +166,10 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
             if (out_len == 0 && err_len == 0) {
                 printf("    (no output captured)\n");
             }
+            CCSlice base = cc_path_basename(&test_arena, slice_from_cstr(path));
+            printf("    logs: %s/%s.stdout.txt, %s/%s.stderr.txt\n",
+                   LOG_DIR, (const char*)base.ptr,
+                   LOG_DIR, (const char*)base.ptr);
             stats->failed++;
         }
         

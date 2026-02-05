@@ -1,0 +1,37 @@
+/*
+ * Stress Test: Inbox Spawn Storm
+ *
+ * Spawns nested nurseries across multiple workers to exercise
+ * cross-worker spawn routing and inbox draining behavior.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define OUTER_TASKS 32
+#define INNER_TASKS 128
+
+cc_atomic_int g_counter = 0;
+
+int main(void) {
+    printf("inbox_spawn_stress: outer=%d inner=%d\n", OUTER_TASKS, INNER_TASKS);
+
+    @nursery {
+        for (int i = 0; i < OUTER_TASKS; i++) {
+            spawn(() => {
+                @nursery {
+                    for (int j = 0; j < INNER_TASKS; j++) {
+                        spawn(() => {
+                            cc_atomic_fetch_add(&g_counter, 1);
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    int total = cc_atomic_load(&g_counter);
+    int expected = OUTER_TASKS * INNER_TASKS;
+    printf("inbox_spawn_stress: completed %d/%d\n", total, expected);
+    return (total == expected) ? 0 : 1;
+}

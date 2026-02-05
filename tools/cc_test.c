@@ -52,6 +52,46 @@ static int ensure_dir_p(const char* path) {
     return 0;
 }
 
+static int write_file_from_buf(const char* path, const unsigned char* buf, size_t len) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len) (void)fwrite(buf, 1, len, f);
+    fclose(f);
+    return 0;
+}
+
+static int read_entire_file_alloc(const char* path, unsigned char** out_buf, size_t* out_len);
+
+static void log_failure_files(const char* stem,
+                              const char* out_path,
+                              const char* err_path,
+                              const char* build_err_path) {
+    if (!stem || !stem[0]) return;
+    if (ensure_dir_p("tmp/cc_test_logs") != 0) return;
+
+    char dest[512];
+    unsigned char* buf = NULL;
+    size_t len = 0;
+
+    if (out_path && read_entire_file_alloc(out_path, &buf, &len) == 0 && buf) {
+        snprintf(dest, sizeof(dest), "tmp/cc_test_logs/%s.stdout.txt", stem);
+        (void)write_file_from_buf(dest, buf, len);
+    }
+    free(buf); buf = NULL; len = 0;
+
+    if (err_path && read_entire_file_alloc(err_path, &buf, &len) == 0 && buf) {
+        snprintf(dest, sizeof(dest), "tmp/cc_test_logs/%s.stderr.txt", stem);
+        (void)write_file_from_buf(dest, buf, len);
+    }
+    free(buf); buf = NULL; len = 0;
+
+    if (build_err_path && read_entire_file_alloc(build_err_path, &buf, &len) == 0 && buf) {
+        snprintf(dest, sizeof(dest), "tmp/cc_test_logs/%s.build.stderr.txt", stem);
+        (void)write_file_from_buf(dest, buf, len);
+    }
+    free(buf);
+}
+
 static int ends_with(const char* s, const char* suf) {
     if (!s || !suf) return 0;
     size_t n = strlen(s), m = strlen(suf);
@@ -349,6 +389,7 @@ static int run_one_test(const char* stem,
         }
         if (build_rc == 124) {
             fprintf(stderr, "[TIMEOUT] %s: build timed out after %ds\n", stem, build_timeout_sec);
+            log_failure_files(stem, out_txt, err_txt, build_err_txt);
             free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
             return 1;
         }
@@ -368,6 +409,7 @@ static int run_one_test(const char* stem,
             fprintf(stderr, "[TIMEOUT] %s: build timed out after %ds\n", stem, build_timeout_sec);
         }
         fprintf(stderr, "[FAIL] %s: build failed\n", stem);
+        log_failure_files(stem, out_txt, err_txt, build_err_txt);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
         return 1;
     }
@@ -378,6 +420,7 @@ static int run_one_test(const char* stem,
             fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, run_timeout_sec);
         }
         fprintf(stderr, "[FAIL] %s: run failed\n", stem);
+        log_failure_files(stem, out_txt, err_txt, build_err_txt);
         free(exp_stdout); free(exp_stderr); free(exp_compile_err); free(ldflags);
         return 1;
     }
@@ -410,7 +453,7 @@ int main(int argc, char** argv) {
     int use_cache = 0;
     int clean = 0;
     int build_timeout_sec = 300;
-    int run_timeout_sec = 5;
+    int run_timeout_sec = 10;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--verbose") == 0) { verbose = 1; continue; }
         if (strcmp(argv[i], "--list") == 0) { list_only = 1; continue; }

@@ -333,7 +333,8 @@ static fiber_task* fq_pop(fiber_queue* q) {
 
 /* Per-worker local queue for spawn locality */
 #define LOCAL_QUEUE_SIZE 256
-/* Per-worker inbox for cross-thread spawns */
+/* Per-worker inbox for cross-thread spawns.
+ * If this fills, we fall back to the global queue and optionally warn. */
 #define INBOX_QUEUE_SIZE 1024
 
 typedef struct {
@@ -347,6 +348,35 @@ typedef struct {
     _Atomic size_t head;
     _Atomic size_t tail;
 } inbox_queue;
+
+static _Atomic size_t g_inbox_overflow = 0;
+static _Atomic int g_inbox_warned = 0;
+static int g_inbox_debug = -1;  /* -1 = not checked, 0 = disabled, 1 = enabled */
+static int g_inbox_dump = -1;   /* -1 = not checked, 0 = disabled, 1 = enabled */
+
+static int inbox_debug_enabled(void) {
+    if (g_inbox_debug < 0) {
+        g_inbox_debug = getenv("CC_DEBUG_INBOX") != NULL;
+    }
+    return g_inbox_debug;
+}
+
+static int inbox_dump_enabled(void) {
+    if (g_inbox_dump < 0) {
+        g_inbox_dump = getenv("CC_DEBUG_INBOX_DUMP") != NULL;
+    }
+    return g_inbox_dump;
+}
+
+static int join_debug_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("CC_DEBUG_JOIN") != NULL;
+    }
+    return enabled;
+}
+
+static void cc__fiber_dump_queue_state(void);
 
 static int iq_push(inbox_queue* q, fiber_task* f) {
     int pause_round = 0;
@@ -372,6 +402,15 @@ static int iq_push(inbox_queue* q, fiber_task* f) {
         cpu_pause();
     }
     sched_yield();
+    atomic_fetch_add_explicit(&g_inbox_overflow, 1, memory_order_relaxed);
+    if (inbox_debug_enabled()) {
+        int expected = 0;
+        if (atomic_compare_exchange_strong(&g_inbox_warned, &expected, 1)) {
+            fprintf(stderr,
+                    "[cc] inbox full (size=%d); falling back to global queue\n",
+                    INBOX_QUEUE_SIZE);
+        }
+    }
     return -1;
 }
 
@@ -505,10 +544,12 @@ static void cc__fiber_check_deadlock(void) {
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
     size_t blocked = atomic_load_explicit(&g_sched.blocked_threads, memory_order_acquire);
     size_t parked = get_total_parked();
+    size_t temp_workers = atomic_load_explicit(&g_sched.temp_worker_count, memory_order_acquire);
+    size_t total_workers = g_sched.num_workers + temp_workers;
     
     /* Potential deadlock: all workers unavailable + parked fibers waiting */
     size_t unavailable = sleeping + blocked;
-    if (unavailable >= g_sched.num_workers && parked > 0) {
+    if (unavailable >= total_workers && parked > 0) {
         uint64_t now = cc__monotonic_ms();
         uint64_t first = atomic_load(&g_deadlock_first_seen);
         
@@ -529,11 +570,12 @@ static void cc__fiber_check_deadlock(void) {
             fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n\n");
             
             fprintf(stderr, "Runtime state:\n");
-            fprintf(stderr, "  Workers: %zu total, %zu unavailable (sleeping or blocked)\n",
-                    g_sched.num_workers, unavailable);
+            fprintf(stderr, "  Workers: %zu total (%zu base, %zu temp), %zu unavailable (sleeping or blocked)\n",
+                    total_workers, g_sched.num_workers, temp_workers, unavailable);
             fprintf(stderr, "  Fibers:  %zu parked (waiting), %zu completed total\n",
                     parked, (size_t)atomic_load(&g_sched.completed));
             fprintf(stderr, "\n");
+            cc__fiber_dump_queue_state();
             
 #ifdef CC_DEBUG_DEADLOCK
             /* Dump parked fibers - only available with CC_DEBUG_DEADLOCK */
@@ -677,6 +719,37 @@ static inline void wake_one_if_sleeping_unconditional(int timing) {
         if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
     } else {
         if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
+    }
+}
+
+static void cc__fiber_dump_queue_state(void) {
+    if (!inbox_dump_enabled()) return;
+    fprintf(stderr, "\n[cc] Queue state dump:\n");
+    fprintf(stderr, "  pending=%zu active=%zu sleeping=%zu spinning=%zu parked=%zu\n",
+            (size_t)atomic_load(&g_sched.pending),
+            (size_t)atomic_load(&g_sched.active),
+            (size_t)atomic_load(&g_sched.sleeping),
+            (size_t)atomic_load(&g_sched.spinning),
+            get_total_parked());
+    fprintf(stderr, "  workers: base=%zu temp=%zu\n",
+            g_sched.num_workers,
+            (size_t)atomic_load_explicit(&g_sched.temp_worker_count, memory_order_relaxed));
+    fprintf(stderr, "  run_queue: head=%zu tail=%zu\n",
+            atomic_load(&g_sched.run_queue.head),
+            atomic_load(&g_sched.run_queue.tail));
+    fprintf(stderr, "  inbox_overflow=%zu\n",
+            (size_t)atomic_load(&g_inbox_overflow));
+    for (size_t i = 0; i < g_sched.num_workers; i++) {
+        local_queue* lq = &g_sched.local_queues[i];
+        inbox_queue* iq = &g_sched.inbox_queues[i];
+        size_t lq_head = atomic_load_explicit(&lq->head, memory_order_relaxed);
+        size_t lq_tail = atomic_load_explicit(&lq->tail, memory_order_relaxed);
+        size_t iq_head = atomic_load_explicit(&iq->head, memory_order_relaxed);
+        size_t iq_tail = atomic_load_explicit(&iq->tail, memory_order_relaxed);
+        if (lq_tail > lq_head || iq_tail > iq_head) {
+            fprintf(stderr, "  worker[%zu]: local=%zu inbox=%zu\n",
+                    i, lq_tail - lq_head, iq_tail - iq_head);
+        }
     }
 }
 
@@ -935,6 +1008,15 @@ static void fiber_entry(mco_coro* co) {
     atomic_store_explicit(&f->done, 1, memory_order_release);
     fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
     join_spinlock_unlock(&f->join_lock);
+    if (join_debug_enabled()) {
+        int waiters = atomic_load_explicit(&f->join_waiters, memory_order_relaxed);
+        fprintf(stderr,
+                "[join] fiber_entry done: fiber=%lu waiter=%s waiters=%d state=%d\n",
+                (unsigned long)f->fiber_id,
+                waiter ? "set" : "null",
+                waiters,
+                atomic_load_explicit(&f->state, memory_order_relaxed));
+    }
     
     /* Set state to DONE BEFORE signaling waiters.
      * This ensures the fiber is fully "completed" before joiners return
@@ -1432,10 +1514,15 @@ int cc_fiber_sched_init(size_t num_workers) {
         pthread_create(&g_sched.workers[i], NULL, worker_main, (void*)i);
     }
 
-    atomic_store_explicit(&g_sched.sysmon_running, 1, memory_order_release);
-    g_sched.sysmon_started = (pthread_create(&g_sched.sysmon_thread, NULL, sysmon_main, NULL) == 0);
-    if (!g_sched.sysmon_started)
+    if (num_workers > 1) {
+        atomic_store_explicit(&g_sched.sysmon_running, 1, memory_order_release);
+        g_sched.sysmon_started = (pthread_create(&g_sched.sysmon_thread, NULL, sysmon_main, NULL) == 0);
+        if (!g_sched.sysmon_started)
+            atomic_store_explicit(&g_sched.sysmon_running, 0, memory_order_release);
+    } else {
         atomic_store_explicit(&g_sched.sysmon_running, 0, memory_order_release);
+        g_sched.sysmon_started = 0;
+    }
     
     atomic_store_explicit(&g_initialized, 2, memory_order_release);
     return 0;
@@ -1620,7 +1707,8 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     /* Wake a sleeping worker if any are sleeping and none are spinning */
     if (pushed_inbox) {
-        /* Inbox enqueue may target a sleeping worker; wake unconditionally. */
+        /* Inbox enqueue may target a sleeping worker unrelated to the current
+         * spawner, so we must wake unconditionally to avoid inbox starvation. */
         wake_one_if_sleeping_unconditional(timing);
     } else {
         wake_one_if_sleeping(timing);
@@ -1693,6 +1781,15 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     
     /* Get current fiber context (if any) - affects whether we park or use condvar */
     fiber_task* current = tls_current_fiber;
+    if (join_debug_enabled()) {
+        fprintf(stderr,
+                "[join] start: target=%lu current=%s done=%d waiters=%d state=%d\n",
+                (unsigned long)f->fiber_id,
+                current ? "fiber" : "thread",
+                atomic_load_explicit(&f->done, memory_order_relaxed),
+                atomic_load_explicit(&f->join_waiters, memory_order_relaxed),
+                atomic_load_explicit(&f->state, memory_order_relaxed));
+    }
     
     /* Fast path - already done */
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
@@ -1723,6 +1820,13 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     
     /* Register as waiter */
     atomic_fetch_add_explicit(&f->join_waiters, 1, memory_order_acq_rel);
+    if (join_debug_enabled()) {
+        fprintf(stderr,
+                "[join] registered: target=%lu waiters=%d done=%d\n",
+                (unsigned long)f->fiber_id,
+                atomic_load_explicit(&f->join_waiters, memory_order_relaxed),
+                atomic_load_explicit(&f->done, memory_order_relaxed));
+    }
     
     /* Check again - fiber might have completed during registration */
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
@@ -1756,6 +1860,12 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         /* Store ourselves as the waiter fiber - guaranteed visible to child */
         atomic_store_explicit(&f->join_waiter_fiber, current, memory_order_release);
         join_spinlock_unlock(&f->join_lock);
+        if (join_debug_enabled()) {
+            fprintf(stderr,
+                    "[join] waiter_set: target=%lu waiter=%lu\n",
+                    (unsigned long)f->fiber_id,
+                    (unsigned long)current->fiber_id);
+        }
         
         /* Now park until woken. At this point, either:
          * 1. Child hasn't completed yet - will see our registration and unpark us
@@ -1804,6 +1914,13 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
                 atomic_fetch_add_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
             }
             mco_yield(current->coro);
+            if (join_debug_enabled()) {
+                fprintf(stderr,
+                        "[join] resumed: target=%lu waiter=%lu done=%d\n",
+                        (unsigned long)f->fiber_id,
+                        (unsigned long)current->fiber_id,
+                        atomic_load_explicit(&f->done, memory_order_relaxed));
+            }
             if (wid >= 0) {
                 atomic_fetch_sub_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
             }
@@ -1997,6 +2114,11 @@ void cc__fiber_unpark(void* fiber_ptr) {
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
         if (expected == FIBER_DONE) {
+            if (join_debug_enabled()) {
+                fprintf(stderr,
+                        "[join] unpark: fiber=%lu already done\n",
+                        (unsigned long)f->fiber_id);
+            }
             return;  /* Already completed, nothing to do */
         }
         /* Fiber is READY (executing) or RUNNING - record pending wake.
@@ -2004,7 +2126,18 @@ void cc__fiber_unpark(void* fiber_ptr) {
          * but hasn't set PARKED yet. The fiber will check unpark_pending before
          * actually yielding. */
         atomic_store_explicit(&f->unpark_pending, 1, memory_order_release);
+        if (join_debug_enabled()) {
+            fprintf(stderr,
+                    "[join] unpark: fiber=%lu state=%d pending=1\n",
+                    (unsigned long)f->fiber_id,
+                    expected);
+        }
         return;
+    }
+    if (join_debug_enabled()) {
+        fprintf(stderr,
+                "[join] unpark: fiber=%lu -> READY\n",
+                (unsigned long)f->fiber_id);
     }
 
     /* Re-enqueue to LOCAL queue if we're in a worker thread.

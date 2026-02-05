@@ -11,4 +11,6 @@
 cc/bin/
 out/
 /bin/
+tmp/cc_test_logs/
+tmp/run_all_logs/
 
