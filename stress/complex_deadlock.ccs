@@ -1,0 +1,60 @@
+/*
+ * complex_deadlock.ccs - Red-teaming the deadlock detector
+ * 
+ * This test creates a circular dependency across multiple fibers and channels.
+ * Fiber A waits for Fiber B, Fiber B waits for Fiber C, Fiber C waits for Fiber A.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    printf("Complex Deadlock Test\n");
+    
+    // Use typed channel syntax - unbuffered for rendezvous
+    // Each handle must be declared separately for closure capture to work
+    int[~ >] tx1;
+    int[~ <] rx1;
+    int[~ >] tx2;
+    int[~ <] rx2;
+    int[~ >] tx3;
+    int[~ <] rx3;
+    
+    CCChan* ch1 = channel_pair(&tx1, &rx1);
+    CCChan* ch2 = channel_pair(&tx2, &rx2);
+    CCChan* ch3 = channel_pair(&tx3, &rx3);
+
+    @nursery {
+        // Fiber 1: waits on rx1, sends to tx3
+        spawn(() => {
+            printf("Fiber 1: Waiting for Fiber 2...\n");
+            int v;
+            (void)chan_recv(rx1, &v);
+            printf("Fiber 1: Sending to Fiber 3...\n");
+            (void)chan_send(tx3, 1);
+        });
+
+        // Fiber 2: waits on rx2, sends to tx1
+        spawn(() => {
+            printf("Fiber 2: Waiting for Fiber 3...\n");
+            int v;
+            (void)chan_recv(rx2, &v);
+            printf("Fiber 2: Sending to Fiber 1...\n");
+            (void)chan_send(tx1, 1);
+        });
+
+        // Fiber 3: waits on rx3, sends to tx2
+        spawn(() => {
+            printf("Fiber 3: Waiting for Fiber 1...\n");
+            int v;
+            (void)chan_recv(rx3, &v);
+            printf("Fiber 3: Sending to Fiber 2...\n");
+            (void)chan_send(tx2, 1);
+        });
+    }
+
+    cc_chan_free(ch1);
+    cc_chan_free(ch2);
+    cc_chan_free(ch3);
+    return 0;
+}
