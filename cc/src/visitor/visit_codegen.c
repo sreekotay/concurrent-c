@@ -788,55 +788,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* Helper alias: used for auto-blocking arg binding to avoid accidental hoisting of these temps. */
     fprintf(out, "typedef intptr_t CCAbIntptr;\n");
     
-    /* TSan synchronization for closure captures using atomic fence.
-     * This creates a release point after writing captures. The corresponding
-     * acquire is in the closure trampoline before reading captures. */
-    fprintf(out, "\n/* --- Closure capture synchronization --- */\n");
-    fprintf(out, "#include <stdatomic.h>\n");
-    fprintf(out, "#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))\n");
-    fprintf(out, "extern void __tsan_release(void* addr);\n");
-    fprintf(out, "extern void __tsan_acquire(void* addr);\n");
-    fprintf(out, "#define CC_TSAN_RELEASE(addr) do { if (addr) __tsan_release(addr); } while(0)\n");
-    fprintf(out, "#define CC_TSAN_ACQUIRE(addr) do { if (addr) __tsan_acquire(addr); } while(0)\n");
-    fprintf(out, "#else\n");
-    fprintf(out, "#define CC_TSAN_RELEASE(addr) atomic_thread_fence(memory_order_release)\n");
-    fprintf(out, "#define CC_TSAN_ACQUIRE(addr) atomic_thread_fence(memory_order_acquire)\n");
-    fprintf(out, "#endif\n");
-    
-    /* Spawn thunks are emitted later (after parsing source) as static fns in this TU. */
-    fprintf(out, "\n");
-    fprintf(out, "/* --- CC spawn lowering helpers (best-effort) --- */\n");
-    fprintf(out, "typedef struct { void (*fn)(void); } __cc_spawn_void_arg;\n");
-    fprintf(out, "static void* __cc_spawn_thunk_void(void* p) {\n");
-    fprintf(out, "  __cc_spawn_void_arg* a = (__cc_spawn_void_arg*)p;\n");
-    fprintf(out, "  if (a && a->fn) a->fn();\n");
-    fprintf(out, "  free(a);\n");
-    fprintf(out, "  return NULL;\n");
-    fprintf(out, "}\n");
-    fprintf(out, "typedef struct { void (*fn)(int); int arg; } __cc_spawn_int_arg;\n");
-    fprintf(out, "static void* __cc_spawn_thunk_int(void* p) {\n");
-    fprintf(out, "  __cc_spawn_int_arg* a = (__cc_spawn_int_arg*)p;\n");
-    fprintf(out, "  if (a && a->fn) a->fn(a->arg);\n");
-    fprintf(out, "  free(a);\n");
-    fprintf(out, "  return NULL;\n");
-    fprintf(out, "}\n");
-    fprintf(out, "/* --- spawn into helpers (ordered channels) --- */\n");
-    fprintf(out, "typedef struct { void* (*fn)(void*); void* arg; } __spawn_into_arg;\n");
-    fprintf(out, "static void* __spawn_into_thunk(void* p) {\n");
-    fprintf(out, "  __spawn_into_arg* a = (__spawn_into_arg*)p;\n");
-    fprintf(out, "  typedef struct { intptr_t __result; } __caps_t;\n");
-    fprintf(out, "  __caps_t* cap = (__caps_t*)cc_task_result_ptr(sizeof(__caps_t));\n");
-    fprintf(out, "  cap->__result = (intptr_t)(a->fn ? a->fn(a->arg) : 0);\n");
-    fprintf(out, "  free(a);\n");
-    fprintf(out, "  return cap;\n");
-    fprintf(out, "}\n");
-    fprintf(out, "static CCTask __spawn_into_call(void* (*fn)(void*), void* arg) {\n");
-    fprintf(out, "  __spawn_into_arg* a = (__spawn_into_arg*)malloc(sizeof(__spawn_into_arg));\n");
-    fprintf(out, "  if (!a) abort();\n");
-    fprintf(out, "  a->fn = fn; a->arg = arg;\n");
-    fprintf(out, "  return cc_fiber_spawn_task(__spawn_into_thunk, a);\n");
-    fprintf(out, "}\n");
-    fprintf(out, "/* --- end spawn helpers --- */\n\n");
+    /* TSan macros and spawn helpers */
+    fprintf(out, "#include <ccc/cc_closure_helper.h>\n\n");
 
     /* Emit container type declarations from type registry (populated by generic rewriting) */
     {

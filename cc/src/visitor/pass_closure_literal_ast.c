@@ -418,6 +418,8 @@ static void cc__maybe_record_decl(char*** scope_names,
 
     int is_slice = 0;
     int slice_has_bang = 0;
+    int is_chan_tx = 0;  /* Channel TX: [~ >] or [~N >] */
+    int is_chan_rx = 0;  /* Channel RX: [~ <] or [~N <] */
     int ptr_n = 0;
     for (const char* s = ty_s; s < ty_e; s++) {
         if (*s == '*') ptr_n++;
@@ -425,16 +427,39 @@ static void cc__maybe_record_decl(char*** scope_names,
             const char* t = s;
             while (t < ty_e && *t != ']') t++;
             if (t < ty_e) {
+                int has_tilde = 0, has_gt = 0, has_lt = 0;
                 for (const char* u = s; u < t; u++) {
                     if (*u == ':') is_slice = 1;
                     if (*u == '!') slice_has_bang = 1;
+                    if (*u == '~') has_tilde = 1;
+                    if (*u == '>') has_gt = 1;
+                    if (*u == '<') has_lt = 1;
                 }
+                /* Channel syntax: [~ >] for TX, [~ <] for RX */
+                if (has_tilde && has_gt) is_chan_tx = 1;
+                if (has_tilde && has_lt) is_chan_rx = 1;
             }
         }
     }
 
     char* ty = NULL;
-    if (is_slice) {
+    if (is_chan_tx) {
+        const char* base = "CCChanTx";
+        size_t bt = strlen(base);
+        ty = (char*)malloc(bt + (size_t)ptr_n + 1);
+        if (!ty) return;
+        memcpy(ty, base, bt);
+        for (int i = 0; i < ptr_n; i++) ty[bt + (size_t)i] = '*';
+        ty[bt + (size_t)ptr_n] = '\0';
+    } else if (is_chan_rx) {
+        const char* base = "CCChanRx";
+        size_t bt = strlen(base);
+        ty = (char*)malloc(bt + (size_t)ptr_n + 1);
+        if (!ty) return;
+        memcpy(ty, base, bt);
+        for (int i = 0; i < ptr_n; i++) ty[bt + (size_t)i] = '*';
+        ty[bt + (size_t)ptr_n] = '\0';
+    } else if (is_slice) {
         const char* base = "CCSlice";
         size_t bt = strlen(base);
         ty = (char*)malloc(bt + (size_t)ptr_n + 1);
@@ -1977,29 +2002,34 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (!d->body_text) continue;
 
         /* protos - entry function and make function prototypes */
-        if (d->param_count == 0) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*);\n", d->id);
-        else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t);\n", d->id);
-        else cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t, intptr_t);\n", d->id);
-
-        /* __cc_closure_make_N prototype - includes captured variable types */
-        const char* cty_p = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
-        cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_%d(", cty_p, d->id);
-        if (d->cap_count == 0) {
-            cc__append_str(&protos, &protos_len, &protos_cap, "void");
+        /* Use macro for simple CCClosure0 with no captures */
+        if (d->param_count == 0 && d->cap_count == 0) {
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "CC_CLOSURE0_DECL(%d);\n", d->id);
         } else {
-            for (int ci = 0; ci < d->cap_count; ci++) {
-                if (ci) cc__append_str(&protos, &protos_len, &protos_cap, ", ");
-                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
-                const char* ty = d->cap_types && d->cap_types[ci] ? d->cap_types[ci] : "int";
-                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
-                if (is_ref) {
-                    cc__append_fmt(&protos, &protos_len, &protos_cap, "%s* %s", ty, nm);
-                } else {
-                    cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s", ty, nm);
+            if (d->param_count == 0) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*);\n", d->id);
+            else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t);\n", d->id);
+            else cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t, intptr_t);\n", d->id);
+
+            /* __cc_closure_make_N prototype - includes captured variable types */
+            const char* cty_p = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_%d(", cty_p, d->id);
+            if (d->cap_count == 0) {
+                cc__append_str(&protos, &protos_len, &protos_cap, "void");
+            } else {
+                for (int ci = 0; ci < d->cap_count; ci++) {
+                    if (ci) cc__append_str(&protos, &protos_len, &protos_cap, ", ");
+                    int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                    const char* ty = d->cap_types && d->cap_types[ci] ? d->cap_types[ci] : "int";
+                    const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                    if (is_ref) {
+                        cc__append_fmt(&protos, &protos_len, &protos_cap, "%s* %s", ty, nm);
+                    } else {
+                        cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s", ty, nm);
+                    }
                 }
             }
+            cc__append_str(&protos, &protos_len, &protos_cap, ");\n");
         }
-        cc__append_str(&protos, &protos_len, &protos_cap, ");\n");
 
         /* defs: env+drop+make */
         cc__append_fmt(&defs, &defs_len, &defs_cap,
@@ -2059,18 +2089,26 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                            mkfn, d->id, d->id);
             cc__append_str(&defs, &defs_len, &defs_cap, "}\n");
         } else {
-            cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "static %s __cc_closure_make_%d(void) { return %s(__cc_closure_entry_%d, NULL, NULL); }\n",
-                           cty, d->id, mkfn, d->id);
+            /* Use macro for simple CCClosure0 with no captures */
+            if (d->param_count == 0) {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "CC_CLOSURE0_SIMPLE(%d) {\n  (void)__p;\n", d->id);
+            } else {
+                cc__append_fmt(&defs, &defs_len, &defs_cap,
+                               "static %s __cc_closure_make_%d(void) { return %s(__cc_closure_entry_%d, NULL, NULL); }\n",
+                               cty, d->id, mkfn, d->id);
+            }
         }
 
-        /* defs: entry */
-        if (d->param_count == 0) {
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p) {\n", d->id);
-        } else if (d->param_count == 1) {
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p, intptr_t __arg0) {\n", d->id);
-        } else {
-            cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p, intptr_t __arg0, intptr_t __arg1) {\n", d->id);
+        /* defs: entry (skip for simple CCClosure0 - handled by macro) */
+        int simple_closure0 = (d->param_count == 0 && d->cap_count == 0);
+        if (!simple_closure0) {
+            if (d->param_count == 0) {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p) {\n", d->id);
+            } else if (d->param_count == 1) {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p, intptr_t __arg0) {\n", d->id);
+            } else {
+                cc__append_fmt(&defs, &defs_len, &defs_cap, "static void* __cc_closure_entry_%d(void* __p, intptr_t __arg0, intptr_t __arg1) {\n", d->id);
+            }
         }
         if (d->cap_count > 0) {
             cc__append_fmt(&defs, &defs_len, &defs_cap, "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)__p;\n", d->id, d->id);
@@ -2088,7 +2126,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = __env->%s;\n", ty, nm, nm);
                 }
             }
-        } else {
+        } else if (!simple_closure0) {
             cc__append_str(&defs, &defs_len, &defs_cap, "  (void)__p;\n");
         }
 

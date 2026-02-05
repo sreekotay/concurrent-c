@@ -1,0 +1,103 @@
+/*
+ * noisy_neighbor.ccs - The "Latency Torture" Test for M:N Scheduling
+ * 
+ * This test spawns several "CPU Hog" fibers that perform intensive math
+ * in a tight loop without any voluntary suspension (no await, no cc_sleep).
+ * One "Heartbeat" fiber monitors if the scheduler can still maintain
+ * regular execution of other tasks.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <stdatomic.h>
+
+#define NUM_HOGS 15          // Leave 1 worker for the heartbeat (if scheduler is fair)
+#define HEARTBEAT_INTERVAL_MS 100
+#define TEST_DURATION_SEC 5
+
+atomic_int g_heartbeats = 0;
+atomic_int g_hogs_active = 0;
+atomic_int g_stop = 0;
+
+/* A "Heartbeat" fiber that should keep ticking if the scheduler is fair */
+void heartbeat_fiber() {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("[Heartbeat] Started\n");
+    while (!atomic_load(&g_stop)) {
+        cc_sleep_ms(HEARTBEAT_INTERVAL_MS);
+        int val = atomic_fetch_add(&g_heartbeats, 1) + 1;
+        printf("[Heartbeat] Tick %d\n", val);
+    }
+}
+
+/* A "CPU Hog" fiber that performs intensive math in a tight loop */
+void hog_fiber(int id) {
+    atomic_fetch_add(&g_hogs_active, 1);
+    printf("[Hog %d] Started CPU-intensive loop...\n", id);
+    
+    volatile double x = 1.1;
+    while (!atomic_load(&g_stop)) {
+        // Tight loop: no await, no yield, no syscalls.
+        for (int i = 0; i < 1000000; i++) {
+            x = x * x;
+            if (x > 1000000.0) x = 1.1;
+        }
+    }
+    
+    printf("[Hog %d] Stopped\n", id);
+    atomic_fetch_sub(&g_hogs_active, 1);
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    // Ensure we have a fixed number of workers for the test
+    setenv("CC_FIBER_WORKERS", "16", 1);
+    
+    printf("=================================================================\n");
+    printf("NOISY NEIGHBOR CHALLENGE: Can the CC Scheduler handle CPU hogs?\n");
+    printf("Workers: 16 | CPU Hogs: %d\n", NUM_HOGS);
+    printf("=================================================================\n\n");
+
+    @nursery {
+        // 1. Start the heartbeat
+        spawn(() => { heartbeat_fiber(); });
+
+        // 2. Wait for healthy start
+        cc_sleep_ms(500);
+        printf("Initial heartbeats: %d (Healthy)\n", atomic_load(&g_heartbeats));
+
+        // 3. Unleash the hogs
+        printf("\n!!! Unleashing CPU Hogs !!!\n");
+        for (int i = 0; i < NUM_HOGS; i++) {
+            int id = i;
+            spawn(() => [id] { hog_fiber(id); });
+        }
+
+        // 4. Monitor for duration
+        cc_sleep_ms(TEST_DURATION_SEC * 1000);
+        
+        printf("\nStopping test...\n");
+        atomic_store(&g_stop, 1);
+    }
+
+    int final_beats = atomic_load(&g_heartbeats);
+    printf("\n=================================================================\n");
+    printf("FINAL RESULTS\n");
+    printf("Total Heartbeats: %d\n", final_beats);
+    
+    // Expected beats: (TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS)
+    int expected = (TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS);
+    if (final_beats >= expected * 0.8) {
+        printf("RESULT: PASS - The scheduler is fair even with CPU hogs!\n");
+    } else {
+        printf("RESULT: FAIL - The scheduler was starved by CPU hogs.\n");
+        printf("Heartbeat efficiency: %.1f%%\n", (double)final_beats * 100.0 / expected);
+    }
+    printf("=================================================================\n");
+
+    return 0;
+}

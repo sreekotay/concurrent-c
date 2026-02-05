@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define TORTURE_DEPTH 2000
+#define TORTURE_DEPTH 10000
 
 cc_atomic_int g_completed_levels = 0;
 
