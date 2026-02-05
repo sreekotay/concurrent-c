@@ -906,8 +906,9 @@ static int cc__walk_call(int idx,
                 }
             }
             /* Handle address-of: cc_move(x) expands to cc__move_marker_impl(&(x), x)
-               Look inside UNARY '&' to find the identifier */
-            if (c->kind == CC_STUB_UNARY && c->aux_s1 && strcmp(c->aux_s1, "&") == 0) {
+               Look inside UNARY '&' to find the identifier.
+               Note: aux1 stores the operator token (e.g., '&' = 38) */
+            if (c->kind == CC_STUB_UNARY && c->aux1 == '&') {
                 const ChildList* ucl = &kids[cl->child[i]];
                 for (int j = 0; j < ucl->len; j++) {
                     const StubNodeView* uc = &nodes[ucl->child[j]];
