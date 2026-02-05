@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 int main(void) {
-    CCArena arena = cc_heap_arena(kilobytes(4));
+    CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
     /* Use Vec<int> generic syntax - triggers codegen declaration */
@@ -33,6 +33,6 @@ int main(void) {
 
     printf("generic_vec_simple_smoke ok\n");
     
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     return 0;
 }

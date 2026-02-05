@@ -12,7 +12,7 @@ static inline int eq_i32(int a, int b) { return a == b; }
 Map(int, int, IntMap, hash_i32, eq_i32);
 
 int main(void) {
-    CCArena arena = cc_heap_arena(kilobytes(4));
+    CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
     IntMap *m = IntMap_init(&arena);
@@ -44,6 +44,6 @@ int main(void) {
     CCSlice msg = cc_slice_from_buffer("map smoke ok\n", 14);
     cc_std_out_write(msg);
 
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     return 0;
 }

@@ -102,7 +102,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
 void* compress_task_wrapper(void* arg) {
     Block* blk = (Block*)arg;
     CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
-    cc_heap_arena_free(&blk->arena);
+    cc_arena_free(&blk->arena);
     
     // Store result in fiber-local storage at offset 0 (what ordered_recv expects)
     typedef struct { CompressedResult* __result; } __result_t;
@@ -157,7 +157,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 CompressedResult* r = (CompressedResult*)result;
                 if (r) {
                     cc_file_write(out_ptr, r->data);
-                    cc_heap_arena_free(&r->arena);
+                    cc_arena_free(&r->arena);
                 }
             }
         });
@@ -167,18 +167,18 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             spawn(() => [in_ptr, tasks_tx] {
                 long seq = 0;
                 while (true) {
-                    CCArena blk_arena = cc_heap_arena(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
+                    CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                     CCSlice data;
                     bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
                     
                     if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
-                        cc_heap_arena_free(&blk_arena);
+                        cc_arena_free(&blk_arena);
                         break;
                     }
                     
                     Block* blk = arena_alloc1(Block, &blk_arena);
                     if (!blk) {
-                        cc_heap_arena_free(&blk_arena);
+                        cc_arena_free(&blk_arena);
                         break;
                     }
                     

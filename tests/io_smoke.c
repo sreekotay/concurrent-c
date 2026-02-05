@@ -17,16 +17,16 @@ int main(void) {
     CCResult_size_t_CCIoError s = cc_file_seek(&f, 0, SEEK_SET);
     if (!s.ok) { cc_file_close(&f); return 3; }
 
-    CCArena arena = cc_heap_arena(kilobytes(4));
+    CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) { cc_file_close(&f); return 4; }
 
     CCResult_CCSlice_CCIoError r = cc_file_read_all(&f, &arena);
-    if (!r.ok) { cc_file_close(&f); cc_heap_arena_free(&arena); return 5; }
+    if (!r.ok) { cc_file_close(&f); cc_arena_free(&arena); return 5; }
 
     CCSlice out = r.u.value;
     bool match = out.len == msg_len && memcmp(out.ptr, msg, msg_len) == 0;
     cc_file_close(&f);
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     if (!match) return 6;
 
     cc_std_out_write(cc_slice_from_buffer("io smoke ok\n", 13));

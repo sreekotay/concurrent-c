@@ -5,7 +5,7 @@
 Vec(int, IntVec);
 
 int main(void) {
-    CCArena arena = cc_heap_arena(kilobytes(4));
+    CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
     IntVec v = IntVec_init(&arena, 2);
@@ -20,7 +20,7 @@ int main(void) {
     CCSlice msg = cc_slice_from_buffer("vec smoke ok\n", 14);
     cc_std_out_write(msg);
 
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     return 0;
 }
 

@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 int main(void) {
-    CCArena arena = cc_heap_arena(kilobytes(4));
+    CCArena arena = cc_arena_heap(kilobytes(4));
     
     Vec<int> v = vec_new<int>(&arena);
     
@@ -25,6 +25,6 @@ int main(void) {
     }
     
     printf("ok\n");
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     return 0;
 }

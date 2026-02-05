@@ -112,13 +112,13 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         args[argc] = NULL;
 
         /* Use a fresh temp arena for each test to avoid accumulation */
-        CCArena test_arena = cc_heap_arena(megabytes(4));
+        CCArena test_arena = cc_arena_heap(megabytes(4));
         /* Use ccc from PATH */
         CCResultProcessOutputIoError res = cc_process_run(&test_arena, "ccc", args);
 
         if (cc_is_err(res)) {
             CCIoError err = cc_unwrap_err_as(res, CCIoError);
-            cc_heap_arena_free(&test_arena);
+            cc_arena_free(&test_arena);
             printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
             stats->skipped++;
             continue;
@@ -173,12 +173,12 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
             stats->failed++;
         }
         
-        cc_heap_arena_free(&test_arena);
+        cc_arena_free(&test_arena);
     }
 }
 
 int main(int argc, char** argv) {
-    CCArena arena = cc_heap_arena(megabytes(16));
+    CCArena arena = cc_arena_heap(megabytes(16));
     Stats stats = {0};
 
     // Parse args
@@ -224,6 +224,6 @@ int main(int argc, char** argv) {
     printf("  Skipped: %d\n", stats.skipped);
     printf("  Total:   %d\n", stats.passed + stats.failed + stats.skipped);
 
-    cc_heap_arena_free(&arena);
+    cc_arena_free(&arena);
     return stats.failed > 0 ? 1 : 0;
 }

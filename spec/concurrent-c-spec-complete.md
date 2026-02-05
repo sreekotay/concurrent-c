@@ -465,8 +465,8 @@ spawn_thread(() => {
 
 ```c
 void ok_pattern() {
-    Arena a = arena(kilobytes(64));
-    char[:] s = arena_alloc<char>(&a, 100);
+    CCArena a = cc_arena_heap(kilobytes(64));
+    char[:] s = arena_alloc(char, &a, 100);
     
     ThreadGroup g = thread_group();
     g.spawn(() => {
@@ -478,8 +478,8 @@ void ok_pattern() {
 void bad_pattern() {
     ThreadGroup g = thread_group();
     {
-        Arena a = arena(kilobytes(64));
-        char[:] s = arena_alloc<char>(&a, 100);
+        CCArena a = cc_arena_heap(kilobytes(64));
+        char[:] s = arena_alloc(char, &a, 100);
         g.spawn(() => {
             use(s);  // ERROR: arena may be freed before thread runs
         });
@@ -1425,26 +1425,44 @@ Arenas own memory; slices are views into arena-owned storage.
 
 ```c
 // Creation
-Arena arena(size_t size);
+CCArena cc_arena_heap(size_t bytes);              // heap-backed arena (malloc)
+int cc_arena_init(CCArena* a, void* buf, size_t cap);  // user-provided buffer
 
 // Lifecycle
-void  arena_free(Arena* a);            // free all memory
-void  arena_reset(Arena* a);           // reclaim memory, invalidate slices
+void cc_arena_free(CCArena* a);                   // free if heap-backed, else no-op
+void cc_arena_reset(CCArena* a);                  // reclaim memory, invalidate slices
 
 // Checkpoints
-typedef struct ArenaCheckpoint ArenaCheckpoint;
-ArenaCheckpoint arena_checkpoint(Arena* a);
-void  arena_restore(ArenaCheckpoint checkpoint);
+typedef struct CCArenaCheckpoint CCArenaCheckpoint;
+CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);
+void cc_arena_restore(CCArenaCheckpoint checkpoint);
 
 // Allocation
-void* arena_alloc(Arena* a, size_t nbytes);       // raw bytes (no provenance)
-T[:]  arena_alloc<T>(Arena* a, size_t nelems);    // tracked, nelems elements
-T[:1] arena_alloc1<T>(Arena* a);                  // tracked, 1 element (sugar)
+void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
+#define arena_alloc(T, arena, count)  // tracked, count elements
+#define arena_alloc1(T, arena)        // tracked, 1 element
+
+// Transfer
+CCArena cc_arena_detach(CCArena* a);              // move ownership out
 
 // Size helpers
 size_t kilobytes(size_t n);            // n * 1024
 size_t megabytes(size_t n);            // n * 1024 * 1024
-size_t gigabytes(size_t n);            // n * 1024 * 1024 * 1024
+```
+
+**Arena ownership model:**
+
+Arenas track their ownership internally:
+- **Heap-backed arenas** (created with `cc_heap_arena`) own their memory and free it when `cc_arena_free` is called.
+- **User-backed arenas** (created with `cc_arena_init`) do not own their buffer; `cc_arena_free` is a no-op.
+
+This allows uniform cleanup code without leaking implementation details:
+
+```c
+// Works for both heap and user-backed arenas
+CCArena a = cc_arena_heap(kilobytes(64));  // or cc_arena_init(&a, buf, sz)
+// ... use arena ...
+cc_arena_free(&a);  // frees if heap-backed, no-op otherwise
 ```
 
 **Rule:** All arenas use atomic operations internally and are safe to share across threads. Arena-allocated slices can be sent through channels or captured in thread closures.
@@ -1460,14 +1478,14 @@ size_t gigabytes(size_t n);            // n * 1024 * 1024 * 1024
  - Restoring a checkpoint does not bump arena provenance; uses-after-restore are programmer errors.
 
 ```c
-Arena a = arena(megabytes(1));
-char[:] s = arena_alloc<char>(&a, 100);
+CCArena a = cc_arena_heap(megabytes(1));
+char[:] s = arena_alloc(char, &a, 100);
 
 spawn_thread(() => {
     use(s);  // OK: a still alive
 });
 
-arena_free(&a);  // BUG: thread may still be using s
+cc_arena_free(&a);  // BUG: thread may still be using s
 ```
 
 **Design Rationale:**
@@ -1491,8 +1509,8 @@ arena_free(&a);  // BUG: thread may still be using s
 * No exceptions or unwinding.
 
 ```c
-Arena scratch = arena(kilobytes(64));
-@defer arena_free(&scratch);
+CCArena scratch = cc_arena_heap(kilobytes(64));
+@defer cc_arena_free(&scratch);
 ```
 
 **Conditional defer (error/success):**
@@ -1504,8 +1522,8 @@ These are useful for ownership transfer patterns where cleanup should only happe
 
 ```c
 Result*!>(IoError) compress_block(Block* blk) {
-    Arena res_arena = cc_heap_arena(blk->data.len + 4096);
-    @defer(err) cc_heap_arena_free(&res_arena);  // cleanup on error only
+    CCArena res_arena = cc_arena_heap(blk->data.len + 4096);
+    @defer(err) cc_arena_free(&res_arena);  // cleanup on error only
     
     Result* res = arena_alloc(Result, &res_arena, 1);
     if (!res) return cc_err(io_error(CC_IO_OUT_OF_MEMORY));
@@ -1523,7 +1541,7 @@ Result*!>(IoError) compress_block(Block* blk) {
 `arena_detach(Arena* a)` transfers the arena's memory to a new owner, leaving the source arena empty. This enables clean ownership transfer out of scoped blocks:
 
 ```c
-Arena arena_detach(Arena* a);  // returns arena contents, leaves a empty
+CCArena cc_arena_detach(CCArena* a);  // returns arena contents, leaves a empty
 ```
 
 After detach:
@@ -1549,7 +1567,7 @@ After detach:
 `@defer name: stmt;` creates a cancellable defer.
 
 ```c
-@defer cleanup: arena_free(&scratch);
+@defer cleanup: cc_arena_free(&scratch);
 
 // ... later, if ownership is transferred ...
 cancel cleanup;  // defer will not run
@@ -1591,9 +1609,9 @@ void!>(DbError) transfer(Db* db, Account from, Account to, int amount) {
 }
 
 // Conditional cleanup
-void!>(IoError) process(char[:] path, Arena* out) {
-    Arena scratch = arena(kilobytes(64));
-    @defer cleanup: arena_free(&scratch);
+void!>(IoError) process(char[:] path, CCArena* out) {
+    CCArena scratch = cc_arena_heap(kilobytes(64));
+    @defer cleanup: cc_arena_free(&scratch);
     
     char[:] data = try read_file(&scratch, path);
     
@@ -1614,7 +1632,7 @@ void!>(IoError) process(char[:] path, Arena* out) {
 @async void!>(Error) good(Arena* scratch) {
     // ✅ CORRECT: defer within sync scope, not across suspension
     {
-        @defer cleanup: arena_free(scratch);
+        @defer cleanup: cc_arena_free(scratch);
         char[:] data = sync_read(scratch);
         process(data);
     }
@@ -1623,8 +1641,8 @@ void!>(IoError) process(char[:] path, Arena* out) {
     await io_operation();
 }
 
-@async void!>(Error) bad(Arena* scratch) {
-    @defer cleanup: arena_free(scratch);
+@async void!>(Error) bad(CCArena* scratch) {
+    @defer cleanup: cc_arena_free(scratch);
     // ❌ ERROR: defer is @scoped and cannot be held across await
     // await io_operation();
 }
@@ -1651,8 +1669,8 @@ The identifier `scratch` is in scope only within the block.
 **Scoped reset:**
 
 ```c
-Arena scratch = arena(kilobytes(256));
-defer arena_free(&scratch);
+CCArena scratch = cc_arena_heap(kilobytes(256));
+defer cc_arena_free(&scratch);
 
 for (int i = 0; i < 10; i++) {
     arena(&scratch) {
@@ -1675,8 +1693,8 @@ The reset form is selected when the parenthesized expression has type `Arena*` (
 // arena scratch(size) { BODY }
 // lowers to:
 {
-    Arena scratch = arena(size);
-    defer arena_free(&scratch);
+    CCArena scratch = cc_arena_heap(size);
+    defer cc_arena_free(&scratch);
     BODY
 }
 
@@ -2071,12 +2089,13 @@ int v = data.load(.relaxed);      // guaranteed to see 42
 
 This section defines message-passing and coordination primitives:
 
-- **§7.1 Channel Types** — topologies and views
-- **§7.2 Semantics** — buffering and termination
-- **§7.3 Copy vs Transfer** — `send` vs `send_take`
-- **§7.4 Select** — multiplexing operations
-- **§7.5 Timeouts** — time-bounded operations
-- **§7.6 Channel API** — function signatures
+- **§6.1 Channel Types** — topologies and views
+- **§6.2 Ordered Channels** — `ordered` flag and `chan_send_task`
+- **§6.3 Semantics** — buffering and termination
+- **§6.4 Copy vs Transfer** — `send` vs `send_take`
+- **§6.5 Select** — multiplexing operations
+- **§6.6 Timeouts** — time-bounded operations
+- **§6.7 Channel API** — function signatures
 
 ---
 
@@ -2248,7 +2267,114 @@ int[~10 1:N sync <] sync_sub = sync_events.subscribe();  // subscribe to sync
 
 ---
 
-replaced_5 Semantics
+### 6.2 Ordered Channels and Task Sending
+
+Channels support an `ordered` flag for FIFO result delivery in task-parallel pipelines. Combined with `chan_send_task`, this enables clean producer-consumer patterns.
+
+**Ordered channel declaration:**
+
+```c
+T[~N ordered >] tx;    // ordered sender
+T[~N ordered <] rx;    // ordered receiver
+```
+
+The `ordered` flag ensures that `recv` returns results in submission order, not completion order. This is essential for pipelines where output order must match input order (e.g., parallel compression).
+
+**`chan_send_task` — spawn and queue:**
+
+```c
+chan_send_task(tx, () => expr);           // spawn task, queue result
+chan_send_task(tx, () => [captures] expr); // with captures
+```
+
+`chan_send_task` spawns a fiber immediately to execute the closure, then queues the task handle in the channel. The receiver's `chan_recv` awaits the task internally and extracts the result.
+
+**How it works:**
+
+| Channel Declaration | Task Execution | Result Delivery |
+| :--- | :--- | :--- |
+| `T[~N >]` | Immediate, async | Completion order (first done, first out) |
+| `T[~N ordered >]` | Immediate, async | Submission order (FIFO) |
+
+Both execute tasks immediately. The difference is purely in `recv` sequencing.
+
+**Full example — parallel compression pipeline:**
+
+```c
+CompressedResult*[~16 ordered >] results_tx;
+CompressedResult*[~16 ordered <] results_rx;
+CCChan* ch = channel_pair(&results_tx, &results_rx);
+
+@nursery {
+    // Consumer: receives results in submission order
+    spawn(() => [results_rx, out] {
+        CompressedResult* r;
+        while (chan_recv(results_rx, &r)) {
+            cc_file_write(out, r->data);
+            cc_arena_free(&r->arena);
+        }
+    });
+    
+    // Producer: spawn tasks, results queued in order
+    @nursery closing(results_tx) {
+        while (read_block(&blk)) {
+            chan_send_task(results_tx, () => [blk] compress_block(blk));
+        }
+    }
+}
+
+cc_chan_free(ch);
+```
+
+**Error propagation:**
+
+When the closure returns `T!>(E)`, errors flow through:
+
+```c
+chan_send_task(results_tx, () => {
+    CompressedResult*!>(CCIoError) res = compress_block(blk);
+    return res;  // Error preserved!
+});
+
+// Consumer can propagate errors with ?
+CompressedResult* r;
+while (chan_recv(results_rx, &r)?) {
+    use(r);
+}
+```
+
+`chan_recv` on a task channel returns `bool!>(E)`:
+- `Ok(true)` — value received
+- `Ok(false)` — channel closed (EOF)
+- `Err(e)` — task failed with error `e`
+
+**Mixing values and tasks:**
+
+The same channel can receive both values and tasks:
+
+```c
+int[~16 >] tx;
+int[~16 <] rx;
+channel_pair(&tx, &rx);
+
+chan_send(tx, 42);                      // send a value
+chan_send_task(tx, () => compute());    // send a task
+
+int x;
+chan_recv(rx, &x);  // gets 42
+chan_recv(rx, &x);  // gets compute() result (awaited internally)
+```
+
+**Backpressure:**
+
+Standard channel semantics apply:
+- `chan_send_task` spawns immediately
+- If channel is full, blocks until space available
+- Provides parallelism up to channel capacity, then natural backpressure
+
+---
+
+### 6.4 Semantics
 
 * **Buffered channels** enqueue up to `n` items; sends block when full.
 * **Unbuffered channels** rendezvous: sender blocks until receiver is ready.
@@ -2597,8 +2723,8 @@ closure_expr := '(' param_list? ')' '=>' ('[' capture_list ']')? expr
 
 ```c
 CCArena[~4 owned {
-    .create = () => cc_heap_arena(4096),
-    .destroy = (CCArena a) => cc_heap_arena_free(&a),
+    .create = () => cc_arena_heap(4096),
+    .destroy = (CCArena a) => cc_arena_free(&a),
     .reset = (CCArena a) => cc_arena_reset(&a)
 }] arena_pool;
 
@@ -2643,8 +2769,8 @@ chan_send(arena_pool, arena);   // Calls .reset before re-adding to pool
 ```c
 // Pool of 4 arenas, each 4KB
 CCArena[~4 owned {
-    .create = () => cc_heap_arena(4096),
-    .destroy = (CCArena a) => cc_heap_arena_free(&a),
+    .create = () => cc_arena_heap(4096),
+    .destroy = (CCArena a) => cc_arena_free(&a),
     .reset = (CCArena a) => cc_arena_reset(&a)
 }] arena_pool;
 
@@ -4856,7 +4982,7 @@ size_t  s.cap();                       // Vec<T> UFCS
 
 Example:
 ```c
-Arena arena = arena(megabytes(1));
+CCArena arena = cc_arena_heap(megabytes(1));
 String s = string_new(&arena);
 s.append("count=")
  .push_char('x')
@@ -6139,7 +6265,7 @@ c_process(s.ptr, s.len);  // decompose slice into ptr/len
 ```c
 extern void c_fill_buffer(char* ptr, size_t len);
 
-Arena arena = arena(megabytes(1));
+CCArena arena = cc_arena_heap(megabytes(1));
 Vec<char> buf = vec_with_capacity<char>(&arena, 1000);
 c_fill_buffer(buf.ptr, buf.cap());  // fill with C code
 ```
