@@ -2068,15 +2068,12 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     atomic_fetch_add_explicit(&g_sched.pending, 1, memory_order_relaxed);
     
-    /* Wake unless we just queued to our own local queue.
-     * The previous optimization (skip wake if spinning > 0) can cause deadlock:
-     * 1. Spawner sees spinning > 0, skips wake
-     * 2. All spinners finish and go to sleep before finding the new fiber
-     * 3. Fiber sits in queue with all workers sleeping
-     * By always signaling the wake primitive, we ensure any worker that goes
-     * to sleep after the signal will immediately wake up. */
+    /* Wake a sleeping worker if needed.
+     * Skip if we pushed to our own local queue (we'll run it ourselves).
+     * Use the conditional version: if workers are spinning, they'll find
+     * the work via queue checks without a costly kernel wake syscall. */
     if (!pushed_local) {
-        wake_one_if_sleeping_unconditional(timing);
+        wake_one_if_sleeping(timing);
     }
     
     if (timing) {
