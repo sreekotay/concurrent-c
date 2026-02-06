@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+
+int main() {
+    const int count = 100000;
+    printf("Spawning %d fibers...\n", count);
+    
+    @nursery {
+        for (int i = 0; i < count; i++) {
+            spawn(() => {
+                cc_sleep_ms(10000);
+            });
+        }
+        
+        printf("Fibers spawned.\n");
+        
+        // Keep alive for RSS measurement
+        cc_sleep_ms(5000);
+    }
+    
+    return 0;
+}
