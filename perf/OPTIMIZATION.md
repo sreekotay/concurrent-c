@@ -26,6 +26,7 @@ typedef enum {
     CC__FIBER_CREATED,  // Newly allocated
     CC__FIBER_QUEUED,   // Queued to run
     CC__FIBER_RUNNING,  // Currently executing
+    CC__FIBER_PARKING,  // Transitioning to parked (between CAS and yield)
     CC__FIBER_PARKED,   // Blocked (e.g., waiting on channel)
     CC__FIBER_DONE      // Completed
 } cc__fiber_state;

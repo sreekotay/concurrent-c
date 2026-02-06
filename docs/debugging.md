@@ -88,6 +88,9 @@ Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
 - Enqueue paths must transition to `QUEUED` exactly once (CAS from expected state); stale queue entries are dropped.
 - Fiber state transitions: `CREATED -> QUEUED -> RUNNING -> PARKING -> PARKED -> QUEUED -> RUNNING -> DONE`.
   The `PARKING` state is visible to concurrent `unpark` calls and enables safe cancellation of the park.
+- `pending_unpark` is a per-park-attempt latch, not a persistent flag. It must be cleared
+  (`cc__fiber_clear_pending_unpark()`) before entering a new wait context (e.g., select park loop)
+  to avoid consuming a stale signal from an unrelated prior operation.
 
 If you add new scheduler behaviors, update these invariants and extend the stress tests.
 

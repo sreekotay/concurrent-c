@@ -202,10 +202,6 @@ static _Atomic uintptr_t g_chan_dbg_last_close = 0;
 static inline int cc__chan_dbg_enabled(void);
 static inline int cc__chan_dbg_verbose_enabled(void);
 
-static inline void cc__chan_dbg_inc_chan(_Atomic uint64_t* c) {
-    if (!cc__chan_dbg_enabled()) return;
-    atomic_fetch_add_explicit(c, 1, memory_order_relaxed);
-}
 
 static inline int cc__chan_dbg_enabled(void) {
     if (g_chan_dbg_enabled == -1) {
@@ -770,7 +766,7 @@ static void cc__chan_add_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
     if (ch->use_lockfree) {
         cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_add);
-        cc__chan_dbg_inc_chan(&ch->dbg_lf_recv_waiter_add);
+        cc__chan_dbg_inc(&ch->dbg_lf_recv_waiter_add);
     }
     cc__chan_add_waiter(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
 }
@@ -855,7 +851,7 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
     if (!ch->recv_waiters_head) {
         if (ch->use_lockfree && atomic_load_explicit(&ch->lfqueue_count, memory_order_relaxed) > 0) {
             cc__chan_dbg_inc(&g_chan_dbg.lf_recv_wake_no_waiter);
-            cc__chan_dbg_inc_chan(&ch->dbg_lf_recv_wake_no_waiter);
+            cc__chan_dbg_inc(&ch->dbg_lf_recv_wake_no_waiter);
         }
         return;
     }
@@ -879,7 +875,7 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
         }
         if (ch->use_lockfree) {
             cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_wake);
-            cc__chan_dbg_inc_chan(&ch->dbg_lf_recv_waiter_wake);
+            cc__chan_dbg_inc(&ch->dbg_lf_recv_waiter_wake);
         }
         wake_batch_add(node->fiber);
         return;
@@ -1710,7 +1706,7 @@ static int cc__chan_try_enqueue_lockfree_impl(CCChan* ch, const void* value) {
     if (ok) {
         atomic_fetch_add_explicit(&ch->lfqueue_count, 1, memory_order_release);
         cc__chan_dbg_inc(&g_chan_dbg.lf_enq_ok);
-        cc__chan_dbg_inc_chan(&ch->dbg_lf_enq_ok);
+        cc__chan_dbg_inc(&ch->dbg_lf_enq_ok);
     } else {
         cc__chan_dbg_inc(&g_chan_dbg.lf_enq_fail);
         if (cc__chan_dbg_enabled()) {
@@ -1791,7 +1787,7 @@ static int cc_chan_try_dequeue_lockfree(CCChan* ch, void* out_value) {
         return EAGAIN;
     }
     cc__chan_dbg_inc(&g_chan_dbg.lf_deq_ok);
-    cc__chan_dbg_inc_chan(&ch->dbg_lf_deq_ok);
+    cc__chan_dbg_inc(&ch->dbg_lf_deq_ok);
     atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
     
     /* Small element: stored directly in pointer */
@@ -1858,7 +1854,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         /* If a receiver is waiting, handoff directly */
         cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
         if (rnode) {
-            cc__chan_dbg_inc_chan(&ch->dbg_rv_send_handoff);
+            cc__chan_dbg_inc(&ch->dbg_rv_send_handoff);
             channel_store_slot(rnode->data, value, ch->elem_size);
             atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
             if (rnode->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
@@ -1920,7 +1916,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 cc__fiber_wait_node* rnode2 = cc__chan_pop_recv_waiter(ch);
                 if (rnode2) {
                     /* Found a receiver! Remove ourselves from send wait list and do handoff. */
-                    cc__chan_dbg_inc_chan(&ch->dbg_rv_send_inner_handoff);
+                    cc__chan_dbg_inc(&ch->dbg_rv_send_inner_handoff);
                     cc__chan_remove_send_waiter(ch, &node);
                     channel_store_slot(rnode2->data, value, ch->elem_size);
                     atomic_store_explicit(&rnode2->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
@@ -1942,7 +1938,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
-                    cc__chan_dbg_inc_chan(&ch->dbg_rv_send_parked);
+                    cc__chan_dbg_inc(&ch->dbg_rv_send_parked);
                     CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: waiting for receiver");
                 }
                 pthread_mutex_lock(&ch->mu);
@@ -1959,7 +1955,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         {
             int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notify_val == CC_CHAN_NOTIFY_SIGNAL) {
-                cc__chan_dbg_inc_chan(&ch->dbg_rv_send_got_signal);
+                cc__chan_dbg_inc(&ch->dbg_rv_send_got_signal);
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_send_waiter(ch, &node);
                 continue;
@@ -1967,7 +1963,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
             if (notify_val == CC_CHAN_NOTIFY_DATA) {
                 /* notified=1 means a receiver actually took our data.
                  * The receiver already popped us from the list. */
-                cc__chan_dbg_inc_chan(&ch->dbg_rv_send_got_data);
+                cc__chan_dbg_inc(&ch->dbg_rv_send_got_data);
                 return 0;
             }
             if (notify_val == CC_CHAN_NOTIFY_CLOSE) {
@@ -1980,7 +1976,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
              * restarting the outer loop -- otherwise the node (a stack local) is
              * re-initialized while still linked, corrupting the doubly-linked
              * list. */
-            cc__chan_dbg_inc_chan(&ch->dbg_rv_send_got_zero);
+            cc__chan_dbg_inc(&ch->dbg_rv_send_got_zero);
             cc__chan_remove_send_waiter(ch, &node);
         }
 
@@ -2008,7 +2004,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         /* If a sender is waiting, handoff directly */
         cc__fiber_wait_node* snode = cc__chan_pop_send_waiter(ch);
         if (snode) {
-            cc__chan_dbg_inc_chan(&ch->dbg_rv_recv_handoff);
+            cc__chan_dbg_inc(&ch->dbg_rv_recv_handoff);
             channel_load_slot(snode->data, out_value, ch->elem_size);
             atomic_store_explicit(&snode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
             if (snode->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
@@ -2047,7 +2043,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
-                    cc__chan_dbg_inc_chan(&ch->dbg_rv_recv_parked);
+                    cc__chan_dbg_inc(&ch->dbg_rv_recv_parked);
                     CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: waiting for sender");
                 }
                 pthread_mutex_lock(&ch->mu);
@@ -2064,7 +2060,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         {
             int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notify_val == CC_CHAN_NOTIFY_SIGNAL) {
-                cc__chan_dbg_inc_chan(&ch->dbg_rv_recv_got_signal);
+                cc__chan_dbg_inc(&ch->dbg_rv_recv_got_signal);
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
@@ -2073,7 +2069,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             if (notify_val == CC_CHAN_NOTIFY_DATA) {
                 /* notified=1 means a sender actually delivered data.
                  * The sender already popped us from the list. */
-                cc__chan_dbg_inc_chan(&ch->dbg_rv_recv_got_data);
+                cc__chan_dbg_inc(&ch->dbg_rv_recv_got_data);
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
                 return 0;
             }
@@ -2088,7 +2084,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
              * restarting the outer loop -- otherwise the node (a stack local) is
              * re-initialized at line 1981 while still linked, corrupting the
              * doubly-linked list. */
-            cc__chan_dbg_inc_chan(&ch->dbg_rv_recv_got_zero);
+            cc__chan_dbg_inc(&ch->dbg_rv_recv_got_zero);
             cc__chan_remove_recv_waiter(ch, &node);
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
         }
@@ -2126,7 +2122,7 @@ static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct 
 
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (!ch || !value || value_size == 0) return EINVAL;
-    cc__chan_dbg_inc_chan(&ch->dbg_lf_send_calls);
+    cc__chan_dbg_inc(&ch->dbg_lf_send_calls);
     
     /* Owned channel (pool): call on_reset before returning item to pool */
     if (ch->is_owned && ch->on_reset.fn) {
@@ -2166,7 +2162,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 /* Direct handoff to waiting receiver */
                 channel_store_slot(rnode->data, value, ch->elem_size);
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_send);
+                    cc__chan_dbg_inc(&ch->dbg_lf_direct_send);
                     cc__chan_dbg_inc(&g_chan_dbg.lf_direct_send);
                 }
                 if (cc__chan_dbg_enabled()) {
@@ -2505,7 +2501,7 @@ static int cc_chan_recv_owned(CCChan* ch, void* out_value, size_t value_size) {
 
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (!ch || !out_value || value_size == 0) return EINVAL;
-    cc__chan_dbg_inc_chan(&ch->dbg_lf_recv_calls);
+    cc__chan_dbg_inc(&ch->dbg_lf_recv_calls);
     
     /* Owned channel (pool) special handling */
     if (ch->is_owned) {
@@ -2684,7 +2680,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     if (ch->use_lockfree) {
                         cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
                         cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                        cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_recv);
+                        cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
                     }
                     if (timing) {
                         uint64_t done = channel_rdtsc();
@@ -2703,7 +2699,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                         if (ch->use_lockfree) {
                             cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
                             cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                            cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_recv);
+                            cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
                         }
                         if (timing) {
                             uint64_t done = channel_rdtsc();
@@ -2727,7 +2723,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     if (ch->use_lockfree) {
                         cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
                         cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                        cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_recv);
+                        cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
                     }
                     if (timing) {
                         uint64_t done = channel_rdtsc();
@@ -2754,7 +2750,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     if (ch->use_lockfree) {
                         cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
                         cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                        cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_recv);
+                        cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
                     }
                     if (cc__chan_dbg_enabled()) {
                         fprintf(stderr, "CC_CHAN_DEBUG: direct_recv_pre_deq ch=%p node=%p\n", (void*)ch, (void*)&node);
@@ -2824,7 +2820,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 if (ch->use_lockfree) {
                     cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
                     cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                    cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_recv);
+                    cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
                 }
                 if (cc__chan_dbg_enabled()) {
                     fprintf(stderr, "CC_CHAN_DEBUG: direct_recv ch=%p node=%p\n", (void*)ch, (void*)&node);
@@ -2860,7 +2856,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 if (ch->use_lockfree) {
                     cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
                     cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                    cc__chan_dbg_inc_chan(&ch->dbg_lf_direct_recv);
+                    cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
                 }
                 if (cc__chan_dbg_enabled()) {
                     fprintf(stderr, "CC_CHAN_DEBUG: direct_recv_recheck ch=%p node=%p\n", (void*)ch, (void*)&node);
@@ -2878,7 +2874,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 cc__chan_remove_recv_waiter(ch, &node);
                 if (ch->use_lockfree) {
                     cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_cancel);
-                    cc__chan_dbg_inc_chan(&ch->dbg_lf_recv_remove_zero);
+                    cc__chan_dbg_inc(&ch->dbg_lf_recv_remove_zero);
                 }
                 if (cc__chan_dbg_enabled()) {
                     fprintf(stderr, "CC_CHAN_DEBUG: recv_remove_zero ch=%p node=%p pre_in_list=%d pre_notified=%d post_in_list=%d\n",

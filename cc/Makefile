@@ -122,10 +122,10 @@ $(OBJDIR)/%.o: %.c
 
 clean:
 	rm -f $(WRAPPER) $(REAL_BINARY)
+	rm -rf $(OBJDIR)
 	# Clean legacy in-tree objects from earlier layouts.
 	@rm -f $(SRCS:.c=.o)
 	@rm -f bin/cc ../out/cc/bin/cc
-	rm -rf $(OBJDIR)
 
 .PHONY: all clean
 

@@ -96,6 +96,14 @@ When `cc__fiber_unpark()` is called on a fiber that is `RUNNING` or `QUEUED` (no
 
 This ensures no unpark signal is ever lost, regardless of timing.
 
+### `cc__fiber_clear_pending_unpark`
+
+Before entering a multi-channel select (`@match`), the fiber calls `cc__fiber_clear_pending_unpark()` to reset the latch. This prevents a stale `pending_unpark` from a previous channel operation (e.g., a send that completed via direct handoff) from causing the select's `park_if` to skip immediately, which would spin-loop without making progress.
+
+**Invariant:** `pending_unpark` is a *per-park-attempt* signal, not a persistent flag. It must be cleared before any new wait operation that will use `park_if`. Currently this is only needed before select park loops; single-channel send/recv operations use fresh wait nodes whose `notified` field serves the same purpose.
+
+**Audit note:** If a future code path adds a new wait primitive that uses `park_if` across multiple unrelated channels or objects, it must also clear `pending_unpark` before its park loop.
+
 ### `cc__fiber_park_if` (Conditional Park)
 
 ```c
