@@ -254,6 +254,8 @@ typedef struct fiber_task {
     void* park_obj;           /* Optional related object (e.g., channel pointer) */
     uintptr_t fiber_id;       /* Unique ID for this fiber (for debug output) */
     
+    int last_worker_id;       /* Worker affinity hint: last worker that ran this fiber (-1 = none) */
+    
     struct fiber_task* next;  /* For free list / queues */
     struct fiber_task* debug_next;  /* For all-fibers debug list (deadlock dump) */
 } fiber_task;
@@ -988,6 +990,7 @@ static fiber_task* fiber_alloc(void) {
             f->park_reason = NULL;
             f->park_file = NULL;
             f->park_line = 0;
+            f->last_worker_id = -1;
             f->next = NULL;
             /* f->coro and f->fiber_id are kept for reuse! */
             return f;
@@ -1005,6 +1008,7 @@ static fiber_task* fiber_alloc(void) {
         atomic_store(&nf->join_lock, 0);
         nf->tsan_fiber = TSAN_FIBER_CREATE();
         nf->fiber_id = atomic_fetch_add(&g_next_fiber_id, 1);
+        nf->last_worker_id = -1;
     }
     return nf;
 }
@@ -1412,6 +1416,7 @@ static inline int worker_run_fiber(fiber_task* f) {
         return 0;
     }
     tls_current_fiber = f;
+    f->last_worker_id = tls_worker_id;  /* Record affinity hint */
     fiber_resume(f);
     tls_current_fiber = NULL;
     return 1;
@@ -2697,27 +2702,37 @@ queued:
                 (unsigned long)f->fiber_id);
     }
 
-    /* Re-enqueue to LOCAL queue if we're in a worker thread.
-     * This provides better cache locality for ping-pong patterns where
-     * the unparker is likely to be the fiber that will process the response.
-     * Work stealing naturally redistributes work if one queue gets overloaded. */
-    int pushed_local = 0;
-    if (tls_worker_id >= 0) {
-        if (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
-            pushed_local = 1;
+    /* Re-enqueue using fiber affinity hint.
+     * If the fiber previously ran on a specific worker, prefer that worker's
+     * queue (inbox if cross-worker, local if same worker).  This keeps
+     * communicating fiber pairs on the same core, reducing __ulock_wake
+     * cross-core wakes.  Work stealing naturally redistributes load. */
+    int pushed = 0;
+    int preferred = f->last_worker_id;
+    if (preferred >= 0 && preferred < (int)g_sched.num_workers) {
+        if (preferred == tls_worker_id) {
+            /* Same worker — push directly to our local queue (no contention) */
+            pushed = (lq_push(&g_sched.local_queues[preferred], f) == 0);
+        } else {
+            /* Different worker — use its inbox (MPSC-safe) */
+            pushed = (iq_push(&g_sched.inbox_queues[preferred], f) == 0);
         }
+    } else if (tls_worker_id >= 0) {
+        /* No affinity yet — fall back to current worker's local queue */
+        pushed = (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0);
     }
     
-    /* Fallback to global queue if not in worker context or local queue is full */
-    if (!pushed_local) {
+    /* Fallback to global queue if not in worker context or target queue is full */
+    if (!pushed) {
         fq_push_blocking(g_sched.run_queue, f);
     }
     
-    /* Wake ONE sleeping worker - work stealing will naturally distribute load.
-     * Using wake_one instead of wake_all reduces wake overhead and avoids
-     * thundering herd. If more workers are needed, they'll wake when they
-     * find stealable work in other queues. */
-    wake_one_if_sleeping_unconditional(0);
+    /* Wake a sleeping worker — but skip the costly kernel wake syscall if
+     * we pushed to our OWN local queue (the current worker will find the
+     * fiber on its next loop iteration without any kernel transition). */
+    if (!(pushed && preferred == tls_worker_id && preferred >= 0)) {
+        wake_one_if_sleeping_unconditional(0);
+    }
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {

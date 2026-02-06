@@ -441,6 +441,7 @@ struct CCChan {
     void *buf;                 /* Data buffer: ring buffer for mutex path, slot array for lock-free */
     size_t elem_size;
     int closed;
+    int fast_path_ok;          /* Brand: 1 = minimal fast path eligible (lockfree, small elem, not owned) */
     int tx_error_code;         /* Error code when tx closed with error (downstream propagation) */
     int rx_error_closed;       /* Flag: rx side was error-closed */
     int rx_error_code;         /* Error code from rx side (upstream propagation to senders) */
@@ -1228,6 +1229,7 @@ void cc_chan_close(CCChan* ch) {
         atomic_store_explicit(&g_chan_dbg_last_close, (uintptr_t)ch, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_chan_dbg_close_seq, 1, memory_order_relaxed);
     }
+    ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
     ch->closed = 1;
     pthread_cond_broadcast(&ch->not_empty);
@@ -1248,6 +1250,7 @@ void cc_chan_close_err(CCChan* ch, int err) {
         atomic_store_explicit(&g_chan_dbg_last_close, (uintptr_t)ch, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_chan_dbg_close_seq, 1, memory_order_relaxed);
     }
+    ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
     ch->closed = 1;
     ch->tx_error_code = err;
@@ -1262,6 +1265,7 @@ void cc_chan_close_err(CCChan* ch, int err) {
 
 void cc_chan_rx_close_err(CCChan* ch, int err) {
     if (!ch) return;
+    ch->fast_path_ok = 0;  /* Disable minimal fast path */
     pthread_mutex_lock(&ch->mu);
     ch->rx_error_closed = 1;
     ch->rx_error_code = err;
@@ -1357,6 +1361,11 @@ static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
             ch->buf = malloc(slots * elem_size);
             if (!ch->buf) return ENOMEM;
         }
+        /* Brand the channel for the minimal fast path if all invariants hold:
+         * lockfree, buffered, small elements, not owned/ordered/sync. */
+        ch->fast_path_ok = (ch->use_lockfree && ch->cap > 0 && ch->buf &&
+                            elem_size <= sizeof(void*) &&
+                            !ch->is_owned && !ch->is_ordered && !ch->is_sync);
         return 0;
     }
     if (ch->elem_size != elem_size) return EINVAL;
@@ -1747,6 +1756,59 @@ static int cc_chan_try_enqueue_lockfree(CCChan* ch, const void* value) {
     return rc;
 }
 
+/* Minimal-path enqueue: absolute minimum work.  No debug counters, no lfqueue_count,
+ * no signal_activity, no maybe_yield.  Used only from the branded fast_path_ok path
+ * where the caller has already checked the brand. */
+static inline int cc__chan_enqueue_lockfree_minimal(CCChan* ch, const void* value) {
+    void *queue_val = NULL;
+    memcpy(&queue_val, value, ch->elem_size);
+    return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val) ? 0 : EAGAIN;
+}
+
+/* Minimal-path dequeue: absolute minimum work. */
+static inline int cc__chan_dequeue_lockfree_minimal(CCChan* ch, void* out_value) {
+    void *key, *val;
+    if (!lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val))
+        return EAGAIN;
+    memcpy(out_value, &val, ch->elem_size);
+    return 0;
+}
+
+/* Fast-path enqueue: no guard checks, no inflight tracking.
+ * Caller MUST have already verified use_lockfree, cap>0, buf, elem_size<=sizeof(void*).
+ * Use only on the hot send path where the channel is known to be open and valid. */
+static inline int cc__chan_enqueue_lockfree_fast(CCChan* ch, const void* value) {
+    void *queue_val = NULL;
+    memcpy(&queue_val, value, ch->elem_size);
+    cc__chan_dbg_inc(&g_chan_dbg.lf_enq_attempt);
+    int ok = lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
+    if (ok) {
+        atomic_fetch_add_explicit(&ch->lfqueue_count, 1, memory_order_release);
+        cc__chan_dbg_inc(&g_chan_dbg.lf_enq_ok);
+        cc__chan_dbg_inc(&ch->dbg_lf_enq_ok);
+    } else {
+        cc__chan_dbg_inc(&g_chan_dbg.lf_enq_fail);
+    }
+    return ok ? 0 : EAGAIN;
+}
+
+/* Fast-path dequeue: no guard checks.
+ * Caller MUST have already verified use_lockfree, cap>0, buf, elem_size<=sizeof(void*). */
+static inline int cc__chan_dequeue_lockfree_fast(CCChan* ch, void* out_value) {
+    void *key, *val;
+    cc__chan_dbg_inc(&g_chan_dbg.lf_deq_attempt);
+    int ok = lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val);
+    if (!ok) {
+        cc__chan_dbg_inc(&g_chan_dbg.lf_deq_fail);
+        return EAGAIN;
+    }
+    cc__chan_dbg_inc(&g_chan_dbg.lf_deq_ok);
+    cc__chan_dbg_inc(&ch->dbg_lf_deq_ok);
+    atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
+    memcpy(out_value, &val, ch->elem_size);
+    return 0;
+}
+
 /* Try lock-free dequeue. Returns 0 on success, EAGAIN if empty.
  * Must NOT hold ch->mu when calling this.
  * ONLY valid for small elements (elem_size <= sizeof(void*)). */
@@ -2121,6 +2183,27 @@ static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct 
 }
 
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
+    /* Minimal fast path: branded channel, just enqueue and return.
+     * Skips guards, debug, timing, signal_activity.
+     * Checks recv_waiters_head to wake parked receivers (pipeline correctness). */
+    if (ch->fast_path_ok && value_size == ch->elem_size) {
+        if (cc__chan_enqueue_lockfree_minimal(ch, value) == 0) {
+            if (__builtin_expect(ch->recv_waiters_head != NULL, 0)) {
+                cc_chan_lock(ch);
+                cc__chan_signal_recv_waiter(ch);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+            }
+            if (__builtin_expect(cc__fiber_in_context() != 0, 1)) {
+                if (++cc__tls_lf_ops >= CC_LF_YIELD_INTERVAL) {
+                    cc__tls_lf_ops = 0;
+                    cc__fiber_yield_global();
+                }
+            }
+            return 0;
+        }
+        /* Buffer full — fall through to full path for yield-retry / blocking */
+    }
     if (!ch || !value || value_size == 0) return EINVAL;
     cc__chan_dbg_inc(&ch->dbg_lf_send_calls);
     
@@ -2196,8 +2279,15 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             pthread_mutex_unlock(&ch->mu);
         }
         
-        /* No waiters - try lock-free enqueue to buffer */
-        int rc = cc_chan_try_enqueue_lockfree(ch, value);
+        /* No waiters - try lock-free enqueue to buffer (fast path, no inflight) */
+        int rc = cc__chan_enqueue_lockfree_fast(ch, value);
+        if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
+            /* Buffer full — yield to let the receiver fiber run, then retry
+             * once before falling to the expensive blocking path.
+             * Use global yield so fibers on other workers can also make progress. */
+            cc__fiber_yield_global();
+            rc = cc__chan_enqueue_lockfree_fast(ch, value);
+        }
         if (rc == 0) {
             if (timing) {
                 uint64_t done = channel_rdtsc();
@@ -2500,6 +2590,28 @@ static int cc_chan_recv_owned(CCChan* ch, void* out_value, size_t value_size) {
 }
 
 int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
+    /* Minimal fast path: branded channel, just dequeue and return.
+     * Skips guards, debug, timing, signal_activity.
+     * Checks send_waiters_head to wake parked senders (pipeline correctness). */
+    if (ch->fast_path_ok && value_size == ch->elem_size) {
+        if (cc__chan_dequeue_lockfree_minimal(ch, out_value) == 0) {
+            if (__builtin_expect(ch->send_waiters_head != NULL, 0)) {
+                cc_chan_lock(ch);
+                cc__chan_wake_one_send_waiter(ch);
+                pthread_cond_signal(&ch->not_full);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+            }
+            if (__builtin_expect(cc__fiber_in_context() != 0, 1)) {
+                if (++cc__tls_lf_ops >= CC_LF_YIELD_INTERVAL) {
+                    cc__tls_lf_ops = 0;
+                    cc__fiber_yield_global();
+                }
+            }
+            return 0;
+        }
+        /* Buffer empty — fall through to full path for yield-retry / blocking */
+    }
     if (!ch || !out_value || value_size == 0) return EINVAL;
     cc__chan_dbg_inc(&ch->dbg_lf_recv_calls);
     
@@ -2523,7 +2635,14 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
      * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
-        int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
+        int rc = cc__chan_dequeue_lockfree_fast(ch, out_value);
+        if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
+            /* Buffer empty — yield to let the sender fiber run, then retry
+             * once before falling to the expensive blocking path.
+             * Use global yield so fibers on other workers can also make progress. */
+            cc__fiber_yield_global();
+            rc = cc__chan_dequeue_lockfree_fast(ch, out_value);
+        }
         if (rc == 0) {
             if (timing) {
                 uint64_t done = channel_rdtsc();
@@ -2621,9 +2740,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     }
     
     while (1) {
-        /* Try lock-free dequeue */
+        /* Try lock-free dequeue (fast path, guards already checked) */
         pthread_mutex_unlock(&ch->mu);
-        int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
+        int rc = cc__chan_dequeue_lockfree_fast(ch, out_value);
         if (rc == 0) {
             
             if (timing) t_dequeue = channel_rdtsc();
@@ -2782,7 +2901,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 cc__chan_remove_recv_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
             }
-            if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
+            if (cc__chan_dequeue_lockfree_fast(ch, out_value) == 0) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
                 pthread_cond_signal(&ch->not_full);
