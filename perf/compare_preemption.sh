@@ -61,6 +61,9 @@ run_test "Concurrent-C" "$REPO_ROOT/bin/noisy_neighbor"
 CC_BEATS=$(cat last_beats.txt)
 rm last_beats.txt
 
+echo "DATA_PTHREAD_PRE_BEATS: $PTHREAD_BEATS"
+echo "DATA_CC_PRE_BEATS: $CC_BEATS"
+
 echo ""
 echo "================================================================="
 echo "VERDICT"

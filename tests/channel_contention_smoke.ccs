@@ -1,0 +1,53 @@
+/*
+ * channel_contention_smoke.ccs - lock-free contention deadlock guard
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+
+#define ITERS 10000
+
+cc_atomic_int g_errors = 0;
+
+static void producer(CCChanTx tx, int count) {
+    for (int i = 0; i < count; i++) {
+        CCDeadline d = cc_deadline_after_ms(200);
+        int rc = cc_chan_deadline_send(tx.raw, &i, sizeof(int), &d);
+        if (rc != 0) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            return;
+        }
+    }
+}
+
+static void consumer(CCChanRx rx, int count) {
+    int v = 0;
+    for (int i = 0; i < count; i++) {
+        CCDeadline d = cc_deadline_after_ms(200);
+        int rc = cc_chan_deadline_recv(rx.raw, &v, sizeof(int), &d);
+        if (rc != 0) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            return;
+        }
+    }
+}
+
+int main(void) {
+    int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = channel_pair(&tx1_h, &rx1_h);
+    int[~1024 >] tx2_h; int[~1024 <] rx2_h; CCChan* ch2 = channel_pair(&tx2_h, &rx2_h);
+    (void)ch1; (void)ch2;
+    CCChanTx tx1 = tx1_h;
+    CCChanRx rx1 = rx1_h;
+    CCChanTx tx2 = tx2_h;
+    CCChanRx rx2 = rx2_h;
+
+    @nursery {
+        spawn(() => [tx1] { producer(tx1, ITERS); });
+        spawn(() => [rx1] { consumer(rx1, ITERS); });
+        spawn(() => [tx2] { producer(tx2, ITERS); });
+        spawn(() => [rx2] { consumer(rx2, ITERS); });
+    }
+
+    return cc_atomic_load(&g_errors) == 0 ? 0 : 1;
+}

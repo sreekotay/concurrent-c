@@ -34,6 +34,9 @@ echo ""
 PTHREAD_TP=$(grep "Throughput" arena_pthread_out.txt | awk '{print $2}')
 CC_TP=$(grep "Throughput" arena_cc_out.txt | awk '{print $2}')
 
+echo "DATA_PTHREAD_ARENA_TP: $PTHREAD_TP"
+echo "DATA_CC_ARENA_TP: $CC_TP"
+
 echo "================================================================="
 echo "FINAL VERDICT"
 echo "================================================================="

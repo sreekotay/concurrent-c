@@ -31,8 +31,11 @@ echo "--- Running Concurrent-C ---"
 echo ""
 
 # 4. Extract average latency
-PTHREAD_AVG=$(grep "Sample" herd_pthread_out.txt | sed 's/.*: *//; s/ ms//' | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
-CC_AVG=$(grep "Sample" herd_cc_out.txt | sed 's/.*: *//; s/ ms//' | awk '{sum+=$1} END {if (NR>0) print sum/NR; else print 0}')
+PTHREAD_AVG=$(grep "Sample" herd_pthread_out.txt | sed 's/.*: *//; s/ ms//' | awk '{sum+=$1} END {if (NR>0) printf "%.4f", sum/NR; else print "0"}')
+CC_AVG=$(grep "Sample" herd_cc_out.txt | sed 's/.*: *//; s/ ms//' | awk '{sum+=$1} END {if (NR>0) printf "%.4f", sum/NR; else print "0"}')
+
+echo "DATA_PTHREAD_HERD_LATENCY: $PTHREAD_AVG"
+echo "DATA_CC_HERD_LATENCY: $CC_AVG"
 
 echo "================================================================="
 echo "FINAL VERDICT"

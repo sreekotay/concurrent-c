@@ -1,0 +1,108 @@
+/*
+ * lost_wakeup_hammer.ccs - Channel Selection Correctness Test
+ *
+ * This test hammers unbuffered channels with many concurrent selectors
+ * and senders. It targets the "Lost Wakeup" bug where a notification
+ * is dropped during high contention, leaving a fiber blocked forever.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define NUM_FIBERS 50
+#define OPS_PER_FIBER 1000
+#define TOTAL_OPS (NUM_FIBERS * OPS_PER_FIBER)
+
+cc_atomic_int g_recvs_completed = 0;
+cc_atomic_int g_sends_completed = 0;
+
+void selector_fiber(int[~ <] rx1, int[~ <] rx2) {
+    for (int i = 0; i < OPS_PER_FIBER; i++) {
+        int v;
+        @match {
+            case rx1.recv(&v): {
+                cc_atomic_fetch_add(&g_recvs_completed, 1);
+            }
+            case rx2.recv(&v): {
+                cc_atomic_fetch_add(&g_recvs_completed, 1);
+            }
+        }
+    }
+}
+
+void sender_fiber(int[~ >] tx1, int[~ >] tx2) {
+    for (int i = 0; i < OPS_PER_FIBER; i++) {
+        int val = i;
+        if (rand() % 2 == 0) {
+            (void)tx1.send(val);
+        } else {
+            (void)tx2.send(val);
+        }
+        cc_atomic_fetch_add(&g_sends_completed, 1);
+    }
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    srand(time(NULL));
+
+    printf("=================================================================\n");
+    printf("LOST WAKEUP HAMMER: %d fibers | %d ops each\n", NUM_FIBERS * 2, OPS_PER_FIBER);
+    printf("Targeting unbuffered channel rendezvous contention...\n");
+    printf("=================================================================\n\n");
+
+    int[~ >] tx1_h, tx2_h;
+    int[~ <] rx1_h, rx2_h;
+    channel_pair(&tx1_h, &rx1_h); // Unbuffered by default
+    channel_pair(&tx2_h, &rx2_h);
+
+    int[~ >] tx1 = tx1_h; int[~ >] tx2 = tx2_h;
+    int[~ <] rx1 = rx1_h; int[~ <] rx2 = rx2_h;
+
+    @nursery {
+        // 1. Start Selectors
+        for (int i = 0; i < NUM_FIBERS; i++) {
+            CCChanRx r1 = rx1;
+            CCChanRx r2 = rx2;
+            spawn(() => [r1, r2] { selector_fiber(r1, r2); });
+        }
+
+        // 2. Start Senders
+        for (int i = 0; i < NUM_FIBERS; i++) {
+            CCChanTx t1 = tx1;
+            CCChanTx t2 = tx2;
+            spawn(() => [t1, t2] { sender_fiber(t1, t2); });
+        }
+        
+        // 3. Monitor progress with a timeout
+        int last_count = 0;
+        int stalled_iters = 0;
+        while (cc_atomic_load(&g_recvs_completed) < TOTAL_OPS) {
+            cc_sleep_ms(500);
+            int current = cc_atomic_load(&g_recvs_completed);
+            printf("\rProgress: %d/%d operations...", current, TOTAL_OPS);
+            
+            if (current == last_count) {
+                stalled_iters++;
+                if (stalled_iters > 10) { // 5 seconds of no progress
+                    printf("\n\n!!! HANG DETECTED !!!\n");
+                    printf("Possible Lost Wakeup bug in channel selection.\n");
+                    printf("Sends completed: %d\n", cc_atomic_load(&g_sends_completed));
+                    printf("Recvs completed: %d\n", current);
+                    exit(1);
+                }
+            } else {
+                last_count = current;
+                stalled_iters = 0;
+            }
+        }
+    }
+
+    printf("\n\nRESULT: PASS - All %d operations completed without a hang.\n", TOTAL_OPS);
+    printf("=================================================================\n");
+
+    return 0;
+}

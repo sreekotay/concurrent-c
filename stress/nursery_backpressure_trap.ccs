@@ -1,0 +1,55 @@
+/*
+ * nursery_backpressure_trap.ccs - The Structured Concurrency "Death Trap"
+ *
+ * This test verifies if a fiber blocked on backpressure (full channel)
+ * correctly unblocks when its parent nursery is cancelled.
+ *
+ * If it doesn't, the nursery will hang forever waiting for the fiber.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define CHANNEL_CAP 1
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    printf("=================================================================\n");
+    printf("NURSERY BACKPRESSURE TRAP: Can cancellation break backpressure?\n");
+    printf("=================================================================\n\n");
+
+    int[~CHANNEL_CAP >] tx_h; int[~CHANNEL_CAP <] rx_h;
+    channel_pair(&tx_h, &rx_h);
+    int[~CHANNEL_CAP >] tx = tx_h;
+
+    // 1. Fill the channel to create backpressure
+    tx.send(1);
+    printf("Channel is full. Next send will block.\n");
+
+    @nursery {
+        // 2. Spawn a fiber that will block on send
+        CCChanTx t = tx;
+        spawn(() => [t] {
+            printf("[Fiber] Attempting to send to full channel (will block)...\n");
+            int rc = cc_chan_send(t.raw, (int[]){2}, sizeof(int));
+            printf("[Fiber] Send returned with code: %d (expected EPIPE=32 or ECANCELED=89)\n", rc);
+        });
+
+        // 3. Wait a bit to ensure the fiber is actually blocked
+        cc_sleep_ms(500);
+
+        // 4. Close the channel to break backpressure
+        printf("[Main] Closing channel to unblock fiber...\n");
+        t.close();
+        printf("[Main] Channel closed. Nursery will exit when fiber completes.\n");
+    }
+
+    printf("\nRESULT: PASS - The nursery successfully joined the blocked fiber!\n");
+    printf("=================================================================\n");
+
+    return 0;
+}

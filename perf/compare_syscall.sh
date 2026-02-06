@@ -59,6 +59,9 @@ run_test "Concurrent-C" "$REPO_ROOT/bin/syscall_kidnap"
 CC_BEATS=$(cat last_beats.txt)
 rm last_beats.txt
 
+echo "DATA_PTHREAD_SYSCALL_BEATS: $PTHREAD_BEATS"
+echo "DATA_CC_SYSCALL_BEATS: $CC_BEATS"
+
 echo ""
 echo "================================================================="
 echo "VERDICT"

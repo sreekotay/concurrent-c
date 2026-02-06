@@ -35,6 +35,9 @@ echo ""
 PTHREAD_DROP=$(grep "Throughput Drop" pthread_out.txt | tail -n 1 | awk '{print $3}' | tr -d '%')
 CC_DROP=$(grep "Throughput Drop" cc_out.txt | tail -n 1 | awk '{print $3}' | tr -d '%')
 
+echo "DATA_PTHREAD_CONT_DROP: $PTHREAD_DROP"
+echo "DATA_CC_CONT_DROP: $CC_DROP"
+
 echo "================================================================="
 echo "FINAL VERDICT"
 echo "================================================================="

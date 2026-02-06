@@ -1,0 +1,30 @@
+/*
+ * Minimal test: spawn a single fiber and wait for it.
+ * This isolates the core spawn/join race condition.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 1000
+
+cc_atomic_int g = 0;
+
+int main(void) {
+    printf("minimal_spawn_race: testing basic spawn/join\n");
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        int x = i;
+        @nursery {
+            spawn (() => [x] {
+                cc_atomic_store(&g, x);
+            });
+        }
+        
+        if ((i + 1) % 100 == 0) {
+            printf("  completed %d/%d (g=%d)\n", i + 1, ITERATIONS, cc_atomic_load(&g));
+        }
+    }
+    
+    printf("minimal_spawn_race: PASS (%d iterations)\n", ITERATIONS);
+    return 0;
+}

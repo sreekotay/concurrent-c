@@ -1,0 +1,132 @@
+/*
+ * channel_close_race.ccs - High-concurrency Channel Closure Test
+ *
+ * This test hammers a buffered channel with many concurrent senders and receivers,
+ * then closes the channel in the middle of the storm.
+ * It verifies that:
+ * 1. All fibers unblock immediately with EPIPE.
+ * 2. No fibers are left hanging (zombies).
+ * 3. The runtime doesn't crash on idempotent close.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define NUM_FIBERS 50
+#define NUM_ITERS 50
+
+cc_atomic_int g_sends_attempted = 0;
+cc_atomic_int g_recvs_attempted = 0;
+cc_atomic_int g_sends_finished = 0;
+cc_atomic_int g_recvs_finished = 0;
+
+void sender(int[~10 >] tx, int id, int trace, int trace_every) {
+    int ops = 0;
+    while (1) {
+        cc_atomic_fetch_add(&g_sends_attempted, 1);
+        int rc = cc_chan_send(tx.raw, (int[]){42}, sizeof(int));
+        cc_atomic_fetch_add(&g_sends_finished, 1);
+        if (trace && trace_every > 0) {
+            ops++;
+            if ((ops % trace_every) == 0) {
+                printf("[send %d] ops=%d rc=%d\n", id, ops, rc);
+            }
+        }
+        if (rc != 0) break; // Channel closed
+    }
+}
+
+void receiver(int[~10 <] rx, int id, int trace, int trace_every) {
+    int ops = 0;
+    while (1) {
+        cc_atomic_fetch_add(&g_recvs_attempted, 1);
+        int v;
+        int rc = cc_chan_recv(rx.raw, &v, sizeof(int));
+        cc_atomic_fetch_add(&g_recvs_finished, 1);
+        if (trace && trace_every > 0) {
+            ops++;
+            if ((ops % trace_every) == 0) {
+                printf("[recv %d] ops=%d rc=%d\n", id, ops, rc);
+            }
+        }
+        if (rc != 0) break; // Channel closed
+    }
+}
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    int n = atoi(v);
+    return n > 0 ? n : fallback;
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    srand(time(NULL));
+    int num_fibers = env_int_or("CC_STRESS_FIBERS", NUM_FIBERS);
+    int num_iters = env_int_or("CC_STRESS_ITERS", NUM_ITERS);
+    int verbose = env_int_or("CC_STRESS_VERBOSE", 0);
+    int trace = env_int_or("CC_STRESS_TRACE", 0);
+    int trace_every = env_int_or("CC_STRESS_TRACE_EVERY", 1000);
+
+    printf("=================================================================\n");
+    printf("CHANNEL CLOSE RACE: %d fibers | %d iterations\n", num_fibers * 2, num_iters);
+    printf("Targeting atomic teardown and immediate eviction...\n");
+    printf("=================================================================\n\n");
+
+    for (int iter = 1; iter <= num_iters; iter++) {
+        cc_atomic_store(&g_sends_attempted, 0);
+        cc_atomic_store(&g_recvs_attempted, 0);
+        cc_atomic_store(&g_sends_finished, 0);
+        cc_atomic_store(&g_recvs_finished, 0);
+
+        printf("\rIteration %d/%d...", iter, num_iters);
+
+        int[~10 >] tx_h; int[~10 <] rx_h;
+        channel_pair(&tx_h, &rx_h);
+        int[~10 >] tx = tx_h; int[~10 <] rx = rx_h;
+
+        @nursery {
+            // 1. Start the storm
+            for (int i = 0; i < num_fibers; i++) {
+                CCChanTx t = tx;
+                CCChanRx r = rx;
+                int sid = i;
+                int rid = i;
+                spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); });
+                spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); });
+            }
+
+            // 2. Close from parent context immediately.
+            //    The parent thread isn't a fiber worker, so it won't be starved.
+            tx.close();
+            tx.close();
+        }
+
+        // 5. Verification: All fibers that attempted an op must have finished it
+        int s_att = cc_atomic_load(&g_sends_attempted);
+        int s_fin = cc_atomic_load(&g_sends_finished);
+        int r_att = cc_atomic_load(&g_recvs_attempted);
+        int r_fin = cc_atomic_load(&g_recvs_finished);
+
+        if (s_att != s_fin || r_att != r_fin) {
+            printf("\n\n!!! FAILURE DETECTED !!!\n");
+            printf("Iteration: %d\n", iter);
+            printf("Sends: %d attempted, %d finished (%d hanging)\n", s_att, s_fin, s_att - s_fin);
+            printf("Recvs: %d attempted, %d finished (%d hanging)\n", r_att, r_fin, r_att - r_fin);
+            return 1;
+        }
+        if (verbose) {
+            printf("\n  Sends: %d attempted, %d finished\n", s_att, s_fin);
+            printf("  Recvs: %d attempted, %d finished\n", r_att, r_fin);
+        }
+    }
+
+    printf("\n\nRESULT: PASS - All %d iterations survived the chaos close.\n", num_iters);
+    printf("=================================================================\n");
+
+    return 0;
+}

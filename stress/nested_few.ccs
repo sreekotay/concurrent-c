@@ -1,0 +1,29 @@
+/*
+ * Nested nursery with few iterations - find minimum to trigger bug
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define ITERATIONS 10
+
+cc_atomic_int g = 0;
+
+int main(void) {
+    printf("nested_few: %d iterations\n", ITERATIONS);
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        int x = i;
+        @nursery {
+            spawn (() => [x] {
+                @nursery {
+                    spawn (() => [x] {
+                        cc_atomic_store(&g, x);
+                    });
+                }
+            });
+        }
+    }
+    
+    printf("nested_few: PASS (g=%d)\n", cc_atomic_load(&g));
+    return 0;
+}

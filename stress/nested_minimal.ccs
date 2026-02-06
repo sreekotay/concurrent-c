@@ -1,0 +1,36 @@
+/*
+ * Minimal nested nursery test - single iteration
+ * If this fails, we have isolated the bug.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+cc_atomic_int g = 0;
+
+int main(void) {
+    printf("nested_minimal: single iteration\n");
+    
+    @nursery {
+        spawn (() => [] {
+            printf("  fiber1: starting\n");
+            @nursery {
+                spawn (() => [] {
+                    printf("  fiber2: running\n");
+                    cc_atomic_store(&g, 42);
+                });
+            }
+            printf("  fiber1: done\n");
+        });
+    }
+    
+    int val = cc_atomic_load(&g);
+    printf("nested_minimal: g=%d (expected 42)\n", val);
+    
+    if (val == 42) {
+        printf("nested_minimal: PASS\n");
+        return 0;
+    } else {
+        printf("nested_minimal: FAIL\n");
+        return 1;
+    }
+}

@@ -24,7 +24,7 @@ $(OUT_DIR)/pigz: $(PIGZ_SRCS) $(PIGZ_C_DIR)/yarn.h $(PIGZ_C_DIR)/try.h | $(OUT_D
 
 # CC version
 $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
-	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz -lzopfli -L/opt/homebrew/lib" --cc-flags "-I/opt/homebrew/include"
+	$(CCC) -O -o $@ pigz_cc/pigz_cc.ccs --ld-flags "-lz -lzopfli -L/opt/homebrew/lib" --cc-flags "-I/opt/homebrew/include" --release
 
 # Idiomatic CC version (with T!E result types)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
