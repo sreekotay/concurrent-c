@@ -13,7 +13,7 @@ CURL_BUILD := $(CURL_DIR)/build
 all: cc
 
 cc:
-	$(MAKE) -C $(CC_DIR) BUILD=$(BUILD)
+	$(MAKE) -C $(CC_DIR) BUILD=$(BUILD) -B
 
 clean:
 	$(MAKE) -C $(CC_DIR) clean

@@ -19,6 +19,7 @@ static void bench_buffered(void) {
     int[~1000 >] tx;
     int[~1000 <] rx;
     channel_pair(&tx, &rx);
+    printf("  [buffered] tx.raw=%p rx.raw=%p\n", (void*)tx.raw, (void*)rx.raw);
     
     double start = time_now_ms();
     
@@ -51,6 +52,7 @@ static void bench_unbuffered(void) {
     int[~ >] tx;
     int[~ <] rx;
     channel_pair(&tx, &rx);  /* unbuffered */
+    printf("  [unbuffered] tx.raw=%p rx.raw=%p\n", (void*)tx.raw, (void*)rx.raw);
     
     int iterations = ITERATIONS / 10;  /* Unbuffered is slower */
     double start = time_now_ms();
@@ -82,6 +84,7 @@ static void bench_single_thread(void) {
     int[~1000 >] tx;
     int[~1000 <] rx;
     channel_pair(&tx, &rx);
+    printf("  [single-thread] tx.raw=%p rx.raw=%p\n", (void*)tx.raw, (void*)rx.raw);
     
     double start = time_now_ms();
     

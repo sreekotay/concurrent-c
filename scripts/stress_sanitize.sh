@@ -17,6 +17,9 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Per-test timeout (seconds). Use `STRESS_TIMEOUT=NN` to override.
+STRESS_TIMEOUT=${STRESS_TIMEOUT:-60}
+
 STRESS_TESTS=(
     stress/spawn_storm.ccs
     stress/channel_flood.ccs
@@ -43,7 +46,7 @@ run_with_sanitizer() {
 
         # Build and run with sanitizer
         # Note: --no-cache ensures fresh build with sanitizer flags
-        output=$(./cc/bin/ccc build run "$test" --cc-flags "$san_flags" --no-cache 2>&1) || true
+        output=$(./cc/bin/ccc build run "$test" --timeout "$STRESS_TIMEOUT" --cc-flags "$san_flags" --no-cache 2>&1) || true
         exit_code=$?
 
         # Check for sanitizer errors in output
@@ -108,7 +111,7 @@ run_with_compiler() {
         printf "  %-30s " "$name"
 
         # Build and run with specific compiler
-        output=$(CC="$cc_bin" CFLAGS="-w" ./cc/bin/ccc build run "$test" --no-cache 2>&1) || true
+        output=$(CC="$cc_bin" CFLAGS="-w" ./cc/bin/ccc build run "$test" --timeout "$STRESS_TIMEOUT" --no-cache 2>&1) || true
         exit_code=$?
 
         # Check exit code and output

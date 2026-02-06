@@ -24,7 +24,7 @@ Defines the fiber lifecycle states:
 ```c
 typedef enum {
     CC__FIBER_CREATED,  // Newly allocated
-    CC__FIBER_READY,    // Ready to run
+    CC__FIBER_QUEUED,   // Queued to run
     CC__FIBER_RUNNING,  // Currently executing
     CC__FIBER_PARKED,   // Blocked (e.g., waiting on channel)
     CC__FIBER_DONE      // Completed

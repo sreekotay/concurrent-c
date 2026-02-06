@@ -1448,6 +1448,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
 
     /* Some stub STMT spans can cover multiple semicolon-terminated statements (especially after
        other rewrites inserted helper decls + await statements). Split and emit each. */
+    char* alloc_p = NULL;
     {
         char** parts = NULL;
         int pn = 0;
@@ -1463,6 +1464,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         }
         if (pn == 1) {
             p = parts[0];
+            alloc_p = parts[0];
             /* fall through; free at end of function */
         } else {
             free(parts);
@@ -1470,6 +1472,24 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         if (pn == 1) {
             /* keep p allocated until end */
         }
+    }
+
+    /* Handle preprocessor lines injected by earlier passes (e.g. nursery_cancel macro).
+       Emit each #line separately with identifier rewrites, then continue with the remainder. */
+    while (1) {
+        const char* q = cc__skip_ws(p);
+        if (q[0] != '#') { p = q; break; }
+        const char* le = strpbrk(q, "\r\n");
+        size_t ln = le ? (size_t)(le - q) : strlen(q);
+        char* line = cc__strndup_trim_ws(q, ln);
+        char* line2 = cc__rewrite_idents(line, e->map_names, e->map_repls, e->map_n);
+        if (line2) cc__emit_line(e, line2);
+        free(line);
+        free(line2);
+        if (!le) { if (alloc_p) free(alloc_p); return 1; }
+        p = le;
+        while (*p == '\r' || *p == '\n') p++;
+        if (*p == 0) { if (alloc_p) free(alloc_p); return 1; }
     }
 
     if (strncmp(p, "return", 6) == 0 && !cc__is_ident_char(p[6])) {
@@ -1720,7 +1740,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         }
     }
     /* free single-part allocation if we created it */
-    if (p != text) free((void*)p);
+    if (alloc_p) free(alloc_p);
     return 1;
 }
 

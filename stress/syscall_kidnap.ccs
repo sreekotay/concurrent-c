@@ -26,13 +26,10 @@ atomic_int g_kidnappers_active = 0;
 void heartbeat_fiber() {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("[Heartbeat] Started\n");
-    while (1) {
+    while (!cc_cancelled()) {
         usleep(HEARTBEAT_INTERVAL_MS * 1000);
         atomic_fetch_add(&g_heartbeats, 1);
         printf("[Heartbeat] Tick %d\n", atomic_load(&g_heartbeats));
-        // Pattern: (cancelled && no_work) => exit
-        // We just did our work (tick). If cancelled, don't do more.
-        if (cc_cancelled()) break;
     }
     printf("[Heartbeat] Cancelled, exiting\n");
 }

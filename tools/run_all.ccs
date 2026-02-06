@@ -65,6 +65,7 @@ static void write_log(CCArena* arena, const char* path, const char* suffix,
 static int get_expected_exit_code(const char* path) {
     if (strstr(path, "recipe_tcp_echo") != NULL) return -1;       /* Server */
     if (strstr(path, "deadlock_detect_demo") != NULL) return 1;   /* Expected deadlock abort */
+    if (strstr(path, "complex_deadlock") != NULL) return 1;   /* Expected deadlock abort */
     return 0;
 }
 
