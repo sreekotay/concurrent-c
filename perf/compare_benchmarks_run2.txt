@@ -1,0 +1,22 @@
+
+=== compare_benchmarks run 2 ===
+[0;34mConcurrent-C vs Go Performance Comparison[0m
+==========================================
+
+[0;34mPerformance Comparison: Concurrent-C vs Go[0m
+==========================================
+[0;36mBenchmark            [0;32mConcurrent-C       [0;34mGo                 [1;33mC/Go    [0m
+------------------------------------------------------------------------------------------
+[1;33mRunning spawn_nursery...[0m
+spawn_nursery        [0;32m2037033 spawns/sec [0;34m5918134 spawns/sec [1;33m0.34    [0m
+[1;33mRunning spawn_sequential...[0m
+spawn_sequential     [0;32m12500000 spawns/sec [0;34m4082935 spawns/sec [1;33m3.06    [0m
+[1;33mRunning channel_throughput...[0m
+  single-thread      [0;32m88495575 ops/sec   [0;34m100061072 ops/sec  [1;33m0.88    [0m
+  buffered           [0;32m71505184 ops/sec   [0;34m78837455 ops/sec   [1;33m0.90    [0m
+  unbuffered         [0;32m14015417 ops/sec   [0;34m17921680 ops/sec   [1;33m0.78    [0m
+
+[0;32m✓ Comparison completed[0m
+
+Ratio: Concurrent-C performance relative to Go (higher = better)
+Note: Comparisons use primary metric from each benchmark

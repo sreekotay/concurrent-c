@@ -1,0 +1,7 @@
+
+Median results over 10 runs:
+spawn_nursery    CC 2175880 spawns/sec | Go 5930860 spawns/sec | C/Go 0.37
+spawn_sequential CC 14506017 spawns/sec | Go 4043240 spawns/sec | C/Go 3.59
+single-thread    CC 37950686 ops/sec | Go 110196971 ops/sec | C/Go 0.34
+buffered         CC 59857802 ops/sec | Go 82535113 ops/sec | C/Go 0.73
+unbuffered       CC 8807950 ops/sec | Go 18214564 ops/sec | C/Go 0.48
