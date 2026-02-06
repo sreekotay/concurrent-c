@@ -15,19 +15,20 @@ echo ""
 
 # 1. Build implementations
 echo "Building tests..."
-$CCC build "$SCRIPT_DIR/arena_contention_storm.ccs" -o "$SCRIPT_DIR/arena_contention_storm"
-gcc -O3 "$SCRIPT_DIR/pthread_malloc_baseline.c" -o "$SCRIPT_DIR/pthread_malloc_baseline" -lpthread
+mkdir -p "$SCRIPT_DIR/out"
+$CCC build "$SCRIPT_DIR/arena_contention_storm.ccs" -o "$SCRIPT_DIR/out/arena_contention_storm"
+gcc -O3 "$SCRIPT_DIR/pthread_malloc_baseline.c" -o "$SCRIPT_DIR/out/pthread_malloc_baseline" -lpthread
 echo "Done."
 echo ""
 
 # 2. Run Pthread Baseline
 echo "--- Running Pthread Malloc Baseline ---"
-"$SCRIPT_DIR/pthread_malloc_baseline" | tee arena_pthread_out.txt
+"$SCRIPT_DIR/out/pthread_malloc_baseline" | tee arena_pthread_out.txt
 echo ""
 
 # 3. Run Concurrent-C Arena
 echo "--- Running Concurrent-C Arena ---"
-"$SCRIPT_DIR/arena_contention_storm" | tee arena_cc_out.txt
+"$SCRIPT_DIR/out/arena_contention_storm" | tee arena_cc_out.txt
 echo ""
 
 # 4. Extract throughput

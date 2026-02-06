@@ -23,8 +23,9 @@ echo ""
 
 # 1. Build implementations
 echo "Building tests..."
-$CCC build "$STRESS_DIR/noisy_neighbor.ccs" -o "$STRESS_DIR/noisy_neighbor"
-gcc -O3 "$STRESS_DIR/pthread_noisy_baseline.c" -o "$STRESS_DIR/pthread_noisy_baseline" -lpthread
+mkdir -p "$STRESS_DIR/out"
+$CCC build "$STRESS_DIR/noisy_neighbor.ccs" -o "$STRESS_DIR/out/noisy_neighbor"
+gcc -O3 "$STRESS_DIR/pthread_noisy_baseline.c" -o "$STRESS_DIR/out/pthread_noisy_baseline" -lpthread
 echo "Done."
 echo ""
 
@@ -50,14 +51,14 @@ run_test() {
 }
 
 # 2. Run Pthread Baseline
-run_test "Pthread (Baseline)" "$STRESS_DIR/pthread_noisy_baseline"
+run_test "Pthread (Baseline)" "$STRESS_DIR/out/pthread_noisy_baseline"
 PTHREAD_BEATS=$(cat last_beats.txt)
 
 echo ""
 
 # 3. Run Concurrent-C
 export CC_FIBER_WORKERS=$WORKERS
-run_test "Concurrent-C" "$REPO_ROOT/bin/noisy_neighbor"
+run_test "Concurrent-C" "$STRESS_DIR/out/noisy_neighbor"
 CC_BEATS=$(cat last_beats.txt)
 rm last_beats.txt
 

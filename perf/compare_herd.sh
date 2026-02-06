@@ -15,19 +15,20 @@ echo ""
 
 # 1. Build implementations
 echo "Building tests..."
-$CCC build "$SCRIPT_DIR/thundering_herd.ccs" -o "$SCRIPT_DIR/thundering_herd"
-gcc -O3 "$SCRIPT_DIR/pthread_herd_baseline.c" -o "$SCRIPT_DIR/pthread_herd_baseline" -lpthread
+mkdir -p "$SCRIPT_DIR/out"
+$CCC build "$SCRIPT_DIR/thundering_herd.ccs" -o "$SCRIPT_DIR/out/thundering_herd"
+gcc -O3 "$SCRIPT_DIR/pthread_herd_baseline.c" -o "$SCRIPT_DIR/out/pthread_herd_baseline" -lpthread
 echo "Done."
 echo ""
 
 # 2. Run Pthread Baseline
 echo "--- Running Pthread Baseline ---"
-"$SCRIPT_DIR/pthread_herd_baseline" | tee herd_pthread_out.txt
+"$SCRIPT_DIR/out/pthread_herd_baseline" | tee herd_pthread_out.txt
 echo ""
 
 # 3. Run Concurrent-C
 echo "--- Running Concurrent-C ---"
-"$SCRIPT_DIR/thundering_herd" | tee herd_cc_out.txt
+"$SCRIPT_DIR/out/thundering_herd" | tee herd_cc_out.txt
 echo ""
 
 # 4. Extract average latency

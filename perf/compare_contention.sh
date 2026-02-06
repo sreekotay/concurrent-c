@@ -16,19 +16,20 @@ echo ""
 
 # 1. Build implementations
 echo "Building tests..."
-$CCC build "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/channel_contention"
-gcc -O3 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/pthread_contention_baseline" -lpthread
+mkdir -p "$SCRIPT_DIR/out"
+$CCC build "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/channel_contention"
+gcc -O3 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
 echo "Done."
 echo ""
 
 # 2. Run Pthread Baseline
 echo "--- Running Pthread Baseline ---"
-"$SCRIPT_DIR/pthread_contention_baseline" | tee pthread_out.txt
+"$SCRIPT_DIR/out/pthread_contention_baseline" | tee pthread_out.txt
 echo ""
 
 # 3. Run Concurrent-C
 echo "--- Running Concurrent-C ---"
-"$SCRIPT_DIR/channel_contention" | tee cc_out.txt
+"$SCRIPT_DIR/out/channel_contention" | tee cc_out.txt
 echo ""
 
 # 4. Extract results

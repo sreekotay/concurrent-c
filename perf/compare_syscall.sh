@@ -23,8 +23,9 @@ echo ""
 
 # 1. Build implementations
 echo "Building tests..."
-$CCC build "$STRESS_DIR/syscall_kidnap.ccs" -o "$STRESS_DIR/syscall_kidnap"
-gcc -O3 "$STRESS_DIR/adler_baseline_kidnap.c" -o "$STRESS_DIR/adler_baseline_kidnap" -lpthread
+mkdir -p "$STRESS_DIR/out"
+$CCC build "$STRESS_DIR/syscall_kidnap.ccs" -o "$STRESS_DIR/out/syscall_kidnap"
+gcc -O3 "$STRESS_DIR/adler_baseline_kidnap.c" -o "$STRESS_DIR/out/adler_baseline_kidnap" -lpthread
 echo "Done."
 echo ""
 
@@ -50,12 +51,12 @@ run_test() {
 }
 
 # 2. Run Pthread Baseline
-run_test "Pthread (Adler)" "$STRESS_DIR/adler_baseline_kidnap"
+run_test "Pthread (Adler)" "$STRESS_DIR/out/adler_baseline_kidnap"
 PTHREAD_BEATS=$(cat last_beats.txt)
 
 # 3. Run Concurrent-C
 export CC_FIBER_WORKERS=$WORKERS
-run_test "Concurrent-C" "$REPO_ROOT/bin/syscall_kidnap"
+run_test "Concurrent-C" "$STRESS_DIR/out/syscall_kidnap"
 CC_BEATS=$(cat last_beats.txt)
 rm last_beats.txt
 
