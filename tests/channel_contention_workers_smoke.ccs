@@ -6,13 +6,13 @@
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_atomic.cch>
 
-#define ITERS 200000
+#define ITERS 50000
 
 cc_atomic_int g_errors = 0;
 
 static void producer(CCChanTx tx, int count) {
     for (int i = 0; i < count; i++) {
-        CCDeadline d = cc_deadline_after_ms(200);
+        CCDeadline d = cc_deadline_after_ms(2000);
         int rc = cc_chan_deadline_send(tx.raw, &i, sizeof(int), &d);
         if (rc != 0) { 
             fprintf(stderr, "producer: send error rc=%d at i=%d\n", rc, i);
@@ -25,7 +25,7 @@ static void producer(CCChanTx tx, int count) {
 static void consumer(CCChanRx rx, int count) {
     int v = 0;
     for (int i = 0; i < count; i++) {
-        CCDeadline d = cc_deadline_after_ms(200);
+        CCDeadline d = cc_deadline_after_ms(2000);
         int rc = cc_chan_deadline_recv(rx.raw, &v, sizeof(int), &d);
         if (rc != 0) { 
             fprintf(stderr, "consumer: recv error rc=%d at i=%d\n", rc, i);

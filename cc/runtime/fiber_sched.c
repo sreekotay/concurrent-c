@@ -2431,6 +2431,12 @@ void* cc_fiber_get_result(fiber_task* f) {
     return f->result;
 }
 
+/* Get pointer to fiber's result_buf (for range checks in task.c) */
+void* cc_fiber_get_result_buf(fiber_task* f) {
+    if (!f) return NULL;
+    return f->result_buf;
+}
+
 /* ============================================================================
  * Fiber Parking (for channel blocking)
  * ============================================================================ */

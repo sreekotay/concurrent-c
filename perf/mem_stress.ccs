@@ -7,7 +7,7 @@ int main() {
     @nursery {
         for (int i = 0; i < count; i++) {
             spawn(() => {
-                cc_sleep_ms(10000);
+                cc_sleep_ms(100);
             });
         }
         

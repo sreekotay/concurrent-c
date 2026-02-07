@@ -30,12 +30,17 @@ $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz"
 
+# Pthread CC version (OS threads)
+$(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_pthread.ccs --ld-flags "-lz"
+
 # Convenience targets
 pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
 pigz_idiomatic: $(OUT_DIR)/pigz_idiomatic
+pigz_pthread: $(OUT_DIR)/pigz_pthread
 
-all: pigz pigz_cc pigz_idiomatic
+all: pigz pigz_cc pigz_idiomatic pigz_pthread
 
 # Download source files if not present
 setup:

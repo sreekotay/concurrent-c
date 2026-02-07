@@ -69,6 +69,7 @@ int cc_fiber_join(fiber_task* f, void** out_result);
 void cc_fiber_task_free(fiber_task* f);
 int cc_fiber_poll_done(fiber_task* f);
 void* cc_fiber_get_result(fiber_task* f);
+void* cc_fiber_get_result_buf(fiber_task* f);
 
 /* Spawn task poll functions (defined in scheduler.c) */
 int cc_thread_task_poll_done(struct CCSpawnTask* task);
@@ -356,12 +357,12 @@ intptr_t cc_block_on_intptr(CCTask t) {
     
     /* Handle fiber tasks with fiber join.
      *
-     * The thunk typically returns a pointer into the fiber's result_buf
-     * (via cc_task_result_ptr).  fiber_task_free pools the struct for
-     * immediate reuse, so that pointer becomes dangling.  We memcpy
-     * result_buf into a thread-local buffer BEFORE freeing, and return
-     * a pointer to the TLS copy.  Callers can safely dereference it
-     * until the next cc_block_on_intptr call on the same thread. */
+     * If the thunk used cc_task_result_ptr, its return value points into
+     * the fiber's result_buf.  fiber_task_free pools the struct for
+     * immediate reuse, so that pointer becomes dangling.  We detect this
+     * case (result points into result_buf) and memcpy into a thread-local
+     * buffer BEFORE freeing.  If the thunk returned a plain integer cast
+     * to void*, we pass it through as-is. */
     if (t.kind == CC_TASK_KIND_FIBER) {
         static __thread char tls_fiber_result[48] __attribute__((aligned(8)));
         CCTaskFiberInternal* fi = TASK_FIBER(&t);
@@ -369,8 +370,14 @@ intptr_t cc_block_on_intptr(CCTask t) {
             void* result = NULL;
             cc_fiber_join(fi->fiber, &result);
             if (result) {
-                memcpy(tls_fiber_result, result, sizeof(tls_fiber_result));
-                r = (intptr_t)tls_fiber_result;
+                /* Check if result points into the fiber's result_buf */
+                char* buf = (char*)cc_fiber_get_result_buf(fi->fiber);
+                if (buf && (char*)result >= buf && (char*)result < buf + 48) {
+                    memcpy(tls_fiber_result, result, sizeof(tls_fiber_result));
+                    r = (intptr_t)tls_fiber_result;
+                } else {
+                    r = (intptr_t)result;
+                }
             }
             cc_fiber_task_free(fi->fiber);
         }

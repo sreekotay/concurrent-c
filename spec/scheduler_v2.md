@@ -100,8 +100,8 @@ Minimal required behavior (conceptual):
 2. If `load(flag) != expected`, return immediately.
 3. Yield to a scheduler/trampoline stack (the fiber stack becomes quiescent).
 4. On the scheduler/trampoline stack, attempt to commit to parking:
-   - publish the parked state (e.g. `store_seq_cst(f->control, PARKED)` per the Dekker rule above when using a separate `pending_unpark` latch)
-   - if `load_seq_cst(pending_unpark)` (or `exchange_seq_cst(pending_unpark, 0)`) indicates a pending wake, abort parking by making the fiber runnable (e.g. `CAS(PARKED→ASSIGNED)` then enqueue). (If the CAS fails, a concurrent unpark already made it runnable; no further action needed.)
+   - publish the parked state with a `seq_cst` store (per the Dekker rule above when using a separate `pending_unpark` latch), e.g. `atomic_store_explicit(&f->control, PARKED, memory_order_seq_cst)`
+   - read `pending_unpark` with a `seq_cst` read (e.g. `atomic_load_explicit(&f->pending_unpark, memory_order_seq_cst)`); if non-zero, clear it (e.g. `exchange_acq_rel(..., 0)`) and abort parking by making the fiber runnable (e.g. `CAS(PARKED→ASSIGNED)` then enqueue). (If the CAS fails, a concurrent unpark already made it runnable; no further action needed.)
    - if `load(flag) != expected`, abort parking by making the fiber runnable
 5. If still parked, run another runnable fiber. When this fiber is later made runnable, it resumes and returns to the caller.
 

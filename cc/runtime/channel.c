@@ -1386,9 +1386,17 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
 
     /* Unbuffered rendezvous: sender must wait for a receiver and for slot to be free. */
     if (ch->cap == 0) {
-        if (fiber && !deadline) {
+        if (fiber) {
             /* Fiber-aware blocking: park the fiber instead of condvar wait */
             while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
+                if (deadline) {
+                    struct timespec now;
+                    clock_gettime(CLOCK_REALTIME, &now);
+                    if (now.tv_sec > deadline->tv_sec ||
+                        (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+                        return ETIMEDOUT;
+                    }
+                }
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
@@ -1426,13 +1434,21 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     }
 
     /* Buffered channel */
-    if (fiber && !deadline) {
+    if (fiber) {
         /* Fiber-aware blocking */
         while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap) {
             /* Check if current nursery is cancelled - unblock so the fiber can exit */
             CCNursery* cur_nursery = cc__tls_current_nursery;
             if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
                 return ECANCELED;
+            }
+            if (deadline) {
+                struct timespec now;
+                clock_gettime(CLOCK_REALTIME, &now);
+                if (now.tv_sec > deadline->tv_sec ||
+                    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+                    return ETIMEDOUT;
+                }
             }
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
@@ -1492,9 +1508,18 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
 
         
 
-        if (fiber && !deadline) {
+        if (fiber) {
             /* Fiber-aware blocking */
             while (!ch->closed && !ch->rv_has_value) {
+                if (deadline) {
+                    struct timespec now;
+                    clock_gettime(CLOCK_REALTIME, &now);
+                    if (now.tv_sec > deadline->tv_sec ||
+                        (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+                        ch->rv_recv_waiters--;
+                        return ETIMEDOUT;
+                    }
+                }
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
@@ -1558,16 +1583,24 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
 
     
 
-    if (fiber && !deadline) {
+    if (fiber) {
         /* Fiber-aware blocking */
         while (!ch->closed && ch->count == 0) {
+            if (deadline) {
+                struct timespec now;
+                clock_gettime(CLOCK_REALTIME, &now);
+                if (now.tv_sec > deadline->tv_sec ||
+                    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+                    return ETIMEDOUT;
+                }
+            }
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
             atomic_store(&node.notified, 0);
             cc__chan_add_recv_waiter(ch, &node);
 
             pthread_mutex_unlock(&ch->mu);
-            CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: waiting for space");
+            CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: waiting for data");
             pthread_mutex_lock(&ch->mu);
 
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
@@ -3243,6 +3276,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     
     /* For lock-free channels, poll while waiting */
     if (ch->use_lockfree) {
+        int in_fiber = cc__fiber_in_context();
         while (!ch->closed) {
             /* Increment inflight BEFORE unlocking to prevent drain race. */
             atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
@@ -3258,6 +3292,42 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 cc__chan_signal_activity(ch);
                 return 0;
             }
+            
+            /* Check deadline before blocking */
+            if (abs_deadline) {
+                struct timespec now;
+                clock_gettime(CLOCK_REALTIME, &now);
+                if (now.tv_sec > abs_deadline->tv_sec ||
+                    (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                    return ETIMEDOUT;
+                }
+            }
+            
+            if (in_fiber) {
+                /* Fiber context: park on send_waiters for precision wake */
+                cc__fiber* fiber_ts = cc__fiber_current();
+                pthread_mutex_lock(&ch->mu);
+                if (ch->closed) break;
+                cc__fiber_wait_node node = {0};
+                node.fiber = fiber_ts;
+                atomic_store(&node.notified, 0);
+                cc__chan_add_send_waiter(ch, &node);
+                pthread_mutex_unlock(&ch->mu);
+                cc__fiber_set_park_obj(ch);
+                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
+                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_send: waiting for space (lockfree)");
+                }
+                pthread_mutex_lock(&ch->mu);
+                /* Always remove from waiter list — node is stack-allocated */
+                if (node.in_wait_list) {
+                    cc__chan_remove_send_waiter(ch, &node);
+                }
+                if (ch->closed) break;
+                /* Loop back to retry enqueue */
+                continue;
+            }
+            
+            /* Non-fiber: use condvar timed wait */
             pthread_mutex_lock(&ch->mu);
             if (ch->closed) break;
             
@@ -3296,6 +3366,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     }
     cc_chan_enqueue(ch, value);
     pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
     return 0;
 }
 
@@ -3338,6 +3409,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
     
     /* For lock-free channels, poll the lock-free queue while waiting */
     if (ch->use_lockfree) {
+        int in_fiber_r = cc__fiber_in_context();
         while (!ch->closed) {
             pthread_mutex_unlock(&ch->mu);
             int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
@@ -3350,6 +3422,40 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 cc__chan_signal_activity(ch);
                 return 0;
             }
+            
+            /* Check deadline before blocking */
+            if (abs_deadline) {
+                struct timespec now;
+                clock_gettime(CLOCK_REALTIME, &now);
+                if (now.tv_sec > abs_deadline->tv_sec ||
+                    (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                    return ETIMEDOUT;
+                }
+            }
+            
+            if (in_fiber_r) {
+                /* Fiber context: park on recv_waiters for precision wake */
+                cc__fiber* fiber_tr = cc__fiber_current();
+                pthread_mutex_lock(&ch->mu);
+                if (ch->closed) break;
+                cc__fiber_wait_node node = {0};
+                node.fiber = fiber_tr;
+                atomic_store(&node.notified, 0);
+                cc__chan_add_recv_waiter(ch, &node);
+                pthread_mutex_unlock(&ch->mu);
+                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
+                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_recv: waiting for data (lockfree)");
+                }
+                pthread_mutex_lock(&ch->mu);
+                /* Always remove from waiter list — node is stack-allocated */
+                if (node.in_wait_list) {
+                    cc__chan_remove_recv_waiter(ch, &node);
+                }
+                if (ch->closed) break;
+                continue;
+            }
+            
+            /* Non-fiber: use condvar timed wait */
             pthread_mutex_lock(&ch->mu);
             if (ch->closed) break;
             
@@ -3394,6 +3500,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     cc_chan_dequeue(ch, out_value);
     pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
     return 0;
 }
 
