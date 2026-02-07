@@ -1,13 +1,9 @@
 /*
- * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
+ * pigz_pthread.ccs -- Parallel gzip using cc_thread_spawn (OS threads)
  *
- * Demonstrates the chan_send_task pattern:
- * - chan_send_task(ch, () => expr) - spawn task, send handle
- * - chan_recv on ordered channels awaits task internally
- * - 'ordered' flag ensures FIFO result delivery
- *
- * Uses manual lowering until compiler support lands.
- * See spec-progress/language-patterns-v3.md Section 7.
+ * Identical to pigz_idiomatic.ccs except compression tasks are dispatched
+ * to OS threads via cc_thread_spawn instead of M:N fibers via cc_fiber_spawn_task.
+ * This isolates fiber scheduler overhead from compression throughput.
  */
 
 #include <ccc/std/prelude.cch>
@@ -98,30 +94,23 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     }
 }
 
-// Task wrapper - stores result in fiber-local storage (what ordered_recv expects)
 void* compress_task_wrapper(void* arg) {
     Block* blk = (Block*)arg;
     CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
     cc_arena_free(&blk->arena);
     
-    // Store result in fiber-local storage at offset 0 (what ordered_recv expects)
     typedef struct { CompressedResult* __result; } __result_t;
     __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
-    if (!storage) return NULL;
+    if (!storage) {
+        /* cc_thread_spawn doesn't have fiber-local storage;
+           fall back to malloc for the tiny result wrapper */
+        storage = (__result_t*)malloc(sizeof(__result_t));
+        if (!storage) return NULL;
+    }
     
     storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
     return storage;
 }
-
-/*
- * IDEAL SYNTAX (what we want):
- *   CompressedResult*[~16 ordered] results;
- *   chan_send_task(results, () => [blk] compress_block(blk, 6));
- *   while (chan_recv(results, &r)) { use(r); }
- *
- * MANUAL LOWERING (what works today):
- *   CCTask channel + ordered_recv helper
- */
 
 int compress_file(const char* in_path, const char* out_path, int level) {
     (void)level;
@@ -140,7 +129,6 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     }
     @defer cc_file_close(&out_file);
 
-    // Internal representation: channel of CCTask handles
     CCTask[~CHAN_CAP >] tasks_tx;
     CCTask[~CHAN_CAP <] tasks_rx;
     CCChan* ch = channel_pair(&tasks_tx, &tasks_rx);
@@ -162,7 +150,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             }
         });
 
-        // Producer: spawn task + send handle (manual chan_send_task)
+        // Producer: spawn OS thread task + send handle
         @nursery closing(tasks_tx) {
             spawn(() => [in_ptr, tasks_tx] {
                 long seq = 0;
@@ -187,12 +175,10 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                     blk->is_last = (data.len < BLOCK_SIZE);
                     blk->arena = blk_arena;
                     
-                    // Read is_last before spawn — blk lives in blk_arena which
-                    // the compression fiber may free on another worker.
                     bool is_last = blk->is_last;
                     
-                    // Manual lowering of: chan_send_task(tx, () => compress_block(blk))
-                    CCTask task = cc_fiber_spawn_task(compress_task_wrapper, blk);
+                    // KEY DIFFERENCE: cc_thread_spawn instead of cc_fiber_spawn_task
+                    CCTask task = cc_thread_spawn(compress_task_wrapper, blk);
                     cc_chan_send(tasks_tx.raw, &task, sizeof(task));
                     
                     if (is_last) break;

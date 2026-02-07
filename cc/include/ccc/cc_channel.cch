@@ -79,9 +79,11 @@ static inline int ordered_recv(CCChanRx rx, void** out) {
     int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
     if (rc == 0) {
         /* Successfully received task - block on it and extract result.
-           The thunk returns a pointer to fiber-local storage where __result is at offset 0. */
+           The thunk returns a pointer to fiber-local storage where __result is at offset 0.
+           For fiber tasks, cc_block_on_intptr copies result_buf into a TLS buffer
+           before freeing the fiber, so the returned pointer is safe to dereference. */
         void* cap = (void*)cc_block_on_intptr(task);
-        *out = *(void**)cap;  /* __result is at offset 0 */
+        *out = cap ? *(void**)cap : NULL;
         return 1;  /* value received */
     } else if (rc == EPIPE) {
         return 0;  /* channel closed */

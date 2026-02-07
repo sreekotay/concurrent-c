@@ -354,13 +354,24 @@ intptr_t cc_block_on_intptr(CCTask t) {
         return r;
     }
     
-    /* Handle fiber tasks with fiber join */
+    /* Handle fiber tasks with fiber join.
+     *
+     * The thunk typically returns a pointer into the fiber's result_buf
+     * (via cc_task_result_ptr).  fiber_task_free pools the struct for
+     * immediate reuse, so that pointer becomes dangling.  We memcpy
+     * result_buf into a thread-local buffer BEFORE freeing, and return
+     * a pointer to the TLS copy.  Callers can safely dereference it
+     * until the next cc_block_on_intptr call on the same thread. */
     if (t.kind == CC_TASK_KIND_FIBER) {
+        static __thread char tls_fiber_result[48] __attribute__((aligned(8)));
         CCTaskFiberInternal* fi = TASK_FIBER(&t);
         if (fi->fiber) {
             void* result = NULL;
             cc_fiber_join(fi->fiber, &result);
-            r = (intptr_t)result;
+            if (result) {
+                memcpy(tls_fiber_result, result, sizeof(tls_fiber_result));
+                r = (intptr_t)tls_fiber_result;
+            }
             cc_fiber_task_free(fi->fiber);
         }
         cc__deadlock_thread_unblock();
