@@ -1594,6 +1594,21 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                     return ETIMEDOUT;
                 }
             }
+            /* Re-check deadlock guard inside loop (same as initial guard above) */
+            if (!deadline && !ch->closed && ch->count == 0 &&
+                ch->autoclose_owner && cc__tls_current_nursery &&
+                ch->autoclose_owner == cc__tls_current_nursery) {
+                const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
+                if (g && g[0] == '1') {
+                    if (!ch->warned_autoclose_block) {
+                        ch->warned_autoclose_block = 1;
+                        fprintf(stderr,
+                                "CC: runtime guard: blocking cc_chan_recv() on a `closing(...)` channel from inside the same nursery "
+                                "may deadlock (use a sentinel/explicit close, or drain outside the nursery)\n");
+                    }
+                    return EDEADLK;
+                }
+            }
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
             atomic_store(&node.notified, 0);
@@ -2810,6 +2825,24 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
                 pthread_mutex_unlock(&ch->mu);
                 return ECANCELED;
+            }
+        }
+        
+        /* Re-check deadlock guard inside the loop: the initial guard above
+         * may have passed when items were still available.  Now the buffer is
+         * empty and the producer may be done -- detect the foot-gun. */
+        if (!ch->closed && ch->autoclose_owner && cc__tls_current_nursery &&
+            ch->autoclose_owner == cc__tls_current_nursery) {
+            const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
+            if (g && g[0] == '1') {
+                if (!ch->warned_autoclose_block) {
+                    ch->warned_autoclose_block = 1;
+                    fprintf(stderr,
+                            "CC: runtime guard: blocking cc_chan_recv() on a `closing(...)` channel from inside the same nursery "
+                            "may deadlock (use a sentinel/explicit close, or drain outside the nursery)\n");
+                }
+                pthread_mutex_unlock(&ch->mu);
+                return EDEADLK;
             }
         }
         
