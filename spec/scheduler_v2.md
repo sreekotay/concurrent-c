@@ -20,6 +20,13 @@ Fibers are reused, not destroyed. Each fiber repeatedly:
 
 Note: if the system permits unbounded growth, reuse is best-effort; otherwise impose a global cap (out of scope here).
 
+## Fiber stacks (defaults and growth)
+
+- Fibers SHOULD use a large virtual stack reservation with demand paging (low resident memory, avoids tiny fixed stacks).
+- The implementation MUST use a guard page (or equivalent) so fiber stack overflow fails deterministically (trap/crash), not via silent corruption.
+- Stack size MAY be configurable (compile-time and/or env override) but should not require user tuning for common code.
+- Guidance: avoid unbounded recursion and large stack allocations inside fiber code; use heap/arena for large buffers.
+
 ## Control word (state + lease)
 
 Each fiber has `_Atomic int64_t control`:
@@ -57,7 +64,17 @@ Each fiber may maintain a diagnostic `_Atomic uint64_t last_transition` updated 
 
 - Each worker has a **local run queue** (stealable).
 - Each worker has an **inbox** (MPSC) for remote pushes and targeted wakeups.
+- A **global run queue** holds overflow and cross-worker fibers.
 - Idle workers may steal from other workers' local run queues; inboxes are not stolen from.
+
+### Global run queue: ring + overflow list
+
+The global run queue uses a two-tier design:
+
+1. **Lock-free MPMC ring buffer** (`CC_FIBER_QUEUE_INITIAL` slots, default 4096): fast path for common workloads. Push and pop are lock-free CAS loops.
+2. **Mutex-protected overflow linked list**: when the ring is full, `fq_push_blocking` appends to a singly-linked list (via `fiber_task.next`) under a mutex. Pop drains the overflow list when the ring is empty.
+
+This design keeps the common case lock-free while handling arbitrary spawn bursts (e.g. 100k fibers) without blocking the caller. `fq_push_blocking` **never blocks** — it always succeeds by falling back to the overflow list.
 
 Fairness rule: workers MUST periodically yield to a global/fair scheduling point (e.g. push current fiber to a global queue or check the global queue) after a bounded amount of local-only work, to prevent starvation under contention.
 
@@ -180,7 +197,7 @@ Ordered channels implement **FIFO on task handles**, not “FIFO on completion t
 - **Result lifetime**: for fiber tasks, the pointer returned by `block_on` may be ephemeral (fiber can be recycled immediately). Receivers MUST copy result bytes out immediately.
 - **Result layout convention (if using fiber-local result storage)**: if a task stores its result in fiber-local storage, the user-visible result MUST be at offset 0 (commonly named `__result`) so ordered recv can extract it without allocation.
 - **`chan_send_task` vs `cc_chan_send_task`**: `chan_send_task(ch, () => ...)` means “spawn a task and send the `CCTask` handle.” `cc_chan_send_task(ch, &value, sizeof(value))` is a different API: it returns a poll-based task representing the *send operation* (caller must ensure `value` outlives that task).
-- **Send-failure cleanup (required)**: if lowering spawns a task and then fails to send the handle (closed/error), the implementation MUST immediately free/cancel/join the spawned task to avoid orphan work/leaks.
+- **Send-failure cleanup (required)**: if lowering spawns a task and then fails to send the handle (closed/error), the implementation MUST immediately **join** the spawned task (e.g. `block_on`) and then free it. (Do not detach/orphan work; `free` without join is unsafe if the task is still running.)
 
 ## Affinity and direct handoff
 
@@ -208,9 +225,29 @@ Minimal safe sequence:
 
 Direct producer→consumer switching is permitted only if you can prove it never publishes `producer` as `IDLE` while still executing on the producer stack (otherwise it is forbidden by this spec).
 
+## Sleep queue (timer-based fiber parking)
+
+`cc_sleep_ms` (and any future timed waits) use a **sleep queue** instead of busy-yielding through the run queue. This eliminates O(N) queue churn when N fibers sleep concurrently.
+
+Design:
+- A global `sleep_queue` is a mutex-protected singly-linked list of `fiber_task*` (via `next`), each with a `sleep_deadline` (`struct timespec`, `CLOCK_MONOTONIC`).
+- `cc_sleep_ms` computes the deadline, transitions the fiber to `QUEUED`, pushes it to the sleep queue, and yields (`mco_yield`). The fiber is **not** on the run queue.
+- `sq_drain` walks the list, removes expired fibers, and pushes them to the global run queue via `fq_push_blocking`. It then wakes idle workers.
+- Draining happens in two places:
+  1. **Sysmon**: every `SYSMON_CHECK_US` (~250µs). Wakes workers via `wake_one_if_sleeping_unconditional`.
+  2. **Idle workers**: before checking run queues in the sleep loop, each worker calls `sq_drain` to avoid waiting for sysmon.
+
+Latency: sleep resolution is bounded by max(`SYSMON_CHECK_US`, worker idle poll interval). For a 100ms sleep this is negligible; for sub-millisecond sleeps, resolution is ~250µs.
+
+Future: a timer wheel (hashed by deadline bucket) would reduce `sq_drain` from O(N) to O(expired), but the mutex-list is sufficient for current workloads.
+
 ## Sysmon
 
 Sysmon is advisory and must be bounded.
+
+### Sleep queue draining
+
+Sysmon calls `sq_drain` on every tick to wake fibers whose sleep deadline has passed, then signals idle workers via the wake primitive.
 
 ### Horizontal scaling
 
