@@ -19,19 +19,24 @@
 #define CC_ATOMIC_CAS(ptr, expected_ptr, desired) cc_atomic_cas((ptr), (expected_ptr), (desired))
 
 // Arena ownership flags (stored in _flags field)
-#define CC_ARENA_FLAG_HEAP_OWNED 0x1  // Arena owns its backing memory (allocated via malloc)
+#define CC_ARENA_FLAG_HEAP_OWNED  0x1  // Arena owns its backing memory (allocated via malloc)
+#define CC_ARENA_FLAG_IS_EXTENT   0x4  // This arena struct is a heap-allocated extent (from growth)
 
-typedef struct {
+typedef struct CCArena {
     uint8_t *base;
     size_t capacity;
     cc_atomic_size offset;
     uint64_t provenance;      // monotonically increasing arena id
     uint32_t _flags;          // ownership and state flags
+    uint16_t block_idx;       // current block index (0 = initial)
+    uint16_t block_max;       // budget: 0 = unbounded, 1 = fixed, N = max blocks
+    struct CCArena* prev;     // points to the previous full block (NULL if none)
 } CCArena;
 
 typedef struct {
     CCArena* arena;
     size_t offset;
+    uint16_t block_idx;       // which block this checkpoint was taken in
 } CCArenaCheckpoint;
 
 // Global provenance counter (defined in runtime).
@@ -46,7 +51,7 @@ static inline size_t cc__align_up(size_t value, size_t align) {
 
 // Initialize an arena with caller-provided backing storage.
 // Returns 0 on success, non-zero on invalid parameters.
-// Note: This creates a non-owning arena; cc_arena_free() will be a no-op.
+// Note: This creates a non-owning, fixed arena (block_max=1); cc_arena_free() will be a no-op.
 static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
     if (!arena || !buffer || capacity == 0) {
         return -1;
@@ -56,30 +61,26 @@ static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
     CC_ATOMIC_STORE(&arena->offset, 0);
     arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
     arena->_flags = 0;  // not heap-owned
+    arena->block_idx = 0;
+    arena->block_max = 1;  // fixed: no growth allowed
+    arena->prev = NULL;
     return 0;
 }
 
-// Allocate `size` bytes aligned to `align` (power-of-two, >=1).
-// Returns NULL on exhaustion; no automatic growth.
-static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
-    if (!arena || !arena->base || size == 0) {
-        return NULL;
-    }
+// Internal: attempt allocation in the current block (fast path).
+// Returns NULL if the current block is exhausted.
+static inline void *cc__arena_alloc_fast(CCArena *arena, size_t size, size_t align) {
     size_t aligned_offset = 0;
     size_t new_offset = 0;
     size_t expected = CC_ATOMIC_LOAD(&arena->offset);
     for (;;) {
         aligned_offset = cc__align_up(expected, align);
-        if (aligned_offset > arena->capacity) {
-            return NULL;
+        if (aligned_offset > arena->capacity || aligned_offset + size > arena->capacity) {
+            return NULL;  // exhausted
         }
         new_offset = aligned_offset + size;
-        if (new_offset > arena->capacity) {
-            return NULL;
-        }
         size_t desired = new_offset;
         if (CC_ATOMIC_CAS(&arena->offset, &expected, desired)) {
-            // CAS succeeded; expected now holds previous value.
             break;
         }
         // CAS failed; expected updated with current value, retry.
@@ -87,27 +88,176 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
     return arena->base + aligned_offset;
 }
 
-// Reset arena to empty. Does not free backing storage.
+// Internal: grow the arena by pushing the current block into an extent
+// and allocating a new, larger buffer (1.5x). Returns 0 on success, -1 on failure.
+static inline int cc__arena_grow(CCArena *arena) {
+    // Check budget
+    if (arena->block_max > 0 && arena->block_idx + 1 >= arena->block_max) {
+        return -1;  // budget exhausted
+    }
+
+    // Compute new capacity (1.5x, minimum 4096)
+    size_t new_cap = arena->capacity + arena->capacity / 2;
+    if (new_cap < 4096) new_cap = 4096;
+
+    // Allocate extent struct to hold the current block's state
+    CCArena *extent = (CCArena *)malloc(sizeof(CCArena));
+    if (!extent) return -1;
+
+    // Allocate new buffer for the root
+    uint8_t *new_buf = (uint8_t *)malloc(new_cap);
+    if (!new_buf) {
+        free(extent);
+        return -1;
+    }
+
+    // Push current state into extent
+    extent->base = arena->base;
+    extent->capacity = arena->capacity;
+    CC_ATOMIC_STORE(&extent->offset, CC_ATOMIC_LOAD(&arena->offset));
+    extent->provenance = arena->provenance;
+    extent->_flags = arena->_flags | CC_ARENA_FLAG_IS_EXTENT;
+    extent->block_idx = arena->block_idx;
+    extent->block_max = arena->block_max;
+    extent->prev = arena->prev;
+
+    // Update root with new buffer
+    arena->prev = extent;
+    arena->base = new_buf;
+    arena->capacity = new_cap;
+    CC_ATOMIC_STORE(&arena->offset, 0);
+    arena->block_idx++;
+    arena->_flags |= CC_ARENA_FLAG_HEAP_OWNED;  // new buffer is always heap-owned
+
+    return 0;
+}
+
+// Allocate `size` bytes aligned to `align` (power-of-two, >=1).
+// Returns NULL on exhaustion (fixed arena) or OOM (growable arena).
+// Growable arenas (block_max != 1) automatically allocate new blocks on exhaustion.
+static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
+    if (!arena || !arena->base || size == 0) {
+        return NULL;
+    }
+
+    // Fast path: try current block
+    void *ptr = cc__arena_alloc_fast(arena, size, align);
+    if (ptr) return ptr;
+
+    // Slow path: try to grow
+    if (arena->block_max == 1) {
+        return NULL;  // fixed arena, no growth
+    }
+
+    // Ensure new block is large enough for this allocation
+    while (cc__arena_grow(arena) == 0) {
+        ptr = cc__arena_alloc_fast(arena, size, align);
+        if (ptr) return ptr;
+        // Extremely rare: new block still too small (huge single alloc).
+        // Loop will grow again or hit budget.
+    }
+
+    return NULL;  // budget exhausted or OOM
+}
+
+// Reset arena to empty. Frees all grown extents and restores the original block.
 static inline void cc_arena_reset(CCArena *arena) {
     if (!arena) return;
+
+    // If we have grown extents, unwind the chain back to the original block.
+    if (arena->prev) {
+        // Walk to the tail of the chain (the original block).
+        CCArena *tail = arena->prev;
+        while (tail->prev) tail = tail->prev;
+
+        // Free the current root's buffer (it was heap-allocated during growth)
+        if (arena->_flags & CC_ARENA_FLAG_HEAP_OWNED && arena->base) {
+            free(arena->base);
+        }
+
+        // Restore root to original block state
+        arena->base = tail->base;
+        arena->capacity = tail->capacity;
+        arena->_flags = (arena->_flags & ~CC_ARENA_FLAG_HEAP_OWNED)
+                       | (tail->_flags & CC_ARENA_FLAG_HEAP_OWNED);
+
+        // Free all extent structs and their buffers (except tail's buffer, which is now root's)
+        CCArena *cur = arena->prev;
+        while (cur) {
+            CCArena *next = cur->prev;
+            if (cur != tail && cur->base) {
+                free(cur->base);
+            }
+            free(cur);
+            cur = next;
+        }
+
+        arena->prev = NULL;
+        arena->block_idx = 0;
+    }
+
     CC_ATOMIC_STORE(&arena->offset, 0);
     // Bump provenance so new allocations get a fresh id (helps detect stale use).
     arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
 }
 
-// Capture current arena allocation state.
+// Capture current arena allocation state (including block index for cross-block restore).
 static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     CCArenaCheckpoint cp;
     cp.arena = arena;
     cp.offset = arena ? CC_ATOMIC_LOAD(&arena->offset) : 0;
+    cp.block_idx = arena ? arena->block_idx : 0;
     return cp;
 }
 
 // Restore arena to a previously captured checkpoint.
+// If the arena has grown since the checkpoint, this unwinds the growth chain:
+// frees all extents newer than the checkpoint's block_idx and restores the
+// root to the checkpointed block's state.
 // Note: This does NOT bump provenance; allocations before the checkpoint remain valid.
 static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     CCArena* arena = checkpoint.arena;
     if (!arena) return;
+
+    // If we need to unwind growth
+    if (checkpoint.block_idx < arena->block_idx) {
+        // Walk the prev chain to find the extent matching checkpoint.block_idx.
+        // Along the way, collect extents to free.
+        // The chain is: root(newest) -> prev -> prev -> ... -> NULL(oldest, idx=0)
+        // We need to restore the extent with block_idx == checkpoint.block_idx.
+
+        // Free the current root buffer (it's newer than checkpoint)
+        if (arena->_flags & CC_ARENA_FLAG_HEAP_OWNED && arena->base) {
+            free(arena->base);
+        }
+
+        // Walk the chain, freeing extents until we find our target
+        CCArena *cur = arena->prev;
+        CCArena *target = NULL;
+        while (cur) {
+            if (cur->block_idx == checkpoint.block_idx) {
+                target = cur;
+                break;
+            }
+            // This extent is newer than checkpoint, free it
+            CCArena *next = cur->prev;
+            if (cur->base) free(cur->base);
+            free(cur);
+            cur = next;
+        }
+
+        if (target) {
+            // Restore root from target extent
+            arena->base = target->base;
+            arena->capacity = target->capacity;
+            arena->block_idx = target->block_idx;
+            arena->_flags = (arena->_flags & ~CC_ARENA_FLAG_HEAP_OWNED)
+                           | (target->_flags & CC_ARENA_FLAG_HEAP_OWNED);
+            arena->prev = target->prev;
+            free(target);  // free the extent struct (not its buffer, which is now root's)
+        }
+    }
+
     size_t off = checkpoint.offset;
     if (off > arena->capacity) off = arena->capacity;
     CC_ATOMIC_STORE(&arena->offset, off);

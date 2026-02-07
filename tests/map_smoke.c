@@ -1,4 +1,3 @@
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 #include <stdint.h>
 #include <stdio.h>

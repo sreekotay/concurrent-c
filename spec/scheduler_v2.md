@@ -168,8 +168,19 @@ Non-blocking channel fast paths (buffer not full/empty, direct handoff, etc.) do
 | **sync** (any cap) | full/empty/partner | condvar signal/broadcast | **Meaning**: thread-blocking when *not* in fiber context. In fiber context, follows the fiber context rule above (park fiber; do not block OS thread). |
 | **async buffered** (cap>0) | send: full, recv: empty | set `notified=DATA` then `unpark` | May do direct handoff under lock (sender satisfies waiting receiver or vice versa). |
 | **async rendezvous** (cap==0) | until a partner exists | set `notified=DATA` then `unpark` | Cancellation must be checked **before** the commit point (node enqueued under lock). After commit, the operation must complete via DATA or close/error; it must not abort “mid-wait”. |
-| **ordered** | same as buffered/unbuffered | DATA wakes the recv | Payload is a `CCTask`. After recv, waiting for completion uses the **standard join protocol**: in fiber context it blocks via `park_if`/`unpark` on the task's completion flag/handshake; in thread context it may block via condvar. |
+| **ordered** | same as buffered/unbuffered | DATA wakes the recv | Payload is a `CCTask` handle (FIFO). Receiver awaits handles in FIFO order (see ordered pattern below). |
 | **owned (pool)** | recv: empty pool | DATA wakes recv | recv may create (`on_create`), send may reset (`on_reset`). Typically configured as sync. |
+
+### Ordered task-channel pattern (`chan_send_task` / ordered receive)
+
+Ordered channels implement **FIFO on task handles**, not “FIFO on completion time.” Ordering comes from the receiver awaiting handles in the order they were received.
+
+- **Head-of-line blocking**: if an earlier task stalls, later completed tasks are not observed until earlier ones complete.
+- **Join behavior**: after receiving a `CCTask`, awaiting completion uses the standard join protocol (fiber context uses `park_if`/`unpark`; thread context may use condvar).
+- **Result lifetime**: for fiber tasks, the pointer returned by `block_on` may be ephemeral (fiber can be recycled immediately). Receivers MUST copy result bytes out immediately.
+- **Result layout convention (if using fiber-local result storage)**: if a task stores its result in fiber-local storage, the user-visible result MUST be at offset 0 (commonly named `__result`) so ordered recv can extract it without allocation.
+- **`chan_send_task` vs `cc_chan_send_task`**: `chan_send_task(ch, () => ...)` means “spawn a task and send the `CCTask` handle.” `cc_chan_send_task(ch, &value, sizeof(value))` is a different API: it returns a poll-based task representing the *send operation* (caller must ensure `value` outlives that task).
+- **Send-failure cleanup (required)**: if lowering spawns a task and then fails to send the handle (closed/error), the implementation MUST immediately free/cancel/join the spawned task to avoid orphan work/leaks.
 
 ## Affinity and direct handoff
 

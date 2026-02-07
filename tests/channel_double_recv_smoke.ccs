@@ -1,5 +1,4 @@
 /* Test: verify channel recv delivers each item exactly once */
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <stdio.h>

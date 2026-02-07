@@ -134,7 +134,7 @@ Result types (`T!>(E)`) support these methods via UFCS:
 | `cc_unwrap_err(res)` | Get error (primitives) | `CCError e = cc_unwrap_err(res);` |
 | `cc_unwrap_err_as(res, E)` | Get error (structs) | `CCIoError e = cc_unwrap_err_as(res, CCIoError);` |
 
-**C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. Short aliases (`String`, `Arena`, etc.) are only available when the user opts in via `#include <ccc/std/prelude.cch>` and defining `CC_ENABLE_SHORT_NAMES` before inclusion. Default is prefixed-only.
+**C ABI naming:** All runtime/stdlib symbols use `CC*`/`cc_*` prefixes to avoid collisions with user code. The compiler automatically resolves short aliases (`String`, `Arena`, etc.) to their prefixed forms (`CCString`, `CCArena`, etc.) during compilation.
 
 ---
 
@@ -1425,24 +1425,26 @@ Arenas own memory; slices are views into arena-owned storage.
 
 ```c
 // Creation
-CCArena cc_arena_heap(size_t bytes);              // heap-backed arena (malloc)
-int cc_arena_init(CCArena* a, void* buf, size_t cap);  // user-provided buffer
+CCArena cc_arena_heap(size_t bytes);                        // heap-backed, growable (unbounded)
+CCArena cc_arena_heap_budget(size_t bytes, uint16_t max);   // heap-backed with block budget
+int cc_arena_init(CCArena* a, void* buf, size_t cap);       // user-provided buffer (fixed, no growth)
 
 // Lifecycle
-void cc_arena_free(CCArena* a);                   // free if heap-backed, else no-op
-void cc_arena_reset(CCArena* a);                  // reclaim memory, invalidate slices
+void cc_arena_free(CCArena* a);                   // free all blocks if heap-backed, else no-op
+void cc_arena_reset(CCArena* a);                  // unwind to original block, reclaim memory
+void cc_arena_destroy(CCArena* a);                // alias for cc_arena_free
 
-// Checkpoints
+// Checkpoints (cross-block aware)
 typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 CCArenaCheckpoint cc_arena_checkpoint(CCArena* a);
 void cc_arena_restore(CCArenaCheckpoint checkpoint);
 
-// Allocation
+// Allocation (automatically grows when current block is exhausted)
 void* cc_arena_alloc(CCArena* a, size_t nbytes, size_t align);
 #define arena_alloc(T, arena, count)  // tracked, count elements
 #define arena_alloc1(T, arena)        // tracked, 1 element
 
-// Transfer
+// Transfer (moves ownership of all blocks)
 CCArena cc_arena_detach(CCArena* a);              // move ownership out
 
 // Size helpers
@@ -1453,7 +1455,7 @@ size_t megabytes(size_t n);            // n * 1024 * 1024
 **Arena ownership model:**
 
 Arenas track their ownership internally:
-- **Heap-backed arenas** (created with `cc_heap_arena`) own their memory and free it when `cc_arena_free` is called.
+- **Heap-backed arenas** (created with `cc_arena_heap`) own their memory and free it when `cc_arena_free` is called.
 - **User-backed arenas** (created with `cc_arena_init`) do not own their buffer; `cc_arena_free` is a no-op.
 
 This allows uniform cleanup code without leaking implementation details:
@@ -1464,6 +1466,38 @@ CCArena a = cc_arena_heap(kilobytes(64));  // or cc_arena_init(&a, buf, sz)
 // ... use arena ...
 cc_arena_free(&a);  // frees if heap-backed, no-op otherwise
 ```
+
+**Growable arenas (normative):**
+
+Arenas created with `cc_arena_heap` are **growable by default** (`block_max = 0`, meaning unbounded). When allocation exhausts the current block, a new block is allocated (1.5x the previous capacity, minimum 4096 bytes) and the full block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
+
+- `block_max = 0`: Unbounded growth (default for `cc_arena_heap` / `@arena`).
+- `block_max = 1`: Fixed, no growth allowed (default for `cc_arena_init` / stack-backed arenas).
+- `block_max = N` (N > 1): At most N blocks total. Growth beyond the budget returns NULL.
+
+```c
+// Growable arena: will automatically allocate new blocks as needed
+CCArena a = cc_arena_heap(kilobytes(4));
+for (int i = 0; i < 10000; i++) {
+    arena_alloc(int, &a, 100);  // seamlessly grows across blocks
+}
+cc_arena_free(&a);  // frees all blocks
+
+// Fixed arena with explicit budget
+CCArena b = cc_arena_heap_budget(kilobytes(16), 4);  // at most 4 blocks
+// ... after 4 blocks are exhausted, arena_alloc returns NULL
+
+// Stack-backed arenas are always fixed
+uint8_t buf[4096];
+CCArena c;
+cc_arena_init(&c, buf, sizeof(buf));  // block_max = 1, no growth
+```
+
+**Rule:** `cc_arena_reset` unwinds all grown extents, frees their buffers and extent structs, and restores the root arena to its original block. After reset, the arena is back to its initial capacity with `block_idx = 0`.
+
+**Rule:** `cc_arena_checkpoint` / `cc_arena_restore` are cross-block aware. A checkpoint captures `block_idx` along with the allocation offset. Restoring a checkpoint taken in an earlier block unwinds the growth chain to that block, freeing all intervening blocks.
+
+**Rule:** `cc_arena_free` frees all blocks in the chain (current + all extents). For user-backed arenas, only the extent structs and their heap-allocated buffers are freed; the original user buffer is not freed.
 
 **Rule:** All arenas use atomic operations internally and are safe to share across threads. Arena-allocated slices can be sent through channels or captured in thread closures.
 
@@ -6513,27 +6547,38 @@ Lowers to:
 
 ### C.5 Arena Implementation Hints
 
-**Bump allocator:**
+**Growable chained bump allocator:**
+
+The arena implementation uses a "swapping chain" pattern. The root `CCArena` struct always holds the current (active) block. On growth, the current block's state is pushed into a heap-allocated extent struct linked via `prev`, and the root is updated with a fresh, larger buffer.
 
 ```c
-struct Arena {
-    void* base;      // start of allocation
-    size_t size;     // total size
-    size_t used;     // bytes used so far
+struct CCArena {
+    uint8_t* base;       // current block's buffer
+    size_t   capacity;   // current block's capacity
+    size_t   offset;     // atomic: bytes used in current block
+    uint64_t provenance; // monotonic arena id
+    uint32_t _flags;     // CC_ARENA_FLAG_HEAP_OWNED, CC_ARENA_FLAG_IS_EXTENT
+    uint16_t block_idx;  // current block generation (0 = initial)
+    uint16_t block_max;  // budget: 0 = unbounded, 1 = fixed, N = max
+    CCArena* prev;       // previous full block (NULL if none)
 };
-
-void* arena_alloc(Arena* a, size_t nbytes, size_t align) {
-    size_t aligned = (a->used + align - 1) / align * align;
-    if (aligned + nbytes > a->size) return null;  // overflow
-    void* result = a->base + aligned;
-    a->used = aligned + nbytes;
-    return result;
-}
-
-void arena_reset(Arena* a) {
-    a->used = 0;  // O(1) reset
-}
 ```
+
+**Growth (slow path):**
+
+```
+On alloc failure in current block:
+  1. Check budget: if block_idx + 1 >= block_max (and block_max > 0), return NULL
+  2. Allocate extent struct (malloc), copy root state into it
+  3. Allocate new buffer (1.5x capacity, min 4096)
+  4. Push: extent->prev = root->prev; root->prev = extent
+  5. Update root: base = new_buf, capacity = new_cap, offset = 0, block_idx++
+  6. Retry allocation in the new block
+```
+
+**Reset:** Walk `prev` chain to tail (original block), free all intermediate buffers and extent structs, restore root to original state, set offset = 0.
+
+**Checkpoint/Restore:** Checkpoint captures `{arena, offset, block_idx}`. Restore checks if `checkpoint.block_idx < arena->block_idx`; if so, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block.
 
 **Per-request pattern:**
 
@@ -6544,7 +6589,7 @@ while (true) {
     
     handle_request(&req, &req_arena);
     
-    arena_reset(&req_arena);  // O(1) cleanup
+    arena_reset(&req_arena);  // O(1) if no growth; frees extents if grown
 }
 ```
 

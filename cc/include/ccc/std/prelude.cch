@@ -28,7 +28,8 @@
 static inline size_t kilobytes(size_t n) { return n * 1024; }
 static inline size_t megabytes(size_t n) { return n * 1024 * 1024; }
 
-// Allocate an arena with heap-backed storage of given size.
+// Allocate a growable arena with heap-backed storage of given initial size.
+// block_max = 0 means unbounded growth (default for @arena).
 // The returned arena owns its memory; cc_arena_free() will free it.
 static inline CCArena cc_arena_heap(size_t bytes) {
     CCArena a = {0};
@@ -38,21 +39,43 @@ static inline CCArena cc_arena_heap(size_t bytes) {
         a.base = NULL;
     } else if (buf) {
         a._flags |= CC_ARENA_FLAG_HEAP_OWNED;  // mark as heap-owned
+        a.block_max = 0;  // growable (unbounded) by default
     }
     return a;
 }
 
-// Free arena if heap-backed; no-op for user-backed arenas.
+// Allocate a growable arena with an explicit block budget.
+// budget = 0: unbounded, 1: fixed (no growth), N: at most N blocks.
+static inline CCArena cc_arena_heap_budget(size_t bytes, uint16_t budget) {
+    CCArena a = cc_arena_heap(bytes);
+    a.block_max = budget;
+    return a;
+}
+
+// Free arena and all grown extents. Frees heap-backed buffers; no-op for user-backed.
 // This is the unified cleanup function for all arena types.
 static inline void cc_arena_free(CCArena* a) {
-    if (!a || !a->base) return;
-    if (a->_flags & CC_ARENA_FLAG_HEAP_OWNED) {
+    if (!a) return;
+
+    // Free all extent structs and their buffers in the growth chain
+    CCArena *cur = a->prev;
+    while (cur) {
+        CCArena *next = cur->prev;
+        if (cur->base) free(cur->base);
+        free(cur);  // free the extent struct itself
+        cur = next;
+    }
+    a->prev = NULL;
+
+    // Free the root's buffer if heap-owned
+    if (a->base && (a->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
         free(a->base);
     }
     a->base = NULL;
     a->capacity = 0;
     a->offset = 0;
     a->_flags = 0;
+    a->block_idx = 0;
 }
 
 // Legacy alias - use cc_arena_heap instead
@@ -65,10 +88,11 @@ static inline void cc_heap_arena_free(CCArena* a) {
     cc_arena_free(a);
 }
 
-// Detach and return the arena's memory, leaving the source arena empty.
+// Detach and return the arena's memory (including all growth extents),
+// leaving the source arena empty.
 // Use this to transfer ownership out of an @arena block.
 // After detach, the source arena is empty and its cleanup becomes a no-op.
-// The returned arena inherits the ownership flag.
+// The returned arena inherits the ownership flag and growth chain.
 static inline CCArena cc_arena_detach(CCArena* a) {
     CCArena taken = {0};
     if (a && a->base) {
@@ -77,6 +101,9 @@ static inline CCArena cc_arena_detach(CCArena* a) {
         a->capacity = 0;
         a->offset = 0;
         a->_flags = 0;
+        a->block_idx = 0;
+        a->block_max = 0;
+        a->prev = NULL;
     }
     return taken;
 }

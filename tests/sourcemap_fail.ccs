@@ -1,4 +1,3 @@
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 
 // Intentional error to validate #line mapping back to this file.

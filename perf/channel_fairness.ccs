@@ -10,7 +10,6 @@
  * Actual: Worker 0 gets almost all items
  */
 
-#define CC_ENABLE_SHORT_NAMES
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
 #include <stdio.h>

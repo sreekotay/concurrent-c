@@ -43,7 +43,7 @@ split(&s, ",");
 7. **No Dependencies:** Stdlib depends only on C standard library and CC language primitives.
 8. **Integration with Async:** I/O functions have sync and `@async` variants where applicable.
 9. **Single runtime TU:** Runtime impls are aggregated in `cc/runtime/concurrent_c.c` (`#include` of arena, io, scheduler, channels) so consumers can link one object/archive without juggling multiple runtime objects.
-10. **Prefixed C ABI:** Public C names are prefixed (`CCString`, `CCArena`, `cc_file_*`) to avoid collisions. `std/prelude.cch` can optionally expose short aliases when `CC_ENABLE_SHORT_NAMES` is defined; default is prefixed-only. Header implementations are `static inline` to keep stdlib header-only.
+10. **Prefixed C ABI:** Public C names are prefixed (`CCString`, `CCArena`, `cc_file_*`) to avoid collisions. The compiler automatically resolves short aliases to their prefixed forms. Header implementations are `static inline` to keep stdlib header-only.
 11. **Arena-first collections:** Collections default to arena-backed, bounded growth. Vectors/maps grow by allocating new buffers/tables in the provided arena and reusing them; old buffers remain until the arena resets. Growth fails if the arena is exhausted. Heap-backed helpers (kvec/khash style) are optional, tool-only, and never used by generated code unless explicitly included.
 12. **Async backend auto-probe:** The runtime may auto-select a native async backend (io_uring/kqueue/poll) with a safe fallback to the portable executor. An environment override (e.g., `CC_RUNTIME_BACKEND=executor|poll|io_uring`) can force selection; otherwise a best-available backend is chosen lazily.
 
@@ -219,7 +219,7 @@ The Phase 1 stdlib includes three core modules: strings (manipulation and parsin
 
 ### 1. Strings (`<std/string.cch>`)
 
-**Naming:** Language surface keeps `String` for UFCS ergonomics, but the C ABI is prefixed (`CCString`, `cc_string_*`). Short aliases are available only if `CC_ENABLE_SHORT_NAMES` is defined before including `std/prelude.cch`.
+**Naming:** Language surface keeps `String` for UFCS ergonomics, but the C ABI is prefixed (`CCString`, `cc_string_*`). The compiler resolves short aliases automatically.
 
 **Collections note:** Vectors/Maps are arena-backed by default. They may grow by allocating new buffers/tables in the arena and copying/rehashing; growth fails if the arena cannot satisfy the request. Optional heap-backed variants exist for tools/tests when explicitly included; generated code uses the arena-backed forms.
 

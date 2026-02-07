@@ -57,13 +57,4 @@ const char *cc_string_cstr(CCString *str) {
     return str->data;
 }
 
-#ifdef CC_ENABLE_SHORT_NAMES
-CCString string_new(CCArena *arena) { return cc_string_new(arena); }
-CCString* string_append(CCString *str, const char *cstr) {
-    if (!cstr) return str;
-    CCSlice s = cc_slice_from_buffer((void *)cstr, strlen(cstr));
-    return cc_string_push(str, s);
-}
-CCSlice string_as_slice(const CCString *str) { return cc_string_as_slice(str); }
-#endif
 

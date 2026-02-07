@@ -117,8 +117,8 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
 }
 
 /* Short name to CC-prefixed name mappings for stdlib types.
-   When CC_ENABLE_SHORT_NAMES is used, source code can write "IoError" but
-   the generated C code needs "CCIoError" for result type declarations. */
+   The compiler resolves short names (e.g. "IoError") to their CC-prefixed
+   forms (e.g. "CCIoError") in generated C code. */
 static const struct { const char* short_name; const char* cc_name; } cc__type_aliases[] = {
     { "IoError",     "CCIoError" },
     { "IoErrorKind", "CCIoErrorKind" },
