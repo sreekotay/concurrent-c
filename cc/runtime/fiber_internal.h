@@ -39,6 +39,7 @@ void cc_fiber_dump_state(const char* reason);  /* Debug: dump scheduler state */
 int cc__fiber_sched_active(void);
 void cc__fiber_set_park_obj(void* obj);
 void cc__fiber_clear_pending_unpark(void);  /* Clear stale pending_unpark before new wait */
+void cc__fiber_sleep_park(unsigned int ms); /* Park fiber on sleep queue with timer */
 
 /* Convenience macro to park with source location */
 #define CC_FIBER_PARK(reason) cc__fiber_park_reason(reason, __FILE__, __LINE__)

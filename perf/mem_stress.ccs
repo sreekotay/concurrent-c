@@ -1,21 +1,34 @@
 #include <ccc/std/prelude.cch>
+#include <sys/resource.h>
+#include <stdatomic.h>
+
+static _Atomic int g_completed = 0;
 
 int main() {
     const int count = 100000;
-    printf("Spawning %d fibers...\n", count);
+    printf("START. Spawning %d fibers...\n", count);
+    fflush(stdout);
     
     @nursery {
         for (int i = 0; i < count; i++) {
             spawn(() => {
-                cc_sleep_ms(100);
+                cc_sleep_ms(1000);
+                atomic_fetch_add(&g_completed, 1);
             });
+            if ((i + 1) % 10000 == 0) {
+                printf("  %d / %d spawned...\n", i + 1, count);
+                fflush(stdout);
+            }
         }
         
-        printf("Fibers spawned.\n");
-        
-        // Keep alive for RSS measurement
-        cc_sleep_ms(5000);
+        printf("All %d fibers spawned. Waiting for completion...\n", count);
+        fflush(stdout);
     }
     
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    printf("Done: %d/%d completed. Peak RSS: %ld KB (%.1f MB)\n",
+           atomic_load(&g_completed), count,
+           ru.ru_maxrss / 1024, ru.ru_maxrss / 1024.0 / 1024.0);
     return 0;
 }

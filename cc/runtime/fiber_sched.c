@@ -205,8 +205,8 @@ static int get_spin_yield_iters(void) {
 #endif
 #endif
 
-#ifndef CC_FIBER_QUEUE_SIZE
-#define CC_FIBER_QUEUE_SIZE 65536  /* 64K slots to handle large workloads */
+#ifndef CC_FIBER_QUEUE_INITIAL
+#define CC_FIBER_QUEUE_INITIAL 4096  /* Start small, grow on demand */
 #endif
 
 #define MAX_WORKERS 64
@@ -256,71 +256,113 @@ typedef struct fiber_task {
     
     int last_worker_id;       /* Worker affinity hint: last worker that ran this fiber (-1 = none) */
     
+    struct timespec sleep_deadline;  /* Deadline for cc_sleep_ms timer parking */
+    
     struct fiber_task* next;  /* For free list / queues */
     struct fiber_task* debug_next;  /* For all-fibers debug list (deadlock dump) */
 } fiber_task;
 
 /* ============================================================================
- * Lock-Free MPMC Queue
+ * Lock-Free MPMC Queue with overflow list
+ *
+ * Fast path: fixed-size lock-free ring buffer (CC_FIBER_QUEUE_INITIAL slots).
+ * Slow path: when the ring is full, overflow to a mutex-protected linked list.
+ * Workers drain the overflow list back into the ring when they find it empty.
+ * This keeps the common case lock-free while handling arbitrary spawn bursts.
  * ============================================================================ */
 
 typedef struct {
-    fiber_task* _Atomic slots[CC_FIBER_QUEUE_SIZE];
+    fiber_task* _Atomic slots[CC_FIBER_QUEUE_INITIAL];
     _Atomic size_t head;
     _Atomic size_t tail;
+    /* Overflow list for when ring is full */
+    pthread_mutex_t overflow_mu;
+    fiber_task* overflow_head;
+    fiber_task* overflow_tail;
+    _Atomic size_t overflow_count;
 } fiber_queue;
 
-static int fq_push(fiber_queue* q, fiber_task* f) {
-    int pause_round = 0;
-    for (int retry = 0; retry < 1000; retry++) {
+static void fq_init(fiber_queue* q) {
+    memset(q->slots, 0, sizeof(q->slots));
+    atomic_store(&q->head, 0);
+    atomic_store(&q->tail, 0);
+    pthread_mutex_init(&q->overflow_mu, NULL);
+    q->overflow_head = NULL;
+    q->overflow_tail = NULL;
+    atomic_store(&q->overflow_count, 0);
+}
+
+/* Try to push to the lock-free ring. Returns 0 on success, -1 if full. */
+static int fq_push_ring(fiber_queue* q, fiber_task* f) {
+    for (int retry = 0; retry < 64; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
         size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
 
-        if (tail - head >= CC_FIBER_QUEUE_SIZE) {
-            if (++pause_round >= 16) {
-                pause_round = 0;
-                sched_yield();
-            } else {
-                cpu_pause();
-            }
-            continue;
+        if (tail - head >= CC_FIBER_QUEUE_INITIAL) {
+            return -1;  /* Ring full */
         }
 
         if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
                                                    memory_order_release,
                                                    memory_order_relaxed)) {
-            atomic_store_explicit(&q->slots[tail % CC_FIBER_QUEUE_SIZE], f, memory_order_release);
+            atomic_store_explicit(&q->slots[tail % CC_FIBER_QUEUE_INITIAL], f, memory_order_release);
             return 0;
         }
-        pause_round = 0;
         cpu_pause();
     }
-    sched_yield();
     return -1;
 }
 
-static inline void fq_push_blocking(fiber_queue* q, fiber_task* f) {
-    while (fq_push(q, f) != 0) {
-        sched_yield();
+/* Push: try ring first, fall back to overflow list. Never blocks. */
+static void fq_push_blocking(fiber_queue* q, fiber_task* f) {
+    if (fq_push_ring(q, f) == 0) return;
+    
+    /* Ring full — use overflow list */
+    f->next = NULL;
+    pthread_mutex_lock(&q->overflow_mu);
+    if (q->overflow_tail) {
+        q->overflow_tail->next = f;
+    } else {
+        q->overflow_head = f;
     }
+    q->overflow_tail = f;
+    atomic_fetch_add_explicit(&q->overflow_count, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&q->overflow_mu);
 }
 
-
-/* Check if global queue has items (non-destructive peek) */
+/* Check if queue has items (non-destructive peek) */
 static int fq_peek(fiber_queue* q) {
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
     size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    return head < tail;
+    if (head < tail) return 1;
+    return atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0;
+}
+
+/* Pop from overflow list (caller should try ring first). */
+static fiber_task* fq_pop_overflow(fiber_queue* q) {
+    if (atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0)
+        return NULL;
+    pthread_mutex_lock(&q->overflow_mu);
+    fiber_task* f = q->overflow_head;
+    if (f) {
+        q->overflow_head = f->next;
+        if (!q->overflow_head) q->overflow_tail = NULL;
+        f->next = NULL;
+        atomic_fetch_sub_explicit(&q->overflow_count, 1, memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&q->overflow_mu);
+    return f;
 }
 
 static fiber_task* fq_pop(fiber_queue* q) {
+    /* Try lock-free ring first */
     for (int retry = 0; retry < 1000; retry++) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
         size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
         
-        if (head >= tail) return NULL;
+        if (head >= tail) break;  /* Ring empty, try overflow */
         
-        size_t idx = head % CC_FIBER_QUEUE_SIZE;
+        size_t idx = head % CC_FIBER_QUEUE_INITIAL;
         fiber_task* f = atomic_load_explicit(&q->slots[idx], memory_order_acquire);
         
         if (!f) {
@@ -341,7 +383,77 @@ static fiber_task* fq_pop(fiber_queue* q) {
             return f;
         }
     }
-    return NULL;
+    /* Ring empty — check overflow */
+    return fq_pop_overflow(q);
+}
+
+/* ============================================================================
+ * Sleep Queue — timer-based fiber parking for cc_sleep_ms
+ *
+ * Instead of busy-yielding sleeping fibers back through the run queue,
+ * we park them here.  Sysmon (or workers during idle) scans the list
+ * every millisecond and re-enqueues fibers whose deadline has passed.
+ * This eliminates O(N) queue churn for N concurrent sleepers.
+ * ============================================================================ */
+
+typedef struct {
+    pthread_mutex_t mu;
+    fiber_task* head;        /* Singly-linked list of sleeping fibers (via ->next) */
+    _Atomic size_t count;    /* Approximate count for quick peek */
+} sleep_queue;
+
+static sleep_queue g_sleep_queue;
+
+static void sq_init(void) {
+    pthread_mutex_init(&g_sleep_queue.mu, NULL);
+    g_sleep_queue.head = NULL;
+    atomic_store(&g_sleep_queue.count, 0);
+}
+
+static void sq_destroy(void) {
+    pthread_mutex_destroy(&g_sleep_queue.mu);
+}
+
+/* Park a fiber for sleep.  Caller must have already set f->sleep_deadline
+ * and transitioned the fiber state to FIBER_QUEUED (or similar).
+ * The fiber will be resumed by sq_drain when its deadline passes. */
+static void sq_push(fiber_task* f) {
+    pthread_mutex_lock(&g_sleep_queue.mu);
+    f->next = g_sleep_queue.head;
+    g_sleep_queue.head = f;
+    atomic_fetch_add_explicit(&g_sleep_queue.count, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&g_sleep_queue.mu);
+}
+
+/* Drain expired sleepers back into the run queue.
+ * Returns the number of fibers woken. */
+static size_t sq_drain(fiber_queue* run_queue) {
+    if (atomic_load_explicit(&g_sleep_queue.count, memory_order_relaxed) == 0)
+        return 0;
+    
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    
+    pthread_mutex_lock(&g_sleep_queue.mu);
+    fiber_task** pp = &g_sleep_queue.head;
+    size_t woken = 0;
+    while (*pp) {
+        fiber_task* f = *pp;
+        if (now.tv_sec > f->sleep_deadline.tv_sec ||
+            (now.tv_sec == f->sleep_deadline.tv_sec &&
+             now.tv_nsec >= f->sleep_deadline.tv_nsec)) {
+            /* Deadline passed — remove from sleep list and enqueue */
+            *pp = f->next;
+            f->next = NULL;
+            atomic_fetch_sub_explicit(&g_sleep_queue.count, 1, memory_order_relaxed);
+            fq_push_blocking(run_queue, f);
+            woken++;
+        } else {
+            pp = &f->next;
+        }
+    }
+    pthread_mutex_unlock(&g_sleep_queue.mu);
+    return woken;
 }
 
 /* ============================================================================
@@ -931,8 +1043,9 @@ void cc_fiber_dump_state(const char* reason) {
     if (g_sched.run_queue) {
         size_t head = atomic_load(&g_sched.run_queue->head);
         size_t tail = atomic_load(&g_sched.run_queue->tail);
-        fprintf(stderr, "  run_queue: head=%zu tail=%zu (approx %zu items)\n",
-                head, tail, (tail - head) % CC_FIBER_QUEUE_SIZE);
+        size_t overflow = atomic_load(&g_sched.run_queue->overflow_count);
+        fprintf(stderr, "  run_queue: head=%zu tail=%zu (ring ~%zu + overflow %zu items)\n",
+                head, tail, tail - head, overflow);
     } else {
         fprintf(stderr, "  run_queue: (uninitialized)\n");
     }
@@ -1338,6 +1451,17 @@ static void* sysmon_main(void* arg) {
     (void)arg;
     while (atomic_load_explicit(&g_sched.sysmon_running, memory_order_acquire)) {
         usleep(SYSMON_CHECK_US);
+        
+        /* Wake any fibers whose sleep deadline has passed */
+        {
+            size_t woken = sq_drain(g_sched.run_queue);
+            if (woken > 0) {
+                /* Fibers were pushed to run queue — wake workers to process them */
+                for (size_t w = 0; w < woken && w < g_sched.num_workers; w++) {
+                    wake_one_if_sleeping_unconditional(0);
+                }
+            }
+        }
 
         size_t current = atomic_load(&g_sched.temp_worker_count);
         if (current >= MAX_EXTRA_WORKERS) continue;
@@ -1507,7 +1631,7 @@ static void* worker_main(void* arg) {
                     for (size_t s = count; s < stolen; s++) {
                         if (lq_push(my_queue, steal_buf[s]) != 0) {
                             /* Local queue full, put overflow in global */
-                            fq_push(g_sched.run_queue, steal_buf[s]);
+                            fq_push_blocking(g_sched.run_queue, steal_buf[s]);
                         }
                     }
                     break;  /* Got work, stop stealing */
@@ -1666,6 +1790,9 @@ static void* worker_main(void* arg) {
          * - If spawner pushed after our check: wake_val changed, wait returns immediately */
         while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
             /* Check if there's runnable work */
+            /* Drain any expired sleepers before checking queues */
+            if (g_sched.run_queue) sq_drain(g_sched.run_queue);
+            
             int has_local = lq_peek(my_queue);
             int has_inbox = iq_peek(&g_sched.inbox_queues[worker_id]);
             int has_global = g_sched.run_queue && fq_peek(g_sched.run_queue);
@@ -1787,6 +1914,8 @@ int cc_fiber_sched_init(size_t num_workers) {
     g_sched.num_workers = num_workers;
     atomic_store(&g_sched.running, 1);
     g_sched.run_queue = (fiber_queue*)calloc(1, sizeof(fiber_queue));
+    fq_init(g_sched.run_queue);
+    sq_init();
     g_sched.local_queues = (local_queue*)calloc(num_workers, sizeof(local_queue));
     g_sched.inbox_queues = (inbox_queue*)calloc(num_workers, sizeof(inbox_queue));
     g_sched.workers = (pthread_t*)calloc(num_workers, sizeof(pthread_t));
@@ -1795,6 +1924,7 @@ int cc_fiber_sched_init(size_t num_workers) {
         num_workers, sizeof(*g_sched.worker_heartbeat));
     if (!g_sched.run_queue || !g_sched.local_queues || !g_sched.inbox_queues ||
         !g_sched.workers || !g_sched.worker_parked || !g_sched.worker_heartbeat) {
+        if (g_sched.run_queue) pthread_mutex_destroy(&g_sched.run_queue->overflow_mu);
         free(g_sched.run_queue);
         free(g_sched.local_queues);
         free(g_sched.inbox_queues);
@@ -1883,6 +2013,8 @@ void cc_fiber_sched_shutdown(void) {
     free(g_sched.inbox_queues);
     free(g_sched.worker_parked);
     free(g_sched.worker_heartbeat);
+    sq_destroy();
+    pthread_mutex_destroy(&g_sched.run_queue->overflow_mu);
     free(g_sched.run_queue);
     g_sched.workers = NULL;
     g_sched.local_queues = NULL;
@@ -2060,10 +2192,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     /* Non-worker spawns or queue full: use global queue */
     if (!pushed) {
-        if (fq_push(g_sched.run_queue, f) != 0) {
-            fiber_free(f);
-            return NULL;
-        }
+        fq_push_blocking(g_sched.run_queue, f);
         if (join_debug_enabled()) {
             fprintf(stderr, "[spawn] fiber=%lu to global\n", (unsigned long)f->fiber_id);
         }
@@ -2794,6 +2923,39 @@ void cc__fiber_yield_global(void) {
         return;
     }
     fq_push_blocking(g_sched.run_queue, current);
+    mco_yield(current->coro);
+}
+
+/* Park the current fiber for `ms` milliseconds.
+ * The fiber is removed from the run queue entirely and placed on the
+ * sleep queue.  Sysmon drains expired sleepers every ~250µs.
+ * This avoids the O(N) queue churn of yield-and-recheck. */
+void cc__fiber_sleep_park(unsigned int ms) {
+    fiber_task* current = tls_current_fiber;
+    if (!current || !current->coro) {
+        /* Not in fiber context — fall back to OS sleep */
+        struct timespec ts = { .tv_sec = ms / 1000,
+                               .tv_nsec = (long)(ms % 1000) * 1000000L };
+        while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {}
+        return;
+    }
+    /* Compute deadline */
+    clock_gettime(CLOCK_MONOTONIC, &current->sleep_deadline);
+    uint64_t ns = (uint64_t)ms * 1000000ULL;
+    current->sleep_deadline.tv_nsec += (long)(ns % 1000000000ULL);
+    current->sleep_deadline.tv_sec  += (time_t)(ns / 1000000000ULL);
+    if (current->sleep_deadline.tv_nsec >= 1000000000L) {
+        current->sleep_deadline.tv_nsec -= 1000000000L;
+        current->sleep_deadline.tv_sec  += 1;
+    }
+    /* Transition to QUEUED and place on sleep queue */
+    int expected_state = FIBER_RUNNING;
+    if (!atomic_compare_exchange_strong_explicit(&current->state, &expected_state, FIBER_QUEUED,
+                                                  memory_order_release,
+                                                  memory_order_relaxed)) {
+        return;  /* State changed concurrently — skip */
+    }
+    sq_push(current);
     mco_yield(current->coro);
 }
 

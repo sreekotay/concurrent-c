@@ -235,6 +235,14 @@ void* cc_thread_task_get_result(struct CCSpawnTask* task) {
 }
 
 int cc_sleep_ms(unsigned int ms) {
+    /* Fiber-aware: park the fiber on the sleep queue with a deadline.
+     * Sysmon drains expired sleepers every ~250µs and re-enqueues them.
+     * This avoids O(N) queue churn when many fibers sleep concurrently. */
+    if (cc__fiber_in_context()) {
+        cc__fiber_sleep_park(ms);
+        return 0;
+    }
+    /* Thread context: block the OS thread directly. */
     struct timespec ts;
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
