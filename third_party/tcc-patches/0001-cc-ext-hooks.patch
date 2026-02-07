@@ -758,7 +758,7 @@ index 1c2f6949..ada8f8f2 100644
  ST_DATA const int *macro_ptr;
  ST_DATA int parse_flags;
 diff --git a/tccgen.c b/tccgen.c
-index 6d42de67..064a56bc 100644
+index 50802edf..a47cbbef 100644
 --- a/tccgen.c
 +++ b/tccgen.c
 @@ -49,6 +49,45 @@ ST_DATA SValue *vtop;
@@ -858,7 +858,7 @@ index 6d42de67..064a56bc 100644
          else
              pstrcat(buf, buf_size, get_tok_str(v, NULL));
          break;
-@@ -3386,6 +3439,10 @@ error:
+@@ -3389,6 +3442,10 @@ error:
          if (ds == ss && ds >= 4)
              goto done;
          if (dbt_bt == VT_PTR || sbt_bt == VT_PTR) {
@@ -869,7 +869,7 @@ index 6d42de67..064a56bc 100644
              tcc_warning("cast between pointer and integer of different size");
              if (sbt_bt == VT_PTR) {
                  /* put integer type to allow logical operations below */
-@@ -3589,7 +3646,8 @@ static void cast_error(CType *st, CType *dt)
+@@ -3592,7 +3649,8 @@ static void cast_error(CType *st, CType *dt)
  static void verify_assign_cast(CType *dt)
  {
      CType *st, *type1, *type2;
@@ -879,7 +879,7 @@ index 6d42de67..064a56bc 100644
  
      st = &vtop->type; /* source type */
      dbt = dt->t & VT_BTYPE;
-@@ -3608,6 +3666,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3611,6 +3669,10 @@ static void verify_assign_cast(CType *dt)
              break;
          /* accept implicit pointer to integer cast with warning */
          if (is_integer_btype(sbt)) {
@@ -890,7 +890,7 @@ index 6d42de67..064a56bc 100644
              tcc_warning("assignment makes pointer from integer without a cast");
              break;
          }
-@@ -3643,8 +3705,29 @@ static void verify_assign_cast(CType *dt)
+@@ -3646,8 +3708,29 @@ static void verify_assign_cast(CType *dt)
  		   base types, though, in particular for unsigned enums
  		   and signed int targets.  */
              } else {
@@ -922,7 +922,7 @@ index 6d42de67..064a56bc 100644
              }
          }
          if (qualwarn)
-@@ -3655,6 +3738,10 @@ static void verify_assign_cast(CType *dt)
+@@ -3658,6 +3741,10 @@ static void verify_assign_cast(CType *dt)
      case VT_INT:
      case VT_LLONG:
          if (sbt == VT_PTR || sbt == VT_FUNC) {
@@ -933,7 +933,7 @@ index 6d42de67..064a56bc 100644
              tcc_warning("assignment makes integer from pointer without a cast");
          } else if (sbt == VT_STRUCT) {
              goto case_VT_STRUCT;
-@@ -4493,6 +4580,24 @@ do_decl:
+@@ -4496,6 +4583,24 @@ do_decl:
          if (s->c != -1
              && !(u == VT_ENUM && s->c == 0)) /* not yet defined typed enum */
              tcc_error("struct/union/enum already defined");
@@ -958,7 +958,7 @@ index 6d42de67..064a56bc 100644
          s->c = -2;
          /* cannot be empty */
          /* non empty enums are not allowed */
-@@ -4521,6 +4626,15 @@ do_decl:
+@@ -4524,6 +4629,15 @@ do_decl:
                  ss = sym_push(v, &t, VT_CONST, 0);
                  ss->enum_val = ll;
                  *ps = ss, ps = &ss->next;
@@ -974,7 +974,7 @@ index 6d42de67..064a56bc 100644
                  if (ll < nl)
                      nl = ll;
                  if (ll > pl)
-@@ -4534,6 +4648,7 @@ do_decl:
+@@ -4537,6 +4651,7 @@ do_decl:
                      break;
              }
              skip('}');
@@ -982,7 +982,7 @@ index 6d42de67..064a56bc 100644
  
              if (bt) {
                  t.t = bt;
-@@ -4668,6 +4783,19 @@ do_decl:
+@@ -4671,6 +4786,19 @@ do_decl:
                          ss->a = ad1.a;
                          *ps = ss;
                          ps = &ss->next;
@@ -1002,7 +1002,7 @@ index 6d42de67..064a56bc 100644
                      }
                      if (tok == ';' || tok == TOK_EOF)
                          break;
-@@ -4676,6 +4804,12 @@ do_decl:
+@@ -4679,6 +4807,12 @@ do_decl:
                  skip(';');
              }
              skip('}');
@@ -1015,7 +1015,7 @@ index 6d42de67..064a56bc 100644
  	    parse_attribute(&ad);
              if (ad.cleanup_func) {
                  tcc_warning("attribute '__cleanup__' ignored on type");
-@@ -4724,6 +4858,33 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
+@@ -4727,6 +4861,33 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
  
      while(1) {
          switch(tok) {
@@ -1049,7 +1049,7 @@ index 6d42de67..064a56bc 100644
          case TOK_EXTENSION:
              /* currently, we really ignore extension */
              next();
-@@ -5602,6 +5763,18 @@ ST_FUNC void unary(void)
+@@ -5605,6 +5766,18 @@ ST_FUNC void unary(void)
      case TOK_CCHAR: 
  	t = VT_INT;
   push_tokc:
@@ -1068,7 +1068,7 @@ index 6d42de67..064a56bc 100644
  	type.t = t;
  	vsetc(&type, VT_CONST, &tokc);
          next();
-@@ -5657,6 +5830,25 @@ ST_FUNC void unary(void)
+@@ -5660,6 +5833,25 @@ ST_FUNC void unary(void)
          /* string parsing */
          t = char_type.t;
      str_init:
@@ -1094,7 +1094,7 @@ index 6d42de67..064a56bc 100644
          if (tcc_state->warn_write_strings & WARN_ON)
              t |= VT_CONSTANT;
          type.t = t;
-@@ -5666,10 +5858,34 @@ ST_FUNC void unary(void)
+@@ -5669,10 +5861,34 @@ ST_FUNC void unary(void)
          ad.section = rodata_section;
          decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
          break;
@@ -1129,7 +1129,7 @@ index 6d42de67..064a56bc 100644
          /* cast ? */
          if (parse_btype(&type, &ad, 0)) {
              type_decl(&type, &ad, &n, TYPE_ABSTRACT);
-@@ -5722,11 +5938,14 @@ ST_FUNC void unary(void)
+@@ -5725,11 +5941,14 @@ ST_FUNC void unary(void)
          }
          break;
      case '*':
@@ -1144,7 +1144,7 @@ index 6d42de67..064a56bc 100644
          next();
          unary();
          /* functions names must be treated as function pointers,
-@@ -5741,17 +5960,22 @@ ST_FUNC void unary(void)
+@@ -5744,17 +5963,22 @@ ST_FUNC void unary(void)
            vtop->sym->a.addrtaken = 1;
          mk_pointer(&vtop->type);
          gaddrof();
@@ -1167,7 +1167,7 @@ index 6d42de67..064a56bc 100644
          break;
      case '+':
          next();
-@@ -5771,13 +5995,30 @@ ST_FUNC void unary(void)
+@@ -5774,13 +5998,30 @@ ST_FUNC void unary(void)
      case TOK_ALIGNOF2:
      case TOK_ALIGNOF3:
          t = tok;
@@ -1198,7 +1198,7 @@ index 6d42de67..064a56bc 100644
          } else {
              type_size(&type, &align);
              s = NULL;
-@@ -5976,6 +6217,7 @@ ST_FUNC void unary(void)
+@@ -5979,6 +6220,7 @@ ST_FUNC void unary(void)
          inc(0, t);
          break;
      case '-':
@@ -1206,7 +1206,7 @@ index 6d42de67..064a56bc 100644
          next();
          unary();
  	if (is_float(vtop->type.t)) {
-@@ -5985,6 +6227,7 @@ ST_FUNC void unary(void)
+@@ -5988,6 +6230,7 @@ ST_FUNC void unary(void)
              vswap();
              gen_op('-');
          }
@@ -1214,7 +1214,7 @@ index 6d42de67..064a56bc 100644
          break;
      case TOK_LAND:
          if (!gnu_ext)
-@@ -6090,13 +6333,95 @@ special_math_val:
+@@ -6093,13 +6336,95 @@ special_math_val:
  
      default:
      tok_identifier:
@@ -1311,7 +1311,7 @@ index 6d42de67..064a56bc 100644
              if (tok != '(')
                  tcc_error("'%s' undeclared", name);
              /* for simple function calls, we tolerate undeclared
-@@ -6136,17 +6461,100 @@ special_math_val:
+@@ -6139,17 +6464,100 @@ special_math_val:
      /* post operations */
      while (1) {
          if (tok == TOK_INC || tok == TOK_DEC) {
@@ -1416,7 +1416,7 @@ index 6d42de67..064a56bc 100644
  	    s = find_field(&vtop->type, tok, &cumofs);
              /* add field offset to pointer */
              gaddrof();
-@@ -6165,13 +6573,28 @@ special_math_val:
+@@ -6168,13 +6576,28 @@ special_math_val:
                      vtop->r |= VT_MUSTBOUND;
  #endif
              }
@@ -1446,7 +1446,7 @@ index 6d42de67..064a56bc 100644
          } else if (tok == '(') {
              SValue ret;
              Sym *sa;
-@@ -6179,6 +6602,8 @@ special_math_val:
+@@ -6182,6 +6605,8 @@ special_math_val:
              TokenString *p, *p2;
  
              /* function call  */
@@ -1455,7 +1455,7 @@ index 6d42de67..064a56bc 100644
              if ((vtop->type.t & VT_BTYPE) != VT_FUNC) {
                  /* pointer test (no array accepted) */
                  if ((vtop->type.t & (VT_BTYPE | VT_ARRAY)) == VT_PTR) {
-@@ -6187,6 +6612,53 @@ special_math_val:
+@@ -6190,6 +6615,53 @@ special_math_val:
                          goto error_func;
                  } else {
                  error_func:
@@ -1509,7 +1509,7 @@ index 6d42de67..064a56bc 100644
                      expect("function pointer");
                  }
              } else {
-@@ -6261,8 +6733,13 @@ special_math_val:
+@@ -6264,8 +6736,13 @@ special_math_val:
                      skip(',');
                  }
              }
@@ -1524,7 +1524,7 @@ index 6d42de67..064a56bc 100644
  
              if (p) { /* with reverse_funcargs */
                  for (n = 0; p; p = p2, ++n) {
-@@ -6279,10 +6756,39 @@ special_math_val:
+@@ -6282,10 +6759,39 @@ special_math_val:
                  vrev(n);
              }
  
@@ -1564,7 +1564,7 @@ index 6d42de67..064a56bc 100644
              if (ret_nregs < 0) {
                  vsetc(&ret.type, ret.r, &ret.c);
  #ifdef TCC_TARGET_RISCV64
-@@ -6363,9 +6869,11 @@ static void expr_prod(void)
+@@ -6366,9 +6872,11 @@ static void expr_prod(void)
  
      unary();
      while ((t = tok) == '*' || t == '/' || t == '%') {
@@ -1576,7 +1576,7 @@ index 6d42de67..064a56bc 100644
      }
  }
  
-@@ -6375,9 +6883,11 @@ static void expr_sum(void)
+@@ -6378,9 +6886,11 @@ static void expr_sum(void)
  
      expr_prod();
      while ((t = tok) == '+' || t == '-') {
@@ -1588,7 +1588,7 @@ index 6d42de67..064a56bc 100644
      }
  }
  
-@@ -6506,11 +7016,13 @@ static void expr_infix(int p)
+@@ -6509,11 +7019,13 @@ static void expr_infix(int p)
          if (t == TOK_LOR || t == TOK_LAND) {
              expr_landor(t);
          } else {
@@ -1602,7 +1602,7 @@ index 6d42de67..064a56bc 100644
          }
          t = tok;
      }
-@@ -6700,12 +7212,13 @@ static void expr_cond(void)
+@@ -6703,12 +7215,13 @@ static void expr_cond(void)
      }
  }
  
@@ -1617,7 +1617,7 @@ index 6d42de67..064a56bc 100644
          test_lvalue();
          next();
          if (t == '=') {
-@@ -6716,6 +7229,7 @@ static void expr_eq(void)
+@@ -6719,6 +7232,7 @@ static void expr_eq(void)
              gen_op(TOK_ASSIGN_OP(t));
          }
          vstore();
@@ -1625,7 +1625,7 @@ index 6d42de67..064a56bc 100644
      }
  }
  
-@@ -7116,7 +7630,23 @@ static void lblock(int *bsym, int *csym)
+@@ -7119,7 +7633,23 @@ static void lblock(int *bsym, int *csym)
          loop_scope = co;
      }
      co->bsym = bsym;
@@ -1649,7 +1649,7 @@ index 6d42de67..064a56bc 100644
      co->bsym = b;
      if (csym) {
          co->csym = c;
-@@ -7139,14 +7669,74 @@ static void gexpr_decl(void)
+@@ -7142,14 +7672,74 @@ static void gexpr_decl(void)
      }
  }
  
@@ -1725,7 +1725,7 @@ index 6d42de67..064a56bc 100644
      /* If the token carries a value, next() might destroy it. Only with
         invalid code such as f(){"123"4;} */
      if (TOK_HAS_VALUE(t))
-@@ -7157,24 +7747,40 @@ again:
+@@ -7160,24 +7750,40 @@ again:
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
  
      if (t == TOK_IF) {
@@ -1766,7 +1766,7 @@ index 6d42de67..064a56bc 100644
          new_scope_s(&o);
          d = gind();
          skip('(');
-@@ -7187,12 +7793,33 @@ again:
+@@ -7190,12 +7796,33 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope_s(&o);
@@ -1800,7 +1800,7 @@ index 6d42de67..064a56bc 100644
          /* handle local labels declarations */
          while (tok == TOK_LABEL) {
              do {
-@@ -7208,7 +7835,24 @@ again:
+@@ -7211,7 +7838,24 @@ again:
          while (tok != '}') {
  	    decl(VT_LOCAL);
              if (tok != '}') {
@@ -1825,7 +1825,7 @@ index 6d42de67..064a56bc 100644
              }
          }
  
-@@ -7220,7 +7864,19 @@ again:
+@@ -7223,7 +7867,19 @@ again:
          else if (!nocode_wanted)
              check_func_return();
  
@@ -1845,7 +1845,7 @@ index 6d42de67..064a56bc 100644
          b = (func_vt.t & VT_BTYPE) != VT_VOID;
          if (tok != ';') {
              gexpr();
-@@ -7239,6 +7895,7 @@ again:
+@@ -7242,6 +7898,7 @@ again:
          if (b)
              gfunc_return(&func_vt);
          skip(';');
@@ -1853,7 +1853,7 @@ index 6d42de67..064a56bc 100644
          /* jump unless last stmt in top-level block */
          if (tok != '}' || local_scope != 1)
              rsym = gjmp(rsym);
-@@ -7266,6 +7923,7 @@ again:
+@@ -7269,6 +7926,7 @@ again:
          skip(';');
  
      } else if (t == TOK_FOR) {
@@ -1861,7 +1861,7 @@ index 6d42de67..064a56bc 100644
          new_scope(&o);
  
          skip('(');
-@@ -7299,6 +7957,7 @@ again:
+@@ -7302,6 +7960,7 @@ again:
          gsym_addr(b, d);
          gsym(a);
          prev_scope(&o, 0);
@@ -1869,7 +1869,7 @@ index 6d42de67..064a56bc 100644
  
      } else if (t == TOK_DO) {
          new_scope_s(&o);
-@@ -7485,6 +8144,7 @@ again:
+@@ -7488,6 +8147,7 @@ again:
  
      if (debug_modes)
          tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_end (tcc_state, 0);
@@ -1877,7 +1877,7 @@ index 6d42de67..064a56bc 100644
  }
  
  /* This skips over a stream of tokens containing balanced {} and ()
-@@ -7815,6 +8475,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
+@@ -7818,6 +8478,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
  	    ElfW_Rel *rel;
  	    esym = elfsym(vtop->sym);
  	    ssec = tcc_state->sections[esym->st_shndx];
@@ -1887,7 +1887,7 @@ index 6d42de67..064a56bc 100644
  	    memmove (ptr, ssec->data + esym->st_value + (int)vtop->c.i, size);
  	    if (ssec->reloc) {
  		/* We need to copy over all memory contents, and that
-@@ -8669,6 +9332,15 @@ static int decl(int l)
+@@ -8672,6 +9335,15 @@ static int decl(int l)
      AttributeDef ad, adbase;
      ElfSym *esym;
  
@@ -1903,7 +1903,7 @@ index 6d42de67..064a56bc 100644
      while (1) {
  
          oldint = 0;
-@@ -8684,6 +9356,44 @@ static int decl(int l)
+@@ -8687,6 +9359,44 @@ static int decl(int l)
                  do_Static_assert();
                  continue;
              }
@@ -1948,7 +1948,7 @@ index 6d42de67..064a56bc 100644
              if (l != VT_CONST)
                  break;
              if (tok == TOK_ASM1 || tok == TOK_ASM2 || tok == TOK_ASM3) {
-@@ -8720,8 +9430,68 @@ static int decl(int l)
+@@ -8723,8 +9433,68 @@ static int decl(int l)
          while (1) { /* iterate thru each declaration */
              type = btype;
  	    ad = adbase;
@@ -2018,7 +2018,7 @@ index 6d42de67..064a56bc 100644
              if ((type.t & VT_BTYPE) == VT_FUNC) {
                  if ((type.t & VT_STATIC) && (l != VT_CONST))
                      tcc_error("function without file scope cannot be static");
-@@ -8829,6 +9599,31 @@ static int decl(int l)
+@@ -8832,6 +9602,31 @@ static int decl(int l)
  		} else if (type.t & VT_TYPEDEF) {
                      /* save typedefed type  */
                      /* XXX: test storage specifiers ? */
@@ -2050,7 +2050,7 @@ index 6d42de67..064a56bc 100644
                      sym = sym_find(v);
                      if (sym && sym->sym_scope == local_scope) {
                          if (!is_compatible_types(&sym->type, &type)
-@@ -8860,6 +9655,11 @@ static int decl(int l)
+@@ -8863,6 +9658,11 @@ static int decl(int l)
  
                      if (tok == '=')
                          has_init = 1;
@@ -2062,7 +2062,7 @@ index 6d42de67..064a56bc 100644
  
                      if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
  		        || (type.t & VT_BTYPE) == VT_FUNC
-@@ -8900,14 +9700,22 @@ static int decl(int l)
+@@ -8903,14 +9703,22 @@ static int decl(int l)
                  }
                  if (tok != ',') {
                      if (l == VT_JMP)
