@@ -120,7 +120,7 @@ stress-check: cc
 	@failed=0; \
 	for f in stress/*.ccs; do \
 		printf "  %-40s" "$$f"; \
-		if [ "$$f" = "stress/deadlock_detect_demo.ccs" ]; then \
+		if [ "$$f" = "stress/deadlock_detect_demo.ccs" ] || [ "$$f" = "stress/complex_deadlock.ccs" ]; then \
 			CC_DEADLOCK_TIMEOUT=1 $(CC_DIR)/bin/ccc run "$$f" >/dev/null 2>&1; \
 			rc=$$?; \
 			if [ $$rc -eq 124 ] || [ $$rc -eq 1 ]; then \

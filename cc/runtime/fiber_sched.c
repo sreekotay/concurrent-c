@@ -216,14 +216,33 @@ static int get_spin_yield_iters(void) {
  * Fiber State
  * ============================================================================ */
 
-typedef enum {
-    FIBER_CREATED,
-    FIBER_QUEUED,
-    FIBER_RUNNING,
-    FIBER_PARKING,
-    FIBER_PARKED,
-    FIBER_DONE
-} fiber_state;
+/* Unified control word — encodes lifecycle state + exclusive worker ownership.
+ * Replaces the old (fiber_state enum + running_lock) pair.
+ *
+ *   CTRL_IDLE     (0)   — in pool, available for reuse
+ *   CTRL_QUEUED  (-1)   — in a run queue
+ *   CTRL_PARKED  (-2)   — parked, stack quiescent, safe to resume
+ *   CTRL_PARKING (-3)   — transitioning to parked (stack may be active)
+ *   CTRL_DONE    (-4)   — completed
+ *   > 0: CTRL_OWNED(wid) = wid+1 — stack exclusively owned by worker wid
+ *
+ * The CAS QUEUED→OWNED(wid) atomically claims "running" AND "I own the stack",
+ * eliminating the need for a separate running_lock. */
+#define CTRL_IDLE       ((int64_t) 0)
+#define CTRL_QUEUED     ((int64_t)-1)
+#define CTRL_PARKED     ((int64_t)-2)
+#define CTRL_PARKING    ((int64_t)-3)
+#define CTRL_DONE       ((int64_t)-4)
+#define CTRL_OWNED(wid)      ((int64_t)((wid) + 1))
+#define CTRL_OWNED_TEMP      ((int64_t)0x7FFF)   /* replacement worker sentinel */
+#define CTRL_IS_OWNED(v)     ((v) > 0)
+#define CTRL_OWNER(v)        ((int)((v) - 1))
+
+/* yield_dest values — set by fiber, consumed by worker trampoline */
+#define YIELD_NONE   0
+#define YIELD_LOCAL  1
+#define YIELD_GLOBAL 2
+#define YIELD_SLEEP  3
 
 typedef struct fiber_task {
     /* Hot path fields - accessed during execution */
@@ -232,11 +251,15 @@ typedef struct fiber_task {
     void* arg;                /* User argument */
     void* result;             /* Return value */
     char result_buf[48];      /* Fiber-local storage for struct results (avoids malloc) */
-    _Atomic int state;
+    _Atomic int64_t control;  /* Unified control word (see encoding above) */
     _Atomic int done;
-    _Atomic int running_lock; /* Serialize resume/unpark */
     _Atomic uint64_t wake_counter; /* Debug-only wake counter */
     _Atomic int pending_unpark; /* Latch for early unpark while running */
+    
+    /* Yield-before-commit: fiber sets yield_dest then mco_yield().
+     * The worker trampoline enqueues after mco_resume returns.
+     * 0=none, 1=local queue, 2=global queue, 3=sleep queue */
+    int yield_dest;
     
     /* Per-fiber join synchronization */
     _Atomic int join_waiters;           /* Count of threads/fibers waiting to join */
@@ -415,7 +438,7 @@ static void sq_destroy(void) {
 }
 
 /* Park a fiber for sleep.  Caller must have already set f->sleep_deadline
- * and transitioned the fiber state to FIBER_QUEUED (or similar).
+ * and transitioned the fiber control word to CTRL_QUEUED (or similar).
  * The fiber will be resumed by sq_drain when its deadline passes. */
 static void sq_push(fiber_task* f) {
     pthread_mutex_lock(&g_sleep_queue.mu);
@@ -777,17 +800,19 @@ static void cc__fiber_check_deadlock(void) {
                 fiber_task* af = g_all_fibers_head;
                 int acount = 0;
                 while (af && acount < 50) {
-                    int st = atomic_load_explicit(&af->state, memory_order_relaxed);
+                    int64_t st = atomic_load_explicit(&af->control, memory_order_relaxed);
                     int dn = atomic_load_explicit(&af->done, memory_order_relaxed);
                     int pu = atomic_load_explicit(&af->pending_unpark, memory_order_relaxed);
                     const char* state_str = "???";
-                    switch (st) {
-                        case FIBER_CREATED: state_str = "CREATED"; break;
-                        case FIBER_QUEUED:  state_str = "QUEUED";  break;
-                        case FIBER_RUNNING: state_str = "RUNNING"; break;
-                        case FIBER_PARKING: state_str = "PARKING"; break;
-                        case FIBER_PARKED:  state_str = "PARKED";  break;
-                        case FIBER_DONE:    state_str = "DONE";    break;
+                    char owned_buf[32];
+                    if      (st == CTRL_IDLE)    state_str = "IDLE";
+                    else if (st == CTRL_QUEUED)  state_str = "QUEUED";
+                    else if (st == CTRL_PARKED)  state_str = "PARKED";
+                    else if (st == CTRL_PARKING) state_str = "PARKING";
+                    else if (st == CTRL_DONE)    state_str = "DONE";
+                    else if (CTRL_IS_OWNED(st)) {
+                        snprintf(owned_buf, sizeof(owned_buf), "OWNED(%d)", CTRL_OWNER(st));
+                        state_str = owned_buf;
                     }
                     const char* reason = af->park_reason ? af->park_reason : "none";
                     fprintf(stderr, "  [fiber %lu] state=%-7s done=%d pending_unpark=%d park_reason=%s park_obj=%p\n",
@@ -1090,9 +1115,9 @@ static fiber_task* fiber_alloc(void) {
             f->fn = NULL;
             f->arg = NULL;
             f->result = NULL;
-            atomic_store(&f->state, FIBER_CREATED);
+            atomic_store(&f->control, CTRL_IDLE);
             atomic_store(&f->done, 0);
-            atomic_store(&f->running_lock, 0);
+            f->yield_dest = YIELD_NONE;
             atomic_store(&f->wake_counter, 0);
             atomic_store(&f->pending_unpark, 0);
             atomic_store(&f->join_waiters, 0);
@@ -1177,8 +1202,8 @@ static void fiber_panic(const char* msg, fiber_task* f, mco_result res) {
     fprintf(stderr, "Error: %s\n", msg);
     fprintf(stderr, "Minicoro result: %s (%d)\n", mco_result_str(res), (int)res);
     if (f) {
-        fprintf(stderr, "Fiber: %p, state=%d, done=%d\n", 
-                (void*)f, atomic_load(&f->state), atomic_load(&f->done));
+        fprintf(stderr, "Fiber: %p, control=%lld, done=%d\n", 
+                (void*)f, (long long)atomic_load(&f->control), atomic_load(&f->done));
         if (f->coro) {
             fprintf(stderr, "Coroutine: %p, status=%d\n", 
                     (void*)f->coro, (int)mco_status(f->coro));
@@ -1233,13 +1258,12 @@ static void fiber_entry(mco_coro* co) {
      * IMPORTANT: We also check join_cv_initialized under the lock to avoid
      * a race with thread joiners who init the condvar after we check it.
      * 
-     * IMPORTANT: We set state=FIBER_DONE under the lock too, so joiners
-     * see both done=1 and state=FIBER_DONE atomically. Otherwise there's
-     * a window where joiner sees done=1, calls wait_for_fiber_done_state(),
-     * and spins waiting for state=FIBER_DONE while we're preempted. */
+     * IMPORTANT: We do NOT set control=CTRL_DONE here — the worker trampoline
+     * does that after mco_resume returns, ensuring the stack is truly quiescent.
+     * Joiners observe done=1 for completion, and wait_for_fiber_done_state
+     * spins on CTRL_DONE to ensure the worker has released the stack. */
     join_spinlock_lock(&f->join_lock);
     atomic_store_explicit(&f->done, 1, memory_order_release);
-    atomic_store_explicit(&f->state, FIBER_DONE, memory_order_release);
     atomic_fetch_sub_explicit(&g_sched.pending, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_sched.completed, 1, memory_order_relaxed);
     fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
@@ -1254,12 +1278,12 @@ static void fiber_entry(mco_coro* co) {
     if (join_debug_enabled()) {
         int waiters = atomic_load_explicit(&f->join_waiters, memory_order_relaxed);
         fprintf(stderr,
-                "[join] fiber_entry done: fiber=%lu waiter=%s waiters=%d cv_init=%d state=%d\n",
+                "[join] fiber_entry done: fiber=%lu waiter=%s waiters=%d cv_init=%d control=%lld\n",
                 (unsigned long)f->fiber_id,
                 waiter ? "set" : "null",
                 waiters,
                 cv_initialized,
-                atomic_load_explicit(&f->state, memory_order_relaxed));
+                (long long)atomic_load_explicit(&f->control, memory_order_relaxed));
     }
     
     if (waiter) {
@@ -1286,23 +1310,16 @@ static void fiber_entry(mco_coro* co) {
  * Worker Thread
  * ============================================================================ */
 
-/* Helper to resume fiber with error checking */
+/* Helper to resume fiber with error checking.
+ * With the unified control word the caller already holds exclusive ownership
+ * (CTRL_OWNED(wid)), so no separate running_lock is needed. */
 static void fiber_resume(fiber_task* f) {
     if (!f->coro) {
         fiber_panic("NULL coroutine", f, MCO_INVALID_POINTER);
     }
     
-    /* Acquire running lock - serializes resume with unpark */
-    int expected = 0;
-    if (!atomic_compare_exchange_strong_explicit(&f->running_lock, &expected, 1,
-                                                  memory_order_acq_rel,
-                                                  memory_order_acquire)) {
-        fiber_panic("double resume detected", f, MCO_INVALID_OPERATION);
-    }
-    
     mco_state st = mco_status(f->coro);
     if (st != MCO_SUSPENDED) {
-        atomic_store_explicit(&f->running_lock, 0, memory_order_release);
         fiber_panic("coroutine not in suspended state", f, MCO_NOT_SUSPENDED);
     }
     
@@ -1311,9 +1328,6 @@ static void fiber_resume(fiber_task* f) {
     mco_result res = mco_resume(f->coro);
     /* Switch back to scheduler context after resume returns. */
     TSAN_FIBER_SWITCH(tls_tsan_sched_fiber);
-    
-    /* Release running lock */
-    atomic_store_explicit(&f->running_lock, 0, memory_order_release);
     
     if (res != MCO_SUCCESS) {
         fiber_panic("mco_resume failed", f, res);
@@ -1526,23 +1540,55 @@ static void* sysmon_main(void* arg) {
 }
 
 static inline int worker_run_fiber(fiber_task* f) {
-    int expected = FIBER_QUEUED;
-    if (!atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_RUNNING,
+    int wid = tls_worker_id;
+    int64_t expected = CTRL_QUEUED;
+    int64_t owned = (wid >= 0) ? CTRL_OWNED(wid) : CTRL_OWNED_TEMP;
+    if (!atomic_compare_exchange_strong_explicit(&f->control, &expected, owned,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
         return 0;  /* Stale/duplicate queue entry */
     }
-    if (atomic_load_explicit(&f->running_lock, memory_order_acquire)) {
-        /* Fiber is still running (queued before yield completed).
-         * Put it back to avoid double resume. */
-        atomic_store_explicit(&f->state, FIBER_QUEUED, memory_order_release);
-        fq_push_blocking(g_sched.run_queue, f);
-        return 0;
-    }
+    /* CAS succeeded — we exclusively own the fiber's stack. No running_lock needed. */
     tls_current_fiber = f;
-    f->last_worker_id = tls_worker_id;  /* Record affinity hint */
+    f->last_worker_id = wid;  /* Record affinity hint */
     fiber_resume(f);
     tls_current_fiber = NULL;
+    
+    /* ---- Trampoline: mco_resume returned, stack is quiescent ----
+     *
+     * Possible states:
+     * 1. Fiber set yield_dest → yield-before-commit, enqueue now
+     * 2. Fiber completed → done=1, control still OWNED(me), set CTRL_DONE
+     * 3. Fiber parked → control is CTRL_PARKED (or CTRL_PARKING), nothing to do
+     */
+    int dest = f->yield_dest;
+    if (dest != YIELD_NONE) {
+        /* Case 1: yield — enqueue to appropriate queue */
+        f->yield_dest = YIELD_NONE;
+        atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
+        switch (dest) {
+            case YIELD_LOCAL:
+                if (wid >= 0 && lq_push(&g_sched.local_queues[wid], f) == 0)
+                    break;
+                /* fall through to global if local full or no worker id */
+                /* fallthrough */
+            case YIELD_GLOBAL:
+                fq_push_blocking(g_sched.run_queue, f);
+                break;
+            case YIELD_SLEEP:
+                sq_push(f);
+                break;
+        }
+    } else if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+        /* Case 2: fiber completed — set CTRL_DONE now that mco_resume has
+         * returned and the stack is truly quiescent.  Joiners spinning in
+         * wait_for_fiber_done_state will see this and know it's safe to
+         * reclaim the fiber. */
+        atomic_store_explicit(&f->control, CTRL_DONE, memory_order_release);
+    }
+    /* Case 3 (parked): fiber already committed CTRL_PARKED before yielding.
+     * Nothing to do — unpark will transition PARKED→QUEUED when ready. */
+    
     return 1;
 }
 
@@ -2052,14 +2098,14 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     f->fn = fn;
     f->arg = arg;
-    int expected_state = FIBER_CREATED;
-    if (!atomic_compare_exchange_strong_explicit(&f->state, &expected_state, FIBER_QUEUED,
+    int64_t expected_state = CTRL_IDLE;
+    if (!atomic_compare_exchange_strong_explicit(&f->control, &expected_state, CTRL_QUEUED,
                                                   memory_order_release,
                                                   memory_order_relaxed)) {
         /* Unexpected state - avoid enqueuing a stale fiber. */
         if (join_debug_enabled()) {
-            fprintf(stderr, "[spawn] unexpected state=%d for fiber=%lu (expected CREATED)\n",
-                    expected_state, (unsigned long)f->fiber_id);
+            fprintf(stderr, "[spawn] unexpected control=%lld for fiber=%lu (expected IDLE)\n",
+                    (long long)expected_state, (unsigned long)f->fiber_id);
         }
         fiber_free(f);
         return NULL;
@@ -2237,9 +2283,9 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     }
     atomic_fetch_add_explicit(&g_fibers_spawned, 1, memory_order_relaxed);
     if (deadlock_debug_enabled()) {
-        fprintf(stderr, "CC_FIBER_LIFECYCLE: spawned fiber=%lu reused=%d state=%d pending_unpark=%d\n",
+        fprintf(stderr, "CC_FIBER_LIFECYCLE: spawned fiber=%lu reused=%d control=%lld pending_unpark=%d\n",
                 (unsigned long)f->fiber_id, reused,
-                atomic_load_explicit(&f->state, memory_order_relaxed),
+                (long long)atomic_load_explicit(&f->control, memory_order_relaxed),
                 atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
     }
     
@@ -2247,63 +2293,37 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
 }
 
 /* Helper: wait for fiber to fully finish executing.
- * This is needed because done=1 is set while fiber_entry is still running,
- * but we can't return the fiber to the pool until fiber_entry has completed.
- * 
- * We MUST always wait for running_lock=0, even from fiber context. The previous
- * assumption that "if we're executing, the child's mco_resume must have returned"
- * is only true if we're on the SAME worker. If the joiner and child are on
- * different workers, the child's mco_resume might not have returned yet.
- * Returning the fiber to the pool prematurely causes tls_current_fiber to
- * point to a reused fiber with a different coro, leading to stack mismatch. */
+ * With the unified control word, CTRL_DONE is set under the join_lock
+ * together with done=1, so once we see done=1, control should be CTRL_DONE
+ * (with only a brief memory ordering delay possible).
+ *
+ * No separate running_lock wait is needed — when fiber_resume returns on the
+ * worker, the worker's trampoline immediately stores CTRL_DONE (under the
+ * join_lock), so the control word is already CTRL_DONE by the time the worker
+ * finishes with the fiber. */
 static inline void wait_for_fiber_done_state(fiber_task* f) {
     if (!f) return;
     
     fiber_task* current = tls_current_fiber;
     int in_fiber = (current && current->coro);
     
-    /* In fiber context, we MUST NOT call sched_yield() because it blocks the
-     * worker thread while holding running_lock, which can deadlock other fibers
-     * trying to unpark us. Since done=1 and state=FIBER_DONE are now set
-     * atomically under join_lock, if we saw done=1, state should be FIBER_DONE.
-     * We do a brief spin just in case of memory ordering delays. */
-    
-    /* Wait for state=FIBER_DONE */
+    /* Wait for control=CTRL_DONE */
     for (int i = 0; i < 10000; i++) {
-        if (atomic_load_explicit(&f->state, memory_order_seq_cst) == FIBER_DONE) {
-            goto state_done;
-        }
-        cpu_pause();
-    }
-    
-    if (in_fiber) {
-        /* In fiber context, if state isn't FIBER_DONE after 10k spins, something
-         * is wrong. But we can't block, so just proceed and hope for the best.
-         * The nursery cleanup will handle any issues. */
-        return;
-    }
-    
-    /* Thread context: safe to yield */
-    while (atomic_load_explicit(&f->state, memory_order_seq_cst) != FIBER_DONE) {
-        sched_yield();
-    }
-    
-state_done:
-    /* Wait for running_lock=0 - the child's worker must finish mco_resume
-     * before we can safely return the fiber to the pool. */
-    for (int i = 0; i < 10000; i++) {
-        if (atomic_load_explicit(&f->running_lock, memory_order_acquire) == 0) {
+        if (atomic_load_explicit(&f->control, memory_order_seq_cst) == CTRL_DONE) {
             return;
         }
         cpu_pause();
     }
     
     if (in_fiber) {
-        /* Same as above - can't block in fiber context */
+        /* In fiber context, if control isn't CTRL_DONE after 10k spins, something
+         * is wrong. But we can't block, so just proceed and hope for the best.
+         * The nursery cleanup will handle any issues. */
         return;
     }
     
-    while (atomic_load_explicit(&f->running_lock, memory_order_acquire) != 0) {
+    /* Thread context: safe to yield */
+    while (atomic_load_explicit(&f->control, memory_order_seq_cst) != CTRL_DONE) {
         sched_yield();
     }
 }
@@ -2315,12 +2335,12 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     fiber_task* current = tls_current_fiber;
     if (join_debug_enabled()) {
         fprintf(stderr,
-                "[join] start: target=%lu current=%s done=%d waiters=%d state=%d\n",
+                "[join] start: target=%lu current=%s done=%d waiters=%d control=%lld\n",
                 (unsigned long)f->fiber_id,
                 current ? "fiber" : "thread",
                 atomic_load_explicit(&f->done, memory_order_relaxed),
                 atomic_load_explicit(&f->join_waiters, memory_order_relaxed),
-                atomic_load_explicit(&f->state, memory_order_relaxed));
+                (long long)atomic_load_explicit(&f->control, memory_order_relaxed));
     }
     
     /* Fast path - already done */
@@ -2428,12 +2448,12 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
             park_loops++;
             if (join_debug_enabled()) {
                 fprintf(stderr,
-                        "[join] park_loop: target=%lu waiter=%lu loop=%d done=%d state=%d\n",
+                        "[join] park_loop: target=%lu waiter=%lu loop=%d done=%d control=%lld\n",
                         (unsigned long)f->fiber_id,
                         (unsigned long)current->fiber_id,
                         park_loops,
                         atomic_load_explicit(&f->done, memory_order_relaxed),
-                        atomic_load_explicit(&current->state, memory_order_relaxed));
+                        (long long)atomic_load_explicit(&current->control, memory_order_relaxed));
             }
             cc__fiber_park_if(&f->done, 0, "join", __FILE__, __LINE__);
         }
@@ -2531,11 +2551,11 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     
     if (join_debug_enabled()) {
         fprintf(stderr,
-                "[join] completing: target=%lu current=%s done=%d state=%d\n",
+                "[join] completing: target=%lu current=%s done=%d control=%lld\n",
                 (unsigned long)f->fiber_id,
                 current ? "fiber" : "thread",
                 atomic_load_explicit(&f->done, memory_order_relaxed),
-                atomic_load_explicit(&f->state, memory_order_relaxed));
+                (long long)atomic_load_explicit(&f->control, memory_order_relaxed));
     }
     wait_for_fiber_done_state(f);
     if (out_result) *out_result = f->result;
@@ -2644,6 +2664,9 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
         park_dbg = (v && v[0] == '1') ? 1 : 0;
     }
  
+    int wid = tls_worker_id;
+    int64_t my_owned = (wid >= 0) ? CTRL_OWNED(wid) : CTRL_OWNED_TEMP;
+
     if (atomic_exchange_explicit(&f->pending_unpark, 0, memory_order_acq_rel)) {
         /* pending_unpark was set -- someone called unpark while we were running.
          * We must NOT park.  The old "stale detection" logic (checking whether
@@ -2658,17 +2681,17 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
                 reason);
         return;
     }
-    int expected_state0 = FIBER_RUNNING;
-    if (!atomic_compare_exchange_strong_explicit(&f->state, &expected_state0, FIBER_PARKING,
+    int64_t expected_state0 = my_owned;
+    if (!atomic_compare_exchange_strong_explicit(&f->control, &expected_state0, CTRL_PARKING,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
-        if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_state0 fiber=%lu state=%d reason=%s\n", (unsigned long)f->fiber_id, expected_state0, reason);
+        if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_state0 fiber=%lu control=%lld reason=%s\n", (unsigned long)f->fiber_id, (long long)expected_state0, reason);
         return;
     }
     if (atomic_exchange_explicit(&f->pending_unpark, 0, memory_order_acq_rel)) {
         /* pending_unpark was set while we were transitioning to PARKING.
          * Same reasoning: always bail out, never treat as stale. */
-        atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
+        atomic_store_explicit(&f->control, my_owned, memory_order_release);
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_pending2 fiber=%lu flag=%d reason=%s\n",
                 (unsigned long)f->fiber_id,
                 flag ? atomic_load_explicit(flag, memory_order_acquire) : -1,
@@ -2676,38 +2699,60 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
         return;
     }
     if (flag && atomic_load_explicit(flag, memory_order_acquire) != expected) {
-        atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
+        atomic_store_explicit(&f->control, my_owned, memory_order_release);
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_flag fiber=%lu reason=%s\n", (unsigned long)f->fiber_id, reason);
         return;
     }
 
     int did_park = 0;
-    int expected_state = FIBER_PARKING;
-    if (atomic_compare_exchange_strong_explicit(&f->state, &expected_state, FIBER_PARKED,
+    int64_t expected_state = CTRL_PARKING;
+    if (atomic_compare_exchange_strong_explicit(&f->control, &expected_state, CTRL_PARKED,
                                                  memory_order_acq_rel,
                                                  memory_order_acquire)) {
+        /* Post-commit re-check (Dekker): unpark may have set pending_unpark
+         * after our pre-CAS check but before we committed PARKED.
+         * If so, we must abort the park: CAS PARKED→OWNED(me) and bail. */
+        if (atomic_exchange_explicit(&f->pending_unpark, 0, memory_order_seq_cst)) {
+            int64_t parked_exp = CTRL_PARKED;
+            if (atomic_compare_exchange_strong_explicit(&f->control, &parked_exp, my_owned,
+                                                         memory_order_acq_rel,
+                                                         memory_order_acquire)) {
+                if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: post_commit_abort fiber=%lu reason=%s\n", (unsigned long)f->fiber_id, reason);
+                f->park_reason = NULL;
+                f->park_file = NULL;
+                f->park_line = 0;
+                f->park_obj = NULL;
+                return;
+            }
+            /* If CAS failed, someone already unparked us (PARKED→QUEUED).
+             * We must yield so the worker trampoline sees us in QUEUED. */
+        }
+        /* Also re-check the flag condition — the flag may have changed
+         * after our check but before we committed PARKED. */
+        if (flag && atomic_load_explicit(flag, memory_order_seq_cst) != expected) {
+            int64_t parked_exp2 = CTRL_PARKED;
+            if (atomic_compare_exchange_strong_explicit(&f->control, &parked_exp2, my_owned,
+                                                         memory_order_acq_rel,
+                                                         memory_order_acquire)) {
+                if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: post_commit_flag_abort fiber=%lu reason=%s\n", (unsigned long)f->fiber_id, reason);
+                f->park_reason = NULL;
+                f->park_file = NULL;
+                f->park_line = 0;
+                f->park_obj = NULL;
+                return;
+            }
+        }
         did_park = 1;
-    } else if (expected_state == FIBER_QUEUED) {
-        /* Early unpark while we were parking - yield to scheduler. */
-        if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: early_unpark fiber=%lu reason=%s\n", (unsigned long)f->fiber_id, reason);
-        mco_yield(f->coro);
-        atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
-        f->park_reason = NULL;
-        f->park_file = NULL;
-        f->park_line = 0;
-        f->park_obj = NULL;
-        return;
-    } else if (expected_state == FIBER_DONE) {
+    } else if (expected_state == CTRL_DONE) {
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_done fiber=%lu reason=%s\n", (unsigned long)f->fiber_id, reason);
         return;
     } else {
-        atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
-        if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_other fiber=%lu state=%d reason=%s\n", (unsigned long)f->fiber_id, expected_state, reason);
+        atomic_store_explicit(&f->control, my_owned, memory_order_release);
+        if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_other fiber=%lu control=%lld reason=%s\n", (unsigned long)f->fiber_id, (long long)expected_state, reason);
         return;
     }
 
     /* Per-worker parked count - no global contention */
-    int wid = tls_worker_id;
     if (did_park && wid >= 0) {
         atomic_fetch_add_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
     }
@@ -2718,14 +2763,15 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
     /* Yield back to worker */
     mco_yield(f->coro);
     
-    /* Resumed by unpark */
+    /* Resumed by unpark — worker_run_fiber already set CTRL_OWNED(wid) for us */
     if (did_park && deadlock_debug_enabled()) {
         parked_list_remove(f);
     }
     if (did_park && wid >= 0) {
         atomic_fetch_sub_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
     }
-    atomic_store_explicit(&f->state, FIBER_RUNNING, memory_order_release);
+    /* No need to set control = OWNED(me) here — worker_run_fiber did the
+     * CAS QUEUED→OWNED(wid) when it picked us back up from the run queue. */
     f->park_reason = NULL;
     f->park_file = NULL;
     f->park_line = 0;
@@ -2771,27 +2817,22 @@ void cc__fiber_unpark(void* fiber_ptr) {
         atomic_fetch_add_explicit(&f->wake_counter, 1, memory_order_relaxed);
     }
 
-    /* CAS: PARKED -> QUEUED (or PARKING -> QUEUED). If fiber isn't parking/parked,
-     * the caller should re-check its condition and avoid parking. */
+    /* CAS: PARKED -> QUEUED.  If PARKING, the fiber's stack is still active
+     * on its owning worker — we must NOT enqueue.  Just set pending_unpark
+     * and let the owning worker's park_if see it and bail out. */
     while (1) {
-        int expected = FIBER_PARKED;
-        if (atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_QUEUED,
+        int64_t expected = CTRL_PARKED;
+        if (atomic_compare_exchange_strong_explicit(&f->control, &expected, CTRL_QUEUED,
                                                      memory_order_acq_rel,
                                                      memory_order_acquire)) {
             goto queued;
         }
-        if (expected == FIBER_PARKING) {
-            int expected2 = FIBER_PARKING;
-            if (atomic_compare_exchange_strong_explicit(&f->state, &expected2, FIBER_QUEUED,
-                                                        memory_order_acq_rel,
-                                                        memory_order_acquire)) {
-                goto queued;
-            }
-            /* If it flipped to PARKED between attempts, retry once. */
-            if (expected2 == FIBER_PARKED) {
-                continue;
-            }
-            expected = expected2;
+        if (expected == CTRL_PARKING) {
+            /* Fiber is mid-park — its stack is still live on another worker.
+             * Set pending_unpark so park_if will abort when it checks.
+             * Do NOT CAS or enqueue — the owning worker handles everything. */
+            atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
+            return;
         }
         static int chan_dbg_verbose = -1;
         if (chan_dbg_verbose == -1) {
@@ -2800,21 +2841,22 @@ void cc__fiber_unpark(void* fiber_ptr) {
         }
         if (chan_dbg_verbose && f->park_reason && strncmp(f->park_reason, "chan_", 5) == 0) {
             fprintf(stderr,
-                    "CC_CHAN_DEBUG: unpark_skip fiber=%lu state=%d reason=%s obj=%p\n",
+                    "CC_CHAN_DEBUG: unpark_skip fiber=%lu control=%lld reason=%s obj=%p\n",
                     (unsigned long)f->fiber_id,
-                    expected,
+                    (long long)expected,
                     f->park_reason,
                     f->park_obj);
         }
-        if (expected == FIBER_RUNNING || expected == FIBER_QUEUED) {
-            /* Latch early wake so a later park doesn't lose it. */
+        if (CTRL_IS_OWNED(expected) || expected == CTRL_QUEUED) {
+            /* Fiber is running or already queued — latch early wake so a later
+             * park doesn't lose it. */
             atomic_store_explicit(&f->pending_unpark, 1, memory_order_release);
             if (chan_dbg_verbose) {
-                fprintf(stderr, "CC_CHAN_DEBUG: pending_unpark_set fiber=%lu state=%d reason=%s\n",
-                        (unsigned long)f->fiber_id, expected, f->park_reason ? f->park_reason : "null");
+                fprintf(stderr, "CC_CHAN_DEBUG: pending_unpark_set fiber=%lu control=%lld reason=%s\n",
+                        (unsigned long)f->fiber_id, (long long)expected, f->park_reason ? f->park_reason : "null");
             }
         }
-        if (expected == FIBER_DONE) {
+        if (expected == CTRL_DONE) {
             if (join_debug_enabled()) {
                 fprintf(stderr,
                         "[join] unpark: fiber=%lu already done\n",
@@ -2824,9 +2866,9 @@ void cc__fiber_unpark(void* fiber_ptr) {
         }
         if (join_debug_enabled()) {
             fprintf(stderr,
-                    "[join] unpark: fiber=%lu state=%d (skipped, not parked)\n",
+                    "[join] unpark: fiber=%lu control=%lld (skipped, not parked)\n",
                     (unsigned long)f->fiber_id,
-                    expected);
+                    (long long)expected);
         }
         return;
     }
@@ -2885,24 +2927,12 @@ void cc__fiber_yield(void) {
         return;
     }
     
-    /* Push self back onto run queue */
-    int expected_state = FIBER_RUNNING;
-    if (!atomic_compare_exchange_strong_explicit(&current->state, &expected_state, FIBER_QUEUED,
-                                                  memory_order_release,
-                                                  memory_order_relaxed)) {
-        return;
-    }
-    if (tls_worker_id >= 0) {
-        if (lq_push(&g_sched.local_queues[tls_worker_id], current) != 0) {
-            /* Local queue full, use global */
-            fq_push_blocking(g_sched.run_queue, current);
-        }
-    } else {
-        fq_push_blocking(g_sched.run_queue, current);
-    }
-    
-    /* Yield to scheduler - will pick up next runnable fiber */
+    /* Yield-before-commit: tell the trampoline to enqueue us on the local
+     * queue after mco_resume returns.  Control stays OWNED(me) until the
+     * trampoline transitions it to QUEUED, so no other worker can touch us. */
+    current->yield_dest = YIELD_LOCAL;
     mco_yield(current->coro);
+    /* When we resume, worker_run_fiber has already set CTRL_OWNED(new_wid). */
 }
 
 /* Yield to the GLOBAL run queue.
@@ -2916,13 +2946,8 @@ void cc__fiber_yield_global(void) {
         sched_yield();
         return;
     }
-    int expected_state = FIBER_RUNNING;
-    if (!atomic_compare_exchange_strong_explicit(&current->state, &expected_state, FIBER_QUEUED,
-                                                  memory_order_release,
-                                                  memory_order_relaxed)) {
-        return;
-    }
-    fq_push_blocking(g_sched.run_queue, current);
+    /* Yield-before-commit: trampoline will enqueue on global queue. */
+    current->yield_dest = YIELD_GLOBAL;
     mco_yield(current->coro);
 }
 
@@ -2948,14 +2973,8 @@ void cc__fiber_sleep_park(unsigned int ms) {
         current->sleep_deadline.tv_nsec -= 1000000000L;
         current->sleep_deadline.tv_sec  += 1;
     }
-    /* Transition to QUEUED and place on sleep queue */
-    int expected_state = FIBER_RUNNING;
-    if (!atomic_compare_exchange_strong_explicit(&current->state, &expected_state, FIBER_QUEUED,
-                                                  memory_order_release,
-                                                  memory_order_relaxed)) {
-        return;  /* State changed concurrently — skip */
-    }
-    sq_push(current);
+    /* Yield-before-commit: trampoline will place on sleep queue. */
+    current->yield_dest = YIELD_SLEEP;
     mco_yield(current->coro);
 }
 
