@@ -34,6 +34,10 @@ Each fiber has `_Atomic int64_t control`:
 - `IDLE (0)`: available for assignment (not currently executing on its stack).
 - `ASSIGNED (-1)`: exclusive metadata lock while publishing runnable work for this fiber.
 - `PARKED (-2)`: the fiber is blocked; its stack is quiescent and safe to resume.
+- `DONE (-4)`: the fiber has completed; its stack is quiescent.  Set by the
+  trampoline after `mco_resume` returns so joiners know it is safe to reclaim
+  the fiber.  Fibers in the idle pool may retain `DONE`; `fiber_alloc`
+  transitions them back to `IDLE` before reuse.
 - `OWNED (>0)`: the fiber stack is currently leased to worker `id` (1-indexed).
 
 ### Invariants

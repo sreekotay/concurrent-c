@@ -77,17 +77,14 @@ Example: `tests/tsan_closure_make_stress.c` validates that `cc_closure*_make` su
 
 Key invariants in `cc/runtime/fiber_sched.c` that should not be violated:
 
-- `running_lock` protects `mco_resume()` from concurrent resume attempts.
-- `cc__fiber_unpark()` is non-blocking and handles `PARKED -> QUEUED` and `PARKING -> QUEUED` (CAS).
-  If the fiber is `RUNNING` or `QUEUED`, it sets `pending_unpark = 1`.
+- `cc__fiber_unpark()` is non-blocking and handles `PARKED -> ASSIGNED` (CAS).
+  If the fiber is `OWNED` or `ASSIGNED`, it sets `pending_unpark = 1`.
 - `cc__fiber_park_if(flag, expected, reason)` only parks if `*flag == expected` and `pending_unpark == 0`.
-  Uses a two-phase CAS: `RUNNING -> PARKING -> PARKED`. Either phase can be interrupted by unpark.
-- `join_lock` + `join_waiter_fiber` provide a handshake so joiners never miss a wakeup.
-  `done=1` and `state=FIBER_DONE` are set under the join lock.
+  Uses yield-before-commit: the fiber yields, then the worker publishes `PARKED` on the trampoline stack.
+- `join_waiter_fiber` provides a single-fiber waiter fast path; thread waiters use `join_mu`/`join_cv`.
 - Wake counters are debug-only telemetry (if enabled) and are not used for correctness.
-- Enqueue paths must transition to `QUEUED` exactly once (CAS from expected state); stale queue entries are dropped.
-- Fiber state transitions: `CREATED -> QUEUED -> RUNNING -> PARKING -> PARKED -> QUEUED -> RUNNING -> DONE`.
-  The `PARKING` state is visible to concurrent `unpark` calls and enables safe cancellation of the park.
+- Enqueue paths must transition to `ASSIGNED` exactly once (CAS from expected state); stale queue entries are dropped.
+- Fiber state transitions: `IDLE -> ASSIGNED -> OWNED -> PARKED -> ASSIGNED -> OWNED -> DONE`.
 - `pending_unpark` is a per-park-attempt latch, not a persistent flag. It must be cleared
   (`cc__fiber_clear_pending_unpark()`) before entering a new wait context (e.g., select park loop)
   to avoid consuming a stale signal from an unrelated prior operation.

@@ -17,19 +17,17 @@ This document captures the performance work done to close the gap with Go's goro
 
 The fiber scheduler consists of three main components:
 
-### 1. `fiber_internal.h` - Fiber State Machine
+### 1. `fiber_sched.c` - Control Word States
 
-Defines the fiber lifecycle states:
+Defines the fiber lifecycle control word:
 
 ```c
-typedef enum {
-    CC__FIBER_CREATED,  // Newly allocated
-    CC__FIBER_QUEUED,   // Queued to run
-    CC__FIBER_RUNNING,  // Currently executing
-    CC__FIBER_PARKING,  // Transitioning to parked (between CAS and yield)
-    CC__FIBER_PARKED,   // Blocked (e.g., waiting on channel)
-    CC__FIBER_DONE      // Completed
-} cc__fiber_state;
+// control word values
+CTRL_IDLE     // Available for assignment
+CTRL_ASSIGNED // Enqueued/assigned to a worker
+CTRL_OWNED    // Actively executing on a worker
+CTRL_PARKED   // Blocked (e.g., waiting on channel)
+CTRL_DONE     // Completed
 ```
 
 ### 2. `fiber.c` - Cross-Platform Fiber Primitives

@@ -59,42 +59,34 @@ Background thread that monitors for CPU-bound work and triggers scaling:
 
 ## Fiber States and Scheduling
 
-Fiber scheduling uses a single state machine with an explicit parking intermediate:
+Fiber scheduling uses a unified control word with yield-before-commit parking:
 
 ```
-CREATED -> QUEUED -> RUNNING -> PARKING -> PARKED -> QUEUED -> RUNNING -> DONE
-                         \                              ^
-                          \--- (pending_unpark) -------/
+IDLE -> ASSIGNED -> OWNED -> PARKED -> ASSIGNED -> OWNED -> DONE
 ```
 
 ### State Definitions
 
 | State | Meaning |
 |-------|---------|
-| `FIBER_CREATED` | Allocated but not yet enqueued |
-| `FIBER_QUEUED` | On a run queue, waiting for a worker |
-| `FIBER_RUNNING` | Actively executing on a worker |
-| `FIBER_PARKING` | Transitioning to parked (between CAS and yield) |
-| `FIBER_PARKED` | Suspended, waiting for unpark |
-| `FIBER_DONE` | Completed execution |
+| `CTRL_IDLE` | Available for assignment (not executing) |
+| `CTRL_ASSIGNED` | Assigned to a worker/queue (metadata published) |
+| `CTRL_OWNED` | Actively executing on a worker |
+| `CTRL_PARKED` | Suspended, waiting for unpark |
+| `CTRL_DONE` | Completed execution |
 
 ### Key Invariants
 
-- A fiber may only be resumed when its state is `QUEUED`.
-- Enqueue paths must transition to `QUEUED` exactly once before push (CAS from expected state).
+- A fiber may only be resumed when its control is `ASSIGNED`.
+- Enqueue paths must transition to `ASSIGNED` exactly once before push (CAS from expected state).
 - Stale/duplicate queue entries are dropped when the CAS fails.
-- Dequeue paths must CAS `QUEUED -> RUNNING` before `mco_resume`.
-- The `PARKING` state is visible to concurrent `unpark` calls; see below.
+- Dequeue paths must CAS `ASSIGNED -> OWNED` before `mco_resume`.
 
 ### The `pending_unpark` Latch
 
-When `cc__fiber_unpark()` is called on a fiber that is `RUNNING` or `QUEUED` (not yet parked), the unpark cannot take effect immediately. Instead, it sets `pending_unpark = 1`.
+When `cc__fiber_unpark()` is called on a fiber that is `OWNED` or `ASSIGNED` (not yet parked), the unpark cannot take effect immediately. Instead, it sets `pending_unpark = 1`.
 
-`cc__fiber_park_if()` checks `pending_unpark` twice:
-1. Before the `RUNNING -> PARKING` CAS — if set, bail out immediately.
-2. After the CAS (now `PARKING`) — if set, revert to `RUNNING` and bail out.
-
-This ensures no unpark signal is ever lost, regardless of timing.
+`cc__fiber_park_if()` checks `pending_unpark` before yielding, and the worker-side commit rechecks it after publishing `PARKED`. This ensures no unpark signal is ever lost, regardless of timing.
 
 ### `cc__fiber_clear_pending_unpark`
 
@@ -113,133 +105,50 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, ...)
 Parks the fiber only if `*flag == expected` at the point of commitment. The sequence is:
 
 1. Check `pending_unpark` — bail if set
-2. CAS `RUNNING -> PARKING` — bail if fiber not running
-3. Check `pending_unpark` again — bail if set (revert to RUNNING)
-4. Check `*flag != expected` — bail if condition changed
-5. CAS `PARKING -> PARKED` — commit to park
-6. `mco_yield()` — suspend
-
-If `unpark()` fires between steps 4 and 5, it CAS's `PARKING -> QUEUED`, and step 5 finds `state == QUEUED` instead of `PARKING`, so the fiber yields and resumes immediately.
+2. Check `*flag != expected` — bail if condition changed
+3. `mco_yield()` — suspend (fiber stack becomes quiescent)
+4. On the worker/trampoline stack: store `PARKED` (seq_cst)
+5. Re-check `pending_unpark` (seq_cst) and `*flag != expected` — if changed, abort to `ASSIGNED` and re-enqueue
 
 ### `cc__fiber_unpark`
 
-Non-blocking. Attempts `PARKED -> QUEUED` or `PARKING -> QUEUED` via CAS. If the fiber is `RUNNING` or `QUEUED`, sets `pending_unpark = 1` as a latch for the next park attempt.
+Non-blocking. Attempts `PARKED -> ASSIGNED` via CAS. If the fiber is `OWNED` or `ASSIGNED`, sets `pending_unpark = 1` as a latch for the next park attempt.
 
 ## Fiber Join Synchronization
 
 The scheduler implements a careful handshake protocol for fiber join operations to avoid lost wakeups and deadlocks.
 
-### Join Lock Protocol
+### Join Protocol (Control Word)
 
-Each fiber has a `join_lock` spinlock that synchronizes the completion handshake:
+Joiners observe completion by `control == CTRL_DONE`.
 
-```c
-// Fiber completion (in fiber_entry):
-join_spinlock_lock(&f->join_lock);
-atomic_store(&f->done, 1);           // Mark done
-atomic_store(&f->state, FIBER_DONE); // Set state atomically with done
-fiber_task* waiter = atomic_exchange(&f->join_waiter_fiber, NULL);
-int cv_initialized = atomic_load(&f->join_cv_initialized);
-join_spinlock_unlock(&f->join_lock);
-
-// Signal waiters
-if (waiter) cc__fiber_unpark(waiter);
-if (cv_initialized) {
-    pthread_mutex_lock(&f->join_mu);
-    pthread_cond_broadcast(&f->join_cv);
-    pthread_mutex_unlock(&f->join_mu);
-}
-```
+**Fiber completion**:
+- The worker trampoline publishes `CTRL_DONE` after `mco_resume` returns.
+- `fiber_entry` signals the single fiber waiter (if present) and broadcasts the condvar.
 
 ### Fiber-to-Fiber Join
 
-When a fiber joins another fiber, it uses park/unpark:
+When a fiber joins another fiber, it registers itself as the waiter and parks until woken:
 
 ```c
-join_spinlock_lock(&f->join_lock);
-if (atomic_load(&f->done)) {
-    // Already done - fast path
-    join_spinlock_unlock(&f->join_lock);
-    return;
-}
-// Register as waiter under lock
-atomic_store(&f->join_waiter_fiber, current);
-join_spinlock_unlock(&f->join_lock);
-
-// Park until unparked by completing fiber
-while (!atomic_load(&f->done)) {
-    cc__fiber_park_if(&f->done, 0, "join");
+// Register as waiter (CAS) then park
+atomic_compare_exchange_strong(&f->join_waiter_fiber, NULL, current);
+while (atomic_load(&f->control) != CTRL_DONE) {
+    cc__fiber_park_if(NULL, 0, "join");
 }
 ```
 
 ### Thread-to-Fiber Join
 
-When a thread (not a fiber) joins a fiber, it uses a condvar:
+When a thread joins a fiber, it uses the per-fiber condvar:
 
 ```c
-join_spinlock_lock(&f->join_lock);
-if (atomic_load(&f->done)) {
-    join_spinlock_unlock(&f->join_lock);
-    return;
-}
-
-// Initialize condvar if needed
-if (CAS(&f->join_cv_initialized, 0, 1)) {
-    pthread_mutex_init(&f->join_mu, NULL);
-    pthread_cond_init(&f->join_cv, NULL);
-}
-
-// Lock condvar mutex BEFORE releasing join_lock
-// This prevents lost wakeups
 pthread_mutex_lock(&f->join_mu);
-join_spinlock_unlock(&f->join_lock);
-
-while (!atomic_load(&f->done)) {
+while (atomic_load(&f->control) != CTRL_DONE) {
     pthread_cond_wait(&f->join_cv, &f->join_mu);
 }
 pthread_mutex_unlock(&f->join_mu);
 ```
-
-### Wait for Fiber Done State
-
-After seeing `done=1`, joiners must wait for `state=FIBER_DONE` and `running_lock=0`:
-
-```c
-static inline void wait_for_fiber_done_state(fiber_task* f) {
-    int in_fiber = (tls_current_fiber && tls_current_fiber->coro);
-    
-    // Spin briefly for state=FIBER_DONE
-    for (int i = 0; i < 10000; i++) {
-        if (atomic_load(&f->state) == FIBER_DONE) goto state_done;
-        cpu_pause();
-    }
-    
-    if (in_fiber) {
-        // Can't block in fiber context - proceed anyway
-        return;
-    }
-    
-    // Thread context: safe to yield
-    while (atomic_load(&f->state) != FIBER_DONE) {
-        sched_yield();
-    }
-    
-state_done:
-    // Wait for running_lock=0 (worker finished mco_resume)
-    for (int i = 0; i < 10000; i++) {
-        if (atomic_load(&f->running_lock) == 0) return;
-        cpu_pause();
-    }
-    
-    if (in_fiber) return;  // Can't block
-    
-    while (atomic_load(&f->running_lock) != 0) {
-        sched_yield();
-    }
-}
-```
-
-**Critical**: In fiber context, we MUST NOT call `sched_yield()` because it blocks the worker thread while holding `running_lock`, which can deadlock other fibers trying to unpark us.
 
 ## Channel Notification Protocol
 
@@ -284,7 +193,7 @@ For lock-free buffered channels, an `inflight` counter tracks in-progress enqueu
 
 ## Unpark Semantics
 
-`cc__fiber_unpark()` is non-blocking and only transitions `PARKED -> QUEUED` (or `PARKING -> QUEUED`) and enqueues the fiber. It does not resume a fiber directly. If the fiber is `RUNNING` or `QUEUED`, it sets `pending_unpark = 1`.
+`cc__fiber_unpark()` is non-blocking and only transitions `PARKED -> ASSIGNED` and enqueues the fiber. It does not resume a fiber directly. If the fiber is `OWNED` or `ASSIGNED`, it sets `pending_unpark = 1`.
 
 ## Multi-Channel Select (@match)
 
@@ -337,7 +246,7 @@ This enables soft affinity: tasks prefer their assigned worker but can be stolen
 **Intentionally contended / blocking**:
 - Channel mutex path (buffered slow path and unbuffered rendezvous).
 - Select wait lists (per-channel waiters).
-- Join handshake (`join_lock`), and thread join condvar (`join_mu`/`join_cv`).
+- Join waiters (`join_waiter_fiber`) and thread join condvar (`join_mu`/`join_cv`).
 
 **Tradeoffs**:
 - Lock-free paths favor throughput and low latency.
@@ -480,10 +389,10 @@ Parked fibers (waiting for unpark that will never come):
 
 | Issue | Solution |
 |-------|----------|
-| Lost wakeup (done before wait) | Check done under join_lock before parking |
-| Condvar race | Lock join_mu before releasing join_lock |
+| Lost wakeup (done before wait) | Use join-waiter sentinel + re-check control before parking |
+| Condvar race | Always init join_cv and wait under join_mu |
 | Fiber blocking worker | Never sched_yield() in fiber context |
-| State visibility | Set done+state atomically under join_lock |
+| State visibility | Publish CTRL_DONE on trampoline after mco_resume |
 
 ### Avoiding Deadlocks in Channels
 
