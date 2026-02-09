@@ -330,6 +330,14 @@ typedef struct fiber_task {
     
     struct timespec sleep_deadline;  /* Deadline for cc_sleep_ms timer parking */
     
+    /* Debug: track who last enqueued this fiber */
+    int enqueue_src;          /* Enum: 1=trampoline_yield, 2=spawn, 3=park_abort_pending,
+                                 4=park_abort_flag, 5=park_abort_cas, 6=park_self_unpark,
+                                 7=park_post_flag, 8=unpark, 9=commit_park_abort */
+    int64_t enqueue_ctrl;     /* Control word at enqueue time */
+    int enqueue_done;         /* done flag at enqueue time */
+    int enqueue_dest;         /* yield_dest at enqueue time */
+    
     struct fiber_task* next;  /* For free list / queues */
     struct fiber_task* debug_next;  /* For all-fibers debug list (deadlock dump) */
 } fiber_task;
@@ -1387,6 +1395,30 @@ static void fiber_resume(fiber_task* f) {
         fiber_panic("NULL coroutine", f, MCO_INVALID_POINTER);
     }
     
+    if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+        fprintf(stderr,
+                "\n=== FIBER RESUME OF DONE FIBER ===\n"
+                "Fiber: %p, id=%lu, control=%lld, done=1\n"
+                "Coroutine: %p, status=%d\n"
+                "park_reason=%s park_obj=%p\n"
+                "yield_dest=%d pending_unpark=%d\n"
+                "enqueue_src=%d enqueue_ctrl=%lld enqueue_done=%d enqueue_dest=%d\n"
+                "==============================\n\n",
+                (void*)f, (unsigned long)f->fiber_id,
+                (long long)atomic_load(&f->control),
+                (void*)f->coro, (int)mco_status(f->coro),
+                f->park_reason ? f->park_reason : "null",
+                f->park_obj,
+                f->yield_dest,
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed),
+                f->enqueue_src,
+                (long long)f->enqueue_ctrl,
+                f->enqueue_done,
+                f->enqueue_dest);
+        fflush(stderr);
+        abort();
+    }
+    
     mco_state st = mco_status(f->coro);
     if (st != MCO_SUSPENDED) {
         fiber_panic("coroutine not in suspended state", f, MCO_NOT_SUSPENDED);
@@ -1686,46 +1718,72 @@ static inline int worker_run_fiber(fiber_task* f) {
     
     /* ---- Trampoline: mco_resume returned, stack is quiescent ----
      *
-     * Possible states:
-     * 1. Fiber set yield_dest → yield-before-commit, enqueue now
-     * 2. Fiber completed → done=1, control still OWNED(me), set CTRL_DONE
-     * 3. Fiber parked → handled by worker_commit_park (yield-before-commit)
-     * 4. Legacy: control is CTRL_PARKED (shouldn't happen with yield-before-commit)
-     */
+     * CRITICAL: Before touching any fiber fields, verify we still own it via CAS.
+     * There is a race where wait_for_fiber_done_state (old code) could give up
+     * its spin, the joiner frees the fiber to the pool, and a new incarnation
+     * recycles it — all while this trampoline was preempted between mco_resume
+     * returning and reaching this point.  If the fiber was recycled, control is
+     * no longer OWNED(me), so the CAS fails and we bail out safely.
+     *
+     * We read yield_dest and done first (they're set by OUR coroutine run, so
+     * they're valid), then use CAS to atomically transition control. */
     int dest = f->yield_dest;
-    if (dest != YIELD_NONE) {
+    int is_done = atomic_load_explicit(&f->done, memory_order_acquire);
+
+    if (is_done) {
+        /* Fiber completed — try to set CTRL_DONE.  CAS ensures we still own it. */
+        f->yield_dest = YIELD_NONE;
+        int64_t exp_owned = owned;
+        if (atomic_compare_exchange_strong_explicit(&f->control, &exp_owned, CTRL_DONE,
+                                                     memory_order_release,
+                                                     memory_order_relaxed)) {
+            atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+        }
+        /* If CAS failed: fiber was already recycled — another incarnation owns it.
+         * Our done=1 was from OUR run; the recycled fiber has done=0.  Safe to
+         * just walk away. */
+    } else if (dest != YIELD_NONE) {
         f->yield_dest = YIELD_NONE;
         if (dest == YIELD_PARK) {
-            /* Yield-before-commit park: fiber is still OWNED by us, stack is
-             * now quiescent. Commit PARKED or abort + re-enqueue. */
-            worker_commit_park(f, wid);
-        } else {
-            /* Yield: enqueue to appropriate queue */
-            atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
-            switch (dest) {
-                case YIELD_LOCAL:
-                    if (wid >= 0 && lq_push(&g_sched.local_queues[wid], f) == 0)
-                        break;
-                    /* fall through to global if local full or no worker id */
-                    /* fallthrough */
-                case YIELD_GLOBAL:
-                    fq_push_blocking(g_sched.run_queue, f);
-                    break;
-                case YIELD_SLEEP:
-                    sq_push(f);
-                    break;
+            /* Yield-before-commit park: verify we still own the fiber before
+             * committing the park.  worker_commit_park will CAS OWNED→PARKED,
+             * but its abort paths also need our ownership to be valid. */
+            int64_t cur_ctrl = atomic_load_explicit(&f->control, memory_order_acquire);
+            if (cur_ctrl != owned) {
+                /* Fiber was recycled — bail out. */
+            } else {
+                worker_commit_park(f, wid);
             }
+        } else {
+            /* Yield: CAS OWNED→QUEUED then enqueue.
+             * If CAS fails, fiber was recycled — bail out. */
+            int64_t exp_owned2 = owned;
+            if (atomic_compare_exchange_strong_explicit(&f->control, &exp_owned2, CTRL_QUEUED,
+                                                         memory_order_release,
+                                                         memory_order_relaxed)) {
+                f->enqueue_src = 1;
+                f->enqueue_ctrl = owned;
+                f->enqueue_done = 0;
+                f->enqueue_dest = dest;
+                switch (dest) {
+                    case YIELD_LOCAL:
+                        if (wid >= 0 && lq_push(&g_sched.local_queues[wid], f) == 0)
+                            break;
+                        /* fall through to global if local full or no worker id */
+                        /* fallthrough */
+                    case YIELD_GLOBAL:
+                        fq_push_blocking(g_sched.run_queue, f);
+                        break;
+                    case YIELD_SLEEP:
+                        sq_push(f);
+                        break;
+                }
+            }
+            /* If CAS failed: fiber recycled — bail out safely. */
         }
-    } else if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-        /* Case 2: fiber completed — set CTRL_DONE now that mco_resume has
-         * returned and the stack is truly quiescent.  Joiners spinning in
-         * wait_for_fiber_done_state will see this and know it's safe to
-         * reclaim the fiber. */
-        atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
-        atomic_store_explicit(&f->control, CTRL_DONE, memory_order_release);
     }
-    /* Case 3 (parked): fiber already committed CTRL_PARKED before yielding.
-     * Nothing to do — unpark will transition PARKED→QUEUED when ready. */
+    /* Else: no yield_dest, not done → fiber parked (committed CTRL_PARKED
+     * before yielding).  Nothing to do — unpark handles it. */
     
     return 1;
 }
@@ -2265,6 +2323,8 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     f->fn = fn;
     f->arg = arg;
+    f->enqueue_src = 2;
+    f->enqueue_ctrl = 0; /* CTRL_IDLE */
     int64_t expected_state = CTRL_IDLE;
     if (!atomic_compare_exchange_strong_explicit(&f->control, &expected_state, CTRL_QUEUED,
                                                   memory_order_release,
@@ -2310,8 +2370,12 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
              * We only need to reset the context registers and update metadata. */
             mco_coro* co = f->coro;
             
-            /* Reset context: just the register state, no memset needed */
+            /* Reset context: zero entire ctxbuf first to clear stale callee-saved
+             * registers from the previous run (fp, d8-d15, etc.), then set the
+             * fields needed for a fresh start. Without zeroing, stale x29 (frame
+             * pointer) or SIMD registers can cause crashes on reused coroutines. */
             _mco_ctxbuf* ctx = &((_mco_context*)co->context)->ctx;
+            memset(ctx, 0, sizeof(_mco_ctxbuf));
             #if defined(__aarch64__) || defined(__arm64__)
             ctx->x[0] = (void*)(co);
             ctx->x[1] = (void*)(_mco_main);
@@ -2478,25 +2542,30 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
 static inline void wait_for_fiber_done_state(fiber_task* f) {
     if (!f) return;
     
-    fiber_task* current = tls_current_fiber;
-    int in_fiber = (current && current->coro);
-    
-    /* Wait for control=CTRL_DONE */
+    /* Wait for control=CTRL_DONE.  The gap between done=1 (set inside the
+     * coroutine by fiber_entry) and CTRL_DONE (set by the worker trampoline
+     * via CAS OWNED(wid)→CTRL_DONE after mco_resume returns) is extremely
+     * short — a few instructions on the SAME worker thread.  But the joiner
+     * may be on a different core and observe done=1 before CTRL_DONE.
+     *
+     * We MUST wait: if we return early and the caller frees the fiber, the
+     * owning worker's trampoline could race with the new incarnation.  Even
+     * with the CAS-based trampoline, cc_fiber_spawn's memset of the coroutine
+     * context could corrupt the old trampoline's stack if it hasn't finished
+     * the context switch yet.
+     *
+     * Strategy: tight cpu_pause spin (covers >99.9% of cases), then fall back
+     * to sched_yield() which is a safe OS-level yield hint (not a fiber yield). */
     for (int i = 0; i < 10000; i++) {
         if (atomic_load_explicit(&f->control, memory_order_seq_cst) == CTRL_DONE) {
             return;
         }
         cpu_pause();
     }
-    
-    if (in_fiber) {
-        /* In fiber context, if control isn't CTRL_DONE after 10k spins, something
-         * is wrong. But we can't block, so just proceed and hope for the best.
-         * The nursery cleanup will handle any issues. */
-        return;
-    }
-    
-    /* Thread context: safe to yield */
+    /* Fallback: sched_yield loop.  This is safe in both fiber and thread context
+     * because sched_yield() is just an OS thread hint — it does NOT call
+     * mco_yield and does NOT cause reentrancy.  The gap should be at most a few
+     * instructions, so this loop is extremely unlikely to iterate more than once. */
     while (atomic_load_explicit(&f->control, memory_order_seq_cst) != CTRL_DONE) {
         sched_yield();
     }
@@ -2822,8 +2891,15 @@ static void worker_commit_park(fiber_task* f, int wid) {
 
     /* 1. Pre-check pending_unpark */
     if (atomic_exchange_explicit(&f->pending_unpark, 0, memory_order_acq_rel)) {
-        /* Someone called unpark while the fiber was running — don't park. */
-        atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
+        /* Someone called unpark while the fiber was running — don't park.
+         * CAS OWNED→QUEUED to verify we still own it. */
+        int64_t exp_o = owned;
+        if (!atomic_compare_exchange_strong_explicit(&f->control, &exp_o, CTRL_QUEUED,
+                                                      memory_order_release,
+                                                      memory_order_relaxed)) {
+            return;  /* Recycled — bail out */
+        }
+        f->enqueue_src = 3; f->enqueue_ctrl = owned;
         fq_push_blocking(g_sched.run_queue, f);
         return;
     }
@@ -2833,8 +2909,15 @@ static void worker_commit_park(fiber_task* f, int wid) {
     int expected_val = f->park_expected;
     f->park_flag = NULL;  /* consumed */
     if (flag && atomic_load_explicit(flag, memory_order_acquire) != expected_val) {
-        /* Condition changed — don't park, re-enqueue. */
-        atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
+        /* Condition changed — don't park, re-enqueue.
+         * CAS OWNED→QUEUED to verify we still own it. */
+        int64_t exp_o2 = owned;
+        if (!atomic_compare_exchange_strong_explicit(&f->control, &exp_o2, CTRL_QUEUED,
+                                                      memory_order_release,
+                                                      memory_order_relaxed)) {
+            return;  /* Recycled — bail out */
+        }
+        f->enqueue_src = 4; f->enqueue_ctrl = owned;
         fq_push_blocking(g_sched.run_queue, f);
         return;
     }
@@ -2844,10 +2927,8 @@ static void worker_commit_park(fiber_task* f, int wid) {
     if (!atomic_compare_exchange_strong_explicit(&f->control, &exp, CTRL_PARKED,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
-        /* (no last_transition update — we failed, still OWNED) */
-        /* Shouldn't happen — we own it. But if it does, re-enqueue defensively. */
-        atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
-        fq_push_blocking(g_sched.run_queue, f);
+        /* CAS failed — fiber was recycled or state changed unexpectedly.
+         * Do NOT re-enqueue — we don't own it anymore. */
         return;
     }
     atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
@@ -2861,6 +2942,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
                                                      memory_order_acq_rel,
                                                      memory_order_acquire)) {
             /* We un-parked ourselves — re-enqueue. */
+            f->enqueue_src = 6; f->enqueue_ctrl = CTRL_PARKED;
             fq_push_blocking(g_sched.run_queue, f);
             return;
         }
@@ -2875,6 +2957,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
         if (atomic_compare_exchange_strong_explicit(&f->control, &parked_exp2, CTRL_QUEUED,
                                                      memory_order_acq_rel,
                                                      memory_order_acquire)) {
+            f->enqueue_src = 7; f->enqueue_ctrl = CTRL_PARKED;
             fq_push_blocking(g_sched.run_queue, f);
             return;
         }
@@ -3067,6 +3150,8 @@ queued:
                 "[join] unpark: fiber=%lu -> QUEUED\n",
                 (unsigned long)f->fiber_id);
     }
+    f->enqueue_src = 8;
+    f->enqueue_ctrl = CTRL_PARKED;
 
     /* Re-enqueue using fiber affinity hint.
      * If the fiber previously ran on a specific worker, prefer that worker's

@@ -861,9 +861,17 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
         if (ch->use_lockfree) {
             cc__chan_dbg_inc(&g_chan_dbg.lf_send_waiter_wake);
         }
+        /* Do NOT clear has_send_waiters here — the woken fiber hasn't completed
+         * its operation yet. Leave the flag set so the Dekker protocol continues
+         * to protect the woken fiber until it either re-registers or finishes.
+         * The flag will be cleared by cc__chan_remove_send_waiter when the fiber
+         * runs and removes itself. */
         wake_batch_add(node->fiber);
         return;
     }
+    /* All nodes were cancelled selects — list is now empty, clear flag */
+    if (!ch->send_waiters_head)
+        atomic_store_explicit(&ch->has_send_waiters, 0, memory_order_seq_cst);
 }
 
 /* Signal a recv waiter to wake and try the buffer (must hold ch->mu).
@@ -1385,7 +1393,7 @@ static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
         }
         /* Brand the channel for the minimal fast path if all invariants hold:
          * lockfree, buffered, small elements, not owned/ordered/sync. */
-        ch->fast_path_ok = (ch->use_lockfree && ch->cap > 0 && ch->buf &&
+        ch->fast_path_ok = (0 && ch->use_lockfree && ch->cap > 0 && ch->buf &&
                             elem_size <= sizeof(void*) &&
                             !ch->is_owned && !ch->is_ordered && !ch->is_sync);
         return 0;
@@ -1832,7 +1840,13 @@ static int cc_chan_try_enqueue_lockfree(CCChan* ch, const void* value) {
 static inline int cc__chan_enqueue_lockfree_minimal(CCChan* ch, const void* value) {
     void *queue_val = NULL;
     memcpy(&queue_val, value, ch->elem_size);
-    return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val) ? 0 : EAGAIN;
+    if (!lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val))
+        return EAGAIN;
+    /* Must maintain lfqueue_count so receivers can decide whether to park.
+     * Without this, a receiver checking lfqueue_count sees 0 and parks
+     * even though there IS data in the queue — causing a deadlock. */
+    atomic_fetch_add_explicit(&ch->lfqueue_count, 1, memory_order_release);
+    return 0;
 }
 
 /* Minimal-path dequeue: absolute minimum work. */
@@ -1840,6 +1854,7 @@ static inline int cc__chan_dequeue_lockfree_minimal(CCChan* ch, void* out_value)
     void *key, *val;
     if (!lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val))
         return EAGAIN;
+    atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
     memcpy(out_value, &val, ch->elem_size);
     return 0;
 }
@@ -2258,7 +2273,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
      * Checks recv_waiters_head to wake parked receivers (pipeline correctness). */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
         if (cc__chan_enqueue_lockfree_minimal(ch, value) == 0) {
-            if (__builtin_expect(ch->recv_waiters_head != NULL, 0)) {
+            if (__builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst) != 0, 0)) {
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
                 pthread_mutex_unlock(&ch->mu);
@@ -2306,7 +2321,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         
         /* Direct handoff: if receivers waiting, give item directly to one.
          * This must be done under lock to coordinate with the fair queue. */
-        if (ch->recv_waiters_head != NULL) {
+        if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
             cc_chan_lock(ch);
             if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
             if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
@@ -2364,10 +2379,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 channel_timing_record_send(t0, t0, done, done, done);
             }
             /* Signal any waiters that might have joined the queue.
-             * Fast check: skip mutex if no waiters visible. The receiver's
-             * wait-add path now checks node.notified for direct handoff
-             * before retrying or parking, so missed signals here are safe. */
-            if (ch->recv_waiters_head) {
+             * Use atomic Dekker flag — recv_waiters_head is mutex-protected
+             * and cannot be read safely without the lock. */
+            if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
                 pthread_mutex_unlock(&ch->mu);
@@ -2550,7 +2564,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                         }
                         return 0;
                     }
-                    /* Enqueue failed - recheck closed and loop */
+                    /* Enqueue failed after wake - yield to let receiver run
+                     * before re-parking, preventing a tight spin. */
+                    cc__fiber_yield_global();
                     cc_chan_lock(ch);
                     continue;
                 }
@@ -2675,7 +2691,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
      * Checks send_waiters_head to wake parked senders (pipeline correctness). */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
         if (cc__chan_dequeue_lockfree_minimal(ch, out_value) == 0) {
-            if (__builtin_expect(ch->send_waiters_head != NULL, 0)) {
+            if (__builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst) != 0, 0)) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
                 pthread_cond_signal(&ch->not_full);
@@ -2728,10 +2744,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 uint64_t done = channel_rdtsc();
                 channel_timing_record_recv(t0, t0, done, done, done);
             }
-            /* Signal send waiters only if visible.
-             * Sender's wait-add path rechecks lfqueue_count after adding
-             * its node, so it will see our dequeue and not park. */
-            if (ch->send_waiters_head) {
+            /* Signal send waiters — use atomic Dekker flag, not the
+             * mutex-protected send_waiters_head. */
+            if (atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst)) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
                 pthread_cond_signal(&ch->not_full);
@@ -3352,14 +3367,15 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     /* For lock-free channels, poll while waiting */
     if (ch->use_lockfree) {
         int in_fiber = cc__fiber_in_context();
+        cc__fiber* fiber_ts = in_fiber ? cc__fiber_current() : NULL;
         while (!ch->closed) {
-            /* Increment inflight BEFORE unlocking to prevent drain race. */
+            /* Try lock-free enqueue */
             atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
             pthread_mutex_unlock(&ch->mu);
             int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
             atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
             if (rc == 0) {
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
                 pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
@@ -3367,8 +3383,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 cc__chan_signal_activity(ch);
                 return 0;
             }
-            
-            /* Check deadline before blocking */
+            /* Check deadline */
             if (abs_deadline) {
                 struct timespec now;
                 clock_gettime(CLOCK_REALTIME, &now);
@@ -3377,11 +3392,16 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     return ETIMEDOUT;
                 }
             }
-            
-            if (in_fiber) {
-                /* Fiber context: park on send_waiters for precision wake */
-                cc__fiber* fiber_ts = cc__fiber_current();
-                pthread_mutex_lock(&ch->mu);
+            if (fiber_ts) {
+                /* Yield-retry if count suggests space */
+                int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
+                if (count < (int)ch->cap && !ch->closed) {
+                    cc__fiber_yield();
+                    cc_chan_lock(ch);
+                    continue;
+                }
+                /* Register as send waiter, then use robust Dekker protocol */
+                cc_chan_lock(ch);
                 if (ch->closed) break;
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber_ts;
@@ -3389,24 +3409,70 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 cc__chan_add_send_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
                 cc__fiber_set_park_obj(ch);
-                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_send: waiting for space (lockfree)");
+                /* Re-check count — a recv may have freed space since our
+                 * enqueue attempt above. */
+                if (atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire) < (int)ch->cap) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_send_waiter(ch, &node);
+                    pthread_mutex_unlock(&ch->mu);
+                    continue;
                 }
+                /* Retry enqueue one more time (we're registered, so any future
+                 * recv will wake us). */
+                atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
+                atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                if (rc == 0) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_send_waiter(ch, &node);
+                    cc__chan_signal_recv_waiter(ch);
+                    pthread_cond_signal(&ch->not_empty);
+                    pthread_mutex_unlock(&ch->mu);
+                    wake_batch_flush();
+                    cc__chan_signal_activity(ch);
+                    return 0;
+                }
+                /* Dekker pre-park: wake any parked receiver before we sleep.
+                 * has_send_waiters is set, so a new receiver will see us. */
+                if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
+                    cc_chan_lock(ch);
+                    cc__chan_signal_recv_waiter(ch);
+                    pthread_cond_signal(&ch->not_empty);
+                    cc_chan_unlock(ch);
+                    wake_batch_flush();
+                }
+                CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_send: waiting for space (lockfree)");
                 pthread_mutex_lock(&ch->mu);
-                /* Always remove from waiter list — node is stack-allocated */
-                if (node.in_wait_list) {
+                int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
+                if (notified == CC_CHAN_NOTIFY_SIGNAL) {
+                    atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
+                    cc__chan_remove_send_waiter(ch, &node);
+                    /* Retry enqueue after wake */
+                    atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                    pthread_mutex_unlock(&ch->mu);
+                    rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
+                    atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                    if (rc == 0) {
+                        cc_chan_lock(ch);
+                        cc__chan_signal_recv_waiter(ch);
+                        pthread_cond_signal(&ch->not_empty);
+                        pthread_mutex_unlock(&ch->mu);
+                        wake_batch_flush();
+                        cc__chan_signal_activity(ch);
+                        return 0;
+                    }
+                    cc_chan_lock(ch);
+                    continue;
+                }
+                if (!notified) {
                     cc__chan_remove_send_waiter(ch, &node);
                 }
-                if (ch->closed) break;
-                /* Loop back to retry enqueue */
+                /* Not notified or close-notified — loop will check closed */
                 continue;
             }
-            
-            /* Non-fiber: use condvar timed wait */
+            /* Non-fiber: condvar timed wait */
             pthread_mutex_lock(&ch->mu);
             if (ch->closed) break;
-            
-            /* Timed wait - wake periodically to check lock-free queue */
             struct timespec poll_deadline;
             clock_gettime(CLOCK_REALTIME, &poll_deadline);
             poll_deadline.tv_nsec += 10000000; /* 10ms */
@@ -3419,7 +3485,6 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 (poll_deadline.tv_sec == abs_deadline->tv_sec && poll_deadline.tv_nsec < abs_deadline->tv_nsec))) {
                 wait_deadline = &poll_deadline;
             }
-            
             err = pthread_cond_timedwait(&ch->not_full, &ch->mu, wait_deadline ? wait_deadline : &poll_deadline);
             if (err == ETIMEDOUT && abs_deadline) {
                 struct timespec now;
@@ -3482,14 +3547,15 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
         return err;
     }
     
-    /* For lock-free channels, poll the lock-free queue while waiting */
+    /* For lock-free channels, poll while waiting */
     if (ch->use_lockfree) {
         int in_fiber_r = cc__fiber_in_context();
+        cc__fiber* fiber_tr = in_fiber_r ? cc__fiber_current() : NULL;
         while (!ch->closed) {
             pthread_mutex_unlock(&ch->mu);
             int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
             if (rc == 0) {
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
                 pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
@@ -3497,8 +3563,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 cc__chan_signal_activity(ch);
                 return 0;
             }
-            
-            /* Check deadline before blocking */
+            /* Check deadline */
             if (abs_deadline) {
                 struct timespec now;
                 clock_gettime(CLOCK_REALTIME, &now);
@@ -3507,34 +3572,79 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     return ETIMEDOUT;
                 }
             }
-            
-            if (in_fiber_r) {
-                /* Fiber context: park on recv_waiters for precision wake */
-                cc__fiber* fiber_tr = cc__fiber_current();
-                pthread_mutex_lock(&ch->mu);
+            if (fiber_tr) {
+                /* Yield-retry if count suggests data */
+                int count_r = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
+                if (count_r > 0 && !ch->closed) {
+                    cc__fiber_yield();
+                    cc_chan_lock(ch);
+                    continue;
+                }
+                /* Register as recv waiter, then use robust Dekker protocol */
+                cc_chan_lock(ch);
                 if (ch->closed) break;
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber_tr;
                 atomic_store(&node.notified, 0);
                 cc__chan_add_recv_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
-                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_recv: waiting for data (lockfree)");
+                cc__fiber_set_park_obj(ch);
+                /* Re-check count */
+                if (atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire) > 0) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    pthread_mutex_unlock(&ch->mu);
+                    continue;
                 }
+                /* Retry dequeue one more time */
+                rc = cc_chan_try_dequeue_lockfree(ch, out_value);
+                if (rc == 0) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    cc__chan_wake_one_send_waiter(ch);
+                    pthread_cond_signal(&ch->not_full);
+                    pthread_mutex_unlock(&ch->mu);
+                    wake_batch_flush();
+                    cc__chan_signal_activity(ch);
+                    return 0;
+                }
+                /* Dekker pre-park: wake any parked sender */
+                if (atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst)) {
+                    cc_chan_lock(ch);
+                    cc__chan_wake_one_send_waiter(ch);
+                    pthread_cond_signal(&ch->not_full);
+                    cc_chan_unlock(ch);
+                    wake_batch_flush();
+                }
+                CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_recv: waiting for data (lockfree)");
                 pthread_mutex_lock(&ch->mu);
-                /* Always remove from waiter list — node is stack-allocated */
-                if (node.in_wait_list) {
+                int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
+                if (notified == CC_CHAN_NOTIFY_SIGNAL) {
+                    atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    /* Retry dequeue after wake */
+                    pthread_mutex_unlock(&ch->mu);
+                    rc = cc_chan_try_dequeue_lockfree(ch, out_value);
+                    if (rc == 0) {
+                        cc_chan_lock(ch);
+                        cc__chan_wake_one_send_waiter(ch);
+                        pthread_cond_signal(&ch->not_full);
+                        pthread_mutex_unlock(&ch->mu);
+                        wake_batch_flush();
+                        cc__chan_signal_activity(ch);
+                        return 0;
+                    }
+                    cc_chan_lock(ch);
+                    continue;
+                }
+                if (!notified) {
                     cc__chan_remove_recv_waiter(ch, &node);
                 }
-                if (ch->closed) break;
                 continue;
             }
-            
-            /* Non-fiber: use condvar timed wait */
+            /* Non-fiber: condvar timed wait */
             pthread_mutex_lock(&ch->mu);
             if (ch->closed) break;
-            
-            /* Timed wait - wake periodically to check lock-free queue */
             struct timespec poll_deadline;
             clock_gettime(CLOCK_REALTIME, &poll_deadline);
             poll_deadline.tv_nsec += 10000000; /* 10ms */
@@ -3542,26 +3652,22 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 poll_deadline.tv_nsec -= 1000000000;
                 poll_deadline.tv_sec++;
             }
-            /* Use earlier of poll deadline or caller deadline */
             const struct timespec* wait_deadline = abs_deadline;
             if (abs_deadline && (poll_deadline.tv_sec < abs_deadline->tv_sec ||
                 (poll_deadline.tv_sec == abs_deadline->tv_sec && poll_deadline.tv_nsec < abs_deadline->tv_nsec))) {
                 wait_deadline = &poll_deadline;
             }
-            
             err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, wait_deadline ? wait_deadline : &poll_deadline);
             if (err == ETIMEDOUT) {
-                /* Check if caller deadline expired */
                 if (abs_deadline) {
                     struct timespec now;
                     clock_gettime(CLOCK_REALTIME, &now);
                     if (now.tv_sec > abs_deadline->tv_sec ||
                         (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
-                        pthread_mutex_unlock(&ch->mu);
-                        return ETIMEDOUT;
+                            pthread_mutex_unlock(&ch->mu);
+                            return ETIMEDOUT;
                     }
                 }
-                /* Poll deadline expired, loop to check lock-free queue again */
             }
         }
         pthread_mutex_unlock(&ch->mu);
