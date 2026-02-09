@@ -1,0 +1,85 @@
+/*
+ * Minimal buffered channel benchmark aligned with perf/go/channel_throughput.go
+ * (buffered case only).
+ *
+ * Measures one producer + one consumer over a cap=1000 channel.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+#include <stdint.h>
+
+#define ITERATIONS 100000
+#define SAMPLES 7
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static double run_once(void) {
+    int[~1000 >] tx_h;
+    int[~1000 <] rx_h;
+    channel_pair(&tx_h, &rx_h);
+
+    CCChanTx tx = tx_h;
+    CCChanRx rx = rx_h;
+
+    double start = time_now_ms();
+    @nursery closing(tx_h) {
+        spawn(() => [tx] {
+            for (int i = 0; i < ITERATIONS; i++) {
+                tx.send(i);
+            }
+        });
+
+        spawn(() => [rx] {
+            int v = 0;
+            int64_t checksum = 0;
+            for (int i = 0; i < ITERATIONS; i++) {
+                rx.recv(&v);
+                checksum += v;
+            }
+            /* Keep the checksum live so the loop cannot be elided. */
+            if (checksum < 0) {
+                fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+            }
+        });
+    }
+    return time_now_ms() - start;
+}
+
+int main(void) {
+    printf("perf_buffered_base: cap=1000 iters=%d\n", ITERATIONS);
+
+    /* Warmup to reduce first-run noise. */
+    (void)run_once();
+
+    double elapsed_ms[SAMPLES] = {0};
+    double ops_sec[SAMPLES] = {0};
+    for (int i = 0; i < SAMPLES; i++) {
+        elapsed_ms[i] = run_once();
+        ops_sec[i] = (ITERATIONS * 2.0) / (elapsed_ms[i] / 1000.0);
+        printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
+    }
+
+    sort_doubles(ops_sec, SAMPLES);
+    sort_doubles(elapsed_ms, SAMPLES);
+    int mid = SAMPLES / 2;
+    printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
+    printf("perf_buffered_base: DONE\n");
+    return 0;
+}

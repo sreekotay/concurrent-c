@@ -16,29 +16,27 @@ static double time_now_ms(void) {
 
 /* Buffered channel: producer/consumer in separate tasks */
 static void bench_buffered(void) {
-    int[~1 >] tx;
-    int[~1 <] rx;
+    int[~1000 >] tx;
+    int[~1000 <] rx;
     channel_pair(&tx, &rx);
     
     double start = time_now_ms();
-    
-    @with_deadline(seconds(5)) {
-        @nursery closing(tx) {
-            /* Producer */
-            spawn(() => {
-                for (int i = 0; i < ITERATIONS; i++) {
-                    tx.send(i);
-                }
-            });
-            
-            /* Consumer */
-            spawn(() => {
-                int v;
-                for (int i = 0; i < ITERATIONS; i++) {
-                    rx.recv(&v);
-                }
-            });
-        }
+
+    @nursery closing(tx) {
+        /* Producer */
+        spawn(() => {
+            for (int i = 0; i < ITERATIONS; i++) {
+                tx.send(i);
+            }
+        });
+        
+        /* Consumer */
+        spawn(() => {
+            int v;
+            for (int i = 0; i < ITERATIONS; i++) {
+                rx.recv(&v);
+            }
+        });
     }
     double elapsed = time_now_ms() - start;
     double ops_per_sec = (ITERATIONS * 2.0) / (elapsed / 1000.0);  /* send + recv */
