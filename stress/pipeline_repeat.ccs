@@ -1,0 +1,77 @@
+/*
+ * Stress: pipeline close path in a tight loop, single process.
+ * Hangs immediately on failure — no timeout guessing.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define NUM_ITEMS 100
+#define REPEATS   500
+
+int[~8 >] g_tx0, g_tx1, g_tx2, g_tx3, g_tx4;
+int[~8 <] g_rx0, g_rx1, g_rx2, g_rx3, g_rx4;
+CCChan* g_ch0;
+CCChan* g_ch1;
+CCChan* g_ch2;
+CCChan* g_ch3;
+CCChan* g_ch4;
+cc_atomic_int g_out_count = 0;
+cc_atomic_int g_out_sum = 0;
+
+int main(void) {
+    for (int iter = 0; iter < REPEATS; iter++) {
+        if (iter % 100 == 0) fprintf(stderr, "iter %d/%d\n", iter, REPEATS);
+
+        g_ch0 = channel_pair(&g_tx0, &g_rx0);
+        g_ch1 = channel_pair(&g_tx1, &g_rx1);
+        g_ch2 = channel_pair(&g_tx2, &g_rx2);
+        g_ch3 = channel_pair(&g_tx3, &g_rx3);
+        g_ch4 = channel_pair(&g_tx4, &g_rx4);
+        cc_atomic_store(&g_out_count, 0);
+        cc_atomic_store(&g_out_sum, 0);
+
+        @nursery {
+            spawn(() => {
+                for (int i = 0; i < NUM_ITEMS; i++) chan_send(g_tx0, i);
+                chan_close(g_tx0);
+            });
+            spawn(() => {
+                int v; while (cc_io_avail(chan_recv(g_rx0, &v))) chan_send(g_tx1, v+1);
+                chan_close(g_tx1);
+            });
+            spawn(() => {
+                int v; while (cc_io_avail(chan_recv(g_rx1, &v))) chan_send(g_tx2, v+1);
+                chan_close(g_tx2);
+            });
+            spawn(() => {
+                int v; while (cc_io_avail(chan_recv(g_rx2, &v))) chan_send(g_tx3, v+1);
+                chan_close(g_tx3);
+            });
+            spawn(() => {
+                int v; while (cc_io_avail(chan_recv(g_rx3, &v))) chan_send(g_tx4, v+1);
+                chan_close(g_tx4);
+            });
+            spawn(() => {
+                int v; while (cc_io_avail(chan_recv(g_rx4, &v))) {
+                    cc_atomic_fetch_add(&g_out_count, 1);
+                    cc_atomic_fetch_add(&g_out_sum, v);
+                }
+            });
+        }
+
+        int expected = (NUM_ITEMS*(NUM_ITEMS-1))/2 + 4*NUM_ITEMS;
+        int c = cc_atomic_load(&g_out_count);
+        int s = cc_atomic_load(&g_out_sum);
+        if (c != NUM_ITEMS || s != expected) {
+            fprintf(stderr, "FAIL iter %d: count=%d sum=%d (expected %d/%d)\n",
+                    iter, c, s, NUM_ITEMS, expected);
+            return 1;
+        }
+
+        cc_chan_free(g_ch0); cc_chan_free(g_ch1); cc_chan_free(g_ch2);
+        cc_chan_free(g_ch3); cc_chan_free(g_ch4);
+    }
+    printf("pipeline_repeat: %d iterations OK\n", REPEATS);
+    return 0;
+}

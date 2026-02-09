@@ -475,6 +475,11 @@ struct CCChan {
     cc__fiber_wait_node* send_waiters_tail;
     cc__fiber_wait_node* recv_waiters_head;
     cc__fiber_wait_node* recv_waiters_tail;
+    /* Dekker flags: set by add_waiter, cleared by remove_waiter (NOT by wake_one).
+     * This ensures the flag remains visible between wake_one removing the node
+     * and the woken fiber calling remove_waiter, closing the lost-wakeup window. */
+    _Atomic int has_send_waiters;
+    _Atomic int has_recv_waiters;
     
     /* Lock-free MPMC queue for buffered channels (cap > 0) */
     int use_lockfree;                               /* 1 = use lock-free queue, 0 = use mutex */
@@ -760,6 +765,7 @@ static void cc__chan_add_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
         cc__chan_dbg_inc(&g_chan_dbg.lf_send_waiter_add);
     }
     cc__chan_add_waiter(&ch->send_waiters_head, &ch->send_waiters_tail, node);
+    atomic_store_explicit(&ch->has_send_waiters, 1, memory_order_seq_cst);
 }
 
 /* Add a fiber to recv waiters queue (must hold ch->mu) */
@@ -770,6 +776,7 @@ static void cc__chan_add_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
         cc__chan_dbg_inc(&ch->dbg_lf_recv_waiter_add);
     }
     cc__chan_add_waiter(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
+    atomic_store_explicit(&ch->has_recv_waiters, 1, memory_order_seq_cst);
 }
 
 /* Remove a fiber from a wait queue (must hold ch->mu) */
@@ -791,20 +798,35 @@ static void cc__chan_remove_waiter_list(cc__fiber_wait_node** head, cc__fiber_wa
 
 static void cc__chan_remove_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
-    if (!node->in_wait_list) return;
+    if (!node->in_wait_list) {
+        /* Node already removed by wake_one — clear the Dekker flag now
+         * that the sender has processed its wake. */
+        if (!ch->send_waiters_head)
+            atomic_store_explicit(&ch->has_send_waiters, 0, memory_order_seq_cst);
+        return;
+    }
     if (ch->use_lockfree) {
         cc__chan_dbg_inc(&g_chan_dbg.lf_send_waiter_remove);
     }
     cc__chan_remove_waiter_list(&ch->send_waiters_head, &ch->send_waiters_tail, node);
+    if (!ch->send_waiters_head)
+        atomic_store_explicit(&ch->has_send_waiters, 0, memory_order_seq_cst);
 }
 
 static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
-    if (!node->in_wait_list) return;
+    if (!node->in_wait_list) {
+        /* Node already removed by signal_recv_waiter — clear the Dekker flag. */
+        if (!ch->recv_waiters_head)
+            atomic_store_explicit(&ch->has_recv_waiters, 0, memory_order_seq_cst);
+        return;
+    }
     if (ch->use_lockfree) {
         cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_remove);
     }
     cc__chan_remove_waiter_list(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
+    if (!ch->recv_waiters_head)
+        atomic_store_explicit(&ch->has_recv_waiters, 0, memory_order_seq_cst);
 }
 
 /* Wake one send waiter (must hold ch->mu) - uses batch */
@@ -2486,6 +2508,16 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     }
                     return 0;
                 }
+                /* Dekker pre-park: wake any parked receiver before we sleep.
+                 * has_send_waiters is already set (from add_send_waiter above),
+                 * so a receiver arriving later will see our flag and wake us. */
+                if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
+                    cc_chan_lock(ch);
+                    cc__chan_signal_recv_waiter(ch);
+                    pthread_cond_signal(&ch->not_empty);
+                    cc_chan_unlock(ch);
+                    wake_batch_flush();
+                }
                 CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: buffer full, waiting for space");
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
@@ -2957,8 +2989,18 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                  * Check count under mutex to decide park vs dequeue. */
                 int snap_count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
                 if (snap_count <= 0) {
-                    /* Buffer empty — stay on wait list and park. */
+                    /* Buffer empty — stay on wait list and park.
+                     * Dekker pre-park: wake any parked sender before we sleep.
+                     * has_recv_waiters is already set (from add_recv_waiter above),
+                     * so a sender arriving later will see our flag and wake us. */
                     pthread_mutex_unlock(&ch->mu);
+                    if (atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst)) {
+                        cc_chan_lock(ch);
+                        cc__chan_wake_one_send_waiter(ch);
+                        pthread_cond_signal(&ch->not_full);
+                        cc_chan_unlock(ch);
+                        wake_batch_flush();
+                    }
                     CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: buffer empty, waiting for data");
                     pthread_mutex_lock(&ch->mu);
                     goto recv_post_park_notified;

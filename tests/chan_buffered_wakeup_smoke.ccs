@@ -1,0 +1,36 @@
+/*
+ * Smoke test: 1 producer, 1 consumer on a buffered channel (cap=1).
+ * Reproduces the lost-wakeup deadlock in tight ping-pong.
+ * Repeats 10000 times to stress the race window.
+ */
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+
+#define NUM_ITEMS  10000
+#define REPEATS    1000
+
+int main(void) {
+    for (int rep = 0; rep < REPEATS; rep++) {
+        if (rep % 1000 == 0) fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
+        int[~1 >] tx;
+        int[~1 <] rx;
+        CCChan* ch = channel_pair(&tx, &rx);
+
+        @nursery closing(tx) {
+            spawn(() => {
+                for (int i = 0; i < NUM_ITEMS; i++) {
+                    tx.send(i);
+                }
+            });
+            spawn(() => {
+                int v;
+                for (int i = 0; i < NUM_ITEMS; i++) {
+                    rx.recv(&v);
+                }
+            });
+        }
+        cc_chan_free(ch);
+    }
+    printf("chan_buffered_wakeup_smoke: %d iterations OK\n", REPEATS);
+    return 0;
+}
