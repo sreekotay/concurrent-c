@@ -362,7 +362,7 @@ static inline void wake_batch_flush(void) {
  * immediately re-popped by the same worker), cc__fiber_yield_global pushes
  * to the GLOBAL queue so other fibers waiting there get a fair chance.
  * Prevents starvation when many fibers loop on lockfree send/recv. */
-#define CC_LF_YIELD_INTERVAL 16
+#define CC_LF_YIELD_INTERVAL 32
 static __thread unsigned int cc__tls_lf_ops = 0;
 static _Atomic int g_chan_edge_wake_mode = -1; /* -1 unknown, 0 off, 1 on */
 static _Atomic int g_chan_minimal_path_mode = -1; /* -1 unknown, 0 off, 1 on */
