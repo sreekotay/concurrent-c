@@ -364,26 +364,7 @@ static inline void wake_batch_flush(void) {
  * Prevents starvation when many fibers loop on lockfree send/recv. */
 #define CC_LF_YIELD_INTERVAL 32
 static __thread unsigned int cc__tls_lf_ops = 0;
-static _Atomic int g_chan_edge_wake_mode = -1; /* -1 unknown, 0 off, 1 on */
 static _Atomic int g_chan_minimal_path_mode = -1; /* -1 unknown, 0 off, 1 on */
-
-static inline int cc__chan_edge_wake_enabled(void) {
-    int cached = atomic_load_explicit(&g_chan_edge_wake_mode, memory_order_relaxed);
-    if (cached < 0) {
-        /* Default ON: edge-triggered wake avoids repeated wake-lock/list work.
-         * Set CC_CHAN_STEADY_EDGE_WAKE=0 to disable for comparison/debugging. */
-        const char* env = getenv("CC_CHAN_STEADY_EDGE_WAKE");
-        int enabled = !(env && env[0] == '0');
-        int expected = -1;
-        (void)atomic_compare_exchange_strong_explicit(&g_chan_edge_wake_mode,
-                                                      &expected,
-                                                      enabled,
-                                                      memory_order_relaxed,
-                                                      memory_order_relaxed);
-        cached = atomic_load_explicit(&g_chan_edge_wake_mode, memory_order_relaxed);
-    }
-    return cached;
-}
 
 static inline int cc__chan_minimal_path_enabled(void) {
     int cached = atomic_load_explicit(&g_chan_minimal_path_mode, memory_order_relaxed);
@@ -2459,12 +2440,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
      * Skips guards, debug, timing, signal_activity.
      * Checks recv_waiters_head to wake parked receivers (pipeline correctness). */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
-        int old_count = 0;
-        if (cc__chan_enqueue_lockfree_minimal(ch, value, &old_count) == 0) {
-            int do_edge_wake = cc__chan_edge_wake_enabled();
-            int should_wake_recv = (!do_edge_wake || old_count == 0);
-            if (should_wake_recv &&
-                __builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst) != 0, 0)) {
+        if (cc__chan_enqueue_lockfree_minimal(ch, value, NULL) == 0) {
+            if (__builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst) != 0, 0)) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_recv_waiters_true);
                 cc__chan_dbg_inc(&g_chan_dbg.lf_wake_lock_send);
                 cc_chan_lock(ch);
@@ -2560,14 +2537,13 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         }
         
         /* No waiters - try lock-free enqueue to buffer (fast path, no inflight) */
-        int old_count = 0;
-        int rc = cc__chan_enqueue_lockfree_fast(ch, value, &old_count);
+        int rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
         if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
             /* Buffer full — yield to let the receiver fiber run, then retry
              * once before falling to the expensive blocking path.
              * Use global yield so fibers on other workers can also make progress. */
             cc__fiber_yield_global();
-            rc = cc__chan_enqueue_lockfree_fast(ch, value, &old_count);
+            rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
         }
         if (rc == 0) {
             if (timing) {
@@ -2577,10 +2553,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             /* Signal any waiters that might have joined the queue.
              * Use atomic Dekker flag — recv_waiters_head is mutex-protected
              * and cannot be read safely without the lock. */
-            int do_edge_wake = cc__chan_edge_wake_enabled();
-            int should_wake_recv = (!do_edge_wake || old_count == 0);
-            if (should_wake_recv &&
-                atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
+            if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_recv_waiters_true);
                 cc__chan_dbg_inc(&g_chan_dbg.lf_wake_lock_send);
                 cc_chan_lock(ch);
@@ -2887,12 +2860,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
      * Skips guards, debug, timing, signal_activity.
      * Checks send_waiters_head to wake parked senders (pipeline correctness). */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
-        int old_count = 0;
-        if (cc__chan_dequeue_lockfree_minimal(ch, out_value, &old_count) == 0) {
-            int do_edge_wake = cc__chan_edge_wake_enabled();
-            int should_wake_send = (!do_edge_wake || old_count == (int)ch->cap);
-            if (should_wake_send &&
-                __builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst) != 0, 0)) {
+        if (cc__chan_dequeue_lockfree_minimal(ch, out_value, NULL) == 0) {
+            if (__builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst) != 0, 0)) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_send_waiters_true);
                 cc__chan_dbg_inc(&g_chan_dbg.lf_wake_lock_recv);
                 cc_chan_lock(ch);
@@ -2936,14 +2905,13 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
      * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
-        int old_count = 0;
-        int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, &old_count);
+        int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
             /* Buffer empty — yield to let the sender fiber run, then retry
              * once before falling to the expensive blocking path.
              * Use global yield so fibers on other workers can also make progress. */
             cc__fiber_yield_global();
-            rc = cc__chan_dequeue_lockfree_fast(ch, out_value, &old_count);
+            rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         }
         if (rc == 0) {
             if (timing) {
@@ -2952,10 +2920,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             }
             /* Signal send waiters — use atomic Dekker flag, not the
              * mutex-protected send_waiters_head. */
-            int do_edge_wake = cc__chan_edge_wake_enabled();
-            int should_wake_send = (!do_edge_wake || old_count == (int)ch->cap);
-            if (should_wake_send &&
-                atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst)) {
+            if (atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst)) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_send_waiters_true);
                 cc__chan_dbg_inc(&g_chan_dbg.lf_wake_lock_recv);
                 cc_chan_lock(ch);
