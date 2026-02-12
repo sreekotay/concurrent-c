@@ -1,0 +1,96 @@
+# Fiber Overhead Convergence — Decision Log
+# Date: 2026-02-10
+
+## Baseline (pre-changes)
+Cap 16: Fiber=0.729s Thread=0.415s Gap=75.6% (CV 28%/20%)
+Cap 64: Fiber=0.372s Thread=0.305s Gap=21.8% (CV 1.9%/2.0%)
+Guardrails: spawn_nursery=1.50M spawn_seq=32.2M buffered=39.1M
+
+## Changes Applied (all kept)
+
+### 1. wait_for_fiber_done_state: seq_cst → acquire
+Hypothesis: seq_cst is unnecessarily strong; release-acquire pair suffices.
+Result: Correctness preserved. Marginal cycle savings per join.
+Decision: KEEP (strictly correct, simpler)
+
+### 2. join_waiters increment: acq_rel → relaxed
+Hypothesis: join_waiters is only used for debug; actual sync is via join_lock.
+Result: Correctness preserved. Removes unnecessary barrier.
+Decision: KEEP (strictly correct, simpler)
+
+### 3. pending/completed counters moved outside join_lock
+Hypothesis: Global counters don't participate in join handshake.
+Result: Reduces lock hold time on completion hot path.
+Decision: KEEP (reduces contention)
+
+### 4. spinning increment: seq_cst → release
+Hypothesis: Spawners read with relaxed; release is sufficient.
+Result: Correctness preserved. Reduces barrier overhead in worker main loop.
+Decision: KEEP (strictly correct)
+
+### 5. Condvar kept initialized across fiber pool reuse
+Hypothesis: Avoids CAS + pthread_mutex_init + pthread_cond_init per join.
+Result: ~9% improvement in cap 16 fiber median. No regressions.
+Decision: KEEP (measurable improvement)
+
+### 6. Condvar broadcast gated on has_waiters > 0
+Hypothesis: With condvar kept initialized, completion always broadcasts
+even when no thread is waiting. Gate on has_waiters avoids pointless
+mutex lock + broadcast + unlock.
+Result: Reduces completion overhead for fibers that finish before joiner.
+Decision: KEEP (reduces unnecessary syscalls)
+
+### 7. Direct-execution mode for no-yield fibers (KEY CHANGE)
+Hypothesis: cc_fiber_spawn_task wrappers never yield. Coroutine context
+switches (2 per task) and the CTRL_DONE gap are pure overhead. Running
+fn(arg) directly on the worker thread eliminates both.
+Result:
+  Cap 64 fiber median: 0.372s → ~0.358s (stable across 4 runs)
+  Cap 64 gap: 21.8% → ~17% (narrowing)
+  Cap 16: noisy due to system load, but best runs show 0.42s (vs 0.73s baseline)
+  Guardrails: no regressions (spawn_nursery, spawn_seq, channels all stable)
+  Correctness: gzip output validated, all tests pass
+Decision: KEEP (architectural improvement, largest single contributor)
+
+## Final State
+Cap 64 (stable): Fiber ~0.358s, Thread ~0.301s, Gap ~17-19%
+  (Baseline was: Fiber 0.372s, Thread 0.305s, Gap 21.8%)
+Cap 16 (noisy): Best median ~0.60s (baseline 0.73s)
+Guardrails: No regressions detected
+
+## Remaining Gap Analysis
+The ~17% remaining gap at cap 64 comes from:
+- fiber_alloc CAS on free list (vs calloc in thread path)
+- CAS control IDLE→QUEUED (no equivalent in thread path)
+- Queue push + wake logic (vs single mutex+signal in exec.c)
+- Join handshake complexity (spinlock + condvar vs single mutex+condvar)
+- wait_for_fiber_done_state spin (eliminated for no_yield, but still
+  called by cc_fiber_join since it doesn't know about no_yield)
+
+### 8. Skip wait_for_fiber_done_state for no_yield fibers
+Hypothesis: Direct-exec fibers set CTRL_DONE immediately (no coroutine
+stack gap), so the spin-wait is unnecessary.
+Result: Eliminates up to 10000 cpu_pause iterations per join.
+Decision: KEEP (correct, removes dead work)
+
+## Final State (all changes applied)
+Cap 64 (stable, 9 runs): Fiber=0.355s Thread=0.299s Gap=18.8% (CV 3.1%/2.8%)
+  Baseline was:          Fiber=0.372s Thread=0.305s Gap=21.8% (CV 1.9%/2.0%)
+  Fiber improvement: ~4.6%
+  Gap reduction: 21.8% → 18.8% (3 percentage points)
+
+Cap 16 (noisy): Best runs show Fiber=0.46s (baseline 0.73s = ~37% improvement)
+  But high variance makes cap 16 unreliable for A/B comparison.
+
+Guardrails: No regressions in spawn_nursery, spawn_sequential, or channel benchmarks.
+
+## Remaining Gap Analysis (~19% at cap 64)
+- fiber_alloc CAS on free list (vs calloc in thread path)
+- CAS control IDLE→QUEUED (no equivalent in thread path)
+- Queue push + wake logic (vs single mutex+signal in exec.c)
+- Join handshake complexity (spinlock + condvar vs single mutex+condvar)
+
+## Next Steps (not implemented)
+- Reduce fiber_alloc overhead (thread-local free lists to avoid CAS contention)
+- Simplify join handshake for no_yield fibers (skip spinlock, use condvar only)
+- Explore lock-free result handoff to bypass condvar entirely

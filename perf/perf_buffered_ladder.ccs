@@ -1,0 +1,168 @@
+/*
+ * Buffered overhead ladder.
+ *
+ * Goal: quantify the remaining gap to "zero overhead" by comparing:
+ *  1) local loop only (no fibers, no channel)
+ *  2) two-fiber loop only (scheduler cost, no channel)
+ *  3) channel single-thread alternating send/recv (no contention)
+ *  4) channel buffered producer+consumer fibers (target workload)
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+#include <stdint.h>
+
+#define ITERATIONS 2000000
+#define SAMPLES 7
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static double bench_loop_local_once(void) {
+    volatile int64_t checksum_a = 0;
+    volatile int64_t checksum_b = 0;
+    double start = time_now_ms();
+    for (int i = 0; i < ITERATIONS; i++) {
+        checksum_a += i;
+        checksum_b += i;
+    }
+    double elapsed = time_now_ms() - start;
+    if (checksum_a < 0 || checksum_b < 0) {
+        fprintf(stderr, "impossible checksums=%lld,%lld\n",
+                (long long)checksum_a, (long long)checksum_b);
+    }
+    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+}
+
+static double bench_loop_two_fiber_once(void) {
+    double start = time_now_ms();
+    @nursery {
+        spawn(() => {
+            volatile int64_t local = 0;
+            for (int i = 0; i < ITERATIONS; i++) {
+                local += i;
+            }
+            if (local < 0) {
+                fprintf(stderr, "impossible local=%lld\n", (long long)local);
+            }
+        });
+        spawn(() => {
+            volatile int64_t local = 0;
+            for (int i = 0; i < ITERATIONS; i++) {
+                local += i;
+            }
+            if (local < 0) {
+                fprintf(stderr, "impossible local=%lld\n", (long long)local);
+            }
+        });
+    }
+    double elapsed = time_now_ms() - start;
+    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+}
+
+static double bench_chan_single_once(void) {
+    int[~1000 >] tx_h;
+    int[~1000 <] rx_h;
+    channel_pair(&tx_h, &rx_h);
+    CCChanTx tx = tx_h;
+    CCChanRx rx = rx_h;
+
+    double start = time_now_ms();
+    int64_t checksum = 0;
+    int v = 0;
+    for (int i = 0; i < ITERATIONS; i++) {
+        tx.send(i);
+        rx.recv(&v);
+        checksum += v;
+    }
+    double elapsed = time_now_ms() - start;
+    if (checksum < 0) {
+        fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+    }
+    tx.close();
+    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+}
+
+static double bench_chan_two_fiber_once(void) {
+    int[~1000 >] tx_h;
+    int[~1000 <] rx_h;
+    channel_pair(&tx_h, &rx_h);
+
+    CCChanTx tx = tx_h;
+    CCChanRx rx = rx_h;
+
+    double start = time_now_ms();
+    @nursery closing(tx_h) {
+        spawn(() => [tx] {
+            for (int i = 0; i < ITERATIONS; i++) {
+                tx.send(i);
+            }
+        });
+
+        spawn(() => [rx] {
+            int v = 0;
+            int64_t checksum = 0;
+            for (int i = 0; i < ITERATIONS; i++) {
+                rx.recv(&v);
+                checksum += v;
+            }
+            if (checksum < 0) {
+                fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+            }
+        });
+    }
+    double elapsed = time_now_ms() - start;
+    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+}
+
+static double median_ops(double (*fn)(void)) {
+    double ops[SAMPLES] = {0};
+    for (int i = 0; i < SAMPLES; i++) {
+        ops[i] = fn();
+    }
+    sort_doubles(ops, SAMPLES);
+    return ops[SAMPLES / 2];
+}
+
+int main(void) {
+    printf("perf_buffered_ladder: iters=%d\n", ITERATIONS);
+    (void)bench_chan_two_fiber_once(); /* warmup */
+
+    double loop_local = median_ops(bench_loop_local_once);
+    double loop_two_fiber = median_ops(bench_loop_two_fiber_once);
+    double chan_single = median_ops(bench_chan_single_once);
+    double chan_two_fiber = median_ops(bench_chan_two_fiber_once);
+
+    printf("  local loop only:            %.0f ops/sec\n", loop_local);
+    printf("  two-fiber loop only:        %.0f ops/sec\n", loop_two_fiber);
+    printf("  channel single-thread pair: %.0f ops/sec\n", chan_single);
+    printf("  channel buffered 2-fiber:   %.0f ops/sec\n", chan_two_fiber);
+
+    printf("  overhead vs local loop:\n");
+    printf("    two-fiber loop:   %.1f%%\n", (loop_two_fiber / loop_local) * 100.0);
+    printf("    chan single:      %.1f%%\n", (chan_single / loop_local) * 100.0);
+    printf("    chan 2-fiber:     %.1f%%\n", (chan_two_fiber / loop_local) * 100.0);
+    printf("  overhead vs two-fiber loop:\n");
+    printf("    chan single:      %.1f%%\n", (chan_single / loop_two_fiber) * 100.0);
+    printf("    chan 2-fiber:     %.1f%%\n", (chan_two_fiber / loop_two_fiber) * 100.0);
+    printf("  buffered vs single-thread channel: %.1f%%\n",
+           (chan_two_fiber / chan_single) * 100.0);
+
+    printf("perf_buffered_ladder: DONE\n");
+    return 0;
+}

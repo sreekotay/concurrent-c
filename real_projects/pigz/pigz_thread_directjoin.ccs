@@ -1,0 +1,251 @@
+/*
+ * pigz_thread_directjoin.ccs
+ *
+ * Ladder variant: use cc_thread_spawn (OS threads) but remove
+ * task channel + ordered_recv consumer. Producer directly joins spawned
+ * tasks in FIFO order using a bounded in-flight ring.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <zlib.h>
+
+#define BLOCK_SIZE (128 * 1024)
+#define BLOCK_ARENA_OVERHEAD 1024
+#define INFLIGHT_CAP_DEFAULT 16
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    bool is_last;
+    CCArena arena;
+} Block;
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    unsigned long crc;
+    size_t original_len;
+    bool is_last;
+    CCArena arena;
+} CompressedResult;
+
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+
+static inline uint64_t ns_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t g_spawn_ns = 0;
+static uint64_t g_join_ns = 0;
+static uint64_t g_write_ns = 0;
+static uint64_t g_blocks_spawned = 0;
+static uint64_t g_blocks_joined = 0;
+static cc_atomic_u64 g_task_exec_ns = 0;
+static cc_atomic_u64 g_task_exec_count = 0;
+
+static size_t get_inflight_cap(void) {
+    const char* v = getenv("PIGZ_INFLIGHT_CAP");
+    if (!v || !v[0]) return INFLIGHT_CAP_DEFAULT;
+    int n = atoi(v);
+    if (n <= 0) return INFLIGHT_CAP_DEFAULT;
+    return (size_t)n;
+}
+
+CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
+    size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
+
+    @arena(res_arena, arena_size) {
+        CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
+        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+        res->seq = blk->seq;
+        res->is_last = blk->is_last;
+        res->original_len = blk->data.len;
+        res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+
+        size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+        if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+        memcpy(out_buf, header, 10);
+        size_t pos = 10;
+
+        z_stream strm = {0};
+        if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        }
+        strm.next_in = (Bytef*)blk->data.ptr;
+        strm.avail_in = (uInt)blk->data.len;
+        strm.next_out = out_buf + pos;
+        strm.avail_out = (uInt)(max_out - pos - 8);
+
+        int ret = deflate(&strm, Z_FINISH);
+        pos += strm.total_out;
+        deflateEnd(&strm);
+        if (ret != Z_STREAM_END) return cc_err(cc_io_error(CC_IO_OTHER));
+
+        unsigned long crc = res->crc;
+        size_t in_len = blk->data.len;
+        out_buf[pos++] = crc & 0xff;
+        out_buf[pos++] = (crc >> 8) & 0xff;
+        out_buf[pos++] = (crc >> 16) & 0xff;
+        out_buf[pos++] = (crc >> 24) & 0xff;
+        out_buf[pos++] = in_len & 0xff;
+        out_buf[pos++] = (in_len >> 8) & 0xff;
+        out_buf[pos++] = (in_len >> 16) & 0xff;
+        out_buf[pos++] = (in_len >> 24) & 0xff;
+
+        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+        cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+        cc_atomic_fetch_add(&g_bytes_out, pos);
+        cc_atomic_fetch_add(&g_blocks_done, 1);
+
+        res->arena = cc_arena_detach(res_arena);
+        return cc_ok(res);
+    }
+}
+
+void* compress_task_wrapper(void* arg) {
+    uint64_t tt0 = ns_now();
+    Block* blk = (Block*)arg;
+    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+    cc_arena_free(&blk->arena);
+
+    typedef struct { CompressedResult* __result; } __result_t;
+    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
+    if (!storage) {
+        storage = (__result_t*)malloc(sizeof(__result_t));
+        if (!storage) return NULL;
+    }
+    storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
+    uint64_t tt1 = ns_now();
+    cc_atomic_fetch_add(&g_task_exec_ns, tt1 - tt0);
+    cc_atomic_fetch_add(&g_task_exec_count, 1);
+    return storage;
+}
+
+static int drain_one(CCFile* out_file, CCTask* t) {
+    uint64_t tj0 = ns_now();
+    void* cap = (void*)cc_block_on_intptr(*t);
+    uint64_t tj1 = ns_now();
+    CompressedResult* r = cap ? *(CompressedResult**)cap : NULL;
+    if (r) {
+        uint64_t tw0 = ns_now();
+        cc_file_write(out_file, r->data);
+        uint64_t tw1 = ns_now();
+        cc_arena_free(&r->arena);
+        g_write_ns += (tw1 - tw0);
+    }
+    g_join_ns += (tj1 - tj0);
+    g_blocks_joined++;
+    return 0;
+}
+
+int compress_file(const char* in_path, const char* out_path, int level) {
+    (void)level;
+
+    CCFile in_file;
+    if (cc_file_open(&in_file, in_path, "rb") != 0) return 1;
+    @defer cc_file_close(&in_file);
+
+    CCFile out_file;
+    if (cc_file_open(&out_file, out_path, "wb") != 0) return 1;
+    @defer cc_file_close(&out_file);
+
+    size_t inflight_cap = get_inflight_cap();
+    CCTask* inflight = (CCTask*)calloc(inflight_cap, sizeof(CCTask));
+    if (!inflight) return 1;
+    @defer free(inflight);
+    size_t head = 0;
+    size_t count = 0;
+    long seq = 0;
+
+    while (true) {
+        CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
+        CCSlice data;
+        bool !>(CCIoError) read_res = cc_file_read(&in_file, &blk_arena, BLOCK_SIZE, &data);
+        if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
+            cc_arena_free(&blk_arena);
+            break;
+        }
+
+        Block* blk = arena_alloc1(Block, &blk_arena);
+        if (!blk) {
+            cc_arena_free(&blk_arena);
+            break;
+        }
+
+        blk->seq = seq++;
+        blk->data = data;
+        blk->is_last = (data.len < BLOCK_SIZE);
+        blk->arena = blk_arena;
+
+        bool is_last = blk->is_last;
+        size_t tail = (head + count) % inflight_cap;
+        uint64_t ts0 = ns_now();
+        inflight[tail] = cc_thread_spawn(compress_task_wrapper, blk);
+        uint64_t ts1 = ns_now();
+        g_spawn_ns += (ts1 - ts0);
+        g_blocks_spawned++;
+        count++;
+
+        if (count == inflight_cap) {
+            drain_one(&out_file, &inflight[head]);
+            head = (head + 1) % inflight_cap;
+            count--;
+        }
+
+        if (is_last) break;
+    }
+
+    while (count > 0) {
+        drain_one(&out_file, &inflight[head]);
+        head = (head + 1) % inflight_cap;
+        count--;
+    }
+
+    cc_file_sync(&out_file);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) return 1;
+    char out_name[4096];
+    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+    int ret = compress_file(argv[1], out_name, 6);
+    if (ret == 0) {
+        printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
+               (long long)cc_atomic_load(&g_bytes_in),
+               (long long)cc_atomic_load(&g_bytes_out),
+               cc_atomic_load(&g_blocks_done));
+        if (getenv("PIGZ_PHASE_STATS")) {
+            printf("PhaseStats(thread_directjoin): spawns=%llu joins=%llu\n",
+                   (unsigned long long)g_blocks_spawned, (unsigned long long)g_blocks_joined);
+            printf("  spawn: %.3f ms total (%.3f us/block)\n",
+                   (double)g_spawn_ns / 1000000.0,
+                   g_blocks_spawned ? (double)g_spawn_ns / 1000.0 / (double)g_blocks_spawned : 0.0);
+            printf("  join:  %.3f ms total (%.3f us/block)\n",
+                   (double)g_join_ns / 1000000.0,
+                   g_blocks_joined ? (double)g_join_ns / 1000.0 / (double)g_blocks_joined : 0.0);
+            printf("  write: %.3f ms total (%.3f us/block)\n",
+                   (double)g_write_ns / 1000000.0,
+                   g_blocks_joined ? (double)g_write_ns / 1000.0 / (double)g_blocks_joined : 0.0);
+            uint64_t task_ns = cc_atomic_load(&g_task_exec_ns);
+            uint64_t task_n = cc_atomic_load(&g_task_exec_count);
+            printf("  task:  %.3f ms total (%.3f us/task)\n",
+                   (double)task_ns / 1000000.0,
+                   task_n ? (double)task_ns / 1000.0 / (double)task_n : 0.0);
+        }
+    }
+    return ret;
+}
