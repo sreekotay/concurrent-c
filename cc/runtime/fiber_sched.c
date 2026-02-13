@@ -3471,8 +3471,9 @@ static void worker_commit_park(fiber_task* f, int wid) {
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line) {
     fiber_task* f = tls_current_fiber;
     if (!f || !f->coro) return;
-    
-    /* CRITICAL: Verify we're on the correct stack before parking. */
+
+#if CC_V3_DIAGNOSTICS || defined(CC_DEBUG_FIBER)
+    /* Debug-only stack ownership validation. */
     volatile size_t _stack_check;
     size_t stack_addr = (size_t)&_stack_check;
     size_t stack_min = (size_t)f->coro->stack_base;
@@ -3483,29 +3484,40 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 #endif
         return;
     }
-    
-    /* Store debug info */
+
+    /* Debug metadata for deadlock/stall reporting. */
     f->park_reason = reason;
     f->park_file = file;
     f->park_line = line;
+#else
+    (void)reason;
+    (void)file;
+    (void)line;
+#endif
 
+#if CC_V3_DIAGNOSTICS
     static int park_dbg = -1;
     if (park_dbg == -1) {
         const char* v = getenv("CC_PARK_DEBUG");
         park_dbg = (v && v[0] == '1') ? 1 : 0;
     }
+#endif
 
     /* Fast-path: pending_unpark already set — don't even yield. */
     if (atomic_exchange_explicit(&f->pending_unpark, 0, memory_order_acq_rel)) {
+#if CC_V3_DIAGNOSTICS
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_pending fiber=%lu reason=%s\n",
                 (unsigned long)f->fiber_id, reason);
+#endif
         return;
     }
 
     /* Fast-path: flag condition already changed. */
     if (flag && atomic_load_explicit(flag, memory_order_acquire) != expected) {
+#if CC_V3_DIAGNOSTICS
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_flag fiber=%lu reason=%s\n",
                 (unsigned long)f->fiber_id, reason);
+#endif
         return;
     }
 
@@ -3524,9 +3536,11 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
      *       and re-enqueued us, or
      *   (b) we were fully parked, then unparked and re-enqueued.
      * In both cases, worker_run_fiber already set CTRL_OWNED(wid). */
+#if CC_V3_DIAGNOSTICS || defined(CC_DEBUG_FIBER)
     f->park_reason = NULL;
     f->park_file = NULL;
     f->park_line = 0;
+#endif
     f->park_obj = NULL;
 }
 

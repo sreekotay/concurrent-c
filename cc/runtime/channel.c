@@ -357,48 +357,16 @@ static inline void wake_batch_flush(void) {
     b->count = 0;
 }
 
-typedef struct cc__chan_wait_notified_ctx {
-    cc__fiber_wait_node* node;
-} cc__chan_wait_notified_ctx;
-
-static bool cc__chan_wait_notified_try_complete(void* waitable, CCSchedFiber* fiber, void* io) {
-    (void)fiber;
-    (void)io;
-    cc__chan_wait_notified_ctx* ctx = (cc__chan_wait_notified_ctx*)waitable;
-    return atomic_load_explicit(&ctx->node->notified, memory_order_acquire) != 0;
-}
-
-static bool cc__chan_wait_notified_publish(void* waitable, CCSchedFiber* fiber, void* io) {
-    (void)waitable;
-    (void)fiber;
-    (void)io;
-    return true;
-}
-
-static void cc__chan_wait_notified_unpublish(void* waitable, CCSchedFiber* fiber) {
-    (void)waitable;
-    (void)fiber;
-}
-
-static void cc__chan_wait_notified_park(void* waitable, CCSchedFiber* fiber, void* io) {
-    (void)fiber;
-    (void)io;
-    cc__chan_wait_notified_ctx* ctx = (cc__chan_wait_notified_ctx*)waitable;
-    CC_FIBER_PARK_IF(&ctx->node->notified, 0, "chan_wait_notified");
-}
-
 static inline cc_sched_wait_result cc__chan_wait_notified(cc__fiber_wait_node* node) {
+    /* Hot path: this wait shape is a single atomic-notified flag and does not
+     * need generic waitable op dispatch/publish bookkeeping. */
     if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
         return CC_SCHED_WAIT_OK;
     }
-    cc__chan_wait_notified_ctx ctx = {.node = node};
-    const cc_sched_waitable_ops ops = {
-        .try_complete = cc__chan_wait_notified_try_complete,
-        .publish = cc__chan_wait_notified_publish,
-        .unpublish = cc__chan_wait_notified_unpublish,
-        .park = cc__chan_wait_notified_park,
-    };
-    return cc_sched_fiber_wait(&ctx, NULL, &ops);
+    CC_FIBER_PARK_IF(&node->notified, 0, "chan_wait_notified");
+    return atomic_load_explicit(&node->notified, memory_order_acquire) != 0
+               ? CC_SCHED_WAIT_OK
+               : CC_SCHED_WAIT_PARKED;
 }
 
 static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_wait_node* node) {
