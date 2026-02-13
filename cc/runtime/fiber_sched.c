@@ -449,7 +449,7 @@ static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle
 static inline int cc_v3_pressure_dump_enabled(void);
 static void cc_v3_dump_pressure_stats(void);
 
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
 static _Atomic int g_cc_v3_worker_stats_mode = -1;
 static _Atomic int g_cc_v3_worker_stats_atexit = 0;
 static _Atomic int g_cc_v3_worker_dump_mode = -1;
@@ -958,21 +958,9 @@ static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle
 }
 
 static inline int64_t cc_sched_pressure_add(int64_t delta) {
-    const int64_t LIM = (INT64_C(1) << 60);
-    int64_t cur = atomic_load_explicit(&g_sched.pressure, memory_order_relaxed);
-    while (1) {
-        int64_t next = cur;
-        if (delta > 0) {
-            next = (cur > LIM - delta) ? LIM : (cur + delta);
-        } else if (delta < 0) {
-            next = (cur < -LIM - delta) ? -LIM : (cur + delta);
-        }
-        if (atomic_compare_exchange_weak_explicit(&g_sched.pressure, &cur, next,
-                                                  memory_order_relaxed,
-                                                  memory_order_relaxed)) {
-            return next;
-        }
-    }
+    /* Hot-path update (spawn/complete): keep it to a single atomic op.
+     * int64 range is effectively unbounded for runtime pressure magnitudes here. */
+    return atomic_fetch_add_explicit(&g_sched.pressure, delta, memory_order_relaxed) + delta;
 }
 
 static inline int cc_v3_pressure_dump_enabled(void) {
@@ -1892,7 +1880,9 @@ static void* sysmon_main(void* arg) {
     (void)arg;
     int stall_tick_counter = 0;
     int low_worker_pressure_streak = 0;
+#if CC_V3_DIAGNOSTICS
     uint64_t negative_pressure_streak = 0;
+#endif
     while (atomic_load_explicit(&g_sched.sysmon_running, memory_order_acquire)) {
         usleep(SYSMON_CHECK_US);
         
@@ -1938,6 +1928,7 @@ static void* sysmon_main(void* arg) {
         size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
         size_t active = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
         int64_t pressure = atomic_load_explicit(&g_sched.pressure, memory_order_relaxed);
+#if CC_V3_DIAGNOSTICS
         atomic_fetch_add_explicit(&g_sched.pressure_samples, 1, memory_order_relaxed);
         if (pressure > 0) {
             atomic_fetch_add_explicit(&g_sched.pressure_positive_samples, 1, memory_order_relaxed);
@@ -1957,14 +1948,19 @@ static void* sysmon_main(void* arg) {
         } else {
             negative_pressure_streak = 0;
         }
+#endif
 
         /* Scale-up gate (§7): require runnable work evidence and positive pressure. */
         if (!sysmon_has_pending_work()) {
+#if CC_V3_DIAGNOSTICS
             atomic_fetch_add_explicit(&g_sched.pressure_block_no_work, 1, memory_order_relaxed);
+#endif
             continue;
         }
         if (pressure <= 0) {
+#if CC_V3_DIAGNOSTICS
             atomic_fetch_add_explicit(&g_sched.pressure_block_nonpositive, 1, memory_order_relaxed);
+#endif
             continue;
         }
         if (g_sched.num_workers <= 2) {
@@ -1983,7 +1979,9 @@ static void* sysmon_main(void* arg) {
         }
         /* If current idle capacity can plausibly absorb pressure, don't promote yet. */
         if ((sleeping + spinning) > 0 && pressure <= (int64_t)(sleeping + spinning)) {
+#if CC_V3_DIAGNOSTICS
             atomic_fetch_add_explicit(&g_sched.pressure_block_idle_capacity, 1, memory_order_relaxed);
+#endif
             continue;
         }
         
@@ -1998,7 +1996,9 @@ static void* sysmon_main(void* arg) {
         }
         
         if (stuck == 0) {
+#if CC_V3_DIAGNOSTICS
             atomic_fetch_add_explicit(&g_sched.pressure_block_not_stuck, 1, memory_order_relaxed);
+#endif
             continue;
         }
         
@@ -2010,7 +2010,9 @@ static void* sysmon_main(void* arg) {
             to_spawn = MAX_EXTRA_WORKERS - current;
         
         if (to_spawn == 0) continue;
+#if CC_V3_DIAGNOSTICS
         atomic_fetch_add_explicit(&g_sched.pressure_gate_passes, 1, memory_order_relaxed);
+#endif
         
         /* Rate limit overall scaling bursts */
         uint64_t last = atomic_load_explicit(&g_sched.last_promotion_cycles, memory_order_acquire);
@@ -2033,7 +2035,9 @@ static void* sysmon_main(void* arg) {
                         "[sysmon] scaling: pressure=%lld active=%zu sleeping=%zu spinning=%zu stuck=%zu spawning=%zu (total will be %zu)\n",
                         (long long)pressure, active, sleeping, spinning, stuck, to_spawn, total_workers + to_spawn);
         }
+#if CC_V3_DIAGNOSTICS
         atomic_fetch_add_explicit(&g_sched.pressure_promoted_workers, to_spawn, memory_order_relaxed);
+#endif
         for (size_t s = 0; s < to_spawn; s++) {
             /* temp_worker_count participates in heuristic accounting, not correctness LPs. */
             if (!atomic_compare_exchange_strong_explicit(&g_sched.temp_worker_count, &current, current + 1,
@@ -2180,17 +2184,22 @@ static void* worker_main(void* arg) {
 
     /* Per-worker PRNG state for randomized stealing */
     uint64_t rng_state = (uint64_t)worker_id * 0x9E3779B97F4A7C15ULL + rdtsc();
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
     const int v3_stats = cc_v3_worker_stats_enabled();
+    const int lifecycle_asserts = cc_v3_worker_lifecycle_enabled();
     if (v3_stats) cc_v3_worker_stats_maybe_init();
+#else
+    const int lifecycle_asserts = 0;
+    const int v3_stats = 0;
 #endif
+    (void)v3_stats;
     /* Bounded fairness: after FAIRNESS_CHECK_INTERVAL consecutive batches
      * with no global work, inject one global queue pop so fibers pushed to
      * global (e.g. by the affinity escape hatch) don't starve. */
     int local_only_batches = 0;
     
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
-        cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "loop_start");
+        if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "loop_start");
         if (join_debug_enabled()) {
             fprintf(stderr, "[worker%d] main_loop_start\n", worker_id);
             fflush(stderr);
@@ -2202,7 +2211,7 @@ static void* worker_main(void* arg) {
             if (gf) {
                 batch[count++] = gf;
                 local_only_batches = 0;
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
                 if (v3_stats) {
                     atomic_fetch_add_explicit(&g_cc_v3_wm_global_pulls, 1, memory_order_relaxed);
                 }
@@ -2214,9 +2223,11 @@ static void* worker_main(void* arg) {
             fiber_task* v3_next = cc_sched_worker_next();
             if (v3_next) {
                 batch[count++] = v3_next;
+#if CC_V3_DIAGNOSTICS
                 if (v3_stats) {
                     atomic_fetch_add_explicit(&g_cc_v3_wm_seed_v3_batches, 1, memory_order_relaxed);
                 }
+#endif
             }
         }
 #endif
@@ -2226,7 +2237,7 @@ static void* worker_main(void* arg) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) break;
             batch[count++] = f;
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
             if (v3_stats) {
                 atomic_fetch_add_explicit(&g_cc_v3_wm_local_pulls, 1, memory_order_relaxed);
             }
@@ -2238,7 +2249,7 @@ static void* worker_main(void* arg) {
             fiber_task* f = iq_pop(&g_sched.inbox_queues[worker_id]);
             if (!f) break;
             batch[count++] = f;
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
             if (v3_stats) {
                 atomic_fetch_add_explicit(&g_cc_v3_wm_inbox_pulls, 1, memory_order_relaxed);
             }
@@ -2254,7 +2265,7 @@ static void* worker_main(void* arg) {
                         worker_id, (unsigned long)f->fiber_id);
             }
             batch[count++] = f;
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
             if (v3_stats) {
                 atomic_fetch_add_explicit(&g_cc_v3_wm_global_pulls, 1, memory_order_relaxed);
             }
@@ -2273,7 +2284,7 @@ static void* worker_main(void* arg) {
                 fiber_task* inbox_task = iq_pop(&g_sched.inbox_queues[victim]);
                 if (inbox_task) {
                     batch[count++] = inbox_task;
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
                     if (v3_stats) {
                         atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
                     }
@@ -2287,14 +2298,14 @@ static void* worker_main(void* arg) {
                 if (stolen > 0) {
                     /* Execute first task immediately, put rest in batch or local queue */
                     batch[count++] = steal_buf[0];
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
                     if (v3_stats) {
                         atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
                     }
 #endif
                     for (size_t s = 1; s < stolen && count < WORKER_BATCH_SIZE; s++) {
                         batch[count++] = steal_buf[s];
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
                         if (v3_stats) {
                             atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
                         }
@@ -2313,8 +2324,8 @@ static void* worker_main(void* arg) {
         }
         
         if (count > 0) {
-            cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "batch_run");
-#if CC_RUNTIME_V3
+            if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "batch_run");
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
             if (v3_stats) {
                 atomic_fetch_add_explicit(&g_cc_v3_wm_batches, 1, memory_order_relaxed);
             }
@@ -2342,12 +2353,12 @@ static void* worker_main(void* arg) {
         {
             fiber_task* idle_probe = cc_sched_worker_idle_probe();
             if (idle_probe) {
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
                 if (v3_stats) {
                     atomic_fetch_add_explicit(&g_cc_v3_wm_idle_probe_hits, 1, memory_order_relaxed);
                 }
 #endif
-                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "idle_probe_hit");
+                if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "idle_probe_hit");
                 atomic_store_explicit(&g_sched.worker_heartbeat[worker_id].heartbeat, rdtsc(), memory_order_relaxed);
                 local_only_batches++;
                 worker_run_fiber_accounted(idle_probe);
@@ -2356,14 +2367,14 @@ static void* worker_main(void* arg) {
         }
 #endif
         
-#if CC_RUNTIME_V3
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
         if (v3_stats) {
             atomic_fetch_add_explicit(&g_cc_v3_wm_empty_loops, 1, memory_order_relaxed);
         }
 #endif
         
         /* No work - enter spinning state */
-        cc_v3_worker_lifecycle_set(worker_id, CC_WL_IDLE_SPIN, "enter_spin");
+        if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_IDLE_SPIN, "enter_spin");
         size_t old_spinning = atomic_fetch_add_explicit(&g_sched.spinning, 1, memory_order_seq_cst);
         if (join_debug_enabled()) {
             fprintf(stderr, "[worker%d] entering spin (spinning: %zu -> %zu)\n", worker_id, old_spinning, old_spinning + 1);
@@ -2400,7 +2411,7 @@ static void* worker_main(void* arg) {
             }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "spin_found_work");
+                if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "spin_found_work");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
@@ -2419,7 +2430,7 @@ static void* worker_main(void* arg) {
             }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "yield_found_work");
+                if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "yield_found_work");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
@@ -2431,7 +2442,7 @@ static void* worker_main(void* arg) {
          * spawners see no workers to wake. */
         atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-        cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
+        if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
         if (join_debug_enabled()) {
             fprintf(stderr, "[worker%d] exiting spin (found_work=%d iters=%d)\n", worker_id, spin_found_work, spin_iters);
             fflush(stderr);
@@ -2443,7 +2454,7 @@ static void* worker_main(void* arg) {
                 fiber_task* f = worker_try_steal_one(worker_id, &rng_state);
                 if (f) {
                     atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
-                    cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "pre_sleep_steal");
+                    if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "pre_sleep_steal");
                     worker_run_fiber_accounted(f);
                     goto next_iteration;
                 }
@@ -2475,7 +2486,7 @@ static void* worker_main(void* arg) {
                     fflush(stderr);
                 }
                 atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
-                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "post_sleep_recheck");
+                if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "post_sleep_recheck");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
@@ -2554,13 +2565,13 @@ static void* worker_main(void* arg) {
             cc__fiber_check_deadlock();
         }
         atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
-        cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "sleep_exit");
+        if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "sleep_exit");
         
         next_iteration:;
     }
     
-    cc_v3_worker_lifecycle_set(worker_id, CC_WL_DRAINING, "shutdown_begin");
-    cc_v3_worker_lifecycle_set(worker_id, CC_WL_DEAD, "shutdown_done");
+    if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_DRAINING, "shutdown_begin");
+    if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_DEAD, "shutdown_done");
     tls_worker_id = -1;
     return NULL;
 }

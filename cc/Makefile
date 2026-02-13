@@ -6,8 +6,9 @@ TCC_LIB ?= ../third_party/tcc
 CC_ENABLE_ASYNC ?= 1
 CC_ENABLE_TLS ?= 0
 CC_RUNTIME_V3 ?= 1
+CC_V3_DIAGNOSTICS ?= 0
 BEARSSL_DIR ?= ../third_party/bearssl
-CFLAGS_COMMON := -Wall -Wextra -Isrc -Iinclude -DCC_RUNTIME_V3=$(CC_RUNTIME_V3)
+CFLAGS_COMMON := -Wall -Wextra -Isrc -Iinclude -DCC_RUNTIME_V3=$(CC_RUNTIME_V3) -DCC_V3_DIAGNOSTICS=$(CC_V3_DIAGNOSTICS)
 ifeq ($(CC_ENABLE_ASYNC),1)
   CFLAGS_COMMON += -DCC_ENABLE_ASYNC
 endif
