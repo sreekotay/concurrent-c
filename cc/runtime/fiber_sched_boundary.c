@@ -1,16 +1,8 @@
 #include "fiber_sched_boundary.h"
 #include "fiber_internal.h"
 
-#if CC_RUNTIME_V3
 CCSchedFiber* cc_sched_v3_worker_next_impl(void);
 CCSchedFiber* cc_sched_v3_idle_probe_impl(void);
-#endif
-
-typedef enum {
-    CC_WAIT_STAGE_RUNNING = 0,
-    CC_WAIT_STAGE_PARKING_PUBLISHED = 1,
-    CC_WAIT_STAGE_PARKED = 2,
-} cc_wait_stage;
 
 /*
  * V2 compatibility shim for the v3 scheduler boundary.
@@ -24,17 +16,11 @@ void cc_sched_schedule(CCSchedFiber* fiber) {
 }
 
 CCSchedFiber* cc_sched_worker_next(void) {
-#if CC_RUNTIME_V3
     return cc_sched_v3_worker_next_impl();
-#endif
-    return NULL;
 }
 
 CCSchedFiber* cc_sched_worker_idle_probe(void) {
-#if CC_RUNTIME_V3
     return cc_sched_v3_idle_probe_impl();
-#endif
-    return NULL;
 }
 
 cc_sched_wait_result cc_sched_fiber_wait(
@@ -43,7 +29,6 @@ cc_sched_wait_result cc_sched_fiber_wait(
     const cc_sched_waitable_ops* ops
 ) {
     CCSchedFiber* fiber = (CCSchedFiber*)cc__fiber_current();
-    cc_wait_stage stage = CC_WAIT_STAGE_RUNNING;
     if (!ops) {
         return CC_SCHED_WAIT_CLOSED;
     }
@@ -58,21 +43,7 @@ cc_sched_wait_result cc_sched_fiber_wait(
     if (!ops->publish(waitable, fiber, io)) {
         return CC_SCHED_WAIT_CLOSED;
     }
-    stage = CC_WAIT_STAGE_PARKING_PUBLISHED;
     /* Stage PARKING_PUBLISHED: once published, wake ownership may race us. */
-    if (ops->try_complete && ops->try_complete(waitable, fiber, io)) {
-        if (ops->unpublish) {
-            ops->unpublish(waitable, fiber);
-        }
-        return CC_SCHED_WAIT_OK;
-    }
-    if (!cc__fiber_in_context()) {
-        if (ops->unpublish) {
-            ops->unpublish(waitable, fiber);
-        }
-        return CC_SCHED_WAIT_CLOSED;
-    }
-
     /* Final pre-park completion check before committing to a park. */
     if (ops->try_complete && ops->try_complete(waitable, fiber, io)) {
         if (ops->unpublish) {
@@ -92,7 +63,6 @@ cc_sched_wait_result cc_sched_fiber_wait(
     } else {
         cc__fiber_park_reason("cc_sched_fiber_wait", __FILE__, __LINE__);
     }
-    stage = CC_WAIT_STAGE_PARKED;
     /*
      * Stage PARKED return path: post-park try_complete models wake_pending
      * recovery where a wake raced the park commit.
@@ -100,7 +70,6 @@ cc_sched_wait_result cc_sched_fiber_wait(
     if (ops->try_complete && ops->try_complete(waitable, fiber, io)) {
         return CC_SCHED_WAIT_OK;
     }
-    (void)stage;
     return CC_SCHED_WAIT_PARKED;
 }
 

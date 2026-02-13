@@ -152,6 +152,7 @@ Contract requirements:
   when entering idle transitions; it MUST NOT return non-runnable ownership.
 - `fiber_wait()` owns the full `RUNNING -> PARKING -> {RUNNING|PARKED}` protocol
   and is the only legal path that publishes/removes waiters on behalf of fibers.
+  It MUST be invoked only while the calling fiber is `RUNNING`.
 - `fiber_wake()` owns the `PARKED -> {wake-claim} -> RUNNABLE` claim/enqueue protocol
   and MUST enforce single enqueue owner (F4).
 - Channel code MUST implement admission and close behavior via `WaitableOps`
@@ -183,6 +184,8 @@ Contract requirements:
 3. **Publish waiter:**
 
 - If `W.publish(W,f,io)` fails → `store_release(f.state, RUNNING)` and return (e.g. `WAIT_CLOSED`).
+- After publish, a single `try_complete` check before park commit is sufficient
+  to cover publish-to-park wake races.
 
 4. **Commit park first (MUST):**
 
@@ -441,6 +444,9 @@ Cancellation path note:
 
 Current matrix coverage in the active runtime is split between runtime asserts and
 static/protocol guarantees:
+
+- Runtime note: v3 scheduler path is the default active path; v0/fallback behavior
+  is retained only as an explicit build override.
 
 - **Runtime asserts (`CC_V3_SPEC_ASSERT=1`):**
   - `RUNNABLE -> RUNNING` claim in `cc/runtime/fiber_sched.c` `worker_run_fiber()`.

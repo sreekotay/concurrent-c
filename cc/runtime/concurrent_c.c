@@ -11,11 +11,7 @@
  */
 
 #include "channel.c"
-#if CC_RUNTIME_V3
 #include "fiber_sched_v3.c"
-#else
-#include "fiber_sched.c"
-#endif
 #include "scheduler.c"
 #include "nursery.c"
 #include "fiber_sched_boundary.c"
