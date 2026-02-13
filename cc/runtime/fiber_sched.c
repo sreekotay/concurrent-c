@@ -349,6 +349,30 @@ typedef struct fiber_task {
     struct fiber_task* debug_next;  /* For all-fibers debug list (deadlock dump) */
 } fiber_task;
 
+/* Optional spec assertion mode for transition/enqueue legality checks.
+ * Enable with CC_V3_SPEC_ASSERT=1 when auditing §9/§10 linearization points. */
+static inline int cc_v3_spec_assert_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_V3_SPEC_ASSERT");
+        enabled = (v && v[0] == '1') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static inline void cc_v3_assert_enqueue_runnable(fiber_task* f, const char* queue_name) {
+    if (!cc_v3_spec_assert_enabled() || !f) return;
+    int64_t ctrl = atomic_load_explicit(&f->control, memory_order_acquire);
+    if (ctrl != CTRL_QUEUED) {
+        fprintf(stderr,
+                "CC_V3_SPEC_ASSERT: enqueue_non_runnable queue=%s fiber=%lu control=%lld\n",
+                queue_name,
+                (unsigned long)f->fiber_id,
+                (long long)ctrl);
+        abort();
+    }
+}
+
 /* ============================================================================
  * Lock-Free MPMC Queue with overflow list
  *
@@ -381,6 +405,7 @@ static void fq_init(fiber_queue* q) {
 
 /* Try to push to the lock-free ring. Returns 0 on success, -1 if full. */
 static int fq_push_ring(fiber_queue* q, fiber_task* f) {
+    cc_v3_assert_enqueue_runnable(f, "global_ring");
     for (int retry = 0; retry < 64; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
         size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
@@ -464,7 +489,7 @@ static fiber_task* fq_pop(fiber_queue* q) {
         }
         
         if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                   memory_order_release,
+                                                   memory_order_relaxed,
                                                    memory_order_relaxed)) {
             atomic_store_explicit(&q->slots[idx], NULL, memory_order_relaxed);
             return f;
@@ -603,6 +628,7 @@ static int wake_debug_enabled(void) {
 static void cc__fiber_dump_queue_state(void);
 
 static int iq_push(inbox_queue* q, fiber_task* f) {
+    cc_v3_assert_enqueue_runnable(f, "inbox");
     int pause_round = 0;
     for (int retry = 0; retry < 1000; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
@@ -670,7 +696,7 @@ static fiber_task* iq_pop(inbox_queue* q) {
             if (!f) continue;  /* Retry from the top */
         }
         if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                   memory_order_release,
+                                                   memory_order_relaxed,
                                                    memory_order_relaxed)) {
             atomic_store_explicit(&q->slots[idx], NULL, memory_order_relaxed);
             return f;
@@ -947,6 +973,7 @@ void cc__deadlock_thread_unblock(void) {
 
 /* Fast local queue push (single producer) */
 static inline int lq_push(local_queue* q, fiber_task* f) {
+    cc_v3_assert_enqueue_runnable(f, "local");
     size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
     size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
     if (tail - head >= LOCAL_QUEUE_SIZE) return -1;  /* Full */
@@ -980,14 +1007,14 @@ static inline fiber_task* lq_pop(local_queue* q) {
         if (!f) {
             /* Lost race with stealer - they cleared slot, try to help advance head */
             atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                   memory_order_release, memory_order_relaxed);
+                                                   memory_order_relaxed, memory_order_relaxed);
             continue;
         }
         
         /* We got the task. Try to advance head once.
          * If CAS fails, someone else advanced it for us - that's fine. */
         atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                               memory_order_release, memory_order_relaxed);
+                                               memory_order_relaxed, memory_order_relaxed);
         return f;
     }
     return NULL;  /* Too much contention, let caller try global queue */
@@ -1012,7 +1039,7 @@ static inline void wake_one_if_sleeping_unconditional(int timing) {
     /* Always bump the wake counter to avoid lost wakeups.
      * If a worker races into sleep after we enqueue work, the changed counter
      * prevents it from blocking on the old wake_val. */
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
+    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
     if (join_debug_enabled()) {
         fprintf(stderr, "[wake] unconditional: sleeping=%zu spinning=%zu\n", sleeping, spinning);
@@ -1021,8 +1048,9 @@ static inline void wake_one_if_sleeping_unconditional(int timing) {
         /* Wake one sleeper; wake_primitive_wake_one bumps the counter. */
         wake_primitive_wake_one(&g_sched.wake_prim);
     } else {
-        /* No sleepers observed: bump counter to avoid lost wakeups. */
-        atomic_fetch_add_explicit(&g_sched.wake_prim.value, 1, memory_order_release);
+        /* No sleepers observed: bump counter to avoid lost wakeups.
+         * This counter is a wake generation heuristic, not a publication LP. */
+        atomic_fetch_add_explicit(&g_sched.wake_prim.value, 1, memory_order_relaxed);
     }
     (void)spinning;
 }
@@ -1074,7 +1102,7 @@ static inline fiber_task* lq_steal(local_queue* q) {
     
     /* We got the task. Now try to advance head. If we fail, someone else advanced it. */
     if (!atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                memory_order_release, memory_order_relaxed)) {
+                                                memory_order_relaxed, memory_order_relaxed)) {
         /* Lost CAS but we still have the task - another thread advanced head.
          * This can happen if owner also exchanged slot (both got NULL except us).
          * But since we got f != NULL, we're the winner. Just return it. */
@@ -1114,13 +1142,13 @@ static inline size_t lq_steal_batch(local_queue* q, fiber_task** out_tasks, size
         if (!f) {
             /* Lost race - try to help advance head and continue */
             atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                   memory_order_release, memory_order_relaxed);
+                                                   memory_order_relaxed, memory_order_relaxed);
             continue;
         }
         
         /* Got a task - try to advance head */
         atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                               memory_order_release, memory_order_relaxed);
+                                               memory_order_relaxed, memory_order_relaxed);
         out_tasks[stolen++] = f;
     }
     
