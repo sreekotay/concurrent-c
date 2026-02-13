@@ -1,0 +1,46 @@
+/*
+ * Exercise worker lifecycle transitions under assert mode.
+ *
+ * With CC_V3_WORKER_LIFECYCLE_ASSERT=1 enabled, any illegal transition
+ * (including shutdown drain/retire path) aborts the process.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <stdio.h>
+
+#define REPEATS 600
+#define TASKS_PER_ROUND 24
+
+cc_atomic_int g_done = 0;
+
+int main(void) {
+    cc_sched_set_num_workers(4);
+
+    for (int rep = 0; rep < REPEATS; rep++) {
+        if ((rep % 100) == 0) {
+            fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
+        }
+
+        @nursery {
+            for (int i = 0; i < TASKS_PER_ROUND; i++) {
+                int k = i;
+                spawn(() => [k] {
+                    if ((k % 4) == 0) cc_sleep_ms(1);
+                    cc_atomic_fetch_add(&g_done, 1);
+                });
+            }
+        }
+
+        /* Give workers a chance to leave ACTIVE and enter idle/sleep states. */
+        cc_sleep_ms(1);
+    }
+
+    int expected = REPEATS * TASKS_PER_ROUND;
+    int observed = cc_atomic_load(&g_done);
+    if (observed != expected) {
+        fprintf(stderr, "lifecycle_smoke mismatch done=%d expected=%d\n", observed, expected);
+        return 1;
+    }
+    return 0;
+}

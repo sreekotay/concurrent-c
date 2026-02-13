@@ -80,7 +80,7 @@ RUNNABLE        // may appear in run queues
 RUNNING         // owned by exactly one worker (on-CPU)
 PARKING         // in-flight RUNNING -> PARKED
 PARKED          // may appear in wait-lists
-WAKING          // in-flight PARKED -> RUNNABLE (waker owns enqueue)
+WAKING          // logical wake-claim phase; may be fused in substrate
 DONE
 CANCELLED
 ```
@@ -103,7 +103,7 @@ CANCELLED
 
 **F4 Single enqueue owner:**
 
-- Only the thread that successfully transitions `PARKED -> WAKING` may enqueue the fiber.
+- Only the thread that wins the wake claim (`PARKED -> WAKING` logical edge, or fused equivalent) may enqueue the fiber.
 
 **F5 Post-park immediate yield:**
 
@@ -123,7 +123,8 @@ typedef struct WaitableOps {
   // Publish: makes f discoverable by wakers
   // If returns true, a wake after this call MUST be observable.
   // If returns true, waiter discoverability MUST be maintained until either:
-  // (a) waker claims PARKED->WAKING, or (b) parker unpublishes while still PARKING.
+  // (a) waker wins wake-claim on PARKED (logical WAKING edge), or
+  // (b) parker unpublishes while still PARKING.
   bool (*publish)(void *W, Fiber *f, void *io);
 
   // Unpublish: remove f if parking is aborted while still on-CPU
@@ -151,7 +152,7 @@ Contract requirements:
   when entering idle transitions; it MUST NOT return non-runnable ownership.
 - `fiber_wait()` owns the full `RUNNING -> PARKING -> {RUNNING|PARKED}` protocol
   and is the only legal path that publishes/removes waiters on behalf of fibers.
-- `fiber_wake()` owns the `PARKED -> WAKING -> RUNNABLE` claim/enqueue protocol
+- `fiber_wake()` owns the `PARKED -> {wake-claim} -> RUNNABLE` claim/enqueue protocol
   and MUST enforce single enqueue owner (F4).
 - Channel code MUST implement admission and close behavior via `WaitableOps`
   and MUST NOT directly mutate scheduler queues or worker ownership state.
@@ -191,7 +192,8 @@ Contract requirements:
 
 - If `exchange_acq_rel(f.wake_pending, 0) == 1`:
   - `W.unpublish(W,f)` (idempotent)
-  - `CAS_acq_rel(f.state, PARKED, WAKING)` MUST succeed.
+  - `CAS_acq_rel` wake-claim on `PARKED` MUST succeed
+    (`PARKED -> WAKING` logical edge, or fused substrate equivalent).
   - `store_release(f.state, RUNNABLE)`
   - return `WAIT_OK` (self-recovered wake before scheduler yield)
 
@@ -212,7 +214,8 @@ When a wake condition occurs, the waker:
   - Cancellation targeting a PARKING fiber MUST use this same wake-pending path.
 - If `s == PARKED`:
   - MUST validate ABA ticket (see §8).
-  - `CAS_acq_rel(f.state, PARKED, WAKING)`; only winner MAY proceed.
+  - `CAS_acq_rel` wake-claim on `PARKED`; only winner MAY proceed
+    (`PARKED -> WAKING` logical edge, or fused substrate equivalent).
   - Remove `f` from wait structure (or tombstone).
   - `store_release(f.state, RUNNABLE)`
   - Enqueue via scheduler exactly once (F4).
@@ -286,8 +289,8 @@ After Close LP, waitable publish rules MUST enforce:
   complete if subsequently claimed by a matching operation.
 - Close wake-all MUST be deterministic/idempotent: repeated close wake scans
   must not cause duplicate scheduler enqueues of the same waiter.
-- Wakers processing close-induced wakeups MUST use standard claim semantics
-  (`PARKED -> WAKING -> RUNNABLE`) and MUST NOT bypass F4.
+- Wakers processing close-induced wakeups MUST use standard wake-claim semantics
+  (`PARKED -> WAKING -> RUNNABLE` logical path, or fused equivalent) and MUST NOT bypass F4.
 
 ### 5.5 Rendezvous-first Algorithm (Non-normative sketch)
 
@@ -356,6 +359,18 @@ Spawn new worker (up to `2*M`) when:
 - no sleepers to wake, and
 - either `(active_count ≈ worker_count AND pressure is rising)` or `pressure` exceeds threshold.
 
+### 7.3 Runtime Explainability Notes (Current implementation)
+
+The active runtime emits optional pressure telemetry (`CC_V3_PRESSURE_STATS_DUMP=1`)
+that includes:
+
+- sample split (`positive_samples`, `negative_samples`) and `current_pressure`
+- promotion gate passes and promoted worker count
+- max sustained negative-pressure streak (`neg_streak_max`)
+- gate-block reasons (`no_work`, `nonpositive`, `idle_capacity`, `not_stuck`)
+
+This keeps scale decisions auditable and helps detect prolonged negative drift.
+
 ---
 
 ## 8. Waiter ABA Defense (Normative)
@@ -376,14 +391,14 @@ Per-fiber monotonic wait ticket (required):
 
 ### 8.3 Ticket Validation Rule (MUST)
 
-A waker may only attempt `PARKED -> WAKING` if:
+A waker may only attempt wake-claim on `PARKED` (`PARKED -> WAKING` logical edge, or fused equivalent) if:
 
 - it reads the waiter node ticket `t`, and
 - it reads `f.wait_ticket == t` (acquire), else it MUST treat the waiter as stale and ignore/remove it.
 
 Stale waiter handling:
 
-- On ticket mismatch, the waker MUST NOT modify `f.state` and MUST NOT enqueue `f`.
+- On ticket mismatch, the waker MUST NOT perform wake-claim and MUST NOT enqueue `f`.
 - A waiter node MUST NOT be reclaimed or reused until no concurrent waker can still observe it (e.g., via ticket/epoch/hazard discipline).
 
 ---
@@ -414,13 +429,32 @@ Stale waiter handling:
 Cancellation path note:
 
 - A parked fiber is cancelled via the standard wake path (`PARKED -> WAKING ->
-  RUNNABLE`) and then self-cancels at a cooperative yield/resume point.
+  RUNNABLE` logical path, or fused equivalent) and then self-cancels at a cooperative yield/resume point.
 
 **MUST NOT transitions:**
 
 - PARKED -> RUNNABLE by parker
 - Any non-RUNNABLE state enqueued into run queues
 - Waker enqueues fiber observed in PARKING
+
+### 9.1 Current Runtime Coverage Notes
+
+Current matrix coverage in the active runtime is split between runtime asserts and
+static/protocol guarantees:
+
+- **Runtime asserts (`CC_V3_SPEC_ASSERT=1`):**
+  - `RUNNABLE -> RUNNING` claim in `cc/runtime/fiber_sched.c` `worker_run_fiber()`.
+  - enqueue legality (`RUNNABLE`/`CTRL_QUEUED` only) on scheduler queue publication paths.
+  - labeled wake-path matrix checks at non-racy claim points for `PARKED -> RUNNABLE`
+    in `worker_commit_park()` self-recovery paths and `cc__fiber_unpark()` waker path.
+
+- **Static/protocol guarantees (documented + code anchored):**
+  - `PARKING -> PARKED` commit and `wake_pending` recovery are serialized by
+    `worker_commit_park()` protocol and LP ordering in §10.
+  - Waker on `PARKING` never enqueues; it only publishes wake-pending
+    (`cc__fiber_unpark()` PARKING branch), satisfying MUST NOT rows.
+  - Channel wake/claim paths enforce waiter-ticket validity before wake/enqueue
+    (`cc/runtime/channel.c` waiter helpers), preventing stale-node enqueue.
 
 ---
 
@@ -446,6 +480,25 @@ Notes:
 
 - Relaxing any ordering in this table is only permitted if equivalent happens-before edges are proven and documented.
 
+### 10.1 Current Runtime Code Anchors (Hybrid substrate)
+
+The current runtime uses control-word transitions as the implementation substrate
+for LPs while preserving the contract above. LP/code anchors:
+
+| LP | Current code anchor(s) | Substrate note |
+| -- | -- | -- |
+| Enqueue RUNNABLE | `cc/runtime/fiber_sched.c`: `cc_fiber_spawn()` (`CTRL_IDLE -> CTRL_QUEUED` + queue push), `cc__fiber_unpark()` queued path, `worker_commit_park()` self-recovery enqueue | RUNNABLE publication is represented by `CTRL_QUEUED` plus queue visibility |
+| Dequeue to RUNNING | `cc/runtime/fiber_sched.c`: `worker_run_fiber()` CAS `CTRL_QUEUED -> CTRL_OWNED(...)` | Ownership claim and RUNNING handoff are combined in control-word CAS |
+| Waiter publish LP | `cc/runtime/channel.c`: `cc__chan_add_waiter()` (`node->in_wait_list = 1` after list link under `ch->mu`); boundary path `cc/runtime/fiber_sched_boundary.c`: `cc_sched_fiber_wait()` publish call | Channel wait-list linkage under mutex is publish LP for channel waiters |
+| Commit PARKED | `cc/runtime/fiber_sched.c`: `worker_commit_park()` CAS `CTRL_OWNED -> CTRL_PARKED` | Park commit occurs in trampoline after stack quiescence |
+| Post-commit check | `cc/runtime/fiber_sched.c`: `worker_commit_park()` `atomic_exchange(pending_unpark, 0, seq_cst)` | Implements wake-pending recovery after park commit |
+| Waker sees PARKING | `cc/runtime/fiber_sched.c`: `cc__fiber_unpark()` branch `expected == CTRL_PARKING` then `pending_unpark=1` | No enqueue allowed while stack is still live |
+| Waker claim + wake enqueue | `cc/runtime/fiber_sched.c`: `cc__fiber_unpark()` CAS `CTRL_PARKED -> CTRL_QUEUED` then affinity/global push | In substrate, claim and wake-enqueue are fused by `PARKED -> QUEUED` |
+| Close LP | `cc/runtime/channel.c`: `cc_chan_close()` / `cc_chan_close_err()` set `ch->closed = 1` under `ch->mu` | Admission observes CLOSED via channel lock/publish rules; close wake-all follows |
+
+The fused `PARKED -> QUEUED` wake path is acceptable under this spec because it
+preserves single-owner wake claim and exactly-once enqueue semantics.
+
 ---
 
 ## 11. Notes on Implementation Choices (Non-normative)
@@ -453,7 +506,7 @@ Notes:
 - Fiber frame pooling: per-worker cache reduces contention.
 - Wait lists: lock-free stacks are acceptable, but MUST handle ABA (tickets/epochs) and removal strategy (tombstone or list splice under CAS).
 - Debug builds SHOULD validate F2/F4 aggressively.
-- Debug builds SHOULD assert that any waiter removed for wake has validated ticket and state transition `PARKED -> WAKING`.
+- Debug builds SHOULD assert that any waiter removed for wake has validated ticket and a successful wake-claim on `PARKED` (logical `PARKED -> WAKING` edge, or fused equivalent).
 
 ---
 

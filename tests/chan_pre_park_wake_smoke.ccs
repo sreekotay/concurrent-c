@@ -1,0 +1,45 @@
+/*
+ * Stress pre-park wake races on unbuffered channels.
+ *
+ * Receiver and sender start together with tight deadlines so wake can race
+ * the PARKING->PARKED commit window repeatedly.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define REPEATS 1000
+
+cc_atomic_int g_errors = 0;
+
+int main(void) {
+    cc_sched_set_num_workers(2);
+
+    for (int rep = 0; rep < REPEATS; rep++) {
+        if ((rep % 1000) == 0) {
+            fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
+        }
+
+        int[~ >] tx;
+        int[~ <] rx;
+        CCChan* ch = channel_pair(&tx, &rx);
+
+        @nursery {
+            spawn(() => [rx] {
+                int v = -1;
+                rx.recv(&v);
+                if (v != 7) cc_atomic_fetch_add(&g_errors, 1);
+            });
+            spawn(() => [tx] {
+                tx.send(7);
+            });
+        }
+
+        tx.close();
+        cc_chan_free(ch);
+        if (cc_atomic_load(&g_errors) != 0) break;
+    }
+
+    return cc_atomic_load(&g_errors) == 0 ? 0 : 1;
+}

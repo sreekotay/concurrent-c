@@ -198,6 +198,7 @@ typedef struct {
     _Atomic uint64_t lf_has_send_waiters_false;
     _Atomic uint64_t lf_wake_lock_send;
     _Atomic uint64_t lf_wake_lock_recv;
+    _Atomic uint64_t lf_waiter_ticket_stale;
 } CCChanDebugCounters;
 
 typedef struct {
@@ -300,6 +301,8 @@ void cc__chan_debug_dump_global(void) {
     fprintf(stderr, "  wake-path lock enter send/recv: %" PRIu64 " / %" PRIu64 "\n",
             atomic_load_explicit(&g_chan_dbg.lf_wake_lock_send, memory_order_relaxed),
             atomic_load_explicit(&g_chan_dbg.lf_wake_lock_recv, memory_order_relaxed));
+    fprintf(stderr, "  stale waiter tickets:%" PRIu64 "\n",
+            atomic_load_explicit(&g_chan_dbg.lf_waiter_ticket_stale, memory_order_relaxed));
     fprintf(stderr, "  last close ptr:   %p (seq=%" PRIu64 ")\n",
             (void*)atomic_load_explicit(&g_chan_dbg_last_close, memory_order_relaxed),
             atomic_load_explicit(&g_chan_dbg_close_seq, memory_order_relaxed));
@@ -525,9 +528,27 @@ static inline void cc__chan_dbg_select_wait(const char* event, cc__select_wait_g
 }
 
 static inline int cc__chan_waiter_ticket_valid(cc__fiber_wait_node* node) {
-    if (!node || !node->fiber) return 0;
+    if (!node) return 0;
+    /* Non-fiber waiters (pthread/condvar paths) do not participate in fiber-frame
+     * reuse and therefore have no ABA ticket contract to validate. */
+    if (!node->fiber) return 1;
     if (node->wait_ticket == 0) return 1; /* Legacy/unpublished node */
     return cc__fiber_wait_ticket_matches(node->fiber, node->wait_ticket);
+}
+
+static inline int cc__chan_waiter_ticket_valid_dbg(cc__fiber_wait_node* node,
+                                                    const char* where) {
+    if (cc__chan_waiter_ticket_valid(node)) return 1;
+    cc__chan_dbg_inc(&g_chan_dbg.lf_waiter_ticket_stale);
+    if (cc__chan_dbg_verbose_enabled() && node) {
+        fprintf(stderr,
+                "CC_CHAN_DEBUG: stale_waiter_ticket where=%s node=%p fiber=%p ticket=%" PRIu64 "\n",
+                where ? where : "(unknown)",
+                (void*)node,
+                (void*)node->fiber,
+                (uint64_t)node->wait_ticket);
+    }
+    return 0;
 }
 
 static inline void cc__chan_debug_invariant(CCChan* ch, const char* where, const char* msg);
@@ -801,6 +822,15 @@ CCChan* cc_chan_pair_create_returning(size_t capacity,
  * Fiber Wait Queue Helpers
  * ============================================================================ */
 
+/*
+ * Wait-node lifetime/ABA contract (§8):
+ * - Nodes are stack-owned by the waiting fiber/select frame and are only linked
+ *   while that frame is alive.
+ * - Wake/claim paths must validate node->wait_ticket before touching notified
+ *   or enqueueing node->fiber; mismatches are treated as stale and skipped.
+ * - Unlinking (in_wait_list=0) happens under ch->mu before a node can be reused.
+ */
+
 /* Add a fiber to a waiter queue (must hold ch->mu) */
 static void cc__chan_add_waiter(cc__fiber_wait_node** head, cc__fiber_wait_node** tail, cc__fiber_wait_node* node) {
     if (!node) return;
@@ -817,6 +847,7 @@ static void cc__chan_add_waiter(cc__fiber_wait_node** head, cc__fiber_wait_node*
         *head = node;
     }
     *tail = node;
+    /* LP (§10 Waiter publish LP): node becomes discoverable to channel wakers. */
     node->in_wait_list = 1;
 }
 
@@ -844,7 +875,7 @@ static int cc__chan_select_try_win(cc__fiber_wait_node* node) {
 
 static inline void cc__chan_select_cancel_node(cc__fiber_wait_node* node) {
     if (!node) return;
-    if (!cc__chan_waiter_ticket_valid(node)) return;
+    if (!cc__chan_waiter_ticket_valid_dbg(node, "select_cancel")) return;
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CANCEL, memory_order_release);
     if (node->is_select && node->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
@@ -959,7 +990,7 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
-        if (!cc__chan_waiter_ticket_valid(node)) {
+        if (!cc__chan_waiter_ticket_valid_dbg(node, "wake_one_send")) {
             continue;
         }
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
@@ -1008,7 +1039,7 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
-        if (!cc__chan_waiter_ticket_valid(node)) {
+        if (!cc__chan_waiter_ticket_valid_dbg(node, "signal_recv")) {
             continue;
         }
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
@@ -1060,7 +1091,7 @@ static cc__fiber_wait_node* cc__chan_pop_send_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
-        if (!cc__chan_waiter_ticket_valid(node)) {
+        if (!cc__chan_waiter_ticket_valid_dbg(node, "pop_send")) {
             ch->send_waiters_head = node->next;
             if (ch->send_waiters_head) {
                 ch->send_waiters_head->prev = NULL;
@@ -1116,7 +1147,7 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
-        if (!cc__chan_waiter_ticket_valid(node)) {
+        if (!cc__chan_waiter_ticket_valid_dbg(node, "pop_recv")) {
             ch->recv_waiters_head = node->next;
             if (ch->recv_waiters_head) {
                 ch->recv_waiters_head->prev = NULL;
@@ -1159,7 +1190,7 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
         cc__chan_select_cancel_node(node);
         return;
     }
-    if (!cc__chan_waiter_ticket_valid(node)) {
+    if (!cc__chan_waiter_ticket_valid_dbg(node, "wake_close_recv")) {
         return;
     }
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
@@ -1193,7 +1224,7 @@ static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
         cc__chan_select_cancel_node(node);
         return;
     }
-    if (!cc__chan_waiter_ticket_valid(node)) {
+    if (!cc__chan_waiter_ticket_valid_dbg(node, "wake_close_send")) {
         return;
     }
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
@@ -1438,6 +1469,7 @@ void cc_chan_close(CCChan* ch) {
     }
     ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
+    /* LP (§10 Close LP): OPEN -> CLOSED under channel mutex. */
     ch->closed = 1;
     pthread_cond_broadcast(&ch->not_empty);
     pthread_cond_broadcast(&ch->not_full);
@@ -1459,6 +1491,7 @@ void cc_chan_close_err(CCChan* ch, int err) {
     }
     ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
+    /* LP (§10 Close LP): OPEN -> CLOSED under channel mutex. */
     ch->closed = 1;
     ch->tx_error_code = err;
     pthread_cond_broadcast(&ch->not_empty);
@@ -1640,7 +1673,12 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || ch->rv_recv_waiters == 0) && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
-                    if (err == ETIMEDOUT) { return ETIMEDOUT; }
+                    if (err == ETIMEDOUT) {
+                        /* Close/error wins over timeout once observed. */
+                        if (ch->rx_error_closed) return ch->rx_error_code;
+                        if (ch->closed) return EPIPE;
+                        return ETIMEDOUT;
+                    }
                 } else {
                     pthread_cond_wait(&ch->not_full, &ch->mu);
                 }
@@ -1705,7 +1743,12 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         while (!ch->closed && !ch->rx_error_closed && ch->count == ch->cap && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
-                if (err == ETIMEDOUT) { return ETIMEDOUT; }
+                if (err == ETIMEDOUT) {
+                    /* Close/error wins over timeout once observed. */
+                    if (ch->rx_error_closed) return ch->rx_error_code;
+                    if (ch->closed) return EPIPE;
+                    return ETIMEDOUT;
+                }
             } else {
                 pthread_cond_wait(&ch->not_full, &ch->mu);
             }
@@ -1777,7 +1820,12 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             while (!ch->closed && !ch->rv_has_value && err == 0) {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
-                    if (err == ETIMEDOUT) { ch->rv_recv_waiters--; return ETIMEDOUT; }
+                    if (err == ETIMEDOUT) {
+                        if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+                        /* Close/error wins over timeout once observed. */
+                        if (ch->closed) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                        return ETIMEDOUT;
+                    }
                 } else {
                     pthread_cond_wait(&ch->not_empty, &ch->mu);
                 }
@@ -1880,7 +1928,11 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         while (!ch->closed && ch->count == 0 && err == 0) {
             if (deadline) {
                 err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
-                if (err == ETIMEDOUT) { return ETIMEDOUT; }
+                if (err == ETIMEDOUT) {
+                    /* Close wins over timeout once observed. */
+                    if (ch->closed && ch->count == 0) return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                    return ETIMEDOUT;
+                }
             } else {
                 pthread_cond_wait(&ch->not_empty, &ch->mu);
             }
@@ -2407,10 +2459,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
             cc__chan_remove_send_waiter(ch, &node);
         }
 
-        if (deadline && err == ETIMEDOUT) {
-            /* node already removed above */
-            return ETIMEDOUT;
-        }
         if (ch->rx_error_closed) {
             /* node already removed above */
             return ch->rx_error_code;
@@ -2418,6 +2466,10 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         if (ch->closed) {
             /* node already removed above */
             return EPIPE;
+        }
+        if (deadline && err == ETIMEDOUT) {
+            /* node already removed above */
+            return ETIMEDOUT;
         }
     }
     return ch->rx_error_closed ? ch->rx_error_code : EPIPE;
@@ -2516,16 +2568,16 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
         }
 
-        if (deadline && err == ETIMEDOUT) {
-            /* node already removed above */
-            return ETIMEDOUT;
-        }
         if (ch->closed) {
             /* node already removed above */
             if (ch->send_waiters_head) {
                 cc__chan_debug_invariant(ch, "recv_unbuffered", "closed with pending send waiters");
             }
             return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+        }
+        if (deadline && err == ETIMEDOUT) {
+            /* node already removed above */
+            return ETIMEDOUT;
         }
     }
     if (ch->send_waiters_head) {
@@ -3966,6 +4018,10 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     clock_gettime(CLOCK_REALTIME, &now);
                     if (now.tv_sec > abs_deadline->tv_sec ||
                         (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                            if (ch->closed) {
+                                pthread_mutex_unlock(&ch->mu);
+                                return cc__chan_try_drain_lockfree_on_close(ch, out_value, abs_deadline);
+                            }
                             pthread_mutex_unlock(&ch->mu);
                             return ETIMEDOUT;
                     }

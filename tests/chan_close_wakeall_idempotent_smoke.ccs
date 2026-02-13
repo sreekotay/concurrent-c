@@ -1,0 +1,62 @@
+/*
+ * Stress close wake-all idempotence with repeated concurrent close calls.
+ *
+ * We park many receivers, then close the same channel multiple times from
+ * concurrent tasks. Every parked receiver must complete exactly once with EPIPE.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <errno.h>
+#include <stdio.h>
+
+#define REPEATS 400
+#define WAITERS 16
+
+cc_atomic_int g_errors = 0;
+cc_atomic_int g_closed = 0;
+
+int main(void) {
+    cc_sched_set_num_workers(2);
+
+    for (int rep = 0; rep < REPEATS; rep++) {
+        if ((rep % 100) == 0) fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
+        int[~ >] tx;
+        int[~ <] rx;
+        CCChan* ch = channel_pair(&tx, &rx);
+
+        @nursery {
+            for (int i = 0; i < WAITERS; i++) {
+                spawn(() => [rx] {
+                    int out = 0;
+                    int rc = cc_chan_recv(rx.raw, &out, sizeof(int));
+                    if (rc == EPIPE) cc_atomic_fetch_add(&g_closed, 1);
+                    else cc_atomic_fetch_add(&g_errors, 1);
+                });
+            }
+            spawn(() => [tx] {
+                cc_sleep_ms(1);
+                tx.close();
+                tx.close();
+                tx.close();
+            });
+            spawn(() => [tx] {
+                cc_sleep_ms(1);
+                tx.close();
+            });
+        }
+
+        tx.close();
+        cc_chan_free(ch);
+        if (cc_atomic_load(&g_errors) != 0) break;
+    }
+
+    int expected = REPEATS * WAITERS;
+    if (cc_atomic_load(&g_closed) != expected) {
+        fprintf(stderr, "wakeall-idempotent mismatch closed=%d expected=%d\n",
+                cc_atomic_load(&g_closed), expected);
+        cc_atomic_fetch_add(&g_errors, 1);
+    }
+    return cc_atomic_load(&g_errors) == 0 ? 0 : 1;
+}
