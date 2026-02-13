@@ -12,6 +12,7 @@
 static __thread uint64_t cc_sched_v3_tls_rng_state = 0;
 static _Atomic int g_cc_sched_v3_stats_mode = -1;
 static _Atomic int g_cc_sched_v3_stats_atexit = 0;
+static _Atomic int g_cc_sched_v3_dump_mode = -1;
 static _Atomic uint64_t g_cc_sched_v3_next_calls = 0;
 static _Atomic uint64_t g_cc_sched_v3_idle_calls = 0;
 static _Atomic uint64_t g_cc_sched_v3_src_local = 0;
@@ -28,7 +29,7 @@ static _Atomic uint64_t g_cc_sched_v3_prefetch_steal_local = 0;
 static int cc_sched_v3_stats_enabled(void) {
     int mode = atomic_load_explicit(&g_cc_sched_v3_stats_mode, memory_order_acquire);
     if (mode >= 0) return mode;
-    mode = getenv("CC_V3_SCHED_STATS") ? 1 : 0;
+    mode = (getenv("CC_V3_SCHED_STATS") || getenv("CC_V3_SCHED_STATS_DUMP")) ? 1 : 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&g_cc_sched_v3_stats_mode,
                                                   &expected,
@@ -36,6 +37,19 @@ static int cc_sched_v3_stats_enabled(void) {
                                                   memory_order_release,
                                                   memory_order_acquire);
     return atomic_load_explicit(&g_cc_sched_v3_stats_mode, memory_order_acquire);
+}
+
+static int cc_sched_v3_dump_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_sched_v3_dump_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = getenv("CC_V3_SCHED_STATS_DUMP") ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_sched_v3_dump_mode,
+                                                  &expected,
+                                                  mode,
+                                                  memory_order_release,
+                                                  memory_order_acquire);
+    return atomic_load_explicit(&g_cc_sched_v3_dump_mode, memory_order_acquire);
 }
 
 static void cc_sched_v3_dump_stats(void) {
@@ -75,7 +89,7 @@ static void cc_sched_v3_dump_stats(void) {
 }
 
 static inline void cc_sched_v3_stats_maybe_init(void) {
-    if (!cc_sched_v3_stats_enabled()) return;
+    if (!cc_sched_v3_stats_enabled() || !cc_sched_v3_dump_enabled()) return;
     int expected = 0;
     if (atomic_compare_exchange_strong_explicit(&g_cc_sched_v3_stats_atexit,
                                                 &expected,

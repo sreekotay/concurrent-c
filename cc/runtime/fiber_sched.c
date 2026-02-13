@@ -373,6 +373,95 @@ static inline void cc_v3_assert_enqueue_runnable(fiber_task* f, const char* queu
     }
 }
 
+#if CC_RUNTIME_V3
+static _Atomic int g_cc_v3_worker_stats_mode = -1;
+static _Atomic int g_cc_v3_worker_stats_atexit = 0;
+static _Atomic int g_cc_v3_worker_dump_mode = -1;
+static _Atomic uint64_t g_cc_v3_wm_batches = 0;
+static _Atomic uint64_t g_cc_v3_wm_seed_v3_batches = 0;
+static _Atomic uint64_t g_cc_v3_wm_local_pulls = 0;
+static _Atomic uint64_t g_cc_v3_wm_inbox_pulls = 0;
+static _Atomic uint64_t g_cc_v3_wm_global_pulls = 0;
+static _Atomic uint64_t g_cc_v3_wm_steal_inbox_pulls = 0;
+static _Atomic uint64_t g_cc_v3_wm_steal_local_pulls = 0;
+static _Atomic uint64_t g_cc_v3_wm_idle_probe_hits = 0;
+static _Atomic uint64_t g_cc_v3_wm_empty_loops = 0;
+
+static inline int cc_v3_worker_stats_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_v3_worker_stats_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = (getenv("CC_V3_SCHED_STATS") || getenv("CC_V3_SCHED_STATS_DUMP")) ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_stats_mode,
+                                                  &expected,
+                                                  mode,
+                                                  memory_order_release,
+                                                  memory_order_acquire);
+    return atomic_load_explicit(&g_cc_v3_worker_stats_mode, memory_order_acquire);
+}
+
+static inline int cc_v3_worker_dump_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_v3_worker_dump_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = getenv("CC_V3_SCHED_STATS_DUMP") ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_dump_mode,
+                                                  &expected,
+                                                  mode,
+                                                  memory_order_release,
+                                                  memory_order_acquire);
+    return atomic_load_explicit(&g_cc_v3_worker_dump_mode, memory_order_acquire);
+}
+
+static void cc_v3_dump_worker_stats(void) {
+    if (!cc_v3_worker_stats_enabled()) return;
+    uint64_t batches = atomic_load_explicit(&g_cc_v3_wm_batches, memory_order_relaxed);
+    uint64_t seed_v3 = atomic_load_explicit(&g_cc_v3_wm_seed_v3_batches, memory_order_relaxed);
+    uint64_t local = atomic_load_explicit(&g_cc_v3_wm_local_pulls, memory_order_relaxed);
+    uint64_t inbox = atomic_load_explicit(&g_cc_v3_wm_inbox_pulls, memory_order_relaxed);
+    uint64_t global = atomic_load_explicit(&g_cc_v3_wm_global_pulls, memory_order_relaxed);
+    uint64_t steal_inbox = atomic_load_explicit(&g_cc_v3_wm_steal_inbox_pulls, memory_order_relaxed);
+    uint64_t steal_local = atomic_load_explicit(&g_cc_v3_wm_steal_local_pulls, memory_order_relaxed);
+    uint64_t idle_hits = atomic_load_explicit(&g_cc_v3_wm_idle_probe_hits, memory_order_relaxed);
+    uint64_t empty = atomic_load_explicit(&g_cc_v3_wm_empty_loops, memory_order_relaxed);
+    uint64_t pulls = local + inbox + global + steal_inbox + steal_local;
+    if (batches == 0 && pulls == 0 && idle_hits == 0 && empty == 0) return;
+    fprintf(stderr,
+            "\n=== V3 WORKER MAIN STATS ===\n"
+            "batches=%llu seed_v3_batches=%llu idle_probe_hits=%llu empty_loops=%llu\n"
+            "pulls local=%llu inbox=%llu global=%llu steal_inbox=%llu steal_local=%llu total=%llu\n"
+            "pull_pct local=%.1f inbox=%.1f global=%.1f steal_inbox=%.1f steal_local=%.1f\n"
+            "============================\n\n",
+            (unsigned long long)batches,
+            (unsigned long long)seed_v3,
+            (unsigned long long)idle_hits,
+            (unsigned long long)empty,
+            (unsigned long long)local,
+            (unsigned long long)inbox,
+            (unsigned long long)global,
+            (unsigned long long)steal_inbox,
+            (unsigned long long)steal_local,
+            (unsigned long long)pulls,
+            pulls ? (100.0 * (double)local / (double)pulls) : 0.0,
+            pulls ? (100.0 * (double)inbox / (double)pulls) : 0.0,
+            pulls ? (100.0 * (double)global / (double)pulls) : 0.0,
+            pulls ? (100.0 * (double)steal_inbox / (double)pulls) : 0.0,
+            pulls ? (100.0 * (double)steal_local / (double)pulls) : 0.0);
+}
+
+static inline void cc_v3_worker_stats_maybe_init(void) {
+    if (!cc_v3_worker_stats_enabled() || !cc_v3_worker_dump_enabled()) return;
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_stats_atexit,
+                                                &expected,
+                                                1,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        atexit(cc_v3_dump_worker_stats);
+    }
+}
+#endif
+
 /* ============================================================================
  * Lock-Free MPMC Queue with overflow list
  *
@@ -1850,6 +1939,10 @@ static void* worker_main(void* arg) {
 
     /* Per-worker PRNG state for randomized stealing */
     uint64_t rng_state = (uint64_t)worker_id * 0x9E3779B97F4A7C15ULL + rdtsc();
+#if CC_RUNTIME_V3
+    const int v3_stats = cc_v3_worker_stats_enabled();
+    if (v3_stats) cc_v3_worker_stats_maybe_init();
+#endif
     /* Bounded fairness: after FAIRNESS_CHECK_INTERVAL consecutive batches
      * with no global work, inject one global queue pop so fibers pushed to
      * global (e.g. by the affinity escape hatch) don't starve. */
@@ -1867,6 +1960,11 @@ static void* worker_main(void* arg) {
             if (gf) {
                 batch[count++] = gf;
                 local_only_batches = 0;
+#if CC_RUNTIME_V3
+                if (v3_stats) {
+                    atomic_fetch_add_explicit(&g_cc_v3_wm_global_pulls, 1, memory_order_relaxed);
+                }
+#endif
             }
         }
 #if CC_RUNTIME_V3
@@ -1874,6 +1972,9 @@ static void* worker_main(void* arg) {
             fiber_task* v3_next = cc_sched_worker_next();
             if (v3_next) {
                 batch[count++] = v3_next;
+                if (v3_stats) {
+                    atomic_fetch_add_explicit(&g_cc_v3_wm_seed_v3_batches, 1, memory_order_relaxed);
+                }
             }
         }
 #endif
@@ -1883,6 +1984,11 @@ static void* worker_main(void* arg) {
             fiber_task* f = lq_pop(my_queue);
             if (!f) break;
             batch[count++] = f;
+#if CC_RUNTIME_V3
+            if (v3_stats) {
+                atomic_fetch_add_explicit(&g_cc_v3_wm_local_pulls, 1, memory_order_relaxed);
+            }
+#endif
         }
         
         /* Priority 2: Pop from inbox queue */
@@ -1890,6 +1996,11 @@ static void* worker_main(void* arg) {
             fiber_task* f = iq_pop(&g_sched.inbox_queues[worker_id]);
             if (!f) break;
             batch[count++] = f;
+#if CC_RUNTIME_V3
+            if (v3_stats) {
+                atomic_fetch_add_explicit(&g_cc_v3_wm_inbox_pulls, 1, memory_order_relaxed);
+            }
+#endif
         }
         
         /* Priority 3: Pop from global queue */
@@ -1901,6 +2012,11 @@ static void* worker_main(void* arg) {
                         worker_id, (unsigned long)f->fiber_id);
             }
             batch[count++] = f;
+#if CC_RUNTIME_V3
+            if (v3_stats) {
+                atomic_fetch_add_explicit(&g_cc_v3_wm_global_pulls, 1, memory_order_relaxed);
+            }
+#endif
         }
         
         /* Priority 4: Batch steal from other workers with randomized victim selection */
@@ -1915,6 +2031,11 @@ static void* worker_main(void* arg) {
                 fiber_task* inbox_task = iq_pop(&g_sched.inbox_queues[victim]);
                 if (inbox_task) {
                     batch[count++] = inbox_task;
+#if CC_RUNTIME_V3
+                    if (v3_stats) {
+                        atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
+                    }
+#endif
                     break;  /* Got work, stop stealing */
                 }
                 
@@ -1924,8 +2045,18 @@ static void* worker_main(void* arg) {
                 if (stolen > 0) {
                     /* Execute first task immediately, put rest in batch or local queue */
                     batch[count++] = steal_buf[0];
+#if CC_RUNTIME_V3
+                    if (v3_stats) {
+                        atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
+                    }
+#endif
                     for (size_t s = 1; s < stolen && count < WORKER_BATCH_SIZE; s++) {
                         batch[count++] = steal_buf[s];
+#if CC_RUNTIME_V3
+                        if (v3_stats) {
+                            atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
+                        }
+#endif
                     }
                     /* Any remaining stolen tasks go to our local queue */
                     for (size_t s = count; s < stolen; s++) {
@@ -1940,6 +2071,11 @@ static void* worker_main(void* arg) {
         }
         
         if (count > 0) {
+#if CC_RUNTIME_V3
+            if (v3_stats) {
+                atomic_fetch_add_explicit(&g_cc_v3_wm_batches, 1, memory_order_relaxed);
+            }
+#endif
             /* Update heartbeat when executing work (sysmon checks for stuck workers) */
             atomic_store_explicit(&g_sched.worker_heartbeat[worker_id].heartbeat, rdtsc(), memory_order_relaxed);
             local_only_batches++;
@@ -1963,11 +2099,22 @@ static void* worker_main(void* arg) {
         {
             fiber_task* idle_probe = cc_sched_worker_idle_probe();
             if (idle_probe) {
+#if CC_RUNTIME_V3
+                if (v3_stats) {
+                    atomic_fetch_add_explicit(&g_cc_v3_wm_idle_probe_hits, 1, memory_order_relaxed);
+                }
+#endif
                 atomic_store_explicit(&g_sched.worker_heartbeat[worker_id].heartbeat, rdtsc(), memory_order_relaxed);
                 local_only_batches++;
                 worker_run_fiber(idle_probe);
                 continue;
             }
+        }
+#endif
+        
+#if CC_RUNTIME_V3
+        if (v3_stats) {
+            atomic_fetch_add_explicit(&g_cc_v3_wm_empty_loops, 1, memory_order_relaxed);
         }
 #endif
         
