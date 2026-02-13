@@ -3,6 +3,10 @@
 This checklist documents the scheduler invariants for the generation-driven
 worker sleep/wake protocol in `cc/runtime/fiber_sched.c`.
 
+For scheduler v3 planning, this document is also the compatibility checklist for
+preserving wake correctness while the implementation is switched behind
+`CC_RUNTIME_V3`.
+
 ## Core idea
 
 `g_sched.wake_prim.value` is a monotonic generation counter.
@@ -45,6 +49,40 @@ generation remains unchanged.
 7. **Single decrement for each increment**
    - Every successful `sleeping++` must have exactly one corresponding
      `sleeping--`, including early exits from post-increment queue hit.
+
+## V3 lifecycle compatibility (required)
+
+The generation protocol must remain valid across these worker states:
+
+- `ACTIVE` -> executes fibers and transitions dequeued work to `RUNNING`.
+- `IDLE_SPIN` -> bounded probe/steal loops before sleeping.
+- `SLEEP` -> blocked on wake primitive coupled to generation snapshot.
+- `DRAINING` -> refuses new work, drains local queue to global queue.
+- `DEAD` -> terminal state.
+
+Fiber lifecycle rules remain:
+
+- Park path: `RUNNING -> PARKING -> PARKED` (or abort to `RUNNING`).
+- Wake path: `PARKED -> WAKING -> RUNNABLE` (single claim owner only).
+- Only `RUNNABLE` fibers are queue-eligible; only `PARKED` fibers are
+  wake-claim eligible.
+
+## Internal API boundary checklist (required)
+
+Channel/waitable code must only interact with scheduler via this boundary:
+
+- `schedule(Fiber*)`
+- `worker_next()`
+- `fiber_wait(waitable, io, ops)`
+- `fiber_wake(Fiber*)`
+
+Checks:
+
+1. Channel/Waitable logic never enqueues directly to run queues.
+2. Wake-all on close still uses claim protocol (`PARKED -> WAKING`) and does not
+   bypass single-enqueue ownership.
+3. `publish()` for post-close admissions fails deterministically; admitted
+   pre-close in-flight waiters may still complete.
 
 ## Performance guidance
 

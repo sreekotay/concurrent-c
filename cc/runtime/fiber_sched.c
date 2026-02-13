@@ -167,6 +167,12 @@ void cc_fiber_dump_timing(void) {
 /* Forward declaration - defined in nursery.c */
 void cc_nursery_dump_timing(void);
 
+#if CC_RUNTIME_V3
+struct fiber_task;
+struct fiber_task* cc_sched_worker_next(void);
+struct fiber_task* cc_sched_worker_idle_probe(void);
+#endif
+
 /* ============================================================================
  * Spin-then-condvar constants
  * 
@@ -1832,6 +1838,15 @@ static void* worker_main(void* arg) {
                 local_only_batches = 0;
             }
         }
+#if CC_RUNTIME_V3
+        if (count == 0) {
+            fiber_task* v3_next = cc_sched_worker_next();
+            if (v3_next) {
+                batch[count++] = v3_next;
+            }
+        }
+#endif
+        /* Priority 1-4: acquire runnable work */
         /* Priority 1: Pop from local queue (no contention) */
         while (count < WORKER_BATCH_SIZE) {
             fiber_task* f = lq_pop(my_queue);
@@ -1912,6 +1927,18 @@ static void* worker_main(void* arg) {
             }
             continue;
         }
+
+#if CC_RUNTIME_V3
+        {
+            fiber_task* idle_probe = cc_sched_worker_idle_probe();
+            if (idle_probe) {
+                atomic_store_explicit(&g_sched.worker_heartbeat[worker_id].heartbeat, rdtsc(), memory_order_relaxed);
+                local_only_batches++;
+                worker_run_fiber(idle_probe);
+                continue;
+            }
+        }
+#endif
         
         /* No work - enter spinning state */
         size_t old_spinning = atomic_fetch_add_explicit(&g_sched.spinning, 1, memory_order_seq_cst);

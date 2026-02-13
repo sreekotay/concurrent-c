@@ -46,6 +46,7 @@
 #include <stdint.h>
 
 #include "fiber_internal.h"
+#include "fiber_sched_boundary.h"
 
 /* ============================================================================
  * Notification values (spec §Notification values)
@@ -246,7 +247,7 @@ static inline void wake_batch_add(cc__fiber* f) {
     wake_batch_t* b = &tls_wake_batch;
     if (b->count >= WAKE_BATCH_SIZE) {
         for (size_t i = 0; i < b->count; i++) {
-            if (b->fibers[i]) { cc__fiber_unpark(b->fibers[i]); b->fibers[i] = NULL; }
+            if (b->fibers[i]) { cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]); b->fibers[i] = NULL; }
         }
         b->count = 0;
     }
@@ -262,7 +263,7 @@ static inline void wake_batch_flush_now(void) {
         atomic_fetch_add_explicit(&g_wake_batch_flush_empty, 1, memory_order_relaxed);
     }
     for (size_t i = 0; i < b->count; i++) {
-        if (b->fibers[i]) { cc__fiber_unpark(b->fibers[i]); b->fibers[i] = NULL; }
+        if (b->fibers[i]) { cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]); b->fibers[i] = NULL; }
     }
     b->count = 0;
 }
@@ -271,6 +272,46 @@ static inline void wake_batch_flush(void) {
     /* Stabilization mode: flush immediately to avoid deferred-wake ordering bugs
      * while validating v2 lock/park semantics. */
     wake_batch_flush_now();
+}
+
+typedef struct cc__chan_wait_flag_ctx {
+    _Atomic int* flag;
+    int expected;
+} cc__chan_wait_flag_ctx;
+
+static bool cc__chan_wait_flag_try_complete(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)fiber;
+    (void)io;
+    cc__chan_wait_flag_ctx* ctx = (cc__chan_wait_flag_ctx*)waitable;
+    return atomic_load_explicit(ctx->flag, memory_order_acquire) != ctx->expected;
+}
+
+static bool cc__chan_wait_flag_publish(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)waitable;
+    (void)fiber;
+    (void)io;
+    return true;
+}
+
+static void cc__chan_wait_flag_unpublish(void* waitable, CCSchedFiber* fiber) {
+    (void)waitable;
+    (void)fiber;
+}
+
+static inline void cc__chan_wait_flag(_Atomic int* flag, int expected) {
+    if (atomic_load_explicit(flag, memory_order_acquire) != expected) {
+        return;
+    }
+    cc__chan_wait_flag_ctx ctx = {
+        .flag = flag,
+        .expected = expected,
+    };
+    const cc_sched_waitable_ops ops = {
+        .try_complete = cc__chan_wait_flag_try_complete,
+        .publish = cc__chan_wait_flag_publish,
+        .unpublish = cc__chan_wait_flag_unpublish,
+    };
+    (void)cc_sched_fiber_wait(&ctx, NULL, &ops);
 }
 
 static inline void cc_chan_lock(CCChan* ch);
@@ -1267,7 +1308,7 @@ static int chan_send_slow(CCChan* ch, const void* value, size_t value_size, cons
             cc_chan_unlock(ch);
 
             cc__fiber_set_park_obj(ch);
-            CC_FIBER_PARK_IF(&node.notified, NOTIFY_WAITING, "chan_send");
+            cc__chan_wait_flag(&node.notified, NOTIFY_WAITING);
 
             /* Post-wake (v1-style): inspect notification under lock first. */
             cc_chan_lock(ch);
@@ -1510,7 +1551,7 @@ static int chan_recv_slow(CCChan* ch, void* out_value, size_t value_size, const 
             cc_chan_unlock(ch);
 
             cc__fiber_set_park_obj(ch);
-            CC_FIBER_PARK_IF(&node.notified, NOTIFY_WAITING, "chan_recv");
+            cc__chan_wait_flag(&node.notified, NOTIFY_WAITING);
 
             /* Post-wake (v1-style): inspect notification under lock first. */
             cc_chan_lock(ch);
@@ -2027,7 +2068,7 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 int seq = atomic_load_explicit(&group.signaled, memory_order_acquire);
                 if (atomic_load_explicit(&group.selected_index, memory_order_acquire) != -1) break;
                 cc__fiber_clear_pending_unpark();
-                CC_FIBER_PARK_IF(&group.signaled, seq, "chan_match: waiting");
+                cc__chan_wait_flag(&group.signaled, seq);
 
                 /* Check all nodes for notification */
                 int saw_notify = 0;
@@ -2071,7 +2112,7 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                     if (notified == NOTIFY_WOKEN) break;
                     if (fiber) {
                         cc__fiber_set_park_obj(cases[sel].ch);
-                        CC_FIBER_PARK_IF(&nodes[sel].notified, NOTIFY_WAITING, "chan_match: waiting for winner");
+                        cc__chan_wait_flag(&nodes[sel].notified, NOTIFY_WAITING);
                         break;
                     }
                 }

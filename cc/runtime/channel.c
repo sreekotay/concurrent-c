@@ -57,6 +57,7 @@
  * ============================================================================ */
 
 #include "fiber_internal.h"
+#include "fiber_sched_boundary.h"
 /* fiber_sched.c is now included in concurrent_c.c */
 
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
@@ -346,11 +347,55 @@ static inline void wake_batch_flush(void) {
     wake_batch* b = &tls_wake_batch;
     for (size_t i = 0; i < b->count; i++) {
         if (b->fibers[i]) {
-            cc__fiber_unpark(b->fibers[i]);
+            cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]);
             b->fibers[i] = NULL;
         }
     }
     b->count = 0;
+}
+
+typedef struct cc__chan_wait_notified_ctx {
+    cc__fiber_wait_node* node;
+} cc__chan_wait_notified_ctx;
+
+static bool cc__chan_wait_notified_try_complete(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)fiber;
+    (void)io;
+    cc__chan_wait_notified_ctx* ctx = (cc__chan_wait_notified_ctx*)waitable;
+    return atomic_load_explicit(&ctx->node->notified, memory_order_acquire) != 0;
+}
+
+static bool cc__chan_wait_notified_publish(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)waitable;
+    (void)fiber;
+    (void)io;
+    return true;
+}
+
+static void cc__chan_wait_notified_unpublish(void* waitable, CCSchedFiber* fiber) {
+    (void)waitable;
+    (void)fiber;
+}
+
+static inline cc_sched_wait_result cc__chan_wait_notified(cc__fiber_wait_node* node) {
+    if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
+        return CC_SCHED_WAIT_OK;
+    }
+    cc__chan_wait_notified_ctx ctx = {.node = node};
+    const cc_sched_waitable_ops ops = {
+        .try_complete = cc__chan_wait_notified_try_complete,
+        .publish = cc__chan_wait_notified_publish,
+        .unpublish = cc__chan_wait_notified_unpublish,
+    };
+    return cc_sched_fiber_wait(&ctx, NULL, &ops);
+}
+
+static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_wait_node* node) {
+    cc_sched_wait_result wait_rc = cc__chan_wait_notified(node);
+    if (wait_rc == CC_SCHED_WAIT_CLOSED) {
+        atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);
+    }
+    return wait_rc;
 }
 
 /* ============================================================================
@@ -1520,15 +1565,17 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 cc__chan_add_send_waiter(ch, &node);
 
                 pthread_mutex_unlock(&ch->mu);
-                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: waiting for receiver (rendezvous)");
-                }
+                (void)cc__chan_wait_notified_mark_close(&node);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                     cc__chan_remove_send_waiter(ch, &node);
                     continue;
+                }
+                if (notified == CC_CHAN_NOTIFY_CLOSE) {
+                    cc__chan_remove_send_waiter(ch, &node);
+                    break;
                 }
                 if (!notified) {
                     cc__chan_remove_send_waiter(ch, &node);
@@ -1583,13 +1630,17 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 break;
             }
-            CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: waiting for space");
+            (void)cc__chan_wait_notified_mark_close(&node);
             pthread_mutex_lock(&ch->mu);
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_send_waiter(ch, &node);
                 continue;
+            }
+            if (notified == CC_CHAN_NOTIFY_CLOSE) {
+                cc__chan_remove_send_waiter(ch, &node);
+                break;
             }
             if (!notified) {
                 cc__chan_remove_send_waiter(ch, &node);
@@ -1653,12 +1704,15 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
 
                 pthread_mutex_unlock(&ch->mu);
 
-                /* If we were already notified before parking, skip the park. */
-                if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: waiting for sender (rendezvous)");
-                }
+                /* Return-aware boundary wait (first migrated call site). */
+                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node);
 
                 pthread_mutex_lock(&ch->mu);
+                if (wait_rc == CC_SCHED_WAIT_CLOSED) {
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    ch->rv_recv_waiters--;
+                    return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                }
 
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__chan_remove_recv_waiter(ch, &node);
@@ -1750,7 +1804,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 break;
             }
-            CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: waiting for data");
+            (void)cc__chan_wait_notified_mark_close(&node);
             pthread_mutex_lock(&ch->mu);
 
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
@@ -1758,6 +1812,10 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
                 continue;
+            }
+            if (notified == CC_CHAN_NOTIFY_CLOSE) {
+                cc__chan_remove_recv_waiter(ch, &node);
+                break;
             }
             if (!notified) {
                 cc__chan_remove_recv_waiter(ch, &node);
@@ -2254,7 +2312,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
                     cc__chan_dbg_inc(&ch->dbg_rv_send_parked);
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: waiting for receiver");
+                    (void)cc__chan_wait_notified_mark_close(&node);
                 }
                 pthread_mutex_lock(&ch->mu);
             } else {
@@ -2359,7 +2417,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
                     cc__chan_dbg_inc(&ch->dbg_rv_recv_parked);
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: waiting for sender");
+                    (void)cc__chan_wait_notified_mark_close(&node);
                 }
                 pthread_mutex_lock(&ch->mu);
             } else {
@@ -2702,7 +2760,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                CC_FIBER_PARK_IF(&node.notified, 0, "chan_send: buffer full, waiting for space");
+                (void)cc__chan_wait_notified_mark_close(&node);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -2738,6 +2796,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                      * Loop back: the top of while() will retry enqueue,
                      * do the bounded yield-retry, then re-park if needed. */
                     cc_chan_lock(ch);
+                    continue;
+                }
+                if (notified == CC_CHAN_NOTIFY_CLOSE) {
+                    cc__chan_remove_send_waiter(ch, &node);
                     continue;
                 }
                 if (!notified) {
@@ -3194,7 +3256,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                         cc_chan_unlock(ch);
                         wake_batch_flush();
                     }
-                    CC_FIBER_PARK_IF(&node.notified, 0, "chan_recv: buffer empty, waiting for data");
+                    (void)cc__chan_wait_notified_mark_close(&node);
                     pthread_mutex_lock(&ch->mu);
                     goto recv_post_park_notified;
                 }
@@ -3619,7 +3681,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_send: waiting for space (lockfree)");
+                (void)cc__chan_wait_notified_mark_close(&node);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -3640,6 +3702,10 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                         return 0;
                     }
                     cc_chan_lock(ch);
+                    continue;
+                }
+                if (notified == CC_CHAN_NOTIFY_CLOSE) {
+                    cc__chan_remove_send_waiter(ch, &node);
                     continue;
                 }
                 if (!notified) {
@@ -3794,7 +3860,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                CC_FIBER_PARK_IF(&node.notified, 0, "chan_timed_recv: waiting for data (lockfree)");
+                (void)cc__chan_wait_notified_mark_close(&node);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -3813,6 +3879,10 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                         return 0;
                     }
                     cc_chan_lock(ch);
+                    continue;
+                }
+                if (notified == CC_CHAN_NOTIFY_CLOSE) {
+                    cc__chan_remove_recv_waiter(ch, &node);
                     continue;
                 }
                 if (!notified) {

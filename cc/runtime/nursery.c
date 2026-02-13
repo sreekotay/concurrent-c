@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "fiber_sched_boundary.h"
 
 /* ============================================================================
  * Nursery spawn timing instrumentation
@@ -80,7 +81,6 @@ typedef struct fiber_task fiber_task;
 fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
 int cc_fiber_join(fiber_task* t, void** out_result);
 void cc_fiber_task_free(fiber_task* t);
-void cc__fiber_unpark(void* fiber_ptr);  /* Wake a parked fiber */
 
 /* Thread-local: current nursery for code running inside nursery-spawned tasks.
    Used by optional runtime deadlock guard in channel.c. */
@@ -206,7 +206,7 @@ void cc_nursery_cancel(CCNursery* n) {
     if (tasks_snapshot) {
         for (size_t i = 0; i < task_count; i++) {
             if (tasks_snapshot[i]) {
-                cc__fiber_unpark(tasks_snapshot[i]);
+                cc_sched_fiber_wake((CCSchedFiber*)tasks_snapshot[i]);
             }
         }
         free(tasks_snapshot);
