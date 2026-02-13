@@ -61,11 +61,23 @@ cc_sched_wait_result cc_sched_fiber_wait(
         return CC_SCHED_WAIT_CLOSED;
     }
 
+    /* Final pre-park completion check before committing to a park. */
+    if (ops->try_complete && ops->try_complete(waitable, fiber, io)) {
+        if (ops->unpublish) {
+            ops->unpublish(waitable, fiber);
+        }
+        return CC_SCHED_WAIT_OK;
+    }
     /*
      * The v2 scheduler park/unpark path is used as the temporary backend.
-     * When the fiber resumes, completion/wake happened through normal wake flow.
+     * Waitables may override the park primitive to preserve flag-guarded
+     * semantics (e.g. CC_FIBER_PARK_IF on a waiter notification flag).
      */
-    cc__fiber_park_reason("cc_sched_fiber_wait", __FILE__, __LINE__);
+    if (ops->park) {
+        ops->park(waitable, fiber, io);
+    } else {
+        cc__fiber_park_reason("cc_sched_fiber_wait", __FILE__, __LINE__);
+    }
     if (ops->try_complete && ops->try_complete(waitable, fiber, io)) {
         return CC_SCHED_WAIT_OK;
     }

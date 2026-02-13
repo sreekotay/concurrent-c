@@ -16,6 +16,11 @@ typedef struct cc_sched_waitable_ops {
     bool (*try_complete)(void* waitable, CCSchedFiber* fiber, void* io);
     bool (*publish)(void* waitable, CCSchedFiber* fiber, void* io);
     void (*unpublish)(void* waitable, CCSchedFiber* fiber);
+    /*
+     * Optional park hook. When provided, this is used instead of the default
+     * park path so waitables can preserve flag-guarded park semantics.
+     */
+    void (*park)(void* waitable, CCSchedFiber* fiber, void* io);
 } cc_sched_waitable_ops;
 
 /* Internal runtime boundary for scheduler/channel integration. */
