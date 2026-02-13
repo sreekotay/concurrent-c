@@ -15,6 +15,7 @@ typedef struct fiber_task cc__fiber;
 /* Wait node for channel blocking */
 typedef struct cc__fiber_wait_node {
     cc__fiber* fiber;
+    uint64_t wait_ticket;
     struct cc__fiber_wait_node* next;
     struct cc__fiber_wait_node* prev;
     void* data;
@@ -40,6 +41,8 @@ int cc__fiber_sched_active(void);
 void cc__fiber_set_park_obj(void* obj);
 void cc__fiber_clear_pending_unpark(void);  /* Clear stale pending_unpark before new wait */
 void cc__fiber_sleep_park(unsigned int ms); /* Park fiber on sleep queue with timer */
+uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr);
+int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
 
 /* Convenience macro to park with source location */
 #define CC_FIBER_PARK(reason) cc__fiber_park_reason(reason, __FILE__, __LINE__)

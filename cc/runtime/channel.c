@@ -524,6 +524,12 @@ static inline void cc__chan_dbg_select_wait(const char* event, cc__select_wait_g
             atomic_load_explicit(&group->signaled, memory_order_relaxed));
 }
 
+static inline int cc__chan_waiter_ticket_valid(cc__fiber_wait_node* node) {
+    if (!node || !node->fiber) return 0;
+    if (node->wait_ticket == 0) return 1; /* Legacy/unpublished node */
+    return cc__fiber_wait_ticket_matches(node->fiber, node->wait_ticket);
+}
+
 static inline void cc__chan_debug_invariant(CCChan* ch, const char* where, const char* msg);
 static inline void cc__chan_debug_check_recv_close(CCChan* ch, const char* where);
 
@@ -798,6 +804,11 @@ CCChan* cc_chan_pair_create_returning(size_t capacity,
 /* Add a fiber to a waiter queue (must hold ch->mu) */
 static void cc__chan_add_waiter(cc__fiber_wait_node** head, cc__fiber_wait_node** tail, cc__fiber_wait_node* node) {
     if (!node) return;
+    if (node->fiber && node->wait_ticket == 0) {
+        /* Single-waiter ops publish here. Multi-node select publishes one
+         * shared ticket in the caller and preloads node->wait_ticket. */
+        node->wait_ticket = cc__fiber_publish_wait_ticket(node->fiber);
+    }
     node->next = NULL;
     node->prev = *tail;
     if (*tail) {
@@ -833,6 +844,7 @@ static int cc__chan_select_try_win(cc__fiber_wait_node* node) {
 
 static inline void cc__chan_select_cancel_node(cc__fiber_wait_node* node) {
     if (!node) return;
+    if (!cc__chan_waiter_ticket_valid(node)) return;
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CANCEL, memory_order_release);
     if (node->is_select && node->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
@@ -947,6 +959,9 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
+        if (!cc__chan_waiter_ticket_valid(node)) {
+            continue;
+        }
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
         if (ch->use_lockfree) {
             cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_signal);
@@ -991,6 +1006,9 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_cancel);
             }
             cc__chan_select_cancel_node(node);
+            continue;
+        }
+        if (!cc__chan_waiter_ticket_valid(node)) {
             continue;
         }
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
@@ -1042,6 +1060,17 @@ static cc__fiber_wait_node* cc__chan_pop_send_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
+        if (!cc__chan_waiter_ticket_valid(node)) {
+            ch->send_waiters_head = node->next;
+            if (ch->send_waiters_head) {
+                ch->send_waiters_head->prev = NULL;
+            } else {
+                ch->send_waiters_tail = NULL;
+            }
+            node->next = node->prev = NULL;
+            node->in_wait_list = 0;
+            continue;
+        }
         ch->send_waiters_head = node->next;
         if (ch->send_waiters_head) {
             ch->send_waiters_head->prev = NULL;
@@ -1087,6 +1116,17 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
             cc__chan_select_cancel_node(node);
             continue;
         }
+        if (!cc__chan_waiter_ticket_valid(node)) {
+            ch->recv_waiters_head = node->next;
+            if (ch->recv_waiters_head) {
+                ch->recv_waiters_head->prev = NULL;
+            } else {
+                ch->recv_waiters_tail = NULL;
+            }
+            node->next = node->prev = NULL;
+            node->in_wait_list = 0;
+            continue;
+        }
         ch->recv_waiters_head = node->next;
         if (ch->recv_waiters_head) {
             ch->recv_waiters_head->prev = NULL;
@@ -1119,6 +1159,9 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
         cc__chan_select_cancel_node(node);
         return;
     }
+    if (!cc__chan_waiter_ticket_valid(node)) {
+        return;
+    }
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
     if (ch->use_lockfree) {
         cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_close);
@@ -1148,6 +1191,9 @@ static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
             cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_cancel);
         }
         cc__chan_select_cancel_node(node);
+        return;
+    }
+    if (!cc__chan_waiter_ticket_valid(node)) {
         return;
     }
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
@@ -4149,11 +4195,13 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
             atomic_store_explicit(&group.signaled, 0, memory_order_release);
             atomic_store_explicit(&group.selected_index, -1, memory_order_release);
             cc__fiber_wait_node nodes[n];
+            uint64_t select_wait_ticket = cc__fiber_publish_wait_ticket(fiber);
             for (size_t i = 0; i < n; ++i) {
                 CCChanMatchCase *c = &cases[i];
                 nodes[i].next = NULL;
                 nodes[i].prev = NULL;
                 nodes[i].fiber = fiber;
+                nodes[i].wait_ticket = select_wait_ticket;
                 nodes[i].data = c->is_send ? (void*)c->send_buf : c->recv_buf;
                 atomic_store_explicit(&nodes[i].notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 nodes[i].select_group = &group;

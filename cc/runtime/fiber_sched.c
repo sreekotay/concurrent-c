@@ -304,6 +304,7 @@ typedef struct fiber_task {
     _Atomic int64_t control;  /* Unified control word (see encoding above) */
     _Atomic int done;
     _Atomic uint64_t wake_counter; /* Debug-only wake counter */
+    _Atomic uint64_t wait_ticket;  /* Monotonic ticket for waiter ABA defense */
     _Atomic int pending_unpark; /* Latch for early unpark while running */
     _Atomic uint64_t last_transition; /* rdtsc timestamp of last state transition (stall diagnostic) */
     
@@ -1192,6 +1193,7 @@ static fiber_task* fiber_alloc(void) {
             f->park_expected = 0;
             atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
             atomic_store(&f->wake_counter, 0);
+            atomic_store(&f->wait_ticket, 0);
             atomic_store(&f->pending_unpark, 0);
             atomic_store(&f->join_waiters, 0);
             atomic_store(&f->join_waiter_fiber, NULL);
@@ -1213,6 +1215,7 @@ static fiber_task* fiber_alloc(void) {
     if (nf) {
         atomic_store_explicit(&nf->join_cv_initialized, 0, memory_order_relaxed);
         atomic_store_explicit(&nf->wake_counter, 0, memory_order_relaxed);
+        atomic_store_explicit(&nf->wait_ticket, 0, memory_order_relaxed);
         atomic_store_explicit(&nf->pending_unpark, 0, memory_order_relaxed);
         atomic_store(&nf->join_waiters, 0);
         atomic_store(&nf->join_waiter_fiber, NULL);
@@ -3092,6 +3095,19 @@ void cc__fiber_clear_pending_unpark(void) {
                     (unsigned long)f->fiber_id, old);
         }
     }
+}
+
+uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr) {
+    fiber_task* f = (fiber_task*)fiber_ptr;
+    if (!f) return 0;
+    return atomic_fetch_add_explicit(&f->wait_ticket, 1, memory_order_acq_rel) + 1;
+}
+
+int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket) {
+    fiber_task* f = (fiber_task*)fiber_ptr;
+    if (!f) return 0;
+    uint64_t cur = atomic_load_explicit(&f->wait_ticket, memory_order_acquire);
+    return cur == ticket;
 }
 
 void cc__fiber_unpark(void* fiber_ptr) {
