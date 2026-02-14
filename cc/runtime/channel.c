@@ -323,7 +323,7 @@ void cc__chan_debug_dump_global(void) {
  * Batch Wake Operations
  * ============================================================================ */
 
-#define WAKE_BATCH_SIZE 16
+#define WAKE_BATCH_SIZE 32
 
 typedef struct {
     cc__fiber* fibers[WAKE_BATCH_SIZE];
