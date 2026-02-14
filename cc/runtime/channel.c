@@ -2293,51 +2293,69 @@ static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value, con
  */
 
 /* Direct handoff rendezvous helpers (cap == 0). Expects ch->mu locked. */
+static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wait_node* rnode, const void* value) {
+    channel_store_slot(rnode->data, value, ch->elem_size);
+    atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
+    if (rnode->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
+    if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+    if (rnode->is_select && rnode->select_group) {
+        cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
+        int sel = atomic_load_explicit(&group->selected_index, memory_order_acquire);
+        int sig_before = atomic_load_explicit(&group->signaled, memory_order_acquire);
+        if (cc__chan_dbg_enabled() && sel == -1) {
+            fprintf(stderr, "CC_CHAN_DEBUG: BUG! handoff_send but selected_index=-1 group=%p node=%p idx=%zu\n",
+                    (void*)group, (void*)rnode, rnode->select_index);
+        }
+        atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+        if (cc__chan_dbg_verbose_enabled()) {
+            int sig_after = atomic_load_explicit(&group->signaled, memory_order_acquire);
+            fprintf(stderr, "CC_CHAN_DEBUG: handoff_send_signaled group=%p fiber=%p sel=%d sig=%d->%d\n",
+                    (void*)group, (void*)rnode->fiber, sel, sig_before, sig_after);
+        }
+        cc__chan_dbg_select_event("handoff_send", rnode);
+    }
+    if (rnode->fiber) {
+        if (cc__chan_dbg_enabled() && rnode->is_select && rnode->select_group) {
+            cc__select_wait_group* g = (cc__select_wait_group*)rnode->select_group;
+            fprintf(stderr, "CC_CHAN_DEBUG: wake_batch_add_handoff fiber=%p group=%p sel=%d sig=%d\n",
+                    (void*)rnode->fiber, (void*)g,
+                    atomic_load_explicit(&g->selected_index, memory_order_acquire),
+                    atomic_load_explicit(&g->signaled, memory_order_acquire));
+        }
+        wake_batch_add(rnode->fiber);
+        wake_batch_flush();
+    } else {
+        pthread_cond_signal(&ch->not_empty);
+    }
+}
+
+static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_wait_node* snode, void* out_value) {
+    channel_load_slot(snode->data, out_value, ch->elem_size);
+    atomic_store_explicit(&snode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
+    if (snode->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
+    if (snode->is_select && snode->select_group) {
+        cc__select_wait_group* group = (cc__select_wait_group*)snode->select_group;
+        atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+        cc__chan_dbg_select_event("handoff_recv", snode);
+    }
+    if (snode->fiber) {
+        wake_batch_add(snode->fiber);
+        wake_batch_flush();
+    } else {
+        pthread_cond_signal(&ch->not_full);
+    }
+}
+
 static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct timespec* deadline) {
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     int err = 0;
 
     while (!ch->closed && !ch->rx_error_closed) {
         /* If a receiver is waiting, handoff directly */
-        cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
+        cc__fiber_wait_node* rnode = ch->recv_waiters_head ? cc__chan_pop_recv_waiter(ch) : NULL;
         if (rnode) {
             cc__chan_dbg_inc(&ch->dbg_rv_send_handoff);
-            channel_store_slot(rnode->data, value, ch->elem_size);
-            atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
-            if (rnode->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
-            if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-            /* IMPORTANT: Increment signaled BEFORE waking the fiber.
-             * Otherwise the fiber could wake, check signaled (unchanged), and re-park
-             * before we increment it - causing a lost wakeup. */
-            if (rnode->is_select && rnode->select_group) {
-                cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
-                int sel = atomic_load_explicit(&group->selected_index, memory_order_acquire);
-                int sig_before = atomic_load_explicit(&group->signaled, memory_order_acquire);
-                if (cc__chan_dbg_enabled() && sel == -1) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: BUG! handoff_send but selected_index=-1 group=%p node=%p idx=%zu\n",
-                            (void*)group, (void*)rnode, rnode->select_index);
-                }
-                atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-                if (cc__chan_dbg_verbose_enabled()) {
-                    int sig_after = atomic_load_explicit(&group->signaled, memory_order_acquire);
-                    fprintf(stderr, "CC_CHAN_DEBUG: handoff_send_signaled group=%p fiber=%p sel=%d sig=%d->%d\n",
-                            (void*)group, (void*)rnode->fiber, sel, sig_before, sig_after);
-                }
-                cc__chan_dbg_select_event("handoff_send", rnode);
-            }
-            if (rnode->fiber) {
-                if (cc__chan_dbg_enabled() && rnode->is_select && rnode->select_group) {
-                    cc__select_wait_group* g = (cc__select_wait_group*)rnode->select_group;
-                    fprintf(stderr, "CC_CHAN_DEBUG: wake_batch_add_handoff fiber=%p group=%p sel=%d sig=%d\n",
-                            (void*)rnode->fiber, (void*)g,
-                            atomic_load_explicit(&g->selected_index, memory_order_acquire),
-                            atomic_load_explicit(&g->signaled, memory_order_acquire));
-                }
-                wake_batch_add(rnode->fiber);
-            } else {
-                pthread_cond_signal(&ch->not_empty);
-            }
-            wake_batch_flush();
+            cc__chan_finish_send_to_recv_waiter(ch, rnode, value);
             cc__chan_signal_activity(ch);
             return 0;
         }
@@ -2360,25 +2378,12 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 /* Before releasing mutex, check if a receiver arrived while we were
                  * setting up. This closes the race where a select receiver adds its
                  * node after our pop_recv_waiter but before we park. */
-                cc__fiber_wait_node* rnode2 = cc__chan_pop_recv_waiter(ch);
+                cc__fiber_wait_node* rnode2 = ch->recv_waiters_head ? cc__chan_pop_recv_waiter(ch) : NULL;
                 if (rnode2) {
                     /* Found a receiver! Remove ourselves from send wait list and do handoff. */
                     cc__chan_dbg_inc(&ch->dbg_rv_send_inner_handoff);
                     cc__chan_remove_send_waiter(ch, &node);
-                    channel_store_slot(rnode2->data, value, ch->elem_size);
-                    atomic_store_explicit(&rnode2->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
-                    if (rnode2->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
-                    if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-                    if (rnode2->is_select && rnode2->select_group) {
-                        cc__select_wait_group* group = (cc__select_wait_group*)rnode2->select_group;
-                        atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-                    }
-                    if (rnode2->fiber) {
-                        wake_batch_add(rnode2->fiber);
-                    } else {
-                        pthread_cond_signal(&ch->not_empty);
-                    }
-                    wake_batch_flush();
+                    cc__chan_finish_send_to_recv_waiter(ch, rnode2, value);
                     cc__chan_signal_activity(ch);
                     return 0;
                 }
@@ -2449,24 +2454,10 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
 
     while (!ch->closed) {
         /* If a sender is waiting, handoff directly */
-        cc__fiber_wait_node* snode = cc__chan_pop_send_waiter(ch);
+        cc__fiber_wait_node* snode = ch->send_waiters_head ? cc__chan_pop_send_waiter(ch) : NULL;
         if (snode) {
             cc__chan_dbg_inc(&ch->dbg_rv_recv_handoff);
-            channel_load_slot(snode->data, out_value, ch->elem_size);
-            atomic_store_explicit(&snode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
-            if (snode->is_select) atomic_fetch_add_explicit(&g_dbg_select_data_set, 1, memory_order_relaxed);
-            /* IMPORTANT: Increment signaled BEFORE waking the fiber. */
-            if (snode->is_select && snode->select_group) {
-                cc__select_wait_group* group = (cc__select_wait_group*)snode->select_group;
-                atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-                cc__chan_dbg_select_event("handoff_recv", snode);
-            }
-            if (snode->fiber) {
-                wake_batch_add(snode->fiber);
-            } else {
-                pthread_cond_signal(&ch->not_full);
-            }
-            wake_batch_flush();
+            cc__chan_finish_recv_from_send_waiter(ch, snode, out_value);
             cc__chan_signal_activity(ch);
             return 0;
         }

@@ -1,0 +1,94 @@
+/*
+ * Unbuffered rendezvous benchmark focused on waiter-list churn.
+ *
+ * Measures N producers and N consumers contending on one unbuffered channel.
+ * This stresses enqueue/dequeue of waiters and handoff wake behavior.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+#include <stdint.h>
+
+#define PRODUCERS 4
+#define CONSUMERS 4
+#define ITERS_PER_PRODUCER 30000
+#define SAMPLES 7
+#define TOTAL_MESSAGES (PRODUCERS * ITERS_PER_PRODUCER)
+#define MSGS_PER_CONSUMER (TOTAL_MESSAGES / CONSUMERS)
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static double run_once(void) {
+    int[~ >] tx_h;
+    int[~ <] rx_h;
+    channel_pair(&tx_h, &rx_h);
+
+    CCChanTx tx = tx_h;
+    CCChanRx rx = rx_h;
+
+    double start = time_now_ms();
+    @nursery closing(tx_h) {
+        for (int p = 0; p < PRODUCERS; p++) {
+            (void)p;
+            spawn(() => [tx] {
+                for (int i = 0; i < ITERS_PER_PRODUCER; i++) {
+                    tx.send(i);
+                }
+            });
+        }
+
+        for (int c = 0; c < CONSUMERS; c++) {
+            (void)c;
+            spawn(() => [rx] {
+                int v = 0;
+                int64_t checksum = 0;
+                for (int i = 0; i < MSGS_PER_CONSUMER; i++) {
+                    rx.recv(&v);
+                    checksum += v;
+                }
+                if (checksum < 0) {
+                    fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+                }
+            });
+        }
+    }
+    return time_now_ms() - start;
+}
+
+int main(void) {
+    printf("perf_unbuffered_rendezvous_base: producers=%d consumers=%d iters=%d\n",
+           PRODUCERS, CONSUMERS, ITERS_PER_PRODUCER);
+
+    (void)run_once();
+
+    double elapsed_ms[SAMPLES] = {0};
+    double ops_sec[SAMPLES] = {0};
+    for (int i = 0; i < SAMPLES; i++) {
+        elapsed_ms[i] = run_once();
+        ops_sec[i] = (TOTAL_MESSAGES * 2.0) / (elapsed_ms[i] / 1000.0);
+        printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
+    }
+
+    sort_doubles(ops_sec, SAMPLES);
+    sort_doubles(elapsed_ms, SAMPLES);
+    int mid = SAMPLES / 2;
+    printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
+    printf("perf_unbuffered_rendezvous_base: DONE\n");
+    return 0;
+}
