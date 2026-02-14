@@ -1746,7 +1746,6 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         } else {
             pthread_cond_signal(&ch->not_full);
         }
-        wake_batch_flush();  /* Flush wakes immediately for rendezvous */
 
         
 
@@ -1768,6 +1767,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 cc__chan_add_recv_waiter(ch, &node);
 
                 pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();  /* Flush queued wakes after unlocking. */
 
                 /* Return-aware boundary wait (first migrated call site). */
                 cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node);
@@ -2323,7 +2323,6 @@ static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wai
                     atomic_load_explicit(&g->signaled, memory_order_acquire));
         }
         wake_batch_add(rnode->fiber);
-        wake_batch_flush();
     } else {
         pthread_cond_signal(&ch->not_empty);
     }
@@ -2340,7 +2339,6 @@ static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_w
     }
     if (snode->fiber) {
         wake_batch_add(snode->fiber);
-        wake_batch_flush();
     } else {
         pthread_cond_signal(&ch->not_full);
     }
