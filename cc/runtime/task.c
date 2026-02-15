@@ -17,8 +17,10 @@ void cc__deadlock_thread_unblock(void);
 #include <errno.h>
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Internal task data layouts (stored in CCTask._data) */
@@ -78,6 +80,128 @@ void* cc_thread_task_get_result(struct CCSpawnTask* task);
 static CCExec* g_task_exec = NULL;
 static pthread_mutex_t g_task_exec_mu = PTHREAD_MUTEX_INITIALIZER;
 static cc_atomic_u64 g_task_submit_failures = 0;
+
+/* Optional join/wait instrumentation for debugging throughput gaps.
+ * Enable with CC_TASK_WAIT_STATS=1 and dump at exit with CC_TASK_WAIT_STATS_DUMP=1. */
+void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues);
+void cc__fiber_join_park_stats(uint64_t* out_joins, uint64_t* out_loops);
+
+typedef struct {
+    _Atomic int mode;              /* -1 unknown, 0 off, 1 on */
+    _Atomic int dump_mode;         /* -1 unknown, 0 off, 1 on */
+    _Atomic int atexit_registered; /* 0/1 */
+    _Atomic uint64_t block_calls_total;
+    _Atomic uint64_t block_spawn_calls;
+    _Atomic uint64_t block_fiber_calls;
+    _Atomic uint64_t block_spawn_wait_ns;
+    _Atomic uint64_t block_fiber_wait_ns;
+    _Atomic uint64_t fiber_join_calls;
+    _Atomic uint64_t fiber_join_wait_ns;
+    _Atomic uint64_t fiber_result_tls_copies;
+} cc_task_wait_stats;
+
+static cc_task_wait_stats g_cc_task_wait_stats = {
+    .mode = -1,
+    .dump_mode = -1,
+    .atexit_registered = 0
+};
+
+static inline uint64_t cc__mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int cc_task_wait_stats_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_task_wait_stats.mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = (getenv("CC_TASK_WAIT_STATS") || getenv("CC_TASK_WAIT_STATS_DUMP")) ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_task_wait_stats.mode,
+                                                   &expected,
+                                                   mode,
+                                                   memory_order_release,
+                                                   memory_order_acquire);
+    return atomic_load_explicit(&g_cc_task_wait_stats.mode, memory_order_acquire);
+}
+
+static int cc_task_wait_stats_dump_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_task_wait_stats.dump_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = getenv("CC_TASK_WAIT_STATS_DUMP") ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_task_wait_stats.dump_mode,
+                                                   &expected,
+                                                   mode,
+                                                   memory_order_release,
+                                                   memory_order_acquire);
+    return atomic_load_explicit(&g_cc_task_wait_stats.dump_mode, memory_order_acquire);
+}
+
+static void cc_task_wait_stats_dump(void) {
+    if (!cc_task_wait_stats_enabled()) return;
+    uint64_t total = atomic_load_explicit(&g_cc_task_wait_stats.block_calls_total, memory_order_relaxed);
+    uint64_t spawn_calls = atomic_load_explicit(&g_cc_task_wait_stats.block_spawn_calls, memory_order_relaxed);
+    uint64_t fiber_calls = atomic_load_explicit(&g_cc_task_wait_stats.block_fiber_calls, memory_order_relaxed);
+    uint64_t spawn_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.block_spawn_wait_ns, memory_order_relaxed);
+    uint64_t fiber_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.block_fiber_wait_ns, memory_order_relaxed);
+    uint64_t fiber_join_calls = atomic_load_explicit(&g_cc_task_wait_stats.fiber_join_calls, memory_order_relaxed);
+    uint64_t fiber_join_wait_ns = atomic_load_explicit(&g_cc_task_wait_stats.fiber_join_wait_ns, memory_order_relaxed);
+    uint64_t tls_copies = atomic_load_explicit(&g_cc_task_wait_stats.fiber_result_tls_copies, memory_order_relaxed);
+    uint64_t unpark_calls = 0;
+    uint64_t unpark_enqueues = 0;
+    uint64_t join_park_joins = 0;
+    uint64_t join_park_loops = 0;
+    cc__fiber_unpark_stats(&unpark_calls, &unpark_enqueues);
+    cc__fiber_join_park_stats(&join_park_joins, &join_park_loops);
+
+    fprintf(stderr, "\n=== CC_TASK_WAIT_STATS ===\n");
+    fprintf(stderr, "block_on calls: total=%llu spawn=%llu fiber=%llu\n",
+            (unsigned long long)total,
+            (unsigned long long)spawn_calls,
+            (unsigned long long)fiber_calls);
+    if (spawn_calls) {
+        fprintf(stderr, "spawn join wait: total=%.3f ms avg=%.3f us\n",
+                (double)spawn_wait_ns / 1000000.0,
+                (double)spawn_wait_ns / (double)spawn_calls / 1000.0);
+    }
+    if (fiber_calls) {
+        fprintf(stderr, "fiber block wait: total=%.3f ms avg=%.3f us\n",
+                (double)fiber_wait_ns / 1000000.0,
+                (double)fiber_wait_ns / (double)fiber_calls / 1000.0);
+    }
+    if (fiber_join_calls) {
+        fprintf(stderr, "fiber join wait: total=%.3f ms avg=%.3f us\n",
+                (double)fiber_join_wait_ns / 1000000.0,
+                (double)fiber_join_wait_ns / (double)fiber_join_calls / 1000.0);
+        fprintf(stderr, "fiber wake path: unpark_calls=%llu enqueues=%llu per_join=(%.3f/%.3f)\n",
+                (unsigned long long)unpark_calls,
+                (unsigned long long)unpark_enqueues,
+                (double)unpark_calls / (double)fiber_join_calls,
+                (double)unpark_enqueues / (double)fiber_join_calls);
+        if (join_park_joins) {
+            fprintf(stderr, "fiber join park loops: joins=%llu loops=%llu avg_loops=%.3f\n",
+                    (unsigned long long)join_park_joins,
+                    (unsigned long long)join_park_loops,
+                    (double)join_park_loops / (double)join_park_joins);
+        }
+    }
+    fprintf(stderr, "fiber result TLS copies: %llu\n",
+            (unsigned long long)tls_copies);
+    fprintf(stderr, "==========================\n");
+}
+
+static inline void cc_task_wait_stats_maybe_init(void) {
+    if (!cc_task_wait_stats_enabled() || !cc_task_wait_stats_dump_enabled()) return;
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_cc_task_wait_stats.atexit_registered,
+                                                &expected,
+                                                1,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        atexit(cc_task_wait_stats_dump);
+    }
+}
 
 /* cc__env_size defined in scheduler.c */
 
@@ -340,16 +464,30 @@ void cc_task_cancel(CCTask* t) {
 intptr_t cc_block_on_intptr(CCTask t) {
     intptr_t r = 0;
     int err = 0;
+    const int wait_stats = cc_task_wait_stats_enabled();
+    if (wait_stats) {
+        cc_task_wait_stats_maybe_init();
+        atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_calls_total, 1, memory_order_relaxed);
+    }
     cc__deadlock_thread_block();  /* Track that this thread is blocking */
     
     /* Handle spawn tasks directly with join */
     if (t.kind == CC_TASK_KIND_SPAWN) {
         CCTaskSpawnInternal* s = TASK_SPAWN(&t);
+        uint64_t wait_start_ns = 0;
+        if (wait_stats) {
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_spawn_calls, 1, memory_order_relaxed);
+            wait_start_ns = cc__mono_ns();
+        }
         if (s->spawn) {
             void* result = NULL;
             cc_thread_task_join_result(s->spawn, &result);
             r = (intptr_t)result;
             cc_thread_task_free(s->spawn);
+        }
+        if (wait_stats) {
+            uint64_t wait_ns = cc__mono_ns() - wait_start_ns;
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_spawn_wait_ns, wait_ns, memory_order_relaxed);
         }
         cc__deadlock_thread_unblock();
         return r;
@@ -366,20 +504,41 @@ intptr_t cc_block_on_intptr(CCTask t) {
     if (t.kind == CC_TASK_KIND_FIBER) {
         static __thread char tls_fiber_result[48] __attribute__((aligned(8)));
         CCTaskFiberInternal* fi = TASK_FIBER(&t);
+        uint64_t fiber_wait_start_ns = 0;
+        if (wait_stats) {
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_fiber_calls, 1, memory_order_relaxed);
+            fiber_wait_start_ns = cc__mono_ns();
+        }
         if (fi->fiber) {
             void* result = NULL;
+            uint64_t join_start_ns = 0;
+            if (wait_stats) {
+                atomic_fetch_add_explicit(&g_cc_task_wait_stats.fiber_join_calls, 1, memory_order_relaxed);
+                join_start_ns = cc__mono_ns();
+            }
             cc_fiber_join(fi->fiber, &result);
+            if (wait_stats) {
+                uint64_t join_wait_ns = cc__mono_ns() - join_start_ns;
+                atomic_fetch_add_explicit(&g_cc_task_wait_stats.fiber_join_wait_ns, join_wait_ns, memory_order_relaxed);
+            }
             if (result) {
                 /* Check if result points into the fiber's result_buf */
                 char* buf = (char*)cc_fiber_get_result_buf(fi->fiber);
                 if (buf && (char*)result >= buf && (char*)result < buf + 48) {
                     memcpy(tls_fiber_result, result, sizeof(tls_fiber_result));
+                    if (wait_stats) {
+                        atomic_fetch_add_explicit(&g_cc_task_wait_stats.fiber_result_tls_copies, 1, memory_order_relaxed);
+                    }
                     r = (intptr_t)tls_fiber_result;
                 } else {
                     r = (intptr_t)result;
                 }
             }
             cc_fiber_task_free(fi->fiber);
+        }
+        if (wait_stats) {
+            uint64_t fiber_wait_ns = cc__mono_ns() - fiber_wait_start_ns;
+            atomic_fetch_add_explicit(&g_cc_task_wait_stats.block_fiber_wait_ns, fiber_wait_ns, memory_order_relaxed);
         }
         cc__deadlock_thread_unblock();
         return r;

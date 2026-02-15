@@ -128,6 +128,28 @@ typedef struct {
 
 static spawn_timing g_spawn_timing = {0};
 static int g_timing_enabled = -1;  /* -1 = not checked, 0 = disabled, 1 = enabled */
+static _Atomic uint64_t g_cc_fiber_unpark_calls = 0;
+static _Atomic uint64_t g_cc_fiber_unpark_enqueues = 0;
+static _Atomic uint64_t g_cc_join_park_joins = 0;
+static _Atomic uint64_t g_cc_join_park_loops = 0;
+
+void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
+    if (out_calls) {
+        *out_calls = atomic_load_explicit(&g_cc_fiber_unpark_calls, memory_order_relaxed);
+    }
+    if (out_enqueues) {
+        *out_enqueues = atomic_load_explicit(&g_cc_fiber_unpark_enqueues, memory_order_relaxed);
+    }
+}
+
+void cc__fiber_join_park_stats(uint64_t* out_joins, uint64_t* out_loops) {
+    if (out_joins) {
+        *out_joins = atomic_load_explicit(&g_cc_join_park_joins, memory_order_relaxed);
+    }
+    if (out_loops) {
+        *out_loops = atomic_load_explicit(&g_cc_join_park_loops, memory_order_relaxed);
+    }
+}
 
 static int spawn_timing_enabled(void) {
     if (g_timing_enabled < 0) {
@@ -551,6 +573,7 @@ typedef struct {
     fiber_task* _Atomic slots[CC_FIBER_QUEUE_INITIAL];
     _Atomic size_t head;
     _Atomic size_t tail;
+    _Atomic int nonempty_hint;  /* 0 likely empty, 1 maybe non-empty */
     /* Overflow list for when ring is full */
     pthread_mutex_t overflow_mu;
     fiber_task* overflow_head;
@@ -562,6 +585,7 @@ static void fq_init(fiber_queue* q) {
     memset(q->slots, 0, sizeof(q->slots));
     atomic_store(&q->head, 0);
     atomic_store(&q->tail, 0);
+    atomic_store(&q->nonempty_hint, 0);
     pthread_mutex_init(&q->overflow_mu, NULL);
     q->overflow_head = NULL;
     q->overflow_tail = NULL;
@@ -583,6 +607,7 @@ static int fq_push_ring(fiber_queue* q, fiber_task* f) {
                                                    memory_order_release,
                                                    memory_order_relaxed)) {
             atomic_store_explicit(&q->slots[tail % CC_FIBER_QUEUE_INITIAL], f, memory_order_release);
+            atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
             return 0;
         }
         cpu_pause();
@@ -604,15 +629,23 @@ static void fq_push_blocking(fiber_queue* q, fiber_task* f) {
     }
     q->overflow_tail = f;
     atomic_fetch_add_explicit(&q->overflow_count, 1, memory_order_relaxed);
+    atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
     pthread_mutex_unlock(&q->overflow_mu);
 }
 
 /* Check if queue has items (non-destructive peek) */
 static int fq_peek(fiber_queue* q) {
+    if (!atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
+        return 0;
+    }
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
     size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
     if (head < tail) return 1;
-    return atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0;
+    int has_overflow = atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0;
+    if (!has_overflow) {
+        atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
+    }
+    return has_overflow;
 }
 
 /* Pop from overflow list (caller should try ring first). */
@@ -632,6 +665,9 @@ static fiber_task* fq_pop_overflow(fiber_queue* q) {
 }
 
 static fiber_task* fq_pop(fiber_queue* q) {
+    if (!atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
+        return NULL;
+    }
     /* Try lock-free ring first */
     for (int retry = 0; retry < 1000; retry++) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
@@ -657,12 +693,33 @@ static fiber_task* fq_pop(fiber_queue* q) {
                                                    memory_order_relaxed,
                                                    memory_order_relaxed)) {
             atomic_store_explicit(&q->slots[idx], NULL, memory_order_relaxed);
+            size_t new_head = head + 1;
+            size_t cur_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+            if (new_head >= cur_tail &&
+                atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
+                atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
+            }
             return f;
         }
     }
     /* Ring empty — check overflow */
-    return fq_pop_overflow(q);
+    fiber_task* of = fq_pop_overflow(q);
+    if (!of) {
+        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+        if (head >= tail &&
+            atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
+            atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
+        }
+    }
+    return of;
 }
+
+/* Global run-queue helpers (implemented after scheduler state declaration). */
+static inline int sched_global_push(fiber_task* f, int preferred_worker);
+static inline fiber_task* sched_global_pop_any(void);
+static inline fiber_task* sched_global_pop_for_worker(int worker_id);
+static inline int sched_global_peek_any(void);
 
 /* ============================================================================
  * Sleep Queue — timer-based fiber parking for cc_sleep_ms
@@ -704,7 +761,7 @@ static void sq_push(fiber_task* f) {
 
 /* Drain expired sleepers back into the run queue.
  * Returns the number of fibers woken. */
-static size_t sq_drain(fiber_queue* run_queue) {
+static size_t sq_drain(void) {
     if (atomic_load_explicit(&g_sleep_queue.count, memory_order_relaxed) == 0)
         return 0;
     
@@ -723,7 +780,7 @@ static size_t sq_drain(fiber_queue* run_queue) {
             *pp = f->next;
             f->next = NULL;
             atomic_fetch_sub_explicit(&g_sleep_queue.count, 1, memory_order_relaxed);
-            fq_push_blocking(run_queue, f);
+            sched_global_push(f, f->last_worker_id);
             woken++;
         } else {
             pp = &f->next;
@@ -829,6 +886,7 @@ static int iq_push(inbox_queue* q, fiber_task* f) {
     return -1;
 }
 
+
 static int iq_peek(inbox_queue* q) {
     size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
     size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
@@ -875,7 +933,8 @@ typedef struct {
     size_t num_workers;
     _Atomic int running;
     
-    fiber_queue* run_queue;         /* Global queue for overflow and cross-worker */
+    fiber_queue* run_queue;         /* Global queue array base (1 or many shards) */
+    size_t run_queue_count;         /* Number of global queue shards */
     local_queue* local_queues;      /* Per-worker local queues */
     inbox_queue* inbox_queues;      /* Per-worker MPMC inbox queues */
     fiber_task* _Atomic free_list;
@@ -939,6 +998,382 @@ static _Atomic int g_deadlock_reported = 0;
 static _Atomic uint64_t g_deadlock_first_seen = 0;  /* Timestamp when deadlock state first seen */
 static _Atomic size_t g_requested_workers = 0;  /* User-requested worker count (0 = auto) */
 static _Atomic int g_cc_v3_pressure_stats_atexit = 0;
+static _Atomic int g_sharded_runq_mode = -1; /* -1 unknown, 0 off, 1 on */
+static _Atomic size_t g_global_pop_rr = 0;
+
+typedef struct {
+    _Atomic int mode;      /* -1 unknown, 0 off, 1 on */
+    _Atomic int dump_mode; /* -1 unknown, 0 off, 1 on */
+    _Atomic uint64_t sleep_enters;
+    _Atomic uint64_t sleep_wait_calls;
+    _Atomic uint64_t sleep_wait_ns;
+    _Atomic uint64_t sleep_post_recheck_hits;
+    _Atomic uint64_t sleep_wake_with_work;
+    _Atomic uint64_t spin_enters;
+    _Atomic uint64_t spin_found_work;
+    _Atomic uint64_t yield_found_work;
+    _Atomic uint64_t pre_sleep_steal_attempts;
+    _Atomic uint64_t pre_sleep_steal_hits;
+    _Atomic uint64_t global_pop_attempts;
+    _Atomic uint64_t global_pop_hits;
+    _Atomic uint64_t global_pop_hint_skips;
+    _Atomic uint64_t global_pop_calls_fairness;
+    _Atomic uint64_t global_pop_hits_fairness;
+    _Atomic uint64_t global_pop_calls_mainloop;
+    _Atomic uint64_t global_pop_hits_mainloop;
+    _Atomic uint64_t global_pop_calls_replacement;
+    _Atomic uint64_t global_pop_hits_replacement;
+    _Atomic uint64_t wake_cond_calls[6];
+    _Atomic uint64_t wake_cond_fired[6];
+    _Atomic uint64_t wake_cond_skip_spinning[6];
+    _Atomic uint64_t wake_cond_skip_no_sleepers[6];
+    _Atomic uint64_t wake_uncond_calls[6];
+    _Atomic uint64_t wake_uncond_fired[6];
+    _Atomic uint64_t wake_uncond_bump_only[6];
+    _Atomic uint64_t unpark_push_local;
+    _Atomic uint64_t unpark_push_inbox;
+    _Atomic uint64_t unpark_push_global_divert_stale;
+    _Atomic uint64_t unpark_push_global_divert_inbox;
+    _Atomic uint64_t unpark_push_global_fallback;
+    _Atomic uint64_t spawn_push_worker_local;
+    _Atomic uint64_t spawn_push_worker_inbox;
+    _Atomic uint64_t spawn_push_nonworker_global;
+    _Atomic uint64_t spawn_push_worker_global_fallback;
+} cc_worker_gap_stats;
+
+static cc_worker_gap_stats g_cc_worker_gap_stats = {
+    .mode = -1,
+    .dump_mode = -1
+};
+
+typedef enum {
+    CC_WAKE_REASON_SYSMON_SLEEPQ = 0,
+    CC_WAKE_REASON_SPAWN_GLOBAL_EDGE = 1,
+    CC_WAKE_REASON_SPAWN_NONGLOBAL = 2,
+    CC_WAKE_REASON_JOIN_THREAD = 3,
+    CC_WAKE_REASON_UNPARK_GLOBAL_EDGE = 4,
+    CC_WAKE_REASON_UNPARK_NONGLOBAL = 5,
+    CC_WAKE_REASON_COUNT = 6
+} cc_wake_reason;
+
+static inline const char* cc_wake_reason_name(cc_wake_reason reason) {
+    switch (reason) {
+        case CC_WAKE_REASON_SYSMON_SLEEPQ: return "sysmon_sleepq";
+        case CC_WAKE_REASON_SPAWN_GLOBAL_EDGE: return "spawn_global";
+        case CC_WAKE_REASON_SPAWN_NONGLOBAL: return "spawn_non_global";
+        case CC_WAKE_REASON_JOIN_THREAD: return "join_thread";
+        case CC_WAKE_REASON_UNPARK_GLOBAL_EDGE: return "unpark_global";
+        case CC_WAKE_REASON_UNPARK_NONGLOBAL: return "unpark_non_global";
+        default: return "unknown";
+    }
+}
+
+static inline uint64_t cc__mono_ns_sched(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static inline int cc_worker_gap_stats_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = (getenv("CC_WORKER_GAP_STATS") || getenv("CC_WORKER_GAP_STATS_DUMP")) ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_worker_gap_stats.mode,
+                                                   &expected,
+                                                   mode,
+                                                   memory_order_release,
+                                                   memory_order_acquire);
+    return atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
+}
+
+static inline int cc_worker_gap_stats_dump_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    mode = getenv("CC_WORKER_GAP_STATS_DUMP") ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_cc_worker_gap_stats.dump_mode,
+                                                   &expected,
+                                                   mode,
+                                                   memory_order_release,
+                                                   memory_order_acquire);
+    return atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
+}
+
+static void cc_worker_gap_stats_dump(void) {
+    if (!cc_worker_gap_stats_enabled()) return;
+    uint64_t sleep_enters = atomic_load_explicit(&g_cc_worker_gap_stats.sleep_enters, memory_order_relaxed);
+    uint64_t sleep_wait_calls = atomic_load_explicit(&g_cc_worker_gap_stats.sleep_wait_calls, memory_order_relaxed);
+    uint64_t sleep_wait_ns = atomic_load_explicit(&g_cc_worker_gap_stats.sleep_wait_ns, memory_order_relaxed);
+    uint64_t post_hits = atomic_load_explicit(&g_cc_worker_gap_stats.sleep_post_recheck_hits, memory_order_relaxed);
+    uint64_t wake_with_work = atomic_load_explicit(&g_cc_worker_gap_stats.sleep_wake_with_work, memory_order_relaxed);
+    uint64_t spin_enters = atomic_load_explicit(&g_cc_worker_gap_stats.spin_enters, memory_order_relaxed);
+    uint64_t spin_found = atomic_load_explicit(&g_cc_worker_gap_stats.spin_found_work, memory_order_relaxed);
+    uint64_t yield_found = atomic_load_explicit(&g_cc_worker_gap_stats.yield_found_work, memory_order_relaxed);
+    uint64_t pre_sleep_steal_attempts =
+        atomic_load_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_attempts, memory_order_relaxed);
+    uint64_t pre_sleep_steal_hits =
+        atomic_load_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_hits, memory_order_relaxed);
+    uint64_t pop_attempts = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_attempts, memory_order_relaxed);
+    uint64_t pop_hits = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits, memory_order_relaxed);
+    uint64_t pop_hint_skips = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, memory_order_relaxed);
+    uint64_t pop_calls_fair = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_calls_fairness, memory_order_relaxed);
+    uint64_t pop_hits_fair = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_fairness, memory_order_relaxed);
+    uint64_t pop_calls_main = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, memory_order_relaxed);
+    uint64_t pop_hits_main = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, memory_order_relaxed);
+    uint64_t pop_calls_repl = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, memory_order_relaxed);
+    uint64_t pop_hits_repl = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, memory_order_relaxed);
+    uint64_t up_local = atomic_load_explicit(&g_cc_worker_gap_stats.unpark_push_local, memory_order_relaxed);
+    uint64_t up_inbox = atomic_load_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, memory_order_relaxed);
+    uint64_t up_g_stale =
+        atomic_load_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, memory_order_relaxed);
+    uint64_t up_g_inbox =
+        atomic_load_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_inbox, memory_order_relaxed);
+    uint64_t up_g_fallback =
+        atomic_load_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, memory_order_relaxed);
+    uint64_t sp_w_local = atomic_load_explicit(&g_cc_worker_gap_stats.spawn_push_worker_local, memory_order_relaxed);
+    uint64_t sp_w_inbox = atomic_load_explicit(&g_cc_worker_gap_stats.spawn_push_worker_inbox, memory_order_relaxed);
+    uint64_t sp_nw_global = atomic_load_explicit(&g_cc_worker_gap_stats.spawn_push_nonworker_global, memory_order_relaxed);
+    uint64_t sp_w_global_fallback =
+        atomic_load_explicit(&g_cc_worker_gap_stats.spawn_push_worker_global_fallback, memory_order_relaxed);
+
+    fprintf(stderr, "\n=== CC_WORKER_GAP_STATS ===\n");
+    fprintf(stderr, "sleep: enters=%llu waits=%llu wait_total=%.3f ms wait_avg=%.3f us\n",
+            (unsigned long long)sleep_enters,
+            (unsigned long long)sleep_wait_calls,
+            (double)sleep_wait_ns / 1000000.0,
+            sleep_wait_calls ? ((double)sleep_wait_ns / (double)sleep_wait_calls / 1000.0) : 0.0);
+    fprintf(stderr, "sleep exits: post_recheck_hits=%llu wake_with_work=%llu\n",
+            (unsigned long long)post_hits,
+            (unsigned long long)wake_with_work);
+    fprintf(stderr, "spin/yield: enters=%llu spin_found=%llu yield_found=%llu pre_sleep_steal=%llu/%llu\n",
+            (unsigned long long)spin_enters,
+            (unsigned long long)spin_found,
+            (unsigned long long)yield_found,
+            (unsigned long long)pre_sleep_steal_hits,
+            (unsigned long long)pre_sleep_steal_attempts);
+    fprintf(stderr, "global pops: attempts=%llu hits=%llu hit_rate=%.1f%% hint_skips=%llu\n",
+            (unsigned long long)pop_attempts,
+            (unsigned long long)pop_hits,
+            pop_attempts ? (100.0 * (double)pop_hits / (double)pop_attempts) : 0.0,
+            (unsigned long long)pop_hint_skips);
+    fprintf(stderr, "global pop callsites: fairness=%llu/%llu mainloop=%llu/%llu replacement=%llu/%llu\n",
+            (unsigned long long)pop_hits_fair,
+            (unsigned long long)pop_calls_fair,
+            (unsigned long long)pop_hits_main,
+            (unsigned long long)pop_calls_main,
+            (unsigned long long)pop_hits_repl,
+            (unsigned long long)pop_calls_repl);
+    fprintf(stderr, "wake sources:\n");
+    for (int i = 0; i < (int)CC_WAKE_REASON_COUNT; i++) {
+        uint64_t cond_calls = atomic_load_explicit(&g_cc_worker_gap_stats.wake_cond_calls[i], memory_order_relaxed);
+        uint64_t cond_fired = atomic_load_explicit(&g_cc_worker_gap_stats.wake_cond_fired[i], memory_order_relaxed);
+        uint64_t cond_skip_spin =
+            atomic_load_explicit(&g_cc_worker_gap_stats.wake_cond_skip_spinning[i], memory_order_relaxed);
+        uint64_t cond_skip_sleep =
+            atomic_load_explicit(&g_cc_worker_gap_stats.wake_cond_skip_no_sleepers[i], memory_order_relaxed);
+        uint64_t uncond_calls = atomic_load_explicit(&g_cc_worker_gap_stats.wake_uncond_calls[i], memory_order_relaxed);
+        uint64_t uncond_fired = atomic_load_explicit(&g_cc_worker_gap_stats.wake_uncond_fired[i], memory_order_relaxed);
+        uint64_t uncond_bump =
+            atomic_load_explicit(&g_cc_worker_gap_stats.wake_uncond_bump_only[i], memory_order_relaxed);
+        if (cond_calls == 0 && uncond_calls == 0) continue;
+        fprintf(stderr,
+                "  %-16s cond=%llu fired=%llu skip_spin=%llu skip_sleep=%llu | uncond=%llu fired=%llu bump_only=%llu\n",
+                cc_wake_reason_name((cc_wake_reason)i),
+                (unsigned long long)cond_calls,
+                (unsigned long long)cond_fired,
+                (unsigned long long)cond_skip_spin,
+                (unsigned long long)cond_skip_sleep,
+                (unsigned long long)uncond_calls,
+                (unsigned long long)uncond_fired,
+                (unsigned long long)uncond_bump);
+    }
+    fprintf(stderr, "unpark enqueue routes: local=%llu inbox=%llu global(divert_stale=%llu divert_inbox=%llu fallback=%llu)\n",
+            (unsigned long long)up_local,
+            (unsigned long long)up_inbox,
+            (unsigned long long)up_g_stale,
+            (unsigned long long)up_g_inbox,
+            (unsigned long long)up_g_fallback);
+    fprintf(stderr, "spawn enqueue routes: worker(local=%llu inbox=%llu global_fallback=%llu) nonworker_global=%llu\n",
+            (unsigned long long)sp_w_local,
+            (unsigned long long)sp_w_inbox,
+            (unsigned long long)sp_w_global_fallback,
+            (unsigned long long)sp_nw_global);
+    fprintf(stderr, "===========================\n");
+}
+
+static inline int cc_sharded_runq_enabled(void) {
+    int mode = atomic_load_explicit(&g_sharded_runq_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    const char* v = getenv("CC_SHARDED_RUNQ");
+    mode = (v && v[0] == '1') ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&g_sharded_runq_mode,
+                                                   &expected,
+                                                   mode,
+                                                   memory_order_release,
+                                                   memory_order_acquire);
+    return atomic_load_explicit(&g_sharded_runq_mode, memory_order_acquire);
+}
+
+static inline size_t sched_global_queue_count(void) {
+    return g_sched.run_queue_count ? g_sched.run_queue_count : 1;
+}
+
+static inline size_t sched_primary_shard_for_worker(int worker_id) {
+    size_t n = sched_global_queue_count();
+    if (n <= 1 || worker_id < 0) return 0;
+    size_t w = (size_t)worker_id;
+    return (w * 2) % n;
+}
+
+static inline size_t sched_secondary_shard_for_worker(int worker_id) {
+    size_t n = sched_global_queue_count();
+    if (n <= 1 || worker_id < 0) return 0;
+    return (sched_primary_shard_for_worker(worker_id) + 1) % n;
+}
+
+static inline int fq_likely_empty(fiber_queue* q) {
+    if (atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
+        return 0;
+    }
+    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    if (head < tail) return 0;
+    return atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0;
+}
+
+static inline int sched_global_push(fiber_task* f, int preferred_worker) {
+    if (!g_sched.run_queue) return 0;
+    size_t n = sched_global_queue_count();
+    size_t idx = 0;
+    if (n > 1 && preferred_worker >= 0) {
+        idx = sched_primary_shard_for_worker(preferred_worker);
+    } else if (n > 1) {
+        idx = (size_t)(atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed) % n);
+    }
+    fiber_queue* q = &g_sched.run_queue[idx];
+    int was_empty = fq_likely_empty(q);
+    fq_push_blocking(q, f);
+    return was_empty;
+}
+
+static inline fiber_task* sched_global_pop_any(void) {
+    if (!g_sched.run_queue) return NULL;
+    const int gap_stats = cc_worker_gap_stats_enabled();
+    if (gap_stats) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_attempts, 1, memory_order_relaxed);
+    }
+    size_t n = sched_global_queue_count();
+    size_t start = (size_t)atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed);
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = (start + i) % n;
+        if (!atomic_load_explicit(&g_sched.run_queue[idx].nonempty_hint, memory_order_acquire)) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
+            }
+            continue;
+        }
+        fiber_task* f = fq_pop(&g_sched.run_queue[idx]);
+        if (f) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
+            }
+            return f;
+        }
+    }
+    return NULL;
+}
+
+static inline fiber_task* sched_global_pop_for_worker(int worker_id) {
+    if (!g_sched.run_queue) return NULL;
+    const int gap_stats = cc_worker_gap_stats_enabled();
+    if (gap_stats) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_attempts, 1, memory_order_relaxed);
+    }
+    size_t n = sched_global_queue_count();
+    if (n <= 1 || worker_id < 0) {
+        if (!atomic_load_explicit(&g_sched.run_queue[0].nonempty_hint, memory_order_acquire)) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
+            }
+            return NULL;
+        }
+        fiber_task* f0 = fq_pop(&g_sched.run_queue[0]);
+        if (f0 && gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
+        }
+        return f0;
+    }
+
+    size_t p = sched_primary_shard_for_worker(worker_id);
+    fiber_task* f = NULL;
+    if (atomic_load_explicit(&g_sched.run_queue[p].nonempty_hint, memory_order_acquire)) {
+        f = fq_pop(&g_sched.run_queue[p]);
+    } else if (gap_stats) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
+    }
+    if (f) {
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
+        }
+        return f;
+    }
+    size_t s = sched_secondary_shard_for_worker(worker_id);
+    if (s != p) {
+        if (atomic_load_explicit(&g_sched.run_queue[s].nonempty_hint, memory_order_acquire)) {
+            f = fq_pop(&g_sched.run_queue[s]);
+        } else if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
+        }
+        if (f) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
+            }
+            return f;
+        }
+    }
+    size_t start = (size_t)atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed);
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = (start + i) % n;
+        if (idx == p || idx == s) continue;
+        if (!atomic_load_explicit(&g_sched.run_queue[idx].nonempty_hint, memory_order_acquire)) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
+            }
+            continue;
+        }
+        f = fq_pop(&g_sched.run_queue[idx]);
+        if (f) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
+            }
+            return f;
+        }
+    }
+    return NULL;
+}
+
+static inline int sched_global_peek_any(void) {
+    if (!g_sched.run_queue) return 0;
+    size_t n = sched_global_queue_count();
+    for (size_t i = 0; i < n; i++) {
+        if (fq_peek(&g_sched.run_queue[i])) return 1;
+    }
+    return 0;
+}
+
+/* Cheap global-work hint probe: checks shard nonempty hints only. */
+static inline int sched_global_has_hint_any(void) {
+    if (!g_sched.run_queue) return 0;
+    size_t n = sched_global_queue_count();
+    for (size_t i = 0; i < n; i++) {
+        if (atomic_load_explicit(&g_sched.run_queue[i].nonempty_hint, memory_order_acquire)) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle next, const char* edge) {
     if (!cc_v3_worker_lifecycle_enabled()) return;
@@ -1265,25 +1700,42 @@ static inline fiber_task* lq_pop(local_queue* q) {
     return NULL;  /* Too much contention, let caller try global queue */
 }
 
-static inline void wake_one_if_sleeping(int timing) {
+static inline void wake_one_if_sleeping(int timing, cc_wake_reason reason) {
+    const int gap_stats = cc_worker_gap_stats_enabled();
+    if (gap_stats) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_cond_calls[(int)reason], 1, memory_order_relaxed);
+    }
     size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
     if (spinning == 0) {
         size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
         if (sleeping > 0) {
             wake_primitive_wake_one(&g_sched.wake_prim);
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_cond_fired[(int)reason], 1, memory_order_relaxed);
+            }
             if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
         } else {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_cond_skip_no_sleepers[(int)reason], 1, memory_order_relaxed);
+            }
             if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
         }
     } else {
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_cond_skip_spinning[(int)reason], 1, memory_order_relaxed);
+        }
         if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_skipped, 1, memory_order_relaxed);
     }
 }
 
-static inline void wake_one_if_sleeping_unconditional(int timing) {
+static inline void wake_one_if_sleeping_unconditional(int timing, cc_wake_reason reason) {
     /* Always bump the wake counter to avoid lost wakeups.
      * If a worker races into sleep after we enqueue work, the changed counter
      * prevents it from blocking on the old wake_val. */
+    const int gap_stats = cc_worker_gap_stats_enabled();
+    if (gap_stats) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_uncond_calls[(int)reason], 1, memory_order_relaxed);
+    }
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
     if (join_debug_enabled()) {
@@ -1292,12 +1744,27 @@ static inline void wake_one_if_sleeping_unconditional(int timing) {
     if (sleeping > 0) {
         /* Wake one sleeper; wake_primitive_wake_one bumps the counter. */
         wake_primitive_wake_one(&g_sched.wake_prim);
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_uncond_fired[(int)reason], 1, memory_order_relaxed);
+        }
     } else {
         /* No sleepers observed: bump counter to avoid lost wakeups.
          * This counter is a wake generation heuristic, not a publication LP. */
         atomic_fetch_add_explicit(&g_sched.wake_prim.value, 1, memory_order_relaxed);
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_uncond_bump_only[(int)reason], 1, memory_order_relaxed);
+        }
     }
+    (void)timing;
     (void)spinning;
+}
+
+/* Global-edge wake policy for count convergence:
+ * require sleepers; allowing active workers avoids missed-wake starvation when
+ * runnable work appears during mixed active/sleeping transitions. */
+static inline int pool_idle_for_global_edge_wake(void) {
+    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+    return sleeping > 0;
 }
 
 static void cc__fiber_dump_queue_state(void) {
@@ -1313,9 +1780,13 @@ static void cc__fiber_dump_queue_state(void) {
     fprintf(stderr, "  workers: base=%zu temp=%zu\n",
             g_sched.num_workers,
             (size_t)atomic_load_explicit(&g_sched.temp_worker_count, memory_order_relaxed));
-    fprintf(stderr, "  run_queue: head=%zu tail=%zu\n",
-            atomic_load(&g_sched.run_queue->head),
-            atomic_load(&g_sched.run_queue->tail));
+    size_t rq_head = 0, rq_tail = 0;
+    for (size_t s = 0; s < sched_global_queue_count(); s++) {
+        rq_head += atomic_load(&g_sched.run_queue[s].head);
+        rq_tail += atomic_load(&g_sched.run_queue[s].tail);
+    }
+    fprintf(stderr, "  run_queue[%zu]: head=%zu tail=%zu\n",
+            sched_global_queue_count(), rq_head, rq_tail);
     fprintf(stderr, "  inbox_overflow=%zu\n",
             (size_t)atomic_load(&g_inbox_overflow));
     for (size_t i = 0; i < g_sched.num_workers; i++) {
@@ -1410,11 +1881,14 @@ void cc_fiber_dump_state(const char* reason) {
             get_total_parked(),
             atomic_load(&g_sched.completed));
     if (g_sched.run_queue) {
-        size_t head = atomic_load(&g_sched.run_queue->head);
-        size_t tail = atomic_load(&g_sched.run_queue->tail);
-        size_t overflow = atomic_load(&g_sched.run_queue->overflow_count);
-        fprintf(stderr, "  run_queue: head=%zu tail=%zu (ring ~%zu + overflow %zu items)\n",
-                head, tail, tail - head, overflow);
+        size_t head = 0, tail = 0, overflow = 0;
+        for (size_t s = 0; s < sched_global_queue_count(); s++) {
+            head += atomic_load(&g_sched.run_queue[s].head);
+            tail += atomic_load(&g_sched.run_queue[s].tail);
+            overflow += atomic_load(&g_sched.run_queue[s].overflow_count);
+        }
+        fprintf(stderr, "  run_queue[%zu]: head=%zu tail=%zu (ring ~%zu + overflow %zu items)\n",
+                sched_global_queue_count(), head, tail, tail - head, overflow);
     } else {
         fprintf(stderr, "  run_queue: (uninitialized)\n");
     }
@@ -1626,7 +2100,6 @@ static void fiber_entry(mco_coro* co) {
     atomic_fetch_sub_explicit(&g_sched.pending, 1, memory_order_relaxed);
     cc_sched_pressure_add(-1);
     atomic_fetch_add_explicit(&g_sched.completed, 1, memory_order_relaxed);
-    fiber_task* waiter = atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
     int cv_initialized = atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire);
     join_spinlock_unlock(&f->join_lock);
     if (deadlock_debug_enabled()) {
@@ -1638,16 +2111,11 @@ static void fiber_entry(mco_coro* co) {
     if (join_debug_enabled()) {
         int waiters = atomic_load_explicit(&f->join_waiters, memory_order_relaxed);
         fprintf(stderr,
-                "[join] fiber_entry done: fiber=%lu waiter=%s waiters=%d cv_init=%d control=%lld\n",
+                "[join] fiber_entry done: fiber=%lu waiters=%d cv_init=%d control=%lld\n",
                 (unsigned long)f->fiber_id,
-                waiter ? "set" : "null",
                 waiters,
                 cv_initialized,
                 (long long)atomic_load_explicit(&f->control, memory_order_relaxed));
-    }
-    
-    if (waiter) {
-        cc__fiber_unpark(waiter);
     }
     
     /* Signal thread waiters via condvar if it was initialized when we checked */
@@ -1755,11 +2223,11 @@ static inline uint64_t xorshift64(uint64_t* state) {
 
 /* Check if there's work in global queue (not local - local is "owned" by workers) */
 static int sysmon_has_global_pending(void) {
-    return g_sched.run_queue ? fq_peek(g_sched.run_queue) : 0;
+    return sched_global_peek_any();
 }
 
 static int sysmon_has_pending_work(void) {
-    if (g_sched.run_queue && fq_peek(g_sched.run_queue)) return 1;
+    if (sched_global_peek_any()) return 1;
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         if (lq_peek(&g_sched.local_queues[i])) return 1;
         if (iq_peek(&g_sched.inbox_queues[i])) return 1;
@@ -1771,7 +2239,7 @@ static int sysmon_has_pending_work(void) {
 static size_t sysmon_count_pending(void) {
     size_t count = 0;
     /* Global queue: approximate by checking if non-empty */
-    if (g_sched.run_queue && fq_peek(g_sched.run_queue)) count += 8; /* assume decent batch */
+    if (sched_global_peek_any()) count += 8; /* assume decent batch */
     /* Local queues: count actual tasks */
     for (size_t i = 0; i < g_sched.num_workers; i++) {
         local_queue* q = &g_sched.local_queues[i];
@@ -1801,9 +2269,16 @@ static void* replacement_worker(void* arg) {
     }
     uint64_t rng_state = rdtsc();
     int consecutive_idle = 0;
+    const int gap_stats = cc_worker_gap_stats_enabled();
 
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
-        fiber_task* f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
+        }
+        fiber_task* f = sched_global_pop_any();
+        if (f && gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+        }
         if (f && join_debug_enabled()) {
             fprintf(stderr, "[temp%d] got fiber=%lu from global\n", my_temp_id, (unsigned long)f->fiber_id);
             fflush(stderr);
@@ -1824,20 +2299,32 @@ static void* replacement_worker(void* arg) {
         } else {
             /* Brief spin then short sleep - balance responsiveness vs CPU burn */
             for (int spin = 0; spin < 64; spin++) {
-                f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
+                }
+                f = sched_global_peek_any() ? sched_global_pop_any() : NULL;
+                if (f && gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+                }
                 if (f) goto got_work;
                 cpu_pause();
             }
             /* Short sleep - wake primitive wakes us when work arrives */
             atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
             /* Re-check queue after incrementing sleeping to close race window */
-            f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
+            }
+            f = sched_global_peek_any() ? sched_global_pop_any() : NULL;
+            if (f && gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+            }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
                 goto got_work;
             }
             uint32_t wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
-            if (!g_sched.run_queue || !fq_peek(g_sched.run_queue)) {
+            if (!sched_global_peek_any()) {
                 wake_primitive_wait_timeout(&g_sched.wake_prim, wake_val, 5);
             }
             atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
@@ -1888,11 +2375,11 @@ static void* sysmon_main(void* arg) {
         
         /* Wake any fibers whose sleep deadline has passed */
         {
-            size_t woken = sq_drain(g_sched.run_queue);
+            size_t woken = sq_drain();
             if (woken > 0) {
                 /* Fibers were pushed to run queue — wake workers to process them */
                 for (size_t w = 0; w < woken && w < g_sched.num_workers; w++) {
-                    wake_one_if_sleeping_unconditional(0);
+                    wake_one_if_sleeping_unconditional(0, CC_WAKE_REASON_SYSMON_SLEEPQ);
                 }
             }
         }
@@ -2102,6 +2589,15 @@ static inline int worker_run_fiber(fiber_task* f) {
                                                      memory_order_release,
                                                      memory_order_relaxed)) {
             atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+            /* Wake joining fiber only after CTRL_DONE is visible. This avoids
+             * waking it early only to spin in wait_for_fiber_done_state(). */
+            join_spinlock_lock(&f->join_lock);
+            fiber_task* waiter =
+                atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
+            join_spinlock_unlock(&f->join_lock);
+            if (waiter) {
+                cc__fiber_unpark(waiter);
+            }
         }
         /* If CAS failed: fiber was already recycled — another incarnation owns it.
          * Our done=1 was from OUR run; the recycled fiber has done=0.  Safe to
@@ -2136,7 +2632,7 @@ static inline int worker_run_fiber(fiber_task* f) {
                         /* fall through to global if local full or no worker id */
                         /* fallthrough */
                     case YIELD_GLOBAL:
-                        fq_push_blocking(g_sched.run_queue, f);
+                        sched_global_push(f, wid);
                         break;
                     case YIELD_SLEEP:
                         sq_push(f);
@@ -2168,6 +2664,31 @@ static inline fiber_task* worker_try_steal_one(int worker_id, uint64_t* rng_stat
     return lq_steal(&g_sched.local_queues[victim]);
 }
 
+static _Atomic int g_cc_untended_first_mode = -1; /* -1 unknown, 0 off, 1 on */
+
+static inline int cc_untended_first_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_untended_first_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    const char* env = getenv("CC_UNTENDED_FIRST_STEAL");
+    mode = (env && env[0] == '1') ? 1 : 0;
+    int expected = -1;
+    if (!atomic_compare_exchange_strong_explicit(&g_cc_untended_first_mode,
+                                                 &expected,
+                                                 mode,
+                                                 memory_order_release,
+                                                 memory_order_acquire)) {
+        mode = atomic_load_explicit(&g_cc_untended_first_mode, memory_order_acquire);
+    }
+    return mode;
+}
+
+static inline int worker_victim_likely_untended(size_t victim, uint64_t now_cycles) {
+    if (!g_sched.worker_heartbeat) return 0;
+    uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[victim].heartbeat,
+                                       memory_order_relaxed);
+    return (hb == 0) || ((now_cycles - hb) >= ORPHAN_THRESHOLD_CYCLES);
+}
+
 static void* worker_main(void* arg) {
     int worker_id = (int)(size_t)arg;
     tls_worker_id = worker_id;
@@ -2192,6 +2713,7 @@ static void* worker_main(void* arg) {
     const int lifecycle_asserts = 0;
     const int v3_stats = 0;
 #endif
+    const int gap_stats = cc_worker_gap_stats_enabled();
     (void)v3_stats;
     /* Bounded fairness: after FAIRNESS_CHECK_INTERVAL consecutive batches
      * with no global work, inject one global queue pop so fibers pushed to
@@ -2206,9 +2728,17 @@ static void* worker_main(void* arg) {
         }
         /* Fairness: periodically inject one global pop before local drain */
         size_t count = 0;
-        if (local_only_batches >= FAIRNESS_CHECK_INTERVAL && g_sched.run_queue) {
-            fiber_task* gf = fq_pop(g_sched.run_queue);
+        if (local_only_batches >= FAIRNESS_CHECK_INTERVAL &&
+            g_sched.run_queue &&
+            sched_global_has_hint_any()) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_fairness, 1, memory_order_relaxed);
+            }
+            fiber_task* gf = sched_global_pop_for_worker(worker_id);
             if (gf) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_fairness, 1, memory_order_relaxed);
+                }
                 batch[count++] = gf;
                 local_only_batches = 0;
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
@@ -2256,69 +2786,88 @@ static void* worker_main(void* arg) {
 #endif
         }
         
-        /* Priority 3: Pop from global queue */
-        while (count < WORKER_BATCH_SIZE) {
-            fiber_task* f = g_sched.run_queue ? fq_pop(g_sched.run_queue) : NULL;
-            if (!f) break;
-            if (join_debug_enabled()) {
-                fprintf(stderr, "[worker%d] main_loop got fiber=%lu from global\n",
-                        worker_id, (unsigned long)f->fiber_id);
-            }
-            batch[count++] = f;
+        /* Priority 3: Pop from global queue.
+         * Only probe global when local+inbox had no work in this loop.
+         * Fairness injection above still prevents long-term global starvation. */
+        if (count == 0) {
+            while (count < WORKER_BATCH_SIZE && sched_global_has_hint_any()) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
+                }
+                fiber_task* f = sched_global_pop_for_worker(worker_id);
+                if (!f) break;
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
+                }
+                if (join_debug_enabled()) {
+                    fprintf(stderr, "[worker%d] main_loop got fiber=%lu from global\n",
+                            worker_id, (unsigned long)f->fiber_id);
+                }
+                batch[count++] = f;
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
-            if (v3_stats) {
-                atomic_fetch_add_explicit(&g_cc_v3_wm_global_pulls, 1, memory_order_relaxed);
-            }
+                if (v3_stats) {
+                    atomic_fetch_add_explicit(&g_cc_v3_wm_global_pulls, 1, memory_order_relaxed);
+                }
 #endif
+            }
         }
         
         /* Priority 4: Batch steal from other workers with randomized victim selection */
         if (count == 0 && g_sched.num_workers > 1) {
             /* Randomize starting victim to avoid thundering herd */
             size_t start = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-            
-            for (size_t j = 0; j < g_sched.num_workers; j++) {
-                size_t victim = (start + j) % g_sched.num_workers;
-                if ((int)victim == worker_id) continue;
-                
-                fiber_task* inbox_task = iq_pop(&g_sched.inbox_queues[victim]);
-                if (inbox_task) {
-                    batch[count++] = inbox_task;
-#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
-                    if (v3_stats) {
-                        atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
+            const int untended_first = cc_untended_first_enabled();
+            const uint64_t now_cycles = rdtsc();
+
+            /* Pass 0: adopt untended slices first. Pass 1: fallback to any slice. */
+            for (int pass = 0; pass < (untended_first ? 2 : 1) && count == 0; pass++) {
+                for (size_t j = 0; j < g_sched.num_workers; j++) {
+                    size_t victim = (start + j) % g_sched.num_workers;
+                    if ((int)victim == worker_id) continue;
+                    if (untended_first && pass == 0 &&
+                        !worker_victim_likely_untended(victim, now_cycles)) {
+                        continue;
                     }
-#endif
-                    break;  /* Got work, stop stealing */
-                }
-                
-                /* Batch steal: take up to half the victim's queue */
-                size_t stolen = lq_steal_batch(&g_sched.local_queues[victim], 
-                                               steal_buf, STEAL_BATCH_SIZE);
-                if (stolen > 0) {
-                    /* Execute first task immediately, put rest in batch or local queue */
-                    batch[count++] = steal_buf[0];
+                    
+                    fiber_task* inbox_task = iq_pop(&g_sched.inbox_queues[victim]);
+                    if (inbox_task) {
+                        batch[count++] = inbox_task;
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
-                    if (v3_stats) {
-                        atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
-                    }
+                        if (v3_stats) {
+                            atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
+                        }
 #endif
-                    for (size_t s = 1; s < stolen && count < WORKER_BATCH_SIZE; s++) {
-                        batch[count++] = steal_buf[s];
+                        break;  /* Got work, stop stealing */
+                    }
+                    
+                    /* Batch steal: take up to half the victim's queue */
+                    size_t stolen = lq_steal_batch(&g_sched.local_queues[victim],
+                                                   steal_buf, STEAL_BATCH_SIZE);
+                    if (stolen > 0) {
+                        /* Execute first task immediately, put rest in batch or local queue */
+                        batch[count++] = steal_buf[0];
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
                         if (v3_stats) {
                             atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
                         }
 #endif
-                    }
-                    /* Any remaining stolen tasks go to our local queue */
-                    for (size_t s = count; s < stolen; s++) {
-                        if (lq_push(my_queue, steal_buf[s]) != 0) {
-                            /* Local queue full, put overflow in global */
-                            fq_push_blocking(g_sched.run_queue, steal_buf[s]);
+                        for (size_t s = 1; s < stolen && count < WORKER_BATCH_SIZE; s++) {
+                            batch[count++] = steal_buf[s];
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
+                            if (v3_stats) {
+                                atomic_fetch_add_explicit(&g_cc_v3_wm_steal_local_pulls, 1, memory_order_relaxed);
+                            }
+#endif
                         }
+                        /* Any remaining stolen tasks go to our local queue */
+                        for (size_t s = count; s < stolen; s++) {
+                            if (lq_push(my_queue, steal_buf[s]) != 0) {
+                                /* Local queue full, put overflow in global */
+                            sched_global_push(steal_buf[s], worker_id);
+                            }
+                        }
+                        break;  /* Got work, stop stealing */
                     }
-                    break;  /* Got work, stop stealing */
                 }
             }
         }
@@ -2375,6 +2924,9 @@ static void* worker_main(void* arg) {
         
         /* No work - enter spinning state */
         if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_IDLE_SPIN, "enter_spin");
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spin_enters, 1, memory_order_relaxed);
+        }
         size_t old_spinning = atomic_fetch_add_explicit(&g_sched.spinning, 1, memory_order_seq_cst);
         if (join_debug_enabled()) {
             fprintf(stderr, "[worker%d] entering spin (spinning: %zu -> %zu)\n", worker_id, old_spinning, old_spinning + 1);
@@ -2397,19 +2949,11 @@ static void* worker_main(void* arg) {
                     fflush(stderr);
                 }
             }
-            if (!f && g_sched.run_queue) {
-                f = fq_pop(g_sched.run_queue);
-                if (f && join_debug_enabled()) {
-                    fprintf(stderr, "[worker%d] spin got fiber=%lu from global\n", worker_id, (unsigned long)f->fiber_id);
-                    fflush(stderr);
-                }
-            }
             if (f) spin_found_work = 1;
-            /* Try to steal every 16 spins */
-            if (!f && (spin & 15) == 15) {
-                f = worker_try_steal_one(worker_id, &rng_state);
-            }
             if (f) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spin_found_work, 1, memory_order_relaxed);
+                }
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "spin_found_work");
                 worker_run_fiber_accounted(f);
@@ -2423,42 +2967,48 @@ static void* worker_main(void* arg) {
             sched_yield();
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
-            if (!f && g_sched.run_queue) f = fq_pop(g_sched.run_queue);
-            /* Try to steal every 4 yields */
-            if (!f && (y & 3) == 3) {
-                f = worker_try_steal_one(worker_id, &rng_state);
-            }
             if (f) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.yield_found_work, 1, memory_order_relaxed);
+                }
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "yield_found_work");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
         }
-        
+
+        /* One bounded pre-sleep steal probe: helps catch untended work without
+         * reintroducing high-frequency steal churn in spin/yield loops. */
+        if (g_sched.num_workers > 1) {
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_attempts, 1, memory_order_relaxed);
+            }
+            fiber_task* f = worker_try_steal_one(worker_id, &rng_state);
+            if (f) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_hits, 1, memory_order_relaxed);
+                }
+                atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
+                if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "pre_sleep_steal");
+                worker_run_fiber_accounted(f);
+                goto next_iteration;
+            }
+        }
+
         /* CRITICAL: Increment sleeping BEFORE decrementing spinning.
          * This ensures there's always at least one counter > 0 during the transition.
          * Otherwise there's a race window where spinning=0 and sleeping=0, and
          * spawners see no workers to wake. */
         atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_enters, 1, memory_order_relaxed);
+        }
         if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
         if (join_debug_enabled()) {
             fprintf(stderr, "[worker%d] exiting spin (found_work=%d iters=%d)\n", worker_id, spin_found_work, spin_iters);
             fflush(stderr);
-        }
-        
-        /* One last steal attempt before sleeping */
-        if (g_sched.num_workers > 1) {
-            for (size_t j = 0; j < g_sched.num_workers; j++) {
-                fiber_task* f = worker_try_steal_one(worker_id, &rng_state);
-                if (f) {
-                    atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
-                    if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "pre_sleep_steal");
-                    worker_run_fiber_accounted(f);
-                    goto next_iteration;
-                }
-            }
         }
         
         /* Sleep using fast wake primitive (futex/ulock instead of condvar) */
@@ -2479,13 +3029,15 @@ static void* worker_main(void* arg) {
         {
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
-            if (!f && g_sched.run_queue) f = fq_pop(g_sched.run_queue);
             if (f) {
                 if (join_debug_enabled()) {
                     fprintf(stderr, "[worker%d] post-sleep-inc found fiber=%lu\n", worker_id, (unsigned long)f->fiber_id);
                     fflush(stderr);
                 }
                 atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_post_recheck_hits, 1, memory_order_relaxed);
+                }
                 if (lifecycle_asserts) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "post_sleep_recheck");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
@@ -2512,36 +3064,25 @@ static void* worker_main(void* arg) {
         while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
             /* Check if there's runnable work */
             /* Drain any expired sleepers before checking queues */
-            if (g_sched.run_queue) sq_drain(g_sched.run_queue);
+            if (g_sched.run_queue) sq_drain();
             
             int has_local = lq_peek(my_queue);
             int has_inbox = iq_peek(&g_sched.inbox_queues[worker_id]);
-            int has_global = g_sched.run_queue && fq_peek(g_sched.run_queue);
+            int has_global = sched_global_peek_any();
             if (join_debug_enabled()) {
                 fprintf(stderr, "[worker%d] sleep_check: local=%d inbox=%d global=%d\n",
                         worker_id, has_local, has_inbox, has_global);
             }
             if (has_local || has_inbox || has_global) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_wake_with_work, 1, memory_order_relaxed);
+                }
                 if (join_debug_enabled()) {
                     fprintf(stderr, "[worker%d] woke: local=%d inbox=%d global=%d\n",
                             worker_id, has_local, has_inbox, has_global);
                 }
                 break;
             }
-            /* Check for stealable work in other queues */
-            int found_stealable = 0;
-            for (size_t i = 0; i < g_sched.num_workers; i++) {
-                if ((int)i != worker_id &&
-                    (lq_peek(&g_sched.local_queues[i]) || iq_peek(&g_sched.inbox_queues[i]))) {
-                    found_stealable = 1;
-                    if (join_debug_enabled()) {
-                        fprintf(stderr, "[worker%d] found stealable in worker%zu\n", worker_id, i);
-                    }
-                    break;
-                }
-            }
-            if (found_stealable) break;
-            
             /* Read wake_val AFTER checking queues - this is critical for correctness.
              * Memory barrier ensures we see any fiber pushed before this point. */
             atomic_thread_fence(memory_order_acquire);
@@ -2549,7 +3090,7 @@ static void* worker_main(void* arg) {
             
             /* Double-check queues after reading wake_val to close the race window */
             if (lq_peek(my_queue) || iq_peek(&g_sched.inbox_queues[worker_id]) ||
-                (g_sched.run_queue && fq_peek(g_sched.run_queue))) {
+                sched_global_peek_any()) {
                 break;
             }
             
@@ -2557,7 +3098,16 @@ static void* worker_main(void* arg) {
             if (join_debug_enabled()) {
                 fprintf(stderr, "[worker%d] sleeping (wake_val=%u)\n", worker_id, wake_val);
             }
+            uint64_t wait_start_ns = 0;
+            if (gap_stats) {
+                wait_start_ns = cc__mono_ns_sched();
+            }
             wake_primitive_wait_timeout(&g_sched.wake_prim, wake_val, 500);
+            if (gap_stats) {
+                uint64_t waited_ns = cc__mono_ns_sched() - wait_start_ns;
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_wait_calls, 1, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_wait_ns, waited_ns, memory_order_relaxed);
+            }
             if (join_debug_enabled()) {
                 uint32_t new_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
                 fprintf(stderr, "[worker%d] woke from wait (new wake_val=%u)\n", worker_id, new_val);
@@ -2589,6 +3139,9 @@ static void cc_fiber_atexit_stats(void) {
     if (getenv("CC_SPAWN_TIMING")) {
         cc_fiber_dump_timing();
         cc_nursery_dump_timing();
+    }
+    if (cc_worker_gap_stats_dump_enabled()) {
+        cc_worker_gap_stats_dump();
     }
 }
 
@@ -2637,8 +3190,17 @@ int cc_fiber_sched_init(size_t num_workers) {
     memset(&g_sched, 0, sizeof(g_sched));
     g_sched.num_workers = num_workers;
     atomic_store(&g_sched.running, 1);
-    g_sched.run_queue = (fiber_queue*)calloc(1, sizeof(fiber_queue));
-    fq_init(g_sched.run_queue);
+    g_sched.run_queue_count = 1;
+    if (cc_sharded_runq_enabled() && num_workers > 1) {
+        size_t shards = num_workers * 2;
+        if (shards > (MAX_WORKERS * 2)) shards = MAX_WORKERS * 2;
+        if (shards < 2) shards = 2;
+        g_sched.run_queue_count = shards;
+    }
+    g_sched.run_queue = (fiber_queue*)calloc(g_sched.run_queue_count, sizeof(fiber_queue));
+    for (size_t i = 0; i < g_sched.run_queue_count; i++) {
+        fq_init(&g_sched.run_queue[i]);
+    }
     sq_init();
     g_sched.local_queues = (local_queue*)calloc(num_workers, sizeof(local_queue));
     g_sched.inbox_queues = (inbox_queue*)calloc(num_workers, sizeof(inbox_queue));
@@ -2650,7 +3212,11 @@ int cc_fiber_sched_init(size_t num_workers) {
     if (!g_sched.run_queue || !g_sched.local_queues || !g_sched.inbox_queues ||
         !g_sched.workers || !g_sched.worker_parked || !g_sched.worker_heartbeat ||
         !g_sched.worker_lifecycle) {
-        if (g_sched.run_queue) pthread_mutex_destroy(&g_sched.run_queue->overflow_mu);
+        if (g_sched.run_queue) {
+            for (size_t i = 0; i < g_sched.run_queue_count; i++) {
+                pthread_mutex_destroy(&g_sched.run_queue[i].overflow_mu);
+            }
+        }
         free(g_sched.run_queue);
         free(g_sched.local_queues);
         free(g_sched.inbox_queues);
@@ -2745,7 +3311,7 @@ void cc_fiber_sched_shutdown(void) {
     /* Drain queues and free pending tasks to avoid leaks */
     if (g_sched.run_queue) {
         fiber_task* f;
-        while ((f = fq_pop(g_sched.run_queue))) {
+        while ((f = sched_global_pop_any())) {
             fiber_free(f);
         }
     }
@@ -2773,7 +3339,9 @@ void cc_fiber_sched_shutdown(void) {
     free(g_sched.worker_heartbeat);
     free(g_sched.worker_lifecycle);
     sq_destroy();
-    pthread_mutex_destroy(&g_sched.run_queue->overflow_mu);
+    for (size_t i = 0; i < g_sched.run_queue_count; i++) {
+        pthread_mutex_destroy(&g_sched.run_queue[i].overflow_mu);
+    }
     free(g_sched.run_queue);
     g_sched.workers = NULL;
     g_sched.local_queues = NULL;
@@ -2782,6 +3350,7 @@ void cc_fiber_sched_shutdown(void) {
     g_sched.worker_heartbeat = NULL;
     g_sched.worker_lifecycle = NULL;
     g_sched.run_queue = NULL;
+    g_sched.run_queue_count = 0;
 
     /* Free pooled fibers (including their coros and join_cvs) */
     fiber_task* f = atomic_load(&g_sched.free_list);
@@ -2797,6 +3366,7 @@ void cc_fiber_sched_shutdown(void) {
 
 fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     int timing = spawn_timing_enabled();
+    const int gap_stats = cc_worker_gap_stats_enabled();
     uint64_t t0 = 0, t1, t2, t3, t4;
     
     if (timing) t0 = rdtsc();
@@ -2932,6 +3502,8 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
      * - Global queue is checked by all workers, reducing miss probability
      * Workers spawning to other workers still use inbox for locality. */
     int pushed = 0;
+    int pushed_global = 0;
+    int global_edge = 0;
     int pushed_local = 0;
     if (tls_worker_id >= 0) {
         /* Worker context: prefer local queue (stealing handles balance). */
@@ -2939,6 +3511,9 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
         if (lq_push(&g_sched.local_queues[self], f) == 0) {
             pushed = 1;
             pushed_local = 1;
+            if (gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_local, 1, memory_order_relaxed);
+            }
             if (join_debug_enabled()) {
                 fprintf(stderr, "[spawn] fiber=%lu to local[%zu]\n", (unsigned long)f->fiber_id, self);
             }
@@ -2951,6 +3526,9 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             }
             if (iq_push(&g_sched.inbox_queues[target], f) == 0) {
                 pushed = 1;
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_inbox, 1, memory_order_relaxed);
+                }
                 if (join_debug_enabled()) {
                     fprintf(stderr, "[spawn] fiber=%lu to inbox[%zu]\n", (unsigned long)f->fiber_id, target);
                 }
@@ -2965,7 +3543,15 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
      *
      * Non-worker spawns or local queue full: fall through to global queue. */
     if (!pushed) {
-        fq_push_blocking(g_sched.run_queue, f);
+        global_edge = sched_global_push(f, -1);
+        pushed_global = 1;
+        if (gap_stats) {
+            if (tls_worker_id >= 0) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_global_fallback, 1, memory_order_relaxed);
+            } else {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_nonworker_global, 1, memory_order_relaxed);
+            }
+        }
         if (join_debug_enabled()) {
             fprintf(stderr, "[spawn] fiber=%lu to global\n", (unsigned long)f->fiber_id);
         }
@@ -2981,7 +3567,13 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
      * Use the conditional version: if workers are spinning, they'll find
      * the work via queue checks without a costly kernel wake syscall. */
     if (!pushed_local) {
-        wake_one_if_sleeping(timing);
+        if (pushed_global) {
+            if (global_edge && pool_idle_for_global_edge_wake()) {
+                wake_one_if_sleeping_unconditional(timing, CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
+            }
+        } else {
+            wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_NONGLOBAL);
+        }
     }
     
     if (timing) {
@@ -3047,7 +3639,7 @@ static inline void wait_for_fiber_done_state(fiber_task* f) {
      * Strategy: tight cpu_pause spin (covers >99.9% of cases), then fall back
      * to sched_yield() which is a safe OS-level yield hint (not a fiber yield). */
     for (int i = 0; i < 10000; i++) {
-        if (atomic_load_explicit(&f->control, memory_order_seq_cst) == CTRL_DONE) {
+        if (atomic_load_explicit(&f->control, memory_order_acquire) == CTRL_DONE) {
             return;
         }
         cpu_pause();
@@ -3056,7 +3648,7 @@ static inline void wait_for_fiber_done_state(fiber_task* f) {
      * because sched_yield() is just an OS thread hint — it does NOT call
      * mco_yield and does NOT cause reentrancy.  The gap should be at most a few
      * instructions, so this loop is extremely unlikely to iterate more than once. */
-    while (atomic_load_explicit(&f->control, memory_order_seq_cst) != CTRL_DONE) {
+    while (atomic_load_explicit(&f->control, memory_order_acquire) != CTRL_DONE) {
         sched_yield();
     }
 }
@@ -3134,7 +3726,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         if (out_result) *out_result = f->result;
         return 0;
     }
-    
+
     /* Slow path: choose strategy based on context */
     
     if (current && current->coro) {
@@ -3176,9 +3768,14 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
                     (unsigned long)current->fiber_id,
                     atomic_load_explicit(&f->done, memory_order_relaxed));
         }
+        /* Fiber-join path already runs on an active worker thread; parking this
+         * fiber yields back to that worker loop immediately, so no extra wake
+         * nudge is needed here. */
         int park_loops = 0;
+        atomic_fetch_add_explicit(&g_cc_join_park_joins, 1, memory_order_relaxed);
         while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
             park_loops++;
+            atomic_fetch_add_explicit(&g_cc_join_park_loops, 1, memory_order_relaxed);
             if (join_debug_enabled()) {
                 fprintf(stderr,
                         "[join] park_loop: target=%lu waiter=%lu loop=%d done=%d control=%lld\n",
@@ -3260,7 +3857,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         /* CRITICAL: Wake a worker before blocking. If all workers are sleeping,
          * the fiber we're waiting for will never run. This ensures at least one
          * worker is awake to process the fiber queue. */
-        wake_one_if_sleeping_unconditional(0);
+        wake_one_if_sleeping(0, CC_WAKE_REASON_JOIN_THREAD);
         
         if (join_debug_enabled()) {
             fprintf(stderr,
@@ -3390,7 +3987,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
             return;  /* Recycled — bail out */
         }
         f->enqueue_src = 3; f->enqueue_ctrl = owned;
-        fq_push_blocking(g_sched.run_queue, f);
+        sched_global_push(f, -1);
         return;
     }
 
@@ -3408,7 +4005,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
             return;  /* Recycled — bail out */
         }
         f->enqueue_src = 4; f->enqueue_ctrl = owned;
-        fq_push_blocking(g_sched.run_queue, f);
+        sched_global_push(f, -1);
         return;
     }
 
@@ -3435,7 +4032,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
             cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(self-recovery)", 1);
             /* We un-parked ourselves — re-enqueue. */
             f->enqueue_src = 6; f->enqueue_ctrl = CTRL_PARKED;
-            fq_push_blocking(g_sched.run_queue, f);
+            sched_global_push(f, -1);
             return;
         }
         /* CAS failed: someone already unparked us (PARKED→QUEUED in unpark path).
@@ -3452,7 +4049,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
             /* §9 row: PARKED -> RUNNABLE (post-commit flag wake). */
             cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(post-commit-flag)", 1);
             f->enqueue_src = 7; f->enqueue_ctrl = CTRL_PARKED;
-            fq_push_blocking(g_sched.run_queue, f);
+            sched_global_push(f, -1);
             return;
         }
         /* Already unparked by someone else. */
@@ -3591,6 +4188,8 @@ int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket) {
 void cc__fiber_unpark(void* fiber_ptr) {
     fiber_task* f = (fiber_task*)fiber_ptr;
     if (!f) return;
+    const int gap_stats = cc_worker_gap_stats_enabled();
+    atomic_fetch_add_explicit(&g_cc_fiber_unpark_calls, 1, memory_order_relaxed);
     int claimed_parked = 0;
 
     if (wake_debug_enabled()) {
@@ -3663,6 +4262,7 @@ void cc__fiber_unpark(void* fiber_ptr) {
 queued:
     /* §9 row: PARKED -> RUNNABLE by waker claim owner only. */
     cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(waker)", claimed_parked);
+    atomic_fetch_add_explicit(&g_cc_fiber_unpark_enqueues, 1, memory_order_relaxed);
     /* Decrement parked counter (incremented by worker_commit_park). */
     {
         int pw = f->last_worker_id;
@@ -3692,6 +4292,10 @@ queued:
      * can pick up the fiber. */
     #define AFFINITY_INBOX_THRESHOLD 64
     int pushed = 0;
+    int pushed_global = 0;
+    int global_edge = 0;
+    int divert_stale = 0;
+    int divert_inbox = 0;
     int preferred = f->last_worker_id;
     if (preferred >= 0 && preferred < (int)g_sched.num_workers) {
         int divert = 0;
@@ -3701,37 +4305,79 @@ queued:
                 memory_order_relaxed);
             if (hb != 0 && (rdtsc() - hb) >= ORPHAN_THRESHOLD_CYCLES) {
                 divert = 1;  /* Worker appears stuck */
+                divert_stale = 1;
             }
             if (!divert && iq_approx_size(&g_sched.inbox_queues[preferred])
                     >= AFFINITY_INBOX_THRESHOLD) {
                 divert = 1;  /* Inbox overloaded */
+                divert_inbox = 1;
             }
         }
         if (divert) {
-            fq_push_blocking(g_sched.run_queue, f);
+            global_edge = sched_global_push(f, preferred);
+            pushed_global = 1;
             pushed = 1;
+            if (gap_stats) {
+                if (divert_stale) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, 1, memory_order_relaxed);
+                } else if (divert_inbox) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_inbox, 1, memory_order_relaxed);
+                } else {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, 1, memory_order_relaxed);
+                }
+            }
         } else if (preferred == tls_worker_id) {
             /* Same worker — push directly to our local queue (no contention) */
             pushed = (lq_push(&g_sched.local_queues[preferred], f) == 0);
+            if (pushed && gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
+            }
         } else {
             /* Different worker — use its inbox (MPSC-safe) */
-            pushed = (iq_push(&g_sched.inbox_queues[preferred], f) == 0);
+            for (int attempt = 0; attempt < 3 && !pushed; attempt++) {
+                pushed = (iq_push(&g_sched.inbox_queues[preferred], f) == 0);
+                if (!pushed) cpu_pause();
+            }
+            if (pushed && gap_stats) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
+            }
         }
     } else if (tls_worker_id >= 0) {
         /* No affinity yet — fall back to current worker's local queue */
         pushed = (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0);
+        if (pushed && gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
+        }
     }
     
     /* Fallback to global queue if not in worker context or target queue is full */
     if (!pushed) {
-        fq_push_blocking(g_sched.run_queue, f);
+        global_edge = sched_global_push(f, preferred);
+        pushed_global = 1;
+        if (gap_stats) {
+            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, 1, memory_order_relaxed);
+        }
     }
     
     /* Wake a sleeping worker — but skip the costly kernel wake syscall if
      * we pushed to our OWN local queue (the current worker will find the
      * fiber on its next loop iteration without any kernel transition). */
     if (!(pushed && preferred == tls_worker_id && preferred >= 0)) {
-        wake_one_if_sleeping_unconditional(0);
+        if (pushed_global) {
+            if (global_edge && pool_idle_for_global_edge_wake()) {
+                if (divert_stale) {
+                    /* Stale-divert is advisory; avoid extra wakes here. */
+                } else if (divert_inbox) {
+                    wake_one_if_sleeping(0, CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
+                } else {
+                    wake_one_if_sleeping_unconditional(0, CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
+                }
+            }
+        } else {
+            /* Inbox-affinity unparks are frequent; if any workers are already
+             * spinning, let them pick the work up without another kernel wake. */
+            wake_one_if_sleeping(0, CC_WAKE_REASON_UNPARK_NONGLOBAL);
+        }
     }
 }
 
