@@ -1069,6 +1069,7 @@ static inline uint64_t cc__mono_ns_sched(void) {
 }
 
 static inline int cc_worker_gap_stats_enabled(void) {
+#if CC_V3_DIAGNOSTICS
     int mode = atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
     if (mode >= 0) return mode;
     mode = (getenv("CC_WORKER_GAP_STATS") || getenv("CC_WORKER_GAP_STATS_DUMP")) ? 1 : 0;
@@ -1079,9 +1080,13 @@ static inline int cc_worker_gap_stats_enabled(void) {
                                                    memory_order_release,
                                                    memory_order_acquire);
     return atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
+#else
+    return 0;
+#endif
 }
 
 static inline int cc_worker_gap_stats_dump_enabled(void) {
+#if CC_V3_DIAGNOSTICS
     int mode = atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
     if (mode >= 0) return mode;
     mode = getenv("CC_WORKER_GAP_STATS_DUMP") ? 1 : 0;
@@ -1092,6 +1097,9 @@ static inline int cc_worker_gap_stats_dump_enabled(void) {
                                                    memory_order_release,
                                                    memory_order_acquire);
     return atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
+#else
+    return 0;
+#endif
 }
 
 static void cc_worker_gap_stats_dump(void) {
