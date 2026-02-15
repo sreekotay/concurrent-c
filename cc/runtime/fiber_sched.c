@@ -1069,7 +1069,6 @@ static inline uint64_t cc__mono_ns_sched(void) {
 }
 
 static inline int cc_worker_gap_stats_enabled(void) {
-#if CC_V3_DIAGNOSTICS
     int mode = atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
     if (mode >= 0) return mode;
     mode = (getenv("CC_WORKER_GAP_STATS") || getenv("CC_WORKER_GAP_STATS_DUMP")) ? 1 : 0;
@@ -1080,13 +1079,9 @@ static inline int cc_worker_gap_stats_enabled(void) {
                                                    memory_order_release,
                                                    memory_order_acquire);
     return atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
-#else
-    return 0;
-#endif
 }
 
 static inline int cc_worker_gap_stats_dump_enabled(void) {
-#if CC_V3_DIAGNOSTICS
     int mode = atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
     if (mode >= 0) return mode;
     mode = getenv("CC_WORKER_GAP_STATS_DUMP") ? 1 : 0;
@@ -1097,9 +1092,6 @@ static inline int cc_worker_gap_stats_dump_enabled(void) {
                                                    memory_order_release,
                                                    memory_order_acquire);
     return atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
-#else
-    return 0;
-#endif
 }
 
 static void cc_worker_gap_stats_dump(void) {
@@ -3530,6 +3522,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     int pushed = 0;
     int pushed_global = 0;
     int global_edge = 0;
+    int non_global_edge = 0;
     int pushed_local = 0;
     static _Atomic size_t spawn_counter = 0;
     if (tls_worker_id >= 0) {
@@ -3557,28 +3550,13 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             }
             if (pushed) {
                 pushed = 1;
+                non_global_edge = inbox_edge;
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_inbox, 1, memory_order_relaxed);
                 }
                 if (join_debug_enabled()) {
                     fprintf(stderr, "[spawn] fiber=%lu to inbox[%zu]\n", (unsigned long)f->fiber_id, target);
                 }
-            }
-        }
-    } else if (g_sched.num_workers > 0) {
-        /* Non-worker context: prefer direct worker inbox delivery first.
-         * This reduces global queue churn and wake fanout for producer threads. */
-        size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
-        int inbox_edge = 0;
-        for (int attempt = 0; attempt < 8 && !pushed; attempt++) {
-            pushed = (iq_push_with_edge(&g_sched.inbox_queues[target], f, &inbox_edge) == 0);
-            if (!pushed) cpu_pause();
-        }
-        if (pushed) {
-            pushed = 1;
-            if (join_debug_enabled()) {
-                fprintf(stderr, "[spawn] fiber=%lu (nonworker) to inbox[%zu]\n",
-                        (unsigned long)f->fiber_id, target);
             }
         }
     }
@@ -3619,7 +3597,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                 wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
             }
         } else {
-            if (pool_strict_idle_for_nonglobal_wake()) {
+            if (non_global_edge || pool_strict_idle_for_nonglobal_wake()) {
                 wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_NONGLOBAL);
             }
         }

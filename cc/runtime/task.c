@@ -113,7 +113,6 @@ static inline uint64_t cc__mono_ns(void) {
 }
 
 static int cc_task_wait_stats_enabled(void) {
-#if CC_V3_DIAGNOSTICS
     int mode = atomic_load_explicit(&g_cc_task_wait_stats.mode, memory_order_acquire);
     if (mode >= 0) return mode;
     mode = (getenv("CC_TASK_WAIT_STATS") || getenv("CC_TASK_WAIT_STATS_DUMP")) ? 1 : 0;
@@ -124,13 +123,9 @@ static int cc_task_wait_stats_enabled(void) {
                                                    memory_order_release,
                                                    memory_order_acquire);
     return atomic_load_explicit(&g_cc_task_wait_stats.mode, memory_order_acquire);
-#else
-    return 0;
-#endif
 }
 
 static int cc_task_wait_stats_dump_enabled(void) {
-#if CC_V3_DIAGNOSTICS
     int mode = atomic_load_explicit(&g_cc_task_wait_stats.dump_mode, memory_order_acquire);
     if (mode >= 0) return mode;
     mode = getenv("CC_TASK_WAIT_STATS_DUMP") ? 1 : 0;
@@ -141,9 +136,6 @@ static int cc_task_wait_stats_dump_enabled(void) {
                                                    memory_order_release,
                                                    memory_order_acquire);
     return atomic_load_explicit(&g_cc_task_wait_stats.dump_mode, memory_order_acquire);
-#else
-    return 0;
-#endif
 }
 
 static void cc_task_wait_stats_dump(void) {
