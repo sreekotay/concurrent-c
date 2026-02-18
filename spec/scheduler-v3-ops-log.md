@@ -1464,3 +1464,62 @@ Immediate cleanup applied:
 - Removed dead helper functions from `cc/runtime/fiber_sched.c`:
   - `sysmon_has_global_pending()`
   - `sysmon_count_pending()`
+
+### 16.28 Structural non-tuning fix: stale-unpark reroute
+
+Problem:
+- `pigz` still showed a large `global pop callsites.replacement` delta versus
+  pthread even after startup/route fixes.
+
+Instrumentation added (`cc/runtime/fiber_sched.c`):
+- Replacement global-hit source split:
+  - `replacement hit sources: spawn=... unpark=... other=...`
+  - spawn route split (`local/inbox/global/unknown`) for replacement hits.
+- This was used to answer *where replacement global hits came from* before
+  changing policy.
+
+Finding:
+- Replacement global hits were dominated by unpark-divert traffic, not spawn
+  publish traffic.
+
+Structural change:
+- In `cc__fiber_unpark()`, stale-affinity divert now prefers peer-inbox reroute
+  first and only falls back to global if inbox push fails.
+
+Validation:
+- Full `smoke`, `stress-check`, `perf-check` green after change.
+- Pigz samples showed replacement global callsite collapse in-session
+  (`replacement=0/0` in repeated runs).
+
+Commit:
+- `b73a258` `perf: reroute stale unpark diverts away from global queue`
+
+### 16.29 Class C residue cleanup: startup spill-mode removal
+
+Intent:
+- Remove legacy startup spill-mode residue that no longer defines behavior under
+  deterministic startup admission.
+
+Change (`cc/runtime/fiber_sched.c`):
+- Removed obsolete startup spill globals:
+  - `g_spawn_nw_startup_spill_mode`
+  - `g_spawn_nw_startup_spill_tokens`
+  - `g_spawn_nw_startup_last_pending`
+  - `g_spawn_nw_startup_low_streak`
+  - `g_spawn_nw_startup_last_wakev_refill/control/enter`
+  - `g_spawn_nw_startup_last_wakev`
+- Removed corresponding forced-spill mode counters and dump fields
+  (`mode_enter/mode_exit/refill/no_tokens/cooldown`).
+- Kept startup admission quota behavior and counters intact
+  (`startup_admit reset/grant/deny` + `forced_spill` volume/context).
+
+Validation:
+- `make smoke` green.
+- Targeted stress guards green:
+  - `work_stealing_race`
+  - `join_init_race`
+  - `fiber_spawn_join_tight`
+  - `block_combinators_stress`
+
+Commit:
+- `72b1b46` `chore: remove legacy startup spill residue from scheduler`

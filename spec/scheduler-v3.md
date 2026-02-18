@@ -347,6 +347,8 @@ timing-sensitive startup starvation:
   generation; overflow deterministically spills to global.
 - In `RUN`, non-worker inbox publish readiness is open (normal steady-state
   routing).
+- Legacy startup spill-mode state has been retired; startup policy is defined by
+  phase + wake-wave admission quota rather than spill-mode hysteresis.
 
 Implementation note:
 - This is an implementation policy layered on top of the normative lifecycle
@@ -538,6 +540,8 @@ preserves single-owner wake claim and exactly-once enqueue semantics.
 - Prefer local deque pop, then global MPMC, then steal.
 - If a worker wakes with no local/inbox/global work visible, it MAY perform a
   bounded peer-inbox rescue probe before returning to sleep.
+- On unpark stale-affinity divert, prefer peer inbox reroute before global
+  fallback to reduce replacement-worker global-pop churn.
 - Sleep only after confirming no local, no global, steal failed, and no pending wakeups.
 - DRAINING: no stealing/accepting; drain local->global; exit after slice.
 
