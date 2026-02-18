@@ -1024,14 +1024,6 @@ static _Atomic size_t g_requested_workers = 0;  /* User-requested worker count (
 static _Atomic int g_cc_v3_pressure_stats_atexit = 0;
 static _Atomic int g_sharded_runq_mode = -1; /* -1 unknown, 0 off, 1 on */
 static _Atomic size_t g_global_pop_rr = 0;
-static _Atomic uint32_t g_spawn_nw_startup_last_wakev = UINT32_MAX;
-static _Atomic int g_spawn_nw_startup_spill_mode = 0;
-static _Atomic size_t g_spawn_nw_startup_spill_tokens = 0;
-static _Atomic size_t g_spawn_nw_startup_last_pending = 0;
-static _Atomic size_t g_spawn_nw_startup_low_streak = 0;
-static _Atomic uint32_t g_spawn_nw_startup_last_wakev_refill = UINT32_MAX;
-static _Atomic uint32_t g_spawn_nw_startup_last_wakev_control = UINT32_MAX;
-static _Atomic uint32_t g_spawn_nw_startup_last_wakev_enter = UINT32_MAX;
 static _Atomic uint32_t g_spawn_nw_startup_admit_wakev = UINT32_MAX;
 static _Atomic size_t g_spawn_nw_startup_admit_remaining = 0;
 
@@ -1102,11 +1094,6 @@ typedef struct {
     _Atomic uint64_t spawn_nw_inbox_success;
     _Atomic uint64_t spawn_nw_global_fallback;
     _Atomic uint64_t spawn_nw_global_forced_spill;
-    _Atomic uint64_t spawn_nw_forced_spill_mode_enter;
-    _Atomic uint64_t spawn_nw_forced_spill_mode_exit;
-    _Atomic uint64_t spawn_nw_forced_spill_token_refill;
-    _Atomic uint64_t spawn_nw_forced_spill_suppressed_no_tokens;
-    _Atomic uint64_t spawn_nw_forced_spill_suppressed_cooldown;
     _Atomic uint64_t spawn_nw_startup_admit_wave_reset;
     _Atomic uint64_t spawn_nw_startup_admit_granted;
     _Atomic uint64_t spawn_nw_startup_admit_denied;
@@ -1448,16 +1435,6 @@ static void cc_worker_gap_stats_dump(void) {
         atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_global_fallback, memory_order_relaxed);
     uint64_t sp_nw_global_forced_spill =
         atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_global_forced_spill, memory_order_relaxed);
-    uint64_t sp_nw_spill_mode_enter =
-        atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_mode_enter, memory_order_relaxed);
-    uint64_t sp_nw_spill_mode_exit =
-        atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_mode_exit, memory_order_relaxed);
-    uint64_t sp_nw_spill_refill =
-        atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_token_refill, memory_order_relaxed);
-    uint64_t sp_nw_spill_supp_no_tokens =
-        atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_suppressed_no_tokens, memory_order_relaxed);
-    uint64_t sp_nw_spill_supp_cooldown =
-        atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_suppressed_cooldown, memory_order_relaxed);
     uint64_t sp_nw_startup_admit_reset =
         atomic_load_explicit(&g_cc_worker_gap_stats.spawn_nw_startup_admit_wave_reset, memory_order_relaxed);
     uint64_t sp_nw_startup_admit_granted =
@@ -1632,18 +1609,13 @@ static void cc_worker_gap_stats_dump(void) {
             (unsigned long long)sp_w_inbox,
             (unsigned long long)sp_w_global_fallback,
             (unsigned long long)sp_nw_global);
-    fprintf(stderr, "spawn nonworker publish: attempts=%llu ready=%llu blocked=%llu inbox_success=%llu global_fallback=%llu forced_spill=%llu(mode_enter=%llu mode_exit=%llu refill=%llu no_tokens=%llu cooldown=%llu startup_admit(reset=%llu grant=%llu deny=%llu)) wake(cond=%llu edge=%llu a0=%llu a>0=%llu idle=%llu tsleep=%llu uncond=%llu all=%llu) ready_active0=%llu target_sleep=%llu\n",
+    fprintf(stderr, "spawn nonworker publish: attempts=%llu ready=%llu blocked=%llu inbox_success=%llu global_fallback=%llu forced_spill=%llu(startup_admit(reset=%llu grant=%llu deny=%llu)) wake(cond=%llu edge=%llu a0=%llu a>0=%llu idle=%llu tsleep=%llu uncond=%llu all=%llu) ready_active0=%llu target_sleep=%llu\n",
             (unsigned long long)sp_nw_attempts,
             (unsigned long long)sp_nw_ready_true,
             (unsigned long long)sp_nw_ready_false,
             (unsigned long long)sp_nw_inbox_success,
             (unsigned long long)sp_nw_global_fallback,
             (unsigned long long)sp_nw_global_forced_spill,
-            (unsigned long long)sp_nw_spill_mode_enter,
-            (unsigned long long)sp_nw_spill_mode_exit,
-            (unsigned long long)sp_nw_spill_refill,
-            (unsigned long long)sp_nw_spill_supp_no_tokens,
-            (unsigned long long)sp_nw_spill_supp_cooldown,
             (unsigned long long)sp_nw_startup_admit_reset,
             (unsigned long long)sp_nw_startup_admit_granted,
             (unsigned long long)sp_nw_startup_admit_denied,
@@ -4490,20 +4462,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
         int startup_phase = sched_in_startup_phase();
         size_t active_snapshot = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
         size_t pending_snapshot = atomic_load_explicit(&g_sched.pending, memory_order_relaxed);
-        int spill_mode_entered = 0;
-        int spill_mode_exited = 0;
-        int spill_refilled = 0;
-        int spill_suppressed_no_tokens = 0;
-        int spill_suppressed_cooldown = 0;
         if (!startup_phase) {
-            int old_mode = atomic_exchange_explicit(&g_spawn_nw_startup_spill_mode, 0, memory_order_relaxed);
-            if (old_mode) spill_mode_exited = 1;
-            atomic_store_explicit(&g_spawn_nw_startup_spill_tokens, 0, memory_order_relaxed);
-            atomic_store_explicit(&g_spawn_nw_startup_low_streak, 0, memory_order_relaxed);
-            atomic_store_explicit(&g_spawn_nw_startup_last_pending, 0, memory_order_relaxed);
-            atomic_store_explicit(&g_spawn_nw_startup_last_wakev_refill, UINT32_MAX, memory_order_relaxed);
-            atomic_store_explicit(&g_spawn_nw_startup_last_wakev_control, UINT32_MAX, memory_order_relaxed);
-            atomic_store_explicit(&g_spawn_nw_startup_last_wakev_enter, UINT32_MAX, memory_order_relaxed);
             atomic_store_explicit(&g_spawn_nw_startup_admit_wakev, UINT32_MAX, memory_order_relaxed);
             atomic_store_explicit(&g_spawn_nw_startup_admit_remaining, 0, memory_order_relaxed);
         } else if (nw_ready) {
@@ -4537,7 +4496,6 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             if (!admitted) {
                 startup_force_global = 1;
                 nw_ready = 0;
-                spill_suppressed_no_tokens = 1;
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_startup_admit_denied, 1, memory_order_relaxed);
                 }
@@ -4563,21 +4521,6 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                                                               (uint64_t)pending_snapshot,
                                                               memory_order_relaxed,
                                                               memory_order_relaxed)) {}
-            }
-            if (spill_mode_entered) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_mode_enter, 1, memory_order_relaxed);
-            }
-            if (spill_mode_exited) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_mode_exit, 1, memory_order_relaxed);
-            }
-            if (spill_refilled) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_token_refill, 1, memory_order_relaxed);
-            }
-            if (spill_suppressed_no_tokens) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_suppressed_no_tokens, 1, memory_order_relaxed);
-            }
-            if (spill_suppressed_cooldown) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_forced_spill_suppressed_cooldown, 1, memory_order_relaxed);
             }
         }
         if (nw_ready) {
