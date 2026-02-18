@@ -335,6 +335,23 @@ DEAD
 
 - Implementations SHOULD use **no-progress** thresholds (stalled worker) rather than raw CPU busy duration.
 
+### 6.3 Startup-to-Run Phase Behavior (Current runtime)
+
+The active v3 runtime currently uses a one-way startup protocol to reduce
+timing-sensitive startup starvation:
+
+- Scheduler starts in explicit `STARTUP` phase, then promotes once to `RUN`.
+- Promotion is driven by completed fiber runs (`startup_run_count`) against a
+  fixed startup target (`startup_target_runs`).
+- In `STARTUP`, non-worker spawn admission to inbox lanes is bounded per wake
+  generation; overflow deterministically spills to global.
+- In `RUN`, non-worker inbox publish readiness is open (normal steady-state
+  routing).
+
+Implementation note:
+- This is an implementation policy layered on top of the normative lifecycle
+  rules above; it does not alter parking/waking correctness contracts in §4.
+
 ---
 
 ## 7. Elastic Pool Scaling (Pressure + Active)
@@ -519,6 +536,8 @@ preserves single-owner wake claim and exactly-once enqueue semantics.
 ## 12. Appendix: Worker Scheduling Loop (Non-normative)
 
 - Prefer local deque pop, then global MPMC, then steal.
+- If a worker wakes with no local/inbox/global work visible, it MAY perform a
+  bounded peer-inbox rescue probe before returning to sleep.
 - Sleep only after confirming no local, no global, steal failed, and no pending wakeups.
 - DRAINING: no stealing/accepting; drain local->global; exit after slice.
 

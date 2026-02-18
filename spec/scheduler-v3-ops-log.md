@@ -17,9 +17,12 @@ Current guardrails:
 - When a change improves counters but regresses stress liveness, revert and continue from last known-good baseline.
 
 Current known state:
-- Most stress checks pass.
-- A rare intermittent timeout remains in `stress/work_stealing_race.ccs`.
-- Recent unsuccessful liveness-rescue experiments were reverted after regression.
+- `smoke`, `stress-check`, and `perf-check` are currently green in this worktree.
+- Startup instability in `work_stealing_race` / `join_init_race` is resolved by
+  explicit `STARTUP -> RUN` phase promotion.
+- A follow-on flake in `stress/block_combinators_stress.ccs` was fixed in
+  `cc/runtime/task.c` by correcting `cc_block_any` to be success-seeking
+  (first non-negative result), not first-completion.
 
 ---
 
@@ -32,7 +35,11 @@ Primary edit surface:
 
 Validation and benchmark surface:
 - `stress/work_stealing_race.ccs`
-  - Main intermittent timeout reproducer.
+  - Historical intermittent timeout reproducer (now used as regression guard).
+- `stress/join_init_race.ccs`
+  - Historical startup-race reproducer (now used as regression guard).
+- `stress/block_combinators_stress.ccs`
+  - Caught combinator semantic bug (`cc_block_any` accepting first completion).
 - `stress/minimal_spawn_race.ccs`
   - Sensitive to startup/starvation mistakes.
 - `tools/run_all.ccs`
@@ -154,9 +161,9 @@ Used for overall safety checks:
 
 And targeted stress files directly as needed.
 
-### 4.4 Flake Repro Loop (Critical)
+### 4.4 Flake Repro Loop (Critical, historical and regression use)
 
-Key loop for the remaining issue:
+Key loop used for startup-liveness diagnosis (and now as a regression guard):
 
 ```sh
 for i in $(seq 1 50); do
@@ -1371,3 +1378,56 @@ Counter characteristics:
 
 Interpretation:
 - This resolves the intermittent startup instability by replacing repeated pseudo-startup re-entry with a single deterministic startup phase and a one-way promotion to run phase.
+
+### 16.25 Post-startup fix follow-through: peer-inbox rescue generalization
+
+Change (`cc/runtime/fiber_sched.c`):
+- Generalized peer-inbox rescue checks from startup-only to all phases.
+- Applied both in the pre-sleep "no local/inbox/global" path and in the
+  immediate post-sleep recheck path.
+
+Why:
+- `stress/fiber_spawn_join_tight.ccs` exposed stranded inbox work in `RUN`
+  phase: a worker could wake, miss its own inbox, and return to sleep while
+  work sat in a peer inbox.
+- The same stranded-inbox pattern affected several channel smoke tests.
+
+Validation:
+- `stress/fiber_spawn_join_tight.ccs`: passes after change.
+- `make smoke`: all pass.
+- `make perf-check`: all pass.
+
+Interpretation:
+- The rescue path is not only a startup concern; it is a general liveness guard
+  for inbox-routed work under wake timing races.
+
+### 16.26 Block combinator stress fix + current baseline snapshot
+
+Change (`cc/runtime/task.c`):
+- Corrected `cc_block_any()` semantics to wait for first successful completion
+  (current convention: non-negative result), instead of treating first completion
+  as success.
+- If all tasks fail, function now returns `ECANCELED` with `winner=-1` and
+  `result=-1`.
+
+Repro + fix confirmation:
+- Before fix (`stress/block_combinators_stress.ccs` loop): `5/20` pass.
+- After fix (`stress/block_combinators_stress.ccs` loop): `20/20` pass.
+
+Current suite status (latest run):
+- `make smoke` -> pass
+- `make stress-check` -> pass
+- `make perf-check` -> pass
+
+Latest pigz sanity pair (200MB, same counter flags):
+- Fiber vs pthread:
+  - `sleep enters`: `20` vs `9`
+  - `sleep waits`: `27` vs `15`
+  - `wake_with_work`: `12` vs `1`
+  - `wake_no_work`: `21` vs `15`
+  - `global pops attempts/hits`: `25/25` vs `1/1`
+  - `spawn nonworker publish attempts`: `1196` vs `2`
+
+Interpretation:
+- Runtime remains more scheduler-active than pthread in this snapshot, but
+  correctness/liveness baseline is currently green across smoke+stress+perf.
