@@ -33,6 +33,7 @@ void cc__fiber_park(void);
 void cc__fiber_park_reason(const char* reason, const char* file, int line);
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
+void cc__fiber_unpark_channel_attrib(void);
 void cc__fiber_yield(void);         /* Cooperative yield - push to local queue */
 void cc__fiber_yield_global(void);  /* Yield to global queue for fairness */
 void cc__fiber_sched_enqueue(void* fiber);

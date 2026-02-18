@@ -350,6 +350,7 @@ static inline void wake_batch_flush(void) {
     wake_batch* b = &tls_wake_batch;
     for (size_t i = 0; i < b->count; i++) {
         if (b->fibers[i]) {
+            cc__fiber_unpark_channel_attrib();
             cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]);
             b->fibers[i] = NULL;
         }
