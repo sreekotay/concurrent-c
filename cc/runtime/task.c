@@ -734,6 +734,7 @@ int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
 /* --- cc_block_any implementation --- */
 
 /* Block until first SUCCESSFUL task completes. Only fails if ALL tasks fail.
+   Current convention: non-negative result indicates success, negative indicates failure.
    winner: index of the first successful task
    result: result of the winning task
    Returns 0 if any task succeeded, ECANCELED if all failed. */
@@ -776,7 +777,8 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
         }
     }
 
-    /* Wait for first SUCCESS (non-zero result indicates error for now) */
+    /* Wait for first SUCCESS (non-negative result).
+       Continue draining completions while tasks fail. */
     int found_success = 0;
     int completed = 0;
     CCBlockRaceResult first_result = {0};
@@ -788,15 +790,18 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
         
         completed++;
         
-        /* For now, treat any completion as success (no error propagation yet) */
-        /* TODO: Add proper error handling when tasks can return errors */
-        found_success = 1;
-        first_result = msg;
+        if (msg.result >= 0) {
+            found_success = 1;
+            first_result = msg;
+        }
     }
 
     if (found_success) {
         if (winner) *winner = first_result.index;
         if (result) *result = first_result.result;
+    } else {
+        if (winner) *winner = -1;
+        if (result) *result = -1;
     }
 
     /* Cancel remaining tasks - this wakes up workers blocked in cc_block_on_intptr */
