@@ -2837,7 +2837,7 @@ static inline uint64_t xorshift64(uint64_t* state) {
  * ============================================================================ */
 
 #define SYSMON_CHECK_US 250                  /* check every 250us (0.25ms) - faster detection */
-#define ORPHAN_THRESHOLD_CYCLES 750000       /* ~0.25ms at 3GHz - faster stuck detection */
+#define ORPHAN_THRESHOLD_CYCLES 3000000      /* ~1ms at 3GHz - reduce false stuck promotions */
 #define MAX_EXTRA_WORKERS 8                  /* scale up to 2x cores max */
 
 /* Stall diagnostic: warn if a fiber stays OWNED without a state transition
@@ -2918,10 +2918,12 @@ static void* replacement_worker(void* arg) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
                 }
                 f = sched_global_pop_any();
-                if (gap_stats) {
-                    if (f) {
+                if (f) {
+                    if (gap_stats) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
-                    } else {
+                    }
+                } else {
+                    if (gap_stats) {
                         CC_REPL_PROBE_COUNT_ADD(global_pop_repl_hint_miss, 1);
                     }
                 }
@@ -3190,10 +3192,11 @@ static void* sysmon_main(void* arg) {
             continue;
         }
         
-        /* Exponential growth: add 50% of current total each scale event */
+        /* Conservative growth: promote one replacement worker per scale event.
+         * This avoids replacement-worker overprovisioning, which can inflate
+         * replacement callsite churn on bursty workloads (e.g., pigz). */
         size_t total_workers = g_sched.num_workers + current;
-        size_t to_spawn = total_workers / 2;  /* grow by 50% */
-        if (to_spawn < 1) to_spawn = 1;
+        size_t to_spawn = 1;
         if (to_spawn > (MAX_EXTRA_WORKERS - current))
             to_spawn = MAX_EXTRA_WORKERS - current;
         
