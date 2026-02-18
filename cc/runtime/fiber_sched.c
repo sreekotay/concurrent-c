@@ -1070,6 +1070,13 @@ typedef struct {
     _Atomic uint64_t global_pop_hits_mainloop;
     _Atomic uint64_t global_pop_calls_replacement;
     _Atomic uint64_t global_pop_hits_replacement;
+    _Atomic uint64_t global_pop_hits_replacement_spawn;
+    _Atomic uint64_t global_pop_hits_replacement_unpark;
+    _Atomic uint64_t global_pop_hits_replacement_other;
+    _Atomic uint64_t global_pop_hits_replacement_spawn_local;
+    _Atomic uint64_t global_pop_hits_replacement_spawn_inbox;
+    _Atomic uint64_t global_pop_hits_replacement_spawn_global;
+    _Atomic uint64_t global_pop_hits_replacement_spawn_unknown;
     _Atomic uint64_t global_pop_repl_nohint;
     _Atomic uint64_t global_pop_repl_hint_miss;
     _Atomic uint64_t global_pop_repl_spin_deferred;
@@ -1399,6 +1406,20 @@ static void cc_worker_gap_stats_dump(void) {
     uint64_t pop_hits_main = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, memory_order_relaxed);
     uint64_t pop_calls_repl = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, memory_order_relaxed);
     uint64_t pop_hits_repl = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, memory_order_relaxed);
+    uint64_t pop_hits_repl_spawn =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn, memory_order_relaxed);
+    uint64_t pop_hits_repl_unpark =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_unpark, memory_order_relaxed);
+    uint64_t pop_hits_repl_other =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_other, memory_order_relaxed);
+    uint64_t pop_hits_repl_spawn_local =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_local, memory_order_relaxed);
+    uint64_t pop_hits_repl_spawn_inbox =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_inbox, memory_order_relaxed);
+    uint64_t pop_hits_repl_spawn_global =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_global, memory_order_relaxed);
+    uint64_t pop_hits_repl_spawn_unknown =
+        atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_unknown, memory_order_relaxed);
     uint64_t pop_repl_nohint = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_repl_nohint, memory_order_relaxed);
     uint64_t pop_repl_hint_miss = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_repl_hint_miss, memory_order_relaxed);
     uint64_t pop_repl_spin_deferred = atomic_load_explicit(&g_cc_worker_gap_stats.global_pop_repl_spin_deferred, memory_order_relaxed);
@@ -1567,6 +1588,15 @@ static void cc_worker_gap_stats_dump(void) {
             (unsigned long long)pop_repl_nohint,
             (unsigned long long)pop_repl_hint_miss,
             (unsigned long long)pop_repl_spin_deferred);
+    fprintf(stderr,
+            "replacement hit sources: spawn=%llu [local=%llu inbox=%llu global=%llu unknown=%llu] unpark=%llu other=%llu\n",
+            (unsigned long long)pop_hits_repl_spawn,
+            (unsigned long long)pop_hits_repl_spawn_local,
+            (unsigned long long)pop_hits_repl_spawn_inbox,
+            (unsigned long long)pop_hits_repl_spawn_global,
+            (unsigned long long)pop_hits_repl_spawn_unknown,
+            (unsigned long long)pop_hits_repl_unpark,
+            (unsigned long long)pop_hits_repl_other);
     fprintf(stderr, "wake sources:\n");
     for (int i = 0; i < (int)CC_WAKE_REASON_COUNT; i++) {
         uint64_t cond_calls = atomic_load_explicit(&g_cc_worker_gap_stats.wake_cond_calls[i], memory_order_relaxed);
@@ -2878,6 +2908,33 @@ static size_t sysmon_count_pending(void) {
 static inline int worker_run_fiber(fiber_task* f);
 static inline int worker_run_fiber_accounted(fiber_task* f);
 
+static inline void replacement_record_global_hit(fiber_task* f) {
+    if (!cc_worker_gap_stats_enabled() || !f) return;
+    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+    if (f->enqueue_src == 2) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn, 1, memory_order_relaxed);
+        switch (f->spawn_publish_route) {
+            case SPAWN_ROUTE_LOCAL:
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_local, 1, memory_order_relaxed);
+                break;
+            case SPAWN_ROUTE_INBOX:
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_inbox, 1, memory_order_relaxed);
+                break;
+            case SPAWN_ROUTE_GLOBAL:
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_global, 1, memory_order_relaxed);
+                break;
+            default:
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_spawn_unknown, 1, memory_order_relaxed);
+                break;
+        }
+    } else if (f->enqueue_src == 8 || f->enqueue_src == 7 || f->enqueue_src == 6 ||
+               f->enqueue_src == 4 || f->enqueue_src == 3) {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_unpark, 1, memory_order_relaxed);
+    } else {
+        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement_other, 1, memory_order_relaxed);
+    }
+}
+
 /* Replacement worker: same as regular worker but uses global queue only.
  * Permanent - sleeps when idle (doesn't burn CPU competing). */
 /* After this many consecutive idle sleep iterations (~5ms each) with no work,
@@ -2920,7 +2977,7 @@ static void* replacement_worker(void* arg) {
                 f = sched_global_pop_any();
                 if (f) {
                     if (gap_stats) {
-                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+                        replacement_record_global_hit(f);
                     }
                 } else {
                     if (gap_stats) {
@@ -2951,6 +3008,7 @@ static void* replacement_worker(void* arg) {
             if (!nohint_fast_idle) {
                 for (int spin = 0; spin < 64; spin++) {
                     f = NULL;
+                    int from_global_probe = 0;
                     if (g_sched.num_workers > 0) {
                         size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
                         f = iq_pop(&g_sched.inbox_queues[victim]);
@@ -2971,6 +3029,8 @@ static void* replacement_worker(void* arg) {
                                 f = sched_global_pop_any();
                                 if (gap_stats && !f) {
                                     CC_REPL_PROBE_COUNT_ADD(global_pop_repl_hint_miss, 1);
+                                } else if (f) {
+                                    from_global_probe = 1;
                                 }
                             } else if (has_hint) {
                                 if (gap_stats) {
@@ -2981,8 +3041,8 @@ static void* replacement_worker(void* arg) {
                             }
                         }
                     }
-                    if (f && gap_stats) {
-                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+                    if (f && gap_stats && from_global_probe) {
+                        replacement_record_global_hit(f);
                     }
                     if (f) goto got_work;
                     cpu_pause();
@@ -2995,6 +3055,7 @@ static void* replacement_worker(void* arg) {
             atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
             /* Re-check queue after incrementing sleeping to close race window */
             f = NULL;
+            int from_global_probe = 0;
             if (g_sched.num_workers > 0) {
                 size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
                 f = iq_pop(&g_sched.inbox_queues[victim]);
@@ -3010,6 +3071,8 @@ static void* replacement_worker(void* arg) {
                     f = sched_global_pop_any();
                     if (gap_stats && !f) {
                         CC_REPL_PROBE_COUNT_ADD(global_pop_repl_hint_miss, 1);
+                    } else if (f) {
+                        from_global_probe = 1;
                     }
                 } else if (has_hint) {
                     if (gap_stats) {
@@ -3019,8 +3082,8 @@ static void* replacement_worker(void* arg) {
                     CC_REPL_PROBE_COUNT_ADD(global_pop_repl_nohint, 1);
                 }
             }
-            if (f && gap_stats) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_replacement, 1, memory_order_relaxed);
+            if (f && gap_stats && from_global_probe) {
+                replacement_record_global_hit(f);
             }
             if (f) {
                 atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
@@ -5440,14 +5503,37 @@ queued:
             }
         }
         if (divert) {
-            global_edge = sched_global_push(f, preferred);
-            pushed_global = 1;
-            pushed = 1;
-            if (gap_stats) {
-                if (divert_stale) {
-                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, 1, memory_order_relaxed);
-                } else {
-                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, 1, memory_order_relaxed);
+            /* Stale-affinity escape: prefer peer inbox reroute first so work
+             * stays on non-global lanes; fall back to global if inbox push fails. */
+            if (g_sched.num_workers > 1) {
+                size_t target = (size_t)(atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed) %
+                                         g_sched.num_workers);
+                if ((int)target == preferred) {
+                    target = (target + 1) % g_sched.num_workers;
+                }
+                int inbox_edge = 0;
+                for (int attempt = 0; attempt < 16 && !pushed; attempt++) {
+                    pushed = (iq_push_with_edge(&g_sched.inbox_queues[target], f, &inbox_edge) == 0);
+                    if (!pushed) cpu_pause();
+                }
+                if (pushed) {
+                    non_global_edge = inbox_edge;
+                    if (gap_stats) {
+                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_inbox, 1, memory_order_relaxed);
+                    }
+                }
+            }
+            if (!pushed) {
+                global_edge = sched_global_push(f, preferred);
+                pushed_global = 1;
+                pushed = 1;
+                if (gap_stats) {
+                    if (divert_stale) {
+                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, 1, memory_order_relaxed);
+                    } else {
+                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, 1, memory_order_relaxed);
+                    }
                 }
             }
         } else if (preferred == tls_worker_id) {
