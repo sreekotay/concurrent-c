@@ -1431,3 +1431,36 @@ Latest pigz sanity pair (200MB, same counter flags):
 Interpretation:
 - Runtime remains more scheduler-active than pthread in this snapshot, but
   correctness/liveness baseline is currently green across smoke+stress+perf.
+
+### 16.27 Scheduler knob classification (cleanup guide)
+
+Intent:
+- Separate structural invariants ("fixes") from calibration knobs ("tuning") and
+  identify legacy residue for removal.
+
+Class A - contract-defining (keep):
+- Explicit startup protocol (`startup_phase`, `startup_run_count`,
+  `startup_target_runs`).
+- Startup wake-wave admission (`g_spawn_nw_startup_admit_wakev`,
+  `g_spawn_nw_startup_admit_remaining`).
+- Scheduler-thread context split (`tls_sched_worker_ctx`) and replacement/non-worker
+  routing separation.
+- Stale-affinity unpark reroute (peer inbox first, global fallback only).
+
+Class B - calibration knobs (keep but document rationale/range):
+- `SYSMON_CHECK_US`
+- `ORPHAN_THRESHOLD_CYCLES`
+- `ORPHAN_COOLDOWN_CYCLES`
+- `TEMP_IDLE_TIMEOUT_ITERS`
+- `FAIRNESS_CHECK_INTERVAL`
+- Replacement probe cadence constants (`&3`, `spin<64`, `(spin&7)`).
+
+Class C - legacy/residue (candidate removal):
+- Startup spill-mode state/counters still threaded through spawn path but no
+  longer policy-defining under deterministic startup admission.
+- Dead helper utilities in sysmon path that are not referenced by runtime logic.
+
+Immediate cleanup applied:
+- Removed dead helper functions from `cc/runtime/fiber_sched.c`:
+  - `sysmon_has_global_pending()`
+  - `sysmon_count_pending()`

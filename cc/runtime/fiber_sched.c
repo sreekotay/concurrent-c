@@ -2876,11 +2876,6 @@ static inline uint64_t xorshift64(uint64_t* state) {
 #define STALL_SCAN_INTERVAL 8000             /* sysmon ticks between scans (8000 * 250us ≈ 2s) */
 #define ORPHAN_COOLDOWN_CYCLES 250000        /* ~0.08ms between batch spawns */
 
-/* Check if there's work in global queue (not local - local is "owned" by workers) */
-static int sysmon_has_global_pending(void) {
-    return sched_global_peek_any();
-}
-
 static int sysmon_has_pending_work(void) {
     if (sched_global_peek_any()) return 1;
     for (size_t i = 0; i < g_sched.num_workers; i++) {
@@ -2888,21 +2883,6 @@ static int sysmon_has_pending_work(void) {
         if (iq_peek(&g_sched.inbox_queues[i])) return 1;
     }
     return 0;
-}
-
-/* Count total pending tasks across all queues (for predictive scaling) */
-static size_t sysmon_count_pending(void) {
-    size_t count = 0;
-    /* Global queue: approximate by checking if non-empty */
-    if (sched_global_peek_any()) count += 8; /* assume decent batch */
-    /* Local queues: count actual tasks */
-    for (size_t i = 0; i < g_sched.num_workers; i++) {
-        local_queue* q = &g_sched.local_queues[i];
-        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
-        if (tail > head) count += (tail - head);
-    }
-    return count;
 }
 
 static inline int worker_run_fiber(fiber_task* f);
