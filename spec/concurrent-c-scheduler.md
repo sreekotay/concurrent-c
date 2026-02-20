@@ -179,6 +179,24 @@ Required rule: store `node.notified` **before** calling `unpark`, otherwise a wo
 - If the target fiber is in the parking transition (between yield and the park commit), `unpark` must still make it runnable (by setting/retaining `pending_unpark` so the commit aborts and enqueues).
 - If the target fiber is running / not parkable, `unpark` must set or retain the fiber's `pending_unpark` latch so the next `park_if` returns without sleeping.
 
+### Lock depth, deferred wakes, and hazards
+
+Some runtimes defer wakeups while holding internal scheduler locks; any `wake_batch`/deferred wake list MUST flush only when lock depth returns to **0**. Flushing while depth > 0 risks re-entrancy, lock inversion, or waking fibers that then try to acquire the same lock.
+
+Parking while lock depth > 0 is a design hazard and must be treated as a bug. If a fiber parks while holding a scheduler lock, it can deadlock the system.
+
+Diagnostics should flag:
+- `WAKE-FLUSH-UNDER-LOCK`: flushing deferred wakes with lock depth > 0.
+- `PARK-UNDER-LOCK`: attempting to park with lock depth > 0.
+
+For both cases, capture the lock stack (or current lock owner chain) to aid postmortem analysis.
+
+Additional lock-gap findings:
+- Under-lock flush/park events were traced to channel send/recv/close paths calling wake/park while `ch->mu` depth was non-zero.
+- Raw `pthread_mutex_unlock(&ch->mu)` in channel code can leave lock depth skewed and trigger park-under-lock even when the mutex is technically released.
+- Select/match cleanup across multiple channels can leave nested lock depth > 1; wake deferral must flush only when depth returns to 0.
+- Condvar waits (`pthread_cond_wait/timedwait`) release and reacquire `ch->mu`; wrappers must adjust lock depth around the wait to avoid false under-lock detection and missed flushes.
+
 Select-style groups require an additional rule: update the group's "winner chosen" state **before** waking any member.
 
 Select cleanup rule: after a select wakes, the fiber must **deregister/cancel all losing wait nodes** from their respective wait lists before returning to user code.

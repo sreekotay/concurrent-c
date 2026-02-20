@@ -2563,6 +2563,8 @@ static fiber_task* fiber_alloc(void) {
             f->park_reason = NULL;
             f->park_file = NULL;
             f->park_line = 0;
+            f->park_obj = NULL;
+            f->enqueue_src = 0;
             f->last_worker_id = -1;
             f->spawn_publish_tsc = 0;
             f->spawn_global_pop_tsc = 0;
@@ -3196,8 +3198,16 @@ static void* sysmon_main(void* arg) {
         for (size_t i = 0; i < g_sched.num_workers; i++) {
             /* Heartbeat is a heuristic liveness signal; no publication edge needed. */
             uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[i].heartbeat, memory_order_relaxed);
-            if (hb != 0 && (now - hb) >= ORPHAN_THRESHOLD_CYCLES)
-                stuck++;
+            if (hb != 0 && (now - hb) >= ORPHAN_THRESHOLD_CYCLES) {
+                /* Don't count workers with channel-parked fibers as stuck.
+                 * A stale heartbeat + parked fibers means the worker went idle
+                 * waiting for unparks — correct behavior, not a CPU orphan. */
+                size_t pf = g_sched.worker_parked
+                    ? atomic_load_explicit(&g_sched.worker_parked[i], memory_order_relaxed)
+                    : 0;
+                if (pf == 0)
+                    stuck++;
+            }
         }
         
         if (stuck == 0) {
