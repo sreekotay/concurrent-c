@@ -4421,10 +4421,22 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                     fprintf(stderr, "[spawn] fiber=%lu to local[%zu]\n", (unsigned long)f->fiber_id, self);
                 }
             } else {
-                /* Local queue full: fall back to inbox for distribution. */
+                /* Local queue full: fall back to inbox. Use RR but skip the
+                 * target if it appears sleeping and a fresher peer exists. */
                 size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
-                if (target == self && g_sched.num_workers > 1) {
+                if (target == self && g_sched.num_workers > 1)
                     target = (target + 1) % g_sched.num_workers;
+                if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
+                    uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
+                    uint64_t now_cyc = rdtsc();
+                    if (hb0 != 0 && (now_cyc - hb0) >= ORPHAN_THRESHOLD_CYCLES) {
+                        for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
+                            size_t cand = (target + scan) % g_sched.num_workers;
+                            if ((int)cand == tls_worker_id) continue;
+                            uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
+                            if (hb != 0 && (now_cyc - hb) < ORPHAN_THRESHOLD_CYCLES) { target = cand; break; }
+                        }
+                    }
                 }
                 int inbox_edge = 0;
                 for (int attempt = 0; attempt < 8 && !pushed; attempt++) {
@@ -4445,8 +4457,19 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                 }
             }
         } else {
-            /* Replacement worker has no owned local queue; use inbox routing directly. */
+            /* Replacement worker: RR but skip a sleeping target if a fresher peer exists. */
             size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+            if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
+                uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
+                uint64_t now_cyc = rdtsc();
+                if (hb0 != 0 && (now_cyc - hb0) >= ORPHAN_THRESHOLD_CYCLES) {
+                    for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
+                        size_t cand = (target + scan) % g_sched.num_workers;
+                        uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
+                        if (hb != 0 && (now_cyc - hb) < ORPHAN_THRESHOLD_CYCLES) { target = cand; break; }
+                    }
+                }
+            }
             int inbox_edge = 0;
             for (int attempt = 0; attempt < 8 && !pushed; attempt++) {
                 pushed = (iq_push_with_edge(&g_sched.inbox_queues[target], f, &inbox_edge) == 0);
@@ -4466,7 +4489,19 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             }
         }
     } else if (g_sched.num_workers > 0) {
+        /* Non-worker spawn: RR but skip a sleeping target if a fresher peer exists. */
         size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+        if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
+            uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
+            uint64_t now_cyc = rdtsc();
+            if (hb0 != 0 && (now_cyc - hb0) >= ORPHAN_THRESHOLD_CYCLES) {
+                for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
+                    size_t cand = (target + scan) % g_sched.num_workers;
+                    uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
+                    if (hb != 0 && (now_cyc - hb) < ORPHAN_THRESHOLD_CYCLES) { target = cand; break; }
+                }
+            }
+        }
         /* More aggressive direct-inbox mode for non-worker spawns. */
         int nw_ready = pool_ready_for_nonworker_inbox_publish();
         int startup_phase = sched_in_startup_phase();
@@ -5477,16 +5512,30 @@ queued:
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
             }
         } else {
-            /* Different worker — use its inbox (MPSC-safe) */
-            int inbox_edge = 0;
-            for (int attempt = 0; attempt < 16 && !pushed; attempt++) {
-                pushed = (iq_push_with_edge(&g_sched.inbox_queues[preferred], f, &inbox_edge) == 0);
-                if (!pushed) cpu_pause();
+            /* Different worker: use its inbox for locality.
+             * Skip only if it is provably sleeping (stale hb) AND spinning
+             * peers exist — they'll pick up the work without a wake syscall. */
+            int use_preferred = 1;
+            if (g_sched.worker_heartbeat) {
+                uint64_t hb = atomic_load_explicit(
+                    &g_sched.worker_heartbeat[preferred].heartbeat, memory_order_relaxed);
+                if (hb != 0 && (rdtsc() - hb) >= ORPHAN_THRESHOLD_CYCLES &&
+                    atomic_load_explicit(&g_sched.spinning, memory_order_relaxed) > 0) {
+                    use_preferred = 0;
+                }
             }
-            if (pushed) non_global_edge = inbox_edge;
-            if (pushed && gap_stats) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
+            if (use_preferred) {
+                int inbox_edge = 0;
+                for (int attempt = 0; attempt < 16 && !pushed; attempt++) {
+                    pushed = (iq_push_with_edge(&g_sched.inbox_queues[preferred], f, &inbox_edge) == 0);
+                    if (!pushed) cpu_pause();
+                }
+                if (pushed) non_global_edge = inbox_edge;
+                if (pushed && gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
+                }
             }
+            /* use_preferred=0: fall through to local/global fallback below */
         }
     } else if (tls_worker_id >= 0) {
         /* No affinity yet — fall back to current worker's local queue */
