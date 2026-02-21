@@ -409,10 +409,15 @@ static inline int cc__chan_minimal_path_enabled(void) {
     return cached;
 }
 
-static inline void cc__chan_maybe_yield(void) {
+/* Pass has_waiters=1 when parked waiters exist; only then pay the global
+ * round-trip.  For 1P-1C free-running flows both sides are already running
+ * and a global yield adds overhead without any fairness benefit. */
+static inline void cc__chan_maybe_yield(int has_waiters) {
     if (++cc__tls_lf_ops >= CC_LF_YIELD_INTERVAL) {
         cc__tls_lf_ops = 0;
-        if (cc__fiber_in_context()) cc__fiber_yield_global();
+        if (cc__fiber_in_context() && has_waiters) {
+            cc__fiber_yield_global();
+        }
     }
 }
 
@@ -2573,12 +2578,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             } else {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_recv_waiters_false);
             }
-            if (__builtin_expect(cc__fiber_in_context() != 0, 1)) {
-                if (++cc__tls_lf_ops >= CC_LF_YIELD_INTERVAL) {
-                    cc__tls_lf_ops = 0;
-                    cc__fiber_yield_global();
-                }
-            }
+            /* The has_recv_waiters check was already done above; the slow
+             * branch handles waking parked receivers.  If we reach here there
+             * were no parked receivers (free-running consumer), so skip yield. */
+            cc__chan_maybe_yield(0 /* no_waiters */);
             return 0;
         }
         /* Buffer full — fall through to full path for yield-retry / blocking */
@@ -2661,10 +2664,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         /* No waiters - try lock-free enqueue to buffer (fast path, no inflight) */
         int rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
         if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
-            /* Buffer full — yield to let the receiver fiber run, then retry
-             * once before falling to the expensive blocking path.
-             * Use global yield so fibers on other workers can also make progress. */
-            cc__fiber_yield_global();
+            /* Buffer full — local yield keeps co-located P/C on the same worker,
+             * allowing the receiver (in the same local queue or inbox) to drain a
+             * slot before we retry.  One retry before falling to blocking path. */
+            cc__fiber_yield();
             rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
         }
         if (rc == 0) {
@@ -2686,7 +2689,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_recv_waiters_false);
             }
             cc__chan_signal_activity(ch);
-            cc__chan_maybe_yield();
+            /* Waiter already unparked above — no need to yield globally; skip
+             * to avoid splitting co-located P/C pairs onto separate workers. */
+            cc__chan_maybe_yield(0);
             return 0;
         }
         /* Lock-free enqueue failed (queue full) - handle mode */
@@ -2998,12 +3003,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             } else {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_send_waiters_false);
             }
-            if (__builtin_expect(cc__fiber_in_context() != 0, 1)) {
-                if (++cc__tls_lf_ops >= CC_LF_YIELD_INTERVAL) {
-                    cc__tls_lf_ops = 0;
-                    cc__fiber_yield_global();
-                }
-            }
+            cc__chan_maybe_yield(0 /* no_waiters */);
             return 0;
         }
         /* Buffer empty — fall through to full path for yield-retry / blocking */
@@ -3033,10 +3033,10 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         ch->elem_size <= sizeof(void*)) {
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
-            /* Buffer empty — yield to let the sender fiber run, then retry
-             * once before falling to the expensive blocking path.
-             * Use global yield so fibers on other workers can also make progress. */
-            cc__fiber_yield_global();
+            /* Buffer empty — local yield keeps co-located P/C on the same worker,
+             * allowing the sender (in the same local queue or inbox) to add a
+             * slot before we retry.  One retry before falling to blocking path. */
+            cc__fiber_yield();
             rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         }
         if (rc == 0) {
@@ -3058,7 +3058,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_has_send_waiters_false);
             }
             cc__chan_signal_activity(ch);
-            cc__chan_maybe_yield();
+            /* Waiter already unparked above — no need to yield globally; skip
+             * to avoid splitting co-located P/C pairs onto separate workers. */
+            cc__chan_maybe_yield(0);
             return 0;
         }
         if (ch->closed) {

@@ -817,6 +817,12 @@ static size_t sq_drain(void) {
 
 /* Per-worker local queue for spawn locality */
 #define LOCAL_QUEUE_SIZE 256
+/* Depth threshold above which new spawns are routed to other workers' inboxes
+ * for parallel execution.  Must be large enough to absorb nursery-internal
+ * fibers (typically 1-3 items) plus the first user-spawned fiber, so that
+ * small P/C pairs stay co-located.  Must be small enough to trigger
+ * distribution for bulk-spawn workloads (e.g. pigz's 16-task pattern). */
+#define CC_SPAWN_LOCAL_DEPTH_LIMIT 4
 /* Per-worker inbox for cross-thread spawns.
  * If this fills, we fall back to the global queue and optionally warn. */
 #define INBOX_QUEUE_SIZE 1024
@@ -4417,14 +4423,16 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
          * Base workers prefer local queue; replacement workers route directly to inbox. */
         if (tls_worker_id >= 0) {
             size_t self = (size_t)tls_worker_id;
-            /* Bulk-spawn distribution: keep the first two fibers on the local
-             * queue so small 2-fiber producer/consumer pairs stay co-located
+            /* Bulk-spawn distribution: keep a few fibers on the local queue so
+             * small P/C pairs plus nursery-internal fibers stay co-located
              * (same worker = cooperative switch, no cross-thread wake overhead).
-             * Once the local queue has 2+ waiting fibers the spawning worker
-             * already has a full pipeline; subsequent fibers are routed to other
-             * workers' inboxes so they can run in parallel.
-             * Single-fiber pipelines always find depth<2 and are unaffected. */
-            if (lq_depth(&g_sched.local_queues[self]) < 2 &&
+             * Once the local queue has CC_SPAWN_LOCAL_DEPTH_LIMIT+ waiting
+             * fibers the spawning worker already has a full pipeline; subsequent
+             * fibers are routed to other workers' inboxes for parallel execution.
+             * 2-fiber pipelines and the nursery framework always stay below the
+             * threshold; bulk spawns (pigz 16-task pattern) distribute from the
+             * (N+1)th fiber. */
+            if (lq_depth(&g_sched.local_queues[self]) < CC_SPAWN_LOCAL_DEPTH_LIMIT &&
                     lq_push(&g_sched.local_queues[self], f) == 0) {
                 pushed = 1;
                 pushed_local = 1;
