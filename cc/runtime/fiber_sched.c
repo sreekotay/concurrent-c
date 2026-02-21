@@ -2225,6 +2225,13 @@ static inline int lq_peek(local_queue* q) {
     return head < tail;
 }
 
+/* Return number of items in local queue (approximate, for routing decisions) */
+static inline size_t lq_depth(local_queue* q) {
+    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    return (tail > head) ? (tail - head) : 0;
+}
+
 /* Fast local queue pop (owner only - but must handle concurrent stealers) 
  * Uses atomic exchange to claim slot first, then try to advance head once.
  * Limited retries to avoid infinite loop under pathological contention. */
@@ -4410,14 +4417,14 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
          * Base workers prefer local queue; replacement workers route directly to inbox. */
         if (tls_worker_id >= 0) {
             size_t self = (size_t)tls_worker_id;
-            /* Bulk-spawn distribution: only use the local queue for the first
-             * fiber when no other fibers are already waiting there.  When the
-             * local queue is non-empty the spawning worker already has work and
-             * subsequent fibers should go to other workers so they run in
-             * parallel rather than queuing behind each other on a single worker.
-             * Single-fiber pipelines (producer parks before spawning the next)
-             * always find an empty local queue and are unaffected. */
-            if (!lq_peek(&g_sched.local_queues[self]) &&
+            /* Bulk-spawn distribution: keep the first two fibers on the local
+             * queue so small 2-fiber producer/consumer pairs stay co-located
+             * (same worker = cooperative switch, no cross-thread wake overhead).
+             * Once the local queue has 2+ waiting fibers the spawning worker
+             * already has a full pipeline; subsequent fibers are routed to other
+             * workers' inboxes so they can run in parallel.
+             * Single-fiber pipelines always find depth<2 and are unaffected. */
+            if (lq_depth(&g_sched.local_queues[self]) < 2 &&
                     lq_push(&g_sched.local_queues[self], f) == 0) {
                 pushed = 1;
                 pushed_local = 1;
