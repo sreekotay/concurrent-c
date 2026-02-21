@@ -1,0 +1,2 @@
+Compressed large_test.bin -> large_test.bin.gz
+Stats: 104857600 bytes in, 104904000 bytes out, 800 blocks

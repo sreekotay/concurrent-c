@@ -4410,7 +4410,15 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
          * Base workers prefer local queue; replacement workers route directly to inbox. */
         if (tls_worker_id >= 0) {
             size_t self = (size_t)tls_worker_id;
-            if (lq_push(&g_sched.local_queues[self], f) == 0) {
+            /* Bulk-spawn distribution: only use the local queue for the first
+             * fiber when no other fibers are already waiting there.  When the
+             * local queue is non-empty the spawning worker already has work and
+             * subsequent fibers should go to other workers so they run in
+             * parallel rather than queuing behind each other on a single worker.
+             * Single-fiber pipelines (producer parks before spawning the next)
+             * always find an empty local queue and are unaffected. */
+            if (!lq_peek(&g_sched.local_queues[self]) &&
+                    lq_push(&g_sched.local_queues[self], f) == 0) {
                 pushed = 1;
                 pushed_local = 1;
                 spawn_publish_route = (int)SPAWN_ROUTE_LOCAL;

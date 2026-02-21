@@ -28,11 +28,11 @@ $(OUT_DIR)/pigz_cc: pigz_cc/pigz_cc.ccs | $(OUT_DIR)
 
 # Idiomatic CC version (with T!E result types)
 $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
-	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz"
+	$(CCC) -O -o $@ pigz_idiomatic.ccs --ld-flags "-lz" --release
 
 # Pthread CC version (OS threads)
 $(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
-	$(CCC) -O -o $@ pigz_pthread.ccs --ld-flags "-lz"
+	$(CCC) -O -o $@ pigz_pthread.ccs --ld-flags "-lz" --release
 
 # Convenience targets
 pigz: $(OUT_DIR)/pigz

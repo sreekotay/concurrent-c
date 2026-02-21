@@ -5,6 +5,7 @@
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_exec.cch>
 #include <ccc/std/task.cch>
+#include "fiber_internal.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -21,6 +22,11 @@ struct CCSpawnTask {
     int detached;
     pthread_mutex_t mu;
     pthread_cond_t cv;
+    /* Fiber-aware join support.
+     * done_atomic mirrors done but is safe to use with cc__fiber_park_if.
+     * Set with release ordering AFTER result is stored and AFTER done=1. */
+    _Atomic int done_atomic;
+    cc__fiber* _Atomic waiter_fiber;
 };
 
 /* Accessor to set spawn task in CCTask._data */
@@ -106,9 +112,17 @@ static void cc__spawn_task_job(void* arg) {
     pthread_mutex_lock(&task->mu);
     task->result = r;
     task->done = 1;
+    /* Grab any waiting fiber under the lock (prevents it missing done=1). */
+    cc__fiber* waiter = (cc__fiber*)atomic_exchange_explicit(
+        &task->waiter_fiber, NULL, memory_order_acq_rel);
+    /* done_atomic release store: ensures result/done are visible to fiber
+     * via cc__fiber_park_if's acquire load on done_atomic. */
+    atomic_store_explicit(&task->done_atomic, 1, memory_order_release);
     pthread_cond_broadcast(&task->cv);
     int detach = task->detached;
     pthread_mutex_unlock(&task->mu);
+    /* Wake fiber outside lock — unpark is safe to call from any thread. */
+    if (waiter) cc__fiber_unpark(waiter);
     if (detach) {
         cc__spawn_task_free_internal(task);
     }
@@ -201,6 +215,41 @@ int cc_thread_task_join_result(struct CCSpawnTask* task, void** out_result) {
     }
     if (out_result) *out_result = task->result;
     pthread_mutex_unlock(&task->mu);
+    return 0;
+}
+
+/* Fiber-aware join: park the calling fiber instead of blocking the worker thread.
+ * Must only be called from within a fiber context (cc__fiber_in_context() == 1).
+ *
+ * Protocol:
+ *   1. Lock mutex, check done — fast path if already done.
+ *   2. Register current fiber as waiter (under lock, so completion can't race past it).
+ *   3. Unlock, then park on done_atomic via cc__fiber_park_if.
+ *      If completion fires between unlock and park, pending_unpark or the flag
+ *      check in cc__fiber_park_if prevents the park.
+ *   4. On wakeup done_atomic==1, result is visible via release/acquire ordering. */
+int cc_thread_task_join_fiber(struct CCSpawnTask* task, void** out_result) {
+    if (!task) return EINVAL;
+    pthread_mutex_lock(&task->mu);
+    if (!task->done) {
+        /* Register as waiter under lock so the completion handler can see us. */
+        atomic_store_explicit(&task->waiter_fiber,
+                              (cc__fiber*)cc__fiber_current(),
+                              memory_order_relaxed);
+        pthread_mutex_unlock(&task->mu);
+        /* Park until done_atomic is set.
+         * cc__fiber_park_if checks pending_unpark first, then the flag — no
+         * lost wakeup is possible even if completion fires before we yield. */
+        CC_FIBER_PARK_IF(&task->done_atomic, 0, "spawn_join");
+        /* Clear stale waiter registration in case park bailed on flag or
+         * pending_unpark without the completion handler clearing it. */
+        atomic_store_explicit(&task->waiter_fiber, NULL, memory_order_relaxed);
+    } else {
+        pthread_mutex_unlock(&task->mu);
+    }
+    /* done_atomic acquire (in park_if or flag check) pairs with the release store
+     * in cc__spawn_task_job, so task->result is visible here. */
+    if (out_result) *out_result = task->result;
     return 0;
 }
 

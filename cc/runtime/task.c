@@ -76,6 +76,10 @@ void* cc_fiber_get_result_buf(fiber_task* f);
 /* Spawn task poll functions (defined in scheduler.c) */
 int cc_thread_task_poll_done(struct CCSpawnTask* task);
 void* cc_thread_task_get_result(struct CCSpawnTask* task);
+int cc_thread_task_join_fiber(struct CCSpawnTask* task, void** out_result);
+
+/* Fiber context detection (defined in fiber_sched.c) */
+int cc__fiber_in_context(void);
 
 static CCExec* g_task_exec = NULL;
 static pthread_mutex_t g_task_exec_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -481,7 +485,15 @@ intptr_t cc_block_on_intptr(CCTask t) {
         }
         if (s->spawn) {
             void* result = NULL;
-            cc_thread_task_join_result(s->spawn, &result);
+            /* Use fiber-aware join when called from fiber context: park the
+             * fiber instead of blocking the OS worker thread via condvar.
+             * This keeps the worker free to run other fibers during the wait
+             * and avoids a kernel condvar round-trip on every completion. */
+            if (cc__fiber_in_context()) {
+                cc_thread_task_join_fiber(s->spawn, &result);
+            } else {
+                cc_thread_task_join_result(s->spawn, &result);
+            }
             r = (intptr_t)result;
             cc_thread_task_free(s->spawn);
         }
