@@ -142,6 +142,7 @@ typedef struct {
 
 static spawn_timing g_spawn_timing = {0};
 static int g_timing_enabled = -1;  /* -1 = not checked, 0 = disabled, 1 = enabled */
+static int stall_debug_enabled(void);  /* forward decl — defined near sysmon */
 static _Atomic uint64_t g_cc_fiber_unpark_calls = 0;
 static _Atomic uint64_t g_cc_fiber_unpark_enqueues = 0;
 static _Atomic uint64_t g_cc_join_park_joins = 0;
@@ -978,7 +979,10 @@ typedef struct {
     _Atomic size_t spinning;    /* Workers actively polling (not sleeping yet) */
     char _pad_spinning[CACHE_LINE_SIZE - sizeof(_Atomic size_t)];
     
-    /* Per-worker parked counts - avoids global mutex and cache line bouncing */
+    /* Global parked-fiber count for deadlock detection (lightweight, always maintained). */
+    _Atomic size_t total_parked;
+
+    /* Per-worker parked counts — diagnostic only, updated only when gap-stats enabled. */
     _Atomic size_t* worker_parked;
     
     /* Hybrid promotion (sysmon): per-worker heartbeat updated once per batch loop.
@@ -2029,14 +2033,9 @@ static void all_fibers_track(fiber_task* f) {
     pthread_mutex_unlock(&g_all_fibers_mu);
 }
 
-/* Helper: sum per-worker parked counts */
+/* Helper: total parked fiber count for deadlock detection. */
 static inline size_t get_total_parked(void) {
-    size_t total = 0;
-    if (!g_sched.worker_parked) return 0;
-    for (size_t i = 0; i < g_sched.num_workers; i++) {
-        total += atomic_load_explicit(&g_sched.worker_parked[i], memory_order_relaxed);
-    }
-    return total;
+    return atomic_load_explicit(&g_sched.total_parked, memory_order_relaxed);
 }
 
 static int deadlock_debug_enabled(void) {
@@ -2564,7 +2563,9 @@ static fiber_task* fiber_alloc(void) {
             f->yield_dest = YIELD_NONE;
             f->park_flag = NULL;
             f->park_expected = 0;
-            atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+            if (stall_debug_enabled()) {
+                atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+            }
             atomic_store(&f->wake_counter, 0);
             atomic_store(&f->wait_ticket, 0);
             atomic_store(&f->pending_unpark, 0);
@@ -3092,7 +3093,7 @@ static int stall_debug_enabled(void) {
     static int val = -1;
     if (val == -1) {
         const char* v = getenv("CC_DEBUG_STALL");
-        val = (v && v[0] == '0') ? 0 : 1;  /* default ON, CC_DEBUG_STALL=0 disables */
+        val = (v && v[0] == '1') ? 1 : 0;  /* default OFF, CC_DEBUG_STALL=1 enables */
     }
     return val;
 }
@@ -3303,8 +3304,10 @@ static inline int worker_run_fiber(fiber_task* f) {
     }
     cc_v3_assert_control_is(f, owned, "RUNNABLE->RUNNING");
     /* CAS succeeded — we exclusively own the fiber's stack. No running_lock needed. */
-    uint64_t run_tsc = rdtsc();
-    if (cc_worker_gap_stats_enabled() && f->last_worker_id < 0) {
+    const int gap_stats_rf = cc_worker_gap_stats_enabled();
+    const int stall_diag_rf = stall_debug_enabled();
+    uint64_t run_tsc = (gap_stats_rf || stall_diag_rf) ? rdtsc() : 0;
+    if (gap_stats_rf && f->last_worker_id < 0) {
         if (f->spawn_publish_valid && f->spawn_publish_route != (unsigned char)SPAWN_ROUTE_NONE) {
             uint64_t delta = (run_tsc >= f->spawn_publish_tsc) ? (run_tsc - f->spawn_publish_tsc) : 0;
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_publish_run_samples, 1, memory_order_relaxed);
@@ -3376,7 +3379,9 @@ static inline int worker_run_fiber(fiber_task* f) {
         f->spawn_global_pop_valid = 0;
         f->spawn_publish_valid = 0;
     }
-    atomic_store_explicit(&f->last_transition, run_tsc, memory_order_relaxed);
+    if (stall_diag_rf) {
+        atomic_store_explicit(&f->last_transition, run_tsc, memory_order_relaxed);
+    }
     tls_current_fiber = f;
     f->last_worker_id = wid;  /* Record affinity hint */
     fiber_resume(f);
@@ -3403,7 +3408,9 @@ static inline int worker_run_fiber(fiber_task* f) {
         if (atomic_compare_exchange_strong_explicit(&f->control, &exp_owned, CTRL_DONE,
                                                      memory_order_release,
                                                      memory_order_relaxed)) {
-            atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+            if (stall_debug_enabled()) {
+                atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+            }
             /* Wake joining fiber only after CTRL_DONE is visible. This avoids
              * waking it early only to spin in wait_for_fiber_done_state(). */
             join_spinlock_lock(&f->join_lock);
@@ -3420,15 +3427,11 @@ static inline int worker_run_fiber(fiber_task* f) {
     } else if (dest != YIELD_NONE) {
         f->yield_dest = YIELD_NONE;
         if (dest == YIELD_PARK) {
-            /* Yield-before-commit park: verify we still own the fiber before
-             * committing the park.  worker_commit_park will CAS OWNED→PARKED,
-             * but its abort paths also need our ownership to be valid. */
-            int64_t cur_ctrl = atomic_load_explicit(&f->control, memory_order_acquire);
-            if (cur_ctrl != owned) {
-                /* Fiber was recycled — bail out. */
-            } else {
-                worker_commit_park(f, wid);
-            }
+            /* Yield-before-commit park: worker_commit_park CAS(OWNED→PARKED)
+             * handles the recycled-fiber case itself (CAS fails → bail out).
+             * Skip the redundant pre-check acquire load to reduce hot-path
+             * atomic overhead on the park fast path. */
+            worker_commit_park(f, wid);
         } else {
             /* Yield: CAS OWNED→QUEUED then enqueue.
              * If CAS fails, fiber was recycled — bail out. */
@@ -5203,7 +5206,9 @@ static void worker_commit_park(fiber_task* f, int wid) {
          * Do NOT re-enqueue — we don't own it anymore. */
         return;
     }
-    atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+    if (stall_debug_enabled()) {
+        atomic_store_explicit(&f->last_transition, rdtsc(), memory_order_relaxed);
+    }
 
     /* 4. Post-commit Dekker check: unpark may have stored pending_unpark=1
      *    after our pre-check but before the PARKED commit.  seq_cst on both
@@ -5242,7 +5247,8 @@ static void worker_commit_park(fiber_task* f, int wid) {
     }
 
     /* Successfully parked — update counters. */
-    if (wid >= 0) {
+    atomic_fetch_add_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
+    if (cc_worker_gap_stats_enabled() && wid >= 0) {
         atomic_fetch_add_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
     }
     if (deadlock_debug_enabled()) {
@@ -5449,7 +5455,8 @@ queued:
     cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(waker)", claimed_parked);
     atomic_fetch_add_explicit(&g_cc_fiber_unpark_enqueues, 1, memory_order_relaxed);
     /* Decrement parked counter (incremented by worker_commit_park). */
-    {
+    atomic_fetch_sub_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
+    if (cc_worker_gap_stats_enabled()) {
         int pw = f->last_worker_id;
         if (pw >= 0 && g_sched.worker_parked) {
             atomic_fetch_sub_explicit(&g_sched.worker_parked[pw], 1, memory_order_relaxed);
