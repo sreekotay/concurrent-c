@@ -147,6 +147,8 @@ static _Atomic uint64_t g_cc_fiber_unpark_calls = 0;
 static _Atomic uint64_t g_cc_fiber_unpark_enqueues = 0;
 static _Atomic uint64_t g_cc_join_park_joins = 0;
 static _Atomic uint64_t g_cc_join_park_loops = 0;
+static _Atomic uint64_t g_cc_join_help_attempts = 0;  /* help-first steal attempts */
+static _Atomic uint64_t g_cc_join_help_hits = 0;      /* help-first steal successes */
 
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
     if (out_calls) {
@@ -163,6 +165,15 @@ void cc__fiber_join_park_stats(uint64_t* out_joins, uint64_t* out_loops) {
     }
     if (out_loops) {
         *out_loops = atomic_load_explicit(&g_cc_join_park_loops, memory_order_relaxed);
+    }
+}
+
+void cc__fiber_join_help_stats(uint64_t* out_attempts, uint64_t* out_hits) {
+    if (out_attempts) {
+        *out_attempts = atomic_load_explicit(&g_cc_join_help_attempts, memory_order_relaxed);
+    }
+    if (out_hits) {
+        *out_hits = atomic_load_explicit(&g_cc_join_help_hits, memory_order_relaxed);
     }
 }
 
@@ -4434,8 +4445,20 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
              * fibers are routed to other workers' inboxes for parallel execution.
              * 2-fiber pipelines and the nursery framework always stay below the
              * threshold; bulk spawns (pigz 16-task pattern) distribute from the
-             * (N+1)th fiber. */
-            if (lq_depth(&g_sched.local_queues[self]) < CC_SPAWN_LOCAL_DEPTH_LIMIT &&
+             * (N+1)th fiber.
+             *
+             * Idle-workers override: if no workers are spinning (they're all
+             * sleeping or active) AND the local queue already has ≥2 items, the
+             * sleeping workers won't find this work via their own queue checks —
+             * they only check their own local+inbox.  Bypass the local queue and
+             * route to inbox so the wake mechanism delivers work immediately.
+             * Threshold ≥2 preserves P/C co-location: a 2-fiber P/C pair spawns
+             * exactly 2 items (depth 0→1, then 1→2) and never triggers this path. */
+            size_t local_depth_now = lq_depth(&g_sched.local_queues[self]);
+            size_t spinning_now = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
+            int idle_override = (spinning_now == 0 && local_depth_now >= 2);
+            if (!idle_override &&
+                    local_depth_now < CC_SPAWN_LOCAL_DEPTH_LIMIT &&
                     lq_push(&g_sched.local_queues[self], f) == 0) {
                 pushed = 1;
                 pushed_local = 1;
@@ -4945,7 +4968,33 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
                     (unsigned long)f->fiber_id,
                     (unsigned long)current->fiber_id);
         }
-        
+
+        /* Help-first join: if target is still queued (not yet started), steer it
+         * into our worker's inbox so it runs immediately after we park — instead
+         * of waiting behind active compressions on some other worker.
+         *
+         * Protocol (safe against concurrent stealers):
+         *   1. CAS target control: CTRL_QUEUED → CTRL_OWNED(my_wid) — claim it.
+         *   2. Reset control back to CTRL_QUEUED — so worker_run_fiber's CAS works.
+         *   3. Push a new pointer into our inbox.
+         * Any stale pointer still in the original queue will fail worker_run_fiber's
+         * CAS and be silently dropped.  If another worker claims the fiber between
+         * step 2 and step 3, their CAS wins; our inbox push adds a harmless stale
+         * entry that also fails CAS.  No double-execution is possible. */
+        int my_wid = tls_worker_id;
+        if (my_wid >= 0 && g_sched.inbox_queues) {
+            atomic_fetch_add_explicit(&g_cc_join_help_attempts, 1, memory_order_relaxed);
+            int64_t ctrl = CTRL_QUEUED;
+            int64_t owned = CTRL_OWNED(my_wid);
+            if (atomic_compare_exchange_strong_explicit(&f->control, &ctrl, owned,
+                                                        memory_order_acq_rel,
+                                                        memory_order_relaxed)) {
+                atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
+                iq_push_with_edge(&g_sched.inbox_queues[my_wid], f, NULL);
+                atomic_fetch_add_explicit(&g_cc_join_help_hits, 1, memory_order_relaxed);
+            }
+        }
+
         /* Now park until woken. At this point, either:
          * 1. Child hasn't completed yet - will see our registration and unpark us
          * 2. Child completed while we held lock - done=1, handled above */

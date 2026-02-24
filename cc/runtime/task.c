@@ -89,6 +89,7 @@ static cc_atomic_u64 g_task_submit_failures = 0;
  * Enable with CC_TASK_WAIT_STATS=1 and dump at exit with CC_TASK_WAIT_STATS_DUMP=1. */
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues);
 void cc__fiber_join_park_stats(uint64_t* out_joins, uint64_t* out_loops);
+void cc__fiber_join_help_stats(uint64_t* out_attempts, uint64_t* out_hits);
 
 typedef struct {
     _Atomic int mode;              /* -1 unknown, 0 off, 1 on */
@@ -156,8 +157,11 @@ static void cc_task_wait_stats_dump(void) {
     uint64_t unpark_enqueues = 0;
     uint64_t join_park_joins = 0;
     uint64_t join_park_loops = 0;
+    uint64_t help_attempts = 0;
+    uint64_t help_hits = 0;
     cc__fiber_unpark_stats(&unpark_calls, &unpark_enqueues);
     cc__fiber_join_park_stats(&join_park_joins, &join_park_loops);
+    cc__fiber_join_help_stats(&help_attempts, &help_hits);
 
     fprintf(stderr, "\n=== CC_TASK_WAIT_STATS ===\n");
     fprintf(stderr, "block_on calls: total=%llu spawn=%llu fiber=%llu\n",
@@ -188,6 +192,12 @@ static void cc_task_wait_stats_dump(void) {
                     (unsigned long long)join_park_joins,
                     (unsigned long long)join_park_loops,
                     (double)join_park_loops / (double)join_park_joins);
+        }
+        if (help_attempts) {
+            fprintf(stderr, "fiber help-first join: attempts=%llu hits=%llu hit_rate=%.1f%%\n",
+                    (unsigned long long)help_attempts,
+                    (unsigned long long)help_hits,
+                    100.0 * (double)help_hits / (double)help_attempts);
         }
     }
     fprintf(stderr, "fiber result TLS copies: %llu\n",

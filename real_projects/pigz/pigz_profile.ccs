@@ -1,0 +1,310 @@
+/*
+ * pigz_profile.ccs -- Profiling version of pigz_idiomatic.
+ *
+ * Adds per-block timing to measure:
+ *   spawn_ns   : when cc_fiber_spawn_task was called (producer side)
+ *   start_ns   : when compress_task_wrapper actually began executing (task side)
+ *   done_ns    : when compress_task_wrapper completed (task side)
+ *
+ * Reports:
+ *   queue_wait  = start - spawn   (how long fiber sat in queue before starting)
+ *   compress_t  = done  - start   (actual deflate time)
+ *   end_to_end  = done  - spawn   (total latency seen by consumer)
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <zlib.h>
+
+#define BLOCK_SIZE (128 * 1024)
+#define BLOCK_ARENA_OVERHEAD 1024
+#define CHAN_CAP 16
+#define MAX_BLOCKS 1024
+
+static inline uint64_t mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    bool is_last;
+    CCArena arena;
+    uint64_t spawn_ns;   /* timestamp when cc_fiber_spawn_task was called */
+} Block;
+
+typedef struct {
+    long seq;
+    CCSlice data;
+    unsigned long crc;
+    size_t original_len;
+    bool is_last;
+    CCArena arena;
+} CompressedResult;
+
+/* Per-block timing record */
+typedef struct {
+    long     seq;
+    uint64_t spawn_ns;
+    uint64_t start_ns;
+    uint64_t done_ns;
+} BlockTiming;
+
+static BlockTiming g_timings[MAX_BLOCKS];
+static _Atomic int g_timing_count = 0;
+
+cc_atomic_i64 g_bytes_in = 0;
+cc_atomic_i64 g_bytes_out = 0;
+cc_atomic_int g_blocks_done = 0;
+
+CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
+    size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
+    
+    @arena(res_arena, arena_size) {
+        CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
+        if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+        
+        res->seq = blk->seq;
+        res->is_last = blk->is_last;
+        res->original_len = blk->data.len;
+        res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+
+        size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+        if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+
+        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+        memcpy(out_buf, header, 10);
+        size_t pos = 10;
+
+        z_stream strm = {0};
+        if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+            return cc_err(cc_io_error(CC_IO_OTHER));
+        }
+        strm.next_in = (Bytef*)blk->data.ptr;
+        strm.avail_in = (uInt)blk->data.len;
+        strm.next_out = out_buf + pos;
+        strm.avail_out = (uInt)(max_out - pos - 8);
+        
+        int ret = deflate(&strm, Z_FINISH);
+        pos += strm.total_out;
+        deflateEnd(&strm);
+        
+        if (ret != Z_STREAM_END) return cc_err(cc_io_error(CC_IO_OTHER));
+        
+        unsigned long crc = res->crc;
+        size_t in_len = blk->data.len;
+        out_buf[pos++] = crc & 0xff;
+        out_buf[pos++] = (crc >> 8) & 0xff;
+        out_buf[pos++] = (crc >> 16) & 0xff;
+        out_buf[pos++] = (crc >> 24) & 0xff;
+        out_buf[pos++] = in_len & 0xff;
+        out_buf[pos++] = (in_len >> 8) & 0xff;
+        out_buf[pos++] = (in_len >> 16) & 0xff;
+        out_buf[pos++] = (in_len >> 24) & 0xff;
+
+        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+        cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+        cc_atomic_fetch_add(&g_bytes_out, pos);
+        cc_atomic_fetch_add(&g_blocks_done, 1);
+
+        res->arena = cc_arena_detach(res_arena);
+        return cc_ok(res);
+    }
+}
+
+typedef struct {
+    Block*   blk;
+    uint64_t spawn_ns;
+} TaskArg;
+
+void* compress_task_wrapper(void* arg) {
+    TaskArg* ta = (TaskArg*)arg;
+    Block* blk = ta->blk;
+    uint64_t spawn_ns = ta->spawn_ns;
+    free(ta);
+
+    uint64_t start_ns = mono_ns();
+
+    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+    cc_arena_free(&blk->arena);
+
+    uint64_t done_ns = mono_ns();
+
+    /* Record timing */
+    int idx = cc_atomic_fetch_add(&g_timing_count, 1);
+    if (idx < MAX_BLOCKS) {
+        g_timings[idx].seq      = blk->seq;
+        g_timings[idx].spawn_ns = spawn_ns;
+        g_timings[idx].start_ns = start_ns;
+        g_timings[idx].done_ns  = done_ns;
+    }
+
+    typedef struct { CompressedResult* __result; } __result_t;
+    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
+    if (!storage) return NULL;
+    
+    storage->__result = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
+    return storage;
+}
+
+static int cmp_seq(const void* a, const void* b) {
+    return (int)(((BlockTiming*)a)->seq - ((BlockTiming*)b)->seq);
+}
+
+static void print_stats(const char* label) {
+    int n = cc_atomic_load(&g_timing_count);
+    if (n <= 0) return;
+    if (n > MAX_BLOCKS) n = MAX_BLOCKS;
+
+    qsort(g_timings, n, sizeof(BlockTiming), cmp_seq);
+
+    uint64_t sum_queue = 0, sum_compress = 0, sum_e2e = 0;
+    uint64_t max_queue = 0, max_compress = 0;
+    uint64_t queues[MAX_BLOCKS], compresses[MAX_BLOCKS];
+
+    for (int i = 0; i < n; i++) {
+        BlockTiming* t = &g_timings[i];
+        uint64_t q = t->start_ns - t->spawn_ns;
+        uint64_t c = t->done_ns  - t->start_ns;
+        uint64_t e = t->done_ns  - t->spawn_ns;
+        sum_queue    += q; queues[i]     = q;
+        sum_compress += c; compresses[i] = c;
+        sum_e2e      += e;
+        if (q > max_queue)    max_queue = q;
+        if (c > max_compress) max_compress = c;
+    }
+
+    /* Sort for percentiles */
+    uint64_t sq[MAX_BLOCKS], sc[MAX_BLOCKS];
+    memcpy(sq, queues,     n * sizeof(uint64_t));
+    memcpy(sc, compresses, n * sizeof(uint64_t));
+    /* simple insertion sort (n<=512) */
+    for (int i = 1; i < n; i++) {
+        uint64_t kq = sq[i], kc = sc[i]; int j = i-1;
+        while (j >= 0 && sq[j] > kq) { sq[j+1] = sq[j]; j--; } sq[j+1] = kq;
+        j = i-1;
+        while (j >= 0 && sc[j] > kc) { sc[j+1] = sc[j]; j--; } sc[j+1] = kc;
+    }
+
+    printf("\n=== pigz block timing: %s (%d blocks) ===\n", label, n);
+    printf("%-14s  %8s  %8s  %8s  %8s  %8s\n", "metric", "avg_us", "p50_us", "p75_us", "p95_us", "max_us");
+    printf("%-14s  %8.1f  %8.1f  %8.1f  %8.1f  %8.1f\n", "queue_wait",
+           sum_queue/1e3/n, sq[n/2]/1e3, sq[3*n/4]/1e3, sq[95*n/100]/1e3, max_queue/1e3);
+    printf("%-14s  %8.1f  %8.1f  %8.1f  %8.1f  %8.1f\n", "compress_time",
+           sum_compress/1e3/n, sc[n/2]/1e3, sc[3*n/4]/1e3, sc[95*n/100]/1e3, max_compress/1e3);
+    printf("%-14s  %8.1f\n", "end_to_end", sum_e2e/1e3/n);
+    printf("===\n");
+}
+
+int compress_file(const char* in_path, const char* out_path, int level) {
+    (void)level;
+    cc_atomic_store(&g_timing_count, 0);
+
+    CCFile in_file;
+    if (cc_file_open(&in_file, in_path, "rb") != 0) {
+        fprintf(stderr, "Failed to open input: %s\n", in_path);
+        return 1;
+    }
+    @defer cc_file_close(&in_file);
+
+    CCFile out_file;
+    if (cc_file_open(&out_file, out_path, "wb") != 0) {
+        fprintf(stderr, "Failed to open output: %s\n", out_path);
+        return 1;
+    }
+    @defer cc_file_close(&out_file);
+
+    CCTask[~CHAN_CAP >] tasks_tx;
+    CCTask[~CHAN_CAP <] tasks_rx;
+    CCChan* ch = channel_pair(&tasks_tx, &tasks_rx);
+    @defer cc_chan_free(ch);
+
+    CCFile* in_ptr = &in_file;
+    CCFile* out_ptr = &out_file;
+
+    @nursery {
+        spawn(() => [out_ptr, tasks_rx] {
+            void* result;
+            while (ordered_recv(tasks_rx, &result) == 1) {
+                CompressedResult* r = (CompressedResult*)result;
+                if (r) {
+                    cc_file_write(out_ptr, r->data);
+                    cc_arena_free(&r->arena);
+                }
+            }
+        });
+
+        @nursery closing(tasks_tx) {
+            spawn(() => [in_ptr, tasks_tx] {
+                long seq = 0;
+                while (true) {
+                    CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
+                    CCSlice data;
+                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
+                    
+                    if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
+                        cc_arena_free(&blk_arena);
+                        break;
+                    }
+                    
+                    Block* blk = arena_alloc1(Block, &blk_arena);
+                    if (!blk) { cc_arena_free(&blk_arena); break; }
+                    
+                    blk->seq     = seq++;
+                    blk->data    = data;
+                    blk->is_last = (data.len < BLOCK_SIZE);
+                    blk->arena   = blk_arena;
+                    
+                    bool is_last = blk->is_last;
+
+                    TaskArg* ta = (TaskArg*)malloc(sizeof(TaskArg));
+                    ta->blk      = blk;
+                    ta->spawn_ns = mono_ns();   /* timestamp just before spawn */
+                    
+                    CCTask task = cc_fiber_spawn_task(compress_task_wrapper, ta);
+                    cc_chan_send(tasks_tx.raw, &task, sizeof(task));
+                    
+                    if (is_last) break;
+                }
+            });
+        }
+    }
+
+    cc_file_sync(&out_file);
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+        return 1;
+    }
+    
+    char out_name[4096];
+    snprintf(out_name, sizeof(out_name), "%s.gz", argv[1]);
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = compress_file(argv[1], out_name, 6);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    if (rc == 0) {
+        double elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        long blocks = cc_atomic_load(&g_blocks_done);
+        fprintf(stderr, "Compressed %s -> %s\n", argv[1], out_name);
+        fprintf(stderr, "Stats: %lld bytes in, %lld bytes out, %ld blocks\n",
+                (long long)cc_atomic_load(&g_bytes_in),
+                (long long)cc_atomic_load(&g_bytes_out),
+                blocks);
+        print_stats("fiber tasks");
+    }
+    return rc;
+}

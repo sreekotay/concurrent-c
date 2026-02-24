@@ -34,11 +34,16 @@ $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_pthread.ccs --ld-flags "-lz" --release
 
+# Profiling version (fiber tasks + per-block timing)
+$(OUT_DIR)/pigz_profile: pigz_profile.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_profile.ccs --ld-flags "-lz" --release
+
 # Convenience targets
 pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
 pigz_idiomatic: $(OUT_DIR)/pigz_idiomatic
 pigz_pthread: $(OUT_DIR)/pigz_pthread
+pigz_profile: $(OUT_DIR)/pigz_profile
 
 all: pigz pigz_cc pigz_idiomatic pigz_pthread
 
