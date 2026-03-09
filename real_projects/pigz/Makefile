@@ -38,12 +38,22 @@ $(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_profile: pigz_profile.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_profile.ccs --ld-flags "-lz" --release
 
+# Profiling version (pthread tasks + per-block timing)
+$(OUT_DIR)/pigz_pthread_profile: pigz_pthread_profile.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_pthread_profile.ccs --ld-flags "-lz" --release
+
+# Unordered variant: no head-of-line blocking (output is corrupt, benchmarking only)
+$(OUT_DIR)/pigz_unordered: pigz_unordered.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_unordered.ccs --ld-flags "-lz" --release
+
 # Convenience targets
 pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
 pigz_idiomatic: $(OUT_DIR)/pigz_idiomatic
 pigz_pthread: $(OUT_DIR)/pigz_pthread
 pigz_profile: $(OUT_DIR)/pigz_profile
+pigz_pthread_profile: $(OUT_DIR)/pigz_pthread_profile
+pigz_unordered: $(OUT_DIR)/pigz_unordered
 
 all: pigz pigz_cc pigz_idiomatic pigz_pthread
 

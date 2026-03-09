@@ -67,15 +67,23 @@ static inline void cc_arena_free(CCArena* a) {
     }
     a->prev = NULL;
 
-    // Free the root's buffer if heap-owned
-    if (a->base && (a->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
-        free(a->base);
-    }
+    // Save fields before zeroing: `a` may be embedded within its own backing store,
+    // so we must clear `a` BEFORE calling free() — not after — to avoid a
+    // write-after-free when the caller pattern is:
+    //   Foo* f = arena_alloc1(Foo, arena);
+    //   f->arena = cc_arena_detach(arena);
+    //   cc_arena_free(&f->arena);  // f and f->arena live inside the buffer being freed
+    uint8_t* base = a->base;
+    unsigned int flags = a->_flags;
     a->base = NULL;
     a->capacity = 0;
     a->offset = 0;
     a->_flags = 0;
     a->block_idx = 0;
+
+    if (base && (flags & CC_ARENA_FLAG_HEAP_OWNED)) {
+        free(base);
+    }
 }
 
 // Legacy alias - use cc_arena_heap instead

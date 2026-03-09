@@ -1,13 +1,13 @@
 /*
- * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
+ * pigz_unordered.ccs -- pigz WITHOUT ordered delivery (output will be corrupt)
  *
- * Demonstrates the chan_send_task pattern:
- * - chan_send_task(ch, () => expr) - spawn task, send handle
- * - chan_recv on ordered channels awaits task internally
- * - 'ordered' flag ensures FIFO result delivery
+ * Identical to pigz_idiomatic except the consumer reads results in completion
+ * order rather than sequence order.  This removes the head-of-line blocking
+ * from ordered_recv and lets us measure the pure scheduling overhead with no
+ * pipeline stalls.
  *
- * Uses manual lowering until compiler support lands.
- * See spec-progress/language-patterns-v3.md Section 7.
+ * Expected: if ordering is the bottleneck, this should approach pigz_pthread.
+ * The output .gz file will be corrupt — for benchmarking only.
  */
 
 #include <ccc/std/prelude.cch>
@@ -98,32 +98,6 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     }
 }
 
-// Task wrapper - stores result in fiber-local storage (what ordered_recv expects)
-void* compress_task_wrapper(void* arg) {
-    Block* blk = (Block*)arg;
-    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
-    cc_arena_free(&blk->arena);
-
-    // Store result in fiber-local storage at offset 0 (what ordered_recv expects)
-    typedef struct { CompressedResult* __result; } __result_t;
-    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
-    if (!storage) { fprintf(stderr, "DIAG: cc_task_result_ptr returned NULL!\n"); return NULL; }
-
-    CompressedResult* cr = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
-    storage->__result = cr;
-    return storage;
-}
-
-/*
- * IDEAL SYNTAX (what we want):
- *   CompressedResult*[~16 ordered] results;
- *   chan_send_task(results, () => [blk] compress_block(blk, 6));
- *   while (chan_recv(results, &r)) { use(r); }
- *
- * MANUAL LOWERING (what works today):
- *   CCTask channel + ordered_recv helper
- */
-
 int compress_file(const char* in_path, const char* out_path, int level) {
     (void)level;
     
@@ -141,36 +115,39 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     }
     @defer cc_file_close(&out_file);
 
-    // Internal representation: channel of CCTask handles
-    CCTask[~CHAN_CAP >] tasks_tx;
-    CCTask[~CHAN_CAP <] tasks_rx;
-    CCChan* ch = channel_pair(&tasks_tx, &tasks_rx);
-    @defer cc_chan_free(ch);
+    /*
+     * UNORDERED variant: compression tasks send CompressedResult* directly to
+     * a result channel as they finish.  The consumer reads them in arrival
+     * order — no head-of-line blocking from ordered_recv.
+     *
+     * The producer still throttles via a separate semaphore-like counter so
+     * we don't spawn all 800 blocks at once (keeps memory bounded at CHAN_CAP
+     * in-flight blocks, matching the original).
+     */
+    CompressedResult*[~CHAN_CAP >] res_tx;
+    CompressedResult*[~CHAN_CAP <] res_rx;
+    CCChan* res_ch = channel_pair(&res_tx, &res_rx);
+    @defer cc_chan_free(res_ch);
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
     @nursery {
-        // Consumer: ordered_recv awaits task and extracts result
-        spawn(() => [out_ptr, tasks_rx] {
-            void* result;
-            long expect_seq = 0;
-            while (ordered_recv(tasks_rx, &result) == 1) {
-                CompressedResult* r = (CompressedResult*)result;
+        // Consumer: read results in COMPLETION order (no ordering guarantee)
+        spawn(() => [out_ptr, res_rx] {
+            CompressedResult* r;
+            while (cc_chan_recv(res_rx.raw, &r, sizeof(r)) == 0) {
                 if (r) {
-                    if (r->seq != expect_seq) {
-                        fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, r->seq);
-                    }
-                    expect_seq++;
                     cc_file_write(out_ptr, r->data);
                     cc_arena_free(&r->arena);
                 }
             }
         });
 
-        // Producer: spawn task + send handle (manual chan_send_task)
-        @nursery closing(tasks_tx) {
-            spawn(() => [in_ptr, tasks_tx] {
+        // Producer + compression: spawn a task per block, each task sends
+        // its result directly to res_tx when done.
+        @nursery closing(res_tx) {
+            spawn(() => [in_ptr, res_tx] {
                 long seq = 0;
                 while (true) {
                     CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
@@ -192,15 +169,17 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                     blk->data = data;
                     blk->is_last = (data.len < BLOCK_SIZE);
                     blk->arena = blk_arena;
-                    
-                    // Read is_last before spawn — blk lives in blk_arena which
-                    // the compression fiber may free on another worker.
                     bool is_last = blk->is_last;
-                    
-                    // Manual lowering of: chan_send_task(tx, () => compress_block(blk))
-                    CCTask task = cc_fiber_spawn_task(compress_task_wrapper, blk);
-                    cc_chan_send(tasks_tx.raw, &task, sizeof(task));
-                    
+
+                    // Spawn compression fiber; it sends result to res_tx directly.
+                    spawn(() => [blk, res_tx] {
+                        CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+                        cc_arena_free(&blk->arena);
+                        CompressedResult* r = cc_is_err(res) ? NULL
+                                                              : cc_unwrap_as(res, CompressedResult*);
+                        cc_chan_send(res_tx.raw, &r, sizeof(r));
+                    });
+
                     if (is_last) break;
                 }
             });
@@ -223,7 +202,7 @@ int main(int argc, char *argv[]) {
     int ret = compress_file(argv[1], out_name, 6);
     
     if (ret == 0) {
-        printf("Compressed %s -> %s\n", argv[1], out_name);
+        printf("Compressed %s -> %s (UNORDERED - output corrupt)\n", argv[1], out_name);
         printf("Stats: %lld bytes in, %lld bytes out, %d blocks\n",
                (long long)cc_atomic_load(&g_bytes_in),
                (long long)cc_atomic_load(&g_bytes_out),

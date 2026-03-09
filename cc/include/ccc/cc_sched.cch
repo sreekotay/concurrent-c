@@ -45,6 +45,7 @@ typedef int CCTaskIntptrKind;
 #define CC_TASK_KIND_FUTURE  2
 #define CC_TASK_KIND_POLL    3
 #define CC_TASK_KIND_FIBER   4
+#define CC_TASK_KIND_POOL    5
 #define CC_TASK_INTPTR_KIND_INVALID 0
 #define CC_TASK_INTPTR_KIND_FUTURE  2
 #define CC_TASK_INTPTR_KIND_POLL    3
@@ -56,6 +57,7 @@ typedef enum {
     CC_TASK_KIND_FUTURE = 2,  /* Executor pool */
     CC_TASK_KIND_POLL = 3,    /* State machine (from @async) */
     CC_TASK_KIND_FIBER = 4,   /* M:N fiber (from cc_fiber_spawn_task) */
+    CC_TASK_KIND_POOL  = 5,   /* M:N pool task (transparent runtime pooling) */
 } CCTaskKind;
 
 /* Opaque CCTask struct - the actual layout is implementation detail.

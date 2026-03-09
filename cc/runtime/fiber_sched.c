@@ -226,12 +226,19 @@ struct fiber_task* cc_sched_worker_idle_probe(void);
  * 
  * Tuned for high-throughput channel operations. More spinning reduces condvar
  * syscall overhead at the cost of CPU usage when idle. Override via env vars:
- *   CC_SPIN_FAST_ITERS=1024  (default: 1024)
- *   CC_SPIN_YIELD_ITERS=64   (default: 64)
+ *   CC_SPIN_FAST_ITERS=128   (default: 128)
+ *   CC_SPIN_YIELD_ITERS=8    (default: 8)
+ *
+ * Rationale: for CPU-bound workloads (e.g. pigz), workers idle between task
+ * completions for ~4ms.  Spinning for 200µs (1024 + 64 iters) wastes 7× that
+ * per pipeline cycle across all idle workers.  128 fast + 8 yield (~26µs) is
+ * long enough to catch work that arrives from a co-located fiber while keeping
+ * idle CPU overhead below 1% per cycle.  Override via env var for I/O-bound
+ * workloads that benefit from lower sleep/wake frequency.
  * ============================================================================ */
 
-#define SPIN_FAST_ITERS_DEFAULT 1024
-#define SPIN_YIELD_ITERS_DEFAULT 64
+#define SPIN_FAST_ITERS_DEFAULT 128
+#define SPIN_YIELD_ITERS_DEFAULT 8
 
 static _Atomic int g_spin_fast_iters = -1;   /* -1 = not initialized */
 static _Atomic int g_spin_yield_iters = -1;
@@ -972,8 +979,9 @@ typedef struct {
     inbox_queue* inbox_queues;      /* Per-worker MPMC inbox queues */
     fiber_task* _Atomic free_list;
     
-    wake_primitive wake_prim;       /* Fast worker wake (futex/ulock instead of condvar) */
-    char _pad_wake[CACHE_LINE_SIZE];  /* Isolate wake_prim from pending */
+    wake_primitive wake_prim;           /* Global wake (shutdown, global-queue, join) */
+    char _pad_wake[CACHE_LINE_SIZE];    /* Isolate from pending */
+    wake_primitive* worker_wake_prims;  /* Per-worker wake primitives: workers sleep here */
     
     /* HIGHLY CONTENDED: updated on every spawn and complete - needs own cache line */
     _Atomic size_t pending;
@@ -1161,6 +1169,13 @@ typedef struct {
     _Atomic uint64_t unpark_chan_bridge_calls;
     _Atomic uint64_t unpark_chan_bridge_startup_pocket;
     _Atomic uint64_t unpark_chan_bridge_startup_sleepers;
+    /* Idle-while-work-exists: counts times a worker was idle/sleeping
+     * when runnable tasks were already sitting in global or other inboxes.
+     * Non-zero here means lost parallelism — the "missing eff-core" budget. */
+    _Atomic uint64_t spin_entered_with_global_work;
+    _Atomic uint64_t sleep_entered_with_global_work;
+    _Atomic uint64_t sleep_entered_with_inbox_backlog;
+    _Atomic uint64_t sleep_inbox_backlog_count;
 } cc_worker_gap_stats;
 
 static cc_worker_gap_stats g_cc_worker_gap_stats = {
@@ -1689,6 +1704,32 @@ static void cc_worker_gap_stats_dump(void) {
             (unsigned long long)up_chan_bridge_calls,
             (unsigned long long)up_chan_bridge_startup_pocket,
             (unsigned long long)up_chan_bridge_startup_sleepers);
+    {
+        uint64_t spin_w_global =
+            atomic_load_explicit(&g_cc_worker_gap_stats.spin_entered_with_global_work, memory_order_relaxed);
+        uint64_t sleep_w_global =
+            atomic_load_explicit(&g_cc_worker_gap_stats.sleep_entered_with_global_work, memory_order_relaxed);
+        uint64_t sleep_w_inbox =
+            atomic_load_explicit(&g_cc_worker_gap_stats.sleep_entered_with_inbox_backlog, memory_order_relaxed);
+        uint64_t sleep_w_inbox_count =
+            atomic_load_explicit(&g_cc_worker_gap_stats.sleep_inbox_backlog_count, memory_order_relaxed);
+        uint64_t spin_enters_val =
+            atomic_load_explicit(&g_cc_worker_gap_stats.spin_enters, memory_order_relaxed);
+        uint64_t sleep_enters_val =
+            atomic_load_explicit(&g_cc_worker_gap_stats.sleep_enters, memory_order_relaxed);
+        fprintf(stderr,
+                "idle-while-work: spin_w_global=%llu/%-6llu(%.1f%%)  sleep_w_global=%llu/%-6llu(%.1f%%)  sleep_w_inbox=%llu/%-6llu(%.1f%%)  inbox_backlog_avg=%.2f\n",
+                (unsigned long long)spin_w_global,
+                (unsigned long long)spin_enters_val,
+                spin_enters_val ? (100.0 * (double)spin_w_global / (double)spin_enters_val) : 0.0,
+                (unsigned long long)sleep_w_global,
+                (unsigned long long)sleep_enters_val,
+                sleep_enters_val ? (100.0 * (double)sleep_w_global / (double)sleep_enters_val) : 0.0,
+                (unsigned long long)sleep_w_inbox,
+                (unsigned long long)sleep_enters_val,
+                sleep_enters_val ? (100.0 * (double)sleep_w_inbox / (double)sleep_enters_val) : 0.0,
+                sleep_w_inbox ? ((double)sleep_w_inbox_count / (double)sleep_w_inbox) : 0.0);
+    }
     fprintf(stderr, "===========================\n");
 }
 
@@ -1884,11 +1925,18 @@ static inline int sched_global_has_hint_any(void) {
 }
 
 static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle next, const char* edge) {
-    const int lifecycle_asserts = cc_v3_worker_lifecycle_enabled();
-    const int lifecycle_trace = cc_worker_gap_trace_enabled();
-    if (!lifecycle_asserts && !lifecycle_trace) return;
     if (worker_id < 0 || !g_sched.worker_lifecycle) return;
     _Atomic unsigned char* slot = &g_sched.worker_lifecycle[(size_t)worker_id];
+
+    const int lifecycle_asserts = cc_v3_worker_lifecycle_enabled();
+    const int lifecycle_trace = cc_worker_gap_trace_enabled();
+    if (!lifecycle_asserts && !lifecycle_trace) {
+        /* Fast path: unconditional relaxed store so spawn-side routing can
+         * always read per-worker spinning/sleeping state to prefer idle workers. */
+        atomic_store_explicit(slot, (unsigned char)next, memory_order_relaxed);
+        return;
+    }
+
     cc_worker_lifecycle prev = (cc_worker_lifecycle)atomic_exchange_explicit(
         slot, (unsigned char)next, memory_order_acq_rel);
     if (lifecycle_trace && prev == CC_WL_DEAD && next != CC_WL_DEAD) {
@@ -2199,6 +2247,11 @@ static void cc__fiber_check_deadlock(void) {
 /* Per-worker thread-local state */
 static __thread fiber_task* tls_current_fiber = NULL;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
+
+/* Count of workers currently executing a long-running CPU-bound pool task via
+ * cc__fiber_pool_task_begin/end.  Sysmon excludes these workers from the
+ * "stuck" count so it doesn't spawn hybrid-promotion threads for them. */
+static _Atomic size_t g_pool_tasks_active = 0;
 /* True for scheduler-owned execution threads (base workers + replacement workers). */
 static __thread int tls_sched_worker_ctx = 0;
 static __thread void* tls_tsan_sched_fiber = NULL;
@@ -2289,7 +2342,23 @@ static inline void wake_one_if_sleeping(int timing, cc_wake_reason reason) {
     if (spinning == 0 || allow_with_spinners) {
         size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
         if (sleeping > 0) {
-            wake_primitive_wake_one(&g_sched.wake_prim);
+            /* Per-worker wake: find a sleeping worker and wake its own
+             * primitive directly.  This matches CCExec's pthread_cond_signal
+             * model — exactly one worker wakes per task, zero thundering herd. */
+            int woke = 0;
+            if (g_sched.worker_wake_prims && g_sched.worker_lifecycle) {
+                for (size_t scan = 0; scan < g_sched.num_workers && !woke; scan++) {
+                    cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+                        &g_sched.worker_lifecycle[scan], memory_order_relaxed);
+                    if (lc == CC_WL_SLEEP) {
+                        wake_primitive_wake_one(&g_sched.worker_wake_prims[scan]);
+                        woke = 1;
+                    }
+                }
+            }
+            if (!woke) {
+                wake_primitive_wake_one(&g_sched.wake_prim);  /* fallback */
+            }
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_cond_fired[(int)reason], 1, memory_order_relaxed);
             }
@@ -2322,14 +2391,29 @@ static inline void wake_one_if_sleeping_unconditional(int timing, cc_wake_reason
         fprintf(stderr, "[wake] unconditional: sleeping=%zu spinning=%zu\n", sleeping, spinning);
     }
     if (sleeping > 0) {
-        /* Wake one sleeper; wake_primitive_wake_one bumps the counter. */
-        wake_primitive_wake_one(&g_sched.wake_prim);
+        int woke = 0;
+        if (g_sched.worker_wake_prims && g_sched.worker_lifecycle) {
+            for (size_t scan = 0; scan < g_sched.num_workers && !woke; scan++) {
+                cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+                    &g_sched.worker_lifecycle[scan], memory_order_relaxed);
+                if (lc == CC_WL_SLEEP) {
+                    wake_primitive_wake_one(&g_sched.worker_wake_prims[scan]);
+                    woke = 1;
+                }
+            }
+        }
+        if (!woke) wake_primitive_wake_one(&g_sched.wake_prim);
         if (gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_uncond_fired[(int)reason], 1, memory_order_relaxed);
         }
     } else {
-        /* No sleepers observed: bump counter to avoid lost wakeups.
-         * This counter is a wake generation heuristic, not a publication LP. */
+        /* No sleepers: bump all per-worker counters AND the global counter so
+         * any worker racing into sleep sees a changed value and re-checks. */
+        if (g_sched.worker_wake_prims) {
+            for (size_t i = 0; i < g_sched.num_workers; i++) {
+                atomic_fetch_add_explicit(&g_sched.worker_wake_prims[i].value, 1, memory_order_relaxed);
+            }
+        }
         atomic_fetch_add_explicit(&g_sched.wake_prim.value, 1, memory_order_relaxed);
         if (gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.wake_uncond_bump_only[(int)reason], 1, memory_order_relaxed);
@@ -2345,6 +2429,26 @@ static inline void wake_one_if_sleeping_unconditional(int timing, cc_wake_reason
 static inline int pool_idle_for_global_edge_wake(void) {
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     return sleeping > 0;
+}
+
+/* Wake a specific worker if it is sleeping, using its per-worker primitive.
+ * Used after pushing to that worker's inbox: zero thundering herd, zero
+ * wasted spin cycles on all other workers.  Falls back to the global wake
+ * primitive when per-worker prims are not yet allocated (startup). */
+static inline void wake_target_worker_if_sleeping(int target_worker, int timing) {
+    if (target_worker < 0) return;
+    if (!g_sched.worker_wake_prims || !g_sched.worker_lifecycle) {
+        wake_primitive_wake_one(&g_sched.wake_prim);
+        return;
+    }
+    cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+        &g_sched.worker_lifecycle[target_worker], memory_order_relaxed);
+    if (lc == CC_WL_SLEEP) {
+        wake_primitive_wake_one(&g_sched.worker_wake_prims[target_worker]);
+        if (timing) atomic_fetch_add_explicit(&g_spawn_timing.wake_calls, 1, memory_order_relaxed);
+    }
+    /* If not sleeping (active or spinning), the worker will find the task
+     * naturally in its inbox check — no wake needed. */
 }
 
 static inline int sched_in_startup_phase(void) {
@@ -3235,6 +3339,13 @@ static void* sysmon_main(void* arg) {
             }
         }
         
+        /* Workers executing intentional long CPU-bound pool tasks are not
+         * actually stuck — they are productively occupied.  Subtract them
+         * from the stuck count before deciding to promote. */
+        size_t busy = atomic_load_explicit(&g_pool_tasks_active, memory_order_relaxed);
+        if (busy >= stuck) stuck = 0;
+        else stuck -= busy;
+
         if (stuck == 0) {
 #if CC_V3_DIAGNOSTICS
             atomic_fetch_add_explicit(&g_sched.pressure_block_not_stuck, 1, memory_order_relaxed);
@@ -3640,6 +3751,28 @@ static void* worker_main(void* arg) {
 #endif
         }
         
+        /* Priority 2.5: Quick targeted steal from two neighboring inboxes.
+         * Handles the common CPU-bound case: a task was spawned to worker W's
+         * inbox while W was active, but this worker (W±1) just became free.
+         * Checking two deterministic neighbors (next + opposite) is O(1) and
+         * covers most imbalance without the full P4 scan overhead. */
+        if (count == 0 && g_sched.num_workers > 1) {
+            size_t n1 = ((size_t)worker_id + 1) % g_sched.num_workers;
+            fiber_task* f2 = iq_pop(&g_sched.inbox_queues[n1]);
+            if (!f2) {
+                size_t n2 = ((size_t)worker_id + g_sched.num_workers / 2) % g_sched.num_workers;
+                if (n2 != n1) f2 = iq_pop(&g_sched.inbox_queues[n2]);
+            }
+            if (f2) {
+                batch[count++] = f2;
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
+                if (v3_stats) {
+                    atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
+                }
+#endif
+            }
+        }
+
         /* Priority 3: Pop from global queue.
          * Only probe global when local+inbox had no work in this loop.
          * Fairness injection above still prevents long-term global starvation. */
@@ -3777,9 +3910,12 @@ static void* worker_main(void* arg) {
 #endif
         
         /* No work - enter spinning state */
-        if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_IDLE_SPIN, "enter_spin");
+        cc_v3_worker_lifecycle_set(worker_id, CC_WL_IDLE_SPIN, "enter_spin");
         if (gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spin_enters, 1, memory_order_relaxed);
+            if (sched_global_has_hint_any()) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spin_entered_with_global_work, 1, memory_order_relaxed);
+            }
         }
         size_t old_spinning = atomic_fetch_add_explicit(&g_sched.spinning, 1, memory_order_seq_cst);
         if (join_debug_enabled()) {
@@ -3809,40 +3945,69 @@ static void* worker_main(void* arg) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spin_found_work, 1, memory_order_relaxed);
                 }
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-                if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "spin_found_work");
+                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "spin_found_work");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
             cpu_pause();
         }
         
-        /* Yield a few times before sleeping, with steal attempts */
-        for (int y = 0; y < SPIN_YIELD_ITERS; y++) {
+        /* Yield a few times before sleeping, with steal attempts.
+         * On the final yield iteration also probe global: backlog-promoted
+         * spawns land in global and need to be visible before we sleep.
+         * Single check on the last iteration avoids the contention of
+         * probing on every iteration (8 workers × 8 iters = stampede). */
+        int yield_iters = SPIN_YIELD_ITERS;
+        for (int y = 0; y < yield_iters; y++) {
             sched_yield();
             fiber_task* f = lq_pop(my_queue);
             if (!f) f = iq_pop(&g_sched.inbox_queues[worker_id]);
+            if (!f && y == yield_iters - 1 && sched_global_has_hint_any()) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
+                }
+                f = sched_global_pop_for_worker(worker_id);
+                if (f && gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
+                }
+            }
             if (f) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.yield_found_work, 1, memory_order_relaxed);
                 }
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
-                if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "yield_found_work");
+                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "yield_found_work");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
         }
 
         /* One bounded pre-sleep steal probe: helps catch untended work without
-         * reintroducing high-frequency steal churn in spin/yield loops. */
-        if (g_sched.num_workers > 1) {
-            if (gap_stats) {
-                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_attempts, 1, memory_order_relaxed);
-            }
-            fiber_task* f = worker_try_steal_one(worker_id, &rng_state);
-            if (f) {
+         * reintroducing high-frequency steal churn in spin/yield loops.
+         * Also check global: last chance before sleeping to catch tasks that
+         * were backlog-promoted to global and whose wake signal fired while
+         * we were still in the spin/yield phase above. */
+        {
+            fiber_task* f = NULL;
+            if (sched_global_has_hint_any()) {
                 if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
+                }
+                f = sched_global_pop_for_worker(worker_id);
+                if (f && gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
+                }
+            }
+            if (!f && g_sched.num_workers > 1) {
+                if (gap_stats) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_attempts, 1, memory_order_relaxed);
+                }
+                f = worker_try_steal_one(worker_id, &rng_state);
+                if (f && gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_hits, 1, memory_order_relaxed);
                 }
+            }
+            if (f) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "pre_sleep_steal");
                 worker_run_fiber_accounted(f);
@@ -3858,8 +4023,21 @@ static void* worker_main(void* arg) {
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
         if (gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_enters, 1, memory_order_relaxed);
+            if (sched_global_has_hint_any()) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_entered_with_global_work, 1, memory_order_relaxed);
+            }
+            uint64_t inbox_backlog = 0;
+            for (size_t _wi = 0; _wi < g_sched.num_workers; _wi++) {
+                if ((int)_wi != worker_id && iq_peek(&g_sched.inbox_queues[_wi])) {
+                    inbox_backlog++;
+                }
+            }
+            if (inbox_backlog > 0) {
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_entered_with_inbox_backlog, 1, memory_order_relaxed);
+                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_inbox_backlog_count, inbox_backlog, memory_order_relaxed);
+            }
         }
-        if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
+        cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
         if (join_debug_enabled()) {
             fprintf(stderr, "[worker%d] exiting spin (found_work=%d iters=%d)\n", worker_id, spin_found_work, spin_iters);
             fflush(stderr);
@@ -3892,7 +4070,7 @@ static void* worker_main(void* arg) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_post_recheck_hits, 1, memory_order_relaxed);
                 }
-                if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "post_sleep_recheck");
+                cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "post_sleep_recheck");
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
@@ -3963,10 +4141,14 @@ static void* worker_main(void* arg) {
                 }
                 break;
             }
-            /* Read wake_val AFTER checking queues - this is critical for correctness.
-             * Memory barrier ensures we see any fiber pushed before this point. */
+            /* Read wake_val from this worker's own primitive AFTER checking queues.
+             * Workers sleep on per-worker prims so wakes are targeted: inbox pushes
+             * wake exactly the right worker, eliminating thundering herd. */
             atomic_thread_fence(memory_order_acquire);
-            uint32_t wake_val = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
+            wake_primitive* my_wake = g_sched.worker_wake_prims
+                                      ? &g_sched.worker_wake_prims[worker_id]
+                                      : &g_sched.wake_prim;
+            uint32_t wake_val = atomic_load_explicit(&my_wake->value, memory_order_acquire);
             
             /* Double-check queues after reading wake_val to close the race window */
             if (lq_peek(my_queue) || iq_peek(&g_sched.inbox_queues[worker_id]) ||
@@ -3982,12 +4164,12 @@ static void* worker_main(void* arg) {
             if (gap_stats) {
                 wait_start_ns = cc__mono_ns_sched();
             }
-            wake_primitive_wait_timeout(&g_sched.wake_prim, wake_val, 500);
+            wake_primitive_wait_timeout(my_wake, wake_val, 500);
             if (gap_stats) {
                 uint64_t waited_ns = cc__mono_ns_sched() - wait_start_ns;
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_wait_calls, 1, memory_order_relaxed);
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.sleep_wait_ns, waited_ns, memory_order_relaxed);
-                uint32_t wake_after = atomic_load_explicit(&g_sched.wake_prim.value, memory_order_acquire);
+                uint32_t wake_after = atomic_load_explicit(&my_wake->value, memory_order_acquire);
                 int has_local_after = lq_peek(my_queue);
                 int has_inbox_after = iq_peek(&g_sched.inbox_queues[worker_id]);
                 int has_global_after = sched_global_peek_any();
@@ -4007,7 +4189,7 @@ static void* worker_main(void* arg) {
             cc__fiber_check_deadlock();
         }
         atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
-        if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "sleep_exit");
+        cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "sleep_exit");
         if (g_sched.num_workers > 1) {
             size_t start = (size_t)(worker_id + 1) % g_sched.num_workers;
             for (size_t j = 0; j < g_sched.num_workers - 1; j++) {
@@ -4085,7 +4267,6 @@ int cc_fiber_sched_init(size_t num_workers) {
             num_workers = CC_FIBER_WORKERS;
             #else
             long n = sysconf(_SC_NPROCESSORS_ONLN);
-            /* Start at 1x cores, auto-scale to 2x for CPU-bound work */
             num_workers = n > 0 ? (size_t)n : 4;
             #endif
         }
@@ -4119,9 +4300,11 @@ int cc_fiber_sched_init(size_t num_workers) {
     g_sched.worker_lifecycle = (_Atomic unsigned char*)calloc(num_workers, sizeof(_Atomic unsigned char));
     g_sched.worker_first_sleep_seen = (_Atomic unsigned char*)calloc(num_workers, sizeof(_Atomic unsigned char));
     g_sched.worker_boot_tsc = (_Atomic uint64_t*)calloc(num_workers, sizeof(_Atomic uint64_t));
+    g_sched.worker_wake_prims = (wake_primitive*)calloc(num_workers, sizeof(wake_primitive));
     if (!g_sched.run_queue || !g_sched.local_queues || !g_sched.inbox_queues ||
         !g_sched.workers || !g_sched.worker_parked || !g_sched.worker_heartbeat ||
-        !g_sched.worker_lifecycle || !g_sched.worker_first_sleep_seen || !g_sched.worker_boot_tsc) {
+        !g_sched.worker_lifecycle || !g_sched.worker_first_sleep_seen || !g_sched.worker_boot_tsc ||
+        !g_sched.worker_wake_prims) {
         if (g_sched.run_queue) {
             for (size_t i = 0; i < g_sched.run_queue_count; i++) {
                 pthread_mutex_destroy(&g_sched.run_queue[i].overflow_mu);
@@ -4136,10 +4319,14 @@ int cc_fiber_sched_init(size_t num_workers) {
         free(g_sched.worker_lifecycle);
         free(g_sched.worker_first_sleep_seen);
         free(g_sched.worker_boot_tsc);
+        free(g_sched.worker_wake_prims);
         fprintf(stderr, "[cc] fiber scheduler init failed: out of memory\n");
         abort();
     }
     wake_primitive_init(&g_sched.wake_prim);
+    for (size_t i = 0; i < num_workers; i++) {
+        wake_primitive_init(&g_sched.worker_wake_prims[i]);
+    }
     atomic_store_explicit(&g_sched.lifecycle_illegal_transitions, 0, memory_order_relaxed);
     atomic_store_explicit(&g_sched.pressure, 0, memory_order_relaxed);
     for (size_t i = 0; i < num_workers; i++) {
@@ -4211,6 +4398,11 @@ void cc_fiber_sched_shutdown(void) {
     atomic_store_explicit(&g_sched.running, 0, memory_order_release);
     atomic_store_explicit(&g_sched.sysmon_running, 0, memory_order_release);
     wake_primitive_wake_all(&g_sched.wake_prim);
+    if (g_sched.worker_wake_prims) {
+        for (size_t i = 0; i < g_sched.num_workers; i++) {
+            wake_primitive_wake_one(&g_sched.worker_wake_prims[i]);
+        }
+    }
 
     if (g_sched.sysmon_started) {
         pthread_join(g_sched.sysmon_thread, NULL);
@@ -4470,38 +4662,118 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                     fprintf(stderr, "[spawn] fiber=%lu to local[%zu]\n", (unsigned long)f->fiber_id, self);
                 }
             } else {
-                /* Local queue full: fall back to inbox. Use RR but skip the
-                 * target if it appears sleeping and a fresher peer exists. */
-                size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
-                if (target == self && g_sched.num_workers > 1)
-                    target = (target + 1) % g_sched.num_workers;
-                if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
-                    uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
-                    uint64_t now_cyc = rdtsc();
-                    if (hb0 != 0 && (now_cyc - hb0) >= ORPHAN_THRESHOLD_CYCLES) {
-                        for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
-                            size_t cand = (target + scan) % g_sched.num_workers;
-                            if ((int)cand == tls_worker_id) continue;
-                            uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
-                            if (hb != 0 && (now_cyc - hb) < ORPHAN_THRESHOLD_CYCLES) { target = cand; break; }
-                        }
-                    }
-                }
-                int inbox_edge = 0;
-                for (int attempt = 0; attempt < 8 && !pushed; attempt++) {
-                    pushed = (iq_push_with_edge(&g_sched.inbox_queues[target], f, &inbox_edge) == 0);
-                    if (!pushed) cpu_pause();
-                }
-                if (pushed) {
+                /* Saturation bypass: when every worker is actively running a fiber
+                 * (spinning==0, sleeping==0) route to the shared global pool instead
+                 * of pre-assigning to a specific inbox.  Any worker that finishes
+                 * will find this work at P3 immediately — identical to how CCExec's
+                 * shared queue works — eliminating the "block N and N+8 stuck behind
+                 * each other on the same worker" problem that causes high tail
+                 * queue_wait.  Guard: only fires after saturation to preserve the
+                 * fast-inbox path during startup when workers are still spinning. */
+                size_t sleeping_now = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+                int saturated = (spinning_now == 0 && sleeping_now == 0 && g_sched.run_queue != NULL);
+                if (saturated) {
+                    int was_empty = sched_global_push(f, -1);
                     pushed = 1;
-                    non_global_edge = inbox_edge;
-                    publish_target_worker = (int)target;
-                    spawn_publish_route = (int)SPAWN_ROUTE_INBOX;
+                    pushed_global = 1;
+                    global_edge = was_empty;
+                    spawn_publish_route = (int)SPAWN_ROUTE_GLOBAL;
                     if (gap_stats) {
-                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_inbox, 1, memory_order_relaxed);
+                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_global_fallback, 1, memory_order_relaxed);
                     }
                     if (join_debug_enabled()) {
-                        fprintf(stderr, "[spawn] fiber=%lu to inbox[%zu]\n", (unsigned long)f->fiber_id, target);
+                        fprintf(stderr, "[spawn] fiber=%lu to global (saturated: spinning=0 sleeping=0)\n", (unsigned long)f->fiber_id);
+                    }
+                } else {
+                    /* Normal path: prefer a spinning or sleeping worker.
+                     * A spinning worker checks its inbox every ~1µs in the spin loop;
+                     * a sleeping worker wakes on the edge signal sent below.  Either is
+                     * dramatically better than landing on a worker currently running a
+                     * 4ms compression block, where the block sits in the inbox waiting
+                     * the full duration — exactly the source of our qw_max spikes. */
+                    size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+                    if (target == self && g_sched.num_workers > 1)
+                        target = (target + 1) % g_sched.num_workers;
+                    if ((spinning_now > 0 || sleeping_now > 0) && g_sched.worker_lifecycle && g_sched.num_workers > 1) {
+                        /* Prefer an idle worker whose inbox is also empty: this
+                         * prevents inbox pile-up where worker W already has tasks
+                         * {A,B} in its inbox while worker X is idle with an empty
+                         * inbox.  Two-tier scan: first idle-with-empty-inbox wins;
+                         * fall back to first idle-with-backlog if none found. */
+                        size_t idle_with_backlog = (size_t)-1;
+                        for (size_t scan = 0; scan < g_sched.num_workers; scan++) {
+                            size_t cand = (target + scan) % g_sched.num_workers;
+                            if ((int)cand == tls_worker_id) continue;
+                            cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+                                &g_sched.worker_lifecycle[cand], memory_order_relaxed);
+                            if (lc == CC_WL_IDLE_SPIN || lc == CC_WL_SLEEP) {
+                                if (!iq_peek(&g_sched.inbox_queues[cand])) {
+                                    target = cand;  /* idle + empty inbox: ideal */
+                                    idle_with_backlog = (size_t)-1;  /* cancel fallback */
+                                    break;
+                                } else if (idle_with_backlog == (size_t)-1) {
+                                    idle_with_backlog = cand;  /* remember first idle-but-busy */
+                                }
+                            }
+                        }
+                        if (idle_with_backlog != (size_t)-1) target = idle_with_backlog;
+                    } else if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
+                        /* Fallback: skip orphaned (truly stuck) workers */
+                        uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
+                        uint64_t now_cyc = rdtsc();
+                        if (hb0 != 0 && (now_cyc - hb0) >= ORPHAN_THRESHOLD_CYCLES) {
+                            for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
+                                size_t cand = (target + scan) % g_sched.num_workers;
+                                if ((int)cand == tls_worker_id) continue;
+                                uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
+                                if (hb != 0 && (now_cyc - hb) < ORPHAN_THRESHOLD_CYCLES) { target = cand; break; }
+                            }
+                        }
+                    }
+                    /* Inbox-to-global promotion: if the selected target already
+                     * has work queued in its inbox, the worker is busy and cannot
+                     * start this fiber immediately regardless of its lifecycle state.
+                     * Routing to a backlogged inbox means the task waits behind
+                     * however many items are already there (~0.84ms avg at cap=16).
+                     * Instead promote to the shared global queue: whichever worker
+                     * finishes first picks it up at P3 immediately — identical to
+                     * how CCExec's shared queue eliminates inbox backlog latency.
+                     * Only applies when a run_queue exists (post-init); during
+                     * startup workers have empty inboxes so this path rarely fires
+                     * and inbox routing remains the fast path. */
+                    int target_has_backlog = (g_sched.run_queue != NULL &&
+                                              iq_peek(&g_sched.inbox_queues[target]));
+                    if (target_has_backlog) {
+                        int was_empty = sched_global_push(f, -1);
+                        pushed = 1;
+                        pushed_global = 1;
+                        global_edge = was_empty;
+                        spawn_publish_route = (int)SPAWN_ROUTE_GLOBAL;
+                        if (gap_stats) {
+                            atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_global_fallback, 1, memory_order_relaxed);
+                        }
+                        if (join_debug_enabled()) {
+                            fprintf(stderr, "[spawn] fiber=%lu to global (inbox backlog at worker %zu)\n",
+                                    (unsigned long)f->fiber_id, target);
+                        }
+                    } else {
+                        int inbox_edge = 0;
+                        for (int attempt = 0; attempt < 8 && !pushed; attempt++) {
+                            pushed = (iq_push_with_edge(&g_sched.inbox_queues[target], f, &inbox_edge) == 0);
+                            if (!pushed) cpu_pause();
+                        }
+                        if (pushed) {
+                            pushed = 1;
+                            non_global_edge = inbox_edge;
+                            publish_target_worker = (int)target;
+                            spawn_publish_route = (int)SPAWN_ROUTE_INBOX;
+                            if (gap_stats) {
+                                atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_push_worker_inbox, 1, memory_order_relaxed);
+                            }
+                            if (join_debug_enabled()) {
+                                fprintf(stderr, "[spawn] fiber=%lu to inbox[%zu]\n", (unsigned long)f->fiber_id, target);
+                            }
+                        }
                     }
                 }
             }
@@ -4724,6 +4996,16 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
         if (pushed_global) {
             if (global_edge && pool_idle_for_global_edge_wake()) {
                 wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
+            } else if (!global_edge) {
+                /* Non-edge global push: happens when we promoted a backlogged-inbox
+                 * spawn to global (target_has_backlog path).  Active workers will
+                 * pick it up at P3 naturally, but sleeping workers need a nudge.
+                 * Only wake if there are actual sleepers — avoids a syscall when
+                 * all workers are busy (the common steady-state case). */
+                size_t sl = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+                if (sl > 0) {
+                    wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
+                }
             } else if (nonworker_global_publish && pool_strict_idle_for_nonglobal_wake()) {
                 /* If non-worker global publish lands on a non-edge, strict-idle
                  * still needs a nudge to avoid occasional all-sleep stalls. */
@@ -4761,7 +5043,8 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                             }
                         }
                     }
-                    wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_NONGLOBAL);
+                    /* Wake the specific target worker, not just any sleeper */
+                    wake_target_worker_if_sleeping(nonworker_target_worker, timing);
                 }
             } else {
                 int strict_idle = pool_strict_idle_for_nonglobal_wake();
@@ -4781,7 +5064,8 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spawn_nw_wake_conditional, 1, memory_order_relaxed);
                 }
                 if (allow_nonglobal_wake) {
-                    wake_one_if_sleeping(timing, CC_WAKE_REASON_SPAWN_NONGLOBAL);
+                    /* Wake the specific target worker, not just any sleeper */
+                    wake_target_worker_if_sleeping(publish_target_worker, timing);
                 }
             }
         }
@@ -5147,6 +5431,17 @@ void* cc_fiber_get_result(fiber_task* f) {
     return f->result;
 }
 
+/* TLS pointer to the current pool slot's result_buf_copy.
+ * Set by cc_pool_runner_fn before invoking a task, cleared after.
+ * cc_task_result_ptr reads this to direct structured results into the
+ * slot's stable buffer instead of the fiber's result_buf. */
+__thread char* cc_tls_pool_slot_result_buf = NULL;
+
+__attribute__((noinline))
+void cc__fiber_set_pool_slot_buf(char* buf) {
+    cc_tls_pool_slot_result_buf = buf;
+}
+
 /* Get pointer to fiber's result_buf (for range checks in task.c) */
 void* cc_fiber_get_result_buf(fiber_task* f) {
     if (!f) return NULL;
@@ -5168,7 +5463,13 @@ void* cc__fiber_current(void) {
 /* Get pointer to fiber-local result buffer (48 bytes).
  * Use this to store task results without malloc.
  * Returns NULL if not in fiber context. */
+__attribute__((noinline))
 void* cc_task_result_ptr(size_t size) {
+    char* pool_buf = cc_tls_pool_slot_result_buf;
+    if (pool_buf) {
+        if (size > 48) return NULL;
+        return pool_buf;
+    }
     if (!tls_current_fiber || size > sizeof(tls_current_fiber->result_buf)) {
         return NULL;
     }
@@ -5603,6 +5904,27 @@ queued:
                     use_preferred = 0;
                 }
             }
+            /* Saturation bypass: if no workers are spinning (all are running
+             * CPU-bound fibers) AND we are inside a base worker that is about
+             * to become free (calling unpark from the completing fiber), route
+             * to the current worker's local queue instead.  The current worker
+             * will run this fiber next — ~2µs latency vs waiting a full task
+             * cycle (~500µs) for the preferred (busy) worker to check its inbox.
+             *
+             * Guard: only when spinning == 0 to preserve affinity and
+             * throughput benefits in lighter-loaded workloads where the
+             * preferred worker will pick this up quickly anyway. */
+            if (use_preferred && tls_worker_id >= 0 &&
+                    atomic_load_explicit(&g_sched.spinning, memory_order_relaxed) == 0) {
+                pushed = (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0);
+                if (pushed) {
+                    pushed_to_current_local = 1;
+                    use_preferred = 0;
+                    if (gap_stats) {
+                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
+                    }
+                }
+            }
             if (use_preferred) {
                 int inbox_edge = 0;
                 for (int attempt = 0; attempt < 16 && !pushed; attempt++) {
@@ -5675,11 +5997,9 @@ queued:
                 }
             }
         } else {
-            /* Inbox-affinity unparks are frequent; if any workers are already
-             * spinning, let them pick the work up without another kernel wake. */
-            if (pool_strict_idle_for_nonglobal_wake()) {
-                wake_one_if_sleeping(0, CC_WAKE_REASON_UNPARK_NONGLOBAL);
-            }
+            /* Inbox-affinity unparks: wake the specific target worker.
+             * If it's already active/spinning it will find the task naturally. */
+            wake_target_worker_if_sleeping(preferred, 0);
         }
     }
 }
@@ -5746,6 +6066,32 @@ void cc__fiber_yield_global(void) {
     /* Yield-before-commit: trampoline will enqueue on global queue. */
     current->yield_dest = YIELD_GLOBAL;
     mco_yield(current->coro);
+}
+
+/* Signal to the sysmon that the current worker is still alive and doing
+ * productive work.  Call this from long-running tasks that do not yield
+ * (e.g. CPU-bound pool tasks) to prevent the orphan-threshold detector
+ * from treating the worker as "stuck" and spawning hybrid-promotion
+ * threads unnecessarily. */
+void cc__fiber_touch_heartbeat(void) {
+    int wid = tls_worker_id;
+    if (wid < 0 || !g_sched.worker_heartbeat) return;
+    atomic_store_explicit(&g_sched.worker_heartbeat[wid].heartbeat,
+                          rdtsc(), memory_order_relaxed);
+}
+
+/* Notify the sysmon that the current fiber is about to execute a long-running
+ * CPU-bound operation (e.g. a pool task).  The sysmon will not count this
+ * worker as "stuck" for the duration, suppressing hybrid-promotion spawns. */
+void cc__fiber_pool_task_begin(void) {
+    atomic_fetch_add_explicit(&g_pool_tasks_active, 1, memory_order_relaxed);
+    /* Also reset the heartbeat so the 1ms threshold starts fresh. */
+    cc__fiber_touch_heartbeat();
+}
+
+void cc__fiber_pool_task_end(void) {
+    cc__fiber_touch_heartbeat();
+    atomic_fetch_sub_explicit(&g_pool_tasks_active, 1, memory_order_relaxed);
 }
 
 /* Park the current fiber for `ms` milliseconds.

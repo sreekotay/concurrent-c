@@ -58,11 +58,17 @@ typedef struct {
     fiber_task* fiber;
 } CCTaskFiberInternal;
 
+/* Internal representation for POOL kind tasks */
+typedef struct {
+    int slot_idx;
+} CCTaskPoolInternal;
+
 /* Accessor macros to get internal data from CCTask */
 #define TASK_FUTURE(t) ((CCTaskFutureInternal*)((t)->_data))
 #define TASK_POLL(t) ((CCTaskPollInternal*)((t)->_data))
 #define TASK_SPAWN(t) ((CCTaskSpawnInternal*)((t)->_data))
 #define TASK_FIBER(t) ((CCTaskFiberInternal*)((t)->_data))
+#define TASK_POOL(t)  ((CCTaskPoolInternal*)((t)->_data))
 #endif /* CC_TASK_INTERNAL_TYPES_DEFINED */
 
 /* Fiber functions (defined in fiber_sched.c) */
@@ -80,6 +86,21 @@ int cc_thread_task_join_fiber(struct CCSpawnTask* task, void** out_result);
 
 /* Fiber context detection (defined in fiber_sched.c) */
 int cc__fiber_in_context(void);
+void* cc__fiber_current(void);
+
+extern void cc__fiber_set_pool_slot_buf(char* buf);
+
+/* Fiber park/unpark for pool task wait (defined in fiber_sched.c) */
+void cc__fiber_park_if(_Atomic int* flag, int expected,
+                       const char* reason, const char* file, int line);
+void cc__fiber_unpark(void* fiber_ptr);
+/* Cooperative yield to global queue (defined in fiber_sched.c) */
+void cc__fiber_yield_global(void);
+/* Sysmon heartbeat touch: prevents orphan-threshold detection during
+ * long-running pool tasks (defined in fiber_sched.c) */
+void cc__fiber_touch_heartbeat(void);
+void cc__fiber_pool_task_begin(void);
+void cc__fiber_pool_task_end(void);
 
 static CCExec* g_task_exec = NULL;
 static pthread_mutex_t g_task_exec_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -219,6 +240,175 @@ static inline void cc_task_wait_stats_maybe_init(void) {
 
 /* cc__env_size defined in scheduler.c */
 
+/* ================================================================
+ * Runtime-level fiber task pool
+ *
+ * cc_fiber_spawn_task routes work to persistent pool-runner fibers
+ * instead of spawning a new fiber per task.  Pool runners loop on
+ * a shared work channel so the next task is picked up inline
+ * (channel buffer hit) with no spawn/route/wake overhead.
+ *
+ * The work channel sends CCPoolSlot* pointers (8 bytes) — this fits
+ * the lock-free fast-path in the channel implementation (≤sizeof(void*)).
+ *
+ * Disabled with CC_FIBER_POOL=0.  Default: enabled.
+ * ================================================================ */
+
+#define CC_POOL_MAX_SLOTS 128  /* max concurrent pool tasks */
+#define CC_POOL_WORK_CAP  128  /* work channel capacity (pointer-sized items) */
+
+/* Per-task slot: stores fn/arg for the runner, result for the waiter */
+typedef struct {
+    void* (*fn)(void*);       /* task function (set at alloc time) */
+    void* arg;                /* task argument */
+    volatile intptr_t result; /* result set by pool runner */
+    char result_buf_copy[48]; /* copy of pool-runner result_buf (if used) */
+    _Atomic int in_use;       /* 0=free, 1=allocated */
+    _Atomic int done;         /* 0=pending, 1=complete */
+    void* _Atomic waiter;     /* fiber_task* of the blocking fiber */
+} CCPoolSlot;
+
+typedef struct {
+    CCChan* work_ch;                     /* channel of CCPoolSlot* pointers */
+    CCPoolSlot slots[CC_POOL_MAX_SLOTS]; /* result slots */
+    _Atomic int next_slot;               /* round-robin allocation hint */
+    _Atomic int ready;                   /* 1 = initialized */
+    _Atomic int shutting_down;           /* 1 = closing */
+} CCFiberPool;
+
+static CCFiberPool g_fpool;
+static pthread_once_t g_fpool_once = PTHREAD_ONCE_INIT;
+
+static int cc_pool_enabled(void) {
+    static _Atomic int enabled = -1;
+    int v = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (v >= 0) return v;
+    const char* ev = getenv("CC_FIBER_POOL");
+    int nv = (!ev || ev[0] != '0') ? 1 : 0; /* default ON */
+    int expected = -1;
+    atomic_compare_exchange_strong_explicit(&enabled, &expected, nv,
+                                            memory_order_release, memory_order_relaxed);
+    return atomic_load_explicit(&enabled, memory_order_relaxed);
+}
+
+static int cc_pool_alloc_slot(void) {
+    int start = atomic_fetch_add_explicit(&g_fpool.next_slot, 1, memory_order_relaxed)
+                % CC_POOL_MAX_SLOTS;
+    for (int i = 0; i < CC_POOL_MAX_SLOTS; i++) {
+        int idx = (start + i) % CC_POOL_MAX_SLOTS;
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&g_fpool.slots[idx].in_use, &expected, 1,
+                                                    memory_order_acq_rel,
+                                                    memory_order_relaxed)) {
+            atomic_store_explicit(&g_fpool.slots[idx].done, 0, memory_order_relaxed);
+            atomic_store_explicit(&g_fpool.slots[idx].waiter, NULL, memory_order_relaxed);
+            return idx;
+        }
+    }
+    return -1; /* all slots in use */
+}
+
+static void cc_pool_free_slot(int idx) {
+    atomic_store_explicit(&g_fpool.slots[idx].in_use, 0, memory_order_release);
+}
+
+/* Pool runner fiber: loops receiving CCPoolSlot* from work_ch, executes fn(arg),
+ * publishes result to the slot, wakes the waiter, then yields so the consumer
+ * gets a scheduling turn before the runner grabs the next task.
+ *
+ * Before calling fn, cc__fiber_set_pool_slot_buf directs cc_task_result_ptr
+ * into the slot's stable result_buf_copy.  Both accessors are noinline to
+ * prevent the compiler from caching TLS descriptor addresses across the
+ * cc_chan_recv yield point (fiber migration invalidates cached TLS slots).
+ *
+ * After fn returns, we detect whether the result landed in the expected slot
+ * buffer, the runner fiber's own result_buf (stale-NULL TLS fallback), or a
+ * different slot (stale-nonzero TLS), and copy to the correct slot if needed.
+ * A plain scalar (non-buffer pointer) passes through as-is. */
+static void* cc_pool_runner_fn(void* arg) {
+    (void)arg;
+
+    /* Capture this runner fiber's result_buf address once at startup (before
+     * any yield).  If the TLS-based cc_task_result_ptr fallback writes into
+     * the fiber's buffer instead of the slot's, we detect and copy below. */
+    fiber_task* self = (fiber_task*)cc__fiber_current();
+    char* my_fiber_buf = self ? (char*)cc_fiber_get_result_buf(self) : NULL;
+
+    CCPoolSlot* slot;
+    while (cc_chan_recv(g_fpool.work_ch, &slot, sizeof(slot)) == 0) {
+        /* Compiler barrier: cc_chan_recv may park/resume this fiber on a
+         * different OS thread.  Force the compiler to re-resolve all TLS
+         * addresses (tls_current_fiber, cc_tls_pool_slot_result_buf, etc.)
+         * rather than reusing stale descriptor addresses from the previous
+         * iteration's thread. */
+        __asm__ volatile("" ::: "memory");
+        if (atomic_load_explicit(&g_fpool.shutting_down, memory_order_acquire)) break;
+
+        cc__fiber_set_pool_slot_buf(slot->result_buf_copy);
+        void* result = slot->fn(slot->arg);
+        char* expected_buf = slot->result_buf_copy;
+        cc__fiber_set_pool_slot_buf(NULL);
+
+        if (result == (void*)expected_buf) {
+            /* TLS worked: result already in the slot's stable buffer. */
+            slot->result = (intptr_t)expected_buf;
+        } else if (my_fiber_buf && result == (void*)my_fiber_buf) {
+            /* TLS was stale (NULL) after fiber migration — task wrote into
+             * the runner fiber's result_buf.  Copy to the slot's buffer. */
+            memcpy(slot->result_buf_copy, my_fiber_buf, 48);
+            slot->result = (intptr_t)slot->result_buf_copy;
+        } else if ((char*)result >= (char*)&g_fpool.slots[0] &&
+                   (char*)result < (char*)&g_fpool.slots[CC_POOL_MAX_SLOTS]) {
+            /* TLS pointed to a different slot's result_buf_copy (stale
+             * from a previous iteration on the old thread).  Copy. */
+            memcpy(slot->result_buf_copy, result, 48);
+            slot->result = (intptr_t)slot->result_buf_copy;
+        } else {
+            /* Raw scalar return (not a result-buffer pointer). */
+            slot->result = (intptr_t)result;
+        }
+
+        atomic_store_explicit(&slot->done, 1, memory_order_release);
+        void* waiter = atomic_exchange_explicit(&slot->waiter, NULL, memory_order_acq_rel);
+        if (waiter) {
+            cc__fiber_unpark(waiter);
+        }
+    }
+    return NULL;
+}
+
+static void cc_fpool_atexit(void) {
+    atomic_store_explicit(&g_fpool.shutting_down, 1, memory_order_release);
+    if (g_fpool.work_ch) {
+        cc_chan_close(g_fpool.work_ch);
+    }
+}
+
+static void cc_fpool_init_impl(void) {
+    if (!cc_pool_enabled()) return;
+
+    size_t num_runners = cc_sched_get_num_workers();
+    if (num_runners == 0) num_runners = 8;
+
+    /* Work channel sends pointer-sized items — fits the lock-free fast-path */
+    g_fpool.work_ch = cc_chan_create(CC_POOL_WORK_CAP);
+    if (!g_fpool.work_ch) return;
+
+    /* Spawn pool runner fibers (detached — live until work_ch is closed) */
+    for (size_t i = 0; i < num_runners; i++) {
+        fiber_task* f = cc_fiber_spawn(cc_pool_runner_fn, NULL);
+        (void)f;
+    }
+
+    atexit(cc_fpool_atexit);
+    atomic_store_explicit(&g_fpool.ready, 1, memory_order_release);
+}
+
+static void cc_fpool_ensure_init(void) {
+    if (atomic_load_explicit(&g_fpool.ready, memory_order_acquire)) return;
+    pthread_once(&g_fpool_once, cc_fpool_init_impl);
+}
+
 static size_t cc__default_blocking_workers(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n > 0 && n < 4) return (size_t)n;
@@ -347,6 +537,15 @@ CCFutureStatus cc_task_poll(CCTask* t, intptr_t* out_val, int* out_err) {
         }
         return CC_FUTURE_PENDING;
     }
+    if (t->kind == CC_TASK_KIND_POOL) {
+        CCTaskPoolInternal* pi = TASK_POOL(t);
+        if (atomic_load_explicit(&g_fpool.slots[pi->slot_idx].done, memory_order_acquire)) {
+            if (out_val) *out_val = g_fpool.slots[pi->slot_idx].result;
+            if (out_err) *out_err = 0;
+            return CC_FUTURE_READY;
+        }
+        return CC_FUTURE_PENDING;
+    }
     return CC_FUTURE_ERR;
 }
 
@@ -404,6 +603,15 @@ void cc_task_free(CCTask* t) {
         if (fi->fiber) {
             cc_fiber_task_free(fi->fiber);
         }
+    } else if (t->kind == CC_TASK_KIND_POOL) {
+        /* Pool slot is freed in cc_block_on_intptr after collecting result.
+         * If cc_task_free is called on an un-joined pool task (leak path),
+         * release the slot so it can be reused. */
+        CCTaskPoolInternal* pi = TASK_POOL(t);
+        if (atomic_load_explicit(&g_fpool.slots[pi->slot_idx].in_use,
+                                  memory_order_acquire)) {
+            cc_pool_free_slot(pi->slot_idx);
+        }
     }
     memset(t, 0, sizeof(*t));
 }
@@ -414,15 +622,40 @@ static void cc__set_fiber_task(CCTask* t, fiber_task* f) {
     fi->fiber = f;
 }
 
-/* Spawn an M:N fiber task. Returns CCTask with kind=CC_TASK_KIND_FIBER. */
+/* Spawn an M:N fiber task. Returns CCTask with kind=CC_TASK_KIND_FIBER (or POOL).
+ *
+ * When the fiber pool is ready (CC_FIBER_POOL != 0) and a slot is free, the
+ * task is dispatched through the pool: a persistent pool-runner fiber picks it
+ * up from the work channel, eliminating the per-task spawn/route/wake cycle.
+ * If the pool is full or unavailable, falls back to a normal fiber spawn. */
 CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg) {
     CCTask out;
     memset(&out, 0, sizeof(out));
     if (!fn) return out;
-    
+
+    /* Attempt pool dispatch */
+    cc_fpool_ensure_init();
+    if (atomic_load_explicit(&g_fpool.ready, memory_order_acquire)) {
+        int slot_idx = cc_pool_alloc_slot();
+        if (slot_idx >= 0) {
+            CCPoolSlot* slot = &g_fpool.slots[slot_idx];
+            slot->fn  = fn;
+            slot->arg = arg;
+            /* Send pointer (8 bytes) — fits lock-free channel fast-path */
+            if (cc_chan_send(g_fpool.work_ch, &slot, sizeof(slot)) == 0) {
+                out.kind = CC_TASK_KIND_POOL;
+                TASK_POOL(&out)->slot_idx = slot_idx;
+                return out;
+            }
+            /* work_ch closed or error — fall through to direct spawn */
+            cc_pool_free_slot(slot_idx);
+        }
+    }
+
+    /* Fallback: direct fiber spawn */
     fiber_task* f = cc_fiber_spawn(fn, arg);
     if (!f) return out;
-    
+
     out.kind = CC_TASK_KIND_FIBER;
     cc__set_fiber_task(&out, f);
     return out;
@@ -515,6 +748,56 @@ intptr_t cc_block_on_intptr(CCTask t) {
         return r;
     }
     
+    /* Handle pool tasks: wait for a pool runner to complete the task.
+     *
+     * The pool runner copies any result_buf data into slot->result_buf_copy
+     * before signalling done, so slot->result is always stable by the time
+     * we read it.  We copy to a TLS buffer if result points into result_buf_copy
+     * so the slot can be freed immediately without dangling pointers. */
+    if (t.kind == CC_TASK_KIND_POOL) {
+        static __thread char tls_pool_result[48] __attribute__((aligned(8)));
+        CCTaskPoolInternal* pi = TASK_POOL(&t);
+        CCPoolSlot* slot = &g_fpool.slots[pi->slot_idx];
+
+        /* Register ourselves as the waiter before checking done, so we don't
+         * miss a completion that races with our park. */
+        void* cur_fiber = cc__fiber_current();
+        if (cur_fiber) {
+            void* expected_null = NULL;
+            atomic_compare_exchange_strong_explicit(&slot->waiter, &expected_null, cur_fiber,
+                                                    memory_order_acq_rel, memory_order_relaxed);
+            /* Loop: cc__fiber_park_if may return early if pending_unpark was set
+             * by a prior operation (e.g., a channel-recv wake that delivered this
+             * task handle).  Re-park until slot->done is actually 1 — only then
+             * is slot->result stable.  The acquire load in the loop condition
+             * pairs with the release store in cc_pool_runner_fn. */
+            while (!atomic_load_explicit(&slot->done, memory_order_acquire)) {
+                cc__fiber_park_if(&slot->done, 0, "pool_task", __FILE__, __LINE__);
+            }
+        } else {
+            /* Non-fiber context fallback: spin */
+            while (!atomic_load_explicit(&slot->done, memory_order_acquire)) {
+                sched_yield();
+            }
+        }
+
+        /* Discriminate structured vs raw results (mirrors cc_pool_runner_fn):
+         * - slot->result == (intptr_t)slot->result_buf_copy: task used
+         *   cc_task_result_ptr; copy the 48-byte buffer to TLS so the slot
+         *   can be freed and the caller gets a stable pointer.
+         * - otherwise: task returned a plain scalar; pass it through directly. */
+        if (slot->result == (intptr_t)slot->result_buf_copy) {
+            memcpy(tls_pool_result, slot->result_buf_copy, 48);
+            r = (intptr_t)tls_pool_result;
+        } else {
+            r = slot->result;
+        }
+
+        cc_pool_free_slot(pi->slot_idx);
+        cc__deadlock_thread_unblock();
+        return r;
+    }
+
     /* Handle fiber tasks with fiber join.
      *
      * If the thunk used cc_task_result_ptr, its return value points into
