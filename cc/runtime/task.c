@@ -13,6 +13,7 @@
 /* Unified deadlock tracking (defined in fiber_sched.c) */
 void cc__deadlock_thread_block(void);
 void cc__deadlock_thread_unblock(void);
+void cc__fiber_set_worker_affinity(int worker_id);
 
 #include <errno.h>
 
@@ -326,13 +327,15 @@ static void cc_pool_free_slot(int idx) {
  * different slot (stale-nonzero TLS), and copy to the correct slot if needed.
  * A plain scalar (non-buffer pointer) passes through as-is. */
 static void* cc_pool_runner_fn(void* arg) {
-    (void)arg;
-
     /* Capture this runner fiber's result_buf address once at startup (before
      * any yield).  If the TLS-based cc_task_result_ptr fallback writes into
      * the fiber's buffer instead of the slot's, we detect and copy below. */
     fiber_task* self = (fiber_task*)cc__fiber_current();
     char* my_fiber_buf = self ? (char*)cc_fiber_get_result_buf(self) : NULL;
+
+    /* Pre-assign this runner to a distinct worker before first park so the
+     * corrected saturation bypass routes it to that worker's inbox directly. */
+    cc__fiber_set_worker_affinity((int)(intptr_t)arg);
 
     CCPoolSlot* slot;
     while (cc_chan_recv(g_fpool.work_ch, &slot, sizeof(slot)) == 0) {
@@ -394,9 +397,10 @@ static void cc_fpool_init_impl(void) {
     g_fpool.work_ch = cc_chan_create(CC_POOL_WORK_CAP);
     if (!g_fpool.work_ch) return;
 
-    /* Spawn pool runner fibers (detached — live until work_ch is closed) */
+    /* Spawn pool runner fibers, passing index so each pre-assigns itself
+     * to a distinct worker before its first cc_chan_recv park. */
     for (size_t i = 0; i < num_runners; i++) {
-        fiber_task* f = cc_fiber_spawn(cc_pool_runner_fn, NULL);
+        fiber_task* f = cc_fiber_spawn(cc_pool_runner_fn, (void*)(intptr_t)i);
         (void)f;
     }
 

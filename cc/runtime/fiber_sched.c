@@ -2248,6 +2248,19 @@ static void cc__fiber_check_deadlock(void) {
 static __thread fiber_task* tls_current_fiber = NULL;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
 
+/* Pre-assign the calling fiber to a specific worker before its first park.
+ * Pool runners call this once so each parks with a distinct last_worker_id.
+ * Combined with the corrected saturation bypass (only fires when sleeping==0),
+ * this ensures each runner routes to a dedicated worker's inbox on first
+ * unpark — no serialisation, no thundering herd. */
+void cc__fiber_set_worker_affinity(int worker_id) {
+    fiber_task* f = tls_current_fiber;
+    if (!f) return;
+    size_t n = g_sched.num_workers;
+    if (n == 0) return;
+    f->last_worker_id = worker_id % (int)n;
+}
+
 /* Count of workers currently executing a long-running CPU-bound pool task via
  * cc__fiber_pool_task_begin/end.  Sysmon excludes these workers from the
  * "stuck" count so it doesn't spawn hybrid-promotion threads for them. */
@@ -5913,9 +5926,34 @@ queued:
              *
              * Guard: only when spinning == 0 to preserve affinity and
              * throughput benefits in lighter-loaded workloads where the
-             * preferred worker will pick this up quickly anyway. */
+             * preferred worker will pick this up quickly anyway.
+             *
+             * However, spinning == 0 conflates two distinct states:
+             *   (a) All workers busy with CPU-bound tasks  → bypass is appropriate
+             *   (b) All workers sleeping (idle)            → bypass is wrong
+             *
+             * In case (b) the fiber lands on the current worker's local queue but
+             * no wake is sent; the current worker only finds it after parking
+             * itself (introducing a full task-cycle delay).  Worse, with N tasks
+             * submitted in rapid succession all runners pile up on one worker,
+             * serialising what should be parallel work and causing high run-time
+             * variance.
+             *
+             * Fix: only engage the bypass when workers are truly saturated —
+             * spinning == 0 AND sleeping == 0 means every worker is actively
+             * running a fiber so the preferred worker genuinely cannot pick up
+             * more work sooner than the current worker can.
+             *
+             * When sleeping > 0 the bypass must not fire: we would push to the
+             * current worker's local queue (private, not stealable) while sending
+             * a wake to the preferred worker whose inbox is empty — the wake is
+             * wasted and the fiber serialises on one worker.  Instead let the
+             * code fall through to the inbox-push path below, which routes
+             * directly to the preferred worker's inbox and issues a correct
+             * targeted wake. */
             if (use_preferred && tls_worker_id >= 0 &&
-                    atomic_load_explicit(&g_sched.spinning, memory_order_relaxed) == 0) {
+                    atomic_load_explicit(&g_sched.spinning, memory_order_relaxed) == 0 &&
+                    atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed) == 0) {
                 pushed = (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0);
                 if (pushed) {
                     pushed_to_current_local = 1;
