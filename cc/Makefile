@@ -82,7 +82,7 @@ CCCN_WRAPPER := bin/cccn
 # Lowered headers output directory
 OUT_INCLUDE := ../out/include
 
-all: $(WRAPPER) $(CCCN_WRAPPER)
+all: $(WRAPPER) $(CCCN_WRAPPER) lower-headers
 
 # Lower .cch headers to .h files (must run before examples that use generated C)
 .PHONY: lower-headers

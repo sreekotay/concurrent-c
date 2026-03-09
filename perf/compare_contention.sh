@@ -1,8 +1,8 @@
 #!/bin/bash
-# compare_contention.sh - Compare Concurrent-C vs Pthread cache-line contention
+# compare_contention.sh - Compare Concurrent-C vs Pthread channel isolation
 #
-# This script runs the "Contention Challenge" for both implementations and compares
-# how much throughput drops when an adjacent channel is hammered.
+# This script runs the "Channel Isolation Challenge" for both implementations and
+# measures how much independent channels interfere with each other under load.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -10,15 +10,15 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CCC="$REPO_ROOT/out/cc/bin/ccc"
 
 echo "================================================================="
-echo "CACHE-LINE CONTENTION COMPARISON"
+echo "CHANNEL ISOLATION COMPARISON"
 echo "================================================================="
 echo ""
 
 # 1. Build implementations
 echo "Building tests..."
 mkdir -p "$SCRIPT_DIR/out"
-$CCC build "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/channel_contention"
-gcc -O3 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
+$CCC build --release "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/channel_contention"
+gcc -O2 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
 echo "Done."
 echo ""
 
@@ -33,26 +33,25 @@ echo "--- Running Concurrent-C ---"
 echo ""
 
 # 4. Extract results
-PTHREAD_DROP=$(grep "Throughput Drop" pthread_out.txt | tail -n 1 | awk '{print $3}' | tr -d '%')
-CC_DROP=$(grep "Throughput Drop" cc_out.txt | tail -n 1 | awk '{print $3}' | tr -d '%')
+PTHREAD_INTF=$(grep "Interference" pthread_out.txt | tail -n 1 | awk '{print $2}' | tr -d '%')
+CC_INTF=$(grep "Interference" cc_out.txt | tail -n 1 | awk '{print $2}' | tr -d '%')
 
-echo "DATA_PTHREAD_CONT_DROP: $PTHREAD_DROP"
-echo "DATA_CC_CONT_DROP: $CC_DROP"
+echo "DATA_PTHREAD_INTERFERENCE: $PTHREAD_INTF"
+echo "DATA_CC_INTERFERENCE: $CC_INTF"
 
 echo "================================================================="
 echo "FINAL VERDICT"
 echo "================================================================="
-printf "%-20s %-15s\n" "Implementation" "Throughput Drop"
-printf "%-20s %-15s\n" "Pthread (Baseline)" "${PTHREAD_DROP}%"
-printf "%-20s %-15s\n" "Concurrent-C" "${CC_DROP}%"
+printf "%-20s %-15s\n" "Implementation" "Interference"
+printf "%-20s %-15s\n" "Pthread (Baseline)" "${PTHREAD_INTF}%"
+printf "%-20s %-15s\n" "Concurrent-C" "${CC_INTF}%"
 echo "-----------------------------------------------------------------"
 
-# Note: A lower drop is better.
-if [ "$(python3 -c "print(1 if float($CC_DROP) <= float($PTHREAD_DROP) + 10 else 0)")" -eq 1 ]; then
-    echo "RESULT: SUCCESS - Concurrent-C handles contention well!"
+# Closer to 0% = better isolation. Negative = no interference at all.
+if [ "$(python3 -c "print(1 if float($CC_INTF) <= float($PTHREAD_INTF) + 10 else 0)")" -eq 1 ]; then
+    echo "RESULT: SUCCESS - Concurrent-C channels are well-isolated!"
 else
-    echo "RESULT: FAIL - Concurrent-C shows significant cache-line interference."
-    echo "Hint: Add CACHE_LINE_SIZE padding to the CCChan struct."
+    echo "RESULT: FAIL - Concurrent-C shows significant cross-channel interference."
 fi
 echo "================================================================="
 

@@ -6052,6 +6052,14 @@ void cc__fiber_yield(void) {
     /* When we resume, worker_run_fiber has already set CTRL_OWNED(new_wid). */
 }
 
+/* Public API: cooperative yield for user code.
+ * Equivalent to Go's runtime.Gosched() — re-enqueues the current fiber
+ * on the local worker queue and switches to the scheduler.
+ * Falls back to sched_yield() outside a fiber context. */
+void cc_yield(void) {
+    cc__fiber_yield();
+}
+
 /* Yield to the GLOBAL run queue.
  * Unlike cc__fiber_yield which pushes to the local queue (where the same
  * worker immediately re-pops it), this puts the fiber in the global queue.

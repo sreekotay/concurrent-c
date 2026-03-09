@@ -18,12 +18,16 @@ var (
 
 func mallocWorker() {
 	// Go doesn't have arenas, so we just allocate on the heap.
-	// This is the "Convenience" path.
+	var localSuccess int64
 	for i := 0; i < ALLOCS_PER_ROUTINE; i++ {
-		// Allocate 16 bytes
-		_ = make([]byte, 16)
-		atomic.AddInt64(&successCount, 1)
+		buf := make([]byte, 16)
+		// Touch the memory to prevent escape-analysis-driven elimination.
+		buf[0] = byte(i)
+		_ = buf
+		localSuccess++
 	}
+	// Single atomic update at the end — no per-alloc shared contention.
+	atomic.AddInt64(&successCount, localSuccess)
 }
 
 func main() {

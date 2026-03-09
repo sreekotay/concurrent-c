@@ -10,9 +10,6 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <time.h>
 #include <stdatomic.h>
 
 #define NUM_HOGS 15          // Leave 1 worker for the heartbeat (if scheduler is fair)
@@ -20,27 +17,25 @@
 #define TEST_DURATION_SEC 5
 
 atomic_int g_heartbeats = 0;
-atomic_int g_hogs_active = 0;
-atomic_int g_stop = 0;
 
 /* A "Heartbeat" fiber that should keep ticking if the scheduler is fair */
 void heartbeat_fiber() {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("[Heartbeat] Started\n");
-    while (!atomic_load(&g_stop)) {
+    while (!cc_cancelled()) {
         cc_sleep_ms(HEARTBEAT_INTERVAL_MS);
         int val = atomic_fetch_add(&g_heartbeats, 1) + 1;
         printf("[Heartbeat] Tick %d\n", val);
     }
+    printf("[Heartbeat] Cancelled, exiting\n");
 }
 
 /* A "CPU Hog" fiber that performs intensive math in a tight loop */
 void hog_fiber(int id) {
-    atomic_fetch_add(&g_hogs_active, 1);
     printf("[Hog %d] Started CPU-intensive loop...\n", id);
     
     volatile double x = 1.1;
-    while (!atomic_load(&g_stop)) {
+    while (!cc_cancelled()) {
         // Tight loop: no await, no yield, no syscalls.
         for (int i = 0; i < 1000000; i++) {
             x = x * x;
@@ -49,7 +44,6 @@ void hog_fiber(int id) {
     }
     
     printf("[Hog %d] Stopped\n", id);
-    atomic_fetch_sub(&g_hogs_active, 1);
 }
 
 int main(void) {
@@ -79,9 +73,9 @@ int main(void) {
 
         // 4. Monitor for duration
         cc_sleep_ms(TEST_DURATION_SEC * 1000);
-        
+
         printf("\nStopping test...\n");
-        atomic_store(&g_stop, 1);
+        nursery_cancel();
     }
 
     int final_beats = atomic_load(&g_heartbeats);
