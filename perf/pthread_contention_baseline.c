@@ -103,13 +103,14 @@ int main(void) {
         pthread_join(t5, NULL);
         pthread_join(t6, NULL);
         double contention_ms = time_now_ms() - start;
-        printf("  Contention (Q1+Q2):  %8.2f ms (%8.0f ops/sec total)\n", 
-               contention_ms, (double)ITERATIONS * 2.0 * 1000.0 / contention_ms);
+        printf("  Contention (Q1+Q2):  %8.2f ms (%8.0f ops/sec per channel)\n", 
+               contention_ms, (double)ITERATIONS * 1000.0 / contention_ms);
         
         double baseline_ops_sec = (double)ITERATIONS * 1000.0 / baseline_ms;
-        double contention_ops_sec = (double)ITERATIONS * 2.0 * 1000.0 / contention_ms;
-        double throughput_drop = (baseline_ops_sec - contention_ops_sec) / baseline_ops_sec * 100.0;
-        printf("  Throughput Drop:      %8.2f%%\n\n", throughput_drop);
+        // Per-channel throughput: each queue did ITERATIONS ops in contention_ms.
+        double contention_ops_sec = (double)ITERATIONS * 1000.0 / contention_ms;
+        double interference = (baseline_ops_sec - contention_ops_sec) / baseline_ops_sec * 100.0;
+        printf("  Interference:         %8.2f%%\n\n", interference);
     }
 
     return 0;

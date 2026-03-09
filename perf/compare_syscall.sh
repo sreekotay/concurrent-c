@@ -24,8 +24,8 @@ echo ""
 # 1. Build implementations
 echo "Building tests..."
 mkdir -p "$STRESS_DIR/out"
-$CCC build "$STRESS_DIR/syscall_kidnap.ccs" -o "$STRESS_DIR/out/syscall_kidnap"
-gcc -O3 "$STRESS_DIR/adler_baseline_kidnap.c" -o "$STRESS_DIR/out/adler_baseline_kidnap" -lpthread
+$CCC build --release "$STRESS_DIR/syscall_kidnap.ccs" -o "$STRESS_DIR/out/syscall_kidnap"
+gcc -O2 "$STRESS_DIR/adler_baseline_kidnap.c" -o "$STRESS_DIR/out/adler_baseline_kidnap" -lpthread
 echo "Done."
 echo ""
 

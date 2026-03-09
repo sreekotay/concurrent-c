@@ -135,6 +135,12 @@ int cc_scheduler_stats(CCSchedulerStats* out);
 // Sleep for at least ms milliseconds (best-effort).
 int cc_sleep_ms(unsigned int ms);
 
+// Cooperative yield: give other fibers a chance to run.
+// In a fiber context, re-enqueues the current fiber on the local worker queue
+// and switches to the scheduler — equivalent to Go's runtime.Gosched().
+// Outside a fiber context, falls back to sched_yield().
+void cc_yield(void);
+
 // Deadline helpers
 CCDeadline cc_deadline_none(void);
 CCDeadline cc_deadline_after_ms(uint64_t ms);

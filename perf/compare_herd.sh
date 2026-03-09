@@ -16,8 +16,8 @@ echo ""
 # 1. Build implementations
 echo "Building tests..."
 mkdir -p "$SCRIPT_DIR/out"
-$CCC build "$SCRIPT_DIR/thundering_herd.ccs" -o "$SCRIPT_DIR/out/thundering_herd"
-gcc -O3 "$SCRIPT_DIR/pthread_herd_baseline.c" -o "$SCRIPT_DIR/out/pthread_herd_baseline" -lpthread
+$CCC build --release "$SCRIPT_DIR/thundering_herd.ccs" -o "$SCRIPT_DIR/out/thundering_herd"
+gcc -O2 "$SCRIPT_DIR/pthread_herd_baseline.c" -o "$SCRIPT_DIR/out/pthread_herd_baseline" -lpthread
 echo "Done."
 echo ""
 

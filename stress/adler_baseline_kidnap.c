@@ -12,9 +12,9 @@
 #include <stdatomic.h>
 
 #define NUM_THREADS 16
-#define NUM_KIDNAPPERS 16
+#define NUM_KIDNAPPERS 100   // Same as CC/Go — 100 kidnappers on 16 threads
 #define HEARTBEAT_INTERVAL_MS 100000 // 100ms in microseconds
-#define TEST_DURATION_SEC 3
+#define TEST_DURATION_SEC 5
 
 atomic_int g_heartbeats = 0;
 atomic_int g_kidnappers_active = 0;
@@ -45,7 +45,7 @@ void* kidnapper_thread(void* arg) {
 int main(void) {
     printf("=================================================================\n");
     printf("ADLER BASELINE: Pthread robustness against blocking IO\n");
-    printf("Threads: %d | Kidnappers: %d\n", NUM_THREADS, NUM_KIDNAPPERS);
+    printf("Threads: %d | Kidnappers: %d | Each blocks for 2s\n", NUM_THREADS, NUM_KIDNAPPERS);
     printf("=================================================================\n\n");
 
     pthread_t heartbeat;
@@ -55,6 +55,8 @@ int main(void) {
     printf("Initial heartbeats: %d\n", atomic_load(&g_heartbeats));
 
     printf("\n!!! Unleashing Kidnappers !!!\n");
+    // With pthreads, each kidnapper gets its own OS thread, so ALL threads are blocked.
+    // The heartbeat thread must compete with 100 blocked OS threads for CPU time.
     pthread_t kidnappers[NUM_KIDNAPPERS];
     for (int i = 0; i < NUM_KIDNAPPERS; i++) {
         int* id = malloc(sizeof(int));
@@ -64,7 +66,7 @@ int main(void) {
 
     for (int i = 0; i < TEST_DURATION_SEC; i++) {
         sleep(1);
-        printf("T+%ds: Heartbeats=%d | Active Kidnappers=%d\n", 
+        printf("T+%ds: Heartbeats=%d | Active Kidnappers=%d\n",
                i+1, atomic_load(&g_heartbeats), atomic_load(&g_kidnappers_active));
     }
 

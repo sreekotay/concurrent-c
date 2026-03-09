@@ -1,5 +1,8 @@
 /*
  * pthread_herd_baseline.c - Pthread thundering herd test
+ *
+ * Uses a pipe as the wake primitive: write(1 byte) wakes exactly one reader,
+ * matching Go/CC channel-send semantics for a fair comparison.
  */
 
 #include <stdio.h>
@@ -8,25 +11,21 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#include <sched.h>
 
 #define NUM_WAITERS 1000
+#define NUM_SAMPLES 5
 
 typedef struct {
-    pthread_mutex_t mu;
-    pthread_cond_t cond;
-    int ready;
+    int pipefd[2];
     _Atomic int count;
 } Herd;
 
 void* waiter_thread(void* arg) {
     Herd* h = (Herd*)arg;
-    pthread_mutex_lock(&h->mu);
-    while (!h->ready) {
-        pthread_cond_wait(&h->cond, &h->mu);
-    }
-    // h->ready = 0; // REMOVED: let everyone wake up for cleanup
+    char buf;
+    read(h->pipefd[0], &buf, 1);
     atomic_fetch_add(&h->count, 1);
-    pthread_mutex_unlock(&h->mu);
     return NULL;
 }
 
@@ -38,47 +37,43 @@ static double time_now_ms(void) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    Herd h;
-    pthread_mutex_init(&h.mu, NULL);
-    pthread_cond_init(&h.cond, NULL);
-    h.ready = 0;
-    atomic_init(&h.count, 0);
 
     printf("=================================================================\n");
     printf("PTHREAD THUNDERING HERD BASELINE\n");
     printf("=================================================================\n\n");
 
-    for (int sample = 1; sample <= 5; sample++) {
-        h.ready = 0;
-        atomic_store(&h.count, 0);
-        
+    for (int sample = 1; sample <= NUM_SAMPLES; sample++) {
+        Herd h;
+        pipe(h.pipefd);
+        atomic_init(&h.count, 0);
+
         pthread_t threads[NUM_WAITERS];
         for (int i = 0; i < NUM_WAITERS; i++) {
             pthread_create(&threads[i], NULL, waiter_thread, &h);
         }
 
-        usleep(100000); // 100ms
+        usleep(100000); // 100ms - let all threads block on read()
 
         double start = time_now_ms();
-        pthread_mutex_lock(&h.mu);
-        h.ready = 1;
-        pthread_cond_broadcast(&h.cond); // Trigger the herd!
-        pthread_mutex_unlock(&h.mu);
+        char byte = 'x';
+        write(h.pipefd[1], &byte, 1); // wake exactly one reader
 
         while (atomic_load(&h.count) < 1) {
-            usleep(1000);
+            sched_yield();
         }
         double latency_ms = time_now_ms() - start;
         printf("Sample %d: Latency to wake 1st waiter: %8.4f ms\n", sample, latency_ms);
 
-        // Cleanup: let others finish
-        pthread_mutex_lock(&h.mu);
-        h.ready = 1;
-        pthread_cond_broadcast(&h.cond);
-        pthread_mutex_unlock(&h.mu);
+        // Flush the rest so threads can exit
+        for (int i = 1; i < NUM_WAITERS; i++) {
+            write(h.pipefd[1], &byte, 1);
+        }
         for (int i = 0; i < NUM_WAITERS; i++) {
             pthread_join(threads[i], NULL);
         }
+
+        close(h.pipefd[0]);
+        close(h.pipefd[1]);
     }
 
     return 0;

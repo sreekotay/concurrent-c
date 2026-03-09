@@ -6,6 +6,8 @@
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CCC="$REPO_ROOT/out/cc/bin/ccc"
 
 echo "================================================================="
 echo "CONCURRENT-C: THE NECKBEARD CHALLENGES"
@@ -13,98 +15,170 @@ echo "================================================================="
 echo "Running all robustness and fairness comparisons..."
 echo ""
 
-# Helper to extract data from output files
+SKIP_CC=0
+SKIP_GO=0
+
+if ! command -v "$CCC" &>/dev/null && [ ! -x "$CCC" ]; then
+    echo "WARNING: CCC compiler not found at $CCC"
+    echo "         CC and Pthread tests will be skipped."
+    echo "         Build with: make -C $REPO_ROOT"
+    echo ""
+    SKIP_CC=1
+fi
+
+if ! command -v go &>/dev/null; then
+    echo "WARNING: Go not found on PATH"
+    echo "         Go tests will be skipped."
+    echo ""
+    SKIP_GO=1
+fi
+
+val_or_na() {
+    if [ -n "$1" ]; then echo "$1"; else echo "N/A"; fi
+}
+
 extract() {
-    grep "$1" "$2" | tail -n 1 | awk '{print $2}'
+    grep "$1" "$2" 2>/dev/null | tail -n 1 | awk '{print $2}'
 }
 
 # 1. Syscall Kidnapping
 echo "[1/5] Syscall Kidnapping Challenge..."
-"$SCRIPT_DIR/compare_syscall.sh" > cc_syscall_out.txt 2>&1 || true
-go run "$SCRIPT_DIR/go/syscall_kidnap.go" > go_syscall_out.txt 2>&1 || true
-
-CC_SYSCALL_BEATS=$(extract "DATA_CC_SYSCALL_BEATS" cc_syscall_out.txt)
-PTHREAD_SYSCALL_BEATS=$(extract "DATA_PTHREAD_SYSCALL_BEATS" cc_syscall_out.txt)
-GO_SYSCALL_BEATS=$(grep "Total Heartbeats" go_syscall_out.txt | awk '{print $3}')
+if [ "$SKIP_CC" -eq 0 ]; then
+    if "$SCRIPT_DIR/compare_syscall.sh" > cc_syscall_out.txt 2>&1; then
+        CC_SYSCALL_BEATS=$(extract "DATA_CC_SYSCALL_BEATS" cc_syscall_out.txt)
+        PTHREAD_SYSCALL_BEATS=$(extract "DATA_PTHREAD_SYSCALL_BEATS" cc_syscall_out.txt)
+    else
+        echo "  [WARN] compare_syscall.sh failed (exit $?). Check cc_syscall_out.txt for details."
+    fi
+fi
+if [ "$SKIP_GO" -eq 0 ]; then
+    if go run "$SCRIPT_DIR/go/syscall_kidnap.go" > go_syscall_out.txt 2>&1; then
+        GO_SYSCALL_BEATS=$(grep "Total Heartbeats" go_syscall_out.txt | awk '{print $3}')
+    else
+        echo "  [WARN] Go syscall_kidnap failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-15s\n" "Implementation" "Heartbeats"
-printf "%-20s %-15s\n" "Pthread" "$PTHREAD_SYSCALL_BEATS"
-printf "%-20s %-15s\n" "Concurrent-C" "$CC_SYSCALL_BEATS"
-printf "%-20s %-15s\n" "Go" "$GO_SYSCALL_BEATS"
+printf "%-20s %-15s\n" "Pthread" "$(val_or_na "$PTHREAD_SYSCALL_BEATS")"
+printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "$CC_SYSCALL_BEATS")"
+printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_SYSCALL_BEATS")"
 echo "-----------------------------------------------------------------"
 echo ""
 
 # 2. Thundering Herd
 echo "[2/5] Thundering Herd Challenge..."
-"$SCRIPT_DIR/compare_herd.sh" > cc_herd_out.txt 2>&1 || true
-go run "$SCRIPT_DIR/go/thundering_herd.go" > go_herd_out.txt 2>&1 || true
-
-CC_HERD_LATENCY=$(extract "DATA_CC_HERD_LATENCY" cc_herd_out.txt)
-PTHREAD_HERD_LATENCY=$(extract "DATA_PTHREAD_HERD_LATENCY" cc_herd_out.txt)
-GO_HERD_LATENCY=$(grep "Sample" go_herd_out.txt | awk '{sum+=$7} END {if (NR>0) printf "%.4f", sum/NR; else print "0"}')
+if [ "$SKIP_CC" -eq 0 ]; then
+    if "$SCRIPT_DIR/compare_herd.sh" > cc_herd_out.txt 2>&1; then
+        CC_HERD_LATENCY=$(extract "DATA_CC_HERD_LATENCY" cc_herd_out.txt)
+        PTHREAD_HERD_LATENCY=$(extract "DATA_PTHREAD_HERD_LATENCY" cc_herd_out.txt)
+    else
+        echo "  [WARN] compare_herd.sh failed (exit $?). Check cc_herd_out.txt for details."
+    fi
+fi
+if [ "$SKIP_GO" -eq 0 ]; then
+    if go run "$SCRIPT_DIR/go/thundering_herd.go" > go_herd_out.txt 2>&1; then
+        GO_HERD_LATENCY=$(grep "Sample" go_herd_out.txt | awk '{sum+=$8} END {if (NR>0) printf "%.4f", sum/NR; else print "0"}')
+    else
+        echo "  [WARN] Go thundering_herd failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-15s\n" "Implementation" "Avg Latency (ms)"
-printf "%-20s %-15s\n" "Pthread" "$PTHREAD_HERD_LATENCY"
-printf "%-20s %-15s\n" "Concurrent-C" "$CC_HERD_LATENCY"
-printf "%-20s %-15s\n" "Go" "$GO_HERD_LATENCY"
+printf "%-20s %-15s\n" "Pthread" "$(val_or_na "$PTHREAD_HERD_LATENCY")"
+printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "$CC_HERD_LATENCY")"
+printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_HERD_LATENCY")"
 echo "-----------------------------------------------------------------"
 echo ""
 
-# 3. Cache-Line Contention
-echo "[3/5] Cache-Line Contention Challenge..."
-"$SCRIPT_DIR/compare_contention.sh" > cc_contention_out.txt 2>&1 || true
-go run "$SCRIPT_DIR/go/channel_contention.go" > go_contention_out.txt 2>&1 || true
-
-CC_CONT_DROP=$(extract "DATA_CC_CONT_DROP" cc_contention_out.txt)
-PTHREAD_CONT_DROP=$(extract "DATA_PTHREAD_CONT_DROP" cc_contention_out.txt)
-GO_CONT_DROP=$(grep "Throughput Drop" go_contention_out.txt | tail -n 1 | awk '{print $3}')
+# 3. Channel Isolation
+echo "[3/5] Channel Isolation Challenge..."
+if [ "$SKIP_CC" -eq 0 ]; then
+    if "$SCRIPT_DIR/compare_contention.sh" > cc_contention_out.txt 2>&1; then
+        CC_INTF=$(extract "DATA_CC_INTERFERENCE" cc_contention_out.txt)
+        PTHREAD_INTF=$(extract "DATA_PTHREAD_INTERFERENCE" cc_contention_out.txt)
+    else
+        echo "  [WARN] compare_contention.sh failed (exit $?). Check cc_contention_out.txt for details."
+    fi
+fi
+if [ "$SKIP_GO" -eq 0 ]; then
+    if go run "$SCRIPT_DIR/go/channel_contention.go" > go_contention_out.txt 2>&1; then
+        GO_INTF=$(grep "Interference" go_contention_out.txt | tail -n 1 | awk '{print $2}')
+    else
+        echo "  [WARN] Go channel_contention failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
-printf "%-20s %-15s\n" "Implementation" "Throughput Drop"
-printf "%-20s %-15s\n" "Pthread" "${PTHREAD_CONT_DROP}%"
-printf "%-20s %-15s\n" "Concurrent-C" "${CC_CONT_DROP}%"
-printf "%-20s %-15s\n" "Go" "$GO_CONT_DROP"
+printf "%-20s %-15s\n" "Implementation" "Interference"
+printf "%-20s %-15s\n" "Pthread" "$(val_or_na "${PTHREAD_INTF:+${PTHREAD_INTF}%}")"
+printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "${CC_INTF:+${CC_INTF}%}")"
+printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_INTF")"
 echo "-----------------------------------------------------------------"
 echo ""
 
 # 4. Noisy Neighbor
 echo "[4/5] Noisy Neighbor Challenge..."
-"$SCRIPT_DIR/compare_preemption.sh" > cc_preemption_out.txt 2>&1 || true
-go run "$SCRIPT_DIR/go/noisy_neighbor.go" > go_preemption_out.txt 2>&1 || true
-
-CC_PRE_BEATS=$(extract "DATA_CC_PRE_BEATS" cc_preemption_out.txt)
-PTHREAD_PRE_BEATS=$(extract "DATA_PTHREAD_PRE_BEATS" cc_preemption_out.txt)
-GO_PRE_BEATS=$(grep "Total Heartbeats" go_preemption_out.txt | awk '{print $3}')
+if [ "$SKIP_CC" -eq 0 ]; then
+    if "$SCRIPT_DIR/compare_preemption.sh" > cc_preemption_out.txt 2>&1; then
+        CC_PRE_BEATS=$(extract "DATA_CC_PRE_BEATS" cc_preemption_out.txt)
+        PTHREAD_PRE_BEATS=$(extract "DATA_PTHREAD_PRE_BEATS" cc_preemption_out.txt)
+    else
+        echo "  [WARN] compare_preemption.sh failed (exit $?). Check cc_preemption_out.txt for details."
+    fi
+fi
+if [ "$SKIP_GO" -eq 0 ]; then
+    if go run "$SCRIPT_DIR/go/noisy_neighbor.go" > go_preemption_out.txt 2>&1; then
+        GO_PRE_BEATS=$(grep "Total Heartbeats" go_preemption_out.txt | awk '{print $3}')
+    else
+        echo "  [WARN] Go noisy_neighbor failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-15s\n" "Implementation" "Heartbeats"
-printf "%-20s %-15s\n" "Pthread" "$PTHREAD_PRE_BEATS"
-printf "%-20s %-15s\n" "Concurrent-C" "$CC_PRE_BEATS"
-printf "%-20s %-15s\n" "Go" "$GO_PRE_BEATS"
+printf "%-20s %-15s\n" "Pthread" "$(val_or_na "$PTHREAD_PRE_BEATS")"
+printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "$CC_PRE_BEATS")"
+printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_PRE_BEATS")"
 echo "-----------------------------------------------------------------"
 echo ""
 
 # 5. Arena Contention
 echo "[5/5] Arena Contention Challenge..."
-"$SCRIPT_DIR/compare_arena.sh" > cc_arena_out.txt 2>&1 || true
-go run "$SCRIPT_DIR/go/arena_contention.go" > go_arena_out.txt 2>&1 || true
-
-CC_ARENA_TP=$(extract "DATA_CC_ARENA_TP" cc_arena_out.txt)
-PTHREAD_ARENA_TP=$(extract "DATA_PTHREAD_ARENA_TP" cc_arena_out.txt)
-GO_ARENA_TP=$(grep "Throughput" go_arena_out.txt | awk '{print $2}')
+if [ "$SKIP_CC" -eq 0 ]; then
+    if "$SCRIPT_DIR/compare_arena.sh" > cc_arena_out.txt 2>&1; then
+        CC_ARENA_TP=$(extract "DATA_CC_ARENA_TP" cc_arena_out.txt)
+        PTHREAD_ARENA_TP=$(extract "DATA_PTHREAD_ARENA_TP" cc_arena_out.txt)
+    else
+        echo "  [WARN] compare_arena.sh failed (exit $?). Check cc_arena_out.txt for details."
+    fi
+fi
+if [ "$SKIP_GO" -eq 0 ]; then
+    if go run "$SCRIPT_DIR/go/arena_contention.go" > go_arena_out.txt 2>&1; then
+        GO_ARENA_TP=$(grep "Throughput" go_arena_out.txt | awk '{print $2}')
+    else
+        echo "  [WARN] Go arena_contention failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-20s\n" "Implementation" "Throughput (M/sec)"
-printf "%-20s %-20s\n" "Pthread (Malloc)" "$PTHREAD_ARENA_TP"
-printf "%-20s %-20s\n" "Concurrent-C (Arena)" "$CC_ARENA_TP"
-printf "%-20s %-20s\n" "Go (Heap)" "$GO_ARENA_TP"
+printf "%-20s %-20s\n" "Pthread (Arena)" "$(val_or_na "$PTHREAD_ARENA_TP")"
+printf "%-20s %-20s\n" "Concurrent-C (Arena)" "$(val_or_na "$CC_ARENA_TP")"
+printf "%-20s %-20s\n" "Go (mcache)" "$(val_or_na "$GO_ARENA_TP")"
 echo "-----------------------------------------------------------------"
 echo ""
 
 echo "================================================================="
-echo "ALL CHALLENGES COMPLETED"
+if [ "$SKIP_CC" -eq 1 ]; then
+    echo "COMPLETED (Go only — CCC compiler not found)"
+elif [ "$SKIP_GO" -eq 1 ]; then
+    echo "COMPLETED (CC/Pthread only — Go not found)"
+else
+    echo "ALL CHALLENGES COMPLETED"
+fi
 echo "================================================================="
 
 rm -f cc_syscall_out.txt go_syscall_out.txt cc_herd_out.txt go_herd_out.txt \

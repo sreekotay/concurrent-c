@@ -53,7 +53,7 @@ int main(void) {
             
             // Wait for one to finish
             while (cc_atomic_load(&g_count) < 1) {
-                cc_sleep_ms(1);
+                cc_yield();
             }
             double latency_ms = time_now_ms() - start;
             printf("Sample %d: Latency to wake 1st waiter: %8.4f ms\n", sample, latency_ms);

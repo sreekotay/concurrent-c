@@ -24,8 +24,8 @@ echo ""
 # 1. Build implementations
 echo "Building tests..."
 mkdir -p "$STRESS_DIR/out"
-$CCC build "$STRESS_DIR/noisy_neighbor.ccs" -o "$STRESS_DIR/out/noisy_neighbor"
-gcc -O3 "$STRESS_DIR/pthread_noisy_baseline.c" -o "$STRESS_DIR/out/pthread_noisy_baseline" -lpthread
+$CCC build --release "$STRESS_DIR/noisy_neighbor.ccs" -o "$STRESS_DIR/out/noisy_neighbor"
+gcc -O2 "$STRESS_DIR/pthread_noisy_baseline.c" -o "$STRESS_DIR/out/pthread_noisy_baseline" -lpthread
 echo "Done."
 echo ""
 

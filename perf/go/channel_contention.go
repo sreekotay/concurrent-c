@@ -25,7 +25,7 @@ func consumer(ch chan int, count int) {
 
 func main() {
 	fmt.Printf("=================================================================\n")
-	fmt.Printf("GO CHANNEL CONTENTION CHALLENGE\n")
+	fmt.Printf("GO CHANNEL ISOLATION CHALLENGE\n")
 	fmt.Printf("Iterations: %d | Trials: %d\n", ITERATIONS, NUM_TRIALS)
 	fmt.Printf("=================================================================\n\n")
 
@@ -60,10 +60,11 @@ func main() {
 		<-done
 		<-done
 		contentionElapsed := time.Since(start)
-		contentionOpsSec := float64(ITERATIONS*2) / contentionElapsed.Seconds()
-		fmt.Printf("  Contention (Ch1+Ch2): %8.2f ms (%8.0f ops/sec total)\n", contentionElapsed.Seconds()*1000, contentionOpsSec)
+		// Per-channel throughput: each channel did ITERATIONS ops in contentionElapsed.
+		contentionOpsSec := float64(ITERATIONS) / contentionElapsed.Seconds()
+		fmt.Printf("  Contention (Ch1+Ch2): %8.2f ms (%8.0f ops/sec per channel)\n", contentionElapsed.Seconds()*1000, contentionOpsSec)
 
-		throughputDrop := (baselineOpsSec - (contentionOpsSec / 2.0)) / baselineOpsSec * 100.0
-		fmt.Printf("  Throughput Drop:      %8.2f%%\n\n", throughputDrop)
+		interference := (baselineOpsSec - contentionOpsSec) / baselineOpsSec * 100.0
+		fmt.Printf("  Interference:         %8.2f%%\n\n", interference)
 	}
 }

@@ -24,9 +24,10 @@ var (
 
 func kidnapper() {
 	for atomic.LoadInt32(&stop) == 0 {
-		// Use C.usleep to block the OS thread directly.
+		// Use C.sleep to block the OS thread directly for 2s.
 		// Go's time.Sleep is runtime-aware and doesn't block the thread.
-		C.usleep(100000) // 100ms
+		// Matches CC/Pthread kidnapper blocking duration.
+		C.sleep(2)
 	}
 }
 

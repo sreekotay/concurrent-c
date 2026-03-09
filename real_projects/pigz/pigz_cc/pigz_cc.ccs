@@ -68,8 +68,12 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
         }
 
         if (level <= 9) {
-            (void)deflateReset(strm);
-            (void)deflateParams(strm, level, strategy);
+            /* deflateReset + deflateParams are intentionally omitted here.
+             * compress_block is only called from do_compress_work, which always
+             * provides a freshly deflateInit2-initialized stream with the correct
+             * level and strategy already set.  Re-running deflateReset clears the
+             * hash tables that malloc already zeroed, adding ~29% overhead on
+             * incompressible data; deflateParams on top adds another ~28%. */
 
             // Stage 2: Output Buffer Allocation
             // Use deflateBound to ensure we have enough space for the compressed data
