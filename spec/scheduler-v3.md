@@ -335,7 +335,76 @@ DEAD
 
 - Implementations SHOULD use **no-progress** thresholds (stalled worker) rather than raw CPU busy duration.
 
-### 6.3 Startup-to-Run Phase Behavior (Current runtime)
+### 6.3 OS-Thread Blocking Robustness (Current runtime)
+
+#### Problem: raw-syscall "kidnapping"
+
+When user fibers call blocking OS syscalls directly (e.g. raw `sleep()`, blocking
+`read()`), the worker OS thread is captured for the duration of the syscall.
+All M base workers may be simultaneously OS-blocked, leaving no worker available
+to run cooperative fibers (e.g. timer-woken heartbeats).
+
+#### Replacement workers (existing mechanism)
+
+Sysmon detects stuck workers (stale heartbeats older than `ORPHAN_THRESHOLD_CYCLES`)
+and spawns additional OS threads (`replacement_worker`) up to `MAX_EXTRA_WORKERS`.
+Replacement workers probe all worker inboxes before the global queue, ensuring
+timer-woken fibers routed to inboxes are found before bulk-spawned tasks.
+
+Stuck base workers expire naturally when their OS syscall returns; they rejoin
+the pool without any special cleanup. This is intentional: replacement workers
+are parallel, not in-place substitutes.
+
+#### Emergency timer-service worker
+
+When the sleep queue drains an expired fiber (`sq_drain_sysmon`) and all workers —
+base and replacement — are OS-blocked (`sleeping == 0 && spinning == 0`), sysmon
+spawns a **timer-service worker**:
+
+- Scans ALL worker inbox queues only (never global queue).
+- Runs any fiber it finds and immediately exits when inboxes are empty.
+- Holds `g_timer_worker_active = 1` while alive; a CAS gate prevents concurrent
+  duplicates.
+- Because it never touches the global queue it cannot be kidnapped by a
+  raw-syscall fiber, so it always completes quickly and releases the gate.
+
+The gate is time-bounded: `last_sleepq_emerg_cycles` prevents re-spawn faster
+than `4 × ORPHAN_COOLDOWN_CYCLES` (~330 µs), far below any typical timer interval.
+
+#### `sq_drain_sysmon` — inbox-priority routing
+
+Sysmon uses `sq_drain_sysmon()` (not the worker-loop `sq_drain()`) when draining
+the sleep queue. `sq_drain_sysmon` routes each woken fiber to the inbox of the
+least-stale base worker (preferred-affinity first, then freshest-heartbeat scan)
+rather than to the global queue. Inbox routing guarantees the fiber is found at
+Priority 2 in the next worker work-finding pass, ahead of the global queue at
+Priority 3.
+
+#### Nursery context portability (correctness invariant)
+
+`cc__tls_current_nursery` is a thread-local variable set by each fiber's nursery
+entry thunk on first resume. Because fibers can migrate across OS threads (base,
+replacement, timer-service), subsequent resumes on a different thread would see
+a `NULL` nursery, causing `cc_nursery_is_cancelled(NULL)` to return `true` and
+the fiber to exit prematurely.
+
+**Invariant:** `worker_run_fiber()` MUST save and restore `cc__tls_current_nursery`
+around every `fiber_resume()` call:
+
+```c
+// Before resume
+CCNursery* prev = cc__tls_current_nursery;
+cc__tls_current_nursery = f->saved_nursery;   // restore fiber's last known nursery
+fiber_resume(f);
+f->saved_nursery = cc__tls_current_nursery;   // save whatever fiber set during run
+cc__tls_current_nursery = prev;               // restore scheduler thread's context
+```
+
+`fiber_task.saved_nursery` is initialized to `NULL` (set by first nursery entry
+thunk run) and updated on every yield. This makes nursery context portable across
+any number of OS-thread migrations.
+
+### 6.4 Startup-to-Run Phase Behavior (Current runtime)
 
 The active v3 runtime currently uses a one-way startup protocol to reduce
 timing-sensitive startup starvation:
@@ -537,7 +606,28 @@ preserves single-owner wake claim and exactly-once enqueue semantics.
 
 ## 12. Appendix: Worker Scheduling Loop (Non-normative)
 
-- Prefer local deque pop, then global MPMC, then steal.
+**Base worker priority order:**
+1. Local deque pop (spawn-locality, post-yield re-queue)
+2. Own inbox pop (timer-woken fibers, affinity-routed unparks)
+3. Global MPMC pop
+4. Peer inbox rescue / work-steal
+
+**Replacement worker priority order:**
+1. Full scan of ALL worker inboxes (random start offset to avoid thundering-herd)
+2. Peer local-queue steal
+3. Global MPMC pop
+
+The full inbox scan for replacement workers is intentional: sysmon routes
+timer-woken fibers to inboxes (`sq_drain_sysmon`), so a replacement must check
+every inbox before touching global to avoid running a bulk task ahead of a
+timer fiber.
+
+**Timer-service worker** (inbox-only, spawned by sysmon emergency path):
+- Scans inbox queues only (no local queues, no global).
+- Exits as soon as all inboxes are empty.
+- Never kidnappable by raw-syscall fibers.
+
+Other rules:
 - If a worker wakes with no local/inbox/global work visible, it MAY perform a
   bounded peer-inbox rescue probe before returning to sleep.
 - On unpark stale-affinity divert, prefer peer inbox reroute before global
