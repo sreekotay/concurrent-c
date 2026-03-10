@@ -212,8 +212,12 @@ void cc_fiber_dump_timing(void) {
     fprintf(stderr, "================================\n\n");
 }
 
-/* Forward declaration - defined in nursery.c */
+/* Forward declarations - defined in nursery.c */
 void cc_nursery_dump_timing(void);
+typedef struct CCNursery CCNursery;
+/* cc__tls_current_nursery is the per-OS-thread nursery context pointer.
+ * Fibers must restore it on migration; see worker_run_fiber(). */
+extern __thread CCNursery* cc__tls_current_nursery;
 
 #if CC_RUNTIME_V3
 struct fiber_task;
@@ -398,6 +402,7 @@ typedef struct fiber_task {
     unsigned char spawn_publish_valid;   /* 1 if publish metadata is populated */
     
     struct timespec sleep_deadline;  /* Deadline for cc_sleep_ms timer parking */
+    CCNursery* saved_nursery;       /* Nursery context saved across fiber migrations */
     
     /* Debug: track who last enqueued this fiber */
     int enqueue_src;          /* Enum: 1=trampoline_yield, 2=spawn, 3=park_abort_pending,
@@ -3037,6 +3042,46 @@ static inline void replacement_record_global_hit(fiber_task* f) {
  * the replacement worker retires.  200 * 5ms = ~1 second idle timeout. */
 #define TEMP_IDLE_TIMEOUT_ITERS 200
 
+/* Timer-service worker: scans ALL worker inboxes and runs any fiber found.
+ * Exits immediately when all inboxes are empty — intentionally never touches
+ * the global queue, so it cannot be kidnapped by a raw-syscall fiber.
+ *
+ * Spawned by sysmon when sq_drain_sysmon routes a timer-woken fiber to an
+ * inbox but no scheduler-sleeping or spinning worker exists to pick it up.
+ * This allows the heartbeat (or any cc_sleep_ms sleeper) to run even when
+ * all base+replacement workers are OS-blocked by raw syscalls. */
+static _Atomic uint32_t g_timer_worker_active = 0;  /* 0=none, 1=one running */
+static void* timer_service_worker(void* arg) {
+    (void)arg;
+    tls_sched_worker_ctx = 1;
+    if (!tls_tsan_sched_fiber) {
+        tls_tsan_sched_fiber = TSAN_FIBER_CREATE();
+        TSAN_FIBER_SWITCH(tls_tsan_sched_fiber);
+    }
+    uint64_t rng_state = rdtsc();
+    /* Scan all worker INBOXES and run whatever we find.  Stop when empty.
+     * Intentionally does NOT touch local queues or the global queue — those
+     * can contain raw-syscall fibers (kidnappers) that would kidnap this
+     * thread and hold g_timer_worker_active=1 for the duration, blocking
+     * all future emergency spawns.  sq_drain_sysmon routes timer-woken
+     * fibers exclusively to inboxes, so inbox-only is sufficient. */
+    while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
+        fiber_task* f = NULL;
+        if (g_sched.num_workers > 0) {
+            size_t start = xorshift64(&rng_state) % g_sched.num_workers;
+            for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
+                size_t w = (start + s) % g_sched.num_workers;
+                f = iq_pop(&g_sched.inbox_queues[w]);
+            }
+        }
+        if (!f) break;  /* All inboxes empty — exit */
+        worker_run_fiber_accounted(f);
+    }
+    atomic_store_explicit(&g_timer_worker_active, 0, memory_order_release);
+    atomic_fetch_sub_explicit(&g_sched.temp_worker_count, 1, memory_order_relaxed);
+    return NULL;
+}
+
 static void* replacement_worker(void* arg) {
     (void)arg;
     static _Atomic int temp_worker_id_counter = 0;
@@ -3055,12 +3100,21 @@ static void* replacement_worker(void* arg) {
         fiber_task* f = NULL;
         int nohint_fast_idle = 0;
         /* Replacement workers primarily recover untended local/inbox work.
-         * Prefer steal paths first; only touch global when hint says non-empty. */
+         * Scan ALL worker inboxes before touching the global queue so that
+         * inbox-routed fibers (e.g. timer wakeups from sq_drain_sysmon) are
+         * always found ahead of bulk-spawned global queue items.  Without the
+         * full scan, a single random-victim steal gives only 1/N hit rate and
+         * the replacement immediately falls through to global, grabbing a
+         * kidnapper and blocking for seconds before trying inboxes again.
+         *
+         * Use a random start offset to avoid all replacements hammering the
+         * same worker's inbox simultaneously. */
         if (g_sched.num_workers > 0) {
-            size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-            f = iq_pop(&g_sched.inbox_queues[victim]);
-            if (!f) {
-                f = lq_steal(&g_sched.local_queues[victim]);
+            size_t start = xorshift64(&rng_state) % g_sched.num_workers;
+            for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
+                size_t w = (start + s) % g_sched.num_workers;
+                f = iq_pop(&g_sched.inbox_queues[w]);
+                if (!f) f = lq_steal(&g_sched.local_queues[w]);
             }
         }
         if (!f) {
@@ -3106,9 +3160,12 @@ static void* replacement_worker(void* arg) {
                     f = NULL;
                     int from_global_probe = 0;
                     if (g_sched.num_workers > 0) {
-                        size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-                        f = iq_pop(&g_sched.inbox_queues[victim]);
-                        if (!f) f = lq_steal(&g_sched.local_queues[victim]);
+                        size_t start = xorshift64(&rng_state) % g_sched.num_workers;
+                        for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
+                            size_t w = (start + s) % g_sched.num_workers;
+                            f = iq_pop(&g_sched.inbox_queues[w]);
+                            if (!f) f = lq_steal(&g_sched.local_queues[w]);
+                        }
                     }
                     if (!f) {
                         if ((spin & 7) != 0) {
@@ -3153,9 +3210,12 @@ static void* replacement_worker(void* arg) {
             f = NULL;
             int from_global_probe = 0;
             if (g_sched.num_workers > 0) {
-                size_t victim = (size_t)(xorshift64(&rng_state) % g_sched.num_workers);
-                f = iq_pop(&g_sched.inbox_queues[victim]);
-                if (!f) f = lq_steal(&g_sched.local_queues[victim]);
+                size_t start = xorshift64(&rng_state) % g_sched.num_workers;
+                for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
+                    size_t w = (start + s) % g_sched.num_workers;
+                    f = iq_pop(&g_sched.inbox_queues[w]);
+                    if (!f) f = lq_steal(&g_sched.local_queues[w]);
+                }
             }
             if (!f) {
                 int has_hint = sched_global_has_hint_any();
@@ -3226,23 +3286,172 @@ static int stall_debug_enabled(void) {
     return val;
 }
 
+/* Drain expired sleepers and route them to worker inboxes.
+ *
+ * Unlike sq_drain (which pushes to global), this function places each woken
+ * fiber into the inbox of the "freshest" (least-stale) base worker.  Base
+ * workers check their own inbox at Priority 2 — BEFORE the global queue — so
+ * a fiber in an inbox is guaranteed to run as soon as that worker finishes its
+ * current task, regardless of how many items are in the global queue.
+ * Replacement workers do a full inbox scan so they also find these fibers.
+ *
+ * If no base worker's inbox accepts the fiber (all full, or no workers), we
+ * fall back to sched_global_push so the fiber is never lost.
+ *
+ * Returns the number of fibers woken. */
+static size_t sq_drain_sysmon(void) {
+    if (atomic_load_explicit(&g_sleep_queue.count, memory_order_relaxed) == 0)
+        return 0;
+
+    struct timespec now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    uint64_t now_cyc = rdtsc();
+
+    /* Collect all expired fibers under the lock, then route them outside it. */
+    fiber_task* list = NULL;
+    size_t woken = 0;
+    pthread_mutex_lock(&g_sleep_queue.mu);
+    fiber_task** pp = &g_sleep_queue.head;
+    while (*pp) {
+        fiber_task* f = *pp;
+        if (now_ts.tv_sec > f->sleep_deadline.tv_sec ||
+            (now_ts.tv_sec == f->sleep_deadline.tv_sec &&
+             now_ts.tv_nsec >= f->sleep_deadline.tv_nsec)) {
+            *pp = f->next;
+            f->next = list;
+            list = f;
+            atomic_fetch_sub_explicit(&g_sleep_queue.count, 1, memory_order_relaxed);
+            woken++;
+        } else {
+            pp = &f->next;
+        }
+    }
+    pthread_mutex_unlock(&g_sleep_queue.mu);
+
+    if (!list) return 0;
+
+    /* Route each woken fiber to the inbox of the least-stale base worker.
+     * A recently-active worker is most likely to check its inbox soon (e.g.
+     * it may only be briefly kidnapped and about to return).  If the fiber
+     * has a preferred worker from a previous run, try that first. */
+    for (fiber_task* f = list; f; ) {
+        fiber_task* next_f = f->next;
+        f->next = NULL;
+
+        int routed = 0;
+        if (g_sched.num_workers > 0 && g_sched.worker_heartbeat) {
+            /* First: try preferred worker (warm affinity cache) */
+            int preferred = f->last_worker_id;
+            if (preferred >= 0 && (size_t)preferred < g_sched.num_workers) {
+                uint64_t hb = atomic_load_explicit(
+                    &g_sched.worker_heartbeat[preferred].heartbeat,
+                    memory_order_relaxed);
+                if (hb != 0) {
+                    int edge = 0;
+                    if (iq_push_with_edge(&g_sched.inbox_queues[preferred], f, &edge) == 0) {
+                        routed = 1;
+                    }
+                }
+            }
+
+            /* Second: find the freshest (least-stale) worker and try its inbox */
+            if (!routed) {
+                int best = -1;
+                uint64_t best_hb = 0;
+                for (size_t w = 0; w < g_sched.num_workers; w++) {
+                    uint64_t hb = atomic_load_explicit(
+                        &g_sched.worker_heartbeat[w].heartbeat,
+                        memory_order_relaxed);
+                    if (hb != 0 && hb > best_hb) {
+                        best_hb = hb;
+                        best = (int)w;
+                    }
+                }
+                if (best >= 0) {
+                    int edge = 0;
+                    if (iq_push_with_edge(&g_sched.inbox_queues[best], f, &edge) == 0) {
+                        routed = 1;
+                    }
+                }
+            }
+        }
+
+        if (!routed) {
+            /* Last resort: global queue — fiber will not be lost */
+            sched_global_push(f, f->last_worker_id);
+        }
+
+        f = next_f;
+    }
+    (void)now_cyc;
+    return woken;
+}
+
 static void* sysmon_main(void* arg) {
     (void)arg;
     int stall_tick_counter = 0;
     int low_worker_pressure_streak = 0;
+    uint64_t last_sleepq_emerg_cycles = 0;
 #if CC_V3_DIAGNOSTICS
     uint64_t negative_pressure_streak = 0;
 #endif
     while (atomic_load_explicit(&g_sched.sysmon_running, memory_order_acquire)) {
         usleep(SYSMON_CHECK_US);
         
-        /* Wake any fibers whose sleep deadline has passed */
+        /* Wake any fibers whose sleep deadline has passed.
+         *
+         * sq_drain_sysmon routes them to worker INBOXES (Priority 2, before
+         * global).  If all workers are OS-blocked (kidnapped by raw syscalls),
+         * sleeping==0 && spinning==0 — the normal wake is a no-op.  In that
+         * case we spawn an emergency replacement worker whose full inbox scan
+         * will find the woken fiber and run it. */
         {
-            size_t woken = sq_drain();
+            size_t woken = sq_drain_sysmon();
             if (woken > 0) {
-                /* Fibers were pushed to run queue — wake workers to process them */
-                for (size_t w = 0; w < woken && w < g_sched.num_workers; w++) {
-                    wake_one_if_sleeping_unconditional(0, CC_WAKE_REASON_SYSMON_SLEEPQ);
+                size_t sl = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+                size_t sp = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
+                if (sl > 0 || sp > 0) {
+                    /* Workers are awake — send targeted wakes */
+                    for (size_t w = 0; w < woken && w < g_sched.num_workers; w++) {
+                        wake_one_if_sleeping_unconditional(0, CC_WAKE_REASON_SYSMON_SLEEPQ);
+                    }
+                } else {
+                    /* All workers are OS-blocked (kidnapped).  Spawn an emergency
+                     * replacement to drain the inboxes we just filled.  Use a
+                     * separate, longer cooldown so this doesn't interfere with
+                     * the normal orphan-detection path below. */
+                    /* Emergency path: spawn a timer-service worker.
+                     *
+                     * All regular workers are OS-blocked (kidnapped by raw
+                     * syscalls).  Spawn a dedicated inbox-only worker that
+                     * will run the timer-woken fiber and then EXIT — it
+                     * never touches the global queue, so it can't get
+                     * kidnapped.  A single active timer worker suffices
+                     * (g_timer_worker_active flag prevents duplicates). */
+                    uint64_t now_emerg = rdtsc();
+                    uint32_t tw_expected = 0;
+                    if ((now_emerg - last_sleepq_emerg_cycles) > (uint64_t)ORPHAN_COOLDOWN_CYCLES * 4 &&
+                            atomic_compare_exchange_strong_explicit(
+                                &g_timer_worker_active, &tw_expected, 1,
+                                memory_order_acquire, memory_order_relaxed)) {
+                        last_sleepq_emerg_cycles = now_emerg;
+                        atomic_fetch_add_explicit(&g_sched.temp_worker_count, 1,
+                                                  memory_order_relaxed);
+                        pthread_t tid;
+                        pthread_attr_t attr;
+                        pthread_attr_init(&attr);
+                        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+                        if (pthread_create(&tid, &attr, timer_service_worker, NULL) == 0)
+                            atomic_fetch_add_explicit(&g_sched.promotion_count, 1,
+                                                      memory_order_relaxed);
+                        else {
+                            atomic_fetch_sub_explicit(&g_sched.temp_worker_count, 1,
+                                                      memory_order_relaxed);
+                            atomic_store_explicit(&g_timer_worker_active, 0,
+                                                  memory_order_release);
+                        }
+                        pthread_attr_destroy(&attr);
+                    }
                 }
             }
         }
@@ -3519,7 +3728,15 @@ static inline int worker_run_fiber(fiber_task* f) {
     }
     tls_current_fiber = f;
     f->last_worker_id = wid;  /* Record affinity hint */
+    /* Restore the fiber's saved nursery context on this thread so that
+     * cc_cancelled() works correctly even when the fiber migrates to a
+     * different OS thread (e.g. a replacement or timer-service worker).
+     * Save the previous value so we can restore it after the fiber yields. */
+    CCNursery* prev_nursery = cc__tls_current_nursery;
+    cc__tls_current_nursery = f->saved_nursery;
     fiber_resume(f);
+    f->saved_nursery = cc__tls_current_nursery;
+    cc__tls_current_nursery = prev_nursery;
     tls_current_fiber = NULL;
     
     /* ---- Trampoline: mco_resume returned, stack is quiescent ----

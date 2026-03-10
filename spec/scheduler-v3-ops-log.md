@@ -1626,3 +1626,84 @@ embedded CPU-bound thread pool (Option A, architectural change).
 
 - `work_stealing_race`: PASS
 - `join_init_race`: PASS
+
+---
+
+## Session: OS-Thread Kidnapping Robustness (`syscall_kidnap` regression fix)
+
+### Symptom
+
+`perf/compare_syscall.sh` regressed: heartbeat fiber produced only 5–6 ticks
+(vs ~54 for pthread baseline) after 100 raw-`sleep(2)` fibers kidnapped all 16
+base workers. The scheduler was "bricked."
+
+### Root Cause Triage
+
+Three independent issues compounded:
+
+**Issue 1 — Nursery context not portable across OS threads (correctness bug)**
+
+`cc__tls_current_nursery` is thread-local. A fiber's nursery entry thunk sets it
+on first resume. On any subsequent resume on a *different* OS thread (replacement
+worker, timer-service worker), the TLS was NULL. `cc_nursery_is_cancelled(NULL)`
+returns `true`, so any fiber (e.g. the heartbeat) migrated to a fresh OS thread
+would see itself as cancelled, exit its while-loop, and die after exactly one tick.
+
+**Fix:** Save/restore `cc__tls_current_nursery` around every `fiber_resume()` in
+`worker_run_fiber()`. Add `fiber_task.saved_nursery` to carry the nursery pointer
+across migrations. See §6.3 in the spec for the invariant.
+
+**Issue 2 — Sleep-queue drain routed woken fibers to global queue**
+
+`sq_drain()` (called by both sysmon and idle workers) pushed expired fibers to
+the global MPMC queue. With 100 kidnappers already in global, the heartbeat was
+buried — replacement workers grabbed a kidnapper before the heartbeat.
+
+**Fix:** Sysmon uses a dedicated `sq_drain_sysmon()` that routes each woken fiber
+to the inbox of the least-stale base worker (affinity-preferred, then
+freshest-heartbeat scan). Inbox items are processed at Priority 2, ahead of the
+global queue at Priority 3.
+
+**Issue 3 — All replacement workers also became kidnapped; no worker left for timer fibers**
+
+With `MAX_EXTRA_WORKERS = 8` replacement workers all eventually grabbing
+kidnappers and blocking for 2s, no worker remained to service the heartbeat
+even after `sq_drain_sysmon` correctly routed it to an inbox. The
+`current >= MAX_EXTRA_WORKERS` gate blocked further spawning.
+
+**Fix:** Add an **emergency timer-service worker** spawned by sysmon when
+`sq_drain_sysmon()` returns `woken > 0` and `sleeping == 0 && spinning == 0`
+(all workers are OS-blocked). The timer-service worker:
+- Scans all worker inboxes only — never the global queue.
+- Runs each fiber it finds, exits when inboxes are empty.
+- Cannot be kidnapped because it never touches the global queue.
+- Is gated by `g_timer_worker_active` (single active at a time) and a 4×
+  cooldown to prevent runaway spawning.
+
+### Debugging Sequence (key discoveries)
+
+1. Added `[sysmon] emerg:` trace → confirmed spawn fired once at T≈600ms.
+2. Added `[trampoline] sq_push` trace → confirmed heartbeat re-queued after tick 6
+   *only* when wid=0 (base worker), **never** when wid=-1 (timer worker).
+3. Identified `cc_nursery_is_cancelled(NULL) = true` as the exit trigger.
+4. Confirmed timer-service worker must be inbox-only: when it also checked local
+   queues (`lq_steal`), it occasionally stole a kidnapper, blocking for 2s and
+   holding `g_timer_worker_active = 1`, causing ~20 missed ticks per incident.
+
+### Results
+
+| Metric | Before | After |
+|--------|--------|-------|
+| CC heartbeats (5s, 100 kidnappers, 16 workers) | 5–6 | 54–56 |
+| Pthread baseline | 52–56 | 52–56 |
+| compare_syscall verdict | FAIL/PARTIAL | **SUCCESS** |
+
+### Files Changed
+
+- `cc/runtime/fiber_sched.c`:
+  - `struct fiber_task`: added `CCNursery* saved_nursery`
+  - `worker_run_fiber()`: save/restore `cc__tls_current_nursery` around `fiber_resume()`
+  - Added `sq_drain_sysmon()`: inbox-priority routing for sysmon sleep-queue drain
+  - `sysmon_main()`: calls `sq_drain_sysmon()`, emergency-spawns `timer_service_worker` when all workers OS-blocked
+  - Added `timer_service_worker()`: inbox-only fiber executor, cannot be kidnapped
+  - `replacement_worker()`: full inbox scan (all workers) before global queue pop
