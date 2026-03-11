@@ -791,6 +791,14 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 const char* elem_sz_expr = "0";
                 int allow_take = cc__elem_type_implies_take(elem_ty, &elem_sz_expr);
 
+                /* Ordered channels store CCTask values internally, regardless of the
+                   declared element type.  Override elem_size so chan_send_task and the
+                   ordered recv helper always agree on the wire size. */
+                if (rx_ordered) {
+                    elem_sz_expr = "sizeof(CCTask)";
+                    allow_take = 0;
+                }
+
                 const char* topo_enum = "CC_CHAN_TOPO_DEFAULT";
                 if (tx_has_topo) {
                     if (strcmp(tx_topo, "1:1") == 0) topo_enum = "CC_CHAN_TOPO_1_1";
@@ -819,10 +827,10 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ do { int __cc_err = cc_chan_pair_create_full(%s, %s, %d, %s, %d, %s, &%s, %s); "
-                             "if (__cc_err) { fprintf(stderr, \"CC: channel_pair failed: %%d\\n\", __cc_err); abort(); } } while(0);",
+                             "/* channel_pair */ do { CCChan* __cc_ch = cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
+                             "if (!__cc_ch) { fprintf(stderr, \"CC: channel_pair failed\\n\"); abort(); } } while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
-                             (tx_mode == 1) ? 1 : 0, topo_enum, tx_name, rx_arg);
+                             (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 }
 
@@ -1329,19 +1337,29 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
             cc__sb_append_cstr_local(&out, &o_len, &o_cap, " ");
         }
         
-        /* Emit wrapper block - simplified to avoid typedef inside closure */
+        /* Emit closure body wrapper.
+         * The task stores its pointer-sized result in fiber-local storage at offset 0.
+         * chan_recv on an ordered channel copies sizeof(T) bytes from that location,
+         * so the result must be scalar- or pointer-sized (the common case).
+         * For structured Result types (T!>(E)), unwrap the result inside the
+         * closure body before passing it to chan_send_task. */
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ ");
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "intptr_t* __cc_st_r = (intptr_t*)cc_task_result_ptr(sizeof(intptr_t)); ");
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (intptr_t)(");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*)); ");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
         
         /* Emit body (the actual expression/block) */
         cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
         
+        /* Return pointer to result storage so ordered recv can extract it. */
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = cc_fiber_spawn_closure0(__cc_st_c");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); cc_chan_send((");
+
+        /* Send the task handle.  Per spec §scheduler_v2 "Send-failure cleanup": if
+           send fails (channel closed or error) we must join the task to avoid
+           orphaning live fiber work. */
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); { int __cc_st_e = cc_chan_send((");
         
         /* Emit channel */
         cc__sb_append_local(&out, &o_len, &o_cap, src + ch_start, ch_end - ch_start);
@@ -1350,7 +1368,9 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, ", sizeof(__cc_st_t");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); }");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); if (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); } } }");
         
         last_emit = paren_end + 1;
         i = paren_end;

@@ -242,7 +242,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             }
         });
 
-        @nursery closing(tasks_tx) {
+        @closing(tasks_tx) {
             spawn(() => [in_ptr, tasks_tx] {
                 long seq = 0;
                 while (true) {

@@ -1,0 +1,27 @@
+#include <ccc/cc_runtime.cch>
+
+static volatile int g_sum = 0;
+
+static void consumer(CCChanRx rx) {
+    int v = 0;
+    while (cc_io_avail(chan_recv(rx, &v))) g_sum += v;
+}
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+
+    @nursery {
+        spawn(() => consumer(rx));
+
+        @closing(tx) {
+            spawn(() => {
+                for (int i = 1; i <= 3; i++) (void)chan_send(tx, i);
+            });
+        }
+    }
+
+    cc_chan_free(ch);
+    return (g_sum == 6) ? 0 : 1;
+}

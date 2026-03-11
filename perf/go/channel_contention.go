@@ -3,14 +3,13 @@ package main
 import (
 	"fmt"
 	"runtime"
-	"sort"
 	"sync/atomic"
 	"time"
 )
 
 const (
 	ITERATIONS = 1000000
-	NUM_TRIALS = 7
+	NUM_TRIALS = 15
 )
 
 // Prevent dead-code elimination of consumer work.

@@ -1,0 +1,14 @@
+#include <ccc/cc_runtime.cch>
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    channel_pair(&tx, &rx);
+
+    @nursery closing(tx) {
+        spawn(() => {
+            (void)chan_send(tx, 1);
+        });
+    }
+    return 0;
+}

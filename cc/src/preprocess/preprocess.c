@@ -3870,7 +3870,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     
                     /* Short form: cc_ok(v) has 0 commas, cc_err(e) has 0 commas
                        Long form: cc_ok(T,v) has 1+ commas
-                       Shorthand: cc_err(CC_ERR_*, "msg") has 1 comma - expand to cc_error() */
+                       Shorthand: cc_err(CC_ERR_*, "msg") has 1 comma - expand to CC_ERROR(...) */
                     int is_short = (comma_count == 0);
                     
                     /* Check for cc_err shorthand: cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") */
@@ -3887,8 +3887,8 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                     }
                     
                     if (is_err_shorthand && depth == 0) {
-                        /* Rewrite cc_err(CC_ERR_*) -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, NULL))
-                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(cc_error(CC_ERR_*, "msg"))
+                        /* Rewrite cc_err(CC_ERR_*) -> cc_err_CCResult_T_E(CC_ERROR(CC_ERR_*, NULL))
+                           Rewrite cc_err(CC_ERR_*, "msg") -> cc_err_CCResult_T_E(CC_ERROR(CC_ERR_*, "msg"))
                            Type names must be mangled (e.g., MyData* -> MyDataptr) */
                         char mangled_ok[128], mangled_err[128];
                         cc__mangle_type_name(current_ok_type, strlen(current_ok_type), mangled_ok, sizeof(mangled_ok));
@@ -3899,7 +3899,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
                         cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_ok);
                         cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
                         cc_sb_append_cstr(&out, &out_len, &out_cap, mangled_err);
-                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(cc_error(");
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(CC_ERROR(");
                         /* Copy args */
                         cc_sb_append(&out, &out_len, &out_cap, src + args_start, j - args_start);
                         if (is_err_shorthand_no_msg) {
@@ -3951,17 +3951,17 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
 }
 
 /* Rewrite @closing(ch) spawn(...) or @closing(ch) { ... } syntax.
-   This transforms the annotation into a spawned sub-nursery:
+   This transforms the annotation into explicit nested-nursery form:
    
    @closing(ch) spawn(task);
    becomes:
-   spawn(() => { @nursery closing(ch) { spawn(task); } });
+   @nursery closing(ch) { spawn(task); }
    
    @closing(ch) { for (w) spawn(worker); }
    becomes:
-   spawn(() => { @nursery closing(ch) { for (w) spawn(worker); } });
+   @nursery closing(ch) { for (w) spawn(worker); }
    
-   This allows flat visual structure while maintaining correct channel close semantics. */
+   This keeps @closing(...) semantically equivalent to explicit nursery ownership. */
 static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -4091,23 +4091,37 @@ static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
                 /* Emit everything up to start */
                 cc_sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
                 
-                /* Emit the transformed code:
-                   spawn(() => { @nursery closing(channels) { body } }); */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "spawn(() => { @nursery closing(");
+                /* Emit transformed code in canonical nested-nursery form.
+                   This keeps @closing(...) equivalent to explicit @nursery closing(...). */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@nursery closing(");
                 cc_sb_append(&out, &out_len, &out_cap, src + chans_start, chans_end - chans_start);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, ") ");
                 
                 if (is_block) {
-                    /* Body already has braces */
-                    cc_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
+                    /* Body already has braces.  Re-run closing rewrite recursively so
+                       nested @closing(...) blocks inside this body are lowered too. */
+                    size_t blen = body_end - body_start;
+                    char* inner = cc__rewrite_closing_annotation(src + body_start, blen);
+                    if (inner) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, inner);
+                        free(inner);
+                    } else {
+                        cc_sb_append(&out, &out_len, &out_cap, src + body_start, blen);
+                    }
                 } else {
-                    /* Wrap single spawn in braces */
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "{ ");
-                    cc_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                    /* Single-spawn form.  Allow recursive rewrite within the spawn
+                       statement as well (e.g., nested closure bodies). */
+                    size_t blen = body_end - body_start;
+                    char* inner = cc__rewrite_closing_annotation(src + body_start, blen);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "{\n");
+                    if (inner) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, inner);
+                        free(inner);
+                    } else {
+                        cc_sb_append(&out, &out_len, &out_cap, src + body_start, blen);
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "\n}");
                 }
-                
-                cc_sb_append_cstr(&out, &out_len, &out_cap, " });");
                 
                 last_emit = body_end;
                 i = body_end;
@@ -4645,11 +4659,8 @@ static const char* cc__parse_stubs =
     "#ifndef __CC_ERROR_TYPE_DEFINED\n"
     "#define __CC_ERROR_TYPE_DEFINED\n"
     "typedef struct { int kind; const char* message; } CCError;\n"
-    "#endif\n"
-    /* cc_error helper */
-    "#ifndef __CC_ERROR_HELPER_DEFINED\n"
-    "#define __CC_ERROR_HELPER_DEFINED\n"
-    "static inline CCError cc_error(int k, const char* m) { CCError e = {k, m}; return e; }\n"
+    "static inline CCError __cc_error_make(int kind, const char* msg) { CCError e = {kind, msg}; return e; }\n"
+    "#define CC_ERROR(kind, msg) __cc_error_make((kind), (msg))\n"
     "#endif\n"
     /* Result constructors - variadic macros to accept any type.
        We use a comma expression to evaluate the arg (so it appears in AST) then return generic.

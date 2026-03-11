@@ -194,8 +194,7 @@ static int should_emit_forward_decl(CCNNode* func) {
         return 0;
     
     /* Skip main and internal functions */
-    if (strcmp(func->as.func.name, "main") == 0 ||
-        strcmp(func->as.func.name, "cc_error") == 0)
+    if (strcmp(func->as.func.name, "main") == 0)
         return 0;
     
     /* Skip functions with anonymous struct return types */
@@ -442,7 +441,6 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                     strcmp(fn, "cc_none") == 0 ||
                     strcmp(fn, "cc_ok") == 0 ||
                     strcmp(fn, "cc_err") == 0 ||
-                    strcmp(fn, "cc_error") == 0 ||
                     strncmp(fn, "__CC", 4) == 0) {
                     break;
                 }

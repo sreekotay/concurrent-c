@@ -54,13 +54,20 @@ typedef struct CCError {
     CCErrorKind kind;
     const char* message;  /* May be NULL */
 } CCError;
-
-/* Helper to construct errors */
-static inline CCError cc_error(CCErrorKind kind, const char* msg) {
+static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
     CCError e = { kind, msg };
     return e;
 }
+#define CC_ERROR(kind, msg) __cc_error_make((kind), (msg))
+
 #endif /* CC_PARSER_MODE */
+
+#ifdef CC_PARSER_MODE
+/* Parser-mode placeholder for shorthand error construction in cc_err(...). */
+#ifndef CC_ERROR
+#define CC_ERROR(kind, msg) (0)
+#endif
+#endif
 
 /*
  * Result type layout:
@@ -343,7 +350,7 @@ typedef __CCResultGeneric CCResult_void_CCError;
  * Example:
  *   int!>(CCError) read_value(void) {
  *       if (success) return cc_ok(42);
- *       return cc_err(cc_error(CC_ERR_NOT_FOUND, "not found"));
+ *       return cc_err(CC_ERROR(CC_ERR_NOT_FOUND, "not found"));
  *   }
  */
 
@@ -372,6 +379,8 @@ typedef __CCResultGeneric CCResult_void_CCError;
  */
 #define cc_is_ok(res) ((res).ok)
 #define cc_is_err(res) (!(res).ok)
+#define cc_value(res) ((res).u.value)
+#define cc_error(res) ((res).u.error)
 
 /* cc_unwrap - get value from result, abort if error.
    For struct values, use cc_unwrap_as(res, Type) to cast to correct type.

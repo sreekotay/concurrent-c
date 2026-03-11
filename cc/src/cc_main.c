@@ -453,8 +453,8 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --bin-dir DIR       Output dir for linked executables (default: <repo>/bin)\n");
     fprintf(stderr, "  --out-stem NAME     Override the basename/stem used for generated files\n");
     fprintf(stderr, "  --no-cache          Disable incremental cache (also: CC_NO_CACHE=1)\n");
-    fprintf(stderr, "  --strict-deadlock   Treat deadlock heuristics as errors (also: CC_STRICT_DEADLOCK=1)\n");
-    fprintf(stderr, "  --no-strict-deadlock  Disable strict deadlock mode for this run\n");
+    fprintf(stderr, "  --strict-deadlock   Force deadlock heuristics to errors (default; also: CC_STRICT_DEADLOCK=1)\n");
+    fprintf(stderr, "  --no-strict-deadlock  Downgrade deadlock heuristics to warnings for this run\n");
     fprintf(stderr, "  --timeout SECONDS   Kill run/test step after timeout\n");
     fprintf(stderr, "  --verbose           Print invoked commands\n");
 }

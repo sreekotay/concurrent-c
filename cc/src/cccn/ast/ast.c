@@ -326,9 +326,58 @@ CCNNode* ccn_node_clone(CCNNode* node) {
         case CCN_TYPE_OPTIONAL:
             clone->as.type_ptr.base = ccn_node_clone(node->as.type_ptr.base);
             break;
-            
+
+        case CCN_TYPE_ARRAY:
+        case CCN_TYPE_SLICE:
+            clone->as.type_array.elem = ccn_node_clone(node->as.type_array.elem);
+            clone->as.type_array.size = ccn_node_clone(node->as.type_array.size);
+            break;
+
+        /* Channel types: elem is the value type, capacity is the buffer size expr.
+           These are declared in the new AST but are still lowered by the text-rewrite
+           pass before the CCNNode tree is built.  Clone/free coverage is provided so
+           that any future pass that constructs them does not leak. */
+        case CCN_TYPE_CHAN_TX:
+        case CCN_TYPE_CHAN_RX:
+            clone->as.type_chan.elem = ccn_node_clone(node->as.type_chan.elem);
+            clone->as.type_chan.capacity = ccn_node_clone(node->as.type_chan.capacity);
+            break;
+
+        case CCN_TYPE_RESULT:
+            clone->as.type_result.ok_type  = ccn_node_clone(node->as.type_result.ok_type);
+            clone->as.type_result.err_type = ccn_node_clone(node->as.type_result.err_type);
+            break;
+
+        case CCN_STMT_FOR_AWAIT:
+            clone->as.stmt_while.cond = ccn_node_clone(node->as.stmt_while.cond);
+            clone->as.stmt_while.body = ccn_node_clone(node->as.stmt_while.body);
+            break;
+
+        case CCN_STMT_MATCH:
+            clone->as.stmt_match.arms = ccn_list_clone(&node->as.stmt_match.arms);
+            break;
+
+        case CCN_MATCH_ARM:
+            clone->as.match_arm.pattern = ccn_node_clone(node->as.match_arm.pattern);
+            clone->as.match_arm.body    = ccn_node_clone(node->as.match_arm.body);
+            break;
+
+        case CCN_EXPR_OK:
+        case CCN_EXPR_ERR:
+        case CCN_EXPR_SOME:
+            clone->as.expr_result.value = ccn_node_clone(node->as.expr_result.value);
+            break;
+
+        case CCN_EXPR_LITERAL_CHAR:
+            clone->as.expr_string.value = clone_str(node->as.expr_string.value);
+            clone->as.expr_string.len   = node->as.expr_string.len;
+            break;
+
+        /* CCN_EXPR_CHAN_SEND / CCN_EXPR_CHAN_RECV do not yet have a union member;
+           they are future-facing placeholders lowered by the text-rewrite pass.
+           Fall through to the leaf/scalar default. */
         default:
-            /* For unhandled kinds, the shallow copy is already done */
+            /* Leaf nodes or kinds without pointer fields – shallow copy is correct. */
             break;
     }
     
@@ -510,9 +559,50 @@ void ccn_node_free(CCNNode* node) {
         case CCN_TYPE_NAME:
             free((void*)node->as.type_name.name);
             break;
-            
+
+        case CCN_TYPE_ARRAY:
+        case CCN_TYPE_SLICE:
+            ccn_node_free(node->as.type_array.elem);
+            ccn_node_free(node->as.type_array.size);
+            break;
+
+        case CCN_TYPE_CHAN_TX:
+        case CCN_TYPE_CHAN_RX:
+            ccn_node_free(node->as.type_chan.elem);
+            ccn_node_free(node->as.type_chan.capacity);
+            break;
+
+        case CCN_TYPE_RESULT:
+            ccn_node_free(node->as.type_result.ok_type);
+            ccn_node_free(node->as.type_result.err_type);
+            break;
+
+        case CCN_STMT_FOR_AWAIT:
+            ccn_node_free(node->as.stmt_while.cond);
+            ccn_node_free(node->as.stmt_while.body);
+            break;
+
+        case CCN_STMT_MATCH:
+            ccn_list_free(&node->as.stmt_match.arms);
+            break;
+
+        case CCN_MATCH_ARM:
+            ccn_node_free(node->as.match_arm.pattern);
+            ccn_node_free(node->as.match_arm.body);
+            break;
+
+        case CCN_EXPR_OK:
+        case CCN_EXPR_ERR:
+        case CCN_EXPR_SOME:
+            ccn_node_free(node->as.expr_result.value);
+            break;
+
+        case CCN_EXPR_LITERAL_CHAR:
+            free((void*)node->as.expr_string.value);
+            break;
+
         default:
-            /* Leaf nodes without dynamic allocations */
+            /* Leaf nodes or scalar kinds without pointer fields. */
             break;
     }
     
@@ -556,8 +646,34 @@ static const char* ccn_kind_name(CCNKind kind) {
         case CCN_EXPR_TERNARY: return "EXPR_TERNARY";
         case CCN_EXPR_CAST: return "EXPR_CAST";
         case CCN_EXPR_SIZEOF: return "EXPR_SIZEOF";
+        case CCN_EXPR_LITERAL_FLOAT: return "EXPR_FLOAT";
+        case CCN_EXPR_LITERAL_CHAR: return "EXPR_CHAR";
+        case CCN_EXPR_ASSIGN: return "EXPR_ASSIGN";
+        case CCN_EXPR_INIT_LIST: return "EXPR_INIT_LIST";
+        case CCN_EXPR_OK: return "EXPR_OK";
+        case CCN_EXPR_ERR: return "EXPR_ERR";
+        case CCN_EXPR_SOME: return "EXPR_SOME";
+        case CCN_EXPR_NONE: return "EXPR_NONE";
+        /* Channel send/recv: currently lowered by text-rewrite pass before AST is built. */
+        case CCN_EXPR_CHAN_SEND: return "EXPR_CHAN_SEND";
+        case CCN_EXPR_CHAN_RECV: return "EXPR_CHAN_RECV";
         case CCN_TYPE_NAME: return "TYPE_NAME";
         case CCN_TYPE_PTR: return "TYPE_PTR";
+        case CCN_TYPE_ARRAY: return "TYPE_ARRAY";
+        case CCN_TYPE_SLICE: return "TYPE_SLICE";
+        case CCN_TYPE_CHAN_TX: return "TYPE_CHAN_TX";
+        case CCN_TYPE_CHAN_RX: return "TYPE_CHAN_RX";
+        case CCN_TYPE_OPTIONAL: return "TYPE_OPTIONAL";
+        case CCN_TYPE_RESULT: return "TYPE_RESULT";
+        case CCN_TYPE_FUNC: return "TYPE_FUNC";
+        case CCN_STMT_FOR_AWAIT: return "STMT_FOR_AWAIT";
+        case CCN_STMT_SWITCH: return "STMT_SWITCH";
+        case CCN_STMT_BREAK: return "STMT_BREAK";
+        case CCN_STMT_CONTINUE: return "STMT_CONTINUE";
+        case CCN_STMT_GOTO: return "STMT_GOTO";
+        case CCN_STMT_LABEL: return "STMT_LABEL";
+        case CCN_MATCH_ARM: return "MATCH_ARM";
+        case CCN_DESIGNATOR: return "DESIGNATOR";
         case CCN_STRUCT_DECL: return "STRUCT_DECL";
         case CCN_STRUCT_FIELD: return "STRUCT_FIELD";
         case CCN_TYPEDEF: return "TYPEDEF";

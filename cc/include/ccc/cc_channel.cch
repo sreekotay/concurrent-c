@@ -92,6 +92,38 @@ static inline int ordered_recv(CCChanRx rx, void** out) {
     }
 }
 
+/* Forward declaration needed by cc__chan_recv_ordered below.
+   Full declaration appears after the pair-creation API. */
+int cc_chan_is_ordered(CCChan* ch);
+
+/* Internal helper used by the chan_recv macro.
+ *
+ * For unordered channels: plain blocking recv into `out` (out_sz bytes).
+ * For ordered channels: receives a queued CCTask handle, awaits it, then
+ * copies the user-typed result (stored at offset 0 of the fiber-local result
+ * struct) into `out`.  The caller is responsible for sizing `out` correctly
+ * (sizeof(*out_ptr) in the macro, i.e. sizeof(T) where T is the element type).
+ *
+ * Ordered channels always hold CCTask values internally (elem_size ==
+ * sizeof(CCTask)), which is enforced by the channel_pair lowering pass.
+ */
+#if !defined(CC_PARSER_MODE)
+#include <string.h>
+static inline CCResult_bool_CCIoError cc__chan_recv_ordered(CCChanRx rx, void* out, size_t out_sz) {
+    if (cc_chan_is_ordered(rx.raw)) {
+        CCTask task;
+        int rc = cc_chan_recv(rx.raw, &task, sizeof(task));
+        if (rc == 0) {
+            void* cap = (void*)cc_block_on_intptr(task);
+            if (cap) memcpy(out, cap, out_sz);
+            else memset(out, 0, out_sz);
+        }
+        return cc_chan_result_from_errno(rc);
+    }
+    return cc_chan_result_from_errno(cc_chan_recv(rx.raw, out, out_sz));
+}
+#endif /* !CC_PARSER_MODE */
+
 typedef enum {
     CC_CHAN_MODE_BLOCK = 0,   // block when full/empty (default)
     CC_CHAN_MODE_DROP_NEW,    // drop new send (return EAGAIN) when full

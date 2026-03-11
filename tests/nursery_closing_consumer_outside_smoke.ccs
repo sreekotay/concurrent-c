@@ -20,7 +20,7 @@ int main(void) {
     g_err = 0;
 
     // Spawn producer(s) inside nursery; channel is closed on nursery exit.
-    @nursery closing(ch_tx) {
+    @closing(ch_tx) {
         spawn(() => { producer(ch_tx); });
     }
 

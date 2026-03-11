@@ -49,7 +49,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `arena` | After `@` (in `@arena(a)`) | Define arena allocation scope |
 | `lock` | After `@` (in `@lock (m) as var`) | Acquire mutex guard |
 | `noblock` | After `@` (in `@noblock fn`) | Mark function as provably non-blocking |
-| `closing` | In `@nursery closing(...)` or `@closing(ch)` | Auto-close channels when tasks complete |
+| `closing` | In `@closing(ch)` | Auto-close channels when producer scope completes |
 
 ### Special Block Forms (11)
 
@@ -59,8 +59,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@latency_sensitive` | Mark as latency-critical (no dispatch coalescing) | `@async @latency_sensitive void handle() { }` |
 | `@scoped type T` | Type tied to lexical scope (cannot escape) | `@scoped type Guard<T>;` |
 | `@nursery { }` | Structured concurrency scope; spawn tasks here | `@nursery { spawn (t1()); spawn (t2()); }` |
-| `@nursery closing(ch1, ch2)` | Nursery that closes channels on exit | `@nursery closing(ch) { }` |
-| `@closing(ch) spawn/{ }` | Mark spawns as owning channel (planned) | `@closing(tx) spawn(producer);` |
+| `@closing(ch) spawn/{ }` | Mark producer scope as owning channel close | `@closing(tx) spawn(producer);` |
 | `@arena(a) { }` | Arena memory allocation scope | `@arena(a) { Vec<int> v = ...; }` |
 | `@lock (m) as g { }` | Acquire mutex, bind guard to variable | `@lock (m) as guard { guard.data++; }` |
 | `@match { case T x = ... }` | Multiplex on channel events | `@match { case int x = await ch: ... }` |
@@ -105,7 +104,7 @@ These are normal functions in `concurrent_c.h` with `cc_` prefix to avoid naming
 | `cc_err(CC_ERR_*, "msg")` | CCError shorthand | `return cc_err(CC_ERR_NOT_FOUND, "msg");` |
 | `cc_ok(T, value)` | T!>(CCError) success (explicit) | `return cc_ok(int, 42);` |
 | `cc_ok(T, E, value)` | T!>(E) success (explicit) | `return cc_ok(int, MyError, 42);` |
-| `cc_err(T, error)` | T!>(CCError) error (explicit) | `return cc_err(int, cc_error(...));` |
+| `cc_err(T, error)` | T!>(CCError) error (explicit) | `return cc_err(int, CC_ERROR(...));` |
 | `cc_err(T, E, error)` | T!>(E) error (explicit) | `return cc_err(int, MyError, err);` |
 | `cc_move(x)` | Explicit move of move-only value | `ch.send_take(arr, cc_move(arr));` |
 | `cc_cancel()` | Cancel current task or nursery | `if (timeout) cc_cancel();` |
@@ -119,7 +118,7 @@ Result types (`T!>(E)`) support these methods via UFCS:
 | Method | Purpose | Example |
 |--------|---------|---------|
 | `r.is_ok()` | Check if success | `if (r.is_ok()) { ... }` |
-| `r.is_err()` | Check if error | `if (r.is_err()) handle(r.u.error);` |
+| `r.is_err()` | Check if error | `if (r.is_err()) handle(cc_error(r));` |
 | `r.unwrap()` | Get value or abort | `int v = r.unwrap();` |
 | `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);` |
 
@@ -222,7 +221,7 @@ nursery {
 - All spawned tasks complete before scope exits
 - Cancellation propagates to all tasks
 - Error from any task fails the nursery
-- No deadlocks (guaranteed progress via cancellation)
+- Compiler-enforced structure eliminates many task-lifecycle deadlocks; channel-flow deadlocks are diagnosed via compile-time checks and runtime guards
 
 **Channels:** Async-only or sync-only (determined at type, not context)
 
@@ -521,8 +520,7 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@latency_sensitive` | Latency-critical (no coalescing) | `@async @latency_sensitive Response handle() { }` |
 | | `@scoped` | Type tied to lexical scope | `@scoped type Guard<T>;` |
 | | `@nursery` | Structured concurrency block | `@nursery { spawn (task()); }` |
-| | `@nursery closing(...)` | Nursery with auto-channel-close | `@nursery closing(ch) { }` |
-| | `@closing(ch)` | Spawn(s) own channel | `@closing(tx) spawn(task);` |
+| | `@closing(ch)` | Producer-scope channel ownership | `@closing(tx) spawn(task);` |
 | | `@arena(a)` | Arena allocation scope | `@arena(a) { Vec<int> v = ...; }` |
 | | `@lock (m) as var` | Mutex guard acquisition | `@lock (m) as g { g.value++; }` |
 | | `@match` | Channel event dispatch | `@match { case T x = await ch: ... }` |
@@ -543,7 +541,7 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `cc_err(error)` | Construct T!>(E) error (inferred) | `return cc_err(MyError_NotFound);` |
 | | `cc_ok(T, value)` | T!>(CCError) success (explicit) | `return cc_ok(int, 42);` |
 | | `cc_ok(T, E, v)` | T!>(E) success (explicit) | `return cc_ok(int, MyError, 42);` |
-| | `cc_err(T, e)` | T!>(CCError) error (explicit) | `return cc_err(int, cc_error(...));` |
+| | `cc_err(T, e)` | T!>(CCError) error (explicit) | `return cc_err(int, CC_ERROR(...));` |
 | | `cc_err(T, E, e)` | T!>(E) error (explicit) | `return cc_err(int, MyError, err);` |
 | | `cc_move(x)` | Explicit move of move-only value | `ch.send_take(arr, cc_move(arr));` |
 | | `cc_cancel()` | Cancel current task/nursery | `if (timeout) cc_cancel();` |
@@ -756,7 +754,7 @@ int v = cc_unwrap_or(maybe_val, 0);
   * **Inferred (preferred inside a function returning `T!>(E)`):**
     * `cc_ok(value)` - construct `T!>(E)` success (T,E inferred from function return type)
     * `cc_err(error)` - construct `T!>(E)` error (T,E inferred from function return type)
-    * `cc_err(CC_ERR_*)` or `cc_err(CC_ERR_*, "msg")` - shorthand for `cc_error(...)` when `E` is `CCError`
+    * `cc_err(CC_ERR_*)` or `cc_err(CC_ERR_*, "msg")` - shorthand for `CC_ERROR(...)` when `E` is `CCError`
   * **Explicit (required outside return-context or when ambiguous):**
     * `cc_ok(T, value)` - construct `T!>(CCError)` success
     * `cc_ok(T, E, value)` - construct `T!>(E)` success (custom error type)
@@ -775,21 +773,21 @@ int!>(CCError) parse_int_safe(char[:] s) {
 
 // Inferred constructors (preferred)
 int!>(CCError) x = cc_ok(42);
-int!>(CCError) y = cc_err(cc_error(CC_ERR_NOT_FOUND, "file not found"));
+int!>(CCError) y = cc_err(CC_ERROR(CC_ERR_NOT_FOUND, "file not found"));
 int!>(IoError) a = cc_ok(42);
 int!>(IoError) b = cc_err(IoError_FileNotFound);
 
 // Explicit constructors (still available)
 int!>(CCError) x2 = cc_ok(int, 42);
-int!>(CCError) y2 = cc_err(int, cc_error(CC_ERR_NOT_FOUND, "file not found"));
+int!>(CCError) y2 = cc_err(int, CC_ERROR(CC_ERR_NOT_FOUND, "file not found"));
 int!>(IoError) a2 = cc_ok(int, IoError, 42);
 int!>(IoError) b2 = cc_err(int, IoError, IoError_FileNotFound);
 
-if (x.ok) use(x.value);
-else handle(x.error);
+if (cc_is_ok(x)) use(cc_value(x));
+else handle(cc_error(x));
 ```
 
-**Lowering:**
+**Lowering (normative):**
 
 ```c
 // T!>(E) lowers to a tagged union:
@@ -806,7 +804,59 @@ struct CCResult_T_E {
 // cc_err(T, E, e)    → cc_err_CCResult_T_E(e)            // 3 args: T!>(E) (custom)
 ```
 
-Surface syntax `x.value` maps to `x.u.value`; `x.error` maps to `x.u.error`.
+Canonical accessors (normative):
+
+- `cc_is_ok(r)` / `cc_is_err(r)` read the tag
+- `cc_value(r)` reads the success payload
+- `cc_error(r)` reads the error payload
+
+Lowering is explicit and ABI-preserving:
+
+- `cc_is_ok(r)` lowers to `(r).ok`
+- `cc_is_err(r)` lowers to `(!(r).ok)`
+- `cc_value(r)` lowers to `(r).u.value`
+- `cc_error(r)` lowers to `(r).u.error`
+
+These accessors are the idiomatic source-level API. Direct `.u.value` / `.u.error`
+access is a C-interop detail, not the preferred surface style.
+
+**Lowering examples (normative):**
+
+```c
+// Source
+bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
+if (cc_is_ok(read_res)) {
+    bool available = cc_value(read_res);
+} else {
+    CCIoError e = cc_error(read_res);
+}
+
+// Lowered C
+CCResult_bool_CCIoError read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
+if (read_res.ok) {
+    bool available = read_res.u.value;
+} else {
+    CCIoError e = read_res.u.error;
+}
+```
+
+```c
+// Source (try binding)
+if @try (int n = parse_count(s)) {
+    use(n);
+}
+
+// Lowered C (shape)
+{
+    CCResult_int_CCError __cc_try_bind = parse_count(s);
+    if (__cc_try_bind.ok) {
+        int n = __cc_try_bind.u.value;
+        use(n);
+    } else {
+        return cc_err_CCResult_int_CCError(__cc_try_bind.u.error);
+    }
+}
+```
 
 **Rule (active field):** Only the active union member is initialized and valid, as determined by `ok`. When `ok == true`, `u.value` is active; when `ok == false`, `u.error` is active. Reading the inactive member is undefined behavior (and is a compile-time error where statically provable).
 
@@ -834,6 +884,8 @@ For generated C code, these macros provide direct access without UFCS lowering:
 |-------|---------|-------------|
 | `cc_is_ok(res)` | `bool` | True if result is success |
 | `cc_is_err(res)` | `bool` | True if result is error |
+| `cc_value(res)` | `T` | Get success payload (valid only when `cc_is_ok(res)`) |
+| `cc_error(res)` | `E` | Get error payload (valid only when `cc_is_err(res)`) |
 | `cc_unwrap(res)` | `T` | Get value (for primitives) |
 | `cc_unwrap_err(res)` | `E` | Get error (for primitives) |
 | `cc_unwrap_as(res, T)` | `T` | Get value as type T (for structs) |
@@ -863,18 +915,18 @@ if (r.is_ok()) {
 // Or use unwrap_or for default value
 int v = r.unwrap_or(0);      // returns 0 on error
 
-// Direct field access still available
-if (r.ok) use(r.u.value);
+// Canonical accessor style
+if (cc_is_ok(r)) use(cc_value(r));
 
 // Macro-style access (for generated C code)
 // Prefer sigil types in .ccs; use CCRes* only for C interop or explicit name mangling.
 int!>(CCError) res = parse("42");
 if (cc_is_err(res)) {
-    CCError err = cc_unwrap_err(res);
+    CCError err = cc_error(res);
     handle_error(err);
     return;
 }
-int value = cc_unwrap(res);
+int value = cc_value(res);
 ```
 
 **Lowering:** `r.unwrap()` → `CCResult_T_E_unwrap(r)`, etc.
@@ -2137,19 +2189,44 @@ Channels are typed queues for **handoff and coordination**.
 
 Key properties:
 
-* `recv()` returns `T?` (explicit termination)
-* `send` / `send_take` return `bool` (send-after-close is non-fatal)
+* `recv(&out)` receives into caller-provided storage
+* `send` / `send_take` are non-fatal on closed channels
 * Slices are copied by default; transfer is explicit
 
-**Rule:** The free function form is normative. `ch.recv()` is UFCS sugar for `recv(&ch)`; `ch.send(v)` lowers to `send(&ch, v)`.
+**Rule:** Channels participate in the ordinary UFCS model at the **language surface**, but use C-like receiver-first free functions rather than zero-argument receive.
+
+The normative surface form is:
+
+* `tx.send(v)` lowers to `send(tx, v)`
+* `rx.recv(&out)` lowers to `recv(rx, &out)`
+* `tx.close()` lowers to `close(tx)`
+* `h.free()` lowers to `free(h)`
+
+**Intended DX vs equivalent lowered C:**
+
+```c
+// Native CCC (preferred)
+tx.send(job);
+await rx.recv(&result);
+tx.close();
+ch.free();
+
+// Equivalent lowered C at the language surface
+send(tx, job);
+await recv(rx, &result);
+close(tx);
+free(ch);
+```
+
+Implementation note: generated C may lower these surface operations further to explicit runtime helpers such as `cc_channel_send`, `cc_channel_recv`, `cc_channel_close`, and `cc_channel_free`, but those names are not the normative language-level API.
 
 **Rule:** `await` is only valid inside `@async` functions.
 
-**Rule:** `recv()`, `send()`, and `send_take()` are dual-mode operations:
-* In `@async` code, they are suspension points and must be written as `await ch.recv()` / `await ch.send(v)` / `await ch.send_take(v)` unless used inside `select` (which implicitly awaits).
+**Rule:** `recv(&out)`, `send()`, and `send_take()` are dual-mode operations:
+* In `@async` code, they are suspension points and must be written as `await rx.recv(&out)` / `await tx.send(v)` / `await tx.send_take(v)` unless used inside `select` (which implicitly awaits). The compiler may lower these further to task-returning runtime helpers internally, but that is not part of the language-level API.
 * In sync code, they block the OS thread.
 
-**Rule:** Channel operations have identical types in sync and async contexts. `recv()` returns `T?`, `send()` returns `bool`. The suspension behavior is contextual, not encoded in types. There is no `Task<T?>` wrapper—`await ch.recv()` yields `T?` directly.
+**Rule:** Channel operations keep the same **surface signatures** in sync and async contexts: `send(v)`, `recv(&out)`, `send_take(v)`, `close()`, and `free()`. The suspension behavior is contextual; the internal runtime lowering may differ, but the user-facing model stays in terms of these receiver-first operations.
 
 
 
@@ -2226,29 +2303,29 @@ Channels are created by producing a `(tx, rx)` pair:
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = channel_pair(&tx, &rx);  // returns the underlying channel
+CCChan* ch = cc_channel_pair(&tx, &rx);  // returns the underlying channel
 ```
 
 Notes:
-- `channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
+- `cc_channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
 - `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
-- `chan_close(tx)` (or `closing(tx)` in a nursery) closes the underlying channel.
-- `chan_free(ch)` frees the channel. Always free the channel, not the handles.
+- `cc_channel_close(tx)` (or `closing(tx)` in a nursery) closes the underlying channel.
+- `cc_channel_free(ch)` frees the channel. Always free the channel, not the handles.
 
 **Ownership idiom:**
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx);
 
 @nursery {
     spawn(consumer(rx));
-    @nursery closing(tx) {
+    @closing(tx) {
         spawn(producer(tx));
     }
 }
 
-chan_free(ch);  // free what you created
+cc_channel_free(ch);  // free what you created
 ```
 
 **Error channels:**
@@ -2350,7 +2427,7 @@ CCChan* ch = channel_pair(&results_tx, &results_rx);
     });
     
     // Producer: spawn tasks, results queued in order
-    @nursery closing(results_tx) {
+    @closing(results_tx) {
         while (read_block(&blk)) {
             chan_send_task(results_tx, () => [blk] compress_block(blk));
         }
@@ -2377,7 +2454,7 @@ while (chan_recv(results_rx, &r)?) {
 }
 ```
 
-`chan_recv` on a task channel returns `bool!>(E)`:
+`cc_channel_recv` on a task channel returns `bool!>(E)`:
 - `Ok(true)` — value received
 - `Ok(false)` — channel closed (EOF)
 - `Err(e)` — task failed with error `e`
@@ -2389,20 +2466,20 @@ The same channel can receive both values and tasks:
 ```c
 int[~16 >] tx;
 int[~16 <] rx;
-channel_pair(&tx, &rx);
+cc_channel_pair(&tx, &rx);
 
-chan_send(tx, 42);                      // send a value
-chan_send_task(tx, () => compute());    // send a task
+cc_channel_send(tx, 42);                // send a value
+cc_channel_send_task(tx, () => compute()); // send a task
 
 int x;
-chan_recv(rx, &x);  // gets 42
-chan_recv(rx, &x);  // gets compute() result (awaited internally)
+cc_channel_recv(rx, &x);  // gets 42
+cc_channel_recv(rx, &x);  // gets compute() result (awaited internally)
 ```
 
 **Backpressure:**
 
 Standard channel semantics apply:
-- `chan_send_task` spawns immediately
+- `cc_channel_send_task` spawns immediately
 - If channel is full, blocks until space available
 - Provides parallelism up to channel capacity, then natural backpressure
 
@@ -2585,17 +2662,18 @@ channel_pair(&tx, &rx);
 // send/recv operations require await in @async code
 
 // Core operations (must await)
-bool ok = await send(&tx, value);      // suspends until sent
-T? x = await recv(&rx);                // suspends until received
+bool ok = await send(tx, value);       // suspends until sent
+T x;
+bool got = await recv(rx, &x);         // suspends until received
 
 // Slice transfer (must await; send handle only)
-bool ok = await send_take(&tx, slice);  // suspends, transfers ownership
+bool ok = await send_take(tx, slice);  // suspends, transfers ownership
 
 // Close (no await; send handle only)
-void close(&tx);                        // idempotent, no await
+void close(tx);                         // idempotent, no await
 
 // Cancellation-aware variants (must await)
-bool ok = await send_cancellable(&tx, value);   // returns false if cancelled
+bool ok = await send_cancellable(tx, value);    // returns false if cancelled
 T!>(Cancelled)? x = await recv_cancellable(&rx);   // returns err(Cancelled) if cancelled
 
 // Non-blocking (no await, either context)
@@ -2710,7 +2788,7 @@ Capacity `N` and topology `Topo` are erased at runtime (all use the same impleme
 
 **Rule:** Calling `send` on a recv-only channel view (`T[~n <]`), or `recv` on a send-only channel view (`T[~n >]`), is a compile-time error.
 
-**Rule:** Channel handles must be initialized via `channel_pair(&tx, &rx)` (or equivalent constructor for special topologies). The combined form `T[~n]` is not allowed.
+**Rule:** Channel handles must be initialized via `cc_channel_pair(&tx, &rx)` (or equivalent constructor for special topologies). The combined form `T[~n]` is not allowed.
 
 ---
 
@@ -2793,7 +2871,7 @@ chan_send(arena_pool, arena);   // Calls .reset before re-adding to pool
 
 **Rule (create failure):** If `.create` returns a value indicating failure (e.g., null pointer, zero-initialized struct), the behavior is undefined. `.create` should allocate successfully or abort.
 
-**Rule (owned channel close):** Owned channels can be closed with `chan_close()`. After close:
+**Rule (owned channel close):** Owned channels can be closed with `cc_channel_close()`. After close:
 - `recv` returns immediately with the closed status
 - Items still in the pool are destroyed via `.destroy`
 - Borrowed items are not affected (borrower still holds them)
@@ -2887,7 +2965,7 @@ return;  // Clean exit, no manual drain needed
 
 **Rule (downstream propagation):** When `cc_chan_close_err(ch, err)` is called, subsequent `recv()` operations return `err` instead of `EPIPE` after the channel is drained.
 
-**Rule (regular close unchanged):** `cc_chan_close(ch)` continues to work as before—recv returns `EPIPE` when closed and drained.
+**Rule (regular close unchanged):** `cc_channel_close(ch)` continues to work as before—recv returns `EPIPE` when closed and drained.
 
 ---
 
@@ -2928,7 +3006,7 @@ This section specifies:
 }
 
 // With channel cleanup
-@nursery closing(ch1, ch2) {
+@closing(ch1, ch2) {
     spawn (producer(ch1));
     spawn (consumer(ch2));
 }
@@ -2970,7 +3048,7 @@ A **nursery** is a lexical structured-concurrency block that manages the lifetim
 **With automatic channel close:**
 
 ```c
-@nursery closing(ch1, ch2) {
+@closing(ch1, ch2) {
     spawn (producer(ch1));
     spawn (consumer(ch2));
 }  // closes ch1, ch2 after all children exit
@@ -3024,41 +3102,36 @@ Cancellation is cooperative. Child tasks observe cancellation via `cc_is_cancell
 }  // if another task fails, long_task observes cc_is_cancelled()
 ```
 
-**Channel Close Ordering:**
+**Channel Close Ordering (Preferred Pattern):**
 
-The `closing(...)` clause ensures channels are closed after all children exit, eliminating close-before-send races:
-
-```c
-@nursery closing(out) {
-    spawn (producer(out));   // sends to out
-    spawn (consumer(out));   // receives from out
-}
-// Producer and consumer both exit before out is closed
-```
-
-**`@closing` Annotation (Planned):**
-
-> **Note:** The `@closing` annotation is a planned feature for future releases. Currently, use nested `@nursery closing(...)` blocks for channel ownership management.
-
-For more complex pipelines, `@closing(ch)` will provide a flatter syntax by annotating individual spawns or spawn groups:
+Use `@closing(...)` to make producer ownership explicit so channels close when the producer scope exits:
 
 ```c
-// Planned syntax (not yet implemented):
-@closing(ch) spawn (producer(ch));              // single spawn owns channel
-@closing(ch) {                                  // group owns channel
-    spawn (worker1(ch));
-    spawn (worker2(ch));
+@nursery {
+    spawn(consumer(out));          // drains until close
+    @closing(out) spawn(producer(out));
 }
 ```
 
-**Current approach:** Use nested nurseries:
+Group form is supported for multiple producer tasks:
 
 ```c
 @nursery {
     spawn(writer);
-    @nursery closing(results_tx) {
+    @closing(results_tx) {
         for (int w = 0; w < N; w++) spawn(worker);
-        @nursery closing(blocks_tx) {
+    }
+}
+```
+
+Legacy equivalent (still supported):
+
+```c
+@nursery {
+    spawn(writer);
+    @closing(results_tx) {
+        for (int w = 0; w < N; w++) spawn(worker);
+        @closing(blocks_tx) {
             spawn(reader);
         }
     }
@@ -3208,7 +3281,7 @@ with compile-time restrictions enforced by the CC compiler (task handle escape c
 The `closing(...)` clause:
 
 ```c
-@nursery closing(ch) {
+@closing(ch) {
     spawn (producer(ch));
 }
 ```
@@ -3461,18 +3534,18 @@ In brief:
 ```c
 int[~ >] tx;
 int[~ <] rx;
-CCChan* ch = channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx);
 // ... use tx, rx ...
-chan_free(ch);
+cc_channel_free(ch);
 ```
 
 **Sync channels:**
 ```c
 int[~ sync >] tx;
 int[~ sync <] rx;
-CCChan* ch = channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx);
 // ... use tx, rx ...
-chan_free(ch);
+cc_channel_free(ch);
 ```
 
 **Rule:** Channel mode is fixed in the handle type. An `int[~ ...]` handle is always async; an `int[~ sync ...]` handle is always sync. Operations must match the handle type.
@@ -3578,7 +3651,9 @@ Function signatures make clear what context is required:
 ```c
 // Clearly async
 @async int!>(Error) async_reader(int[~ <] ch) {
-    int x = await recv(&ch);  // obvious: must await
+    int x = 0;
+    bool ok = await recv(ch, &x);  // obvious: must await
+    if (!ok) return cc_err(Error_EOF);
     return cc_ok(x);
 }
 
@@ -3692,7 +3767,7 @@ CCChan* work_ch = channel_pair(&work_tx, &work_rx);
     }
 }
 
-@nursery closing(work_tx) {
+@closing(work_tx) {
     spawn (producer());
     spawn (consumer());
 }
@@ -3771,7 +3846,8 @@ No manual polling or timeouts in reader. Cancellation handles it.
 **Before (confusing, legacy combined channel):**
 ```c
 int[~] ch;
-int x = recv(&ch);  // What does this do? Depends on context!
+int x = 0;
+recv(ch, &x);          // What does this do? Depends on context?
 ```
 
 **After (clear):**
@@ -3779,12 +3855,14 @@ int x = recv(&ch);  // What does this do? Depends on context!
 int[~ >] tx;
 int[~ <] rx;
 channel_pair(&tx, &rx);
-int x = await recv(&rx);  // Async receive handle, must await (always)
+int x = 0;
+await recv(rx, &x);       // Async receive handle, must await (always)
 
 int[~ sync >] stx;
 int[~ sync <] srx;
 channel_pair(&stx, &srx);
-int x = recv(&srx);       // Sync receive handle, no await (always)
+int y = 0;
+recv(srx, &y);            // Sync receive handle, no await (always)
 ```
 
 Each channel type has one clear set of operations. No context-dependent surprises.
@@ -4225,7 +4303,7 @@ Streaming uses explicit channel parameters:
     int[~10 >] tx;
     int[~10 <] rx;
     channel_pair(&tx, &rx);
-    @nursery closing(tx) {
+    @closing(tx) {
         spawn (produce(100, &tx));
         @for await (int x : rx) use(x);
     }
@@ -4938,9 +5016,11 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Design principle:** The free function form is definitive (for generic code, composition, functional programming). UFCS method syntax desugars to free functions and is the primary API for most users.
 
+**Channel note:** Channels follow the same language-level UFCS rule, but their normative free-function spellings are C-like receiver-first operations such as `send(tx, v)` and `recv(rx, &out)`. Backend lowering may still target `chan_*` helpers in generated C.
+
 **UFCS Equivalence (Normative):**
 
-Both forms are fully equivalent and compile identically:
+For UFCS-enabled types, both forms are fully equivalent and compile identically:
 - `x.method(args)` is syntactic sugar for `method(x, args)` (when `x` is a pointer or struct)
 - `x.method(args)` with value `x` desugars to `method(&x, args)` (taking a pointer)
 - The compiler treats both forms interchangeably
@@ -5369,14 +5449,14 @@ enum AppError { Io(IoError), Parse(ParseError) }
 // Helper to convert error types
 int!>(AppError) parse_with_app_error(char[:] s) {
     int!>(ParseError) r = parse_int(s);
-    if (r.ok) return cc_ok(r.value);
-    return cc_err(AppError.Parse(r.error));
+    if (cc_is_ok(r)) return cc_ok(cc_value(r));
+    return cc_err(AppError.Parse(cc_error(r)));
 }
 
 int!>(AppError) read_with_app_error(char[:] path) {
     char[:]!>(IoError) r = read_file(path);
-    if (r.ok) return cc_ok(r.value);
-    return cc_err(AppError.Io(r.error));
+    if (cc_is_ok(r)) return cc_ok(cc_value(r));
+    return cc_err(AppError.Io(cc_error(r)));
 }
 
 int!>(AppError) process(char[:] path) {
@@ -5478,34 +5558,39 @@ This section documents syntactic sugar and conventions:
 
 **Methods / UFCS:**
 
-`x.method(args)` is syntax sugar for `method(&x, args)` (value) or `method(x, args)` (pointer).
+`x.method(args)` is syntax sugar for the corresponding receiver-first free function. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`String_push(&s, x)`).
 
 ```c
-tx.send(v);        // lowers to send(&tx, v)
-tx.close();        // lowers to close(&tx)
+tx.send(v);        // lowers to send(tx, v)
+rx.recv(&out);     // lowers to recv(rx, &out)
+tx.close();        // lowers to close(tx)
 slice.len;         // field access (not a call)
 ```
 
-**Rule:** The free function form is normative. Method syntax is always desugaring.
+**Rule:** The free function form is normative. Method syntax is always desugaring. Channels use receiver-first surface forms such as `send(tx, v)` and `recv(rx, &out)`; generated C may lower those further to `cc_channel_*` helpers.
 
-**UFCS auto-deref:**
+**UFCS receiver syntax:**
 
-UFCS auto-dereferences one pointer level. If `p` has type `T*`, `p.method(v)` lowers to `method(p, v)`.
+UFCS uses the receiver operator honestly:
+
+- `x.method(...)` is for value receivers
+- `p->method(...)` is for pointer receivers
+- `p.method(...)` where `p` has pointer type is invalid
 
 ```c
 int[~10 >]* tx_ptr = &tx;
-tx_ptr.send(42);   // lowers to send(tx_ptr, 42)
-tx_ptr.close();    // lowers to close(tx_ptr)
+tx_ptr->send(42);   // lowers to send(tx_ptr, 42)
+tx_ptr->close();    // lowers to close(tx_ptr)
 ```
 
 **Rule (UFCS in defer):** UFCS works uniformly in `defer` statements regardless of whether the receiver is a value or pointer:
 
 ```c
 int[~10 >] tx;
-defer tx.close();        // OK: lowers to close(&tx)
+defer tx.close();        // OK: lowers to close(tx)
 
 int[~10 >]* tx_ptr = get_tx();
-defer tx_ptr.close();    // OK: lowers to close(tx_ptr)
+defer tx_ptr->close();   // OK: lowers to close(tx_ptr)
 ```
 
 **Loops:**

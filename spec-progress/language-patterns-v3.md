@@ -314,7 +314,7 @@ channel_pair(&results_tx, &results_rx);
     });
     
     // Producer
-    @nursery closing(results_tx) {
+    @closing(results_tx) {
         while (read_block(&blk)?) {
             chan_send_task(results_tx, () => [blk] compress_block(blk));
         }

@@ -27,6 +27,21 @@
 - 1:1, 1\:N, M:1 emerge as fast paths, not different queue types.
 - **Lifecycle rigor:** explicit in-flight states for parking/waking to eliminate lost-wake, double-enqueue, and “run while wait-listed” classes.
 
+### Recorded Investigation Notes (Mar 2026)
+
+These findings are implementation notes from runtime benchmarking, not new
+normative rules:
+
+- Non-worker nursery sibling grouping (`CC_NW_SPAWN_GROUP_HINT`) helped some
+  contention scenarios but regressed `pigz`; it should not be treated as a safe
+  default optimization for mixed workloads.
+- Channel-partner affinity (`CC_CHAN_PARTNER_HINT`) improved the channel
+  contention microbenchmark but regressed `pigz` badly enough that the runtime
+  now keeps it opt-in rather than default-on.
+- The later `runnext` / anti-steal heuristics were secondary in the `pigz`
+  investigation; the strongest regression signal came from partner-affinity
+  routing itself.
+
 ---
 
 ## 1. Entities

@@ -16,7 +16,7 @@
 #include <time.h>
 
 #define ITERATIONS 1000000
-#define NUM_TRIALS 7
+#define NUM_TRIALS 15
 #define CAP        1024
 
 /* Prevent dead-code elimination of consumer work. */
@@ -28,14 +28,33 @@ static double time_now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
 }
 
+static int trace_contention_trials_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("CC_CONTENTION_TRACE") != NULL;
+    }
+    return enabled;
+}
+
+static void trace_trial_marker(const char* phase, int trial, const char* event, double elapsed_ms) {
+    if (!trace_contention_trials_enabled()) return;
+    if (elapsed_ms >= 0.0) {
+        fprintf(stderr, "CC_TRACE_TRIAL phase=%s trial=%d event=%s elapsed_ms=%.2f\n",
+                phase, trial, event, elapsed_ms);
+    } else {
+        fprintf(stderr, "CC_TRACE_TRIAL phase=%s trial=%d event=%s\n", phase, trial, event);
+    }
+}
+
 /* Run a single producer/consumer pair and return wall-clock ms. */
-static double run_single_pair(void) {
+static double run_single_pair(int trial) {
     int[~CAP >] tx;
     int[~CAP <] rx;
     channel_pair(&tx, &rx);
     long long sum = 0;
+    trace_trial_marker("baseline", trial, "begin", -1.0);
     double start = time_now_ms();
-    @nursery closing(tx) {
+    @closing(tx) {
         spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) { tx.send(i ^ (i >> 16)); }
         });
@@ -47,11 +66,13 @@ static double run_single_pair(void) {
         });
     }
     g_sink += sum;
-    return time_now_ms() - start;
+    double elapsed = time_now_ms() - start;
+    trace_trial_marker("baseline", trial, "end", elapsed);
+    return elapsed;
 }
 
 /* Run two independent producer/consumer pairs concurrently and return wall-clock ms. */
-static double run_two_pairs(void) {
+static double run_two_pairs(int trial) {
     int[~CAP >] tx1;
     int[~CAP <] rx1;
     int[~CAP >] tx2;
@@ -60,8 +81,9 @@ static double run_two_pairs(void) {
     channel_pair(&tx2, &rx2);
     long long sum1 = 0;
     long long sum2 = 0;
+    trace_trial_marker("contention", trial, "begin", -1.0);
     double start = time_now_ms();
-    @nursery closing(tx1, tx2) {
+    @closing(tx1, tx2) {
         spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) { tx1.send(i ^ (i >> 16)); }
         });
@@ -82,7 +104,9 @@ static double run_two_pairs(void) {
         });
     }
     g_sink += sum1 + sum2;
-    return time_now_ms() - start;
+    double elapsed = time_now_ms() - start;
+    trace_trial_marker("contention", trial, "end", elapsed);
+    return elapsed;
 }
 
 int main(void) {
@@ -97,8 +121,8 @@ int main(void) {
     double contention_times[NUM_TRIALS];
 
     for (int trial = 1; trial <= NUM_TRIALS; trial++) {
-        baseline_times[trial - 1]   = run_single_pair();
-        contention_times[trial - 1] = run_two_pairs();
+        baseline_times[trial - 1]   = run_single_pair(trial);
+        contention_times[trial - 1] = run_two_pairs(trial);
         printf("  Trial %d:  baseline=%6.2f ms  contention=%6.2f ms\n",
                trial, baseline_times[trial - 1], contention_times[trial - 1]);
     }

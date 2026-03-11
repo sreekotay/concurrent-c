@@ -44,7 +44,7 @@ int main(void) {
     g_err = 0;
     g_sum = 0;
 
-    @nursery closing(ch1_tx, ch2_tx) {
+    @closing(ch1_tx, ch2_tx) {
         spawn(() => { producer(ch1_tx, ch2_tx); });
         spawn(() => { consumer(ch1_rx, ch2_rx); });
     }

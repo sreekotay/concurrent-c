@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
+#include <time.h>
 
 /* Opaque fiber handle - actual definition in fiber_sched.c */
 typedef struct fiber_task cc__fiber;
@@ -36,6 +37,8 @@ void* cc__fiber_current(void);
 void cc__fiber_park(void);
 void cc__fiber_park_reason(const char* reason, const char* file, int line);
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
+int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
+                            const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
 void cc__fiber_unpark_channel_attrib(void);
 void cc__fiber_yield(void);         /* Cooperative yield - push to local queue */
@@ -55,9 +58,14 @@ int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
 /* Channel direct-handoff helpers — implemented in fiber_sched.c */
 int  cc__sched_current_worker_id(void);
 void cc__fiber_hint_channel_partner(void* fiber, int worker_id);
+uint64_t cc__fiber_debug_id(void* fiber_ptr);
+int cc__fiber_debug_last_worker(void* fiber_ptr);
+const char* cc__fiber_debug_park_reason(void* fiber_ptr);
 
 /* Convenience macro to park with source location */
 #define CC_FIBER_PARK(reason) cc__fiber_park_reason(reason, __FILE__, __LINE__)
 #define CC_FIBER_PARK_IF(flag, expected, reason) cc__fiber_park_if(flag, expected, reason, __FILE__, __LINE__)
+#define CC_FIBER_PARK_IF_UNTIL(flag, expected, deadline, reason) \
+    cc__fiber_park_if_until(flag, expected, deadline, reason, __FILE__, __LINE__)
 
 #endif /* CC_FIBER_INTERNAL_H */

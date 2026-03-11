@@ -13,7 +13,7 @@ int main(void) {
     int sent = 0;
     int received = 0;
     
-    @nursery closing(tx) {
+    @closing(tx) {
         spawn(@unsafe () => [tx, &sent] {
             for (int i = 0; i < 10; i++) tx.send(i);
             sent = 10;

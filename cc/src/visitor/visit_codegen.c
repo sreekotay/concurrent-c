@@ -97,7 +97,7 @@ static void cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, 
 }
 
 /* Rewrite @closing(ch) spawn(...) or @closing(ch) { ... } syntax.
-   Transforms into spawned sub-nursery for flat visual structure. */
+   Transforms into explicit nested `@nursery closing(...)` form. */
 static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -201,19 +201,33 @@ static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
                 }
                 
                 cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
-                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "spawn(() => { @nursery closing(");
+                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "@nursery closing(");
                 cc__cg_sb_append(&out, &out_len, &out_cap, src + chans_start, chans_end - chans_start);
                 cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ") ");
                 
                 if (is_block) {
-                    cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
+                    /* Re-run rewrite recursively to handle nested @closing(...) */
+                    size_t blen = body_end - body_start;
+                    char* inner = cc__rewrite_closing_annotation(src + body_start, blen);
+                    if (inner) {
+                        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, inner);
+                        free(inner);
+                    } else {
+                        cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, blen);
+                    }
                 } else {
-                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "{ ");
-                    cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, body_end - body_start);
-                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " }");
+                    /* Single-spawn form with recursive rewrite support. */
+                    size_t blen = body_end - body_start;
+                    char* inner = cc__rewrite_closing_annotation(src + body_start, blen);
+                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "{\n");
+                    if (inner) {
+                        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, inner);
+                        free(inner);
+                    } else {
+                        cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, blen);
+                    }
+                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n}");
                 }
-                
-                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " });");
                 
                 last_emit = body_end;
                 i = body_end;
@@ -947,6 +961,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             
             /* Result type declarations are now emitted at file scope in the header section,
                so no need to splice them into source here. */
+        }
+        /* Result field sugar:
+           `res.value` / `res.error` -> `res.u.value` / `res.u.error`
+           while keeping the compact union ABI in generated C. */
+        {
+            char* rew_res_fields = cc__rewrite_result_field_sugar_text(ctx, src_ufcs, src_ufcs_len);
+            if (rew_res_fields) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rew_res_fields;
+                src_ufcs_len = strlen(src_ufcs);
+            }
         }
         /* Insert optional type declarations for custom types.
            Each CC_DECL_OPTIONAL is inserted right before the first use of that specific

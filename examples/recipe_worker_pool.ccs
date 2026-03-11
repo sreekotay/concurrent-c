@@ -40,7 +40,7 @@ int main(void) {
         }
 
         /* Feeder: sends all jobs, then inner nursery closes jobs channel. */
-        @nursery closing(jobs_tx) {
+        @closing(jobs_tx) {
             spawn(() => {
                 for (int j = 1; j <= NUM_JOBS; j++) {
                     (void)chan_send(jobs_tx, j);

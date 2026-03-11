@@ -1,0 +1,18 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+
+int main(void) {
+    CCChanTx ch_tx;
+    CCChanRx ch_rx;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
+
+    @closing(ch_tx) spawn(() => {
+        int v = 0;
+        while (cc_io_avail(chan_recv(ch_rx, &v))) {
+            (void)v;
+        }
+    });
+
+    chan_free(ch_tx);
+    return 0;
+}

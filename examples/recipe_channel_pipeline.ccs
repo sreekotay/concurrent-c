@@ -34,7 +34,7 @@ int main(void) {
         });
 
         /* Producers: live in inner nursery with closing(ch). */
-        @nursery closing(tx) {
+        @closing(tx) {
             spawn(() => {
                 for (int i = 1; i <= 3; i++) {
                     (void)chan_send(tx, i);

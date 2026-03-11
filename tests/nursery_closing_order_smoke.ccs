@@ -39,7 +39,7 @@ int main(void) {
     g_got = 0;
 
     // Spec: closing(ch) must close after all children exit (i.e., after joining).
-    @nursery closing(ch_tx) {
+    @closing(ch_tx) {
         spawn(() => { producer(ch_tx); });
         spawn(() => { consumer(ch_rx); });
     }

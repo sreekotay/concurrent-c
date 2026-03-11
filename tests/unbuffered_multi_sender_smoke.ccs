@@ -16,7 +16,7 @@ int main(void) {
     int[~ <] rx;
     channel_pair(&tx, &rx);
 
-    @nursery closing(tx) {
+    @closing(tx) {
         /* 2 senders, each sends 10 messages */
         spawn(() => [tx] {
             for (int i = 0; i < 10; i++) tx.send(i);

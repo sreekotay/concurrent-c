@@ -49,8 +49,10 @@
     cc_chan_result_from_errno(cc_chan_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
 })
 /* Recv into pointer `out_ptr`.
+   For ordered channels: awaits the queued CCTask and copies the typed result.
+   For unordered channels: plain blocking recv.
    Returns bool !>(CCIoError): Ok(true)=got item, Ok(false)=closed, Err(e)=error. */
-#define chan_recv(rx, out_ptr) (cc_chan_result_from_errno(cc_chan_recv((rx).raw, (out_ptr), sizeof(*(out_ptr)))))
+#define chan_recv(rx, out_ptr) cc__chan_recv_ordered((rx), (void*)(out_ptr), sizeof(*(out_ptr)))
 /* Close the underlying channel (valid on tx). */
 #define chan_close(tx) (cc_chan_close((tx).raw))
 /* Free the underlying channel (call exactly once for a (tx,rx) pair).
@@ -74,7 +76,7 @@
 #else
 /* Fallbacks (less ergonomic): still avoid `.raw` at call sites for common cases. */
 #define chan_send(tx, value) (cc_chan_result_from_errno(cc_chan_send((tx).raw, &(value), sizeof(value))))
-#define chan_recv(rx, out_ptr) (cc_chan_result_from_errno(cc_chan_recv((rx).raw, (out_ptr), sizeof(*(out_ptr)))))
+#define chan_recv(rx, out_ptr) cc__chan_recv_ordered((rx), (void*)(out_ptr), sizeof(*(out_ptr)))
 #define chan_close(tx) (cc_chan_close((tx).raw))
 /* Free the underlying channel - for handles use chan_free(tx), for CCChan* use cc_chan_free(ch) */
 #define chan_free(h) (cc_chan_free((h).raw))

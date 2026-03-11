@@ -29,6 +29,13 @@ char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, 
  * Returns newly allocated string, or NULL if no rewrites. */
 char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, size_t n);
 
+/* Rewrite result field sugar:
+ *   res.value -> res.u.value
+ *   res.error -> res.u.error
+ * Applies only when `res` is declared with a `CCResult_*` type in the same unit.
+ * Returns newly allocated string, or NULL if no rewrites. */
+char* cc__rewrite_result_field_sugar_text(const CCVisitorCtx* ctx, const char* src, size_t n);
+
 /* Rewrite inferred result constructors `cc_ok(v)` / `cc_err(e)` to typed versions.
  * Returns newly allocated string, or NULL if no rewrites. */
 char* cc__rewrite_inferred_result_constructors(const char* src, size_t n);

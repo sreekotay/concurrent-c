@@ -1,13 +1,25 @@
 /*
  * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
  *
- * Demonstrates the chan_send_task pattern:
- * - chan_send_task(ch, () => expr) - spawn task, send handle
- * - chan_recv on ordered channels awaits task internally
- * - 'ordered' flag ensures FIFO result delivery
+ * Demonstrates the ordered channel + chan_send_task pattern:
+ *   CompressedResult*[~N >] tx;
+ *   CompressedResult*[~N ordered <] rx;
+ *   CCChan* ch = channel_pair(&tx, &rx);
+ *   chan_send_task(tx, () => [blk] compress_block_unwrapped(blk, 6));
+ *   CompressedResult* r;
+ *   while (cc_io_avail(chan_recv(rx, &r))) { use(r); }
  *
- * Uses manual lowering until compiler support lands.
- * See spec-progress/language-patterns-v3.md Section 7.
+ * The 'ordered' flag on the channel ensures results are delivered in
+ * submission order (FIFO) even though tasks execute concurrently.
+ * chan_recv on an ordered channel awaits the next queued task and
+ * extracts the typed result automatically (no manual ordered_recv needed).
+ *
+ * NOTE: chan_send_task boxes the closure result as a pointer-sized value
+ * via fiber-local storage.  compress_block returns T!>(E); we unwrap it
+ * inside the closure with a thin helper so chan_send_task receives a plain
+ * CompressedResult* (NULL on error, since error info is currently erased).
+ * Full typed-result propagation through chan_send_task is a planned future
+ * enhancement (see spec-progress/language-patterns-v3.md §7).
  */
 
 #include <ccc/std/prelude.cch>
@@ -98,31 +110,15 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     }
 }
 
-// Task wrapper - stores result in fiber-local storage (what ordered_recv expects)
-void* compress_task_wrapper(void* arg) {
-    Block* blk = (Block*)arg;
-    CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+/* Thin unwrapping helper passed to chan_send_task.
+ * chan_send_task boxes the return value as a pointer-sized result.
+ * Returning NULL on error loses the error type; full T!>(E) propagation
+ * through chan_send_task is a planned future enhancement. */
+static CompressedResult* compress_block_unwrapped(Block* blk, int level) {
+    CompressedResult* !>(CCIoError) res = compress_block(blk, level);
     cc_arena_free(&blk->arena);
-
-    // Store result in fiber-local storage at offset 0 (what ordered_recv expects)
-    typedef struct { CompressedResult* __result; } __result_t;
-    __result_t* storage = (__result_t*)cc_task_result_ptr(sizeof(__result_t));
-    if (!storage) { fprintf(stderr, "DIAG: cc_task_result_ptr returned NULL!\n"); return NULL; }
-
-    CompressedResult* cr = cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
-    storage->__result = cr;
-    return storage;
+    return cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
 }
-
-/*
- * IDEAL SYNTAX (what we want):
- *   CompressedResult*[~16 ordered] results;
- *   chan_send_task(results, () => [blk] compress_block(blk, 6));
- *   while (chan_recv(results, &r)) { use(r); }
- *
- * MANUAL LOWERING (what works today):
- *   CCTask channel + ordered_recv helper
- */
 
 int compress_file(const char* in_path, const char* out_path, int level) {
     (void)level;
@@ -141,22 +137,24 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     }
     @defer cc_file_close(&out_file);
 
-    // Internal representation: channel of CCTask handles
-    CCTask[~CHAN_CAP >] tasks_tx;
-    CCTask[~CHAN_CAP <] tasks_rx;
-    CCChan* ch = channel_pair(&tasks_tx, &tasks_rx);
+    /* Ordered channel of CompressedResult*.  'ordered' is a recv-side flag:
+     * chan_recv awaits queued tasks in FIFO submission order.  The tx handle
+     * is a plain sender — ordering is irrelevant at the send site. */
+    CompressedResult*[~CHAN_CAP >] results_tx;
+    CompressedResult*[~CHAN_CAP ordered <] results_rx;
+    CCChan* ch = channel_pair(&results_tx, &results_rx);
     @defer cc_chan_free(ch);
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
     @nursery {
-        // Consumer: ordered_recv awaits task and extracts result
-        spawn(() => [out_ptr, tasks_rx] {
-            void* result;
+        /* Consumer: chan_recv on ordered channel awaits each task in
+         * submission order and delivers the typed CompressedResult*. */
+        spawn(() => [out_ptr, results_rx] {
+            CompressedResult* r;
             long expect_seq = 0;
-            while (ordered_recv(tasks_rx, &result) == 1) {
-                CompressedResult* r = (CompressedResult*)result;
+            while (cc_io_avail(chan_recv(results_rx, &r))) {
                 if (r) {
                     if (r->seq != expect_seq) {
                         fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, r->seq);
@@ -168,9 +166,10 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             }
         });
 
-        // Producer: spawn task + send handle (manual chan_send_task)
-        @nursery closing(tasks_tx) {
-            spawn(() => [in_ptr, tasks_tx] {
+        /* Producer: chan_send_task spawns each block concurrently and
+         * enqueues the task handle in submission order. */
+        @closing(results_tx) {
+            spawn(() => [in_ptr, results_tx] {
                 long seq = 0;
                 while (true) {
                     CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
@@ -193,13 +192,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                     blk->is_last = (data.len < BLOCK_SIZE);
                     blk->arena = blk_arena;
                     
-                    // Read is_last before spawn — blk lives in blk_arena which
-                    // the compression fiber may free on another worker.
                     bool is_last = blk->is_last;
-                    
-                    // Manual lowering of: chan_send_task(tx, () => compress_block(blk))
-                    CCTask task = cc_fiber_spawn_task(compress_task_wrapper, blk);
-                    cc_chan_send(tasks_tx.raw, &task, sizeof(task));
+                    chan_send_task(results_tx, () => [blk] compress_block_unwrapped(blk, 6));
                     
                     if (is_last) break;
                 }

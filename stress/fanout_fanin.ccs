@@ -38,7 +38,7 @@ int main(void) {
         });
 
         /* Workers: receive, process, send result */
-        @nursery closing(done_tx) {
+        @closing(done_tx) {
             for (int w = 0; w < NUM_WORKERS; w++) {
                 spawn(() => {
                     int v;
@@ -51,7 +51,7 @@ int main(void) {
             }
 
             /* Producer: fan out work items */
-            @nursery closing(work_tx) {
+            @closing(work_tx) {
                 spawn(() => {
                     for (int i = 0; i < NUM_ITEMS; i++) {
                         (void)chan_send(work_tx, i);

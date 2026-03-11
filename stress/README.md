@@ -13,6 +13,8 @@ Stress tests that push the compiler and runtime with demanding patterns.
 | `nursery_deep` | 20 levels of nested nurseries | Nursery stack, structured concurrency |
 | `pipeline_long` | 50-stage processing pipeline | Channel chaining, throughput |
 | `deadline_race` | Many tasks with competing deadlines | Deadline handling, timing |
+| `cycle_ring3_deadline` | 3-task send-first ring under deadlines | Cyclic wait teardown, deadline escape |
+| `backpressure_cycle_ring3_deadline` | 3-task buffered ring with all queues full | Backpressure cycles, deadline escape |
 | `worker_pool_heavy` | 8 workers processing 500 jobs | Worker pool pattern, job throughput |
 | `fanout_fanin` | Scatter-gather with 16 workers | Fan-out/fan-in, parallel processing |
 | `closure_capture_storm` | 100 closures capturing different vars | Closure allocation, capture semantics |

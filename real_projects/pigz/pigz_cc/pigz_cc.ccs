@@ -486,7 +486,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             }
         });
 
-        @nursery closing(decompressed_tx) {
+        @closing(decompressed_tx) {
             /* Decompressor Task - CPU work in the middle */
             spawn(() => [compressed_rx, decompressed_tx] {
                 z_stream strm;
@@ -538,7 +538,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             });
 
             /* Reader Task - reads compressed data ahead */
-            @nursery closing(compressed_tx) {
+            @closing(compressed_tx) {
                 spawn(() => [in_ptr, compressed_tx, p_total_in] {
                     while (true) {
                         // Allocate chunk for this read
@@ -998,7 +998,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         });
 
         /* Reader Task - spawns compression tasks and sends handles through channel */
-        @nursery closing(tasks_tx) {
+        @closing(tasks_tx) {
             spawn(() => [in_ptr, tasks_tx, arena_pool] {
                 long seq = 0;
                 bool hit_eof = false;
