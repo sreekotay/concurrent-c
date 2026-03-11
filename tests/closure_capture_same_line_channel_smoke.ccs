@@ -1,0 +1,26 @@
+// Test: closure capture type inference handles later declarations on the same line.
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+static int g_value = -1;
+
+int main(void) {
+    int[~1 >] tx; int[~1 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+
+    @nursery {
+        spawn(() => [rx] {
+            int v = -1;
+            assert(cc_io_avail(chan_recv(rx, &v)));
+            g_value = v;
+        });
+        spawn(() => [tx] {
+            (void)chan_send(tx, 42);
+        });
+    }
+
+    assert(g_value == 42);
+    cc_chan_free(ch);
+    printf("closure_capture_same_line_channel_smoke: OK\n");
+    return 0;
+}

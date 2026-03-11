@@ -1,0 +1,90 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+#include <ccc/std/string.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int value;
+#ifdef CC_PARSER_MODE
+    int (*ping)();
+#endif
+} NamedToy;
+
+typedef struct {
+    int value;
+#ifdef CC_PARSER_MODE
+    int (*ping)();
+#endif
+} LambdaToy;
+
+static void named_toy_ping(NamedToy *toy) {
+    toy->value += 1;
+}
+
+static void lambda_toy_ping(LambdaToy *toy) {
+    toy->value += 10;
+}
+
+static CCSlice cc_file_ufcs_rewrite(CCSlice method, CCSliceArray argv, CCArena *arena) {
+    (void)argv;
+    return cc_concat(arena, "cc_file_", method);
+}
+
+static CCSlice named_toy_prefix(CCSlice recv_type) {
+    if (recv_type.len == sizeof("NamedToy") - 1 &&
+        memcmp(recv_type.ptr, "NamedToy", recv_type.len) == 0) {
+        return cc_slice_from_buffer("named_toy_", sizeof("named_toy_") - 1);
+    }
+    return cc_slice_from_buffer("broken_", sizeof("broken_") - 1);
+}
+
+static CCSlice named_toy_ufcs_rewrite(CCSlice method, CCSliceArray argv, CCArena *arena) {
+    CCSlice recv_type = argv.len > 0 ? argv.items[0] : cc_slice_empty();
+    return cc_concat(arena, named_toy_prefix(recv_type), method);
+}
+
+@comptime {
+    (void)cc_ufcs_register("CCFile", cc_file_ufcs_rewrite);
+    (void)cc_ufcs_register("NamedToy", named_toy_ufcs_rewrite);
+    (void)cc_ufcs_register("LambdaToy",
+        (method, argv, arena) => cc_concat(arena,
+            ((argv.len > 0 &&
+              argv.items[0].len == sizeof("LambdaToy") - 1 &&
+              memcmp(argv.items[0].ptr, "LambdaToy", argv.items[0].len) == 0)
+                 ? cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1)
+                 : cc_slice_from_buffer("broken_", sizeof("broken_") - 1)),
+            method));
+}
+
+int main(void) {
+    @arena {
+        // Registered at compile time: file.write(data) -> cc_file_write(&file, data)
+        CCFile file = { tmpfile() };
+        CCSlice data = cc_slice_from_buffer("ok", 2);
+        assert(file.handle != NULL);
+        (void)file.write(data);
+        cc_file_close(&file);
+
+        // Mixed inputs stay ergonomic: literals + CCString + literals.
+        CCString suffix = cc_string_new(arena);
+        suffix.append("send");
+
+        CCSlice channel_send = cc_concat(arena, "cc_channel_", &suffix, "_task");
+        assert(channel_send.len == sizeof("cc_channel_send_task") - 1);
+        assert(memcmp(channel_send.ptr, "cc_channel_send_task", channel_send.len) == 0);
+
+        // Both handler forms now go through real comptime execution and can
+        // depend on helper indirection plus argv[0].
+        NamedToy named = { 1 };
+        LambdaToy lambda = { 2 };
+        named.ping();
+        lambda.ping();
+        assert(named.value == 2);
+        assert(lambda.value == 12);
+    }
+
+    printf("concat_slice_smoke: PASS\n");
+    return 0;
+}

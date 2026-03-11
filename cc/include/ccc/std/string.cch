@@ -71,10 +71,13 @@ typedef CCResult_bool_CC_BoolParseError CCResultBoolParse;
 
 // ------------------------- Slice helpers ----------------------------------
 
+#ifndef CC_CCSLICEARRAY_DEFINED
+#define CC_CCSLICEARRAY_DEFINED 1
 typedef struct {
     CCSlice *items;
     size_t len;
 } CCSliceArray;
+#endif
 
 /*
  * Forward declarations for UFCS methods.
@@ -221,6 +224,47 @@ static inline CCSliceArray cc_slice_split_all(CCArena *arena, CCSlice s, CCSlice
     return arr;
 }
 
+/*
+ * Concat helpers.
+ *
+ * `cc_slice_concat_*` stays close to the slice model and is pure except for the
+ * arena-backed allocation wrapper. This keeps the low-level pieces suitable for
+ * future comptime evaluation while still giving runtime code an ergonomic
+ * `cc_concat(arena, ...)` surface.
+ */
+static inline size_t cc_slice_concat_lenv(const CCSlice *parts, size_t count) {
+    size_t total = 0;
+    if (!parts) return 0;
+    for (size_t i = 0; i < count; ++i) {
+        total += parts[i].len;
+    }
+    return total;
+}
+
+static inline CCSlice cc_slice_concat_into(void *dst, size_t cap, const CCSlice *parts, size_t count) {
+    size_t total = cc_slice_concat_lenv(parts, count);
+    uint8_t *out = (uint8_t *)dst;
+    size_t off = 0;
+    if (total == 0) return cc_slice_empty();
+    if (!out || cap < total) return cc_slice_empty();
+    for (size_t i = 0; i < count; ++i) {
+        if (!parts[i].ptr || parts[i].len == 0) continue;
+        memcpy(out + off, parts[i].ptr, parts[i].len);
+        off += parts[i].len;
+    }
+    return cc_slice_from_parts(dst, total, CC_SLICE_ID_UNTRACKED, cap);
+}
+
+static inline CCSlice cc_slice_concat_many(CCArena *arena, const CCSlice *parts, size_t count) {
+    size_t total = cc_slice_concat_lenv(parts, count);
+    void *buf;
+    if (total == 0) return cc_slice_empty();
+    if (!arena) return cc_slice_empty();
+    buf = cc_arena_alloc(arena, total, sizeof(char));
+    if (!buf) return cc_slice_empty();
+    return cc_slice_concat_into(buf, total, parts, count);
+}
+
 // ------------------------- String builder ---------------------------------
 
 CCString cc_string_new(CCArena *arena);
@@ -261,6 +305,70 @@ static inline CCString* string_append(CCString *str, const char *cstr) {
     return cc_string_push(str, s);
 }
 static inline CCSlice string_as_slice(const CCString *str) { return cc_string_as_slice(str); }
+
+static inline CCSlice cc__concat_from_cstr(const char *cstr) {
+    if (!cstr) return cc_slice_empty();
+    return cc_slice_from_buffer((void *)cstr, strlen(cstr));
+}
+
+static inline CCSlice cc__concat_from_slice(CCSlice s) {
+    return s;
+}
+
+static inline CCSlice cc__concat_from_string_value(CCString str) {
+    return cc_string_as_slice(&str);
+}
+
+static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
+    return cc_string_as_slice(str);
+}
+
+#define cc__concat_arg(x) _Generic((x), \
+    CCSlice: cc__concat_from_slice, \
+    char *: cc__concat_from_cstr, \
+    const char *: cc__concat_from_cstr, \
+    CCString: cc__concat_from_string_value, \
+    CCString *: cc__concat_from_string_ptr, \
+    const CCString *: cc__concat_from_string_ptr \
+)(x)
+
+#define cc__concat_args_1(a1) \
+    cc__concat_arg(a1)
+#define cc__concat_args_2(a1, a2) \
+    cc__concat_arg(a1), cc__concat_arg(a2)
+#define cc__concat_args_3(a1, a2, a3) \
+    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3)
+#define cc__concat_args_4(a1, a2, a3, a4) \
+    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4)
+#define cc__concat_args_5(a1, a2, a3, a4, a5) \
+    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5)
+#define cc__concat_args_6(a1, a2, a3, a4, a5, a6) \
+    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5), cc__concat_arg(a6)
+#define cc__concat_args_7(a1, a2, a3, a4, a5, a6, a7) \
+    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5), cc__concat_arg(a6), cc__concat_arg(a7)
+#define cc__concat_args_8(a1, a2, a3, a4, a5, a6, a7, a8) \
+    cc__concat_arg(a1), cc__concat_arg(a2), cc__concat_arg(a3), cc__concat_arg(a4), cc__concat_arg(a5), cc__concat_arg(a6), cc__concat_arg(a7), cc__concat_arg(a8)
+
+#define cc__concat_pick(_1, _2, _3, _4, _5, _6, _7, _8, NAME, ...) NAME
+#define cc__concat_args(...) \
+    cc__concat_pick(__VA_ARGS__, \
+        cc__concat_args_8, \
+        cc__concat_args_7, \
+        cc__concat_args_6, \
+        cc__concat_args_5, \
+        cc__concat_args_4, \
+        cc__concat_args_3, \
+        cc__concat_args_2, \
+        cc__concat_args_1)(__VA_ARGS__)
+
+#define cc__concat_count_pick(_1, _2, _3, _4, _5, _6, _7, _8, N, ...) N
+#define cc__concat_count(...) \
+    cc__concat_count_pick(__VA_ARGS__, 8, 7, 6, 5, 4, 3, 2, 1)
+
+#define cc_concat(arena, ...) \
+    cc_slice_concat_many((arena), \
+        (CCSlice[]){ cc__concat_args(__VA_ARGS__) }, \
+        cc__concat_count(__VA_ARGS__))
 
 // ------------------------- Parse helpers ----------------------------------
 

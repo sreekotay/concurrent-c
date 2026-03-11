@@ -21,6 +21,11 @@
 
 typedef struct {
     FILE *handle;
+#ifdef CC_PARSER_MODE
+    /* Parser-only UFCS placeholder so `file.write(...)` type-checks without
+       colliding with POSIX `write` declarations from <unistd.h>. */
+    int (*write)();
+#endif
 } CCFile;
 
 typedef struct {
@@ -44,7 +49,6 @@ typedef struct {
 CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_CCOptional_CCSlice_CCIoError, CCOptional_CCSlice, CCIoError)
-
 
 // Open a file (mode like "r", "w", "a"). Returns 0 on success.
 int cc_file_open(CCFile *file, const char *path, const char *mode);

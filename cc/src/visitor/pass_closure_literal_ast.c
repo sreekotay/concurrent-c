@@ -24,6 +24,10 @@ typedef CCNodeView NodeView;
 #define cc__is_ident_start_char cc_is_ident_start
 #define cc__is_ident_char2 cc_is_ident_char
 
+static int cc__is_internal_generated_name(const char* s, size_t n) {
+    return s && n >= 5 && strncmp(s, "__cc_", 5) == 0;
+}
+
 static size_t cc__find_closure_start_from_arrow(const char* src, size_t span_start, size_t arrow_off) {
     if (!src) return span_start;
     if (arrow_off <= span_start) return span_start;
@@ -359,18 +363,19 @@ static char* cc__lower_nursery_spawn_in_body_text(int closure_id, const char* bo
     return out ? out : strdup(body);
 }
 
-static void cc__maybe_record_decl(char*** scope_names,
-                                  char*** scope_types,
-                                  unsigned char** scope_flags,
-                                  int* scope_counts,
-                                  int depth,
-                                  const char* line) {
-    if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !line) return;
-    const char* p = line;
+static void cc__maybe_record_decl_stmt(char*** scope_names,
+                                       char*** scope_types,
+                                       unsigned char** scope_flags,
+                                       int* scope_counts,
+                                       int depth,
+                                       const char* stmt,
+                                       const char* stmt_end) {
+    if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !stmt) return;
+    const char* p = stmt;
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '#' || *p == '\0') return;
-    const char* semi = strchr(p, ';');
-    if (!semi) return;
+    const char* semi = stmt_end;
+    if (!semi || semi <= p) return;
     /* Ignore function prototypes (best-effort) */
     const char* lp = strchr(p, '(');
     if (lp && lp < semi) {
@@ -403,6 +408,7 @@ static void cc__maybe_record_decl(char*** scope_names,
         while (cur < semi && cc__is_ident_char2(*cur)) cur++;
         size_t n = (size_t)(cur - s);
         if (n == 0 || cc__is_keyword_tok(s, n)) continue;
+        if (cc__is_internal_generated_name(s, n)) continue;
         name_s = s;
         name_n = n;
     }
@@ -500,6 +506,22 @@ static void cc__maybe_record_decl(char*** scope_names,
     scope_counts[depth] = cur_n + 1;
 }
 
+static void cc__maybe_record_decl(char*** scope_names,
+                                  char*** scope_types,
+                                  unsigned char** scope_flags,
+                                  int* scope_counts,
+                                  int depth,
+                                  const char* line) {
+    if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !line) return;
+    const char* stmt = line;
+    while (*stmt) {
+        const char* semi = strchr(stmt, ';');
+        if (!semi) break;
+        cc__maybe_record_decl_stmt(scope_names, scope_types, scope_flags, scope_counts, depth, stmt, semi);
+        stmt = semi + 1;
+    }
+}
+
 static const char* cc__lookup_decl_type(char** scope_names,
                                         char** scope_types,
                                         int n,
@@ -551,6 +573,7 @@ static void cc__collect_caps_from_block(char*** scope_names,
         while (cc__is_ident_char2(*p)) p++;
         size_t n = (size_t)(p - s);
         if (cc__is_keyword_tok(s, n)) continue;
+        if (cc__is_internal_generated_name(s, n)) continue;
         if (ignore_name0 && strlen(ignore_name0) == n && strncmp(ignore_name0, s, n) == 0) continue;
         if (ignore_name1 && strlen(ignore_name1) == n && strncmp(ignore_name1, s, n) == 0) continue;
         {

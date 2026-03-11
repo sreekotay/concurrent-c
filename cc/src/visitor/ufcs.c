@@ -3,8 +3,13 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include <ccc/std/prelude.cch>
+#include <ccc/std/string.cch>
+
+#include "comptime/symbols.h"
 #include "preprocess/type_registry.h"
 
 // Simple identifier check (ASCII-only for now).
@@ -17,12 +22,17 @@ static int is_ident_char(char c) {
 static _Thread_local int g_ufcs_await_context = 0;
 
 // Thread-local context: set to 1 when receiver's resolved type is a pointer.
-// Used for free() dispatch: ptr.free() -> cc_chan_free(ptr) vs handle.free() -> chan_free(handle).
+// Used for free() dispatch: ptr.free() -> cc_channel_free(ptr) vs handle.free() -> chan_free(handle).
 static _Thread_local int g_ufcs_recv_type_is_ptr = 0;
 
 // Thread-local context: receiver type name from TCC (e.g., "Point", "Vec_int").
 // When set, UFCS generates TypeName_method(&recv, ...) for struct types.
 static _Thread_local const char* g_ufcs_recv_type = NULL;
+static _Thread_local CCSymbolTable* g_ufcs_symbols = NULL;
+
+void cc_ufcs_set_symbols(CCSymbolTable* symbols) {
+    g_ufcs_symbols = symbols;
+}
 
 // Map a receiver+method to a desugared function call prefix.
 // Returns number of bytes written to out (not including args), or -1 on failure.
@@ -61,6 +71,82 @@ static int is_addr_of_ident(const char* s) {
 }
 
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
+typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice method, CCSliceArray argv, CCArena *arena);
+
+#define CC_UFCS_VALUE_TAG "__cc_ufcs_value__:"
+
+static int cc__emit_registered_callable(char* out,
+                                        size_t cap,
+                                        const char* recv,
+                                        const char* method,
+                                        int recv_is_simple,
+                                        bool recv_is_ptr,
+                                        const char* recv_type_name,
+                                        const char* args_rewritten,
+                                        bool has_args) {
+    const void* fn_ptr = NULL;
+    CCSlice argv_items[5];
+    CCSliceArray argv = {0};
+    CCArena arena = cc_heap_arena(1024);
+    CCUfcsCompiledCallable fn;
+    CCSlice method_slice;
+    CCSlice lowered;
+    char lowered_name[256];
+    size_t lowered_len = 0;
+    int receiver_by_value = 0;
+    if (!g_ufcs_symbols || !recv_type_name) return -1;
+    /* Real comptime UFCS path for callable registrations collected from named
+       handlers and non-capturing lambdas. */
+    if (cc_symbols_lookup_ufcs_callable(g_ufcs_symbols, recv_type_name, &fn_ptr) != 0 || !fn_ptr) {
+        cc_heap_arena_free(&arena);
+        return -1;
+    }
+    fn = (CCUfcsCompiledCallable)fn_ptr;
+    argv_items[argv.len++] = cc_slice_from_buffer((void*)recv_type_name, strlen(recv_type_name));
+    argv_items[argv.len++] = cc_slice_from_buffer((void*)recv, strlen(recv));
+    if (has_args && args_rewritten && args_rewritten[0]) {
+        argv_items[argv.len++] = cc_slice_from_buffer((void*)args_rewritten, strlen(args_rewritten));
+    } else {
+        argv_items[argv.len++] = cc_slice_empty();
+    }
+    argv_items[argv.len++] = cc_slice_from_buffer((void*)(g_ufcs_await_context ? "await" : "sync"),
+                                                  g_ufcs_await_context ? sizeof("await") - 1 : sizeof("sync") - 1);
+    argv_items[argv.len++] = cc_slice_from_buffer((void*)(recv_is_ptr ? "ptr" : "value"),
+                                                  recv_is_ptr ? sizeof("ptr") - 1 : sizeof("value") - 1);
+    argv.items = argv_items;
+    method_slice = cc_slice_from_buffer((void*)method, strlen(method));
+    lowered = fn(method_slice, argv, &arena);
+    if (!lowered.ptr || lowered.len == 0) {
+        cc_heap_arena_free(&arena);
+        return -1;
+    }
+    if (lowered.len > sizeof(CC_UFCS_VALUE_TAG) - 1 &&
+        memcmp(lowered.ptr, CC_UFCS_VALUE_TAG, sizeof(CC_UFCS_VALUE_TAG) - 1) == 0) {
+        receiver_by_value = 1;
+        lowered.ptr = (char*)lowered.ptr + (sizeof(CC_UFCS_VALUE_TAG) - 1);
+        lowered.len -= (sizeof(CC_UFCS_VALUE_TAG) - 1);
+    }
+    lowered_len = lowered.len < sizeof(lowered_name) - 1 ? lowered.len : sizeof(lowered_name) - 1;
+    memcpy(lowered_name, lowered.ptr, lowered_len);
+    lowered_name[lowered_len] = '\0';
+    cc_heap_arena_free(&arena);
+    if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
+        fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: receiver type %s lowered %s -> %s\n",
+                recv_type_name, method, lowered_name);
+    }
+    if (has_args) {
+        if (receiver_by_value) {
+            return snprintf(out, cap, "%s(%s, ", lowered_name, recv);
+        }
+        if (recv_is_ptr || !recv_is_simple)
+            return snprintf(out, cap, "%s(%s, ", lowered_name, recv);
+        return snprintf(out, cap, "%s(&%s, ", lowered_name, recv);
+    }
+    if (receiver_by_value) return snprintf(out, cap, "%s(%s)", lowered_name, recv);
+    if (recv_is_ptr || !recv_is_simple)
+        return snprintf(out, cap, "%s(%s)", lowered_name, recv);
+    return snprintf(out, cap, "%s(&%s)", lowered_name, recv);
+}
 
 static int emit_desugared_call(char* out,
                                size_t cap,
@@ -71,61 +157,139 @@ static int emit_desugared_call(char* out,
                                bool has_args) {
     if (!out || cap == 0 || !recv || !method) return -1;
     int recv_is_simple = is_ident_only(recv) || is_addr_of_ident(recv);
+    const char* typed_chan_type = NULL;
+    const char* recv_type_name = g_ufcs_recv_type;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
 
-    /* Channel ergonomic sugar:
-       Prefer the surface chan_* helpers and do NOT auto-take address-of for handles.
-       Also avoids collisions with libc symbols like close/free.
-       In await context, emit task-returning variants (cc_chan_*_task). */
+    if (reg && is_ident_only(recv)) {
+        const char* type_name = cc_type_registry_lookup_var(reg, recv);
+        if (!recv_type_name) recv_type_name = type_name;
+        if (type_name && (strncmp(type_name, "CCChanTx_", 9) == 0 ||
+                          strncmp(type_name, "CCChanRx_", 9) == 0)) {
+            typed_chan_type = type_name;
+        }
+    }
+    if (!typed_chan_type && g_ufcs_recv_type &&
+        (strncmp(g_ufcs_recv_type, "CCChanTx_", 9) == 0 ||
+         strncmp(g_ufcs_recv_type, "CCChanRx_", 9) == 0)) {
+        typed_chan_type = g_ufcs_recv_type;
+    }
+
+    if (recv_type_name) {
+        int callable_len = cc__emit_registered_callable(out, cap, recv, method, recv_is_simple,
+                                                        recv_is_ptr, recv_type_name, args_rewritten, has_args);
+        if (callable_len >= 0) return callable_len;
+    }
+
+    if (g_ufcs_symbols && recv_type_name) {
+        const char* registered_prefix = NULL;
+        if (cc_symbols_lookup_ufcs_prefix(g_ufcs_symbols, recv_type_name, &registered_prefix) == 0 &&
+            registered_prefix && registered_prefix[0]) {
+            if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
+                fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: receiver type %s uses prefix %s\n",
+                        recv_type_name, registered_prefix);
+            }
+            if (has_args) {
+                if (recv_is_ptr || !recv_is_simple)
+                    return snprintf(out, cap, "%s%s(%s, ", registered_prefix, method, recv);
+                return snprintf(out, cap, "%s%s(&%s, ", registered_prefix, method, recv);
+            }
+            if (recv_is_ptr || !recv_is_simple)
+                return snprintf(out, cap, "%s%s(%s)", registered_prefix, method, recv);
+            return snprintf(out, cap, "%s%s(&%s)", registered_prefix, method, recv);
+        }
+    }
+
+    if (typed_chan_type) {
+        if (g_ufcs_await_context &&
+            (strcmp(method, "send") == 0 || strcmp(method, "recv") == 0)) {
+            if (!has_args || !args_rewritten) {
+                return snprintf(out, cap, "%s((%s%s).raw, NULL, 0)",
+                                strcmp(method, "send") == 0 ? "cc_channel_send_task" : "cc_channel_recv_task",
+                                recv_is_ptr ? "*" : "", recv);
+            }
+            if (strcmp(method, "send") == 0) {
+                return snprintf(out, cap, "cc_channel_send_task((%s%s).raw, &(%s), sizeof(%s))",
+                                recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
+            }
+            return snprintf(out, cap, "cc_channel_recv_task((%s%s).raw, %s, sizeof(*(%s)))",
+                            recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
+        }
+        if (strcmp(method, "send") == 0 || strcmp(method, "recv") == 0 ||
+            strcmp(method, "try_send") == 0 || strcmp(method, "try_recv") == 0 ||
+            strcmp(method, "close") == 0 || strcmp(method, "free") == 0) {
+            if (!has_args || !args_rewritten) {
+                return snprintf(out, cap, "%s_%s(%s%s)", typed_chan_type, method,
+                                recv_is_ptr ? "*" : "", recv);
+            }
+            return snprintf(out, cap, "%s_%s(%s%s, %s)", typed_chan_type, method,
+                            recv_is_ptr ? "*" : "", recv, args_rewritten);
+        }
+    }
+
+    /* Channel UFCS:
+       - Sync path: lower to the canonical CC_TYPED_CHAN_* helper layer.
+       - Await path: lower directly to cc_channel_*_task so async storage stays in
+         the caller's frame rather than a wrapper-local temporary.
+       - Avoids collisions with libc symbols like close/free. */
     if (strcmp(method, "send") == 0) {
         if (g_ufcs_await_context) {
-            /* Emit cc_chan_send_task(recv.raw, &val, sizeof(val)) */
+            /* Emit cc_channel_send_task(recv.raw, &val, sizeof(val)) */
             if (!has_args || !args_rewritten) {
-                return snprintf(out, cap, "cc_chan_send_task((%s%s).raw, NULL, 0)",
+                return snprintf(out, cap, "cc_channel_send_task((%s%s).raw, NULL, 0)",
                                recv_is_ptr ? "*" : "", recv);
             }
             return snprintf(out, cap,
-                           "cc_chan_send_task((%s%s).raw, &(%s), sizeof(%s))",
+                           "cc_channel_send_task((%s%s).raw, &(%s), sizeof(%s))",
                            recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
         }
-        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_send(%s%s)", recv_is_ptr ? "*":"", recv);
-        return snprintf(out, cap, "chan_send(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+        if (!has_args || !args_rewritten) {
+            return snprintf(out, cap, "CC_TYPED_CHAN_SEND((%s%s), 0)", recv_is_ptr ? "*" : "", recv);
+        }
+        return snprintf(out, cap, "CC_TYPED_CHAN_SEND((%s%s), %s)", recv_is_ptr ? "*" : "", recv, args_rewritten);
     }
     if (strcmp(method, "recv") == 0) {
         if (g_ufcs_await_context) {
-            /* Emit cc_chan_recv_task(recv.raw, ptr, sizeof(*ptr)) */
+            /* Emit cc_channel_recv_task(recv.raw, ptr, sizeof(*ptr)) */
             if (!has_args || !args_rewritten) {
-                return snprintf(out, cap, "cc_chan_recv_task((%s%s).raw, NULL, 0)",
+                return snprintf(out, cap, "cc_channel_recv_task((%s%s).raw, NULL, 0)",
                                recv_is_ptr ? "*" : "", recv);
             }
             return snprintf(out, cap,
-                           "cc_chan_recv_task((%s%s).raw, %s, sizeof(*(%s)))",
+                           "cc_channel_recv_task((%s%s).raw, %s, sizeof(*(%s)))",
                            recv_is_ptr ? "*" : "", recv, args_rewritten, args_rewritten);
         }
-        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_recv(%s%s)", recv_is_ptr ? "*":"", recv);
-        return snprintf(out, cap, "chan_recv(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+        if (!has_args || !args_rewritten) {
+            return snprintf(out, cap, "CC_TYPED_CHAN_RECV((%s%s), NULL)", recv_is_ptr ? "*" : "", recv);
+        }
+        return snprintf(out, cap, "CC_TYPED_CHAN_RECV((%s%s), %s)", recv_is_ptr ? "*" : "", recv, args_rewritten);
     }
     if (strcmp(method, "send_take") == 0) {
         if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_send_take(%s%s)", recv_is_ptr ? "*":"", recv);
         return snprintf(out, cap, "chan_send_take(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
     }
     if (strcmp(method, "try_send") == 0) {
-        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_try_send(%s%s)", recv_is_ptr ? "*":"", recv);
-        return snprintf(out, cap, "chan_try_send(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+        if (!has_args || !args_rewritten) {
+            return snprintf(out, cap, "CC_TYPED_CHAN_TRY_SEND((%s%s), 0)", recv_is_ptr ? "*" : "", recv);
+        }
+        return snprintf(out, cap, "CC_TYPED_CHAN_TRY_SEND((%s%s), %s)", recv_is_ptr ? "*" : "", recv, args_rewritten);
     }
     if (strcmp(method, "try_recv") == 0) {
-        if (!has_args || !args_rewritten) return snprintf(out, cap, "chan_try_recv(%s%s)", recv_is_ptr ? "*":"", recv);
-        return snprintf(out, cap, "chan_try_recv(%s%s, %s)", recv_is_ptr ? "*":"", recv, args_rewritten);
+        if (!has_args || !args_rewritten) {
+            return snprintf(out, cap, "CC_TYPED_CHAN_TRY_RECV((%s%s), NULL)", recv_is_ptr ? "*" : "", recv);
+        }
+        return snprintf(out, cap, "CC_TYPED_CHAN_TRY_RECV((%s%s), %s)", recv_is_ptr ? "*" : "", recv, args_rewritten);
     }
     if (strcmp(method, "close") == 0) {
-        return snprintf(out, cap, "chan_close(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "CC_TYPED_CHAN_CLOSE((%s%s))", recv_is_ptr ? "*" : "", recv);
     }
     if (strcmp(method, "free") == 0) {
-        /* If receiver's resolved type is a pointer (e.g., CCChan*), call cc_chan_free directly.
+        /* If receiver's resolved type is a pointer (e.g., CCChan*), call cc_channel_free directly.
            Otherwise use chan_free macro which expects a handle with .raw field. */
         if (g_ufcs_recv_type_is_ptr) {
-            return snprintf(out, cap, "cc_chan_free(%s%s)", recv_is_ptr ? "*":"", recv);
+            return snprintf(out, cap, "cc_channel_free(%s%s)", recv_is_ptr ? "*":"", recv);
         }
-        return snprintf(out, cap, "chan_free(%s%s)", recv_is_ptr ? "*":"", recv);
+        return snprintf(out, cap, "CC_TYPED_CHAN_FREE((%s%s))", recv_is_ptr ? "*" : "", recv);
     }
 
     /* Special cases for stdlib convenience (String methods).
@@ -308,7 +472,6 @@ static int emit_desugared_call(char* out,
     }
 
     /* Container UFCS: check type registry for Vec_T/Map_K_V types */
-    CCTypeRegistry* reg = cc_type_registry_get_global();
     if (reg && is_ident_only(recv)) {
         const char* type_name = cc_type_registry_lookup_var(reg, recv);
         if (type_name) {

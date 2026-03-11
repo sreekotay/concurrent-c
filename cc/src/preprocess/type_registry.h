@@ -12,10 +12,11 @@
 
 #include <stddef.h>
 
-/* Container kind for type instantiations */
+/* Generic family kind for emitted type instantiations */
 typedef enum {
     CC_CONTAINER_VEC,
     CC_CONTAINER_MAP,
+    CC_CONTAINER_CHANNEL,
 } CCContainerKind;
 
 /* Type registry opaque handle */
@@ -36,6 +37,7 @@ const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_nam
 int cc_type_registry_add_vec(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
 int cc_type_registry_add_map(CCTypeRegistry* reg, const char* key_type, const char* val_type, const char* mangled_name);
 int cc_type_registry_add_optional(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
+int cc_type_registry_add_channel(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
 
 /* Iterate over registered types for emitting declarations */
 typedef struct {
@@ -53,6 +55,9 @@ const CCTypeInstantiation* cc_type_registry_get_map(CCTypeRegistry* reg, size_t 
 
 size_t cc_type_registry_optional_count(CCTypeRegistry* reg);
 const CCTypeInstantiation* cc_type_registry_get_optional(CCTypeRegistry* reg, size_t idx);
+
+size_t cc_type_registry_channel_count(CCTypeRegistry* reg);
+const CCTypeInstantiation* cc_type_registry_get_channel(CCTypeRegistry* reg, size_t idx);
 
 /* Thread-local global registry for use during preprocessing */
 CCTypeRegistry* cc_type_registry_get_global(void);

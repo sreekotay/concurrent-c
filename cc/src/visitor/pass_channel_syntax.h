@@ -1,7 +1,7 @@
 /* pass_channel_syntax.h - Channel syntax lowering passes.
  *
  * Handles:
- *   - channel_pair(&tx, &rx) -> cc_chan_pair_create_returning(...) (both forms)
+ *   - channel_pair(&tx, &rx) -> cc_channel_pair_create_returning(...) (both forms)
  *     The 'ordered' flag on rx channels is preserved; ordered channels use
  *     sizeof(CCTask) as elem_size so chan_send_task and chan_recv agree on wire size.
  *   - T[~ ... >] -> CCChanTx
@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include "visitor/visitor.h"
 
-/* Rewrite `channel_pair(&tx, &rx)` calls to cc_chan_pair_create_returning(...).
+/* Rewrite `channel_pair(&tx, &rx)` calls to cc_channel_pair_create_returning(...).
  * Both expression-form (CCChan* ch = channel_pair(...)) and statement-form
  * (channel_pair(...);) are handled; both preserve the ordered flag.
  * Returns newly allocated string, or NULL on error.

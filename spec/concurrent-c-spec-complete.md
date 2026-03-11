@@ -5810,7 +5810,17 @@ if (e is IoError.Other(code)) { use(code); }
 
 ## 10. Generics
 
-This section defines user-defined generic types and functions, with compile-time monomorphization and no trait system in v1.0.
+Concurrent-C uses **compile-time monomorphization** for generic families.
+
+**Implementation status (v1.0):**
+- **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `Vec<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
+- **Planned direction:** full user-defined generic functions and generic type declarations with the same monomorphization model.
+
+This section therefore mixes:
+- the **normative monomorphization model** used by implemented built-in families today
+- the **target source-language model** for future full user-defined generics
+
+No trait system is part of v1.0.
 
 - **§10.1 Syntax** — type parameters and value parameters
 - **§10.2 Instantiation & monomorphization** — when code is generated
@@ -5828,7 +5838,7 @@ Concurrent-C supports two kinds of generic parameters:
 - **Type parameters:** `T`, `K`, `V`, etc.
 - **Comptime value parameters:** compile-time integers/bools/etc used for sizes/layout.
 
-**Generic function:**
+**Generic function (target source model):**
 
 ```c
 void swap<T>(T* a, T* b) {
@@ -5838,7 +5848,7 @@ void swap<T>(T* a, T* b) {
 }
 ```
 
-**Generic type (struct/enum):**
+**Generic type (struct/enum, target source model):**
 
 ```c
 enum Option<T> { None, Some(T) }
@@ -5866,6 +5876,8 @@ generic_param  := ident
 - A type parameter is an identifier with no prefix: `T`.
 - A value parameter is introduced with `comptime <type> <name>`: `comptime int N`.
 
+**Status note:** The current implementation robustly supports built-in monomorphized families (`Vec<T>`, `Map<K,V>`, `T?`, `T!>(E)`, channels) via lowering and mangling. Full user-defined generic declarations as shown above remain a future direction.
+
 **Rule:** A `comptime` value parameter is always a compile-time constant and may be used in:
 - array lengths `T[N]`
 - channel capacities `T[~N ... >]` / `T[~N ... <]`
@@ -5875,7 +5887,7 @@ generic_param  := ident
 
 ### 10.2 Instantiation & Monomorphization (Normative)
 
-Generics are implemented via compile-time monomorphization.
+Built-in generic families are implemented today via compile-time monomorphization, and future user-defined generics are intended to follow the same model.
 
 **Rule (instantiation):** A generic declaration produces no code by itself. Code is generated only when the program forms an instantiation by calling the function or naming the type with concrete arguments.
 
@@ -5886,6 +5898,11 @@ Generics are implemented via compile-time monomorphization.
 **Rule (identity):** Two instantiations are the "same" only if all type arguments are identical and all comptime value arguments are equal.
 
 **Lowering (conceptual):**
+- `Vec<T>` lowers to a concrete family such as `Vec_<mangled>`.
+- `Map<K,V>` lowers to a concrete family such as `Map_<mangledK>_<mangledV>`.
+- `T?` lowers to `CCOptional_<mangledT>`.
+- `T!>(E)` lowers to `CCResult_<mangledT>_<mangledE>`.
+- `T[~... >]` / `T[~... <]` lower to concrete channel handle families for element type `T`, with additional channel metadata (direction/mode/topology/flags) preserved separately for checking and construction.
 - `swap<T>` lowers to `swap__T_<mangled>(...)` per instantiation.
 - `Option<T>` lowers to `Option__T_<mangled>` per instantiation.
 - (Exact mangling is implementation-defined; uniqueness is required.)
@@ -5899,6 +5916,8 @@ Generics are implemented via compile-time monomorphization.
 ```c
 swap(&a, &b);     // infers T from a/b pointer types
 ```
+
+**Status note:** In the current implementation, inference is primarily exercised through built-in generic families and their constructors/helpers. The general rule above is the target rule for future user-defined generics.
 
 **Rule (explicit instantiation):** The caller may specify generic arguments explicitly:
 
@@ -5936,6 +5955,8 @@ void copy<T>(T[:] dst, T[:] src) {
 
 **Rule:** Only the taken branch is type-checked; untaken branches are discarded.
 
+**Status note:** This section describes the intended generic specialization model. Built-in monomorphized families may use equivalent implementation techniques internally before full user-defined generics land.
+
 ---
 
 ### 10.5 Ownership and Moves in Generic Code
@@ -5961,13 +5982,14 @@ take(*u);                      // moves out (unwrap already moves), OK
 
 Intentionally omitted in v1.0:
 
+- Full user-defined generic function/type declarations in the main compiler pipeline
 - Trait/protocol bounds (`<T: Hashable>`)
 - User-defined compile-time interfaces
 - Generic impl blocks / methods parameterized on `Self`
 - Specialization by overload sets (only `@comptime if` specialization is supported)
 - Runtime reflection over type `T`
 
-**Rule:** Built-in generic types (`Task<T>`, `Mutex<T>`, `Map<K,V>`, etc.) follow the same monomorphization rules as user-defined generics.
+**Rule:** Built-in generic families (`Task<T>`, `Mutex<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channels parameterized by element type) already follow the monomorphization model described above, even where their current implementation uses lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
 
 ---
 

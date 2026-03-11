@@ -1,0 +1,56 @@
+#ifndef CC_UFCS_H
+#define CC_UFCS_H
+
+#include <string.h>
+
+#include <ccc/std/string.cch>
+
+#ifdef CC_PARSER_MODE
+typedef CCSlice (*CCUfcsRewriteFn)();
+#else
+typedef CCSlice (*CCUfcsRewriteFn)(CCSlice method, CCSliceArray argv, CCArena *arena);
+#endif
+
+typedef struct {
+    CCSlice pattern;
+    CCUfcsRewriteFn rewrite;
+} CCUfcsRegistration;
+
+#define CC_UFCS_VALUE_TAG "__cc_ufcs_value__:"
+
+static inline bool cc_ufcs_slice_eq_cstr(CCSlice s, const char *cstr) {
+    size_t len = cstr ? strlen(cstr) : 0;
+    return cstr && s.len == len && memcmp(s.ptr, cstr, len) == 0;
+}
+
+static inline CCSlice cc_ufcs_emit_value(CCArena *arena, CCSlice callee) {
+    return cc_concat(arena, CC_UFCS_VALUE_TAG, callee);
+}
+
+static inline CCSlice cc_ufcs_emit_value_cstr(CCArena *arena, const char *callee) {
+    return cc_concat(arena, CC_UFCS_VALUE_TAG, callee ? callee : "");
+}
+
+static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {
+    CCUfcsRegistration reg = {0};
+    reg.pattern = pattern ? cc_slice_from_buffer((void *)pattern, strlen(pattern)) : cc_slice_empty();
+    reg.rewrite = rewrite;
+    return reg;
+}
+
+#ifdef CC_PARSER_MODE
+static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice method, CCSliceArray argv, CCArena *arena) {
+    (void)reg;
+    (void)method;
+    (void)argv;
+    (void)arena;
+    return cc_slice_empty();
+}
+#else
+static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice method, CCSliceArray argv, CCArena *arena) {
+    if (!reg.rewrite) return cc_slice_empty();
+    return reg.rewrite(method, argv, arena);
+}
+#endif
+
+#endif

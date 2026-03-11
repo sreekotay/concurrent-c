@@ -1,0 +1,246 @@
+/*
+ * channel_wake_wave.ccs - Diagnose wake-to-run latency for a parked recv wave.
+ *
+ * This isolates the post-publish service path more tightly than the full
+ * contention benchmark:
+ *   1. Spawn one receiver per worker.
+ *   2. Affinitize each receiver to a distinct worker and let it park in recv().
+ *   3. Publish one value to each channel from the non-worker main thread.
+ *   4. Measure how long it takes each parked receiver to resume and run.
+ *
+ * If this benchmark shows large wake-wave latencies even with a single send per
+ * receiver, the issue is in the wake/service path itself rather than in steady-
+ * state million-iteration producer/consumer loops.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define NUM_WORKERS 4
+#define DEFAULT_ROUNDS 200
+#define DEFAULT_SETTLE_MS 1
+#define DEFAULT_SLOW_US 5000
+
+/* Private runtime probes used only for diagnostics. */
+void cc__fiber_set_worker_affinity(int worker_id);
+int cc__sched_current_worker_id(void);
+
+static cc_atomic_int g_ready = 0;
+static cc_atomic_int g_done = 0;
+static cc_atomic_u64 g_send_start_ns = 0;
+
+static uint64_t g_latency_ns[NUM_WORKERS];
+static int g_woke_worker[NUM_WORKERS];
+static int g_start_worker[NUM_WORKERS];
+static int g_recv_value[NUM_WORKERS];
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int getenv_int_default(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    char* end = NULL;
+    long parsed = strtol(v, &end, 10);
+    if (end == v) return fallback;
+    return (int)parsed;
+}
+
+static int cmp_u64(const void* a, const void* b) {
+    uint64_t ua = *(const uint64_t*)a;
+    uint64_t ub = *(const uint64_t*)b;
+    if (ua < ub) return -1;
+    if (ua > ub) return 1;
+    return 0;
+}
+
+static void reset_round_state(void) {
+    cc_atomic_store(&g_ready, 0);
+    cc_atomic_store(&g_done, 0);
+    cc_atomic_store(&g_send_start_ns, 0);
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        g_latency_ns[i] = 0;
+        g_woke_worker[i] = -1;
+        g_start_worker[i] = -1;
+        g_recv_value[i] = -1;
+    }
+}
+
+int main(void) {
+    int rounds = getenv_int_default("ROUNDS", DEFAULT_ROUNDS);
+    int settle_ms = getenv_int_default("SETTLE_MS", DEFAULT_SETTLE_MS);
+    int slow_us = getenv_int_default("SLOW_US", DEFAULT_SLOW_US);
+    int trace_slow = getenv("TRACE_SLOW") != NULL;
+    uint64_t* round_max_ns = (uint64_t*)calloc((size_t)rounds, sizeof(uint64_t));
+
+    if (!round_max_ns) {
+        fprintf(stderr, "Failed to allocate stats buffer\n");
+        return 1;
+    }
+
+    cc_sched_set_num_workers(NUM_WORKERS);
+
+    int mismatch_rounds = 0;
+    int slow_rounds = 0;
+    int bad_value_rounds = 0;
+    uint64_t total_max_ns = 0;
+
+    printf("=================================================================\n");
+    printf("CHANNEL WAKE WAVE DIAGNOSTIC\n");
+    printf("=================================================================\n");
+    printf("Workers: %d | Rounds: %d | Settle: %d ms | Slow threshold: %d us\n",
+           NUM_WORKERS, rounds, settle_ms, slow_us);
+    printf("\n");
+
+    for (int round = 0; round < rounds; round++) {
+        reset_round_state();
+
+        int[~1 >] tx0; int[~1 <] rx0; CCChan* ch0 = channel_pair(&tx0, &rx0);
+        int[~1 >] tx1; int[~1 <] rx1; CCChan* ch1 = channel_pair(&tx1, &rx1);
+        int[~1 >] tx2; int[~1 <] rx2; CCChan* ch2 = channel_pair(&tx2, &rx2);
+        int[~1 >] tx3; int[~1 <] rx3; CCChan* ch3 = channel_pair(&tx3, &rx3);
+
+        @closing(tx0, tx1, tx2, tx3) {
+            @nursery {
+                spawn(() => [rx0] {
+                    int v = -1;
+                    cc__fiber_set_worker_affinity(0);
+                    g_start_worker[0] = cc__sched_current_worker_id();
+                    cc_atomic_fetch_add(&g_ready, 1);
+                    chan_recv(rx0, &v);
+                    g_recv_value[0] = v;
+                    g_woke_worker[0] = cc__sched_current_worker_id();
+                    g_latency_ns[0] = now_ns() - cc_atomic_load(&g_send_start_ns);
+                    cc_atomic_fetch_add(&g_done, 1);
+                });
+                spawn(() => [rx1] {
+                    int v = -1;
+                    cc__fiber_set_worker_affinity(1);
+                    g_start_worker[1] = cc__sched_current_worker_id();
+                    cc_atomic_fetch_add(&g_ready, 1);
+                    chan_recv(rx1, &v);
+                    g_recv_value[1] = v;
+                    g_woke_worker[1] = cc__sched_current_worker_id();
+                    g_latency_ns[1] = now_ns() - cc_atomic_load(&g_send_start_ns);
+                    cc_atomic_fetch_add(&g_done, 1);
+                });
+                spawn(() => [rx2] {
+                    int v = -1;
+                    cc__fiber_set_worker_affinity(2);
+                    g_start_worker[2] = cc__sched_current_worker_id();
+                    cc_atomic_fetch_add(&g_ready, 1);
+                    chan_recv(rx2, &v);
+                    g_recv_value[2] = v;
+                    g_woke_worker[2] = cc__sched_current_worker_id();
+                    g_latency_ns[2] = now_ns() - cc_atomic_load(&g_send_start_ns);
+                    cc_atomic_fetch_add(&g_done, 1);
+                });
+                spawn(() => [rx3] {
+                    int v = -1;
+                    cc__fiber_set_worker_affinity(3);
+                    g_start_worker[3] = cc__sched_current_worker_id();
+                    cc_atomic_fetch_add(&g_ready, 1);
+                    chan_recv(rx3, &v);
+                    g_recv_value[3] = v;
+                    g_woke_worker[3] = cc__sched_current_worker_id();
+                    g_latency_ns[3] = now_ns() - cc_atomic_load(&g_send_start_ns);
+                    cc_atomic_fetch_add(&g_done, 1);
+                });
+
+                while (cc_atomic_load(&g_ready) < NUM_WORKERS) {
+                    cc_yield();
+                }
+                if (settle_ms > 0) {
+                    cc_sleep_ms((unsigned int)settle_ms);
+                }
+
+                cc_atomic_store(&g_send_start_ns, now_ns());
+                chan_send(tx0, 100);
+                chan_send(tx1, 101);
+                chan_send(tx2, 102);
+                chan_send(tx3, 103);
+
+                while (cc_atomic_load(&g_done) < NUM_WORKERS) {
+                    cc_yield();
+                }
+            }
+        }
+
+        cc_chan_free(ch0);
+        cc_chan_free(ch1);
+        cc_chan_free(ch2);
+        cc_chan_free(ch3);
+
+        uint64_t max_ns = 0;
+        int mismatches = 0;
+        int bad_values = 0;
+        for (int i = 0; i < NUM_WORKERS; i++) {
+            if (g_latency_ns[i] > max_ns) max_ns = g_latency_ns[i];
+            if (g_woke_worker[i] != i) mismatches++;
+            if (g_recv_value[i] != 100 + i) bad_values++;
+        }
+
+        round_max_ns[round] = max_ns;
+        total_max_ns += max_ns;
+        if (mismatches > 0) mismatch_rounds++;
+        if (bad_values > 0) bad_value_rounds++;
+        if (max_ns >= (uint64_t)slow_us * 1000ull) slow_rounds++;
+
+        if (trace_slow && max_ns >= (uint64_t)slow_us * 1000ull) {
+            printf("round %d slow: max=%.3f ms mismatches=%d values=%d lat_us=[%.1f %.1f %.1f %.1f] start=[%d %d %d %d] woke=[%d %d %d %d]\n",
+                   round + 1,
+                   (double)max_ns / 1000000.0,
+                   mismatches,
+                   bad_values,
+                   (double)g_latency_ns[0] / 1000.0,
+                   (double)g_latency_ns[1] / 1000.0,
+                   (double)g_latency_ns[2] / 1000.0,
+                   (double)g_latency_ns[3] / 1000.0,
+                   g_start_worker[0],
+                   g_start_worker[1],
+                   g_start_worker[2],
+                   g_start_worker[3],
+                   g_woke_worker[0],
+                   g_woke_worker[1],
+                   g_woke_worker[2],
+                   g_woke_worker[3]);
+        }
+    }
+
+    qsort(round_max_ns, (size_t)rounds, sizeof(uint64_t), cmp_u64);
+    uint64_t best = round_max_ns[0];
+    uint64_t median = round_max_ns[rounds / 2];
+    uint64_t p90 = round_max_ns[((rounds - 1) * 9) / 10];
+    uint64_t worst = round_max_ns[rounds - 1];
+
+    printf("Round max wake latency (one parked recv per worker):\n");
+    printf("  best:   %.3f ms\n", (double)best / 1000000.0);
+    printf("  median: %.3f ms\n", (double)median / 1000000.0);
+    printf("  p90:    %.3f ms\n", (double)p90 / 1000000.0);
+    printf("  worst:  %.3f ms\n", (double)worst / 1000000.0);
+    printf("  mean:   %.3f ms\n", (double)total_max_ns / (double)rounds / 1000000.0);
+    printf("\n");
+    printf("Rounds with max >= %d us: %d/%d\n", slow_us, slow_rounds, rounds);
+    printf("Rounds with worker mismatch: %d/%d\n", mismatch_rounds, rounds);
+    printf("Rounds with bad recv payloads: %d/%d\n", bad_value_rounds, rounds);
+    printf("\n");
+    printf("DATA_WAKE_WAVE_BEST_MS: %.3f\n", (double)best / 1000000.0);
+    printf("DATA_WAKE_WAVE_MEDIAN_MS: %.3f\n", (double)median / 1000000.0);
+    printf("DATA_WAKE_WAVE_P90_MS: %.3f\n", (double)p90 / 1000000.0);
+    printf("DATA_WAKE_WAVE_WORST_MS: %.3f\n", (double)worst / 1000000.0);
+    printf("DATA_WAKE_WAVE_SLOW_RATE: %.2f\n", 100.0 * (double)slow_rounds / (double)rounds);
+    printf("DATA_WAKE_WAVE_MISMATCH_RATE: %.2f\n", 100.0 * (double)mismatch_rounds / (double)rounds);
+    printf("=================================================================\n");
+
+    free(round_max_ns);
+    return bad_value_rounds == 0 ? 0 : 1;
+}

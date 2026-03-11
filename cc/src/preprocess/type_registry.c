@@ -43,6 +43,11 @@ struct CCTypeRegistry {
     CCTypeInstEntry* optionals;
     size_t opt_count;
     size_t opt_capacity;
+
+    /* Channel typed-wrapper instantiations */
+    CCTypeInstEntry* channels;
+    size_t chan_count;
+    size_t chan_capacity;
 };
 
 /* Thread-local global registry */
@@ -86,6 +91,8 @@ void cc_type_registry_free(CCTypeRegistry* reg) {
     free(reg->maps);
     free_inst_entries(reg->optionals, reg->opt_count);
     free(reg->optionals);
+    free_inst_entries(reg->channels, reg->chan_count);
+    free(reg->channels);
     free(reg);
 }
 
@@ -99,6 +106,8 @@ void cc_type_registry_clear(CCTypeRegistry* reg) {
     reg->map_count = 0;
     free_inst_entries(reg->optionals, reg->opt_count);
     reg->opt_count = 0;
+    free_inst_entries(reg->channels, reg->chan_count);
+    reg->chan_count = 0;
 }
 
 /* Ensure capacity for var entries */
@@ -256,6 +265,40 @@ int cc_type_registry_add_optional(CCTypeRegistry* reg, const char* elem_type, co
     return 0;
 }
 
+static int ensure_chan_capacity(CCTypeRegistry* reg, size_t needed) {
+    if (reg->chan_capacity >= needed) return 0;
+    size_t new_cap = reg->chan_capacity ? reg->chan_capacity * 2 : 8;
+    while (new_cap < needed) new_cap *= 2;
+    CCTypeInstEntry* nv = (CCTypeInstEntry*)realloc(reg->channels, new_cap * sizeof(CCTypeInstEntry));
+    if (!nv) return -1;
+    reg->channels = nv;
+    reg->chan_capacity = new_cap;
+    return 0;
+}
+
+int cc_type_registry_add_channel(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name) {
+    if (!reg || !elem_type || !mangled_name) return -1;
+
+    for (size_t i = 0; i < reg->chan_count; i++) {
+        if (strcmp(reg->channels[i].mangled_name, mangled_name) == 0) {
+            return 0;
+        }
+    }
+
+    if (ensure_chan_capacity(reg, reg->chan_count + 1) != 0) return -1;
+    reg->channels[reg->chan_count].kind = CC_CONTAINER_CHANNEL;
+    reg->channels[reg->chan_count].mangled_name = strdup(mangled_name);
+    reg->channels[reg->chan_count].type1 = strdup(elem_type);
+    reg->channels[reg->chan_count].type2 = NULL;
+    if (!reg->channels[reg->chan_count].mangled_name || !reg->channels[reg->chan_count].type1) {
+        free(reg->channels[reg->chan_count].mangled_name);
+        free(reg->channels[reg->chan_count].type1);
+        return -1;
+    }
+    reg->chan_count++;
+    return 0;
+}
+
 /* Iteration helpers - return views into internal storage */
 size_t cc_type_registry_vec_count(CCTypeRegistry* reg) {
     return reg ? reg->vec_count : 0;
@@ -282,4 +325,13 @@ size_t cc_type_registry_optional_count(CCTypeRegistry* reg) {
 const CCTypeInstantiation* cc_type_registry_get_optional(CCTypeRegistry* reg, size_t idx) {
     if (!reg || idx >= reg->opt_count) return NULL;
     return (const CCTypeInstantiation*)&reg->optionals[idx];
+}
+
+size_t cc_type_registry_channel_count(CCTypeRegistry* reg) {
+    return reg ? reg->chan_count : 0;
+}
+
+const CCTypeInstantiation* cc_type_registry_get_channel(CCTypeRegistry* reg, size_t idx) {
+    if (!reg || idx >= reg->chan_count) return NULL;
+    return (const CCTypeInstantiation*)&reg->channels[idx];
 }
