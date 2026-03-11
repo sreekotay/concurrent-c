@@ -526,6 +526,18 @@ static inline void cc__chan_maybe_yield(int has_waiters) {
     }
 }
 
+static inline int cc__chan_retry_yield_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* env = getenv("CC_CHAN_RETRY_YIELD");
+        /* Default OFF: on transient full/empty, falling through to the
+         * waiter/park path preserves worker ownership better than
+         * yield-and-retry under constrained worker counts. */
+        enabled = (env && env[0] == '1');
+    }
+    return enabled;
+}
+
 /* ============================================================================
  * Fiber Wait Queue Helpers - moved after struct definition
  * ============================================================================ */
@@ -2769,7 +2781,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         
         /* No waiters - try lock-free enqueue to buffer (fast path, no inflight) */
         int rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
-        if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
+        if (rc != 0 && !ch->closed && cc__fiber_in_context() && cc__chan_retry_yield_enabled()) {
             /* Buffer full — local yield keeps co-located P/C on the same worker,
              * allowing the receiver (in the same local queue or inbox) to drain a
              * slot before we retry.  One retry before falling to blocking path. */
@@ -2889,7 +2901,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             }
             if (fiber) {
                 int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-                if (count < (int)ch->cap && !ch->closed) {
+                if (count < (int)ch->cap && !ch->closed && cc__chan_retry_yield_enabled()) {
                     cc__fiber_yield();
                     cc_chan_lock(ch);
                     continue;
@@ -3138,7 +3150,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
-        if (rc != 0 && !ch->closed && cc__fiber_in_context()) {
+        if (rc != 0 && !ch->closed && cc__fiber_in_context() && cc__chan_retry_yield_enabled()) {
             /* Buffer empty — local yield keeps co-located P/C on the same worker,
              * allowing the sender (in the same local queue or inbox) to add a
              * slot before we retry.  One retry before falling to blocking path. */
@@ -3268,7 +3280,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         }
         if (fiber) {
             int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-            if (count > 0 && !ch->closed) {
+            if (count > 0 && !ch->closed && cc__chan_retry_yield_enabled()) {
                 cc__fiber_yield();
                 pthread_mutex_lock(&ch->mu);
                 continue;
@@ -3809,7 +3821,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
             if (fiber_ts) {
                 /* Yield-retry if count suggests space */
                 int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-                if (count < (int)ch->cap && !ch->closed) {
+                if (count < (int)ch->cap && !ch->closed && cc__chan_retry_yield_enabled()) {
                     cc__fiber_yield();
                     cc_chan_lock(ch);
                     continue;
@@ -3993,7 +4005,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             if (fiber_tr) {
                 /* Yield-retry if count suggests data */
                 int count_r = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-                if (count_r > 0 && !ch->closed) {
+                if (count_r > 0 && !ch->closed && cc__chan_retry_yield_enabled()) {
                     cc__fiber_yield();
                     cc_chan_lock(ch);
                     continue;

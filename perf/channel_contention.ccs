@@ -18,9 +18,19 @@
 #define ITERATIONS 1000000
 #define NUM_TRIALS 15
 #define CAP        1024
+#define TRACE_MAX_ROLES 4
+#define TRACE_MAX_WORKERS 64
 
 /* Prevent dead-code elimination of consumer work. */
 static volatile long long g_sink = 0;
+
+/* Private runtime probe used only for diagnostics. */
+int cc__sched_current_worker_id(void);
+
+static int g_role_last_worker[TRACE_MAX_ROLES];
+static int g_role_switches[TRACE_MAX_ROLES];
+static int g_role_samples[TRACE_MAX_ROLES];
+static int g_role_worker_hits[TRACE_MAX_ROLES][TRACE_MAX_WORKERS];
 
 static double time_now_ms(void) {
     struct timespec ts;
@@ -34,6 +44,86 @@ static int trace_contention_trials_enabled(void) {
         enabled = getenv("CC_CONTENTION_TRACE") != NULL;
     }
     return enabled;
+}
+
+static int trace_contention_workers_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("CC_CONTENTION_WORKERS") != NULL;
+    }
+    return enabled;
+}
+
+static int trace_contention_worker_stride(void) {
+    static int stride = -1;
+    if (stride < 0) {
+        const char* v = getenv("CC_CONTENTION_WORKER_STRIDE");
+        stride = (v && v[0]) ? atoi(v) : 65536;
+        if (stride <= 0) stride = 65536;
+    }
+    return stride;
+}
+
+static void trace_worker_state_reset(void) {
+    if (!trace_contention_workers_enabled()) return;
+    for (int role = 0; role < TRACE_MAX_ROLES; role++) {
+        g_role_last_worker[role] = -1;
+        g_role_switches[role] = 0;
+        g_role_samples[role] = 0;
+        for (int w = 0; w < TRACE_MAX_WORKERS; w++) {
+            g_role_worker_hits[role][w] = 0;
+        }
+    }
+}
+
+static void trace_worker_sample(int role, int iter) {
+    if (!trace_contention_workers_enabled()) return;
+    int stride = trace_contention_worker_stride();
+    if (iter != 0 && iter != ITERATIONS - 1 && (iter % stride) != 0) return;
+    int worker = cc__sched_current_worker_id();
+    if (worker >= 0 && worker < TRACE_MAX_WORKERS) {
+        g_role_worker_hits[role][worker]++;
+    }
+    if (g_role_last_worker[role] >= 0 && worker != g_role_last_worker[role]) {
+        g_role_switches[role]++;
+    }
+    g_role_last_worker[role] = worker;
+    g_role_samples[role]++;
+}
+
+static void trace_worker_summary(const char* phase, int trial, int roles) {
+    if (!trace_contention_workers_enabled()) return;
+    static const char* role_names[TRACE_MAX_ROLES] = {
+        "tx1", "rx1", "tx2", "rx2"
+    };
+    int max_workers = (int)cc_sched_get_num_workers();
+    if (max_workers <= 0 || max_workers > TRACE_MAX_WORKERS) {
+        max_workers = TRACE_MAX_WORKERS;
+    }
+    for (int role = 0; role < roles; role++) {
+        int best_worker = -1;
+        int best_hits = -1;
+        int active_workers = 0;
+        for (int w = 0; w < max_workers; w++) {
+            int hits = g_role_worker_hits[role][w];
+            if (hits > 0) active_workers++;
+            if (hits > best_hits) {
+                best_hits = hits;
+                best_worker = w;
+            }
+        }
+        fprintf(stderr,
+                "CC_TRACE_WORKERS phase=%s trial=%d role=%s samples=%d switches=%d active_workers=%d dominant=%d dominant_hits=%d last=%d\n",
+                phase,
+                trial,
+                role_names[role],
+                g_role_samples[role],
+                g_role_switches[role],
+                active_workers,
+                best_worker,
+                best_hits,
+                g_role_last_worker[role]);
+    }
 }
 
 static void trace_trial_marker(const char* phase, int trial, const char* event, double elapsed_ms) {
@@ -52,22 +142,31 @@ static double run_single_pair(int trial) {
     int[~CAP <] rx;
     channel_pair(&tx, &rx);
     long long sum = 0;
+    trace_worker_state_reset();
     trace_trial_marker("baseline", trial, "begin", -1.0);
     double start = time_now_ms();
     @closing(tx) {
         spawn(() => {
-            for (int i = 0; i < ITERATIONS; i++) { tx.send(i ^ (i >> 16)); }
+            for (int i = 0; i < ITERATIONS; i++) {
+                trace_worker_sample(0, i);
+                tx.send(i ^ (i >> 16));
+            }
         });
         spawn(() => {
             int v;
             long long local_sum = 0;
-            for (int i = 0; i < ITERATIONS; i++) { rx.recv(&v); local_sum += v; }
+            for (int i = 0; i < ITERATIONS; i++) {
+                trace_worker_sample(1, i);
+                rx.recv(&v);
+                local_sum += v;
+            }
             sum += local_sum;
         });
     }
     g_sink += sum;
     double elapsed = time_now_ms() - start;
     trace_trial_marker("baseline", trial, "end", elapsed);
+    trace_worker_summary("baseline", trial, 2);
     return elapsed;
 }
 
@@ -81,31 +180,47 @@ static double run_two_pairs(int trial) {
     channel_pair(&tx2, &rx2);
     long long sum1 = 0;
     long long sum2 = 0;
+    trace_worker_state_reset();
     trace_trial_marker("contention", trial, "begin", -1.0);
     double start = time_now_ms();
     @closing(tx1, tx2) {
         spawn(() => {
-            for (int i = 0; i < ITERATIONS; i++) { tx1.send(i ^ (i >> 16)); }
+            for (int i = 0; i < ITERATIONS; i++) {
+                trace_worker_sample(0, i);
+                tx1.send(i ^ (i >> 16));
+            }
         });
         spawn(() => {
             int v;
             long long local_sum = 0;
-            for (int i = 0; i < ITERATIONS; i++) { rx1.recv(&v); local_sum += v; }
+            for (int i = 0; i < ITERATIONS; i++) {
+                trace_worker_sample(1, i);
+                rx1.recv(&v);
+                local_sum += v;
+            }
             sum1 += local_sum;
         });
         spawn(() => {
-            for (int i = 0; i < ITERATIONS; i++) { tx2.send(i ^ (i >> 16)); }
+            for (int i = 0; i < ITERATIONS; i++) {
+                trace_worker_sample(2, i);
+                tx2.send(i ^ (i >> 16));
+            }
         });
         spawn(() => {
             int v;
             long long local_sum = 0;
-            for (int i = 0; i < ITERATIONS; i++) { rx2.recv(&v); local_sum += v; }
+            for (int i = 0; i < ITERATIONS; i++) {
+                trace_worker_sample(3, i);
+                rx2.recv(&v);
+                local_sum += v;
+            }
             sum2 += local_sum;
         });
     }
     g_sink += sum1 + sum2;
     double elapsed = time_now_ms() - start;
     trace_trial_marker("contention", trial, "end", elapsed);
+    trace_worker_summary("contention", trial, 4);
     return elapsed;
 }
 

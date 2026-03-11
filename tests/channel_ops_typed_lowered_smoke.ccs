@@ -1,0 +1,26 @@
+#include <ccc/cc_runtime.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    int[~3 >] tx;
+    int[~3 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+
+    int v = 0;
+    (void)CCChanTx_int_send(tx, 42);
+    (void)CCChanRx_int_recv(rx, &v);
+    assert(v == 42);
+
+    v = 0;
+    (void)CCChanTx_int_try_send(tx, 7);
+    (void)CCChanRx_int_try_recv(rx, &v);
+    assert(v == 7);
+
+    CCChanTx_int_close(tx);
+    CCChanRx_int_free(rx);
+
+    printf("channel_ops_typed_lowered_smoke: PASS\n");
+    (void)ch;
+    return 0;
+}

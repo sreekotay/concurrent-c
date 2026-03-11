@@ -1,0 +1,28 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_ufcs.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int[~2 >] g_tx;
+int[~2 <] g_rx;
+
+@comptime {
+    (void)cc_ufcs_register("CCChanTx_*", (method, argv, arena) => cc_channel_tx_ufcs_rewrite(method, argv, arena));
+    (void)cc_ufcs_register("CCChanRx_*", (method, argv, arena) => cc_channel_rx_ufcs_rewrite(method, argv, arena));
+}
+
+int main(void) {
+    CCChan* ch = channel_pair(&g_tx, &g_rx);
+    int value = 0;
+    assert(ch != NULL);
+
+    (void)g_tx.send(7);
+    (void)g_rx.recv(&value);
+    assert(value == 7);
+
+    g_tx.close();
+    g_rx.free();
+
+    printf("comptime_channel_ufcs_smoke: PASS\n");
+    return 0;
+}

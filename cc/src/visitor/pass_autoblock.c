@@ -14,7 +14,7 @@
  * Legacy/Transition Note (CC_AB_REWRITE_AWAIT_OPERAND_CALL):
  *   Channel operations (chan_send, chan_recv, etc.) are currently blocking runtime
  *   calls. When used with explicit `await`, they must be wrapped. The preferred
- *   future path is to use task-returning variants (cc_chan_send_task, cc_chan_recv_task)
+ *   future path is to use task-returning variants (cc_channel_send_task, cc_channel_recv_task)
  *   which return CCTaskIntptr directly, eliminating the need for this wrapping.
  *   See: spec-progress/CCTASKINTPTR_CHANNEL_OPS_DESIGN.md
  */
@@ -142,6 +142,22 @@ static int cc__ab_only_ws_comments(const char* s, size_t a, size_t b) {
     return 1;
 }
 
+static int cc__is_typed_chan_send_wrapper(const char* name) {
+    size_t n;
+    if (!name) return 0;
+    if (strncmp(name, "CCChanTx_", 9) != 0) return 0;
+    n = strlen(name);
+    return n > 5 && strcmp(name + n - 5, "_send") == 0;
+}
+
+static int cc__is_typed_chan_recv_wrapper(const char* name) {
+    size_t n;
+    if (!name) return 0;
+    if (strncmp(name, "CCChanRx_", 9) != 0) return 0;
+    n = strlen(name);
+    return n > 5 && strcmp(name + n - 5, "_recv") == 0;
+}
+
 /* ---- end small helpers ---- */
 
 int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
@@ -167,7 +183,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_RETURN_EXPR_CALL = 6,
         CC_AB_REWRITE_ASSIGN_EXPR_CALL = 7,
         /* LEGACY: For `await chan_*` - wraps the blocking call to produce CCTaskIntptr.
-           Future: Use cc_chan_send_task/cc_chan_recv_task which return CCTaskIntptr directly,
+           Future: Use cc_channel_send_task/cc_channel_recv_task which return CCTaskIntptr directly,
            eliminating the need for this wrapping. See: CCTASKINTPTR_CHANNEL_OPS_DESIGN.md */
         CC_AB_REWRITE_AWAIT_OPERAND_CALL = 8,
     } CCAutoBlockRewriteKind;
@@ -235,11 +251,14 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                           strcmp(n[i].aux_s1, "cc_chan_send") == 0 ||
                           strcmp(n[i].aux_s1, "cc_chan_recv") == 0 ||
                           strcmp(n[i].aux_s1, "cc_chan_send_take") == 0 ||
-                          strcmp(n[i].aux_s1, "cc_chan_send_take_slice") == 0);
+                          strcmp(n[i].aux_s1, "cc_chan_send_take_slice") == 0 ||
+                          cc__is_typed_chan_send_wrapper(n[i].aux_s1) ||
+                          cc__is_typed_chan_recv_wrapper(n[i].aux_s1));
         if (is_under_await && !is_chan_op) continue;
         /* In async context, chan ops MUST be awaited - they return CCTaskIntptr. */
         int is_chan_recv = (strcmp(n[i].aux_s1, "chan_recv") == 0 ||
-                           strcmp(n[i].aux_s1, "cc_chan_recv") == 0);
+                           strcmp(n[i].aux_s1, "cc_chan_recv") == 0 ||
+                           cc__is_typed_chan_recv_wrapper(n[i].aux_s1));
 
         /* Find enclosing function decl-item and check @async attr. */
         int cur = n[i].parent;
@@ -1085,10 +1104,10 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
             if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
         } else if (reps[ri].kind == CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
-            /* For `await chan_*` forms, rewrite the call to cc_chan_*_task() which returns CCTaskIntptr.
+            /* For `await chan_*` forms, rewrite the call to cc_channel_*_task() which returns CCTaskIntptr.
                The await keyword is preserved; async lowering handles the CCTaskIntptr await.
-               - chan_send(ch, val)    -> cc_chan_send_task(ch, &val, sizeof(val))
-               - chan_recv(ch, &out)   -> cc_chan_recv_task(ch, out, sizeof(*out))
+               - chan_send(ch, val)    -> cc_channel_send_task(ch, &val, sizeof(val))
+               - chan_recv(ch, &out)   -> cc_channel_recv_task(ch, out, sizeof(*out))
              */
             /* Emit arg temporaries - they may be complex expressions. */
             for (int ai = 0; ai < argc; ai++) {
@@ -1109,9 +1128,38 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
             /* Emit the task-returning call in place of the original call. */
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt, call_s);
-            if (reps[ri].is_chan_recv) {
-                /* chan_recv(ch, &out) -> cc_chan_recv_task(ch, out, sizeof(*out)) */
-                cc__append_str(&repl, &repl_len, &repl_cap, "cc_chan_recv_task(");
+            if (cc__is_typed_chan_send_wrapper(reps[ri].callee) ||
+                cc__is_typed_chan_recv_wrapper(reps[ri].callee)) {
+                cc__append_str(&repl, &repl_len, &repl_cap,
+                               reps[ri].is_chan_recv ? "cc_channel_recv_task(("
+                                                     : "cc_channel_send_task((");
+                if (argc >= 1) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg0", reps[ri].line_start);
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, ").raw, ");
+                if (argc >= 2) {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                }
+                if (reps[ri].is_chan_recv) {
+                    cc__append_str(&repl, &repl_len, &repl_cap, ", sizeof(*(");
+                    if (argc >= 2) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, ")))");
+                } else {
+                    cc__append_str(&repl, &repl_len, &repl_cap, ", &(");
+                    if (argc >= 2) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "), sizeof(");
+                    if (argc >= 2) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg1", reps[ri].line_start);
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "))");
+                }
+            } else if (reps[ri].is_chan_recv) {
+                /* chan_recv(ch, &out) -> cc_channel_recv_task(ch, out, sizeof(*out)) */
+                cc__append_str(&repl, &repl_len, &repl_cap, "cc_channel_recv_task(");
                 if (argc >= 1) {
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg0", reps[ri].line_start);
                 }
@@ -1125,8 +1173,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                 }
                 cc__append_str(&repl, &repl_len, &repl_cap, ")))");
             } else {
-                /* chan_send(ch, val) -> cc_chan_send_task(ch, &val, sizeof(val)) */
-                cc__append_str(&repl, &repl_len, &repl_cap, "cc_chan_send_task(");
+                /* chan_send(ch, val) -> cc_channel_send_task(ch, &val, sizeof(val)) */
+                cc__append_str(&repl, &repl_len, &repl_cap, "cc_channel_send_task(");
                 if (argc >= 1) {
                     cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg0", reps[ri].line_start);
                 }

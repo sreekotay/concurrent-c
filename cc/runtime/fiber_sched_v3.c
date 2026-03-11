@@ -162,6 +162,7 @@ CCSchedFiber* cc_sched_v3_worker_next_impl(void) {
         }
 
         size_t stolen = lq_steal_batch(&g_sched.local_queues[victim],
+                                       (int)victim,
                                        steal_buf,
                                        CC_SCHED_V3_STEAL_PREFETCH);
         if (stolen > 0) {

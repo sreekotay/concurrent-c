@@ -8,6 +8,7 @@
 // supports predefined const bindings (e.g. future build.cc outputs).
 
 typedef struct CCSymbolTable CCSymbolTable;
+typedef void (*CCOwnedResourceFreeFn)(void*);
 
 // Simple name/value binding used to preload consts from the driver.
 typedef struct {
@@ -30,6 +31,21 @@ int cc_symbols_lookup_const(CCSymbolTable* t, const char* name, long long* out_v
 /* Function decl attributes (parsed from CC decl annotations like @async/@noblock). */
 int cc_symbols_set_fn_attrs(CCSymbolTable* t, const char* name, unsigned int attrs);
 int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int* out_attrs);
+
+/* Minimal compile-time UFCS registry (exact-match or simple prefix* patterns).
+   Callable entries back real comptime execution for named handlers and
+   non-capturing lambdas through the active comptime backend. Prefix entries
+   remain as a compatibility fallback for older lowering paths. */
+int cc_symbols_add_ufcs_prefix(CCSymbolTable* t, const char* pattern, const char* prefix);
+int cc_symbols_lookup_ufcs_prefix(CCSymbolTable* t, const char* pattern, const char** out_prefix);
+int cc_symbols_add_ufcs_callable(CCSymbolTable* t,
+                                 const char* pattern,
+                                 const void* fn_ptr,
+                                 void* owner,
+                                 CCOwnedResourceFreeFn owner_free);
+int cc_symbols_lookup_ufcs_callable(CCSymbolTable* t, const char* pattern, const void** out_fn_ptr);
+size_t cc_symbols_ufcs_count(CCSymbolTable* t);
+const char* cc_symbols_ufcs_pattern(CCSymbolTable* t, size_t idx);
 
 #endif // CC_COMPTIME_SYMBOLS_H
 

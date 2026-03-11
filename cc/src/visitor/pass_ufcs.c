@@ -411,9 +411,11 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
                            CCEditBuffer* eb) {
     if (!root || !ctx || !eb || !eb->src) return 0;
 
+    cc_ufcs_set_symbols(ctx->symbols);
     char* rewritten = NULL;
     size_t rewritten_len = 0;
     int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
+    cc_ufcs_set_symbols(NULL);
     if (r <= 0 || !rewritten) return 0;
 
     /* UFCS does many small same-line transforms. Rather than diff, for now we use a

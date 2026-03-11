@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "ast/ast.h"
+#include "comptime/symbols.h"
 
 // UFCS rewrite: transforms x.method(a, b) -> method(&x, a, b) (with small
 // built-in mappings for std string and stdout helpers). Operates on source text
@@ -27,6 +28,9 @@ int cc_ufcs_rewrite_line_ex(const char* in, char* out, size_t out_cap, int is_aw
 // generates TypeName_method(&recv, ...) for struct types.
 int cc_ufcs_rewrite_line_full(const char* in, char* out, size_t out_cap, 
                               int is_await, int recv_type_is_ptr, const char* recv_type);
+
+/* Provide the active compile-time symbol table for UFCS registry lookups. */
+void cc_ufcs_set_symbols(CCSymbolTable* symbols);
 
 #endif // CC_VISITOR_UFCS_H
 

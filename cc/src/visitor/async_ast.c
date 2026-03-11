@@ -191,6 +191,81 @@ static char* cc__rewrite_idents(const char* s, const char* const* names, const c
     return out;
 }
 
+static char* cc__rewrite_typed_chan_await_expr(const char* expr) {
+    if (!expr) return NULL;
+    const char* s = cc__skip_ws(expr);
+    const char* lpar;
+    size_t name_len, expr_len, rpar;
+    int is_send = 0, is_recv = 0;
+    const char* args;
+    size_t args_len;
+    size_t comma = (size_t)-1;
+    int depth = 0, in_str = 0, in_chr = 0;
+    const char* arg0;
+    const char* arg1;
+    size_t arg0_len, arg1_len;
+    size_t prefix_len;
+    char* out;
+    if (!s) return strdup(expr);
+    lpar = strchr(s, '(');
+    if (!lpar) return strdup(expr);
+    name_len = (size_t)(lpar - s);
+    if (name_len <= 5) return strdup(expr);
+    if (strncmp(s, "CCChanTx_", 9) == 0 && memcmp(lpar - 5, "_send", 5) == 0) {
+        is_send = 1;
+    } else if (strncmp(s, "CCChanRx_", 9) == 0 && memcmp(lpar - 5, "_recv", 5) == 0) {
+        is_recv = 1;
+    }
+    if (!is_send && !is_recv) {
+        return strdup(expr);
+    }
+    expr_len = strlen(s);
+    if (!cc__find_matching_paren(s, expr_len, name_len, &rpar)) return strdup(expr);
+    args = s + name_len + 1;
+    args_len = rpar - (name_len + 1);
+    for (size_t i = 0; i < args_len; i++) {
+        char c = args[i];
+        char c2 = (i + 1 < args_len) ? args[i + 1] : 0;
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '(' || c == '[' || c == '{') { depth++; continue; }
+        if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; continue; }
+        if (c == ',' && depth == 0) { comma = i; break; }
+    }
+    if (comma == (size_t)-1) return strdup(expr);
+    arg0 = args;
+    arg0_len = comma;
+    while (arg0_len > 0 && isspace((unsigned char)arg0[arg0_len - 1])) arg0_len--;
+    while (arg0_len > 0 && isspace((unsigned char)*arg0)) { arg0++; arg0_len--; }
+    arg1 = args + comma + 1;
+    arg1_len = args_len - comma - 1;
+    while (arg1_len > 0 && isspace((unsigned char)arg1[arg1_len - 1])) arg1_len--;
+    while (arg1_len > 0 && isspace((unsigned char)*arg1)) { arg1++; arg1_len--; }
+    prefix_len = (size_t)(s - expr);
+    out = (char*)malloc(prefix_len + arg0_len + arg1_len + 96);
+    if (!out) return NULL;
+    memcpy(out, expr, prefix_len);
+    out[prefix_len] = 0;
+    strcat(out, is_recv ? "cc_channel_recv_task((" : "cc_channel_send_task((");
+    strncat(out, arg0, arg0_len);
+    strcat(out, ").raw, ");
+    if (is_recv) {
+        strncat(out, arg1, arg1_len);
+        strcat(out, ", sizeof(*(");
+        strncat(out, arg1, arg1_len);
+        strcat(out, ")))");
+    } else {
+        strcat(out, "&(");
+        strncat(out, arg1, arg1_len);
+        strcat(out, "), sizeof(");
+        strncat(out, arg1, arg1_len);
+        strcat(out, "))");
+    }
+    return out;
+}
+
 typedef enum {
     ST_SEMI,
     ST_BLOCK,
@@ -1307,7 +1382,13 @@ static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to 
     int cont_state = cc__alloc_state(e);
 
     char* ex = cc__rewrite_idents(task_expr, e->map_names, e->map_repls, e->map_n);
+    char* task_ex = NULL;
     if (!ex) return 0;
+    task_ex = cc__rewrite_typed_chan_await_expr(ex);
+    if (!task_ex) {
+        free(ex);
+        return 0;
+    }
 
     /* Comment preserves original await text (pre-rewrite) for readability. */
     {
@@ -1315,9 +1396,10 @@ static int cc__emit_await(Emit* e, const char* task_expr, const char* assign_to 
         if (!raw) raw = "";
         cc__emit_line_fmt(e, "/* await %s */", raw);
     }
-    cc__emit_line_fmt(e, "__f->__t[%d] = (%s);", t, ex);
+    cc__emit_line_fmt(e, "__f->__t[%d] = (%s);", t, task_ex);
     cc__emit_line_fmt(e, "__f->__st = %d;", poll_state);
     cc__emit_line(e, "return CC_FUTURE_PENDING;");
+    free(task_ex);
     free(ex);
     cc__emit_close_case(e);
 

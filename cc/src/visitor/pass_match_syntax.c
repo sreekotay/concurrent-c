@@ -9,6 +9,85 @@
 #include "visitor/edit_buffer.h"
 #include "visitor/pass_common.h"
 
+static void cc__match_trim_ws(char* s) {
+    size_t n, a = 0, b;
+    if (!s) return;
+    n = strlen(s);
+    while (a < n && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) a++;
+    b = n;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) b--;
+    if (a > 0) memmove(s, s + a, b - a);
+    s[b - a] = '\0';
+}
+
+static int cc__match_has_suffix(const char* s, const char* suffix) {
+    size_t slen, tlen;
+    if (!s || !suffix) return 0;
+    slen = strlen(s);
+    tlen = strlen(suffix);
+    return slen >= tlen && strcmp(s + slen - tlen, suffix) == 0;
+}
+
+static int cc__parse_lowered_match_call(const char* hdr,
+                                        int* out_kind,
+                                        char* ch_expr,
+                                        size_t ch_cap,
+                                        char* arg_expr,
+                                        size_t arg_cap) {
+    const char* lp;
+    const char* rp;
+    char fn_name[160];
+    size_t fn_len;
+    int par = 0, brk = 0, brc = 0, in_str = 0;
+    char quote = 0;
+    const char* comma = NULL;
+    size_t a_len, b_len;
+    if (!hdr || !out_kind || !ch_expr || !arg_expr) return 0;
+    lp = strchr(hdr, '(');
+    rp = lp ? strrchr(hdr, ')') : NULL;
+    if (!lp || !rp || rp <= lp) return 0;
+    fn_len = (size_t)(lp - hdr);
+    if (fn_len >= sizeof(fn_name)) fn_len = sizeof(fn_name) - 1;
+    memcpy(fn_name, hdr, fn_len);
+    fn_name[fn_len] = '\0';
+    cc__match_trim_ws(fn_name);
+    if (strcmp(fn_name, "cc_channel_ufcs_recv") == 0 || cc__match_has_suffix(fn_name, "_recv")) {
+        *out_kind = 1;
+    } else if (strcmp(fn_name, "cc_channel_ufcs_send") == 0 || cc__match_has_suffix(fn_name, "_send")) {
+        *out_kind = 0;
+    } else {
+        return 0;
+    }
+    for (const char* p = lp + 1; p < rp; ++p) {
+        char ch = *p;
+        if (in_str) {
+            if (ch == '\\' && p + 1 < rp) { p++; continue; }
+            if (ch == quote) in_str = 0;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') { in_str = 1; quote = ch; continue; }
+        if (ch == '(') par++;
+        else if (ch == ')') { if (par > 0) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk > 0) brk--; }
+        else if (ch == '{') brc++;
+        else if (ch == '}') { if (brc > 0) brc--; }
+        else if (ch == ',' && par == 0 && brk == 0 && brc == 0) { comma = p; break; }
+    }
+    if (!comma) return 0;
+    a_len = (size_t)(comma - (lp + 1));
+    if (a_len >= ch_cap) a_len = ch_cap - 1;
+    memcpy(ch_expr, lp + 1, a_len);
+    ch_expr[a_len] = '\0';
+    cc__match_trim_ws(ch_expr);
+    b_len = (size_t)(rp - (comma + 1));
+    if (b_len >= arg_cap) b_len = arg_cap - 1;
+    memcpy(arg_expr, comma + 1, b_len);
+    arg_expr[b_len] = '\0';
+    cc__match_trim_ws(arg_expr);
+    return ch_expr[0] && arg_expr[0];
+}
+
 int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             const char* src,
                             size_t n,
@@ -190,7 +269,33 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                             const char* dot = recv ? recv : send;
                             int is_recv = (recv != NULL);
                             int is_send = (send != NULL);
-                            if (!dot || (!is_recv && !is_send)) {
+                            if (dot && (is_recv || is_send)) {
+                                size_t cn = (size_t)(dot - hdr);
+                                while (cn > 0 && (hdr[cn - 1] == ' ' || hdr[cn - 1] == '\t')) cn--;
+                                if (cn >= sizeof(cases[case_n].ch_expr)) cn = sizeof(cases[case_n].ch_expr) - 1;
+                                memcpy(cases[case_n].ch_expr, hdr, cn);
+                                cases[case_n].ch_expr[cn] = 0;
+
+                                const char* lp = strchr(dot, '(');
+                                const char* rp = lp ? strrchr(dot, ')') : NULL;
+                                if (!lp || !rp || rp <= lp) {
+                                    char rel[1024];
+                                    cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
+                                            CC_ERR_SYNTAX, "malformed @match case: '%s'", hdr);
+                                    fprintf(stderr, "  note: missing or mismatched parentheses in .recv() or .send()\n");
+                                    free(out);
+                                    return -1;
+                                }
+                                size_t an = (size_t)(rp - (lp + 1));
+                                if (an >= sizeof(cases[case_n].arg_expr)) an = sizeof(cases[case_n].arg_expr) - 1;
+                                memcpy(cases[case_n].arg_expr, lp + 1, an);
+                                cases[case_n].arg_expr[an] = 0;
+                                cc__match_trim_ws(cases[case_n].ch_expr);
+                                cc__match_trim_ws(cases[case_n].arg_expr);
+                                cases[case_n].kind = is_send ? 0 : 1;
+                            } else if (!cc__parse_lowered_match_call(hdr, &cases[case_n].kind,
+                                                                     cases[case_n].ch_expr, sizeof(cases[case_n].ch_expr),
+                                                                     cases[case_n].arg_expr, sizeof(cases[case_n].arg_expr))) {
                                 char rel[1024];
                                 cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
                                         CC_ERR_SYNTAX, "invalid @match case: '%s'", hdr);
@@ -199,27 +304,6 @@ int cc__rewrite_match_syntax(const CCVisitorCtx* ctx,
                                 free(out);
                                 return -1;
                             }
-                            size_t cn = (size_t)(dot - hdr);
-                            while (cn > 0 && (hdr[cn - 1] == ' ' || hdr[cn - 1] == '\t')) cn--;
-                            if (cn >= sizeof(cases[case_n].ch_expr)) cn = sizeof(cases[case_n].ch_expr) - 1;
-                            memcpy(cases[case_n].ch_expr, hdr, cn);
-                            cases[case_n].ch_expr[cn] = 0;
-
-                            const char* lp = strchr(dot, '(');
-                            const char* rp = lp ? strrchr(dot, ')') : NULL;
-                            if (!lp || !rp || rp <= lp) {
-                                char rel[1024];
-                                cc_pass_error_cat(cc_path_rel_to_repo(input_path, rel, sizeof(rel)), line, col,
-                                        CC_ERR_SYNTAX, "malformed @match case: '%s'", hdr);
-                                fprintf(stderr, "  note: missing or mismatched parentheses in .recv() or .send()\n");
-                                free(out);
-                                return -1;
-                            }
-                            size_t an = (size_t)(rp - (lp + 1));
-                            if (an >= sizeof(cases[case_n].arg_expr)) an = sizeof(cases[case_n].arg_expr) - 1;
-                            memcpy(cases[case_n].arg_expr, lp + 1, an);
-                            cases[case_n].arg_expr[an] = 0;
-                            cases[case_n].kind = is_send ? 0 : 1;
                         }
 
                         case_n++;

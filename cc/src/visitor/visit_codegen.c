@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include "visitor/ufcs.h"
 #include "visitor/pass_strip_markers.h"
@@ -44,6 +45,8 @@
 #define cc__skip_ws_local2 cc_skip_ws
 
 #define cc__is_ident_char_local cc_is_ident_char
+
+static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n);
 
 /* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
@@ -94,6 +97,721 @@ static void cc__cg_sb_append(char** out, size_t* out_len, size_t* out_cap, const
 
 static void cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, const char* s) {
     if (s) cc__cg_sb_append(out, out_len, out_cap, s, strlen(s));
+}
+
+static int cc__find_matching_paren_codegen(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
+    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    for (size_t i = lpar; i < len; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '(') depth++;
+        else if (c == ')') {
+            depth--;
+            if (depth == 0) {
+                *out_rpar = i;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int cc__find_matching_brace_codegen(const char* src, size_t len, size_t lbrace, size_t* out_rbrace) {
+    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    for (size_t i = lbrace; i < len; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '{') depth++;
+        else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+                *out_rbrace = i;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static size_t cc__skip_ws_codegen(const char* src, size_t n, size_t i) {
+    while (i < n && isspace((unsigned char)src[i])) i++;
+    return i;
+}
+
+static int cc__match_keyword_codegen(const char* src, size_t n, size_t pos, const char* kw) {
+    size_t klen = strlen(kw);
+    if (pos + klen > n) return 0;
+    if (memcmp(src + pos, kw, klen) != 0) return 0;
+    if (pos > 0 && (isalnum((unsigned char)src[pos - 1]) || src[pos - 1] == '_')) return 0;
+    if (pos + klen < n && (isalnum((unsigned char)src[pos + klen]) || src[pos + klen] == '_')) return 0;
+    return 1;
+}
+
+static void cc__trim_range_codegen(const char* src, size_t* start, size_t* end) {
+    while (*start < *end && isspace((unsigned char)src[*start])) (*start)++;
+    while (*end > *start && isspace((unsigned char)src[*end - 1])) (*end)--;
+}
+
+static int cc__parse_string_literal_codegen(const char* src, size_t n, size_t* io_pos, char* out, size_t out_sz) {
+    size_t i = *io_pos;
+    size_t out_len = 0;
+    if (i >= n || src[i] != '"') return 0;
+    i++;
+    while (i < n) {
+        char c = src[i++];
+        if (c == '"') {
+            if (out_sz > 0) out[out_len < out_sz ? out_len : out_sz - 1] = '\0';
+            *io_pos = i;
+            return 1;
+        }
+        if (c == '\\' && i < n) {
+            char esc = src[i++];
+            c = esc;
+        }
+        if (out_len + 1 < out_sz) out[out_len] = c;
+        out_len++;
+    }
+    return 0;
+}
+
+static int cc__parse_ident_codegen(const char* src, size_t n, size_t* io_pos, char* out, size_t out_sz) {
+    size_t i = *io_pos;
+    size_t len = 0;
+    if (i >= n || !(isalpha((unsigned char)src[i]) || src[i] == '_')) return 0;
+    while (i < n && (isalnum((unsigned char)src[i]) || src[i] == '_')) {
+        if (len + 1 < out_sz) out[len] = src[i];
+        len++;
+        i++;
+    }
+    if (out_sz > 0) out[len < out_sz ? len : out_sz - 1] = '\0';
+    *io_pos = i;
+    return 1;
+}
+
+typedef struct {
+    void* dl_handle;
+    char obj_path[1024];
+    char dylib_path[1024];
+} CCComptimeDlModule;
+
+/*
+ * Named @comptime UFCS handlers currently execute through a small backend
+ * boundary:
+ *   1. extract a helper translation unit from the original source
+ *   2. build a loadable helper module
+ *   3. resolve the exported wrapper and store it as a callable registration
+ *
+ * On macOS we intentionally use the host C toolchain plus a temporary dylib
+ * here rather than libtcc in-process relocation. That keeps the current bridge
+ * working while the pure libtcc backend remains a separate follow-up.
+ */
+
+static void cc__dl_module_free(void* owner) {
+    CCComptimeDlModule* module = (CCComptimeDlModule*)owner;
+    if (!module) return;
+    if (module->dl_handle) dlclose(module->dl_handle);
+    if (module->obj_path[0]) unlink(module->obj_path);
+    if (module->dylib_path[0]) unlink(module->dylib_path);
+    free(module);
+}
+
+static void cc__dirname_codegen(const char* path, char* out, size_t out_sz) {
+    size_t len = 0;
+    const char* slash;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!path || !path[0]) return;
+    slash = strrchr(path, '/');
+    if (!slash) {
+        strncpy(out, ".", out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    len = (size_t)(slash - path);
+    if (len == 0) len = 1;
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, path, len);
+    out[len] = '\0';
+}
+
+static int cc__file_exists_codegen(const char* path) {
+    return path && path[0] && access(path, F_OK) == 0;
+}
+
+static void cc__dirname_inplace_codegen(char* path) {
+    size_t len;
+    char* slash;
+    if (!path) return;
+    len = strlen(path);
+    while (len > 0 && path[len - 1] == '/') {
+        path[len - 1] = '\0';
+        len--;
+    }
+    if (len == 0) return;
+    slash = strrchr(path, '/');
+    if (!slash) {
+        strcpy(path, ".");
+        return;
+    }
+    if (slash == path) {
+        path[1] = '\0';
+        return;
+    }
+    *slash = '\0';
+}
+
+static int cc__find_repo_root_codegen(const char* input_path, char* out, size_t out_sz) {
+    char dir[1024];
+    if (!input_path || !out || out_sz == 0) return 0;
+    cc__dirname_codegen(input_path, dir, sizeof(dir));
+    for (int depth = 0; depth < 20 && dir[0]; ++depth) {
+        char marker[1200];
+        size_t len = strlen(dir);
+        snprintf(marker, sizeof(marker), "%s/cc/src/cc_main.c", dir);
+        if (cc__file_exists_codegen(marker)) {
+            strncpy(out, dir, out_sz - 1);
+            out[out_sz - 1] = '\0';
+            return 1;
+        }
+        if (strcmp(dir, "/") == 0 || len == 0) break;
+        cc__dirname_inplace_codegen(dir);
+    }
+    return 0;
+}
+
+static int cc__chunk_contains_at_codegen(const char* src, size_t start, size_t end) {
+    if (!src || end <= start) return 0;
+    for (size_t i = start; i < end; ++i) {
+        if (src[i] == '@') return 1;
+    }
+    return 0;
+}
+
+static char* cc__build_comptime_tu_from_preprocessed(const char* src,
+                                                     size_t n,
+                                                     const char* repo_root,
+                                                     const char* extra_defs,
+                                                     const char* entry_name,
+                                                     const char* callable_name,
+                                                     int include_top_level_defs) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int line_start = 1;
+    if (!src || !entry_name || !callable_name) return NULL;
+    if (repo_root && repo_root[0]) {
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, repo_root);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "/cc/include/ccc/cc_ufcs.cch\"\n");
+    }
+    while (i < n) {
+        if (line_start && src[i] == '#') {
+            size_t line_end = i;
+            while (line_end < n && src[line_end] != '\n') line_end++;
+            if (strncmp(src + i, "#line", 5) == 0 ||
+                strncmp(src + i, "#include <ccc/", strlen("#include <ccc/")) == 0 ||
+                strncmp(src + i, "#include \"ccc/", strlen("#include \"ccc/")) == 0) {
+                /* Prepend stable absolute stdlib includes above and skip source-local CC includes. */
+            } else {
+                cc__cg_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+            }
+            cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+            i = (line_end < n) ? line_end + 1 : line_end;
+            line_start = 1;
+            continue;
+        }
+        if (isspace((unsigned char)src[i])) {
+            line_start = (src[i] == '\n');
+            i++;
+            continue;
+        }
+        if (!include_top_level_defs) {
+            while (i < n && src[i] != '\n') i++;
+            line_start = 1;
+            continue;
+        }
+        {
+            size_t start = i;
+            size_t j = i;
+            int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+            int saw_top_paren_close = 0;
+            for (; j < n; ++j) {
+                char c = src[j];
+                char c2 = (j + 1 < n) ? src[j + 1] : 0;
+                if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+                if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; j++; } continue; }
+                if (in_str) { if (c == '\\' && c2) { j++; continue; } if (c == '"') in_str = 0; continue; }
+                if (in_chr) { if (c == '\\' && c2) { j++; continue; } if (c == '\'') in_chr = 0; continue; }
+                if (c == '/' && c2 == '/') { in_lc = 1; j++; continue; }
+                if (c == '/' && c2 == '*') { in_bc = 1; j++; continue; }
+                if (c == '"') { in_str = 1; continue; }
+                if (c == '\'') { in_chr = 1; continue; }
+                if (c == '(') { depth++; continue; }
+                if (c == ')') {
+                    if (depth > 0) depth--;
+                    if (depth == 0) saw_top_paren_close = 1;
+                    continue;
+                }
+                if (c == '{' && depth == 0) {
+                    size_t body_r = 0;
+                    if (!cc__find_matching_brace_codegen(src, n, j, &body_r)) {
+                        free(out);
+                        return NULL;
+                    }
+                    if (!saw_top_paren_close) {
+                        j = body_r;
+                        continue;
+                    }
+                    if (!cc__chunk_contains_at_codegen(src, start, body_r + 1)) {
+                        cc__cg_sb_append(&out, &out_len, &out_cap, src + start, body_r + 1 - start);
+                        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                    }
+                    j = body_r;
+                    break;
+                }
+                if (c == ';' && depth == 0) {
+                    if (!cc__chunk_contains_at_codegen(src, start, j + 1)) {
+                        cc__cg_sb_append(&out, &out_len, &out_cap, src + start, j + 1 - start);
+                        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                    }
+                    break;
+                }
+            }
+            i = (j < n) ? (j + 1) : j;
+            line_start = 1;
+        }
+    }
+    if (extra_defs && extra_defs[0]) {
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, extra_defs);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+    }
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\nCCSlice ");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, entry_name);
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap,
+                          "(CCSlice method, CCSliceArray argv, CCArena *arena) {\n    return ");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, callable_name);
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(method, argv, arena);\n}\n");
+    return out;
+}
+
+static int cc__format_host_comptime_compile_cmd(char* out,
+                                                size_t out_sz,
+                                                const char* repo_root,
+                                                const char* input_dir,
+                                                const char* dylib_path,
+                                                const char* source_path) {
+    if (!out || out_sz == 0 || !dylib_path || !source_path) return -1;
+#ifdef __APPLE__
+    if (repo_root && repo_root[0]) {
+        return snprintf(out, out_sz,
+                        "cc -dynamiclib -undefined dynamic_lookup -I\"%s/cc/include\" -I\"%s/out/include\" -o \"%s\" \"%s\"",
+                        repo_root, repo_root, dylib_path, source_path) >= (int)out_sz ? -1 : 0;
+    }
+    if (input_dir && input_dir[0]) {
+        return snprintf(out, out_sz,
+                        "cc -dynamiclib -undefined dynamic_lookup -I\"%s\" -o \"%s\" \"%s\"",
+                        input_dir, dylib_path, source_path) >= (int)out_sz ? -1 : 0;
+    }
+    return snprintf(out, out_sz,
+                    "cc -dynamiclib -undefined dynamic_lookup -o \"%s\" \"%s\"",
+                    dylib_path, source_path) >= (int)out_sz ? -1 : 0;
+#else
+    if (repo_root && repo_root[0]) {
+        return snprintf(out, out_sz,
+                        "cc -shared -fPIC -I\"%s/cc/include\" -I\"%s/out/include\" -o \"%s\" \"%s\"",
+                        repo_root, repo_root, dylib_path, source_path) >= (int)out_sz ? -1 : 0;
+    }
+    if (input_dir && input_dir[0]) {
+        return snprintf(out, out_sz,
+                        "cc -shared -fPIC -I\"%s\" -o \"%s\" \"%s\"",
+                        input_dir, dylib_path, source_path) >= (int)out_sz ? -1 : 0;
+    }
+    return snprintf(out, out_sz,
+                    "cc -shared -fPIC -o \"%s\" \"%s\"",
+                    dylib_path, source_path) >= (int)out_sz ? -1 : 0;
+#endif
+}
+
+static char* cc__build_lambda_handler_definition_codegen(const char* src,
+                                                         size_t n,
+                                                         size_t handler_s,
+                                                         size_t handler_e,
+                                                         const char* lambda_name) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t lpar = 0, rpar = 0, body_s = 0, body_e = handler_e;
+    char params[3][64];
+    const char* param_types[3] = { "CCSlice", "CCSliceArray", "CCArena *" };
+    int param_count = 0;
+    if (!src || !lambda_name || handler_s >= handler_e || handler_e > n) return NULL;
+    cc__trim_range_codegen(src, &handler_s, &handler_e);
+    if (handler_s >= handler_e || src[handler_s] != '(') return NULL;
+    lpar = handler_s;
+    if (!cc__find_matching_paren_codegen(src, handler_e, lpar, &rpar)) return NULL;
+    {
+        size_t p = lpar + 1;
+        while (p < rpar) {
+            p = cc__skip_ws_codegen(src, rpar, p);
+            if (p >= rpar) break;
+            if (param_count >= 3 || !cc__parse_ident_codegen(src, rpar, &p, params[param_count], sizeof(params[param_count]))) {
+                return NULL;
+            }
+            param_count++;
+            p = cc__skip_ws_codegen(src, rpar, p);
+            if (p < rpar) {
+                if (src[p] != ',') return NULL;
+                p++;
+            }
+        }
+    }
+    if (param_count != 3) return NULL;
+    body_s = cc__skip_ws_codegen(src, handler_e, rpar + 1);
+    if (body_s + 1 >= handler_e || src[body_s] != '=' || src[body_s + 1] != '>') return NULL;
+    body_s = cc__skip_ws_codegen(src, handler_e, body_s + 2);
+    cc__trim_range_codegen(src, &body_s, &body_e);
+    if (body_s >= body_e) return NULL;
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "static CCSlice ");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, lambda_name);
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(");
+    for (int i = 0; i < 3; ++i) {
+        if (i) cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, param_types[i]);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " ");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, params[i]);
+    }
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ") ");
+    if (src[body_s] == '{') {
+        size_t body_r = 0;
+        if (!cc__find_matching_brace_codegen(src, handler_e, body_s, &body_r)) {
+            free(out);
+            return NULL;
+        }
+        cc__cg_sb_append(&out, &out_len, &out_cap, src + body_s, body_r + 1 - body_s);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        return out;
+    }
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "{ return ");
+    cc__cg_sb_append(&out, &out_len, &out_cap, src + body_s, body_e - body_s);
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "; }\n");
+    return out;
+}
+
+static int cc__compile_ufcs_handler_host_backend(const char* input_path,
+                                                 const char* original_src,
+                                                 size_t original_len,
+                                                 const char* symbol_stem,
+                                                 const char* callable_name,
+                                                 const char* extra_defs,
+                                                 int include_top_level_defs,
+                                                 void** out_owner,
+                                                 const void** out_fn_ptr) {
+    char* blanked_src = NULL;
+    char* pp_src = NULL;
+    char* tu_src = NULL;
+    char err_buf[1024] = {0};
+    char entry_name[256];
+    char input_dir[1024];
+    char repo_root[1024];
+    char tmp_base[] = "/tmp/cc_comptime_ufcs_XXXXXX";
+    char compile_cmd[4096];
+    CCComptimeDlModule* module = NULL;
+    int rc = -1;
+    if (!input_path || !original_src || !symbol_stem || !callable_name || !out_owner || !out_fn_ptr) return -1;
+    *out_owner = NULL;
+    *out_fn_ptr = NULL;
+    repo_root[0] = '\0';
+    blanked_src = cc__blank_comptime_blocks_preserve_layout(original_src, original_len);
+    if (!blanked_src) goto done;
+    pp_src = cc_preprocess_to_string_ex(blanked_src, strlen(blanked_src), input_path, 1);
+    if (!pp_src) goto done;
+    snprintf(entry_name, sizeof(entry_name), "__cc_comptime_ufcs_%s", symbol_stem);
+    tu_src = cc__build_comptime_tu_from_preprocessed(pp_src, strlen(pp_src),
+                                                     cc__find_repo_root_codegen(input_path, repo_root, sizeof(repo_root)) ? repo_root : NULL,
+                                                     extra_defs, entry_name, callable_name,
+                                                     include_top_level_defs);
+    if (!tu_src) goto done;
+    cc__dirname_codegen(input_path, input_dir, sizeof(input_dir));
+    {
+        int tmp_fd = mkstemp(tmp_base);
+        if (tmp_fd < 0) goto done;
+        close(tmp_fd);
+    }
+    unlink(tmp_base);
+    module = (CCComptimeDlModule*)calloc(1, sizeof(*module));
+    if (!module) goto done;
+    snprintf(module->obj_path, sizeof(module->obj_path), "%s.c", tmp_base);
+    snprintf(module->dylib_path, sizeof(module->dylib_path), "%s.dylib", tmp_base);
+    {
+        FILE* srcf = fopen(module->obj_path, "w");
+        if (!srcf) {
+            snprintf(err_buf, sizeof(err_buf), "failed to write comptime source");
+            goto done;
+        }
+        fputs(tu_src, srcf);
+        fclose(srcf);
+    }
+    if (cc__format_host_comptime_compile_cmd(compile_cmd, sizeof(compile_cmd),
+                                             repo_root[0] ? repo_root : NULL,
+                                             input_dir[0] ? input_dir : NULL,
+                                             module->dylib_path,
+                                             module->obj_path) != 0) {
+        snprintf(err_buf, sizeof(err_buf), "failed to format host comptime compile command");
+        goto done;
+    }
+    if (system(compile_cmd) != 0) {
+        snprintf(err_buf, sizeof(err_buf), "host comptime compile failed");
+        goto done;
+    }
+    module->dl_handle = dlopen(module->dylib_path, RTLD_NOW | RTLD_LOCAL);
+    if (!module->dl_handle) {
+        snprintf(err_buf, sizeof(err_buf), "dlopen failed: %s", dlerror() ? dlerror() : "unknown error");
+        goto done;
+    }
+    *out_fn_ptr = dlsym(module->dl_handle, entry_name);
+    if (!*out_fn_ptr) {
+        snprintf(err_buf, sizeof(err_buf), "dlsym failed: %s", dlerror() ? dlerror() : "missing symbol");
+        goto done;
+    }
+    *out_owner = module;
+    module = NULL;
+    rc = 0;
+done:
+    if (tu_src && getenv("CC_DEBUG_COMPTIME_UFCS_DUMP")) {
+        FILE* dbg = fopen(getenv("CC_DEBUG_COMPTIME_UFCS_DUMP"), "w");
+        if (dbg) {
+            fputs(tu_src, dbg);
+            fclose(dbg);
+        }
+    }
+    if (rc != 0 && err_buf[0]) {
+        fprintf(stderr, "%s: error: comptime UFCS compile failed for '%s': %s\n",
+                input_path, symbol_stem, err_buf);
+    }
+    if (module) cc__dl_module_free(module);
+    free(blanked_src);
+    free(pp_src);
+    free(tu_src);
+    return rc;
+}
+
+static int cc__compile_named_ufcs_handler(const char* input_path,
+                                          const char* original_src,
+                                          size_t original_len,
+                                          const char* handler_name,
+                                          void** out_owner,
+                                          const void** out_fn_ptr) {
+    return cc__compile_ufcs_handler_host_backend(input_path, original_src, original_len,
+                                                 handler_name, handler_name, NULL, 1,
+                                                 out_owner, out_fn_ptr);
+}
+
+static int cc__compile_lambda_ufcs_handler(const char* input_path,
+                                           const char* original_src,
+                                           size_t original_len,
+                                           size_t handler_s,
+                                           size_t handler_e,
+                                           void** out_owner,
+                                           const void** out_fn_ptr) {
+    char lambda_name[128];
+    char* lambda_def = NULL;
+    int rc = -1;
+    snprintf(lambda_name, sizeof(lambda_name), "__cc_ufcs_lambda_%zu", handler_s);
+    lambda_def = cc__build_lambda_handler_definition_codegen(original_src, original_len,
+                                                            handler_s, handler_e, lambda_name);
+    if (!lambda_def) return -1;
+    rc = cc__compile_ufcs_handler_host_backend(input_path, original_src, original_len,
+                                               lambda_name, lambda_name, lambda_def, 0,
+                                               out_owner, out_fn_ptr);
+    free(lambda_def);
+    return rc;
+}
+
+static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
+                                                   const char* input_path,
+                                                   const char* src,
+                                                   size_t n) {
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!symbols || !src) return 0;
+    for (size_t i = 0; i < n; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) continue;
+        {
+            size_t kw_end = i + 1 + strlen("comptime");
+            size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
+            size_t body_r;
+            if (body_l >= n || src[body_l] != '{') continue;
+            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) continue;
+            for (size_t j = body_l + 1; j < body_r; ++j) {
+                if (!cc__match_keyword_codegen(src, body_r, j, "cc_ufcs_register")) continue;
+                size_t lpar = cc__skip_ws_codegen(src, body_r, j + strlen("cc_ufcs_register"));
+                size_t rpar, p;
+                char pattern[128];
+                char handler[128];
+                size_t handler_s = 0, handler_e = 0;
+                int handler_is_ident = 0;
+                if (lpar >= body_r || src[lpar] != '(') continue;
+                if (!cc__find_matching_paren_codegen(src, body_r, lpar, &rpar)) continue;
+                p = cc__skip_ws_codegen(src, body_r, lpar + 1);
+                if (!cc__parse_string_literal_codegen(src, body_r, &p, pattern, sizeof(pattern))) {
+                    fprintf(stderr, "%s: error: unsupported @comptime cc_ufcs_register pattern form\n",
+                            input_path ? input_path : "<input>");
+                    return -1;
+                }
+                p = cc__skip_ws_codegen(src, body_r, p);
+                if (p >= body_r || src[p] != ',') {
+                    fprintf(stderr, "%s: error: malformed cc_ufcs_register(...) in @comptime block\n",
+                            input_path ? input_path : "<input>");
+                    return -1;
+                }
+                p = cc__skip_ws_codegen(src, body_r, p + 1);
+                handler_s = p;
+                if (cc__parse_ident_codegen(src, body_r, &p, handler, sizeof(handler))) {
+                    handler_is_ident = 1;
+                    handler_e = p;
+                } else {
+                    handler_e = rpar;
+                }
+                if (handler_is_ident) {
+                    void* owner = NULL;
+                    const void* fn_ptr = NULL;
+                    if (cc__compile_named_ufcs_handler(input_path, src, n, handler, &owner, &fn_ptr) != 0) {
+                        fprintf(stderr, "%s: error: unsupported comptime UFCS handler '%s'; expected a plain named function compilable in the comptime subset\n",
+                                input_path ? input_path : "<input>", handler);
+                        return -1;
+                    }
+                    if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
+                        fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
+                                input_path ? input_path : "<input>", pattern);
+                        cc__dl_module_free(owner);
+                        return -1;
+                    }
+                } else {
+                    void* owner = NULL;
+                    const void* fn_ptr = NULL;
+                    cc__trim_range_codegen(src, &handler_s, &handler_e);
+                    if (cc__compile_lambda_ufcs_handler(input_path, src, n, handler_s, handler_e, &owner, &fn_ptr) != 0) {
+                        fprintf(stderr, "%s: error: unsupported comptime UFCS lambda; expected a non-capturing lambda compilable in the comptime subset\n",
+                                input_path ? input_path : "<input>");
+                        return -1;
+                    }
+                    if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
+                        fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
+                                input_path ? input_path : "<input>", pattern);
+                        cc__dl_module_free(owner);
+                        return -1;
+                    }
+                }
+                j = rpar;
+            }
+            i = body_r;
+        }
+    }
+    return 0;
+}
+
+static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
+    char* out = NULL;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src) return NULL;
+    out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, src, n);
+    out[n] = '\0';
+    for (size_t i = 0; i < n; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) continue;
+        {
+            size_t kw_end = i + 1 + strlen("comptime");
+            size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
+            size_t body_r;
+            if (body_l >= n || src[body_l] != '{') continue;
+            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) continue;
+            for (size_t k = i; k <= body_r; ++k) {
+                if (out[k] != '\n') out[k] = ' ';
+            }
+            i = body_r;
+        }
+    }
+    return out;
+}
+
+static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const char* src, size_t n) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!symbols || !reg || !src) return;
+    for (size_t ui = 0; ui < cc_symbols_ufcs_count(symbols); ++ui) {
+        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+        const char* type_name = cc_symbols_ufcs_pattern(symbols, ui);
+        size_t type_len = type_name ? strlen(type_name) : 0;
+        if (!type_len) continue;
+        for (size_t i = 0; i < n; ++i) {
+            char c = src[i];
+            char c2 = (i + 1 < n) ? src[i + 1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+            if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+            if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+            if (c == '"') { in_str = 1; continue; }
+            if (c == '\'') { in_chr = 1; continue; }
+            if (!cc__match_keyword_codegen(src, n, i, type_name)) continue;
+            {
+                size_t p = cc__skip_ws_codegen(src, n, i + type_len);
+                while (p < n && src[p] == '*') p++;
+                p = cc__skip_ws_codegen(src, n, p);
+                if (p < n && (isalpha((unsigned char)src[p]) || src[p] == '_')) {
+                    char var_name[128];
+                    size_t v = p;
+                    size_t vn = 0;
+                    while (v < n && (isalnum((unsigned char)src[v]) || src[v] == '_')) {
+                        if (vn + 1 < sizeof(var_name)) var_name[vn] = src[v];
+                        vn++;
+                        v++;
+                    }
+                    var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
+                    v = cc__skip_ws_codegen(src, n, v);
+                    if (v < n && src[v] == '(') continue; /* function decl, not variable */
+                    cc_type_registry_add_var(reg, var_name, type_name);
+                }
+            }
+            i += type_len ? (type_len - 1) : 0;
+        }
+    }
 }
 
 /* Rewrite @closing(ch) spawn(...) or @closing(ch) { ... } syntax.
@@ -457,6 +1175,31 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* src_ufcs = src_all;
     size_t src_ufcs_len = src_len;
 
+    /* Collect compile-time UFCS registrations from `@comptime { ... }` blocks,
+       then blank those blocks out of the emitted TU while preserving layout so
+       earlier AST spans remain valid. */
+    if (src_ufcs && src_ufcs_len && ctx && ctx->symbols) {
+        if (cc__collect_comptime_ufcs_registrations(ctx->symbols, ctx->input_path, src_ufcs, src_ufcs_len) != 0) {
+            fclose(out);
+            free(src_all);
+            return EINVAL;
+        }
+        if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
+            fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: collected %zu registration(s)\n",
+                    cc_symbols_ufcs_count(ctx->symbols));
+            for (size_t ui = 0; ui < cc_symbols_ufcs_count(ctx->symbols); ++ui) {
+                const char* pat = cc_symbols_ufcs_pattern(ctx->symbols, ui);
+                fprintf(stderr, "  pattern[%zu] = %s\n", ui, pat ? pat : "<null>");
+            }
+        }
+        char* blanked = cc__blank_comptime_blocks_preserve_layout(src_ufcs, src_ufcs_len);
+        if (blanked) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = blanked;
+            src_ufcs_len = src_len;
+        }
+    }
+
     /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
     if (src_ufcs && src_ufcs_len) {
         char* rewritten = cc__rewrite_closing_annotation(src_ufcs, src_ufcs_len);
@@ -547,6 +1290,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        via CCEditBuffer, apply once. Replaces 4 sequential rewrite passes. */
 #ifdef CC_TCC_EXT_AVAILABLE
     if (src_ufcs && root && root->nodes && root->node_count > 0 && ctx->symbols) {
+        cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
         CCEditBuffer eb;
         cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
         
@@ -811,11 +1555,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         if (reg) {
             size_t n_vec = cc_type_registry_vec_count(reg);
             size_t n_map = cc_type_registry_map_count(reg);
+            size_t n_chan = cc_type_registry_channel_count(reg);
             
-            if (n_vec > 0 || n_map > 0) {
+            if (n_vec > 0 || n_map > 0 || n_chan > 0) {
                 fprintf(out, "/* --- CC generic container declarations --- */\n");
                 fprintf(out, "#include <ccc/std/vec.h>\n");
                 fprintf(out, "#include <ccc/std/map.h>\n");
+                fprintf(out, "#include <ccc/cc_channel.cch>\n");
                 /* Vec/Map declarations must be skipped in parser mode where they're
                    already typedef'd to generic placeholders in vec.cch/map.cch */
                 fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -864,6 +1610,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                         }
                         fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
                                 inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                    }
+                }
+
+                for (size_t i = 0; i < n_chan; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
+                    if (inst && inst->type1 && inst->mangled_name) {
+                        fprintf(out, "typedef CCChanTx CCChanTx_%s;\n", inst->mangled_name);
+                        fprintf(out, "typedef CCChanRx CCChanRx_%s;\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanTx_%s_send(tx, value) CC_TYPED_CHAN_SEND((tx), (value))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanRx_%s_recv(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanTx_%s_try_send(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), (value))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanRx_%s_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanTx_%s_close(tx) CC_TYPED_CHAN_CLOSE((tx))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanRx_%s_close(rx) CC_TYPED_CHAN_CLOSE((rx))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanTx_%s_free(tx) CC_TYPED_CHAN_FREE((tx))\n", inst->mangled_name);
+                        fprintf(out, "#define CCChanRx_%s_free(rx) CC_TYPED_CHAN_FREE((rx))\n", inst->mangled_name);
                     }
                 }
                 

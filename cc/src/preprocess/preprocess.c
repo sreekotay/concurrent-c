@@ -745,10 +745,16 @@ static size_t cc__scan_back_to_delim(const char* s, size_t from) {
     return i;
 }
 
+static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz);
+
 /* Rewrite channel handle types (surface syntax) into runtime handle structs.
 
    - `T[~ ... >] name` -> `CCChanTx name`
    - `T[~ ... <] name` -> `CCChanRx name`
+
+   Side effect: registers the element type as a typed wrapper family such as
+   `CCChanTx_int_send(tx, v)` / `CCChanRx_int_recv(rx, &out)` so UFCS lowering
+   and emitted declarations can target a canonical typed layer.
 
    Requires explicit direction ('>' or '<'). Hard errors otherwise.
    Text-based: not valid C, so TCC must see rewritten code. */
@@ -1230,6 +1236,20 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 }
 
                 size_t ty_start = cc__scan_back_to_delim(src, i);
+                char elem_ty[256];
+                size_t elem_len = i - ty_start;
+                if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
+                memcpy(elem_ty, src + ty_start, elem_len);
+                elem_ty[elem_len] = 0;
+                while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) {
+                    elem_ty[--elem_len] = 0;
+                }
+                char mangled_elem[128];
+                char typed_handle[160];
+                cc__mangle_type_name(elem_ty, elem_len, mangled_elem, sizeof(mangled_elem));
+                snprintf(typed_handle, sizeof(typed_handle), "%s_%s",
+                         saw_gt ? "CCChanTx" : "CCChanRx", mangled_elem);
+
                 if (ty_start < last_emit) {
                     /* overlapping/odd context; just ignore and continue */
                 } else {
@@ -1237,6 +1257,28 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     /* Emit CCChanTx for send, CCChanRx for recv (ordered is a flag, not a type) */
                     cc_sb_append_cstr(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
                     last_emit = k + 1; /* skip past ']' */
+                }
+
+                {
+                    CCTypeRegistry* reg = cc_type_registry_get_global();
+                    if (reg && mangled_elem[0]) {
+                        cc_type_registry_add_channel(reg, elem_ty, mangled_elem);
+
+                        size_t v = k + 1;
+                        while (v < n && (src[v] == ' ' || src[v] == '\t')) v++;
+                        if (v < n && cc_is_ident_start(src[v])) {
+                            size_t var_start = v;
+                            while (v < n && cc_is_ident_char(src[v])) v++;
+                            if (v > var_start) {
+                                char var_name[128];
+                                size_t vn_len = v - var_start;
+                                if (vn_len >= sizeof(var_name)) vn_len = sizeof(var_name) - 1;
+                                memcpy(var_name, src + var_start, vn_len);
+                                var_name[vn_len] = 0;
+                                cc_type_registry_add_var(reg, var_name, typed_handle);
+                            }
+                        }
+                    }
                 }
 
                 /* advance to k+1 */
@@ -4287,11 +4329,13 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     {
         size_t n_vec = cc_type_registry_vec_count(reg);
         size_t n_map = cc_type_registry_map_count(reg);
+        size_t n_chan = cc_type_registry_channel_count(reg);
         
-        if (n_vec > 0 || n_map > 0) {
+        if (n_vec > 0 || n_map > 0 || n_chan > 0) {
             fprintf(out, "/* --- CC generic container declarations --- */\n");
             fprintf(out, "#include <ccc/std/vec.cch>\n");
             fprintf(out, "#include <ccc/std/map.cch>\n");
+            fprintf(out, "#include <ccc/cc_channel.cch>\n");
             /* Vec/Map declarations must be skipped in parser mode where they're
                already typedef'd to generic placeholders in vec.cch/map.cch */
             fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -4346,6 +4390,22 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
                     }
                     fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
                             inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                }
+            }
+
+            for (size_t i = 0; i < n_chan; i++) {
+                const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
+                if (inst && inst->type1 && inst->mangled_name) {
+                    fprintf(out, "typedef CCChanTx CCChanTx_%s;\n", inst->mangled_name);
+                    fprintf(out, "typedef CCChanRx CCChanRx_%s;\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_send(tx, value) CC_TYPED_CHAN_SEND((tx), (value))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_recv(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_try_send(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), (value))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_close(tx) CC_TYPED_CHAN_CLOSE((tx))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_close(rx) CC_TYPED_CHAN_CLOSE((rx))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_free(tx) CC_TYPED_CHAN_FREE((tx))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_free(rx) CC_TYPED_CHAN_FREE((rx))\n", inst->mangled_name);
                 }
             }
             
@@ -4486,11 +4546,13 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     {
         size_t n_vec = cc_type_registry_vec_count(reg);
         size_t n_map = cc_type_registry_map_count(reg);
+        size_t n_chan = cc_type_registry_channel_count(reg);
         
-        if (n_vec > 0 || n_map > 0) {
+        if (n_vec > 0 || n_map > 0 || n_chan > 0) {
             fprintf(out, "/* --- CC generic container declarations --- */\n");
             fprintf(out, "#include <ccc/std/vec.cch>\n");
             fprintf(out, "#include <ccc/std/map.cch>\n");
+            fprintf(out, "#include <ccc/cc_channel.cch>\n");
             fprintf(out, "#ifndef CC_PARSER_MODE\n");
             
             /* Emit Vec declarations */
@@ -4532,6 +4594,22 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     }
                     fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
                             inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                }
+            }
+
+            for (size_t i = 0; i < n_chan; i++) {
+                const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
+                if (inst && inst->type1 && inst->mangled_name) {
+                    fprintf(out, "typedef CCChanTx CCChanTx_%s;\n", inst->mangled_name);
+                    fprintf(out, "typedef CCChanRx CCChanRx_%s;\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_send(tx, value) CC_TYPED_CHAN_SEND((tx), (value))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_recv(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_try_send(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), (value))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_close(tx) CC_TYPED_CHAN_CLOSE((tx))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_close(rx) CC_TYPED_CHAN_CLOSE((rx))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanTx_%s_free(tx) CC_TYPED_CHAN_FREE((tx))\n", inst->mangled_name);
+                    fprintf(out, "#define CCChanRx_%s_free(rx) CC_TYPED_CHAN_FREE((rx))\n", inst->mangled_name);
                 }
             }
             

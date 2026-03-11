@@ -132,6 +132,8 @@ TCC (Tiny C Compiler) is used internally by `ccc` for fast preprocessing and par
 
 **Recommendation:** Use Clang or GCC on macOS. TCC-as-final-compiler is only for Linux or niche use cases.
 
+**Current comptime note:** Named `@comptime` UFCS handlers on macOS currently execute through a temporary host-compiler bridge that builds a small dylib and loads it during compilation. This is an implementation staging step, not the long-term pure in-process `libtcc` backend.
+
 ### Build Flavors
 
 Build flavor flags control optimization and debugging:

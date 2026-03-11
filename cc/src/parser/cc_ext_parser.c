@@ -619,7 +619,7 @@ static int cc_try_thread_spawn(void) {
 }
 
 /*
- * Parse @ statements: @arena, @arena_init, @defer, @nursery, @match, @with_deadline
+ * Parse @ statements: @arena, @arena_init, @defer, @nursery, @match, @with_deadline, @comptime
  * Returns:
  *   0 = not handled (tok unchanged)
  *   1 = handled, caller should go to next statement
@@ -644,7 +644,8 @@ static int cc_try_cc_at_stmt(void) {
         strcmp(cc_at, "nursery") != 0 &&
         strcmp(cc_at, "defer") != 0 &&
         strcmp(cc_at, "match") != 0 &&
-        strcmp(cc_at, "with_deadline") != 0) {
+        strcmp(cc_at, "with_deadline") != 0 &&
+        strcmp(cc_at, "comptime") != 0) {
         tcc_error("unknown '@%s' block", cc_at);
         return 0;
     }
@@ -805,6 +806,19 @@ static int cc_try_cc_at_stmt(void) {
         
         cc_ast_record_end();
         return 1; /* handled as a full block now */
+    }
+
+    /* --- @comptime { ... } --- */
+    if (strcmp(cc_at, "comptime") == 0) {
+        cc_ast_record_start(CC_AST_NODE_STMT);
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("comptime");
+        }
+        next(); /* consume 'comptime' */
+        if (tok != '{')
+            tcc_error("expected '{' after @comptime");
+        return 2; /* handled, fall through to block */
     }
     
     /* --- @with_deadline(expr) { ... } --- */

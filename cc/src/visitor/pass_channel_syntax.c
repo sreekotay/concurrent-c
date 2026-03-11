@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/type_registry.h"
 #include "util/path.h"
 #include "util/text.h"
 #include "visitor/pass_common.h"
@@ -23,6 +24,57 @@
 
 /* Global counter for unique owned channel IDs */
 static int g_owned_channel_id = 0;
+
+typedef struct {
+    const char* short_name;
+    const char* cc_name;
+} CCChannelTypeAlias;
+
+static const CCChannelTypeAlias cc__channel_type_aliases[] = {
+    { "IoError", "CCIoError" },
+    { "Error", "CCError" },
+    { "Arena", "CCArena" },
+    { "File", "CCFile" },
+    { "String", "CCString" },
+    { "Slice", "CCSlice" },
+    { NULL, NULL }
+};
+
+static void cc__normalize_channel_type_alias(char* name) {
+    if (!name || !name[0]) return;
+    for (int i = 0; cc__channel_type_aliases[i].short_name; i++) {
+        if (strcmp(name, cc__channel_type_aliases[i].short_name) == 0) {
+            strcpy(name, cc__channel_type_aliases[i].cc_name);
+            return;
+        }
+    }
+}
+
+static void cc__mangle_channel_type_name(const char* src, size_t len, char* out, size_t out_sz) {
+    if (!src || !len || !out || out_sz == 0) {
+        if (out && out_sz > 0) out[0] = 0;
+        return;
+    }
+    while (len > 0 && (*src == ' ' || *src == '\t')) { src++; len--; }
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
+
+    size_t j = 0;
+    for (size_t i = 0; i < len && j < out_sz - 1; i++) {
+        char c = src[i];
+        if (c == ' ' || c == '\t') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else if (c == '*') {
+            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
+        } else if (c == '[' || c == ']' || c == '<' || c == '>' || c == ',') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else {
+            out[j++] = c;
+        }
+    }
+    while (j > 0 && out[j - 1] == '_') j--;
+    out[j] = 0;
+    cc__normalize_channel_type_alias(out);
+}
 
 /* Helper: wrap a closure with typed parameter for CCClosure1.
    v3 syntax: (Type param) => [captures] body
@@ -820,14 +872,14 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
+                             "/* channel_pair */ cc_channel_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ do { CCChan* __cc_ch = cc_chan_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
+                             "/* channel_pair */ do { CCChan* __cc_ch = cc_channel_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
                              "if (!__cc_ch) { fprintf(stderr, \"CC: channel_pair failed\\n\"); abort(); } } while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
@@ -1148,12 +1200,49 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                 }
                 while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
 
+                char elem_ty[256];
+                size_t elem_len = i - ty_start;
+                if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
+                memcpy(elem_ty, src + ty_start, elem_len);
+                elem_ty[elem_len] = 0;
+                while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) {
+                    elem_ty[--elem_len] = 0;
+                }
+                char mangled_elem[128];
+                char typed_handle[160];
+                cc__mangle_channel_type_name(elem_ty, elem_len, mangled_elem, sizeof(mangled_elem));
+                snprintf(typed_handle, sizeof(typed_handle), "%s_%s",
+                         saw_gt ? "CCChanTx" : "CCChanRx", mangled_elem);
+
                 if (ty_start >= last_emit) {
                     cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
                     /* Emit CCChanTx for send, CCChanRx for recv (ordered is a flag, not a type) */
                     cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
                     last_emit = k + 1;
                 }
+
+                {
+                    CCTypeRegistry* reg = cc_type_registry_get_global();
+                    if (reg && mangled_elem[0]) {
+                        cc_type_registry_add_channel(reg, elem_ty, mangled_elem);
+
+                        size_t v = k + 1;
+                        while (v < n && (src[v] == ' ' || src[v] == '\t')) v++;
+                        if (v < n && cc_is_ident_start(src[v])) {
+                            size_t var_start = v;
+                            while (v < n && cc_is_ident_char(src[v])) v++;
+                            if (v > var_start) {
+                                char var_name[128];
+                                size_t vn_len = v - var_start;
+                                if (vn_len >= sizeof(var_name)) vn_len = sizeof(var_name) - 1;
+                                memcpy(var_name, src + var_start, vn_len);
+                                var_name[vn_len] = 0;
+                                cc_type_registry_add_var(reg, var_name, typed_handle);
+                            }
+                        }
+                    }
+                }
+
                 while (i < k + 1) { if (src[i] == '\n') { line++; col = 1; } else col++; i++; }
                 continue;
             }
