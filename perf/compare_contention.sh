@@ -33,8 +33,8 @@ echo "--- Running Concurrent-C ---"
 echo ""
 
 # 4. Extract results
-PTHREAD_INTF=$(grep "Interference" pthread_out.txt | tail -n 1 | awk '{print $2}' | tr -d '%')
-CC_INTF=$(grep "Interference" cc_out.txt | tail -n 1 | awk '{print $2}' | tr -d '%')
+PTHREAD_INTF=$(grep "^Interference:" pthread_out.txt | awk '{print $2}' | tr -d '%')
+CC_INTF=$(grep "^Interference:" cc_out.txt | awk '{print $2}' | tr -d '%')
 
 echo "DATA_PTHREAD_INTERFERENCE: $PTHREAD_INTF"
 echo "DATA_CC_INTERFERENCE: $CC_INTF"
@@ -55,4 +55,4 @@ else
 fi
 echo "================================================================="
 
-rm pthread_out.txt cc_out.txt
+rm -f pthread_out.txt cc_out.txt

@@ -842,11 +842,22 @@ static size_t sq_drain(void) {
 /* Per-worker local queue for spawn locality */
 #define LOCAL_QUEUE_SIZE 256
 /* Depth threshold above which new spawns are routed to other workers' inboxes
- * for parallel execution.  Must be large enough to absorb nursery-internal
- * fibers (typically 1-3 items) plus the first user-spawned fiber, so that
- * small P/C pairs stay co-located.  Must be small enough to trigger
- * distribution for bulk-spawn workloads (e.g. pigz's 16-task pattern). */
-#define CC_SPAWN_LOCAL_DEPTH_LIMIT 4
+ * for parallel execution.  Value 1 means only the very first spawn goes into
+ * the spawning worker's own local queue; every subsequent spawn from the same
+ * nursery is routed to a different worker's inbox immediately.
+ *
+ * This ensures independent channel pairs land on separate workers from the
+ * start, regardless of spawn order.  Co-location within a pair is established
+ * by the direct-handoff hint: when the producer (on worker A) first sends to
+ * the channel it wakes the consumer with a hint for worker A, pulling the
+ * consumer onto A's local queue — so the pair runs co-operatively on A for
+ * all subsequent iterations at zero cross-worker cost.
+ *
+ * Raising this value above 1 causes multiple producers (or multiple consumers)
+ * from independent pairs to share the spawning worker, and the direct-handoff
+ * then pulls all their partners onto the same worker too — serialising what
+ * should be parallel work. */
+#define CC_SPAWN_LOCAL_DEPTH_LIMIT 2
 /* Per-worker inbox for cross-thread spawns.
  * If this fills, we fall back to the global queue and optionally warn. */
 #define INBOX_QUEUE_SIZE 1024
@@ -945,6 +956,13 @@ static int iq_peek(inbox_queue* q) {
     return head < tail;
 }
 
+/* Number of items currently in the inbox (approximate; used for spawn pairing). */
+static inline size_t iq_depth(inbox_queue* q) {
+    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
+    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+    return (tail > head) ? (tail - head) : 0;
+}
+
 static fiber_task* iq_pop(inbox_queue* q) {
     for (int retry = 0; retry < 1000; retry++) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
@@ -982,6 +1000,12 @@ typedef struct {
     size_t run_queue_count;         /* Number of global queue shards */
     local_queue* local_queues;      /* Per-worker local queues */
     inbox_queue* inbox_queues;      /* Per-worker MPMC inbox queues */
+    /* Per-worker single-slot "run next" for channel-partner direct handoff.
+     * Written only by the CURRENT worker (preferred == tls_worker_id).
+     * Read/cleared only by the owning worker.  Never stolen.
+     * This shims Go's runnext concept: the most-recently-unparked channel
+     * partner runs first, and nothing can race with it. */
+    fiber_task* _Atomic* runnext;
     fiber_task* _Atomic free_list;
     
     wake_primitive wake_prim;           /* Global wake (shutdown, global-queue, join) */
@@ -2253,6 +2277,15 @@ static void cc__fiber_check_deadlock(void) {
 static __thread fiber_task* tls_current_fiber = NULL;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
 
+/* Spawn-pair grouping: when a base worker routes a fiber to a remote inbox,
+ * remember the target so the NEXT inbox-bound spawn from the same calling
+ * context can co-locate with it (if and only if the inbox still has exactly
+ * that one pending fiber).  Grouping two consecutive spawns to the same
+ * inbox ensures a producer/consumer pair starts on the same worker without
+ * requiring the developer to order spawns or add scheduler hints.
+ * Reset to -1 after each pairing so triples never form. */
+static __thread int tls_spawn_pair_target = -1;
+
 /* Pre-assign the calling fiber to a specific worker before its first park.
  * Pool runners call this once so each parks with a distinct last_worker_id.
  * Combined with the corrected saturation bypass (only fires when sleeping==0),
@@ -2264,6 +2297,25 @@ void cc__fiber_set_worker_affinity(int worker_id) {
     size_t n = g_sched.num_workers;
     if (n == 0) return;
     f->last_worker_id = worker_id % (int)n;
+}
+
+/* Return the current scheduler base-worker ID, or -1 if the calling thread
+ * is not a base worker (e.g. a temp/timer worker or a non-scheduler thread).
+ * Used by channel wakeup code to implement direct-handoff routing. */
+int cc__sched_current_worker_id(void) {
+    return tls_worker_id;
+}
+
+/* Set a parked fiber's routing hint to worker_id so that its next unpark
+ * lands on that worker's local queue rather than a remote inbox.  Must only
+ * be called while the fiber is parked (not running on any thread).
+ * worker_id is clamped to valid base-worker range; -1 is a no-op. */
+void cc__fiber_hint_channel_partner(void* fiber, int worker_id) {
+    fiber_task* f = (fiber_task*)fiber;
+    if (!f) return;
+    size_t n = g_sched.num_workers;
+    if (n == 0 || worker_id < 0 || (size_t)worker_id >= n) return;
+    f->last_worker_id = worker_id;
 }
 
 /* Count of workers currently executing a long-running CPU-bound pool task via
@@ -3051,6 +3103,22 @@ static inline void replacement_record_global_hit(fiber_task* f) {
  * This allows the heartbeat (or any cc_sleep_ms sleeper) to run even when
  * all base+replacement workers are OS-blocked by raw syscalls. */
 static _Atomic uint32_t g_timer_worker_active = 0;  /* 0=none, 1=one running */
+
+/* Scan all worker inboxes and local queues with a random start to find
+ * a runnable fiber.  Used by replacement_worker at every work-finding
+ * point so inbox-routed fibers (e.g. timer wakeups) are always found
+ * before the global queue. */
+static inline fiber_task* replacement_scan_inboxes(uint64_t* rng) {
+    if (g_sched.num_workers == 0) return NULL;
+    size_t start = xorshift64(rng) % g_sched.num_workers;
+    for (size_t s = 0; s < g_sched.num_workers; s++) {
+        size_t w = (start + s) % g_sched.num_workers;
+        fiber_task* f = iq_pop(&g_sched.inbox_queues[w]);
+        if (!f) f = lq_steal(&g_sched.local_queues[w]);
+        if (f) return f;
+    }
+    return NULL;
+}
 static void* timer_service_worker(void* arg) {
     (void)arg;
     tls_sched_worker_ctx = 1;
@@ -3097,26 +3165,8 @@ static void* replacement_worker(void* arg) {
     const int gap_stats = cc_worker_gap_stats_enabled();
 
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
-        fiber_task* f = NULL;
+        fiber_task* f = replacement_scan_inboxes(&rng_state);
         int nohint_fast_idle = 0;
-        /* Replacement workers primarily recover untended local/inbox work.
-         * Scan ALL worker inboxes before touching the global queue so that
-         * inbox-routed fibers (e.g. timer wakeups from sq_drain_sysmon) are
-         * always found ahead of bulk-spawned global queue items.  Without the
-         * full scan, a single random-victim steal gives only 1/N hit rate and
-         * the replacement immediately falls through to global, grabbing a
-         * kidnapper and blocking for seconds before trying inboxes again.
-         *
-         * Use a random start offset to avoid all replacements hammering the
-         * same worker's inbox simultaneously. */
-        if (g_sched.num_workers > 0) {
-            size_t start = xorshift64(&rng_state) % g_sched.num_workers;
-            for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
-                size_t w = (start + s) % g_sched.num_workers;
-                f = iq_pop(&g_sched.inbox_queues[w]);
-                if (!f) f = lq_steal(&g_sched.local_queues[w]);
-            }
-        }
         if (!f) {
             int has_hint = sched_global_has_hint_any();
             int allow_probe = ((global_probe_gate++ & 3u) == 0u);
@@ -3159,14 +3209,7 @@ static void* replacement_worker(void* arg) {
                 for (int spin = 0; spin < 64; spin++) {
                     f = NULL;
                     int from_global_probe = 0;
-                    if (g_sched.num_workers > 0) {
-                        size_t start = xorshift64(&rng_state) % g_sched.num_workers;
-                        for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
-                            size_t w = (start + s) % g_sched.num_workers;
-                            f = iq_pop(&g_sched.inbox_queues[w]);
-                            if (!f) f = lq_steal(&g_sched.local_queues[w]);
-                        }
-                    }
+                    f = replacement_scan_inboxes(&rng_state);
                     if (!f) {
                         if ((spin & 7) != 0) {
                             if (gap_stats) {
@@ -3207,16 +3250,8 @@ static void* replacement_worker(void* arg) {
             /* Short sleep - wake primitive wakes us when work arrives */
             atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
             /* Re-check queue after incrementing sleeping to close race window */
-            f = NULL;
+            f = replacement_scan_inboxes(&rng_state);
             int from_global_probe = 0;
-            if (g_sched.num_workers > 0) {
-                size_t start = xorshift64(&rng_state) % g_sched.num_workers;
-                for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
-                    size_t w = (start + s) % g_sched.num_workers;
-                    f = iq_pop(&g_sched.inbox_queues[w]);
-                    if (!f) f = lq_steal(&g_sched.local_queues[w]);
-                }
-            }
             if (!f) {
                 int has_hint = sched_global_has_hint_any();
                 int allow_probe = ((global_probe_gate++ & 3u) == 0u);
@@ -3281,7 +3316,16 @@ static int stall_debug_enabled(void) {
     static int val = -1;
     if (val == -1) {
         const char* v = getenv("CC_DEBUG_STALL");
-        val = (v && v[0] == '1') ? 1 : 0;  /* default OFF, CC_DEBUG_STALL=1 enables */
+        val = (v && v[0] == '1') ? 1 : 0;
+    }
+    return val;
+}
+
+static int sysmon_debug_enabled(void) {
+    static int val = -1;
+    if (val == -1) {
+        const char* v = getenv("CC_DEBUG_SYSMON");
+        val = (v && v[0] == '1') ? 1 : 0;
     }
     return val;
 }
@@ -3305,7 +3349,6 @@ static size_t sq_drain_sysmon(void) {
 
     struct timespec now_ts;
     clock_gettime(CLOCK_MONOTONIC, &now_ts);
-    uint64_t now_cyc = rdtsc();
 
     /* Collect all expired fibers under the lock, then route them outside it. */
     fiber_task* list = NULL;
@@ -3383,8 +3426,19 @@ static size_t sq_drain_sysmon(void) {
 
         f = next_f;
     }
-    (void)now_cyc;
     return woken;
+}
+
+/* Spawn a detached OS thread running fn(NULL).
+ * Returns 0 on success, errno on failure. */
+static int spawn_detached_worker(void* (*fn)(void*)) {
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&tid, &attr, fn, NULL);
+    pthread_attr_destroy(&attr);
+    return rc;
 }
 
 static void* sysmon_main(void* arg) {
@@ -3416,18 +3470,12 @@ static void* sysmon_main(void* arg) {
                         wake_one_if_sleeping_unconditional(0, CC_WAKE_REASON_SYSMON_SLEEPQ);
                     }
                 } else {
-                    /* All workers are OS-blocked (kidnapped).  Spawn an emergency
-                     * replacement to drain the inboxes we just filled.  Use a
-                     * separate, longer cooldown so this doesn't interfere with
-                     * the normal orphan-detection path below. */
-                    /* Emergency path: spawn a timer-service worker.
-                     *
-                     * All regular workers are OS-blocked (kidnapped by raw
-                     * syscalls).  Spawn a dedicated inbox-only worker that
-                     * will run the timer-woken fiber and then EXIT — it
-                     * never touches the global queue, so it can't get
-                     * kidnapped.  A single active timer worker suffices
-                     * (g_timer_worker_active flag prevents duplicates). */
+                    /* All regular workers are OS-blocked (kidnapped by raw syscalls).
+                     * Spawn a dedicated inbox-only timer-service worker to drain the
+                     * inboxes we just filled and then exit.  It never touches the
+                     * global queue so it can't itself get kidnapped.  The
+                     * g_timer_worker_active flag ensures at most one is live at a time;
+                     * a longer cooldown keeps it from racing the normal orphan path. */
                     uint64_t now_emerg = rdtsc();
                     uint32_t tw_expected = 0;
                     if ((now_emerg - last_sleepq_emerg_cycles) > (uint64_t)ORPHAN_COOLDOWN_CYCLES * 4 &&
@@ -3437,11 +3485,7 @@ static void* sysmon_main(void* arg) {
                         last_sleepq_emerg_cycles = now_emerg;
                         atomic_fetch_add_explicit(&g_sched.temp_worker_count, 1,
                                                   memory_order_relaxed);
-                        pthread_t tid;
-                        pthread_attr_t attr;
-                        pthread_attr_init(&attr);
-                        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-                        if (pthread_create(&tid, &attr, timer_service_worker, NULL) == 0)
+                        if (spawn_detached_worker(timer_service_worker) == 0)
                             atomic_fetch_add_explicit(&g_sched.promotion_count, 1,
                                                       memory_order_relaxed);
                         else {
@@ -3450,7 +3494,6 @@ static void* sysmon_main(void* arg) {
                             atomic_store_explicit(&g_timer_worker_active, 0,
                                                   memory_order_release);
                         }
-                        pthread_attr_destroy(&attr);
                     }
                 }
             }
@@ -3598,17 +3641,10 @@ static void* sysmon_main(void* arg) {
             continue;
         
         /* Spawn all needed workers at once */
-        {
-            static int sysmon_debug = -1;
-            if (sysmon_debug < 0) {
-                const char* v = getenv("CC_DEBUG_SYSMON");
-                sysmon_debug = (v && v[0] == '1') ? 1 : 0;
-            }
-            if (sysmon_debug)
-                fprintf(stderr,
-                        "[sysmon] scaling: pressure=%lld active=%zu sleeping=%zu spinning=%zu stuck=%zu spawning=%zu (total will be %zu)\n",
-                        (long long)pressure, active, sleeping, spinning, stuck, to_spawn, total_workers + to_spawn);
-        }
+        if (sysmon_debug_enabled())
+            fprintf(stderr,
+                    "[sysmon] scaling: pressure=%lld active=%zu sleeping=%zu spinning=%zu stuck=%zu spawning=%zu (total will be %zu)\n",
+                    (long long)pressure, active, sleeping, spinning, stuck, to_spawn, total_workers + to_spawn);
 #if CC_V3_DIAGNOSTICS
         atomic_fetch_add_explicit(&g_sched.pressure_promoted_workers, to_spawn, memory_order_relaxed);
 #endif
@@ -3620,15 +3656,10 @@ static void* sysmon_main(void* arg) {
                 break;
             current++;
             
-            pthread_t tid;
-            pthread_attr_t attr;
-            pthread_attr_init(&attr);
-            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-            if (pthread_create(&tid, &attr, replacement_worker, NULL) == 0)
+            if (spawn_detached_worker(replacement_worker) == 0)
                 atomic_fetch_add_explicit(&g_sched.promotion_count, 1, memory_order_relaxed);
             else
                 atomic_fetch_sub_explicit(&g_sched.temp_worker_count, 1, memory_order_relaxed);
-            pthread_attr_destroy(&attr);
         }
     }
     return NULL;
@@ -3830,9 +3861,19 @@ static inline fiber_task* worker_try_steal_one(int worker_id, uint64_t* rng_stat
     if (g_sched.num_workers <= 1) return NULL;
     size_t victim = (size_t)(xorshift64(rng_state) % g_sched.num_workers);
     if ((int)victim == worker_id) return NULL;
-    fiber_task* f = iq_pop(&g_sched.inbox_queues[victim]);
-    if (f) return f;
-    return lq_steal(&g_sched.local_queues[victim]);
+    /* Do NOT steal from the victim's inbox here.  Inbox items have a
+     * designated owner: an edge signal was sent to wake that worker and
+     * it will consume the item in its P2 check.  Grabbing it early is the
+     * same violation that runnext prevents for the direct-handoff slot —
+     * it routes the fiber away from its intended partner worker before
+     * co-location is established.  The post-sleep-wake inbox scan is the
+     * correct fallback for genuinely orphaned inbox items. */
+    /* Require depth ≥ 2 before stealing from a victim's local queue.
+     * depth=1: likely the channel partner of the fiber currently running on
+     *          that worker — stealing it breaks runnext co-location. */
+    if (lq_depth(&g_sched.local_queues[victim]) >= 2)
+        return lq_steal(&g_sched.local_queues[victim]);
+    return NULL;
 }
 
 static _Atomic int g_cc_untended_first_mode = -1; /* -1 unknown, 0 off, 1 on */
@@ -3956,6 +3997,15 @@ static void* worker_main(void* arg) {
                 }
             }
         }
+        /* Priority 0: Drain runnext — the channel-partner direct-handoff slot.
+         * Set only by this worker when it unparks its own channel partner.
+         * Never stolen, so no depth guard or timing race is possible. */
+        if (count == 0 && g_sched.runnext) {
+            fiber_task* rn = atomic_exchange_explicit(
+                &g_sched.runnext[worker_id], NULL, memory_order_acquire);
+            if (rn) batch[count++] = rn;
+        }
+
         /* Priority 1-4: acquire runnable work */
         /* Priority 1: Pop from local queue (no contention) */
         while (count < WORKER_BATCH_SIZE) {
@@ -3981,28 +4031,6 @@ static void* worker_main(void* arg) {
 #endif
         }
         
-        /* Priority 2.5: Quick targeted steal from two neighboring inboxes.
-         * Handles the common CPU-bound case: a task was spawned to worker W's
-         * inbox while W was active, but this worker (W±1) just became free.
-         * Checking two deterministic neighbors (next + opposite) is O(1) and
-         * covers most imbalance without the full P4 scan overhead. */
-        if (count == 0 && g_sched.num_workers > 1) {
-            size_t n1 = ((size_t)worker_id + 1) % g_sched.num_workers;
-            fiber_task* f2 = iq_pop(&g_sched.inbox_queues[n1]);
-            if (!f2) {
-                size_t n2 = ((size_t)worker_id + g_sched.num_workers / 2) % g_sched.num_workers;
-                if (n2 != n1) f2 = iq_pop(&g_sched.inbox_queues[n2]);
-            }
-            if (f2) {
-                batch[count++] = f2;
-#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
-                if (v3_stats) {
-                    atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
-                }
-#endif
-            }
-        }
-
         /* Priority 3: Pop from global queue.
          * Only probe global when local+inbox had no work in this loop.
          * Fairness injection above still prevents long-term global starvation. */
@@ -4046,18 +4074,19 @@ static void* worker_main(void* arg) {
                         continue;
                     }
                     
-                    fiber_task* inbox_task = iq_pop(&g_sched.inbox_queues[victim]);
-                    if (inbox_task) {
-                        batch[count++] = inbox_task;
-#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
-                        if (v3_stats) {
-                            atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
-                        }
-#endif
-                        break;  /* Got work, stop stealing */
-                    }
-                    
-                    /* Batch steal: take up to half the victim's queue */
+                    /* P4 does NOT steal from peer inboxes: inbox items have a
+                     * designated owner who was already woken via edge signal and
+                     * will consume the item in P2.  Stealing here creates a
+                     * timing race where an idle worker grabs a freshly-pushed
+                     * inbox item before the target worker processes it, breaking
+                     * channel-partner co-location.  The pre-sleep probe
+                     * (worker_try_steal_one) and post-sleep-wake inbox scan
+                     * provide backup distribution for genuinely orphaned items. */
+
+                    /* Batch steal: skip if victim has only 1 local item — it is
+                     * likely the channel partner of the fiber currently running
+                     * on that worker. */
+                    if (lq_depth(&g_sched.local_queues[victim]) < 2) continue;
                     size_t stolen = lq_steal_batch(&g_sched.local_queues[victim],
                                                    steal_buf, STEAL_BATCH_SIZE);
                     if (stolen > 0) {
@@ -4523,6 +4552,7 @@ int cc_fiber_sched_init(size_t num_workers) {
     sq_init();
     g_sched.local_queues = (local_queue*)calloc(num_workers, sizeof(local_queue));
     g_sched.inbox_queues = (inbox_queue*)calloc(num_workers, sizeof(inbox_queue));
+    g_sched.runnext      = (fiber_task* _Atomic*)calloc(num_workers, sizeof(fiber_task* _Atomic));
     g_sched.workers = (pthread_t*)calloc(num_workers, sizeof(pthread_t));
     g_sched.worker_parked = (_Atomic size_t*)calloc(num_workers, sizeof(_Atomic size_t));
     g_sched.worker_heartbeat = (typeof(g_sched.worker_heartbeat))calloc(
@@ -4682,6 +4712,7 @@ void cc_fiber_sched_shutdown(void) {
     g_sched.workers = NULL;
     g_sched.local_queues = NULL;
     g_sched.inbox_queues = NULL;
+    g_sched.runnext      = NULL;
     g_sched.worker_parked = NULL;
     g_sched.worker_heartbeat = NULL;
     g_sched.worker_lifecycle = NULL;
@@ -4924,6 +4955,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                     size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
                     if (target == self && g_sched.num_workers > 1)
                         target = (target + 1) % g_sched.num_workers;
+
                     if ((spinning_now > 0 || sleeping_now > 0) && g_sched.worker_lifecycle && g_sched.num_workers > 1) {
                         /* Prefer an idle worker whose inbox is also empty: this
                          * prevents inbox pile-up where worker W already has tasks
@@ -6115,8 +6147,22 @@ queued:
                 }
             }
         } else if (preferred == tls_worker_id) {
-            /* Same worker — push directly to our local queue (no contention) */
-            pushed = (lq_push(&g_sched.local_queues[preferred], f) == 0);
+            /* Same worker — use the runnext slot so the partner runs first and
+             * cannot be stolen.  If runnext is already occupied, displace the
+             * old occupant into the local queue and take the slot for the
+             * new (fresher) partner. */
+            if (g_sched.runnext) {
+                fiber_task* old = atomic_exchange_explicit(
+                    &g_sched.runnext[preferred], f, memory_order_release);
+                if (old) {
+                    /* Displaced fiber goes to local queue; it will run after
+                     * the fresh partner. */
+                    lq_push(&g_sched.local_queues[preferred], old);
+                }
+                pushed = 1;
+            } else {
+                pushed = (lq_push(&g_sched.local_queues[preferred], f) == 0);
+            }
             if (pushed) pushed_to_current_local = 1;
             if (pushed && gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
@@ -6129,45 +6175,29 @@ queued:
             if (g_sched.worker_heartbeat) {
                 uint64_t hb = atomic_load_explicit(
                     &g_sched.worker_heartbeat[preferred].heartbeat, memory_order_relaxed);
+                /* Skip preferred inbox only when it is stale AND spinning peers
+                 * exist — they will pick up the work immediately without a
+                 * wake syscall.  When spinning==0 the saturation bypass below
+                 * handles the routing decision instead. */
                 if (hb != 0 && (rdtsc() - hb) >= ORPHAN_THRESHOLD_CYCLES &&
                     atomic_load_explicit(&g_sched.spinning, memory_order_relaxed) > 0) {
                     use_preferred = 0;
                 }
             }
-            /* Saturation bypass: if no workers are spinning (all are running
-             * CPU-bound fibers) AND we are inside a base worker that is about
-             * to become free (calling unpark from the completing fiber), route
-             * to the current worker's local queue instead.  The current worker
-             * will run this fiber next — ~2µs latency vs waiting a full task
-             * cycle (~500µs) for the preferred (busy) worker to check its inbox.
+            /* Saturation bypass: when every worker is actively running a fiber
+             * (spinning==0 && sleeping==0), route to the current worker's local
+             * queue rather than the preferred worker's inbox.  The current
+             * worker is about to become free (it is calling unpark from the
+             * completing fiber) and will pick up this fiber immediately — vs
+             * waiting a full task cycle for the preferred (busy) worker.
              *
-             * Guard: only when spinning == 0 to preserve affinity and
-             * throughput benefits in lighter-loaded workloads where the
-             * preferred worker will pick this up quickly anyway.
-             *
-             * However, spinning == 0 conflates two distinct states:
-             *   (a) All workers busy with CPU-bound tasks  → bypass is appropriate
-             *   (b) All workers sleeping (idle)            → bypass is wrong
-             *
-             * In case (b) the fiber lands on the current worker's local queue but
-             * no wake is sent; the current worker only finds it after parking
-             * itself (introducing a full task-cycle delay).  Worse, with N tasks
-             * submitted in rapid succession all runners pile up on one worker,
-             * serialising what should be parallel work and causing high run-time
-             * variance.
-             *
-             * Fix: only engage the bypass when workers are truly saturated —
-             * spinning == 0 AND sleeping == 0 means every worker is actively
-             * running a fiber so the preferred worker genuinely cannot pick up
-             * more work sooner than the current worker can.
-             *
-             * When sleeping > 0 the bypass must not fire: we would push to the
-             * current worker's local queue (private, not stealable) while sending
-             * a wake to the preferred worker whose inbox is empty — the wake is
-             * wasted and the fiber serialises on one worker.  Instead let the
-             * code fall through to the inbox-push path below, which routes
-             * directly to the preferred worker's inbox and issues a correct
-             * targeted wake. */
+             * This path is orthogonal to runnext: runnext handles the
+             * same-worker case (preferred == tls_worker_id, handled above).
+             * This bypass is for the cross-worker case only.  It is required
+             * for syscall-kidnap recovery: when all base workers are
+             * OS-blocked, spinning==0 && sleeping==0, and the bypass routes
+             * the timer/heartbeat fiber to the timer-service worker's local
+             * queue so it runs immediately without going to a kidnapped inbox. */
             if (use_preferred && tls_worker_id >= 0 &&
                     atomic_load_explicit(&g_sched.spinning, memory_order_relaxed) == 0 &&
                     atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed) == 0) {

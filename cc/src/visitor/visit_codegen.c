@@ -919,6 +919,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs = rew;
             src_ufcs_len = strlen(src_ufcs);
         }
+        /* Reset type registries once before the type-rewriting passes so they
+           accumulate correctly across the optional and result scans below.
+           Previously each scan function reset on entry, losing types collected
+           by earlier calls in the same compilation unit. */
+        cc__cg_reset_type_registries();
         /* Rewrite T? -> CCOptional_T */
         {
             if (getenv("CC_DEBUG_OPTIONAL")) fprintf(stderr, "CC: DEBUG: calling cc__rewrite_optional_types_text, len=%zu\n", src_ufcs_len);
@@ -949,7 +954,13 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         if (cc__cg_optional_type_count > 0) {
             /* Sort types by their first usage position (descending) so we can insert
                from end to start without invalidating positions */
-            size_t type_positions[64];
+            size_t* type_positions = (size_t*)malloc(cc__cg_optional_type_count * sizeof(size_t));
+            size_t* sorted_indices_buf = (size_t*)malloc(cc__cg_optional_type_count * sizeof(size_t));
+            if (!type_positions || !sorted_indices_buf) {
+                free(type_positions);
+                free(sorted_indices_buf);
+                goto skip_optional_decls;
+            }
             for (size_t oi = 0; oi < cc__cg_optional_type_count; oi++) {
                 CCCodegenOptionalType* p = &cc__cg_optional_types[oi];
                 char pattern1[256], pattern2[256];
@@ -987,7 +998,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             
             /* Sort indices by position descending (bubble sort is fine for small N) */
-            size_t sorted_indices[64];
+            size_t* sorted_indices = sorted_indices_buf;
             for (size_t i = 0; i < cc__cg_optional_type_count; i++) sorted_indices[i] = i;
             for (size_t i = 0; i < cc__cg_optional_type_count; i++) {
                 for (size_t j = i + 1; j < cc__cg_optional_type_count; j++) {
@@ -1023,7 +1034,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs = new_src;
                 src_ufcs_len = new_len;
             }
+            free(type_positions);
+            free(sorted_indices_buf);
         }
+        skip_optional_decls:;
         /* Rewrite cc_ok(v) -> cc_ok_CCResult_T_E(v) based on enclosing function return type */
         {
             char* rew_infer = cc__rewrite_inferred_result_constructors(src_ufcs, src_ufcs_len);

@@ -58,8 +58,14 @@ static inline void* __spawn_into_thunk(void* p) {
     __spawn_into_arg* a = (__spawn_into_arg*)p;
     typedef struct { intptr_t __result; } __caps_t;
     __caps_t* cap = (__caps_t*)cc_task_result_ptr(sizeof(__caps_t));
-    cap->__result = (intptr_t)(a->fn ? a->fn(a->arg) : 0);
+    void* fn_result = a->fn ? a->fn(a->arg) : NULL;
     free(a);
+    /* If the called function already stored its structured result in the same
+     * cc_task_result_ptr buffer (evidenced by returning that same pointer),
+     * do not overwrite - preserves the caller's layout (e.g. Result at offset 0). */
+    if (fn_result != (void*)cap) {
+        if (cap) cap->__result = (intptr_t)fn_result;
+    }
     return cap;
 }
 

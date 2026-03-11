@@ -52,6 +52,10 @@ void cc__fiber_pool_task_end(void);         /* Notify sysmon: leaving long CPU-b
 uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr);
 int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
 
+/* Channel direct-handoff helpers — implemented in fiber_sched.c */
+int  cc__sched_current_worker_id(void);
+void cc__fiber_hint_channel_partner(void* fiber, int worker_id);
+
 /* Convenience macro to park with source location */
 #define CC_FIBER_PARK(reason) cc__fiber_park_reason(reason, __FILE__, __LINE__)
 #define CC_FIBER_PARK_IF(flag, expected, reason) cc__fiber_park_if(flag, expected, reason, __FILE__, __LINE__)

@@ -238,9 +238,15 @@ int cc_thread_task_join_fiber(struct CCSpawnTask* task, void** out_result) {
                               memory_order_relaxed);
         pthread_mutex_unlock(&task->mu);
         /* Park until done_atomic is set.
-         * cc__fiber_park_if checks pending_unpark first, then the flag — no
-         * lost wakeup is possible even if completion fires before we yield. */
-        CC_FIBER_PARK_IF(&task->done_atomic, 0, "spawn_join");
+         *
+         * IMPORTANT: clear stale pending_unpark before each park attempt.
+         * Otherwise an unrelated wake can cause cc__fiber_park_if() to return
+         * immediately while done_atomic is still 0, and we'd read task->result
+         * before the spawn job publishes it. */
+        while (atomic_load_explicit(&task->done_atomic, memory_order_acquire) == 0) {
+            cc__fiber_clear_pending_unpark();
+            CC_FIBER_PARK_IF(&task->done_atomic, 0, "spawn_join");
+        }
         /* Clear stale waiter registration in case park bailed on flag or
          * pending_unpark without the completion handler clearing it. */
         atomic_store_explicit(&task->waiter_fiber, NULL, memory_order_relaxed);
