@@ -233,9 +233,11 @@ static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
     return i;
 }
 
-/* Collection of optional types for CC_DECL_OPTIONAL emission (extern in header) */
-CCCodegenOptionalType cc__cg_optional_types[64];
+/* Collection of optional types for CC_DECL_OPTIONAL emission (extern in header).
+ * Dynamic array: starts NULL, grows via realloc on demand. */
+CCCodegenOptionalType* cc__cg_optional_types = NULL;
 size_t cc__cg_optional_type_count = 0;
+size_t cc__cg_optional_type_cap = 0;
 
 /* Built-in optional types that are already declared in cc_optional.cch */
 static const char* cc__builtin_optional_types[] = {
@@ -260,7 +262,15 @@ static void cc__cg_add_optional_type(const char* mangled, const char* raw, size_
             return; /* Already have this type */
         }
     }
-    if (cc__cg_optional_type_count >= sizeof(cc__cg_optional_types)/sizeof(cc__cg_optional_types[0])) return;
+    /* Grow the array if needed */
+    if (cc__cg_optional_type_count >= cc__cg_optional_type_cap) {
+        size_t new_cap = cc__cg_optional_type_cap ? cc__cg_optional_type_cap * 2 : 16;
+        CCCodegenOptionalType* nb = (CCCodegenOptionalType*)realloc(
+            cc__cg_optional_types, new_cap * sizeof(CCCodegenOptionalType));
+        if (!nb) return;
+        cc__cg_optional_types = nb;
+        cc__cg_optional_type_cap = new_cap;
+    }
     CCCodegenOptionalType* p = &cc__cg_optional_types[cc__cg_optional_type_count++];
     strncpy(p->mangled_type, mangled, sizeof(p->mangled_type) - 1);
     p->mangled_type[sizeof(p->mangled_type) - 1] = '\0';
@@ -269,13 +279,20 @@ static void cc__cg_add_optional_type(const char* mangled, const char* raw, size_
     p->raw_type[raw_len] = '\0';
 }
 
-/* Scan for optional type patterns and collect types.
+/* Reset both type registries to empty (retain allocated buffer capacity).
+ * Call once per compilation unit in visit_codegen.c before type rewriting begins.
+ * The old implicit per-call reset made registries non-accumulative across calls. */
+void cc__cg_reset_type_registries(void) {
+    cc__cg_optional_type_count = 0;
+    cc__cg_result_type_count = 0;
+}
+
+/* Scan for optional type patterns and collect types (ACCUMULATES - does not reset).
    Handles:
    - __CC_OPTIONAL(T) - from preprocessor macro approach
-   - CCOptional_T - legacy or direct usage */
+   - CCOptional_T - legacy or direct usage
+   Call cc__cg_reset_type_registries() explicitly before a full source scan. */
 static void cc__scan_for_existing_optional_types(const char* src, size_t n) {
-    /* Reset collection */
-    cc__cg_optional_type_count = 0;
     
     const char* macro_prefix = "__CC_OPTIONAL(";
     size_t macro_prefix_len = strlen(macro_prefix);
@@ -426,9 +443,11 @@ char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, 
     return out;
 }
 
-/* Collection of result type pairs for CC_DECL_RESULT_SPEC emission (extern in header) */
-CCCodegenResultTypePair cc__cg_result_types[64];
+/* Collection of result type pairs for CC_DECL_RESULT_SPEC emission (extern in header).
+ * Dynamic array: starts NULL, grows via realloc on demand. */
+CCCodegenResultTypePair* cc__cg_result_types = NULL;
 size_t cc__cg_result_type_count = 0;
+size_t cc__cg_result_type_cap = 0;
 
 /* Built-in result types already declared in stdlib headers (io.cch, dir.cch, etc.) */
 static const char* cc__builtin_result_types[] = {
@@ -462,7 +481,15 @@ static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* er
             return; /* Already have this type */
         }
     }
-    if (cc__cg_result_type_count >= sizeof(cc__cg_result_types)/sizeof(cc__cg_result_types[0])) return;
+    /* Grow the array if needed */
+    if (cc__cg_result_type_count >= cc__cg_result_type_cap) {
+        size_t new_cap = cc__cg_result_type_cap ? cc__cg_result_type_cap * 2 : 16;
+        CCCodegenResultTypePair* nb = (CCCodegenResultTypePair*)realloc(
+            cc__cg_result_types, new_cap * sizeof(CCCodegenResultTypePair));
+        if (!nb) return;
+        cc__cg_result_types = nb;
+        cc__cg_result_type_cap = new_cap;
+    }
     CCCodegenResultTypePair* p = &cc__cg_result_types[cc__cg_result_type_count++];
     if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
     if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
@@ -482,9 +509,9 @@ static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* er
    - CCRes(T, E)       - convenience macro (parser mode expands to __CCResultGeneric)
    - CCResPtr(T, E)    - convenience macro for pointer types
    - CCResult_T_E      - legacy or direct usage */
+/* Scan for result type patterns and collect type pairs (ACCUMULATES - does not reset).
+   Call cc__cg_reset_type_registries() explicitly before a full source scan. */
 static void cc__scan_for_existing_result_types(const char* src, size_t n) {
-    /* Reset collection */
-    cc__cg_result_type_count = 0;
     
     const char* macro_prefix = "__CC_RESULT(";
     size_t macro_prefix_len = strlen(macro_prefix);

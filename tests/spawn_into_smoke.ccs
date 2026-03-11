@@ -2,8 +2,15 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
+/* Proper spawn-into wrapper: stores result in fiber-local storage and returns it.
+ * spawn into requires void*(*)(void*) functions that manage their own result storage.
+ * The result struct must have __result at offset 0 for ordered_recv compatibility. */
+typedef struct { void* __result; } DoubleResult;
+
 void* double_value(void* arg) {
-    return (void*)((intptr_t)arg * 2);
+    DoubleResult* r = (DoubleResult*)cc_task_result_ptr(sizeof(DoubleResult));
+    r->__result = (void*)((intptr_t)arg * 2);
+    return r;
 }
 
 int main() {

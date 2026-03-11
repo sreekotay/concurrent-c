@@ -1,15 +1,26 @@
 /*
- * channel_contention.ccs - Cache-line contention test for channels
+ * channel_contention.ccs - Channel isolation benchmark
+ *
+ * Measures how much two independent producer/consumer pairs interfere
+ * with each other.  Ideal result: ~0% or negative (pairs run on separate
+ * workers, matching Go's goroutine-per-P behaviour).
+ *
+ * Each producer does a trivial XOR-hash per value; each consumer
+ * accumulates a checksum.  Both results feed g_sink so the optimizer
+ * cannot drop any of the channel work.
  */
 
-#include <ccc/cc_runtime.cch>
-#include <ccc/cc_atomic.cch>
+#include <ccc/std/prelude.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
 #define ITERATIONS 1000000
-#define NUM_TRIALS 3
+#define NUM_TRIALS 7
+#define CAP        1024
+
+/* Prevent dead-code elimination of consumer work. */
+static volatile long long g_sink = 0;
 
 static double time_now_ms(void) {
     struct timespec ts;
@@ -17,69 +28,101 @@ static double time_now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
 }
 
-void producer(CCChanTx tx, int count) {
-    for (int i = 0; i < count; i++) {
-        (void)chan_send(tx, i);
+/* Run a single producer/consumer pair and return wall-clock ms. */
+static double run_single_pair(void) {
+    int[~CAP >] tx;
+    int[~CAP <] rx;
+    channel_pair(&tx, &rx);
+    long long sum = 0;
+    double start = time_now_ms();
+    @nursery closing(tx) {
+        spawn(() => {
+            for (int i = 0; i < ITERATIONS; i++) { tx.send(i ^ (i >> 16)); }
+        });
+        spawn(() => {
+            int v;
+            long long local_sum = 0;
+            for (int i = 0; i < ITERATIONS; i++) { rx.recv(&v); local_sum += v; }
+            sum += local_sum;
+        });
     }
+    g_sink += sum;
+    return time_now_ms() - start;
 }
 
-void consumer(CCChanRx rx, int count) {
-    int v;
-    for (int i = 0; i < count; i++) {
-        (void)chan_recv(rx, &v);
+/* Run two independent producer/consumer pairs concurrently and return wall-clock ms. */
+static double run_two_pairs(void) {
+    int[~CAP >] tx1;
+    int[~CAP <] rx1;
+    int[~CAP >] tx2;
+    int[~CAP <] rx2;
+    channel_pair(&tx1, &rx1);
+    channel_pair(&tx2, &rx2);
+    long long sum1 = 0;
+    long long sum2 = 0;
+    double start = time_now_ms();
+    @nursery closing(tx1, tx2) {
+        spawn(() => {
+            for (int i = 0; i < ITERATIONS; i++) { tx1.send(i ^ (i >> 16)); }
+        });
+        spawn(() => {
+            int v;
+            long long local_sum = 0;
+            for (int i = 0; i < ITERATIONS; i++) { rx1.recv(&v); local_sum += v; }
+            sum1 += local_sum;
+        });
+        spawn(() => {
+            for (int i = 0; i < ITERATIONS; i++) { tx2.send(i ^ (i >> 16)); }
+        });
+        spawn(() => {
+            int v;
+            long long local_sum = 0;
+            for (int i = 0; i < ITERATIONS; i++) { rx2.recv(&v); local_sum += v; }
+            sum2 += local_sum;
+        });
     }
+    g_sink += sum1 + sum2;
+    return time_now_ms() - start;
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    
-    // Idiomatic channel syntax
-    int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = channel_pair(&tx1_h, &rx1_h);
-    int[~1024 >] tx2_h; int[~1024 <] rx2_h; CCChan* ch2 = channel_pair(&tx2_h, &rx2_h);
-
-    // Use simple handle types for capture to avoid inference issues
-    CCChanTx tx1 = tx1_h;
-    CCChanRx rx1 = rx1_h;
-    CCChanTx tx2 = tx2_h;
-    CCChanRx rx2 = rx2_h;
 
     printf("=================================================================\n");
     printf("CHANNEL CONTENTION TEST: Cache-line interference\n");
     printf("Iterations: %d | Trials: %d\n", ITERATIONS, NUM_TRIALS);
     printf("=================================================================\n\n");
 
+    double baseline_times[NUM_TRIALS];
+    double contention_times[NUM_TRIALS];
+
     for (int trial = 1; trial <= NUM_TRIALS; trial++) {
-        printf("Trial %d:\n", trial);
-
-        double start = time_now_ms();
-        @nursery {
-            spawn(() => [tx1] { producer(tx1, ITERATIONS); });
-            spawn(() => [rx1] { consumer(rx1, ITERATIONS); });
-        }
-        double baseline_ms = time_now_ms() - start;
-        printf("  Baseline (Ch1 only):  %8.2f ms (%8.0f ops/sec)\n", 
-               baseline_ms, (double)ITERATIONS * 1000.0 / baseline_ms);
-
-        start = time_now_ms();
-        @nursery {
-            spawn(() => [tx1] { producer(tx1, ITERATIONS); });
-            spawn(() => [rx1] { consumer(rx1, ITERATIONS); });
-            spawn(() => [tx2] { producer(tx2, ITERATIONS); });
-            spawn(() => [rx2] { consumer(rx2, ITERATIONS); });
-        }
-        double contention_ms = time_now_ms() - start;
-        printf("  Contention (Ch1+Ch2): %8.2f ms (%8.0f ops/sec per channel)\n", 
-               contention_ms, (double)ITERATIONS * 1000.0 / contention_ms);
-        
-        double baseline_ops_sec = (double)ITERATIONS * 1000.0 / baseline_ms;
-        // Per-channel throughput: each channel did ITERATIONS ops in contention_ms.
-        // Dividing by 2 gives the per-channel rate, comparable to the single-channel baseline.
-        double contention_ops_sec = (double)ITERATIONS * 1000.0 / contention_ms;
-        double interference = (baseline_ops_sec - contention_ops_sec) / baseline_ops_sec * 100.0;
-        printf("  Interference:         %8.2f%%\n\n", interference);
+        baseline_times[trial - 1]   = run_single_pair();
+        contention_times[trial - 1] = run_two_pairs();
+        printf("  Trial %d:  baseline=%6.2f ms  contention=%6.2f ms\n",
+               trial, baseline_times[trial - 1], contention_times[trial - 1]);
     }
 
-    cc_chan_free(ch1);
-    cc_chan_free(ch2);
+    /* Best (minimum) time is the cleanest signal: it represents what the
+     * scheduler can do when the OS isn't adding noise.  Comparing medians
+     * is misleading because a noisy baseline run makes interference look
+     * negative even when the scheduler is actually serialising the pairs. */
+    double best_baseline   = baseline_times[0];
+    double best_contention = contention_times[0];
+    for (int i = 1; i < NUM_TRIALS; i++) {
+        if (baseline_times[i]   < best_baseline)   best_baseline   = baseline_times[i];
+        if (contention_times[i] < best_contention) best_contention = contention_times[i];
+    }
+
+    double interference = (best_contention - best_baseline) / best_baseline * 100.0;
+
+    printf("\n");
+    printf("  Best baseline:    %6.2f ms  (%8.0f ops/sec)\n",
+           best_baseline, (double)ITERATIONS * 1000.0 / best_baseline);
+    printf("  Best contention:  %6.2f ms  (%8.0f ops/sec per channel)\n",
+           best_contention, (double)ITERATIONS * 1000.0 / best_contention);
+    printf("\n");
+    printf("Interference: %.2f%%  (best-of-%d)\n", interference, NUM_TRIALS);
+
     return 0;
 }

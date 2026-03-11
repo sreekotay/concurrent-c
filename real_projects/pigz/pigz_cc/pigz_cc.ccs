@@ -304,10 +304,17 @@ static inline void return_input_arena(CCArena* arena, CCChan* pool) {
 }
 
 /* ============================================================================
- * Ordered Channel Pattern (Manual Lowering)
- * 
- * This implements the "ordered channels" pattern manually to validate the design.
- * The key insight: __result at offset 0 preserves Result type information.
+ * Ordered Channel Pattern
+ *
+ * Worker wrapper for use with `spawn into(tx)? () => ordered_compress_wrapper(blk)`.
+ * The wrapper stores its Result in fiber-local storage (cc_task_result_ptr) so the
+ * consumer can extract it after cc_block_on_intptr without any heap allocation.
+ *
+ * Contract for spawn-into wrappers:
+ *   1. Call cc_task_result_ptr(sizeof(CapturesStruct)) to claim fiber-local storage.
+ *   2. Store the result (typically a Result type) at offset 0 (__result field).
+ *   3. Return the storage pointer so __spawn_into_thunk detects the self-reference
+ *      and does NOT overwrite the already-stored result.
  * ============================================================================ */
 
 /* Captures struct for ordered channel pattern - __result MUST be at offset 0 */
@@ -356,8 +363,6 @@ void* ordered_compress_wrapper(void* arg) {
     
     return (void*)cap;
 }
-
-/* Note: ordered_spawn and ordered_recv are inlined at use sites (lowered code) */
 
 /* ============================================================================
  * Decompression Engine (matches pigz.c:2700-2750)
@@ -1027,9 +1032,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         return_input_arena(blk_arena, arena_pool);
                         if (prev_blk) {
                             prev_blk->is_last = true;
-                            // [LOWERED from: spawn into(tasks_tx)? () => compress(...)]
+                            // spawn into inside a spawn() closure body is not supported:
+                            // Phase 5 lifts the closure before Phase 6 can see the enclosing
+                            // @nursery, so the nursery check fails. Manual lowering required.
                             {
-                                // No malloc needed - wrapper uses cc_task_result_ptr
                                 CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
                                 if (!cc_io_avail(chan_send(tasks_tx, task))) {
                                     cc_task_free(&task);
@@ -1110,9 +1116,11 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                     // If we already have a pending block, spawn task
                     if (prev_blk) {
-                        // [LOWERED from: spawn into(tasks_tx)? () => compress(...)]
+                        // Manual lowering required here: channel-closed path must also
+                        // return the new block's arena to the pool and break the read loop.
+                        // spawn into(tasks_tx)? only emits cc_task_free on channel-closed,
+                        // but this site needs the extra cleanup before breaking.
                         {
-                            // No malloc needed - wrapper uses cc_task_result_ptr
                             CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
                             if (!cc_io_avail(chan_send(tasks_tx, task))) {
                                 cc_task_free(&task);
@@ -1125,9 +1133,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // If this was a short read, it's the last block.
                     if (data.len < block_size) {
                         blk->is_last = true;
-                        // [LOWERED from: spawn into(tasks_tx)? () => compress(...)]
+                        // Same limitation as above: spawn into inside spawn() closure body
+                        // requires manual lowering.
                         {
-                            // No malloc needed - wrapper uses cc_task_result_ptr
                             CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, blk);
                             if (!cc_io_avail(chan_send(tasks_tx, task))) {
                                 cc_task_free(&task);

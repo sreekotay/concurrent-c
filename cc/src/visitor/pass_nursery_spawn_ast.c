@@ -970,7 +970,15 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
 
         /* Note: spawn into validation (checking tx is paired with ordered rx) would require
            tracking through channel_pair calls. For now, we rely on the await recv validation
-           on the consumer side to catch misuse. */
+           on the consumer side to catch misuse.
+           
+           Limitation: `spawn into` only works at direct @nursery scope, NOT inside
+           `spawn(() => [captures] { body })` closure bodies. Phase 5 (closure_literal_ast)
+           lifts the closure to a top-level C function before Phase 6 (this pass) runs,
+           so the enclosing @nursery is no longer visible in the AST. Sites inside
+           spawn() closures must use manual lowering:
+             CCTask t = cc_fiber_spawn_task(wrapper_fn, arg);
+             if (!cc_io_avail(chan_send(tx, t))) cc_task_free(&t); */
 
         /* Extract the closure expression - find => and get expression after it */
         const char* stmt = in_src + start;
@@ -1050,14 +1058,18 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
         if (func_name[0] && has_func_arg) {
             /* Generate spawn + send for: func(arg)
                Uses __spawn_into_call helper which stores result in fiber-local storage.
-               The helper is generic and works with any void*(*)(void*) function. */
+               The helper is generic and works with any void*(*)(void*) function.
+               
+               The ? (has_error_prop) form discards the task when the channel is closed,
+               using cc_task_free. This is "drop-on-backpressure" semantics - NOT error
+               propagation via cc_try, which would be wrong inside a void* closure. */
             char b[2048];
             int nn;
             if (has_error_prop) {
                 nn = snprintf(b, sizeof(b),
                     "%.*s{ /* spawn into(%s)? () => %s(%s) */\n"
                     "%.*s  CCTask __task = __spawn_into_call((void*(*)(void*))%s, (void*)%s);\n"
-                    "%.*s  cc_try(chan_send(%s, __task));\n"
+                    "%.*s  if (!cc_io_avail(chan_send(%s, __task))) cc_task_free(&__task);\n"
                     "%.*s}\n",
                     (int)ind_len, indent, chan_name, func_name, func_arg,
                     (int)ind_len, indent, func_name, func_arg,
@@ -1067,7 +1079,7 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
                 nn = snprintf(b, sizeof(b),
                     "%.*s{ /* spawn into(%s) () => %s(%s) */\n"
                     "%.*s  CCTask __task = __spawn_into_call((void*(*)(void*))%s, (void*)%s);\n"
-                    "%.*s  chan_send(%s, __task);\n"
+                    "%.*s  (void)chan_send(%s, __task);\n"
                     "%.*s}\n",
                     (int)ind_len, indent, chan_name, func_name, func_arg,
                     (int)ind_len, indent, func_name, func_arg,

@@ -700,9 +700,18 @@ static cc__fiber_wait_node* pop_send_waiter(CCChan* ch) {
     return NULL;
 }
 
-/* unpark_or_signal: wake a fiber or signal a condvar (Invariant 5) */
+/* unpark_or_signal: wake a fiber or signal a condvar (Invariant 5).
+ *
+ * Direct-handoff hint: when waking a fiber, route it to the current
+ * scheduler worker's local queue rather than a remote inbox.  This
+ * makes channel producer/consumer pairs self-organise onto the same
+ * worker after their first synchronisation, eliminating the OS thread
+ * wakeup that would otherwise be required to deliver the fiber.
+ * Matches Go's intra-P goroutine handoff behaviour. */
 static inline void unpark_or_signal(cc__fiber_wait_node* node, pthread_cond_t* cv) {
     if (node->fiber) {
+        int wid = cc__sched_current_worker_id();
+        if (wid >= 0) cc__fiber_hint_channel_partner(node->fiber, wid);
         wake_batch_add(node->fiber);
     } else {
         pthread_cond_signal(cv);
@@ -747,6 +756,7 @@ static void wake_one_send_waiter(CCChan* ch) {
  * Lock-free enqueue/dequeue helpers
  * ============================================================================ */
 static inline int lf_enqueue(CCChan* ch, const void* value, int* old_count_out) {
+    if (ch->elem_size > sizeof(void*)) return EAGAIN;
     void* queue_val = NULL;
     memcpy(&queue_val, value, ch->elem_size);
     if (!lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val)) return EAGAIN;
@@ -756,6 +766,7 @@ static inline int lf_enqueue(CCChan* ch, const void* value, int* old_count_out) 
 }
 
 static inline int lf_dequeue(CCChan* ch, void* out_value, int* old_count_out) {
+    if (ch->elem_size > sizeof(void*)) return EAGAIN;
     void *key, *val;
     if (!lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val)) return EAGAIN;
     int old_count = atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
@@ -767,6 +778,7 @@ static inline int lf_dequeue(CCChan* ch, void* out_value, int* old_count_out) {
 /* Minimal fast-path variants.
  * Keep lfqueue_count updates so edge-triggered wake can avoid unnecessary lock/wake work. */
 static inline int lf_enqueue_minimal(CCChan* ch, const void* value, int* old_count_out) {
+    if (ch->elem_size > sizeof(void*)) return EAGAIN;
     void* queue_val = NULL;
     memcpy(&queue_val, value, ch->elem_size);
     if (!lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val)) return EAGAIN;
@@ -776,6 +788,7 @@ static inline int lf_enqueue_minimal(CCChan* ch, const void* value, int* old_cou
 }
 
 static inline int lf_dequeue_minimal(CCChan* ch, void* out_value, int* old_count_out) {
+    if (ch->elem_size > sizeof(void*)) return EAGAIN;
     void *key, *val;
     if (!lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val)) return EAGAIN;
     int old_count = atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
@@ -823,6 +836,12 @@ static inline void channel_load_slot(const void* src, void* dst, size_t sz) {
 static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
     if (ch->elem_size == 0) {
         ch->elem_size = elem_size;
+        /* Lock-free queue stores one void* per slot (8 bytes on 64-bit).
+         * Disable lockfree for elements that don't fit; they use the
+         * mutex-protected ring buffer instead. */
+        if (ch->use_lockfree && elem_size > sizeof(void*)) {
+            ch->use_lockfree = 0;
+        }
         if (ch->use_lockfree && ch->cap > 0) {
             ch->buf = malloc(ch->lfqueue_cap * elem_size);
         } else {
@@ -1206,11 +1225,14 @@ static int chan_send_slow(CCChan* ch, const void* value, size_t value_size, cons
             int rc = lf_enqueue(ch, value, NULL);
             atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
             if (rc == 0) {
-                cc_chan_lock(ch);
-                wake_one_recv_waiter(ch);
-                pthread_cond_signal(&ch->not_empty);
-                cc_chan_unlock(ch);
-                wake_batch_flush();
+                atomic_fetch_add_explicit(&ch->gen, 1, memory_order_release);
+                if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_seq_cst)) {
+                    cc_chan_lock(ch);
+                    wake_one_recv_waiter(ch);
+                    pthread_cond_signal(&ch->not_empty);
+                    cc_chan_unlock(ch);
+                    wake_batch_flush();
+                }
                 cc__chan_signal_activity(ch);
                 return 0;
             }
@@ -1432,11 +1454,14 @@ static int chan_recv_slow(CCChan* ch, void* out_value, size_t value_size, const 
         if (ch->use_lockfree && ch->cap > 0 && ch->elem_size <= sizeof(void*)) {
             int rc = lf_dequeue(ch, out_value, NULL);
             if (rc == 0) {
-                cc_chan_lock(ch);
-                wake_one_send_waiter(ch);
-                pthread_cond_signal(&ch->not_full);
-                cc_chan_unlock(ch);
-                wake_batch_flush();
+                atomic_fetch_add_explicit(&ch->gen, 1, memory_order_release);
+                if (atomic_load_explicit(&ch->has_send_waiters, memory_order_seq_cst)) {
+                    cc_chan_lock(ch);
+                    wake_one_send_waiter(ch);
+                    pthread_cond_signal(&ch->not_full);
+                    cc_chan_unlock(ch);
+                    wake_batch_flush();
+                }
                 cc__chan_signal_activity(ch);
                 return 0;
             }

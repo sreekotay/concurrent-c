@@ -149,18 +149,63 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 1. ✅ Update this inventory to match reality (2026-02-01)
 2. ✅ Pass chaining helper in preprocess.c - CCPassChain + CC_CHAIN macro (2026-02-01)
 3. ✅ Phase 3 passes unified via CCEditBuffer (2026-02-01)
+4. ✅ Dynamic type registries - `cc__cg_result_types` and `cc__cg_optional_types` are
+   now heap-allocated dynamic arrays (previously fixed [64]). No limit on Result/Optional
+   type count per compilation unit. (2026-03-09)
+5. ✅ Explicit registry reset - `cc__cg_reset_type_registries()` called once per
+   compilation unit in visit_codegen.c. Scan functions now ACCUMULATE rather than
+   implicitly resetting on each call. Previously the second call to any scan function
+   within one compilation unit (e.g. from pass_closure_literal_ast.c) would silently
+   discard types collected by the first call. (2026-03-09)
+6. ✅ `spawn into` correctness - fixed `__spawn_into_thunk` to detect when the called
+   function stores its result directly via cc_task_result_ptr (evidenced by returning
+   the same buffer pointer). The thunk no longer overwrites the caller's structured
+   result. The `spawn into(ch)?` form now uses discard-on-backpressure semantics
+   (cc_task_free) instead of the incorrect cc_try propagation. (2026-03-09)
+
+## AST Migration Investigation (2026-03-09)
+
+### Why text-based rewrites are necessary for type syntax
+
+The type passes (P3, P8, P11) rewrit `T[:]`, `T?`, and `T!>(E)` at the token level.
+TCC's stub-AST does NOT emit AST nodes for these annotations — they exist only as
+surface syntax tokens before TCC sees them. As a result:
+
+- **Fully text-based is correct and necessary** for P3/P8/P11. No AST nodes to visit.
+- The `CCScannerState` refactoring (all 12 passes) already extracted the common
+  scanning boilerplate — this is the right level of abstraction.
+
+### What CAN be migrated to AST-based
+
+| Candidate | Blocker | Status |
+|-----------|---------|--------|
+| `spawn into` validation | Already AST-based via stub-AST `spawn_into` node | ✅ |
+| Nursery nesting checks | Already AST-based via `@nursery` node matching | ✅ |
+| Arena/await interaction check | Already AST-based in pass_arena_ast.c | ✅ |
+| Result type collection | Only in text form (no AST nodes for `T!>E`) | BLOCKED |
+| Try expr rewriting (P15) | Only in text form (no AST nodes for `try expr`) | BLOCKED |
+| Closure literal lowering (P11) | Partially AST-based; whole-file edit blocks batching | MEDIUM |
+
+### Reparse reduction: the real migration target
+
+The `5 reparses` (AST passes that require TCC re-parsing) is the primary cost.
+Reducing to 4 reparses requires making `pass_closure_literal_ast.c` use fine-grained
+`CCEditBuffer` edits instead of whole-file text replacement. This would allow Phase 5
+to batch with Phase 6 (spawn/nursery/arena). Effort: ~2-3 days. Not blocked technically,
+only by refactoring risk.
 
 ## Next Steps
 
-1. **Reparse reduction (3→2)**: Requires refactoring closure_literals to fine-grained edits
+1. **Reparse reduction (5→4)**: Make closure_literals use CCEditBuffer (fine-grained edits)
    - Current: whole-file edit can't batch with spawn/nursery/arena
-   - Effort: Medium-high (significant refactoring)
-   
+   - Effort: Medium (2-3 days)
+   - Saves: 1 TCC reparse per compilation unit
+
 2. **Optional/Result pass merging** (P8+P9, P11+P12): DEFERRED
    - Analysis: 19 → 17 scans = ~10% reduction, minimal real impact
    - Note: P16 must stay separate (runs after try passes)
    - Decision: Not worth the refactoring effort
-   
+
 3. **Dead code removed**: visitor_pipeline.c was deleted (2026-02-01)
    - The Phase 3 consolidation from there was already applied to visit_codegen.c
 

@@ -1,0 +1,99 @@
+/*
+ * thread_spawn_chan_task_smoke.ccs
+ *
+ * Regression test for: large-element channel corruption when CCTask
+ * (sizeof=128, > sizeof(void*)) is used as the channel element type.
+ *
+ * Pattern: producer spawns OS threads, sends CCTask handles through a
+ * buffered channel; consumer receives handles and awaits results via
+ * cc_block_on_intptr.  The channel capacity is intentionally smaller
+ * than the number of items so the code exercises both the ring-buffer
+ * path (first cap items) and the direct-handoff path (remaining items
+ * when the channel is full and the producer parks).
+ *
+ * Previously this would crash ~80% of the time with a SIGSEGV in the
+ * consumer because cc_block_on_intptr returned NULL (null result
+ * pointer dereference) when the task handle was corrupted in transit.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+
+#define NUM_ITEMS 8
+#define CHAN_CAP   3   /* Intentionally < NUM_ITEMS to force direct-handoff path */
+
+typedef struct {
+    int id;
+    int result;
+} Item;
+
+static atomic_int g_failed = 0;
+
+void* compute(void* arg) {
+    Item* item = (Item*)arg;
+    item->result = item->id * item->id;
+    return item;
+}
+
+int main(void) {
+    atomic_store(&g_failed, 0);
+
+    CCTask[~CHAN_CAP >] tx;
+    CCTask[~CHAN_CAP <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+
+    @nursery {
+        /* Producer: spawn OS tasks, send CCTask handles into channel */
+        spawn(() => [tx] {
+            for (int i = 1; i <= NUM_ITEMS; i++) {
+                Item* item = malloc(sizeof(Item));
+                item->id = i;
+                item->result = -1;
+                CCTask task = cc_thread_spawn(compute, item);
+                (void)chan_send(tx, task);
+            }
+            chan_close(tx);
+        });
+
+        /* Consumer: receive handles in order, await each, verify result */
+        spawn(() => [rx] {
+            CCTask task;
+            int idx = 1;
+            while (cc_io_avail(chan_recv(rx, &task))) {
+                void* result = (void*)cc_block_on_intptr(task);
+                if (!result) {
+                    printf("FAIL: item %d: cc_block_on_intptr returned NULL\n", idx);
+                    atomic_store(&g_failed, 1);
+                    idx++;
+                    continue;
+                }
+                Item* item = (Item*)result;
+                int expected = idx * idx;
+                if (item->id != idx || item->result != expected) {
+                    printf("FAIL: item %d: id=%d result=%d (expected id=%d result=%d)\n",
+                           idx, item->id, item->result, idx, expected);
+                    atomic_store(&g_failed, 1);
+                } else {
+                    printf("OK: item %d: %d^2 = %d\n", idx, idx, item->result);
+                }
+                free(item);
+                idx++;
+            }
+            if (idx - 1 != NUM_ITEMS) {
+                printf("FAIL: received %d items, expected %d\n", idx - 1, NUM_ITEMS);
+                atomic_store(&g_failed, 1);
+            }
+        });
+    }
+
+    cc_chan_free(ch);
+
+    if (atomic_load(&g_failed)) {
+        printf("thread_spawn_chan_task_smoke: FAIL\n");
+        return 1;
+    }
+    printf("thread_spawn_chan_task_smoke: PASS\n");
+    return 0;
+}

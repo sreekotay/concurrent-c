@@ -1,5 +1,8 @@
 /*
  * pthread_contention_baseline.c - Pthread-based contention test
+ *
+ * Producer sends i ^ (i >> 16); consumer accumulates a checksum.
+ * Results feed g_sink so the optimizer cannot drop the channel work.
  */
 
 #include <stdio.h>
@@ -9,6 +12,16 @@
 
 #define ITERATIONS 1000000
 #define QUEUE_SIZE 1024
+#define NUM_TRIALS 7
+
+/* Prevent dead-code elimination of consumer work. */
+static volatile long long g_sink = 0;
+
+static int cmp_double(const void* a, const void* b) {
+    double da = *(const double*)a;
+    double db = *(const double*)b;
+    return (da > db) - (da < db);
+}
 
 typedef struct {
     pthread_mutex_t mu;
@@ -54,14 +67,18 @@ int queue_pop(SimpleQueue* q) {
 
 void* producer_thread(void* arg) {
     SimpleQueue* q = (SimpleQueue*)arg;
-    for (int i = 0; i < ITERATIONS; i++) queue_push(q, i);
+    for (int i = 0; i < ITERATIONS; i++) queue_push(q, i ^ (i >> 16));
     return NULL;
 }
 
+/* Returns heap-allocated checksum so main() can accumulate g_sink. */
 void* consumer_thread(void* arg) {
     SimpleQueue* q = (SimpleQueue*)arg;
-    for (int i = 0; i < ITERATIONS; i++) queue_pop(q);
-    return NULL;
+    long long sum = 0;
+    for (int i = 0; i < ITERATIONS; i++) sum += (long long)queue_pop(q);
+    long long* result = (long long*)malloc(sizeof(long long));
+    *result = sum;
+    return result;
 }
 
 static double time_now_ms(void) {
@@ -80,17 +97,19 @@ int main(void) {
     printf("PTHREAD CONTENTION BASELINE\n");
     printf("=================================================================\n\n");
 
-    for (int trial = 1; trial <= 3; trial++) {
-        printf("Trial %d:\n", trial);
+    double baseline_times[NUM_TRIALS];
+    double contention_times[NUM_TRIALS];
 
+    for (int trial = 1; trial <= NUM_TRIALS; trial++) {
         double start = time_now_ms();
         pthread_t t1, t2;
         pthread_create(&t1, NULL, producer_thread, &q1);
         pthread_create(&t2, NULL, consumer_thread, &q1);
         pthread_join(t1, NULL);
-        pthread_join(t2, NULL);
-        double baseline_ms = time_now_ms() - start;
-        printf("  Baseline (Q1 only):   %8.2f ms\n", baseline_ms);
+        long long* cs1 = NULL;
+        pthread_join(t2, (void**)&cs1);
+        g_sink += *cs1; free(cs1);
+        baseline_times[trial - 1] = time_now_ms() - start;
 
         start = time_now_ms();
         pthread_t t3, t4, t5, t6;
@@ -99,19 +118,34 @@ int main(void) {
         pthread_create(&t5, NULL, producer_thread, &q2);
         pthread_create(&t6, NULL, consumer_thread, &q2);
         pthread_join(t3, NULL);
-        pthread_join(t4, NULL);
+        long long* cs2 = NULL;
+        pthread_join(t4, (void**)&cs2);
         pthread_join(t5, NULL);
-        pthread_join(t6, NULL);
-        double contention_ms = time_now_ms() - start;
-        printf("  Contention (Q1+Q2):  %8.2f ms (%8.0f ops/sec per channel)\n", 
-               contention_ms, (double)ITERATIONS * 1000.0 / contention_ms);
-        
-        double baseline_ops_sec = (double)ITERATIONS * 1000.0 / baseline_ms;
-        // Per-channel throughput: each queue did ITERATIONS ops in contention_ms.
-        double contention_ops_sec = (double)ITERATIONS * 1000.0 / contention_ms;
-        double interference = (baseline_ops_sec - contention_ops_sec) / baseline_ops_sec * 100.0;
-        printf("  Interference:         %8.2f%%\n\n", interference);
+        long long* cs3 = NULL;
+        pthread_join(t6, (void**)&cs3);
+        g_sink += *cs2 + *cs3; free(cs2); free(cs3);
+        contention_times[trial - 1] = time_now_ms() - start;
+
+        printf("  Trial %d:  baseline=%6.2f ms  contention=%6.2f ms\n",
+               trial, baseline_times[trial - 1], contention_times[trial - 1]);
     }
+
+    double best_baseline   = baseline_times[0];
+    double best_contention = contention_times[0];
+    for (int i = 1; i < NUM_TRIALS; i++) {
+        if (baseline_times[i]   < best_baseline)   best_baseline   = baseline_times[i];
+        if (contention_times[i] < best_contention) best_contention = contention_times[i];
+    }
+
+    double interference = (best_contention - best_baseline) / best_baseline * 100.0;
+
+    printf("\n");
+    printf("  Best baseline:    %6.2f ms  (%8.0f ops/sec)\n",
+           best_baseline, (double)ITERATIONS * 1000.0 / best_baseline);
+    printf("  Best contention:  %6.2f ms  (%8.0f ops/sec per channel)\n",
+           best_contention, (double)ITERATIONS * 1000.0 / best_contention);
+    printf("\n");
+    printf("Interference: %.2f%%  (best-of-%d)\n", interference, NUM_TRIALS);
 
     return 0;
 }

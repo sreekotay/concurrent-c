@@ -49,8 +49,10 @@ typedef struct {
     char err_type[128];
 } CCCodegenResultTypePair;
 
-extern CCCodegenResultTypePair cc__cg_result_types[64];
+/* Dynamic array - grows via realloc; count/cap managed in pass_type_syntax.c */
+extern CCCodegenResultTypePair* cc__cg_result_types;
 extern size_t cc__cg_result_type_count;
+extern size_t cc__cg_result_type_cap;
 
 /* Optional type registry - used by codegen to emit CC_DECL_OPTIONAL declarations */
 typedef struct {
@@ -58,7 +60,14 @@ typedef struct {
     char raw_type[128];      /* e.g., "Point" (original type name) */
 } CCCodegenOptionalType;
 
-extern CCCodegenOptionalType cc__cg_optional_types[64];
+/* Dynamic array - grows via realloc; count/cap managed in pass_type_syntax.c */
+extern CCCodegenOptionalType* cc__cg_optional_types;
 extern size_t cc__cg_optional_type_count;
+extern size_t cc__cg_optional_type_cap;
+
+/* Reset both type registries to empty (retain allocated buffer capacity).
+ * Call once at the start of each compilation unit in visit_codegen.c rather
+ * than relying on the implicit reset inside each scan function. */
+void cc__cg_reset_type_registries(void);
 
 #endif /* CC_PASS_TYPE_SYNTAX_H */

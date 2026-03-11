@@ -423,6 +423,30 @@ Implementation note:
 - This is an implementation policy layered on top of the normative lifecycle
   rules above; it does not alter parking/waking correctness contracts in §4.
 
+### 6.5 Spawn-task join wait protocol (Current runtime)
+
+`cc_block_on_intptr()` for `CC_TASK_KIND_SPAWN` may execute from fiber context
+via `cc_thread_task_join_fiber()`. This path MUST obey the same no-lost-wake
+requirements as channel parking:
+
+- Wait registration (`task->waiter_fiber = current_fiber`) occurs under
+  `task->mu`.
+- Completion publishes `task->done_atomic = 1` with release semantics after
+  storing `task->result`.
+- Join wait uses an acquire loop on `done_atomic` and MUST clear stale
+  pending-unpark before each park attempt:
+
+```c
+while (atomic_load_explicit(&task->done_atomic, memory_order_acquire) == 0) {
+    cc__fiber_clear_pending_unpark();
+    CC_FIBER_PARK_IF(&task->done_atomic, 0, "spawn_join");
+}
+```
+
+Rationale: an unrelated wake can set fiber pending-unpark and cause
+`CC_FIBER_PARK_IF` to return early. The `done_atomic` loop is the correctness
+guard that prevents reading `task->result` before completion publication.
+
 ---
 
 ## 7. Elastic Pool Scaling (Pressure + Active)

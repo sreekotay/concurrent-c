@@ -3,25 +3,18 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"sort"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	ITERATIONS = 1000000
-	NUM_TRIALS = 3
+	NUM_TRIALS = 7
 )
 
-func producer(ch chan int, count int) {
-	for i := 0; i < count; i++ {
-		ch <- i
-	}
-}
-
-func consumer(ch chan int, count int) {
-	for i := 0; i < count; i++ {
-		<-ch
-	}
-}
+// Prevent dead-code elimination of consumer work.
+var sink int64
 
 func main() {
 	fmt.Printf("=================================================================\n")
@@ -34,37 +27,94 @@ func main() {
 	ch1 := make(chan int, 1024)
 	ch2 := make(chan int, 1024)
 
-	for trial := 1; trial <= NUM_TRIALS; trial++ {
-		fmt.Printf("Trial %d:\n", trial)
+	baselineTimes := make([]float64, NUM_TRIALS)
+	contentionTimes := make([]float64, NUM_TRIALS)
 
-		// 1. Baseline: Run Channel 1 alone
+	for trial := 1; trial <= NUM_TRIALS; trial++ {
+		// Baseline: one P/C pair.
 		start := time.Now()
 		done := make(chan bool, 2)
-		go func() { producer(ch1, ITERATIONS); done <- true }()
-		go func() { consumer(ch1, ITERATIONS); done <- true }()
+		var sum1 int64
+		go func() {
+			for i := 0; i < ITERATIONS; i++ {
+				ch1 <- i ^ (i >> 16)
+			}
+			done <- true
+		}()
+		go func() {
+			var s int64
+			for i := 0; i < ITERATIONS; i++ {
+				s += int64(<-ch1)
+			}
+			atomic.AddInt64(&sum1, s)
+			done <- true
+		}()
 		<-done
 		<-done
-		baselineElapsed := time.Since(start)
-		baselineOpsSec := float64(ITERATIONS) / baselineElapsed.Seconds()
-		fmt.Printf("  Baseline (Ch1 only):  %8.2f ms (%8.0f ops/sec)\n", baselineElapsed.Seconds()*1000, baselineOpsSec)
+		atomic.AddInt64(&sink, sum1)
+		baselineTimes[trial-1] = time.Since(start).Seconds() * 1000
 
-		// 2. Contention: Run Channel 1 while Channel 2 is hammered
+		// Contention: two independent P/C pairs.
 		start = time.Now()
 		done = make(chan bool, 4)
-		go func() { producer(ch1, ITERATIONS); done <- true }()
-		go func() { consumer(ch1, ITERATIONS); done <- true }()
-		go func() { producer(ch2, ITERATIONS); done <- true }()
-		go func() { consumer(ch2, ITERATIONS); done <- true }()
+		var sum2, sum3 int64
+		go func() {
+			for i := 0; i < ITERATIONS; i++ {
+				ch1 <- i ^ (i >> 16)
+			}
+			done <- true
+		}()
+		go func() {
+			var s int64
+			for i := 0; i < ITERATIONS; i++ {
+				s += int64(<-ch1)
+			}
+			atomic.AddInt64(&sum2, s)
+			done <- true
+		}()
+		go func() {
+			for i := 0; i < ITERATIONS; i++ {
+				ch2 <- i ^ (i >> 16)
+			}
+			done <- true
+		}()
+		go func() {
+			var s int64
+			for i := 0; i < ITERATIONS; i++ {
+				s += int64(<-ch2)
+			}
+			atomic.AddInt64(&sum3, s)
+			done <- true
+		}()
 		<-done
 		<-done
 		<-done
 		<-done
-		contentionElapsed := time.Since(start)
-		// Per-channel throughput: each channel did ITERATIONS ops in contentionElapsed.
-		contentionOpsSec := float64(ITERATIONS) / contentionElapsed.Seconds()
-		fmt.Printf("  Contention (Ch1+Ch2): %8.2f ms (%8.0f ops/sec per channel)\n", contentionElapsed.Seconds()*1000, contentionOpsSec)
+		atomic.AddInt64(&sink, sum2+sum3)
+		contentionTimes[trial-1] = time.Since(start).Seconds() * 1000
 
-		interference := (baselineOpsSec - contentionOpsSec) / baselineOpsSec * 100.0
-		fmt.Printf("  Interference:         %8.2f%%\n\n", interference)
+		fmt.Printf("  Trial %d:  baseline=%6.2f ms  contention=%6.2f ms\n",
+			trial, baselineTimes[trial-1], contentionTimes[trial-1])
 	}
+
+	bestBaseline := baselineTimes[0]
+	bestContention := contentionTimes[0]
+	for i := 1; i < NUM_TRIALS; i++ {
+		if baselineTimes[i] < bestBaseline {
+			bestBaseline = baselineTimes[i]
+		}
+		if contentionTimes[i] < bestContention {
+			bestContention = contentionTimes[i]
+		}
+	}
+
+	interference := (bestContention - bestBaseline) / bestBaseline * 100.0
+
+	fmt.Printf("\n")
+	fmt.Printf("  Best baseline:    %6.2f ms  (%8.0f ops/sec)\n",
+		bestBaseline, float64(ITERATIONS)/bestBaseline*1000)
+	fmt.Printf("  Best contention:  %6.2f ms  (%8.0f ops/sec per channel)\n",
+		bestContention, float64(ITERATIONS)/bestContention*1000)
+	fmt.Printf("\n")
+	fmt.Printf("Interference: %.2f%%  (best-of-%d)\n", interference, NUM_TRIALS)
 }
