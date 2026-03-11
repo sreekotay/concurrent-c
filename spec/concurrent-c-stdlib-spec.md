@@ -103,6 +103,8 @@ Macros for working with `T!>(E)` Result types:
 |--------|---------|-------------|
 | `cc_is_ok(res)` | `bool` | True if result is success |
 | `cc_is_err(res)` | `bool` | True if result is error |
+| `cc_value(res)` | `T` | Get success payload (no branch check) |
+| `cc_error(res)` | `E` | Get error payload (no branch check) |
 | `cc_unwrap(res)` | `T` | Get value (for scalar types: int, size_t, bool) |
 | `cc_unwrap_err(res)` | `E` | Get error (for scalar error types) |
 | `cc_unwrap_as(res, T)` | `T` | Get value as specific type (for structs and pointers) |
@@ -126,8 +128,8 @@ All Result types use a unified struct layout:
 struct CCResult_T_E {
     bool ok;           // true = success, false = error
     union {
-        T value;       // access via cc_unwrap(res) or res.u.value
-        E error;       // access via cc_unwrap_err(res) or res.u.error
+        T value;       // access via cc_value(res) or cc_unwrap*(...)
+        E error;       // access via cc_error(res) or cc_unwrap_err*(...)
     } u;
 };
 ```
@@ -138,10 +140,10 @@ struct CCResult_T_E {
 // Pattern 1: Scalar result - use cc_unwrap
 size_t !>(CCIoError) res = cc_file_write(file, data);
 if (cc_is_err(res)) {
-    handle_error(cc_unwrap_err_as(res, CCIoError));
+    handle_error(cc_error(res));
     return;
 }
-size_t bytes_written = cc_unwrap(res);
+size_t bytes_written = cc_value(res);
 
 // Pattern 2: Pointer result - use cc_unwrap_as with pointer type
 CCDirIter* !>(CCIoError) iter_res = cc_dir_open(arena, ".");
@@ -2023,7 +2025,7 @@ Concurrent-C networking provides safe, async-first primitives for TCP/UDP, TLS, 
 
 1. **Arena-first buffers:** All read operations allocate into caller-provided arenas. No hidden mallocs.
 2. **Duplex unification:** TCP sockets and TLS connections expose the same `Duplex` interface as server connections.
-3. **Explicit lifetimes:** Socket handles are resources that must be closed. Use `@defer` or `@nursery closing()`.
+3. **Explicit lifetimes:** Socket handles are resources that must be closed. Use `@defer` (or `@closing(...)` for channel producer scopes).
 4. **Async by default:** All I/O is async. Sync wrappers exist but prefer async in concurrent code.
 
 #### 5.2 TCP Sockets

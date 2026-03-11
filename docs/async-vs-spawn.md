@@ -148,7 +148,7 @@ Sometimes you need both. The key is to use the right tool at each level:
 @nursery {
     spawn(() => {
         // Inner: @async for I/O
-        @nursery closing(tx) {
+        @closing(tx) {
             @async produce(tx, shard_id);  // Channel-heavy work
         }
     });

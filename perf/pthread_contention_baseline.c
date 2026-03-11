@@ -12,16 +12,10 @@
 
 #define ITERATIONS 1000000
 #define QUEUE_SIZE 1024
-#define NUM_TRIALS 7
+#define NUM_TRIALS 15
 
 /* Prevent dead-code elimination of consumer work. */
 static volatile long long g_sink = 0;
-
-static int cmp_double(const void* a, const void* b) {
-    double da = *(const double*)a;
-    double db = *(const double*)b;
-    return (da > db) - (da < db);
-}
 
 typedef struct {
     pthread_mutex_t mu;

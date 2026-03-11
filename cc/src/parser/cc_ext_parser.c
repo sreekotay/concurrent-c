@@ -640,6 +640,7 @@ static int cc_try_cc_at_stmt(void) {
     /* Check for known @ keywords */
     if (strcmp(cc_at, "arena") != 0 &&
         strcmp(cc_at, "arena_init") != 0 &&
+        strcmp(cc_at, "closing") != 0 &&
         strcmp(cc_at, "nursery") != 0 &&
         strcmp(cc_at, "defer") != 0 &&
         strcmp(cc_at, "match") != 0 &&
@@ -648,6 +649,30 @@ static int cc_try_cc_at_stmt(void) {
         return 0;
     }
     
+    /* --- @closing(ch[, ...]) { ... } --- */
+    if (strcmp(cc_at, "closing") == 0) {
+        cc_ast_record_start(CC_AST_NODE_STMT);
+        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
+            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
+            /* Internally this is equivalent to @nursery closing(...) */
+            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("nursery");
+        }
+        tcc_state->cc_at_nursery_wrap = 1;
+        next(); /* consume 'closing' */
+        if (tok != '(')
+            tcc_error("expected '(' after @closing");
+        int depth = 1;
+        next();
+        while (tok && tok != TOK_EOF && depth > 0) {
+            if (tok == '(') depth++;
+            else if (tok == ')') depth--;
+            next();
+        }
+        if (tok != '{')
+            tcc_error("expected '{' after @closing(...)");
+        return 2; /* handled, parse block with nursery wrap */
+    }
+
     /* --- @defer stmt; --- */
     if (strcmp(cc_at, "defer") == 0) {
         cc_ast_record_start(CC_AST_NODE_STMT);

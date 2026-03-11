@@ -1,0 +1,56 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <errno.h>
+
+#define ROUNDS 20
+#define ACTORS_PER_ROUND 3
+
+cc_atomic_int g_timeouts = 0;
+
+static void cycle_actor(CCChanTx tx, CCChanRx rx, int token) {
+    int recv_val = 0;
+    int rc = 0;
+
+    @with_deadline(millis(10)) {
+        rc = cc_chan_send(tx.raw, &token, sizeof(token));
+        if (rc == 0) rc = cc_chan_recv(rx.raw, &recv_val, sizeof(recv_val));
+    }
+
+    if (rc == ETIMEDOUT || rc == ECANCELED) {
+        cc_atomic_fetch_add(&g_timeouts, 1);
+    }
+}
+
+int main(void) {
+    printf("cycle_ring3_deadline: %d rounds\n", ROUNDS);
+    cc_atomic_store(&g_timeouts, 0);
+
+    for (int round = 0; round < ROUNDS; round++) {
+        int[~ >] tx1;
+        int[~ <] rx1;
+        int[~ >] tx2;
+        int[~ <] rx2;
+        int[~ >] tx3;
+        int[~ <] rx3;
+
+        CCChan* ch1 = channel_pair(&tx1, &rx1);
+        CCChan* ch2 = channel_pair(&tx2, &rx2);
+        CCChan* ch3 = channel_pair(&tx3, &rx3);
+
+        @nursery {
+            spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });
+            spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); });
+            spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); });
+        }
+
+        cc_chan_free(ch1);
+        cc_chan_free(ch2);
+        cc_chan_free(ch3);
+    }
+
+    int timeouts = cc_atomic_load(&g_timeouts);
+    int expected = ROUNDS * ACTORS_PER_ROUND;
+    printf("cycle_ring3_deadline: timeouts=%d/%d\n", timeouts, expected);
+    return (timeouts == expected) ? 0 : 1;
+}

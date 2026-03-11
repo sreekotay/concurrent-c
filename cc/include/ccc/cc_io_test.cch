@@ -18,7 +18,7 @@ static inline CCRes(bool, CCIoError) cc_io_test_func(void) {
 /* Test with CCRes(int, CCError) */
 static inline CCRes(int, CCError) cc_io_test_int(int x) {
     if (x < 0) {
-        return CCRes_err(int, CCError, cc_error(CC_ERR_INVALID_ARG, "negative"));
+        return CCRes_err(int, CCError, CC_ERROR(CC_ERR_INVALID_ARG, "negative"));
     }
     return CCRes_ok(int, CCError, x * 2);
 }

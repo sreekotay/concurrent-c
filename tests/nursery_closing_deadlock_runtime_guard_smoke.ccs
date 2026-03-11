@@ -14,7 +14,7 @@ int main(void) {
     CCChanRx ch_rx;
     if (cc_chan_pair_create(3, CC_CHAN_MODE_BLOCK, false, sizeof(int), &ch_tx, &ch_rx) != 0) return 2;
 
-    @nursery closing(ch_tx) {
+    @closing(ch_tx) {
         spawn(() => {
             for (int i = 1; i <= 3; i++) {
                 (void)chan_send(ch_tx, i);

@@ -82,11 +82,11 @@ Uses channels and nested nurseries for clean structured concurrency:
 @nursery {
     spawn(writer);               // Collects results
     
-    @nursery closing(results_tx) {
+    @closing(results_tx) {
         for (N workers)
             spawn(compressor);   // Compress blocks
         
-        @nursery closing(blocks_tx) {
+        @closing(blocks_tx) {
             spawn(reader);       // Produce blocks
         }
     }
@@ -106,9 +106,9 @@ CCChan* ch = channel_pair(&blocks_tx, &blocks_rx);
 ### 2. Nested Nurseries with `closing()`
 Auto-close channels when producers finish:
 ```c
-@nursery closing(results_tx) {
+@closing(results_tx) {
     // Workers here...
-    @nursery closing(blocks_tx) {
+    @closing(blocks_tx) {
         // Reader here - when done, blocks_tx closes
     }
     // Workers drain blocks_rx, then exit

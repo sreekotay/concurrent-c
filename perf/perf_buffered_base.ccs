@@ -39,7 +39,7 @@ static double run_once(void) {
     CCChanRx rx = rx_h;
 
     double start = time_now_ms();
-    @nursery closing(tx_h) {
+    @closing(tx_h) {
         spawn(() => [tx] {
             for (int i = 0; i < ITERATIONS; i++) {
                 tx.send(i);

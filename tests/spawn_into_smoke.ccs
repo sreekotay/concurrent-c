@@ -19,7 +19,7 @@ int main() {
     channel_pair(&tx, &rx);
     
     // Use spawn into to spawn task and send CCTask to channel
-    @nursery closing(tx) {
+    @closing(tx) {
         spawn into(tx) () => double_value((void*)21);
     }
     

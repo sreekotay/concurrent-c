@@ -22,7 +22,7 @@ static void bench_buffered(void) {
     
     double start = time_now_ms();
 
-    @nursery closing(tx) {
+    @closing(tx) {
         /* Producer */
         spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
@@ -54,7 +54,7 @@ static void bench_unbuffered(void) {
     int iterations = ITERATIONS / 10;  /* Unbuffered is slower */
     double start = time_now_ms();
     
-    @nursery closing(tx) {
+    @closing(tx) {
         spawn(() => [iterations] {
             for (int i = 0; i < iterations; i++) {
                 tx.send(i);

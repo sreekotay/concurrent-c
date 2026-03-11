@@ -33,7 +33,7 @@ int main(void) {
         });
 
         /* Producers */
-        @nursery closing(tx) {
+        @closing(tx) {
             for (int p = 0; p < num_producers; p++) {
                 int n = msgs_per;  /* Capture local copy */
                 spawn(() => [n] {

@@ -161,6 +161,56 @@ static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uin
     atomic_fetch_add_explicit(&g_channel_timing.recv_count, 1, memory_order_relaxed);
 }
 
+static int cc_trace_chan_wake_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("CC_TRACE_CHAN_WAKE") != NULL;
+    }
+    return enabled;
+}
+
+static int cc_channel_partner_hint_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_CHAN_PARTNER_HINT");
+        /* Recorded investigation result: default-on partner affinity improved
+         * the contention microbench, but regressed pigz materially enough that
+         * the runtime now leaves it opt-in only. Re-enable with =1 for A/Bs. */
+        enabled = (v && v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static int cc_channel_recv_dedupe_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_CHAN_RECV_DEDUPE");
+        enabled = (!v || v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static void cc__trace_chan_wake(const char* kind, CCChan* ch, cc__fiber_wait_node* node) {
+    if (!cc_trace_chan_wake_enabled() || !node || !node->fiber) return;
+    fprintf(stderr,
+            "[cc][chanwake] kind=%s ch=%p from_w=%d fiber=%" PRIu64 " pref=%d park=%s notified=%d\n",
+            kind,
+            (void*)ch,
+            cc__sched_current_worker_id(),
+            (uint64_t)cc__fiber_debug_id(node->fiber),
+            cc__fiber_debug_last_worker(node->fiber),
+            cc__fiber_debug_park_reason(node->fiber) ? cc__fiber_debug_park_reason(node->fiber) : "null",
+            atomic_load_explicit(&node->notified, memory_order_relaxed));
+}
+
+static inline void cc__chan_hint_partner_worker(cc__fiber_wait_node* node) {
+    if (!node || !node->fiber) return;
+    if (!cc_channel_partner_hint_enabled()) return;
+    int worker_id = cc__sched_current_worker_id();
+    if (worker_id < 0) return;
+    cc__fiber_hint_channel_partner(node->fiber, worker_id);
+}
+
 /* ============================================================================
  * Channel debug counters (lock-free focus)
  * ============================================================================ */
@@ -358,20 +408,75 @@ static inline void wake_batch_flush(void) {
     b->count = 0;
 }
 
-static inline cc_sched_wait_result cc__chan_wait_notified(cc__fiber_wait_node* node) {
-    /* Hot path: this wait shape is a single atomic-notified flag and does not
-     * need generic waitable op dispatch/publish bookkeeping. */
-    if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
-        return CC_SCHED_WAIT_OK;
-    }
-    CC_FIBER_PARK_IF(&node->notified, 0, "chan_wait_notified");
-    return atomic_load_explicit(&node->notified, memory_order_acquire) != 0
-               ? CC_SCHED_WAIT_OK
+typedef struct {
+    _Atomic int* flag;
+    int expected;
+} cc__chan_wait_flag_ctx;
+
+static bool cc__chan_wait_flag_try_complete(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)fiber;
+    (void)io;
+    cc__chan_wait_flag_ctx* ctx = (cc__chan_wait_flag_ctx*)waitable;
+    return atomic_load_explicit(ctx->flag, memory_order_acquire) != ctx->expected;
+}
+
+static bool cc__chan_wait_flag_publish(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)waitable;
+    (void)fiber;
+    (void)io;
+    return true;
+}
+
+static void cc__chan_wait_flag_unpublish(void* waitable, CCSchedFiber* fiber) {
+    (void)waitable;
+    (void)fiber;
+}
+
+static void cc__chan_wait_flag_park(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)fiber;
+    (void)io;
+    cc__chan_wait_flag_ctx* ctx = (cc__chan_wait_flag_ctx*)waitable;
+    CC_FIBER_PARK_IF(ctx->flag, ctx->expected, "chan_wait_notified");
+}
+
+static cc_sched_wait_result cc__chan_wait_flag_park_until(void* waitable, CCSchedFiber* fiber, void* io,
+                                                          const struct timespec* abs_deadline) {
+    (void)fiber;
+    (void)io;
+    cc__chan_wait_flag_ctx* ctx = (cc__chan_wait_flag_ctx*)waitable;
+    return CC_FIBER_PARK_IF_UNTIL(ctx->flag, ctx->expected, abs_deadline, "chan_wait_notified")
+               ? CC_SCHED_WAIT_TIMEOUT
                : CC_SCHED_WAIT_PARKED;
 }
 
-static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_wait_node* node) {
-    cc_sched_wait_result wait_rc = cc__chan_wait_notified(node);
+static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wait_node* node,
+                                                                   const struct timespec* abs_deadline) {
+    if (atomic_load_explicit(&node->notified, memory_order_acquire) != 0) {
+        return CC_SCHED_WAIT_OK;
+    }
+    cc__chan_wait_flag_ctx ctx = {
+        .flag = &node->notified,
+        .expected = 0,
+    };
+    const cc_sched_waitable_ops ops = {
+        .try_complete = cc__chan_wait_flag_try_complete,
+        .publish = cc__chan_wait_flag_publish,
+        .unpublish = cc__chan_wait_flag_unpublish,
+        .park = cc__chan_wait_flag_park,
+        .park_until = cc__chan_wait_flag_park_until,
+    };
+    return abs_deadline
+               ? cc_sched_fiber_wait_until(&ctx, NULL, &ops, abs_deadline)
+               : cc_sched_fiber_wait(&ctx, NULL, &ops);
+}
+
+static inline cc_sched_wait_result cc__chan_wait_notified(cc__fiber_wait_node* node) {
+    return cc__chan_wait_notified_deadline(node, NULL);
+}
+
+static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_wait_node* node,
+                                                                     const struct timespec* abs_deadline) {
+    cc_sched_wait_result wait_rc = cc__chan_wait_notified_deadline(node, abs_deadline);
     if (wait_rc == CC_SCHED_WAIT_CLOSED) {
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);
     }
@@ -862,6 +967,7 @@ static inline void cc__chan_select_cancel_node(cc__fiber_wait_node* node) {
         }
     }
     if (node->fiber) {
+        cc__chan_hint_partner_worker(node);
         if (cc__chan_dbg_enabled() && node->is_select && node->select_group) {
             cc__select_wait_group* g = (cc__select_wait_group*)node->select_group;
             fprintf(stderr, "CC_CHAN_DEBUG: wake_batch_add_cancel fiber=%p group=%p sel=%d sig=%d\n",
@@ -984,6 +1090,8 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
          * to protect the woken fiber until it either re-registers or finishes.
          * The flag will be cleared by cc__chan_remove_send_waiter when the fiber
          * runs and removes itself. */
+        cc__chan_hint_partner_worker(node);
+        cc__trace_chan_wake("send_waiter_signal", ch, node);
         wake_batch_add(node->fiber);
         return;
     }
@@ -993,8 +1101,11 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
 }
 
 /* Signal a recv waiter to wake and try the buffer (must hold ch->mu).
- * Does NOT set notified - the waiter remains in the queue and should check
- * the buffer. Uses simple FIFO - work stealing provides natural load balancing. */
+ * The waiter remains in the queue until it runs and removes itself, so we must
+ * only signal nodes that are still genuinely waiting (notified == NONE).
+ * Re-signaling an already-signaled node creates wake storms without making
+ * forward progress. Uses simple FIFO - work stealing provides natural load
+ * balancing. */
 static void cc__chan_signal_recv_waiter(CCChan* ch) {
     if (!ch) return;
     if (!ch->recv_waiters_head) {
@@ -1006,6 +1117,10 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
     }
     /* Wake the first selectable waiter */
     for (cc__fiber_wait_node* node = ch->recv_waiters_head; node; node = node->next) {
+        int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
+        if (cc_channel_recv_dedupe_enabled() && notify != CC_CHAN_NOTIFY_NONE) {
+            continue;
+        }
         if (!cc__chan_select_try_win(node)) {
             if (ch->use_lockfree) {
                 cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_cancel);
@@ -1029,6 +1144,8 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
             cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_wake);
             cc__chan_dbg_inc(&ch->dbg_lf_recv_waiter_wake);
         }
+        cc__chan_hint_partner_worker(node);
+        cc__trace_chan_wake("recv_waiter_signal", ch, node);
         wake_batch_add(node->fiber);
         return;
     }
@@ -1176,6 +1293,7 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         cc__chan_dbg_select_event("signal_close_recv", node);
     }
+    cc__chan_hint_partner_worker(node);
     wake_batch_add(node->fiber);
 }
 
@@ -1210,6 +1328,7 @@ static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         cc__chan_dbg_select_event("signal_close_send", node);
     }
+    cc__chan_hint_partner_worker(node);
     wake_batch_add(node->fiber);
 }
 
@@ -1612,22 +1731,18 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         if (fiber) {
             /* Fiber-aware blocking: park the fiber instead of condvar wait */
             while (!ch->closed && !ch->rx_error_closed && (ch->rv_has_value || (ch->rv_recv_waiters == 0 && !ch->recv_waiters_head))) {
-                if (deadline) {
-                    struct timespec now;
-                    clock_gettime(CLOCK_REALTIME, &now);
-                    if (now.tv_sec > deadline->tv_sec ||
-                        (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
-                        return ETIMEDOUT;
-                    }
-                }
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
                 cc__chan_add_send_waiter(ch, &node);
 
                 pthread_mutex_unlock(&ch->mu);
-                (void)cc__chan_wait_notified_mark_close(&node);
+                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline);
                 pthread_mutex_lock(&ch->mu);
+                if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
+                    cc__chan_remove_send_waiter(ch, &node);
+                    return ETIMEDOUT;
+                }
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
@@ -1672,14 +1787,6 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
             if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
                 return ECANCELED;
             }
-            if (deadline) {
-                struct timespec now;
-                clock_gettime(CLOCK_REALTIME, &now);
-                if (now.tv_sec > deadline->tv_sec ||
-                    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
-                    return ETIMEDOUT;
-                }
-            }
             cc__fiber_wait_node node = {0};
             node.fiber = fiber;
             atomic_store(&node.notified, 0);
@@ -1696,8 +1803,12 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 break;
             }
-            (void)cc__chan_wait_notified_mark_close(&node);
+            cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline);
             pthread_mutex_lock(&ch->mu);
+            if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
+                cc__chan_remove_send_waiter(ch, &node);
+                return ETIMEDOUT;
+            }
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
@@ -1758,15 +1869,6 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         if (fiber) {
             /* Fiber-aware blocking */
             while (!ch->closed && !ch->rv_has_value) {
-                if (deadline) {
-                    struct timespec now;
-                    clock_gettime(CLOCK_REALTIME, &now);
-                    if (now.tv_sec > deadline->tv_sec ||
-                        (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
-                        ch->rv_recv_waiters--;
-                        return ETIMEDOUT;
-                    }
-                }
                 cc__fiber_wait_node node = {0};
                 node.fiber = fiber;
                 atomic_store(&node.notified, 0);
@@ -1776,9 +1878,14 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 wake_batch_flush();  /* Flush queued wakes after unlocking. */
 
                 /* Return-aware boundary wait (first migrated call site). */
-                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node);
+                cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline);
 
                 pthread_mutex_lock(&ch->mu);
+                if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    ch->rv_recv_waiters--;
+                    return ETIMEDOUT;
+                }
                 if (wait_rc == CC_SCHED_WAIT_CLOSED) {
                     cc__chan_remove_recv_waiter(ch, &node);
                     ch->rv_recv_waiters--;
@@ -1842,14 +1949,6 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     if (fiber) {
         /* Fiber-aware blocking */
         while (!ch->closed && ch->count == 0) {
-            if (deadline) {
-                struct timespec now;
-                clock_gettime(CLOCK_REALTIME, &now);
-                if (now.tv_sec > deadline->tv_sec ||
-                    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
-                    return ETIMEDOUT;
-                }
-            }
             /* Re-check deadlock guard inside loop (same as initial guard above) */
             if (!deadline && !ch->closed && ch->count == 0 &&
                 ch->autoclose_owner && cc__tls_current_nursery &&
@@ -1880,8 +1979,12 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 pthread_mutex_unlock(&ch->mu);
                 break;
             }
-            (void)cc__chan_wait_notified_mark_close(&node);
+            cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline);
             pthread_mutex_lock(&ch->mu);
+            if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
+                cc__chan_remove_recv_waiter(ch, &node);
+                return ETIMEDOUT;
+            }
 
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -2328,6 +2431,7 @@ static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wai
                     atomic_load_explicit(&g->selected_index, memory_order_acquire),
                     atomic_load_explicit(&g->signaled, memory_order_acquire));
         }
+        cc__chan_hint_partner_worker(rnode);
         wake_batch_add(rnode->fiber);
     } else {
         pthread_cond_signal(&ch->not_empty);
@@ -2395,7 +2499,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
                     cc__chan_dbg_inc(&ch->dbg_rv_send_parked);
-                    (void)cc__chan_wait_notified_mark_close(&node);
+                    (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 }
                 pthread_mutex_lock(&ch->mu);
             } else {
@@ -2486,7 +2590,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
                     cc__chan_dbg_inc(&ch->dbg_rv_recv_parked);
-                    (void)cc__chan_wait_notified_mark_close(&node);
+                    (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 }
                 pthread_mutex_lock(&ch->mu);
             } else {
@@ -2643,6 +2747,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
                 }
                 if (rnode->fiber) {
+                    cc__chan_hint_partner_worker(rnode);
+                    cc__trace_chan_wake("direct_send_handoff", ch, rnode);
                     wake_batch_add(rnode->fiber);
                 } else {
                     pthread_cond_signal(&ch->not_empty);
@@ -2829,7 +2935,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                (void)cc__chan_wait_notified_mark_close(&node);
+                (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -3322,7 +3428,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                         cc_chan_unlock(ch);
                         wake_batch_flush();
                     }
-                    (void)cc__chan_wait_notified_mark_close(&node);
+                    (void)cc__chan_wait_notified_mark_close(&node, NULL);
                     pthread_mutex_lock(&ch->mu);
                     goto recv_post_park_notified;
                 }
@@ -3505,6 +3611,8 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         }
         if (rnode->fiber) {
+            cc__chan_hint_partner_worker(rnode);
+            cc__trace_chan_wake("try_send_handoff", ch, rnode);
             wake_batch_add(rnode->fiber);
         } else {
             pthread_cond_signal(&ch->not_empty);
@@ -3747,7 +3855,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                (void)cc__chan_wait_notified_mark_close(&node);
+                (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -3926,7 +4034,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                (void)cc__chan_wait_notified_mark_close(&node);
+                (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {

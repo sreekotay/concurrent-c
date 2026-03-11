@@ -290,7 +290,10 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 
     if (timing) t1 = nursery_rdtsc();
 
-    /* Spawn task on fiber scheduler */
+    /* Spawn task on fiber scheduler.
+     * Non-worker sibling grouping is runtime-gated because it can help some
+     * startup locality cases but regress broader workloads like pigz. */
+    cc_sched_nonworker_spawn_group_hint((const void*)n, 2);
     fiber_task* t = cc_fiber_spawn(cc__nursery_task_trampoline, th);
     if (!t) {
         free(th);

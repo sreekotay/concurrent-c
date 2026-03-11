@@ -1,0 +1,23 @@
+#include <ccc/cc_runtime.cch>
+
+static volatile int g_value = 0;
+
+int main(void) {
+    int[~1 >] tx;
+    int[~1 <] rx;
+    CCChan* ch = channel_pair(&tx, &rx);
+
+    @nursery {
+        spawn(() => {
+            int v = 0;
+            if (cc_io_avail(chan_recv(rx, &v))) g_value = v;
+        });
+
+        @closing(tx) spawn(() => {
+            (void)chan_send(tx, 42);
+        });
+    }
+
+    cc_chan_free(ch);
+    return (g_value == 42) ? 0 : 1;
+}

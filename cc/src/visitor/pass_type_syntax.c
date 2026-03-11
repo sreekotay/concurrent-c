@@ -832,6 +832,170 @@ char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, si
     return out;
 }
 
+char* cc__rewrite_result_field_sugar_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
+    (void)ctx;
+    if (!src || n == 0) return NULL;
+
+    typedef struct {
+        char name[128];
+    } CCResultVar;
+    CCResultVar* vars = NULL;
+    size_t var_count = 0, var_cap = 0;
+
+    /* Pass 1: collect local/global identifiers declared as CCResult_* variables. */
+    {
+        int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+        size_t i = 0;
+        while (i < n) {
+            char c = src[i];
+            char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+            if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+            if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+            if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+            if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+
+            if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+            if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+            if (c == '"') { in_str = 1; i++; continue; }
+            if (c == '\'') { in_chr = 1; i++; continue; }
+
+            if ((i == 0 || !cc__is_ident_char_local(src[i - 1])) &&
+                i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0) {
+                size_t j = i + 9;
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                while (j < n && src[j] == '*') {
+                    j++;
+                    while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                }
+                if (j < n && cc__is_ident_start_local2(src[j])) {
+                    size_t nm_start = j;
+                    j++;
+                    while (j < n && cc__is_ident_char_local(src[j])) j++;
+                    size_t nm_end = j;
+
+                    size_t k = j;
+                    while (k < n && (src[k] == ' ' || src[k] == '\t' || src[k] == '\n' || src[k] == '\r')) k++;
+                    /* Skip function declarations/definitions. */
+                    if (!(k < n && src[k] == '(')) {
+                        size_t nm_len = nm_end - nm_start;
+                        if (nm_len > 0 && nm_len < sizeof(vars[0].name)) {
+                            int exists = 0;
+                            for (size_t vi = 0; vi < var_count; vi++) {
+                                if (strlen(vars[vi].name) == nm_len &&
+                                    memcmp(vars[vi].name, src + nm_start, nm_len) == 0) {
+                                    exists = 1;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                if (var_count == var_cap) {
+                                    size_t nc = var_cap ? var_cap * 2 : 16;
+                                    CCResultVar* nv = (CCResultVar*)realloc(vars, nc * sizeof(CCResultVar));
+                                    if (!nv) {
+                                        free(vars);
+                                        return NULL;
+                                    }
+                                    vars = nv;
+                                    var_cap = nc;
+                                }
+                                memcpy(vars[var_count].name, src + nm_start, nm_len);
+                                vars[var_count].name[nm_len] = '\0';
+                                var_count++;
+                            }
+                        }
+                    }
+                }
+                i = j;
+                continue;
+            }
+            i++;
+        }
+    }
+
+    if (var_count == 0) {
+        free(vars);
+        return NULL;
+    }
+
+    /* Pass 2: rewrite `res.value`/`res.error` to `res.u.value`/`res.u.error`. */
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    {
+        int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+        size_t i = 0;
+        while (i < n) {
+            char c = src[i];
+            char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+            if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+            if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+            if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+            if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+
+            if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+            if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+            if (c == '"') { in_str = 1; i++; continue; }
+            if (c == '\'') { in_chr = 1; i++; continue; }
+
+            if (cc__is_ident_start_local2(c)) {
+                size_t id_start = i;
+                i++;
+                while (i < n && cc__is_ident_char_local(src[i])) i++;
+                size_t id_end = i;
+
+                int is_result_var = 0;
+                for (size_t vi = 0; vi < var_count; vi++) {
+                    size_t vlen = strlen(vars[vi].name);
+                    if (vlen == id_end - id_start &&
+                        memcmp(vars[vi].name, src + id_start, vlen) == 0) {
+                        is_result_var = 1;
+                        break;
+                    }
+                }
+                if (!is_result_var) continue;
+
+                size_t j = id_end;
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                if (j >= n || src[j] != '.') continue;
+                size_t dot = j;
+                j++;
+                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
+                if (j >= n || !cc__is_ident_start_local2(src[j])) continue;
+                size_t mem_start = j;
+                j++;
+                while (j < n && cc__is_ident_char_local(src[j])) j++;
+                size_t mem_end = j;
+
+                size_t mlen = mem_end - mem_start;
+                int is_value = (mlen == 5 && memcmp(src + mem_start, "value", 5) == 0);
+                int is_error = (mlen == 5 && memcmp(src + mem_start, "error", 5) == 0);
+                if (!is_value && !is_error) continue;
+
+                cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, mem_start - last_emit);
+                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "u.");
+                last_emit = mem_start;
+                changed = 1;
+                i = mem_end;
+                (void)dot;
+                continue;
+            }
+            i++;
+        }
+    }
+
+    free(vars);
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Rewrite cc_ok(...) and cc_err(...) to fully qualified forms based on enclosing function's return type.
    Inside a function returning CCResult_T_E:
      cc_ok(v)   -> cc_ok_CCResult_T_E(v)
@@ -1039,12 +1203,13 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         size_t k = args_start;
                         while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
                         
-                        /* cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg") -> cc_err_...(cc_error(...)) */
+                        /* cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg")
+                           -> cc_err_...(CC_ERROR(...)) */
                         if (is_default_err && k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
-                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(cc_error(");
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(CC_ERROR(");
                             cc__sb_append_local(&out, &out_len, &out_cap, src + args_start, j - args_start);
                             if (comma_count == 0) {
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, ", NULL");

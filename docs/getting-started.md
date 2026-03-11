@@ -72,22 +72,27 @@ Send messages between tasks:
 ```c
 int[~10 >] tx;  // sender, capacity 10
 int[~10 <] rx;  // receiver
-channel_pair(&tx, &rx);
+CCChan* ch = channel_pair(&tx, &rx);
 
 @nursery {
+    // Consumer drains until producer ownership scope closes tx.
     spawn(() => {
-        for (int i = 0; i < 5; i++) {
-            chan_send(tx, i);
-        }
-    });
-    
-    spawn(() => {
-        int v;
-        while (chan_recv(rx, &v) == 0) {
+        int v = 0;
+        while (cc_io_avail(chan_recv(rx, &v))) {
             printf("got %d\n", v);
         }
     });
+
+    // Preferred: annotate producer ownership with @closing(tx).
+    @closing(tx) {
+        spawn(() => {
+            for (int i = 0; i < 5; i++) {
+                (void)chan_send(tx, i);
+            }
+        });
+    }
 }
+cc_chan_free(ch);
 ```
 
 ### Cleanup with `@defer`

@@ -66,6 +66,12 @@ typedef enum {
     CCN_TYPE_PTR,         /* T* */
     CCN_TYPE_ARRAY,       /* T[N] */
     CCN_TYPE_SLICE,       /* T[] */
+    /* Channel types — T[~N >] / T[~N <].
+     * NOTE: These are declared for future use.  The current compiler lowers
+     * channel syntax entirely in the text-rewrite pass (pass_channel_syntax.c)
+     * BEFORE the CCNNode tree is built, so parser.c never constructs these
+     * nodes in practice.  clone/free/dump coverage exists so that any future
+     * pass that does construct them will not leak. */
     CCN_TYPE_CHAN_TX,     /* T[~N >] */
     CCN_TYPE_CHAN_RX,     /* T[~N <] */
     CCN_TYPE_OPTIONAL,    /* T? */
@@ -115,6 +121,10 @@ typedef enum {
     /* CC-specific expressions */
     CCN_EXPR_CLOSURE,     /* () => expr, (x) => { ... } */
     CCN_EXPR_AWAIT,       /* await expr */
+    /* Channel send/recv sugar — tx <- val / <-rx.
+     * NOTE: Like the channel types above, these are future-facing.  The current
+     * pipeline rewrites channel operations as text before the CCNNode tree is
+     * built; no union member is defined for these yet (they act as leaves). */
     CCN_EXPR_CHAN_SEND,   /* tx <- val (sugar) */
     CCN_EXPR_CHAN_RECV,   /* <-rx (sugar) */
     CCN_EXPR_OK,          /* cc_ok(val) */

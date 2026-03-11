@@ -1176,6 +1176,30 @@ static char* cc__rewrite_with_edits(const char* src, size_t len, Edit* edits, in
 
 static char* cc__make_call_expr(const CCClosureDesc* d); /* forward */
 
+/* Returns 1 when the capture's make-function parameter should be declared as
+ * void* in the forward declaration proto.  This avoids forward-reference
+ * errors for user-defined types: closure protos are emitted before the user
+ * source (so user struct/typedef definitions are not yet in scope), but the
+ * full closure definitions are emitted at end-of-file where all types are
+ * visible.  Applies to reference captures (which produce T* parameters) and
+ * to value captures of already-pointer types (e.g. Block* captured by value).
+ * Primitive value captures (int, size_t, …) keep their concrete types. */
+static int cc__capture_needs_opaque(int is_ref, const char* ty) {
+    if (is_ref) return 1;
+    if (!ty) return 0;
+    const char* p = ty + strlen(ty);
+    while (p > ty && *(p-1) == ' ') p--;
+    return p > ty && *(p-1) == '*';
+}
+
+/* When an opaque capture preserves a const-qualified pointee, use const void*
+ * in the generated make-function signature so calls like const char* -> void*
+ * do not trigger qualifier-discard warnings. */
+static int cc__capture_needs_const_opaque(int is_ref, const char* ty) {
+    if (!cc__capture_needs_opaque(is_ref, ty) || !ty) return 0;
+    return strstr(ty, "const") != NULL;
+}
+
 static char* cc__lower_nested_closures_in_body(int parent_idx,
                                                const CCClosureDesc* descs,
                                                int desc_n) {
@@ -2010,7 +2034,10 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t);\n", d->id);
             else cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t, intptr_t);\n", d->id);
 
-            /* __cc_closure_make_N prototype - includes captured variable types */
+            /* __cc_closure_make_N prototype.  Pointer-typed captures use
+             * (const) void* here so the proto doesn't require user-defined
+             * types to be visible at proto-emission time (before the user
+             * source body). */
             const char* cty_p = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
             cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_%d(", cty_p, d->id);
             if (d->cap_count == 0) {
@@ -2020,10 +2047,11 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     if (ci) cc__append_str(&protos, &protos_len, &protos_cap, ", ");
                     int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                     const char* ty = d->cap_types && d->cap_types[ci] ? d->cap_types[ci] : "int";
-                    const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
-                    if (is_ref) {
-                        cc__append_fmt(&protos, &protos_len, &protos_cap, "%s* %s", ty, nm);
+                    if (cc__capture_needs_opaque(is_ref, ty)) {
+                        cc__append_str(&protos, &protos_len, &protos_cap,
+                                       cc__capture_needs_const_opaque(is_ref, ty) ? "const void*" : "void*");
                     } else {
+                        const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                         cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s", ty, nm);
                     }
                 }
@@ -2065,7 +2093,12 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
                 const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
-                if (is_ref) {
+                if (cc__capture_needs_opaque(is_ref, ty)) {
+                    /* Match the opaque proto so declaration and definition agree. */
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "%s __cc_opaque_%s",
+                                   cc__capture_needs_const_opaque(is_ref, ty) ? "const void*" : "void*",
+                                   nm);
+                } else if (is_ref) {
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "%s* %s", ty, nm);
                 } else {
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "%s %s", ty, nm);
@@ -2076,6 +2109,21 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                            "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)malloc(sizeof(__cc_closure_env_%d));\n",
                            d->id, d->id, d->id);
             cc__append_str(&defs, &defs_len, &defs_cap, "  if (!__env) abort();\n");
+            /* Cast opaque void* params back to their concrete types.  These
+             * casts are safe because the definitions live at end-of-file where
+             * all user-defined types are in scope. */
+            for (int ci = 0; ci < d->cap_count; ci++) {
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (cc__capture_needs_opaque(is_ref, ty)) {
+                    if (is_ref) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* %s = (%s*)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                    } else {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                    }
+                }
+            }
             for (int ci = 0; ci < d->cap_count; ci++) {
                 cc__append_fmt(&defs, &defs_len, &defs_cap,
                                "  __env->%s = %s;\n",

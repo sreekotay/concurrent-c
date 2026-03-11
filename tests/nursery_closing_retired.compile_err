@@ -1,0 +1,1 @@
+error: async: `@nursery closing(...)` is retired; use `@closing(...)` instead

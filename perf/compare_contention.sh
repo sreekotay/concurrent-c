@@ -19,6 +19,7 @@ echo "Building tests..."
 mkdir -p "$SCRIPT_DIR/out"
 $CCC build --release "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/channel_contention"
 gcc -O2 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
+echo "Using best-of-15 samples."
 echo "Done."
 echo ""
 

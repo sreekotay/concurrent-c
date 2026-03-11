@@ -149,6 +149,7 @@ static _Atomic uint64_t g_cc_join_park_joins = 0;
 static _Atomic uint64_t g_cc_join_park_loops = 0;
 static _Atomic uint64_t g_cc_join_help_attempts = 0;  /* help-first steal attempts */
 static _Atomic uint64_t g_cc_join_help_hits = 0;      /* help-first steal successes */
+static _Atomic size_t g_total_timed_parked = 0;
 
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
     if (out_calls) {
@@ -402,6 +403,11 @@ typedef struct fiber_task {
     unsigned char spawn_publish_valid;   /* 1 if publish metadata is populated */
     
     struct timespec sleep_deadline;  /* Deadline for cc_sleep_ms timer parking */
+    struct timespec timed_park_deadline; /* Deadline for timer-backed guarded park */
+    struct fiber_task* timer_next;       /* Intrusive link for timer wait queue */
+    int timed_park_requested;            /* Park request should arm a timer on commit */
+    _Atomic int timed_park_registered;   /* Timer wait is visible to the timer queue */
+    _Atomic int timed_park_fired;        /* Timer path woke this fiber */
     CCNursery* saved_nursery;       /* Nursery context saved across fiber migrations */
     
     /* Debug: track who last enqueued this fiber */
@@ -492,6 +498,67 @@ static inline const char* cc_v3_worker_lifecycle_name(cc_worker_lifecycle st) {
         case CC_WL_DEAD: return "DEAD";
         default: return "UNKNOWN";
     }
+}
+
+static inline int cc_trace_nw_spawn_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("CC_TRACE_NW_SPAWN") != NULL;
+    }
+    return enabled;
+}
+
+static inline int cc_trace_chan_wake_enabled_sched(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = getenv("CC_TRACE_CHAN_WAKE") != NULL;
+    }
+    return enabled;
+}
+
+static inline int cc_nonworker_spawn_group_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_NW_SPAWN_GROUP_HINT");
+        enabled = (!v || v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static inline int cc_nonworker_keep_sleeping_target_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_NW_SPAWN_KEEP_SLEEPING");
+        enabled = (!v || v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static inline int cc_channel_runnext_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_CHAN_RUNNEXT");
+        enabled = (!v || v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static inline int cc_channel_inbox_steal_guard_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_CHAN_INBOX_STEAL_GUARD");
+        enabled = (!v || v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
+}
+
+static inline int cc_channel_local_steal_depth_guard_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char* v = getenv("CC_CHAN_LOCAL_STEAL_DEPTH_GUARD");
+        enabled = (!v || v[0] != '0') ? 1 : 0;
+    }
+    return enabled;
 }
 
 static inline int cc_v3_worker_lifecycle_is_legal(cc_worker_lifecycle from, cc_worker_lifecycle to) {
@@ -783,14 +850,27 @@ typedef struct {
 
 static sleep_queue g_sleep_queue;
 
+typedef struct {
+    pthread_mutex_t mu;
+    fiber_task* head;        /* Singly-linked list of timed parked fibers (via ->timer_next) */
+    _Atomic size_t count;    /* Approximate queue size for quick peek */
+} timed_park_queue;
+
+static timed_park_queue g_timed_park_queue;
+void cc__fiber_unpark(void* fiber_ptr);
+
 static void sq_init(void) {
     pthread_mutex_init(&g_sleep_queue.mu, NULL);
     g_sleep_queue.head = NULL;
     atomic_store(&g_sleep_queue.count, 0);
+    pthread_mutex_init(&g_timed_park_queue.mu, NULL);
+    g_timed_park_queue.head = NULL;
+    atomic_store(&g_timed_park_queue.count, 0);
 }
 
 static void sq_destroy(void) {
     pthread_mutex_destroy(&g_sleep_queue.mu);
+    pthread_mutex_destroy(&g_timed_park_queue.mu);
 }
 
 /* Park a fiber for sleep.  Caller must have already set f->sleep_deadline
@@ -832,6 +912,61 @@ static size_t sq_drain(void) {
         }
     }
     pthread_mutex_unlock(&g_sleep_queue.mu);
+    return woken;
+}
+
+static void tpq_push(fiber_task* f) {
+    pthread_mutex_lock(&g_timed_park_queue.mu);
+    f->timer_next = g_timed_park_queue.head;
+    g_timed_park_queue.head = f;
+    atomic_fetch_add_explicit(&g_timed_park_queue.count, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&g_timed_park_queue.mu);
+}
+
+static size_t tpq_drain(void) {
+    if (atomic_load_explicit(&g_timed_park_queue.count, memory_order_relaxed) == 0) {
+        return 0;
+    }
+
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    pthread_mutex_lock(&g_timed_park_queue.mu);
+    fiber_task** pp = &g_timed_park_queue.head;
+    fiber_task* expired = NULL;
+    size_t woken = 0;
+    while (*pp) {
+        fiber_task* f = *pp;
+        int registered = atomic_load_explicit(&f->timed_park_registered, memory_order_acquire);
+        int is_expired = registered &&
+            (now.tv_sec > f->timed_park_deadline.tv_sec ||
+             (now.tv_sec == f->timed_park_deadline.tv_sec &&
+              now.tv_nsec >= f->timed_park_deadline.tv_nsec));
+        if (!registered || is_expired) {
+            *pp = f->timer_next;
+            f->timer_next = expired;
+            expired = f;
+            atomic_fetch_sub_explicit(&g_timed_park_queue.count, 1, memory_order_relaxed);
+            if (is_expired &&
+                atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
+                atomic_store_explicit(&f->timed_park_fired, 1, memory_order_release);
+                atomic_fetch_sub_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
+                woken++;
+            }
+        } else {
+            pp = &f->timer_next;
+        }
+    }
+    pthread_mutex_unlock(&g_timed_park_queue.mu);
+
+    while (expired) {
+        fiber_task* f = expired;
+        expired = expired->timer_next;
+        f->timer_next = NULL;
+        if (atomic_load_explicit(&f->timed_park_fired, memory_order_acquire)) {
+            cc__fiber_unpark(f);
+        }
+    }
     return woken;
 }
 
@@ -2126,6 +2261,10 @@ static inline size_t get_total_parked(void) {
     return atomic_load_explicit(&g_sched.total_parked, memory_order_relaxed);
 }
 
+static inline size_t get_total_timed_parked(void) {
+    return atomic_load_explicit(&g_total_timed_parked, memory_order_relaxed);
+}
+
 static int deadlock_debug_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
@@ -2152,12 +2291,14 @@ static void cc__fiber_check_deadlock(void) {
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
     size_t blocked = atomic_load_explicit(&g_sched.blocked_threads, memory_order_acquire);
     size_t parked = get_total_parked();
+    size_t timed_parked = get_total_timed_parked();
+    size_t deadlock_parked = (parked > timed_parked) ? (parked - timed_parked) : 0;
     size_t temp_workers = atomic_load_explicit(&g_sched.temp_worker_count, memory_order_acquire);
     size_t total_workers = g_sched.num_workers + temp_workers;
     
     /* Potential deadlock: all workers unavailable + parked fibers waiting */
     size_t unavailable = sleeping + blocked;
-    if (unavailable >= total_workers && parked > 0) {
+    if (unavailable >= total_workers && deadlock_parked > 0) {
         uint64_t now = cc__monotonic_ms();
         uint64_t first = atomic_load(&g_deadlock_first_seen);
         
@@ -2184,6 +2325,9 @@ static void cc__fiber_check_deadlock(void) {
                     parked, (size_t)atomic_load(&g_sched.completed),
                     (size_t)atomic_load_explicit(&g_fibers_spawned, memory_order_relaxed),
                     (size_t)atomic_load_explicit(&g_sched.pending, memory_order_relaxed));
+            if (timed_parked > 0) {
+                fprintf(stderr, "  Timers:  %zu parked waits still have deadline wakeups\n", timed_parked);
+            }
             fprintf(stderr, "\n");
             cc__fiber_dump_queue_state();
             cc__chan_debug_dump_global();
@@ -2276,6 +2420,8 @@ static void cc__fiber_check_deadlock(void) {
 /* Per-worker thread-local state */
 static __thread fiber_task* tls_current_fiber = NULL;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
+static _Atomic size_t g_spawn_counter = 0;
+static const uint64_t cc_orphan_threshold_cycles_hint = 3000000ULL;
 
 /* Spawn-pair grouping: when a base worker routes a fiber to a remote inbox,
  * remember the target so the NEXT inbox-bound spawn from the same calling
@@ -2285,6 +2431,17 @@ static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
  * requiring the developer to order spawns or add scheduler hints.
  * Reset to -1 after each pairing so triples never form. */
 static __thread int tls_spawn_pair_target = -1;
+/* Non-worker nursery startup hint: consecutive sibling spawns in the same
+ * group stay together for a small chunk before the next chunk advances RR.
+ * This preserves producer/consumer locality for tiny startup bursts while
+ * still letting larger batches spread across workers. */
+static __thread const void* tls_nonworker_spawn_group_hint = NULL;
+static __thread unsigned tls_nonworker_spawn_group_hint_chunk = 0;
+static __thread const void* tls_nonworker_spawn_group_state = NULL;
+static __thread size_t tls_nonworker_spawn_group_target = 0;
+static __thread unsigned tls_nonworker_spawn_group_budget = 0;
+static __thread const void* tls_trace_nw_spawn_group_state = NULL;
+static __thread unsigned tls_trace_nw_spawn_group_seq = 0;
 
 /* Pre-assign the calling fiber to a specific worker before its first park.
  * Pool runners call this once so each parks with a distinct last_worker_id.
@@ -2304,6 +2461,128 @@ void cc__fiber_set_worker_affinity(int worker_id) {
  * Used by channel wakeup code to implement direct-handoff routing. */
 int cc__sched_current_worker_id(void) {
     return tls_worker_id;
+}
+
+uint64_t cc__fiber_debug_id(void* fiber_ptr) {
+    fiber_task* f = (fiber_task*)fiber_ptr;
+    return f ? (uint64_t)f->fiber_id : 0;
+}
+
+int cc__fiber_debug_last_worker(void* fiber_ptr) {
+    fiber_task* f = (fiber_task*)fiber_ptr;
+    return f ? f->last_worker_id : -1;
+}
+
+const char* cc__fiber_debug_park_reason(void* fiber_ptr) {
+    fiber_task* f = (fiber_task*)fiber_ptr;
+    return (f && f->park_reason) ? f->park_reason : NULL;
+}
+
+void cc_sched_nonworker_spawn_group_hint(const void* group_key, unsigned chunk_size) {
+    tls_nonworker_spawn_group_hint = group_key;
+    tls_nonworker_spawn_group_hint_chunk = chunk_size ? chunk_size : 1;
+}
+
+static void cc__trace_nw_spawn_pick(const void* group_key,
+                                    unsigned chunk_size,
+                                    size_t target,
+                                    int reused_target) {
+    if (!cc_trace_nw_spawn_enabled() || !group_key) return;
+    if (tls_trace_nw_spawn_group_state != group_key) {
+        tls_trace_nw_spawn_group_state = group_key;
+        tls_trace_nw_spawn_group_seq = 0;
+    }
+    tls_trace_nw_spawn_group_seq++;
+    size_t active = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
+    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
+    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+    size_t pending = atomic_load_explicit(&g_sched.pending, memory_order_relaxed);
+    fprintf(stderr,
+            "[cc][nwspawn] group=%p seq=%u chunk=%u target=%zu mode=%s pool[a=%zu sp=%zu sl=%zu p=%zu] workers=[",
+            group_key,
+            tls_trace_nw_spawn_group_seq,
+            chunk_size,
+            target,
+            reused_target ? "reuse" : "new",
+            active,
+            spinning,
+            sleeping,
+            pending);
+    for (size_t i = 0; i < g_sched.num_workers; i++) {
+        if (i != 0) fprintf(stderr, " ");
+        cc_worker_lifecycle st = CC_WL_DEAD;
+        if (g_sched.worker_lifecycle) {
+            st = (cc_worker_lifecycle)atomic_load_explicit(&g_sched.worker_lifecycle[i], memory_order_relaxed);
+        }
+        fprintf(stderr, "%zu:%s", i, cc_v3_worker_lifecycle_name(st));
+    }
+    fprintf(stderr, "]\n");
+}
+
+static inline size_t cc__spawn_pick_round_robin_target(void) {
+    size_t target = atomic_fetch_add_explicit(&g_spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+    if (cc_nonworker_keep_sleeping_target_enabled() &&
+        g_sched.worker_lifecycle && g_sched.num_workers > 1) {
+        cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+            &g_sched.worker_lifecycle[target], memory_order_relaxed);
+        /* A sleeping worker is still a good target for a non-worker spawn:
+         * we can publish directly to its inbox and wake it specifically.
+         * Only reroute away from workers that are genuinely unavailable. */
+        if (lc != CC_WL_DRAINING && lc != CC_WL_DEAD) {
+            return target;
+        }
+    }
+    if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
+        uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
+        uint64_t now_cyc = rdtsc();
+        if (hb0 != 0 && (now_cyc - hb0) >= cc_orphan_threshold_cycles_hint) {
+            for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
+                size_t cand = (target + scan) % g_sched.num_workers;
+                uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
+                if (hb != 0 && (now_cyc - hb) < cc_orphan_threshold_cycles_hint) {
+                    target = cand;
+                    break;
+                }
+            }
+        }
+    }
+    return target;
+}
+
+static inline size_t cc__spawn_pick_nonworker_target(void) {
+    const void* group_key = tls_nonworker_spawn_group_hint;
+    unsigned chunk_size = tls_nonworker_spawn_group_hint_chunk;
+    int reused_target = 0;
+    tls_nonworker_spawn_group_hint = NULL;
+    tls_nonworker_spawn_group_hint_chunk = 0;
+    if (!cc_nonworker_spawn_group_enabled()) {
+        tls_trace_nw_spawn_group_state = NULL;
+        tls_trace_nw_spawn_group_seq = 0;
+        tls_nonworker_spawn_group_state = NULL;
+        tls_nonworker_spawn_group_budget = 0;
+        return cc__spawn_pick_round_robin_target();
+    }
+    if (!group_key || chunk_size == 0 || g_sched.num_workers <= 1) {
+        tls_trace_nw_spawn_group_state = NULL;
+        tls_trace_nw_spawn_group_seq = 0;
+        tls_nonworker_spawn_group_state = NULL;
+        tls_nonworker_spawn_group_budget = 0;
+        return cc__spawn_pick_round_robin_target();
+    }
+    if (tls_nonworker_spawn_group_state != group_key || tls_nonworker_spawn_group_budget == 0) {
+        tls_nonworker_spawn_group_state = group_key;
+        tls_nonworker_spawn_group_target = cc__spawn_pick_round_robin_target();
+        tls_nonworker_spawn_group_budget = chunk_size;
+        reused_target = 0;
+    } else {
+        reused_target = 1;
+    }
+    size_t target = tls_nonworker_spawn_group_target;
+    if (tls_nonworker_spawn_group_budget > 0) {
+        tls_nonworker_spawn_group_budget--;
+    }
+    cc__trace_nw_spawn_pick(group_key, chunk_size, target, reused_target);
+    return target;
 }
 
 /* Set a parked fiber's routing hint to worker_id so that its next unpark
@@ -3460,7 +3739,7 @@ static void* sysmon_main(void* arg) {
          * case we spawn an emergency replacement worker whose full inbox scan
          * will find the woken fiber and run it. */
         {
-            size_t woken = sq_drain_sysmon();
+            size_t woken = sq_drain_sysmon() + tpq_drain();
             if (woken > 0) {
                 size_t sl = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
                 size_t sp = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
@@ -3861,18 +4140,14 @@ static inline fiber_task* worker_try_steal_one(int worker_id, uint64_t* rng_stat
     if (g_sched.num_workers <= 1) return NULL;
     size_t victim = (size_t)(xorshift64(rng_state) % g_sched.num_workers);
     if ((int)victim == worker_id) return NULL;
-    /* Do NOT steal from the victim's inbox here.  Inbox items have a
-     * designated owner: an edge signal was sent to wake that worker and
-     * it will consume the item in its P2 check.  Grabbing it early is the
-     * same violation that runnext prevents for the direct-handoff slot —
-     * it routes the fiber away from its intended partner worker before
-     * co-location is established.  The post-sleep-wake inbox scan is the
-     * correct fallback for genuinely orphaned inbox items. */
-    /* Require depth ≥ 2 before stealing from a victim's local queue.
-     * depth=1: likely the channel partner of the fiber currently running on
-     *          that worker — stealing it breaks runnext co-location. */
-    if (lq_depth(&g_sched.local_queues[victim]) >= 2)
+    if (!cc_channel_inbox_steal_guard_enabled()) {
+        fiber_task* f = iq_pop(&g_sched.inbox_queues[victim]);
+        if (f) return f;
+    }
+    if (!cc_channel_local_steal_depth_guard_enabled() ||
+        lq_depth(&g_sched.local_queues[victim]) >= 2) {
         return lq_steal(&g_sched.local_queues[victim]);
+    }
     return NULL;
 }
 
@@ -4000,7 +4275,7 @@ static void* worker_main(void* arg) {
         /* Priority 0: Drain runnext — the channel-partner direct-handoff slot.
          * Set only by this worker when it unparks its own channel partner.
          * Never stolen, so no depth guard or timing race is possible. */
-        if (count == 0 && g_sched.runnext) {
+        if (count == 0 && g_sched.runnext && cc_channel_runnext_enabled()) {
             fiber_task* rn = atomic_exchange_explicit(
                 &g_sched.runnext[worker_id], NULL, memory_order_acquire);
             if (rn) batch[count++] = rn;
@@ -4074,19 +4349,21 @@ static void* worker_main(void* arg) {
                         continue;
                     }
                     
-                    /* P4 does NOT steal from peer inboxes: inbox items have a
-                     * designated owner who was already woken via edge signal and
-                     * will consume the item in P2.  Stealing here creates a
-                     * timing race where an idle worker grabs a freshly-pushed
-                     * inbox item before the target worker processes it, breaking
-                     * channel-partner co-location.  The pre-sleep probe
-                     * (worker_try_steal_one) and post-sleep-wake inbox scan
-                     * provide backup distribution for genuinely orphaned items. */
+                    if (!cc_channel_inbox_steal_guard_enabled()) {
+                        fiber_task* f = iq_pop(&g_sched.inbox_queues[victim]);
+                        if (f) {
+                            batch[count++] = f;
+#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
+                            if (v3_stats) {
+                                atomic_fetch_add_explicit(&g_cc_v3_wm_steal_inbox_pulls, 1, memory_order_relaxed);
+                            }
+#endif
+                            break;
+                        }
+                    }
 
-                    /* Batch steal: skip if victim has only 1 local item — it is
-                     * likely the channel partner of the fiber currently running
-                     * on that worker. */
-                    if (lq_depth(&g_sched.local_queues[victim]) < 2) continue;
+                    if (cc_channel_local_steal_depth_guard_enabled() &&
+                        lq_depth(&g_sched.local_queues[victim]) < 2) continue;
                     size_t stolen = lq_steal_batch(&g_sched.local_queues[victim],
                                                    steal_buf, STEAL_BATCH_SIZE);
                     if (stolen > 0) {
@@ -4354,8 +4631,11 @@ static void* worker_main(void* arg) {
          * - If spawner pushed after our check: wake_val changed, wait returns immediately */
         while (atomic_load_explicit(&g_sched.running, memory_order_relaxed)) {
             /* Check if there's runnable work */
-            /* Drain any expired sleepers before checking queues */
-            if (g_sched.run_queue) sq_drain();
+            /* Drain any expired timer-backed waits before checking queues. */
+            if (g_sched.run_queue) {
+                sq_drain();
+                tpq_drain();
+            }
             
             int has_local = lq_peek(my_queue);
             int has_inbox = iq_peek(&g_sched.inbox_queues[worker_id]);
@@ -4884,7 +5164,6 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     int spawn_publish_active0 = (atomic_load_explicit(&g_sched.active, memory_order_relaxed) == 0);
     int global_preferred = -1;
     int nonworker_ready_snapshot = -1;
-    static _Atomic size_t spawn_counter = 0;
     if (tls_sched_worker_ctx && g_sched.num_workers > 0) {
         /* Scheduler thread context (base + replacement workers).
          * Base workers prefer local queue; replacement workers route directly to inbox. */
@@ -4952,7 +5231,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
                      * dramatically better than landing on a worker currently running a
                      * 4ms compression block, where the block sits in the inbox waiting
                      * the full duration — exactly the source of our qw_max spikes. */
-                    size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+                    size_t target = atomic_fetch_add_explicit(&g_spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
                     if (target == self && g_sched.num_workers > 1)
                         target = (target + 1) % g_sched.num_workers;
 
@@ -5041,7 +5320,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             }
         } else {
             /* Replacement worker: RR but skip a sleeping target if a fresher peer exists. */
-            size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
+            size_t target = atomic_fetch_add_explicit(&g_spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
             if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
                 uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
                 uint64_t now_cyc = rdtsc();
@@ -5072,19 +5351,9 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             }
         }
     } else if (g_sched.num_workers > 0) {
-        /* Non-worker spawn: RR but skip a sleeping target if a fresher peer exists. */
-        size_t target = atomic_fetch_add_explicit(&spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
-        if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
-            uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
-            uint64_t now_cyc = rdtsc();
-            if (hb0 != 0 && (now_cyc - hb0) >= ORPHAN_THRESHOLD_CYCLES) {
-                for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
-                    size_t cand = (target + scan) % g_sched.num_workers;
-                    uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
-                    if (hb != 0 && (now_cyc - hb) < ORPHAN_THRESHOLD_CYCLES) { target = cand; break; }
-                }
-            }
-        }
+        /* Non-worker spawn: preserve small nursery sibling groups in pairs,
+         * otherwise fall back to the usual RR target selection. */
+        size_t target = cc__spawn_pick_nonworker_target();
         /* More aggressive direct-inbox mode for non-worker spawns. */
         int nw_ready = pool_ready_for_nonworker_inbox_publish();
         int startup_phase = sched_in_startup_phase();
@@ -5784,8 +6053,10 @@ static void worker_commit_park(fiber_task* f, int wid) {
         if (!atomic_compare_exchange_strong_explicit(&f->control, &exp_o, CTRL_QUEUED,
                                                       memory_order_release,
                                                       memory_order_relaxed)) {
+            f->timed_park_requested = 0;
             return;  /* Recycled — bail out */
         }
+        f->timed_park_requested = 0;
         f->enqueue_src = 3; f->enqueue_ctrl = owned;
         sched_global_push(f, -1);
         return;
@@ -5802,8 +6073,10 @@ static void worker_commit_park(fiber_task* f, int wid) {
         if (!atomic_compare_exchange_strong_explicit(&f->control, &exp_o2, CTRL_QUEUED,
                                                       memory_order_release,
                                                       memory_order_relaxed)) {
+            f->timed_park_requested = 0;
             return;  /* Recycled — bail out */
         }
+        f->timed_park_requested = 0;
         f->enqueue_src = 4; f->enqueue_ctrl = owned;
         sched_global_push(f, -1);
         return;
@@ -5816,6 +6089,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
                                                   memory_order_acquire)) {
         /* CAS failed — fiber was recycled or state changed unexpectedly.
          * Do NOT re-enqueue — we don't own it anymore. */
+        f->timed_park_requested = 0;
         return;
     }
     if (stall_debug_enabled()) {
@@ -5833,12 +6107,14 @@ static void worker_commit_park(fiber_task* f, int wid) {
             /* §9 row: PARKED -> RUNNABLE (via self-recovery wake claim). */
             cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(self-recovery)", 1);
             /* We un-parked ourselves — re-enqueue. */
+            f->timed_park_requested = 0;
             f->enqueue_src = 6; f->enqueue_ctrl = CTRL_PARKED;
             sched_global_push(f, -1);
             return;
         }
         /* CAS failed: someone already unparked us (PARKED→QUEUED in unpark path).
          * They enqueued us too, so nothing to do. */
+        f->timed_park_requested = 0;
         return;
     }
 
@@ -5850,15 +6126,23 @@ static void worker_commit_park(fiber_task* f, int wid) {
                                                      memory_order_acquire)) {
             /* §9 row: PARKED -> RUNNABLE (post-commit flag wake). */
             cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(post-commit-flag)", 1);
+            f->timed_park_requested = 0;
             f->enqueue_src = 7; f->enqueue_ctrl = CTRL_PARKED;
             sched_global_push(f, -1);
             return;
         }
         /* Already unparked by someone else. */
+        f->timed_park_requested = 0;
         return;
     }
 
     /* Successfully parked — update counters. */
+    if (f->timed_park_requested) {
+        f->timed_park_requested = 0;
+        atomic_store_explicit(&f->timed_park_registered, 1, memory_order_release);
+        tpq_push(f);
+        atomic_fetch_add_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
+    }
     atomic_fetch_add_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
     if (cc_worker_gap_stats_enabled() && wid >= 0) {
         atomic_fetch_add_explicit(&g_sched.worker_parked[wid], 1, memory_order_relaxed);
@@ -5868,9 +6152,10 @@ static void worker_commit_park(fiber_task* f, int wid) {
     }
 }
 
-void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line) {
+static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
+                                  const char* reason, const char* file, int line) {
     fiber_task* f = tls_current_fiber;
-    if (!f || !f->coro) return;
+    if (!f || !f->coro) return 0;
 
 #if CC_V3_DIAGNOSTICS || defined(CC_DEBUG_FIBER)
     /* Debug-only stack ownership validation. */
@@ -5882,7 +6167,7 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 #ifdef CC_DEBUG_FIBER
         fprintf(stderr, "[CC DEBUG] cc__fiber_park: tls_current_fiber mismatch, skipping park\n");
 #endif
-        return;
+        return 0;
     }
 
     /* Debug metadata for deadlock/stall reporting. */
@@ -5909,7 +6194,7 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_pending fiber=%lu reason=%s\n",
                 (unsigned long)f->fiber_id, reason);
 #endif
-        return;
+        return 0;
     }
 
     /* Fast-path: flag condition already changed. */
@@ -5918,7 +6203,16 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
         if (park_dbg) fprintf(stderr, "CC_PARK_DEBUG: skip_flag fiber=%lu reason=%s\n",
                 (unsigned long)f->fiber_id, reason);
 #endif
-        return;
+        return 0;
+    }
+
+    if (abs_deadline) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > abs_deadline->tv_sec ||
+            (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+            return 1;
+        }
     }
 
     /* Yield-before-commit: stash park parameters and yield.
@@ -5928,6 +6222,11 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
      * the fiber while it's still live on this worker's stack. */
     f->park_flag = flag;
     f->park_expected = expected;
+    f->timed_park_requested = abs_deadline ? 1 : 0;
+    if (abs_deadline) {
+        f->timed_park_deadline = *abs_deadline;
+        atomic_store_explicit(&f->timed_park_fired, 0, memory_order_release);
+    }
     f->yield_dest = YIELD_PARK;
     mco_yield(f->coro);
 
@@ -5942,6 +6241,17 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
     f->park_line = 0;
 #endif
     f->park_obj = NULL;
+    f->timed_park_requested = 0;
+    return atomic_exchange_explicit(&f->timed_park_fired, 0, memory_order_acq_rel) ? 1 : 0;
+}
+
+void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line) {
+    (void)cc__fiber_park_if_impl(flag, expected, NULL, reason, file, line);
+}
+
+int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
+                            const char* reason, const char* file, int line) {
+    return cc__fiber_park_if_impl(flag, expected, abs_deadline, reason, file, line);
 }
 
 void cc__fiber_park(void) {
@@ -5994,6 +6304,9 @@ void cc__fiber_unpark(void* fiber_ptr) {
     const int gap_stats = cc_worker_gap_stats_enabled();
     atomic_fetch_add_explicit(&g_cc_fiber_unpark_calls, 1, memory_order_relaxed);
     int claimed_parked = 0;
+    if (atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
+        atomic_fetch_sub_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
+    }
 
     if (wake_debug_enabled()) {
         atomic_fetch_add_explicit(&f->wake_counter, 1, memory_order_relaxed);
@@ -6096,10 +6409,11 @@ queued:
     int pushed = 0;
     int pushed_global = 0;
     int global_edge = 0;
-    int non_global_edge = 0;
     int pushed_to_current_local = 0;
     int divert_stale = 0;
     int preferred = f->last_worker_id;
+    const char* route_name = "none";
+    int route_target = -2;
     if (preferred >= 0 && preferred < (int)g_sched.num_workers) {
         int divert = 0;
         if (preferred != tls_worker_id && g_sched.worker_heartbeat) {
@@ -6127,7 +6441,8 @@ queued:
                     if (!pushed) cpu_pause();
                 }
                 if (pushed) {
-                    non_global_edge = inbox_edge;
+                    route_name = "divert_inbox";
+                    route_target = (int)target;
                     if (gap_stats) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_inbox, 1, memory_order_relaxed);
@@ -6138,6 +6453,8 @@ queued:
                 global_edge = sched_global_push(f, preferred);
                 pushed_global = 1;
                 pushed = 1;
+                route_name = "divert_global";
+                route_target = -1;
                 if (gap_stats) {
                     if (divert_stale) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, 1, memory_order_relaxed);
@@ -6151,7 +6468,7 @@ queued:
              * cannot be stolen.  If runnext is already occupied, displace the
              * old occupant into the local queue and take the slot for the
              * new (fresher) partner. */
-            if (g_sched.runnext) {
+            if (g_sched.runnext && cc_channel_runnext_enabled()) {
                 fiber_task* old = atomic_exchange_explicit(
                     &g_sched.runnext[preferred], f, memory_order_release);
                 if (old) {
@@ -6160,8 +6477,14 @@ queued:
                     lq_push(&g_sched.local_queues[preferred], old);
                 }
                 pushed = 1;
+                route_name = "runnext";
+                route_target = preferred;
             } else {
                 pushed = (lq_push(&g_sched.local_queues[preferred], f) == 0);
+                if (pushed) {
+                    route_name = "local_same";
+                    route_target = preferred;
+                }
             }
             if (pushed) pushed_to_current_local = 1;
             if (pushed && gap_stats) {
@@ -6205,6 +6528,8 @@ queued:
                 if (pushed) {
                     pushed_to_current_local = 1;
                     use_preferred = 0;
+                    route_name = "local_bypass";
+                    route_target = tls_worker_id;
                     if (gap_stats) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
                     }
@@ -6216,7 +6541,10 @@ queued:
                     pushed = (iq_push_with_edge(&g_sched.inbox_queues[preferred], f, &inbox_edge) == 0);
                     if (!pushed) cpu_pause();
                 }
-                if (pushed) non_global_edge = inbox_edge;
+                if (pushed) {
+                    route_name = "preferred_inbox";
+                    route_target = preferred;
+                }
                 if (pushed && gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
                 }
@@ -6226,7 +6554,11 @@ queued:
     } else if (tls_worker_id >= 0) {
         /* No affinity yet — fall back to current worker's local queue */
         pushed = (lq_push(&g_sched.local_queues[tls_worker_id], f) == 0);
-        if (pushed) pushed_to_current_local = 1;
+        if (pushed) {
+            pushed_to_current_local = 1;
+            route_name = "local_no_affinity";
+            route_target = tls_worker_id;
+        }
         if (pushed && gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
         }
@@ -6239,6 +6571,8 @@ queued:
         if (tls_worker_id >= 0 && lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
             pushed = 1;
             pushed_to_current_local = 1;
+            route_name = "local_fallback";
+            route_target = tls_worker_id;
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_local, 1, memory_order_relaxed);
             }
@@ -6253,7 +6587,8 @@ queued:
                     if (!pushed) cpu_pause();
                 }
                 if (pushed) {
-                    non_global_edge = inbox_edge;
+                    route_name = "peer_inbox_fallback";
+                    route_target = (int)target;
                     if (gap_stats) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_inbox, 1, memory_order_relaxed);
                     }
@@ -6262,11 +6597,27 @@ queued:
             if (!pushed) {
                 global_edge = sched_global_push(f, preferred);
                 pushed_global = 1;
+                route_name = "global_fallback";
+                route_target = -1;
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, 1, memory_order_relaxed);
                 }
             }
         }
+    }
+
+    if (cc_trace_chan_wake_enabled_sched()) {
+        fprintf(stderr,
+                "[cc][unpark] fiber=%lu from_w=%d pref=%d route=%s target=%d pushed_global=%d current_local=%d park=%s obj=%p\n",
+                (unsigned long)f->fiber_id,
+                tls_worker_id,
+                preferred,
+                route_name,
+                route_target,
+                pushed_global,
+                pushed_to_current_local,
+                f->park_reason ? f->park_reason : "null",
+                f->park_obj);
     }
     
     /* Wake a sleeping worker — but skip the costly kernel wake syscall if

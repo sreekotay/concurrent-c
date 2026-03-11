@@ -35,7 +35,7 @@ int main(void) {
         });
 
         /* Senders */
-        @nursery closing(tx) {
+        @closing(tx) {
             for (int s = 0; s < SENDERS; s++) {
                 int n = MSGS_PER_SENDER;
                 spawn(() => [n] {

@@ -192,24 +192,6 @@ static void cc__emit_err_cat_fmt(const CCCheckerCtx* ctx, const StubNodeView* n,
     fprintf(stderr, "\n");
 }
 
-/* Legacy wrappers - use cc__emit_err_cat for new code */
-static void cc__emit_err(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
-    cc__emit_err_cat(ctx, n, "check", msg);
-}
-
-static void cc__emit_err_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, const char* fmt, ...) {
-    const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
-    int line = n ? n->line_start : 0;
-    int col = n ? n->col_start : 0;
-    if (col <= 0) col = 1;
-    fprintf(stderr, "%s:%d:%d: error: check: ", path, line, col);
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
-    fprintf(stderr, "\n");
-}
-
 static void cc__emit_warn(const CCCheckerCtx* ctx, const StubNodeView* n, const char* msg) {
     const char* path = (ctx && ctx->input_path) ? ctx->input_path : (n && n->file ? n->file : "<src>");
     int line = n ? n->line_start : 0;
@@ -241,7 +223,51 @@ static void cc__emit_note_fmt(const CCCheckerCtx* ctx, const StubNodeView* n, co
 
 static int cc__deadlock_warn_as_error(void) {
     const char* s = getenv("CC_STRICT_DEADLOCK");
-    return s && s[0] == '1';
+    /* Strict deadlock diagnostics are on by default.
+       Set CC_STRICT_DEADLOCK=0 (or use --no-strict-deadlock) to downgrade to warnings. */
+    if (!s || !s[0]) return 1;
+    return s[0] != '0';
+}
+
+static int cc__check_deprecated_nursery_closing(CCCheckerCtx* ctx, const char* buf, size_t n) {
+    if (!ctx || !ctx->input_path || !buf || n == 0) return 0;
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    int line = 1;
+    int col = 1;
+
+    for (size_t i = 0; i + 16 <= n; i++) {
+        char c = buf[i];
+        char c2 = (i + 1 < n) ? buf[i + 1] : 0;
+
+        if (in_line_comment) { if (c == '\n') { in_line_comment = 0; line++; col = 1; } else col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i++; col += 2; } else { if (c == '\n') { line++; col = 1; } else col++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col += 2; continue; } if (c == '"') in_str = 0; if (c == '\n') { line++; col = 1; } else col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col += 2; continue; } if (c == '\'') in_chr = 0; if (c == '\n') { line++; col = 1; } else col++; continue; }
+
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i++; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i++; col += 2; continue; }
+        if (c == '"') { in_str = 1; col++; continue; }
+        if (c == '\'') { in_chr = 1; col++; continue; }
+        if (c == '\n') { line++; col = 1; continue; }
+
+        if (c == '@' && i + 16 <= n && memcmp(buf + i, "@nursery closing", 16) == 0) {
+            StubNodeView sn;
+            memset(&sn, 0, sizeof(sn));
+            sn.file = ctx->input_path;
+            sn.line_start = line;
+            sn.col_start = col;
+            cc__emit_err_cat(ctx, &sn, CC_ERR_ASYNC,
+                             "`@nursery closing(...)` is retired; use `@closing(...)` instead");
+            fprintf(stderr, "  hint: replace `@nursery closing(ch) { ... }` with `@closing(ch) { ... }`\n");
+            ctx->errors++;
+            return -1;
+        }
+        col++;
+    }
+    return 0;
 }
 
 /* Local aliases for the shared helpers */
@@ -329,6 +355,12 @@ static int cc__body_has_await_recv(const char* buf, size_t len, const char* chna
     if (!memmem(buf, len, chname, strlen(chname)) &&
         !(rxname && rxname[0] && memmem(buf, len, rxname, strlen(rxname)))) return 0;
     return 1;
+}
+
+static int cc__line_has_recv_call(const char* line, size_t len, const char* chname) {
+    if (!line || len == 0 || !chname || !chname[0]) return 0;
+    if (!memmem(line, len, "cc_chan_recv", 12) && !memmem(line, len, "chan_recv", 9)) return 0;
+    return memmem(line, len, chname, strlen(chname)) != NULL;
 }
 
 static void cc__emit_deadlock_diag(const CCCheckerCtx* ctx, const StubNodeView* sn,
@@ -588,6 +620,214 @@ static void cc__check_nursery_closing_deadlock_text(CCCheckerCtx* ctx, const cha
             }
         }
 
+        col++;
+    }
+}
+
+/* Detect the equivalent foot-gun on preferred @closing(...) syntax:
+   @closing(ch) { spawn(() => { while (chan_recv(ch, ...)) { ... } }); } */
+static void cc__check_closing_deadlock_text(CCCheckerCtx* ctx, const char* buf, size_t n) {
+    if (!ctx || !ctx->input_path || !buf || n == 0) return;
+    if (getenv("CC_ALLOW_NURSERY_CLOSING_DRAIN")) return; /* shared escape hatch */
+
+    int in_line_comment = 0;
+    int in_block_comment = 0;
+    int in_str = 0;
+    int in_chr = 0;
+    int line = 1;
+    int col = 1;
+
+    for (size_t i = 0; i + 8 < n; i++) {
+        char c = buf[i];
+        char c2 = (i + 1 < n) ? buf[i + 1] : 0;
+
+        if (in_line_comment) { if (c == '\n') { in_line_comment = 0; line++; col = 1; } else col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i++; col += 2; } else { if (c == '\n') { line++; col = 1; } else col++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i++; col += 2; continue; } if (c == '"') in_str = 0; if (c == '\n') { line++; col = 1; } else col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i++; col += 2; continue; } if (c == '\'') in_chr = 0; if (c == '\n') { line++; col = 1; } else col++; continue; }
+
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i++; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i++; col += 2; continue; }
+        if (c == '"') { in_str = 1; col++; continue; }
+        if (c == '\'') { in_chr = 1; col++; continue; }
+        if (c == '\n') { line++; col = 1; continue; }
+
+        if (!(c == '@' && i + 8 <= n && memcmp(buf + i, "@closing", 8) == 0)) {
+            col++;
+            continue;
+        }
+
+        int at_line = line;
+        int at_col = col;
+        size_t j = i + 8;
+        while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+        if (j >= n || buf[j] != '(') { col++; continue; }
+        j++; /* after '(' */
+
+        char chs[8][64];
+        int chn = 0;
+        for (;;) {
+            while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+            if (j >= n) break;
+            if (buf[j] == ')') { j++; break; }
+            if (!cc__is_ident_start_ch(buf[j])) { chn = 0; break; }
+            size_t s0 = j;
+            j++;
+            while (j < n && cc__is_ident_ch(buf[j])) j++;
+            size_t sl = j - s0;
+            if (sl == 0 || sl >= 64 || chn >= 8) { chn = 0; break; }
+            memcpy(chs[chn], buf + s0, sl);
+            chs[chn][sl] = '\0';
+            chn++;
+            while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+            if (j < n && buf[j] == ',') { j++; continue; }
+            if (j < n && buf[j] == ')') { j++; break; }
+            chn = 0;
+            break;
+        }
+        if (chn <= 0) { col++; continue; }
+
+        while (j < n && (buf[j] == ' ' || buf[j] == '\t' || buf[j] == '\r' || buf[j] == '\n')) j++;
+        if (j >= n) { col++; continue; }
+
+        /* Support both block and single-statement forms:
+           @closing(ch) { ... }
+           @closing(ch) spawn(...); */
+        size_t body_s = 0, body_e = 0;
+        if (buf[j] == '{') {
+            body_s = j;
+            int depth = 0;
+            size_t k = body_s;
+            for (; k < n; k++) {
+                if (buf[k] == '{') depth++;
+                else if (buf[k] == '}') {
+                    depth--;
+                    if (depth == 0) { k++; break; }
+                }
+            }
+            body_e = k;
+        } else if (j + 5 <= n && memcmp(buf + j, "spawn", 5) == 0) {
+            body_s = j;
+            int paren_d = 0, brace_d = 0;
+            size_t k = j;
+            while (k < n) {
+                char bc = buf[k];
+                if (bc == '(') paren_d++;
+                else if (bc == ')') paren_d--;
+                else if (bc == '{') brace_d++;
+                else if (bc == '}') {
+                    if (brace_d == 0) break;
+                    brace_d--;
+                } else if (bc == ';' && paren_d == 0 && brace_d == 0) {
+                    k++;
+                    break;
+                } else if (bc == '"') {
+                    k++;
+                    while (k < n && buf[k] != '"') {
+                        if (buf[k] == '\\' && k + 1 < n) k++;
+                        k++;
+                    }
+                } else if (bc == '\'') {
+                    k++;
+                    while (k < n && buf[k] != '\'') {
+                        if (buf[k] == '\\' && k + 1 < n) k++;
+                        k++;
+                    }
+                }
+                k++;
+            }
+            body_e = k;
+        } else {
+            col++;
+            continue;
+        }
+        if (body_e <= body_s || body_e > n) { col++; continue; }
+
+        for (int ci = 0; ci < chn; ci++) {
+            const char* chname = chs[ci];
+            char rxname[64];
+            rxname[0] = '\0';
+            if (cc__ends_with(chname, "_tx")) {
+                size_t bl = strlen(chname);
+                if (bl >= 3 && bl < sizeof(rxname)) {
+                    memcpy(rxname, chname, bl);
+                    rxname[bl - 3] = '\0';
+                    strncat(rxname, "_rx", sizeof(rxname) - strlen(rxname) - 1);
+                }
+            }
+
+            /* If user explicitly closes this channel in the scope, don't flag it. */
+            {
+                char pat[96];
+                snprintf(pat, sizeof(pat), "cc_chan_close(%s", chname);
+                const char* hit = strstr(buf + body_s, pat);
+                if (hit && (size_t)(hit - (buf + body_s)) < (body_e - body_s)) continue;
+                if (rxname[0]) {
+                    snprintf(pat, sizeof(pat), "cc_chan_close(%s", rxname);
+                    hit = strstr(buf + body_s, pat);
+                    if (hit && (size_t)(hit - (buf + body_s)) < (body_e - body_s)) continue;
+                }
+            }
+
+            {
+                int hit = 0;
+                const char* cur = buf + body_s;
+                const char* end = buf + body_e;
+                while (cur < end) {
+                    const char* nl = memchr(cur, '\n', (size_t)(end - cur));
+                    size_t ll = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+                    if (cc__line_has_deadlock_recv_until_close(cur, ll, chname)) { hit = 1; break; }
+                    if (!hit && rxname[0] && cc__line_has_deadlock_recv_until_close(cur, ll, rxname)) { hit = 1; break; }
+                    if (!nl) break;
+                    cur = nl + 1;
+                }
+                if (hit) {
+                    StubNodeView sn;
+                    memset(&sn, 0, sizeof(sn));
+                    sn.file = ctx->input_path;
+                    sn.line_start = at_line;
+                    sn.col_start = at_col;
+                    cc__emit_err_cat(ctx, &sn, CC_ERR_CHANNEL,
+                                     "deadlock: `@closing(ch)` closes channels only after owned tasks exit; "
+                                     "`while (cc_chan_recv(ch, ...) == 0)` inside the same closing scope can wait forever");
+                    fprintf(stderr, "  hint: move the draining loop outside the @closing(...) scope, or close explicitly / send a sentinel\n");
+                    cc__emit_note(ctx, &sn, "Set CC_ALLOW_NURSERY_CLOSING_DRAIN=1 to bypass this heuristic check.");
+                    ctx->errors++;
+                    return;
+                }
+            }
+
+            {
+                int has_loop = cc__body_has_loop_keyword(buf + body_s, body_e - body_s);
+                int has_await_recv = cc__body_has_await_recv(buf + body_s, body_e - body_s, chname, rxname);
+                int has_recv_call = 0;
+                const char* cur = buf + body_s;
+                const char* end = buf + body_e;
+                while (cur < end) {
+                    const char* nl = memchr(cur, '\n', (size_t)(end - cur));
+                    size_t ll = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+                    if (cc__line_has_recv_call(cur, ll, chname) ||
+                        (rxname[0] && cc__line_has_recv_call(cur, ll, rxname))) {
+                        has_recv_call = 1;
+                        break;
+                    }
+                    if (!nl) break;
+                    cur = nl + 1;
+                }
+                if (has_loop && (has_await_recv || has_recv_call)) {
+                    StubNodeView sn;
+                    memset(&sn, 0, sizeof(sn));
+                    sn.file = ctx->input_path;
+                    sn.line_start = at_line;
+                    sn.col_start = at_col;
+                    cc__emit_warn(ctx, &sn,
+                                  "CC: warning: `@closing(ch)` + recv in a loop may deadlock (closing happens after owned tasks exit). "
+                                  "Prefer draining outside @closing(...), or close explicitly / send a sentinel.");
+                    cc__emit_note(ctx, &sn, "Set CC_ALLOW_NURSERY_CLOSING_DRAIN=1 to bypass this heuristic check.");
+                    ctx->warnings++;
+                }
+            }
+        }
         col++;
     }
 }
@@ -1345,8 +1585,15 @@ int cc_check_ast(const CCASTRoot* root, CCCheckerCtx* ctx) {
                         return -1;
                     }
 
-                    /* Heuristic deadlock check for `@nursery closing(...)` misuse. */
+                    if (cc__check_deprecated_nursery_closing(ctx, buf, got) != 0) {
+                        free(buf);
+                        fclose(f);
+                        return -1;
+                    }
+
+                    /* Heuristic deadlock checks for closing-scope misuse. */
                     cc__check_nursery_closing_deadlock_text(ctx, buf, got);
+                    cc__check_closing_deadlock_text(ctx, buf, got);
                     if (ctx->errors) {
                         free(buf);
                         fclose(f);

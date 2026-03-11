@@ -237,7 +237,7 @@ Concurrent-C detects deadlocks at **compile time** (for guaranteed patterns) and
 #### Compile-time: 100% guaranteed deadlocks → ERROR
 
 ```c
-@nursery closing(ch) {
+@closing(ch) {
     spawn([rx]() => {
         while (chan_recv(rx, &v) == 0) { ... }  // ❌ ERROR: deadlock
     });

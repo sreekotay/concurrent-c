@@ -146,7 +146,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
         // Producer + compression: spawn a task per block, each task sends
         // its result directly to res_tx when done.
-        @nursery closing(res_tx) {
+        @closing(res_tx) {
             spawn(() => [in_ptr, res_tx] {
                 long seq = 0;
                 while (true) {

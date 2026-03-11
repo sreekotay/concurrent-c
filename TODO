@@ -2,6 +2,6 @@
 - cc_heap_arena_free vs cc_arena_free?
 - lowering closures - some macros maybe?
 - comments in closures
-- update language spec on ordered and closures
+- update language spec on ordered and closures (ordered channels now lowered; spec-progress/language-patterns-v3.md §7 and spec/concurrent-c-spec-complete.md §6.2 reflect the directed-pair syntax)
 
 can you open up the lowered c version of @real_projects/pigz/pigz_idiomatic.ccs for me also? I want to look at it

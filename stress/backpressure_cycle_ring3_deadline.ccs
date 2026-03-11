@@ -1,0 +1,63 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <errno.h>
+
+#define ROUNDS 20
+#define ACTORS_PER_ROUND 3
+
+cc_atomic_int g_timeouts = 0;
+
+static void backpressure_actor(CCChanTx tx, CCChanRx rx, int token) {
+    int recv_val = 0;
+    int rc = 0;
+
+    @with_deadline(millis(10)) {
+        rc = cc_chan_send(tx.raw, &token, sizeof(token));
+        if (rc == 0) rc = cc_chan_recv(rx.raw, &recv_val, sizeof(recv_val));
+    }
+
+    if (rc == ETIMEDOUT || rc == ECANCELED) {
+        cc_atomic_fetch_add(&g_timeouts, 1);
+    }
+}
+
+int main(void) {
+    printf("backpressure_cycle_ring3_deadline: %d rounds\n", ROUNDS);
+    cc_atomic_store(&g_timeouts, 0);
+
+    for (int round = 0; round < ROUNDS; round++) {
+        int[~1 >] tx1;
+        int[~1 <] rx1;
+        int[~1 >] tx2;
+        int[~1 <] rx2;
+        int[~1 >] tx3;
+        int[~1 <] rx3;
+
+        CCChan* ch1 = channel_pair(&tx1, &rx1);
+        CCChan* ch2 = channel_pair(&tx2, &rx2);
+        CCChan* ch3 = channel_pair(&tx3, &rx3);
+
+        int seed1 = 11;
+        int seed2 = 22;
+        int seed3 = 33;
+        if (cc_chan_send(tx1.raw, &seed1, sizeof(seed1)) != 0) return 2;
+        if (cc_chan_send(tx2.raw, &seed2, sizeof(seed2)) != 0) return 3;
+        if (cc_chan_send(tx3.raw, &seed3, sizeof(seed3)) != 0) return 4;
+
+        @nursery {
+            spawn(() => [tx2, rx1] { backpressure_actor(tx2, rx1, 101); });
+            spawn(() => [tx3, rx2] { backpressure_actor(tx3, rx2, 202); });
+            spawn(() => [tx1, rx3] { backpressure_actor(tx1, rx3, 303); });
+        }
+
+        cc_chan_free(ch1);
+        cc_chan_free(ch2);
+        cc_chan_free(ch3);
+    }
+
+    int timeouts = cc_atomic_load(&g_timeouts);
+    int expected = ROUNDS * ACTORS_PER_ROUND;
+    printf("backpressure_cycle_ring3_deadline: timeouts=%d/%d\n", timeouts, expected);
+    return (timeouts == expected) ? 0 : 1;
+}

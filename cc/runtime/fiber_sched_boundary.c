@@ -23,10 +23,11 @@ CCSchedFiber* cc_sched_worker_idle_probe(void) {
     return cc_sched_v3_idle_probe_impl();
 }
 
-cc_sched_wait_result cc_sched_fiber_wait(
+static cc_sched_wait_result cc_sched_fiber_wait_impl(
     void* waitable,
     void* io,
-    const cc_sched_waitable_ops* ops
+    const cc_sched_waitable_ops* ops,
+    const struct timespec* abs_deadline
 ) {
     CCSchedFiber* fiber = (CCSchedFiber*)cc__fiber_current();
     if (!ops) {
@@ -58,7 +59,17 @@ cc_sched_wait_result cc_sched_fiber_wait(
      */
     /* LP (§10 Commit PARKED path): park primitive hands off to scheduler-owned
      * RUNNING->PARKING->PARKED substrate (or waitable-specific guarded park). */
-    if (ops->park) {
+    if (abs_deadline) {
+        if (ops->park_until) {
+            cc_sched_wait_result park_rc = ops->park_until(waitable, fiber, io, abs_deadline);
+            if (park_rc == CC_SCHED_WAIT_TIMEOUT || park_rc == CC_SCHED_WAIT_CANCELLED ||
+                park_rc == CC_SCHED_WAIT_CLOSED) {
+                return park_rc;
+            }
+        } else {
+            return CC_SCHED_WAIT_CLOSED;
+        }
+    } else if (ops->park) {
         ops->park(waitable, fiber, io);
     } else {
         cc__fiber_park_reason("cc_sched_fiber_wait", __FILE__, __LINE__);
@@ -71,6 +82,23 @@ cc_sched_wait_result cc_sched_fiber_wait(
         return CC_SCHED_WAIT_OK;
     }
     return CC_SCHED_WAIT_PARKED;
+}
+
+cc_sched_wait_result cc_sched_fiber_wait(
+    void* waitable,
+    void* io,
+    const cc_sched_waitable_ops* ops
+) {
+    return cc_sched_fiber_wait_impl(waitable, io, ops, NULL);
+}
+
+cc_sched_wait_result cc_sched_fiber_wait_until(
+    void* waitable,
+    void* io,
+    const cc_sched_waitable_ops* ops,
+    const struct timespec* abs_deadline
+) {
+    return cc_sched_fiber_wait_impl(waitable, io, ops, abs_deadline);
 }
 
 void cc_sched_fiber_wake(CCSchedFiber* fiber) {

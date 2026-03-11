@@ -49,7 +49,7 @@ int main(void) {
         });
 
         /* Workers + job feeder */
-        @nursery closing(results_tx) {
+        @closing(results_tx) {
             for (int w = 0; w < NUM_WORKERS; w++) {
                 spawn(() => {
                     Job job;
@@ -63,7 +63,7 @@ int main(void) {
             }
 
             /* Job feeder */
-            @nursery closing(jobs_tx) {
+            @closing(jobs_tx) {
                 spawn(() => {
                     for (int i = 0; i < NUM_JOBS; i++) {
                         Job j = {.id = i, .n = i + 1};

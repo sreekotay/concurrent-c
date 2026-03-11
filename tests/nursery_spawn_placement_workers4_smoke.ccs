@@ -1,0 +1,80 @@
+/*
+ * Smoke test: top-level nursery sibling spawns should not collapse onto one
+ * worker when the scheduler is configured with 4 workers.
+ *
+ * This directly targets the non-worker nursery startup placement bug that can
+ * serialize four sibling spawns onto a single inbox/worker, which then shows
+ * up as ~2x channel-isolation contention.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+#define NUM_WORKERS 4
+#define NUM_SIBLINGS 4
+#define ITERATIONS 200
+
+/* Private runtime probe used only by this regression test. */
+int cc__sched_current_worker_id(void);
+static int g_worker_ids[NUM_SIBLINGS];
+static cc_atomic_int g_ready = 0;
+
+static int count_unique_workers(const int* worker_ids, int n) {
+    int unique = 0;
+    for (int i = 0; i < n; i++) {
+        int wid = worker_ids[i];
+        if (wid < 0) {
+            return -1;
+        }
+        int seen = 0;
+        for (int j = 0; j < i; j++) {
+            if (worker_ids[j] == wid) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen) unique++;
+    }
+    return unique;
+}
+
+int main(void) {
+    cc_sched_set_num_workers(NUM_WORKERS);
+
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        for (int i = 0; i < NUM_SIBLINGS; i++) {
+            g_worker_ids[i] = -1;
+        }
+        cc_atomic_store(&g_ready, 0);
+
+        @nursery {
+            for (int i = 0; i < NUM_SIBLINGS; i++) {
+                int idx = i;
+                spawn(() => [idx] {
+                    g_worker_ids[idx] = cc__sched_current_worker_id();
+                    cc_atomic_fetch_add(&g_ready, 1);
+                    while (cc_atomic_load(&g_ready) < NUM_SIBLINGS) {
+                        cc_yield();
+                    }
+                });
+            }
+        }
+
+        int unique = count_unique_workers(g_worker_ids, NUM_SIBLINGS);
+        if (unique < 0) {
+            fprintf(stderr,
+                    "FAIL nursery_spawn_placement_workers4: iter %d recorded invalid worker ids [%d %d %d %d]\n",
+                    iter, g_worker_ids[0], g_worker_ids[1], g_worker_ids[2], g_worker_ids[3]);
+            return 1;
+        }
+        if (unique < 2) {
+            fprintf(stderr,
+                    "FAIL nursery_spawn_placement_workers4: iter %d collapsed onto %d worker [%d %d %d %d]\n",
+                    iter, unique, g_worker_ids[0], g_worker_ids[1], g_worker_ids[2], g_worker_ids[3]);
+            return 1;
+        }
+    }
+
+    printf("nursery_spawn_placement_workers4_smoke: PASS (%d iterations)\n", ITERATIONS);
+    return 0;
+}
