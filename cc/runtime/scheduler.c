@@ -218,6 +218,15 @@ int cc_thread_task_join_result(struct CCSpawnTask* task, void** out_result) {
     return 0;
 }
 
+/* Strict predicate wait for fiber context:
+ * keep parking until *done becomes non-zero, tolerating unrelated wakeups. */
+static inline void cc__fiber_wait_until_done(_Atomic int* done, const char* reason) {
+    while (atomic_load_explicit(done, memory_order_acquire) == 0) {
+        cc__fiber_clear_pending_unpark();
+        CC_FIBER_PARK_IF(done, 0, reason);
+    }
+}
+
 /* Fiber-aware join: park the calling fiber instead of blocking the worker thread.
  * Must only be called from within a fiber context (cc__fiber_in_context() == 1).
  *
@@ -243,10 +252,7 @@ int cc_thread_task_join_fiber(struct CCSpawnTask* task, void** out_result) {
          * Otherwise an unrelated wake can cause cc__fiber_park_if() to return
          * immediately while done_atomic is still 0, and we'd read task->result
          * before the spawn job publishes it. */
-        while (atomic_load_explicit(&task->done_atomic, memory_order_acquire) == 0) {
-            cc__fiber_clear_pending_unpark();
-            CC_FIBER_PARK_IF(&task->done_atomic, 0, "spawn_join");
-        }
+        cc__fiber_wait_until_done(&task->done_atomic, "spawn_join");
         /* Clear stale waiter registration in case park bailed on flag or
          * pending_unpark without the completion handler clearing it. */
         atomic_store_explicit(&task->waiter_fiber, NULL, memory_order_relaxed);
