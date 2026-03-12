@@ -160,12 +160,14 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else if (c == '*') {
             if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
-        } else if (c == '[' || c == ']') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else if (c == '<' || c == '>' || c == ',') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-                                } else {
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_') {
             out[j++] = c;
+        } else if (c == '[' || c == ']' || c == '<' || c == '>' || c == ',' ||
+                   c == '(' || c == ')' || c == '!' || c == ':' || c == '?') {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
+        } else {
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         }
     }
     /* Remove trailing underscore */
@@ -678,7 +680,17 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             /* Check if this looks like a method call (CCResult_T_E_method) or a guard macro.
                If so, trim off the suffix by scanning backwards for underscore
                followed by known method names or guard patterns. */
-            static const char* methods[] = {"_unwrap_or", "_unwrap", "_is_ok", "_is_err", "_DEFINED", NULL};
+            static const char* methods[] = {
+                "_unwrap_or",
+                "_unwrap_err",
+                "_unwrap",
+                "_value",
+                "_error",
+                "_is_ok",
+                "_is_err",
+                "_DEFINED",
+                NULL
+            };
             for (int m = 0; methods[m]; m++) {
                 size_t mlen = strlen(methods[m]);
                 if (err_end - err_start > mlen) {
@@ -974,6 +986,16 @@ char* cc__rewrite_result_field_sugar_text(const CCVisitorCtx* ctx, const char* s
                 int is_value = (mlen == 5 && memcmp(src + mem_start, "value", 5) == 0);
                 int is_error = (mlen == 5 && memcmp(src + mem_start, "error", 5) == 0);
                 if (!is_value && !is_error) continue;
+
+                /* Preserve UFCS method calls like r.value() / r.error().
+                   This pass only owns field sugar (`r.value` / `r.error`). */
+                size_t after_mem = mem_end;
+                while (after_mem < n &&
+                       (src[after_mem] == ' ' || src[after_mem] == '\t' ||
+                        src[after_mem] == '\n' || src[after_mem] == '\r')) {
+                    after_mem++;
+                }
+                if (after_mem < n && src[after_mem] == '(') continue;
 
                 cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, mem_start - last_emit);
                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, "u.");

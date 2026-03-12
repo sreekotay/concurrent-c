@@ -99,15 +99,9 @@ if [ "$SKIP_CC" -eq 0 ]; then
     if "$SCRIPT_DIR/compare_contention.sh" > cc_contention_out.txt 2>&1; then
         CC_INTF=$(extract "DATA_CC_INTERFERENCE" cc_contention_out.txt)
         PTHREAD_INTF=$(extract "DATA_PTHREAD_INTERFERENCE" cc_contention_out.txt)
+        GO_INTF=$(extract "DATA_GO_INTERFERENCE" cc_contention_out.txt)
     else
         echo "  [WARN] compare_contention.sh failed (exit $?). Check cc_contention_out.txt for details."
-    fi
-fi
-if [ "$SKIP_GO" -eq 0 ]; then
-    if go run "$SCRIPT_DIR/go/channel_contention.go" > go_contention_out.txt 2>&1; then
-        GO_INTF=$(grep "Interference" go_contention_out.txt | tail -n 1 | awk '{print $2}')
-    else
-        echo "  [WARN] Go channel_contention failed (exit $?)."
     fi
 fi
 
@@ -182,5 +176,5 @@ fi
 echo "================================================================="
 
 rm -f cc_syscall_out.txt go_syscall_out.txt cc_herd_out.txt go_herd_out.txt \
-      cc_contention_out.txt go_contention_out.txt cc_preemption_out.txt \
+      cc_contention_out.txt cc_preemption_out.txt \
       go_preemption_out.txt cc_arena_out.txt go_arena_out.txt

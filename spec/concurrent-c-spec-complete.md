@@ -2193,32 +2193,34 @@ Key properties:
 * `send` / `send_take` are non-fatal on closed channels
 * Slices are copied by default; transfer is explicit
 
-**Rule:** Channels participate in the ordinary UFCS model at the **language surface**, but use C-like receiver-first free functions rather than zero-argument receive.
+**Rule:** Channels participate in the ordinary UFCS model at the **language surface**, but use receiver-first operations with explicit output storage rather than zero-argument receive.
 
 The normative surface form is:
 
-* `tx.send(v)` lowers to `send(tx, v)`
-* `rx.recv(&out)` lowers to `recv(rx, &out)`
-* `tx.close()` lowers to `close(tx)`
-* `h.free()` lowers to `free(h)`
+* `tx.send(v)`
+* `rx.recv(&out)`
+* `h.close()`
+* `h.free()`
 
-**Intended DX vs equivalent lowered C:**
+**Rule (lowering contract):** UFCS lowering is part of the language contract. By default, ordinary UFCS calls follow receiver-first lowering. Libraries may override that lowering with `cc_ufcs_register(...)` (see **§8 Standard Library / UFCS**). The emitted callee symbol and whether the receiver is passed by address or by value are both part of the contract.
+
+**Current channel note:** The standard library channel families use library-owned UFCS lowering over shared runtime helpers. Generated C may target helpers such as `cc_channel_ufcs_*`, `CC_TYPED_CHAN_*`, `cc_channel_send_task`, and `cc_channel_recv_task`; those names are backend details, but the surface operations above are normative.
+
+**Intended DX:**
 
 ```c
 // Native CCC (preferred)
 tx.send(job);
 await rx.recv(&result);
-tx.close();
+rx.close();
 ch.free();
 
-// Equivalent lowered C at the language surface
+// Equivalent language-level lowering
 send(tx, job);
 await recv(rx, &result);
-close(tx);
+close(rx);
 free(ch);
 ```
-
-Implementation note: generated C may lower these surface operations further to explicit runtime helpers such as `cc_channel_send`, `cc_channel_recv`, `cc_channel_close`, and `cc_channel_free`, but those names are not the normative language-level API.
 
 **Rule:** `await` is only valid inside `@async` functions.
 
@@ -2248,7 +2250,7 @@ Channels are categorized by **mode** (async vs sync) and **topology/direction**.
   - `T[~... >]` — **send-only** handle (tx)
   - `T[~... <]` — **recv-only** handle (rx)
 - A channel is created only by producing a `(tx, rx)` pair (see **Creation** below).
-- `close(...)` is only valid on a **send** handle (`>`). Closing affects the underlying channel and is observed by the `recv` handle (`<`) as termination.
+- `close(...)` is valid on any live channel handle. Closing affects the shared underlying channel state and is observed by all views as termination.
 
 **Async channel topology:**
 | Type        | Meaning                        |
@@ -2303,20 +2305,20 @@ Channels are created by producing a `(tx, rx)` pair:
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = cc_channel_pair(&tx, &rx);  // returns the underlying channel
+CCChan* ch = channel_pair(&tx, &rx);  // returns the underlying channel
 ```
 
 Notes:
-- `cc_channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
+- `channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
 - `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
-- `cc_channel_close(tx)` (or `closing(tx)` in a nursery) closes the underlying channel.
+- `close(tx)` / `close(rx)` (or `closing(tx)` in a nursery) closes the underlying channel.
 - `cc_channel_free(ch)` frees the channel. Always free the channel, not the handles.
 
 **Ownership idiom:**
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = cc_channel_pair(&tx, &rx);
+CCChan* ch = channel_pair(&tx, &rx);
 
 @nursery {
     spawn(consumer(rx));
@@ -2342,27 +2344,32 @@ int!>(ParseError)[~100 sync <] sync_results_rx;   // sync receiver
 CCChan* sync_results_ch = channel_pair(&sync_results_tx, &sync_results_rx);
 ```
 
-**Rule (recv return type):** `recv()` always returns `(ElemType)?`. For a channel with element type `T!>(E)`, `recv()` returns `(T!>(E))?` which is spelled `T!>(E)?`. The outer `?` indicates channel state (null = closed+drained); the inner `!E` is application-level success/failure.
+**Rule (recv result type):** `recv(&out)` returns `bool !>(CCIoError)`.
+- `ok(true)` = a value was received and written into `out`
+- `ok(false)` = the channel is closed and drained
+- `err(e)` = transport/runtime failure
 
 ```c
 // Async channel: must use await
-int!>(ParseError)? r = await results.recv();
-if (!r) {
+int!>(ParseError) r;
+bool !>(CCIoError) got = await results_rx.recv(&r);
+if (!got) {
     // channel closed+drained
 } else if (r.ok) {
-    int v = r.value;  // application success
+    int v = r.value;   // application success
 } else {
-    ParseError e = r.error;  // application error
+    ParseError e = r.error;  // application-level error value
 }
 
 // Sync channel: no await
-int!>(ParseError)? r = results.recv();
-if (!r) {
+int!>(ParseError) r2;
+bool !>(CCIoError) got2 = sync_results_rx.recv(&r2);
+if (!got2) {
     // channel closed+drained
-} else if (r.ok) {
-    int v = r.value;
+} else if (r2.ok) {
+    int v = r2.value;
 } else {
-    ParseError e = r.error;
+    ParseError e = r2.error;
 }
 ```
 
@@ -2490,9 +2497,9 @@ Standard channel semantics apply:
 * **Buffered channels** enqueue up to `n` items; sends block when full.
 * **Unbuffered channels** rendezvous: sender blocks until receiver is ready.
 * **Close** does not drop buffered values; they remain available for recv.
-* **Termination** is observed when the channel is both closed and drained (`recv()` returns `null`).
+* **Termination** is observed when the channel is both closed and drained (`recv(&out)` returns `ok(false)`).
 
-**Rule:** `recv()` returns `null` only when the channel is closed and drained. It never returns `null` to represent an application-level error. For per-item errors, use `T!>(E)[~ <]` channels where `recv()` returns `T!>(E)?`.
+**Rule:** `recv(&out)` returns `ok(false)` only when the channel is closed and drained. It never uses `ok(false)` to represent an application-level payload error. For per-item errors, use `T!>(E)[~ <]` channels where the received value written to `out` is itself a `T!>(E)`.
 
 **Rule (slice element ownership):** For slice element types, `send` deep-copies into channel-internal storage. While queued, the channel owns the copy. On successful `recv`, the receiver gets a **unique slice**; the receiver frees it on scope exit (or transfers it via `send_take` / return). If the value is never received (still buffered when channel is freed), the channel frees it.
 
@@ -2500,7 +2507,7 @@ Standard channel semantics apply:
 
 **Rule (broadcast copy semantics):** On a `1:N` channel, `send` performs a deep copy for **each subscriber** at send time. Each subscriber receives an independent unique slice. For slice elements, this means N independent allocations for N subscribers.
 
-**Rule (broadcast close):** Closing a `1:N` channel closes the broadcaster and all subscriber views. Subscribers may continue draining buffered values; after drain, `recv()` returns `null`.
+**Rule (broadcast close):** Closing a `1:N` channel closes the broadcaster and all subscriber views. Subscribers may continue draining buffered values; after drain, `recv(&out)` returns `ok(false)`.
 
 **Close semantics:**
 
@@ -2571,8 +2578,9 @@ replaced_5 Select / Multiplex
 `select` waits on multiple channel operations:
 
 ```c
+int x;
 @match {
-    case int? x = ch.recv(): handle(x);
+    case ch.recv(&x):        handle(x);
     case ch.send(v):         sent();
     case timeout(100ms):     retry();
 }
@@ -2631,16 +2639,19 @@ Timeouts are defined via `select`:
 
 ```c
 // In sync code:
-int? v = recv_timeout(&ch, 100ms);
+int v;
+bool got = recv_timeout(&ch, 100ms, &v);
 
 // In async code:
-int? v = await recv_timeout(&ch, 100ms);
+int v2;
+bool got2 = await recv_timeout(&ch, 100ms, &v2);
 
 // Equivalent to:
-int? v = null;
+int v3 = 0;
+bool got3 = false;
 @match {
-    case int? x = ch.recv(): { v = x; }
-    case timeout(100ms):     { v = null; }
+    case ch.recv(&v3):   { got3 = true; }
+    case timeout(100ms): { got3 = false; }
 }
 ```
 
@@ -2723,9 +2734,9 @@ T? x = recv_timeout(&srx, Duration d);
 | `close(ch)` | `close(...)` ✅ | `close(...)` ✅ |
 | `subscribe(ch)` | `subscribe(...)` ✅ | `subscribe(...)` ✅ |
 
-**Rule (async channel operations):** All operations on async channel handles (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`) that may suspend require `await`. These include `send()`, `recv()`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `await` is a compile error.
+**Rule (async channel operations):** All operations on async channel handles (`T[~ ... >]` / `T[~ ... <]` or `T[~ ... async ... >/<]`) that may suspend require `await`. These include `send()`, `recv(&out)`, `send_take()`, `recv_cancellable()`, `send_cancellable()`, and `recv_timeout()`. Omitting `await` is a compile error.
 
-**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `await`. These include `send()`, `recv()`, `send_take()`, and `recv_timeout()`. Adding `await` is a compile error.
+**Rule (sync channel operations):** All operations on sync channel handles (`T[~ ... sync ... >]` / `T[~ ... sync ... <]`) that may block have no `await`. These include `send()`, `recv(&out)`, `send_take()`, and `recv_timeout()`. Adding `await` is a compile error.
 
 **Rule (non-blocking operations):** `try_send()`, `try_recv()`, `close()`, and `subscribe()` are valid on both async and sync channels without `await`. They return immediately or have no return value.
 
@@ -2774,19 +2785,19 @@ use(*u);                         // OK: u still owns the buffer
 - `try_recv` returns `err(RecvStatus.WouldBlock)` if the channel is empty but open
 - `try_recv` returns `err(RecvStatus.Closed)` if the channel is closed **and** drained
 
-**Note (try_recv vs recv):** Both `recv()` and `try_recv()` return values from a closed channel as long as buffered values remain. The "closed" status is only reported after all buffered values have been drained. `recv()` signals this via `null`; `try_recv()` signals it via `err(Closed)`.
+**Note (try_recv vs recv):** Both `recv(&out)` and `try_recv()` return values from a closed channel as long as buffered values remain. The "closed" status is only reported after all buffered values have been drained. `recv(&out)` signals this via `ok(false)`; `try_recv()` signals it via `err(Closed)`.
 
 **Note (schematic signatures):** Signatures use `T[~ ... >]*` / `T[~ ... <]*` as shorthand for the channel handle family. The actual type system uses the full channel handle type including capacity, mode, topology, and direction:
 
 ```c
 // Full type signatures (what the compiler sees):
-bool send<T, N, Topo>(T[~N Topo >]* ch, T value);  // send-only
-T?   recv<T, N, Topo>(T[~N Topo <]* ch);           // recv-only
+bool !>(CCIoError) send<T, N, Topo>(T[~N Topo >]* ch, T value);       // send-only
+bool !>(CCIoError) recv<T, N, Topo>(T[~N Topo <]* ch, T* out);        // recv-only
 ```
 
 Capacity `N` and topology `Topo` are erased at runtime (all use the same implementation), but the type system enforces view restrictions at compile time.
 
-**Rule:** Calling `send` on a recv-only channel view (`T[~n <]`), or `recv` on a send-only channel view (`T[~n >]`), is a compile-time error.
+**Rule:** Calling `send` on a recv-only channel view (`T[~n <]`), or `recv(&out)` on a send-only channel view (`T[~n >]`), is a compile-time error.
 
 **Rule:** Channel handles must be initialized via `cc_channel_pair(&tx, &rx)` (or equivalent constructor for special topologies). The combined form `T[~n]` is not allowed.
 
@@ -3564,14 +3575,16 @@ int[~ <] rx;
 CCChan* ch = channel_pair(&tx, &rx);
 
 // Must use await
-int? x = await recv(&rx);                 // suspends, returns optional
-bool ok = await send(&tx, 42);            // suspends, returns success
-int? x = await recv_cancellable(&rx);     // returns err(Cancelled) if cancelled
-bool ok = await send_cancellable(&tx, 42);
+int x;
+bool !>(CCIoError) got = await recv(rx, &x);          // suspends until received
+bool !>(CCIoError) ok = await send(tx, 42);           // suspends until sent
+int y;
+bool !>(Cancelled) got2 = await recv_cancellable(rx, &y);
+bool !>(Cancelled) ok2 = await send_cancellable(tx, 42);
 
 // Cannot use await
-int x = recv(&rx);                        // ❌ ERROR: missing await
-send(&tx, 42);                            // ❌ ERROR: missing await
+recv(rx, &x);                             // ❌ ERROR: missing await
+send(tx, 42);                             // ❌ ERROR: missing await
 
 chan_free(ch);                            // free the channel when done
 ```
@@ -3582,8 +3595,9 @@ chan_free(ch);                            // free the channel when done
 
 ```c
 @async void!>(Error) reader(int[~ <] ch) {
+    int x;
     @match {
-        case int x = await ch.recv():
+        case ch.recv(&x):
             process(x);
         // implicit: case is_cancelled(): return cc_err(Cancelled);
     }
@@ -3606,13 +3620,14 @@ int[~ sync <] rx;
 channel_pair(&tx, &rx);
 
 // No await allowed
-int? x = recv(&rx);                  // blocks OS thread
-bool ok = send(&tx, 42);             // blocks OS thread
-int? x = recv_cancellable(&ch);      // N/A: sync channels don't auto-support cancellation
+int x;
+bool !>(CCIoError) got = recv(rx, &x);    // blocks OS thread
+bool !>(CCIoError) ok = send(tx, 42);     // blocks OS thread
+recv_cancellable(rx, &x);                 // ❌ N/A: sync channels don't auto-support cancellation
 
 // Cannot use await
-int? x = await recv(&rx);            // ❌ ERROR: cannot await sync channel
-bool ok = await send(&tx, 42);       // ❌ ERROR: cannot await sync channel
+await recv(rx, &x);                  // ❌ ERROR: cannot await sync channel
+await send(tx, 42);                  // ❌ ERROR: cannot await sync channel
 ```
 
 **Rule:** All operations on sync channels do NOT use `await`. Adding `await` is a compile error.
@@ -3622,7 +3637,7 @@ bool ok = await send(&tx, 42);       // ❌ ERROR: cannot await sync channel
 ```c
 int[~ sync <] rx;
 @match {
-    case x = recv(&rx):  // ❌ ERROR: @match requires async channel
+    case rx.recv(&x):  // ❌ ERROR: @match requires async channel
         process(x);
 }
 ```
@@ -3633,9 +3648,9 @@ Sync channels do not work with `@match`.
 
 ```c
 @match_blocking {
-    case int x = recv(&sync_ch):
+    case sync_ch.recv(&x):
         process(x);
-    case send(&other_sync_ch, 42):
+    case other_sync_ch.send(42):
         // sent
 }
 ```
@@ -3821,8 +3836,9 @@ No `await` anywhere in worker_thread. Blocks OS thread as expected.
 }
 
 @async int!>(Error) reader(int[~ <] ch) {
+    int x;
     @match {
-        case int x = await ch.recv():
+        case ch.recv(&x):
             return cc_ok(x);
         // implicit cancel case (timeout will cancel)
     }
@@ -3888,9 +3904,10 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 
 ```c
 @async void!>(Error) worker(int[~ <] ch) {  // async recv handle
+    int x;
     while (true) {
         @match {
-            case int x = ch.recv():    // async channel recv, naturally awaitable
+            case ch.recv(&x):          // async channel recv, implicitly awaited inside @match
                 process(x);
             // IMPLICIT (inside cancellable context):
             // case is_cancelled():
@@ -3901,8 +3918,9 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 
 // Sync channels don't work with @match:
 @async void!>(Error) bad_sync(int[~ sync <] ch) {
+    int x;
     @match {
-        case int x = ch.recv():  // ❌ ERROR: @match requires async channel
+        case ch.recv(&x):  // ❌ ERROR: @match requires async channel
             process(x);
     }
 }
@@ -3917,10 +3935,11 @@ This gives cancellation "teeth"—a cancelled task will exit immediately when it
 **Desugaring:**
 
 ```c
-@async void!>(Error) worker(int[~] ch) {
+@async void!>(Error) worker(int[~ <] ch) {
+    int x;
     while (true) {
         @match {
-            case int x = ch.recv():
+            case ch.recv(&x):
                 process(x);
             case is_cancelled():  // implicit
                 return cc_err(Error.Cancelled);
@@ -4033,7 +4052,7 @@ This is still supported but should be rare—most code uses `@match` or variants
   - `recv_cancellable()` / `send_cancellable()` (immediate)
   - `cc_is_cancelled()` (polling, manual)
 - No async context unwinding or stack unwinding
-- Outside an active `with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv()` keeps waiting). Inside `with_deadline(...)`, suspension points are cancellation-aware per **§ 3.2.2** (and may be deferred by `with_shield`, **§ 7.5.2**).
+- Outside an active `with_deadline(...)` scope, non-cancellation-aware awaits are unaffected (e.g., plain `await ch.recv(&x)` keeps waiting). Inside `with_deadline(...)`, suspension points are cancellation-aware per **§ 3.2.2** (and may be deferred by `with_shield`, **§ 7.5.2**).
 
 **Rule:** `t.cancel()` is only valid if `t` is a task with a `Cancelled` error variant. Attempting to cancel a task without `Cancelled` in its error type is a compile error.
 
@@ -4057,9 +4076,10 @@ enum WorkerError {
 }
 
 @async void!>(WorkerError) reader(int[~ <] requests) {
+    int req;
     while (true) {
         @match {
-            case int req = requests.recv():
+            case requests.recv(&req):
                 handle_request(req);
             // implicit: case is_cancelled(): return cc_err(Cancelled);
         }
@@ -4126,8 +4146,9 @@ enum TaskError {
 }
 
 @async int!>(TaskError) worker() {
+    int x;
     @match {
-        case int x = ch.recv():
+        case ch.recv(&x):
             return cc_ok(x);
         // implicit: case is_cancelled(): return cc_err(TaskError.Cancelled);
     }
@@ -4135,7 +4156,8 @@ enum TaskError {
 
 // Bad: no Cancelled variant, so implicit case can't work
 @async int!>(IoError) reader() {
-    int x = await ch.recv();  // ❌ can't be cancelled effectively
+    int x;
+    await ch.recv(&x);  // ❌ can't be cancelled effectively
     return cc_ok(x);
 }
 ```
@@ -4293,7 +4315,7 @@ Streaming uses explicit channel parameters:
 
 ```c
 @async void produce(int n, int[~ >]* out) {
-    defer out.close();  // close is only valid on send handles
+    defer out.close();  // closes the shared channel state when production finishes
     for (int i = 0; i < n; i++) {
         await out.send(i);
     }
@@ -4437,7 +4459,7 @@ An `@async` function is `@nonblocking` if it contains no channel operations insi
 
 **Inference rules (automatic):**
 
-1. No `await ch.send()` or `await ch.recv()` inside `for`, `while`, or `do-while` loops
+1. No `await ch.send()` or `await ch.recv(&x)` inside `for`, `while`, or `do-while` loops
 2. All called `@async` functions are also `@nonblocking`
 3. Any loop with channel operations makes the function **not** `@nonblocking`
 
@@ -5014,16 +5036,17 @@ The blocking model is intentionally conservative:
 
 This section defines the core standard library using **UFCS-first design**: method syntax is primary and ergonomic, free functions are normative.
 
-**Design principle:** The free function form is definitive (for generic code, composition, functional programming). UFCS method syntax desugars to free functions and is the primary API for most users.
+**Design principle:** The free function form remains the ordinary fallback for generic code, composition, and functional programming. UFCS method syntax is the primary API for most users; by default it desugars to free functions, but libraries may supply custom lowering where documented.
 
-**Channel note:** Channels follow the same language-level UFCS rule, but their normative free-function spellings are C-like receiver-first operations such as `send(tx, v)` and `recv(rx, &out)`. Backend lowering may still target `chan_*` helpers in generated C.
+**Channel note:** Channels follow the same language-level UFCS rule, but their method lowering is library-owned via `cc_ufcs_register(...)`. In practice this corresponds to receiver-first operations such as `send(tx, v)` and `recv(rx, &out)`, though the exact emitted helper symbol may differ.
 
 **UFCS Equivalence (Normative):**
 
-For UFCS-enabled types, both forms are fully equivalent and compile identically:
+For types that use ordinary UFCS fallback, both forms are equivalent:
 - `x.method(args)` is syntactic sugar for `method(x, args)` (when `x` is a pointer or struct)
 - `x.method(args)` with value `x` desugars to `method(&x, args)` (taking a pointer)
-- The compiler treats both forms interchangeably
+
+For types or families that register custom UFCS lowering with `cc_ufcs_register(...)`, `x.method(args)` lowers according to the registered handler instead. Libraries may still expose ordinary free-function entry points, but those are a separate API choice rather than the universal rule.
 
 This enables two usage styles:
 
@@ -5051,6 +5074,54 @@ int[] squared = vec_map(numbers, (int x) => x * x);
 // Chain via free functions
 Vec<int> result = vec_map(vec_filter(input, is_even), double);
 ```
+
+---
+
+### 8.0 UFCS Registration and Custom Lowering
+
+UFCS is an extensible language feature. Libraries may declare custom lowering rules at compile time with `cc_ufcs_register(...)`.
+
+**Surface API:**
+
+```c
+typedef CCSlice (*CCUfcsRewriteFn)(CCSlice method, CCSliceArray argv, CCArena* arena);
+
+bool cc_ufcs_register(char[:] pattern, CCUfcsRewriteFn handler);
+```
+
+**Registration rules:**
+- Registrations appear in `@comptime { ... }` code.
+- `pattern` is either an exact type name such as `"CCFile"` or a simple trailing-wildcard family such as `"CCChanTx_*"`.
+- Handlers may be named functions or non-capturing lambdas.
+- The handler returns the lowered callee symbol as a slice. Returning the empty slice means "no custom rewrite; fall back to ordinary UFCS lowering".
+
+**Handler contract:**
+- `method` is the invoked method name.
+- `argv[0]` is the receiver type name.
+- `argv[1]` is the receiver expression text.
+- `argv[2...]` are the argument expression texts plus lowering context slots defined by the language/runtime.
+- `arena` is temporary compile-time storage for constructing the returned symbol.
+
+**By-value receiver lowering:** If a registration wants the receiver passed by value rather than by address, it must return the lowered symbol via `cc_ufcs_emit_value(...)` or `cc_ufcs_emit_value_cstr(...)`.
+
+**Examples:**
+
+```c
+static CCSlice cc_file_ufcs(CCSlice method, CCSliceArray argv, CCArena* arena) {
+    (void)argv;
+    return cc_concat(arena, "cc_file_", method);
+}
+
+@comptime {
+    (void)cc_ufcs_register("CCFile", cc_file_ufcs);
+    (void)cc_ufcs_register("CCChanTx_*",
+        (method, argv, arena) => cc_channel_tx_ufcs_rewrite(method, argv, arena));
+    (void)cc_ufcs_register("CCChanRx_*",
+        (method, argv, arena) => cc_channel_rx_ufcs_rewrite(method, argv, arena));
+}
+```
+
+This same contract is intended to generalize to future library-owned families such as `Vec`, `Map`, `Optional`, and `Result`, so container-style UFCS lowering and family-specific naming remain library policy rather than compiler policy.
 
 ---
 
@@ -5558,7 +5629,7 @@ This section documents syntactic sugar and conventions:
 
 **Methods / UFCS:**
 
-`x.method(args)` is syntax sugar for the corresponding receiver-first free function. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`String_push(&s, x)`).
+`x.method(args)` uses UFCS lowering. For ordinary fallback UFCS, this is syntax sugar for the corresponding receiver-first free function. Libraries may override the emitted callee via `cc_ufcs_register(...)`. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`String_push(&s, x)`).
 
 ```c
 tx.send(v);        // lowers to send(tx, v)
@@ -5567,7 +5638,7 @@ tx.close();        // lowers to close(tx)
 slice.len;         // field access (not a call)
 ```
 
-**Rule:** The free function form is normative. Method syntax is always desugaring. Channels use receiver-first surface forms such as `send(tx, v)` and `recv(rx, &out)`; generated C may lower those further to `cc_channel_*` helpers.
+**Rule:** Ordinary UFCS fallback uses the receiver-first free function form. Registered UFCS families use the callee chosen by their handler. Channels use receiver-first surface forms such as `send(tx, v)` and `recv(rx, &out)`; generated C may lower those further to `cc_channel_*` or other registered helpers.
 
 **UFCS receiver syntax:**
 
@@ -5968,8 +6039,9 @@ Generic code obeys the same copy/move rules as non-generic code.
 ```c
 void take<T>(T x) { use(x); }
 
-char[:]? u = await ch.recv(); // u contains move-only slice
-take(*u);                      // moves out (unwrap already moves), OK
+char[:] u;
+await ch.recv(&u);             // u contains move-only slice
+take(u);                       // moves u into take(), OK
 ```
 
 **Rule (return):** Returning a move-only `T` returns by move (same as normal return rules).

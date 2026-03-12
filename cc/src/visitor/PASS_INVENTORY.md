@@ -22,20 +22,18 @@ Text transforms applied BEFORE TCC parsing. Listed in execution order:
 | P3 | cc__rewrite_slice_types | `T[:]` → CCSlice_T | ~110 | Type syntax |
 | P4 | cc__rewrite_chan_handle_types | `int[~4 >]` → CCChanTx_int | ~510 | Channel types |
 | P5 | cc_rewrite_generic_containers | `Vec<T>` → Vec_T | ~250 | Generic types |
-| P6 | cc_rewrite_ufcs_container_calls | `v.push(x)` → Vec_T_push | ~160 | Container UFCS |
-| P7 | cc_rewrite_std_io_ufcs | `std_out.write()` → printf | ~230 | I/O UFCS |
-| P8 | cc__rewrite_optional_types | `T?` → CCOptional_T | ~100 | Type syntax |
-| P9 | cc__rewrite_optional_constructors | `cc_some_CCOptional_T(v)` → macro | ~120 | Parse stub |
-| P10 | cc__rewrite_inferred_result_ctors | `cc_ok(v)` → `cc_ok_CCResult_T_E(v)` | ~260 | Constructor inference ⚠️ BEFORE P11 |
-| P11 | cc__rewrite_result_types | `T!>(E)` → CCResult_T_E | ~155 | Type syntax |
-| P12 | cc__rewrite_result_constructors | `cc_ok_CCResult_T_E(v)` → macro | ~70 | Parse stub |
-| P13 | cc__normalize_if_try_syntax | `if @try (` → `if (try ` | ~25 | Syntax normalize |
-| P14 | cc__rewrite_try_binding | `if (try T x = expr)` → expanded | ~150 | Result unwrap |
-| P15 | cc__rewrite_try_exprs | `try expr` → `cc_try(expr)` | ~95 | Result unwrap |
-| P16 | cc__rewrite_optional_unwrap | `*opt` → `cc_unwrap_opt(opt)` | ~230 | Optional unwrap |
-| P17 | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery | ~150 | Channel lifecycle |
-| P18 | cc__rewrite_cc_concurrent | `cc_concurrent { }` → closure exec | ~70 | Concurrency |
-| P19 | cc__rewrite_link_directives | `@link("lib")` → linker comment | ~460 | Link directives |
+| P6 | cc__rewrite_optional_types | `T?` → CCOptional_T | ~100 | Type syntax |
+| P7 | cc__rewrite_optional_constructors | `cc_some_CCOptional_T(v)` → macro | ~120 | Parse stub |
+| P8 | cc__rewrite_inferred_result_ctors | `cc_ok(v)` → `cc_ok_CCResult_T_E(v)` | ~260 | Constructor inference ⚠️ BEFORE P11 |
+| P9 | cc__rewrite_result_types | `T!>(E)` → CCResult_T_E | ~155 | Type syntax |
+| P10 | cc__rewrite_result_constructors | `cc_ok_CCResult_T_E(v)` → macro | ~70 | Parse stub |
+| P11 | cc__normalize_if_try_syntax | `if @try (` → `if (try ` | ~25 | Syntax normalize |
+| P12 | cc__rewrite_try_binding | `if (try T x = expr)` → expanded | ~150 | Result unwrap |
+| P13 | cc__rewrite_try_exprs | `try expr` → `cc_try(expr)` | ~95 | Result unwrap |
+| P14 | cc__rewrite_optional_unwrap | `*opt` → `cc_unwrap_opt(opt)` | ~230 | Optional unwrap |
+| P15 | cc__rewrite_closing_annotation | `@closing(ch)` → sub-nursery | ~150 | Channel lifecycle |
+| P16 | cc__rewrite_cc_concurrent | `cc_concurrent { }` → closure exec | ~70 | Concurrency |
+| P17 | cc__rewrite_link_directives | `@link("lib")` → linker comment | ~460 | Link directives |
 
 **Note**: P10 must run before P11 (needs to see `T!>(E)` syntax for type inference).
 
@@ -232,8 +230,7 @@ All suitable passes have been converted to use the shared `CCScannerState` helpe
 - `cc__rewrite_result_constructors` (P12)
 - `cc__rewrite_chan_handle_types` (P4) ✅ 2026-02-01
 - `cc_rewrite_generic_containers` (P5) ✅ 2026-02-01
-- `cc_rewrite_ufcs_container_calls` (P6) ✅ 2026-02-01
-- `cc_rewrite_std_io_ufcs` (P7) ✅ 2026-02-01
+- Legacy preprocess UFCS passes removed; UFCS now lowers through the parser/TCC tolerance plus AST-aware UFCS path.
 
 **Not suitable (1 instance):**
 - `cc__rewrite_with_deadline_syntax` - streaming output architecture incompatible

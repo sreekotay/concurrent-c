@@ -65,15 +65,91 @@ static void cc__mangle_channel_type_name(const char* src, size_t len, char* out,
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else if (c == '*') {
             if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
-        } else if (c == '[' || c == ']' || c == '<' || c == '>' || c == ',') {
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_') {
+            out[j++] = c;
+        } else if (c == '[' || c == ']' || c == '<' || c == '>' || c == ',' ||
+                   c == '(' || c == ')' || c == '!' || c == ':' || c == '?') {
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else {
-            out[j++] = c;
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         }
     }
     while (j > 0 && out[j - 1] == '_') j--;
     out[j] = 0;
     cc__normalize_channel_type_alias(out);
+}
+
+static int cc__lookup_channel_elem_type_for_expr(const char* src,
+                                                 size_t start,
+                                                 size_t end,
+                                                 char* out,
+                                                 size_t out_cap) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    char ident[128];
+    const char* handle_type = NULL;
+    const char* elem_type = NULL;
+    size_t n = 0;
+
+    if (!src || !out || out_cap == 0 || !reg) return 0;
+    out[0] = 0;
+
+    while (start < end && (src[start] == ' ' || src[start] == '\t' ||
+                           src[start] == '\n' || src[start] == '\r')) start++;
+    while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t' ||
+                           src[end - 1] == '\n' || src[end - 1] == '\r')) end--;
+    if (end <= start) return 0;
+
+    n = end - start;
+    if (n >= sizeof(ident)) return 0;
+    memcpy(ident, src + start, n);
+    ident[n] = 0;
+    if (!cc_is_ident_start(ident[0])) return 0;
+    for (size_t i = 1; i < n; i++) {
+        if (!cc_is_ident_char(ident[i])) return 0;
+    }
+
+    handle_type = cc_type_registry_lookup_var(reg, ident);
+    elem_type = cc_type_registry_lookup_channel_elem_type(reg, handle_type);
+    if (!elem_type || !*elem_type) return 0;
+    if (strcmp(elem_type, "CCTask") == 0 || strcmp(elem_type, "Task") == 0) return 0;
+
+    snprintf(out, out_cap, "%s", elem_type);
+    return 1;
+}
+
+static void cc__format_channel_task_value_type(const char* elem_ty, char* out, size_t out_cap) {
+    const char* bang = NULL;
+    const char* lpar = NULL;
+    const char* rpar = NULL;
+    char ok_mangled[128];
+    char err_mangled[128];
+
+    if (!out || out_cap == 0) return;
+    out[0] = 0;
+    if (!elem_ty || !*elem_ty) return;
+
+    bang = strstr(elem_ty, "!>");
+    if (!bang) {
+        snprintf(out, out_cap, "%s", elem_ty);
+        return;
+    }
+
+    lpar = strchr(bang + 2, '(');
+    rpar = lpar ? strrchr(lpar + 1, ')') : NULL;
+    if (!lpar || !rpar || rpar <= lpar + 1) {
+        snprintf(out, out_cap, "%s", elem_ty);
+        return;
+    }
+
+    cc__mangle_channel_type_name(elem_ty, (size_t)(bang - elem_ty), ok_mangled, sizeof(ok_mangled));
+    cc__mangle_channel_type_name(lpar + 1, (size_t)(rpar - (lpar + 1)), err_mangled, sizeof(err_mangled));
+    if (!ok_mangled[0] || !err_mangled[0]) {
+        snprintf(out, out_cap, "%s", elem_ty);
+        return;
+    }
+
+    snprintf(out, out_cap, "CCResult_%s_%s", ok_mangled, err_mangled);
 }
 
 /* Helper: wrap a closure with typed parameter for CCClosure1.
@@ -1041,9 +1117,15 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                     
                     /* Extract element type (before [~) */
                     size_t ty_start = i;
+                    int paren_depth = 0;
                     while (ty_start > 0) {
                         char p = src[ty_start - 1];
-                        if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+                        if (p == ')') { paren_depth++; ty_start--; continue; }
+                        if (p == '(') {
+                            if (paren_depth > 0) { paren_depth--; ty_start--; continue; }
+                            break;
+                        }
+                        if (paren_depth == 0 && (p == ';' || p == '{' || p == '}' || p == ',' || p == '\n')) break;
                         ty_start--;
                     }
                     while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
@@ -1193,9 +1275,15 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                 }
                 
                 size_t ty_start = i;
+                int paren_depth = 0;
                 while (ty_start > 0) {
                     char p = src[ty_start - 1];
-                    if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+                    if (p == ')') { paren_depth++; ty_start--; continue; }
+                    if (p == '(') {
+                        if (paren_depth > 0) { paren_depth--; ty_start--; continue; }
+                        break;
+                    }
+                    if (paren_depth == 0 && (p == ';' || p == '{' || p == '}' || p == ',' || p == '\n')) break;
                     ty_start--;
                 }
                 while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
@@ -1407,6 +1495,10 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         /* Generate replacement */
         int tid = g_send_task_id++;
         char id_buf[32];
+        char elem_ty[256];
+        char task_val_ty[256];
+        int has_typed_result = cc__lookup_channel_elem_type_for_expr(src, ch_start, ch_end, elem_ty, sizeof(elem_ty));
+        cc__format_channel_task_value_type(elem_ty, task_val_ty, sizeof(task_val_ty));
         snprintf(id_buf, sizeof(id_buf), "%d", tid);
         
         /* { CCClosure0 __cc_st_cN = */
@@ -1427,14 +1519,22 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         }
         
         /* Emit closure body wrapper.
-         * The task stores its pointer-sized result in fiber-local storage at offset 0.
-         * chan_recv on an ordered channel copies sizeof(T) bytes from that location,
-         * so the result must be scalar- or pointer-sized (the common case).
-         * For structured Result types (T!>(E)), unwrap the result inside the
-         * closure body before passing it to chan_send_task. */
+         * For typed channel handles, preserve the declared element type in the
+         * task result buffer so ordered recv can memcpy the full payload out.
+         * Fallback to the legacy pointer-sized path when the channel expression
+         * is too complex to resolve through the type registry. */
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ ");
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*)); ");
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+        if (has_typed_result) {
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "* __cc_st_r = (");
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*)cc_task_result_ptr(sizeof(");
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); if (!__cc_st_r) return NULL; *__cc_st_r = (");
+        } else {
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*)); ");
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+        }
         
         /* Emit body (the actual expression/block) */
         cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);

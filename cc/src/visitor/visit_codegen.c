@@ -1230,19 +1230,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
-    /* Rewrite UFCS method calls on containers: v.push(x) -> Vec_int_push(&v, x) */
+    /* General UFCS lowering now goes through the AST-aware UFCS pass below.
+       Synthetic stdio receivers are the remaining exception because they do not
+       correspond to ordinary typed receivers. */
     if (src_ufcs && src_ufcs_len) {
-        char* rewritten = cc_rewrite_ufcs_container_calls(src_ufcs, src_ufcs_len, ctx->input_path);
-        if (rewritten) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = strlen(rewritten);
-        }
-    }
-
-    /* Rewrite std_out.write()/std_err.write() UFCS patterns */
-    if (src_ufcs && src_ufcs_len) {
-        char* rewritten = cc_rewrite_std_io_ufcs(src_ufcs, src_ufcs_len);
+        char* rewritten = cc_rewrite_synthetic_std_io_receivers(src_ufcs, src_ufcs_len);
         if (rewritten) {
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = rewritten;
@@ -1852,6 +1844,37 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
+
+        /* Final UFCS sweep: earlier statement/syntax rewrites can synthesize new
+           method-call surface syntax (notably via @defer / spawn / nursery
+           lowering). Reparse the current source and lower any remaining UFCS
+           spans before emitting C. */
+        if (ctx && ctx->symbols) {
+            CCASTRoot* final_ufcs_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            if (!final_ufcs_root) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+
+            cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
+            CCEditBuffer eb;
+            cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
+            cc__collect_ufcs_edits(final_ufcs_root, ctx, &eb);
+            if (eb.count > 0) {
+                size_t new_len = 0;
+                char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
+                if (rewritten) {
+                    if (src_ufcs != src_all) free(src_ufcs);
+                    src_ufcs = rewritten;
+                    src_ufcs_len = new_len;
+                }
+            }
+            cc_edit_buffer_free(&eb);
+            cc_tcc_bridge_free_ast(final_ufcs_root);
+        }
         
         /* Insert result type declarations INTO the source at the right position.
            They must come AFTER custom type definitions but BEFORE functions that use them.
@@ -1928,6 +1951,26 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 free(closure_defs);
                 closure_defs = closure_defs_lowered;
                 closure_defs_len = closure_defs_lowered_len;
+            }
+
+            /* Closure bodies can preserve raw UFCS after closure lowering.
+               Run the narrow generated-code survival rewrites here so helper
+               definitions don't leak raw method syntax into emitted C. */
+            {
+                char* rewritten = cc_rewrite_file_ufcs_survival(closure_defs, closure_defs_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
+            }
+            {
+                char* rewritten = cc_rewrite_result_ufcs_survival(closure_defs, closure_defs_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
             }
             
             /* Emit closure definitions at end-of-file so global names are in scope. */

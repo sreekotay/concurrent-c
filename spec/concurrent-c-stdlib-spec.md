@@ -33,7 +33,7 @@ split(&s, ",");
 ## Design Principles
 
 1. **UFCS-First API:** Methods on types are primary; free functions are normative forms. Users write `s.len()` not `string_length(s)`.
-   - All UFCS methods desugar to free functions; calling either form is always equivalent and supported.
+   - For ordinary stdlib types, UFCS methods desugar to free functions; custom UFCS registrations may define family-specific lowering where documented.
 
 2. **Header-Only:** All Phase 1 functions defined in headers; no compilation required.
 3. **Explicit Allocation:** All allocations via `Arena*` passed as explicit parameters. No hidden allocators.
@@ -65,11 +65,11 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 | `char[:]?` | `(char[:])?` | optional slice (e.g., `find()` return) |
 | `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read()` return) |
 | `T*!IoError` | `((T)*)!IoError` | result of pointer (e.g., `cc_dir_open()` return) |
-| `T!>(E)?` | `((T)!>(E))?` | optional result (e.g., `recv()` on error channel) |
+| `T!>(E)?` | `((T)!>(E))?` | optional result (general nested type example) |
 
 **Key distinction:**
 - `T!E` — "operation may fail" (e.g., file read: error or data, empty slice means EOF)
-- `T!>(E)?` — "value may be absent; if present, it's a result" (channel recv: closed, or ok/err)
+- `T!>(E)?` — "value may be absent; if present, it's a result" (general nesting pattern)
 - `T*!E` — "operation may fail; if it succeeds, returns a pointer" (common for allocation/lookup)
 
 ### Type Macros

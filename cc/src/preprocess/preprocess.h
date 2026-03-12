@@ -33,17 +33,23 @@ char* cc__rewrite_link_directives(const char* src, size_t n);
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);
 
-// Rewrite UFCS method calls on container variables:
-//   v.push(x) -> Vec_int_push(&v, x)
-//   m.get(k)  -> Map_K_V_get(&m, k)
-// Relies on type registry being populated by cc_rewrite_generic_containers.
-// Returns newly allocated string with rewrites, or NULL if no changes.
-char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path);
+// Rewrite synthetic stdio receivers:
+//   cc_std_out.write(x) / cc_std_err.write(x)
+// These are not ordinary typed UFCS receivers, so they still lower through a
+// small dedicated text pass in final codegen.
+char* cc_rewrite_synthetic_std_io_receivers(const char* src, size_t n);
 
-// Rewrite std_out.write()/std_err.write() UFCS patterns to cc_std_out_write() etc.
-// These are synthetic receivers that don't exist as real variables.
-// Returns newly allocated string with rewrites, or NULL if no changes.
-char* cc_rewrite_std_io_ufcs(const char* src, size_t n);
+// Rewrite CCFile UFCS for parser/generated-code survival:
+//   file.read(...) / file.write(...) / file.sync() / file.close()
+// Final source should still prefer the AST-aware UFCS pass; this helper is for
+// places where generated code introduces raw file UFCS after the main AST pass.
+char* cc_rewrite_file_ufcs_survival(const char* src, size_t n);
+
+// Rewrite CCResult_* UFCS for generated-code survival:
+//   r.value() / r.error() / r.unwrap() / r.unwrap_err() / r.is_ok() / ...
+// This is currently needed for generated closure bodies that bypass the main
+// AST-aware UFCS sweep.
+char* cc_rewrite_result_ufcs_survival(const char* src, size_t n);
 
 #endif // CC_PREPROCESS_H
 

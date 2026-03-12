@@ -736,9 +736,15 @@ static char* cc__rewrite_with_deadline_syntax(const char* src, size_t n) {
 
 static size_t cc__scan_back_to_delim(const char* s, size_t from) {
     size_t i = from;
+    int paren_depth = 0;
     while (i > 0) {
         char p = s[i - 1];
-        if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+        if (p == ')') { paren_depth++; i--; continue; }
+        if (p == '(') {
+            if (paren_depth > 0) { paren_depth--; i--; continue; }
+            break;
+        }
+        if (paren_depth == 0 && (p == ';' || p == '{' || p == '}' || p == ',' || p == '\n')) break;
         i--;
     }
     while (s[i] && (s[i] == ' ' || s[i] == '\t')) i++;
@@ -1343,6 +1349,377 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
     return p;
 }
 
+/* Seed UFCS receiver types that are introduced by ordinary declarations or CC
+   syntax sugar, but are not otherwise recorded by the textual type rewrites.
+   This keeps the AST-aware UFCS pass fed with receiver type names without
+   rewriting UFCS call text in preprocessing. */
+static void cc__seed_ufcs_receiver_types(const char* src, size_t n) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!src || n == 0 || !reg) return;
+
+    size_t si = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+    while (si < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &si)) continue;
+        if (!cc_is_ident_start(src[si])) { si++; continue; }
+
+        size_t type_start = si;
+        while (si < n && cc_is_ident_char(src[si])) si++;
+        size_t type_len = si - type_start;
+        const char* canonical_type = NULL;
+        if ((type_len == sizeof("CCFile") - 1 && memcmp(src + type_start, "CCFile", type_len) == 0) ||
+            (type_len == sizeof("File") - 1 && memcmp(src + type_start, "File", type_len) == 0)) {
+            canonical_type = "CCFile";
+        } else if ((type_len == sizeof("CCArena") - 1 && memcmp(src + type_start, "CCArena", type_len) == 0) ||
+                   (type_len == sizeof("Arena") - 1 && memcmp(src + type_start, "Arena", type_len) == 0)) {
+            canonical_type = "CCArena";
+        } else {
+            continue;
+        }
+
+        size_t j = cc_skip_ws_and_comments(src, n, si);
+        int is_ptr = 0;
+        while (j < n && src[j] == '*') {
+            is_ptr = 1;
+            j++;
+            j = cc_skip_ws_and_comments(src, n, j);
+        }
+        if (j >= n || !cc_is_ident_start(src[j])) continue;
+
+        size_t var_start = j;
+        while (j < n && cc_is_ident_char(src[j])) j++;
+        size_t var_len = j - var_start;
+        if (var_len == 0 || var_len >= 128) continue;
+
+        if (cc_skip_ws_and_comments(src, n, j) < n && src[cc_skip_ws_and_comments(src, n, j)] == '(') continue;
+
+        {
+            char var_name[128];
+            memcpy(var_name, src + var_start, var_len);
+            var_name[var_len] = '\0';
+            if (strcmp(canonical_type, "CCFile") == 0) {
+                cc_type_registry_add_var(reg, var_name, is_ptr ? "CCFile*" : "CCFile");
+            } else {
+                cc_type_registry_add_var(reg, var_name, is_ptr ? "CCArena*" : "CCArena");
+            }
+        }
+    }
+
+    /* Also seed @arena(name, ...) bindings, which are introduced later by
+       arena lowering as `CCArena* name = ...`. */
+    si = 0;
+    cc_scanner_init(&scan);
+    while (si < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &si)) continue;
+        if (src[si] != '@' || !(si + 6 < n && memcmp(src + si, "@arena", 6) == 0)) {
+            si++;
+            continue;
+        }
+        size_t j = cc_skip_ws_and_comments(src, n, si + 6);
+        if (j >= n || src[j] != '(') { si++; continue; }
+        j = cc_skip_ws_and_comments(src, n, j + 1);
+        if (j >= n || !cc_is_ident_start(src[j])) { si++; continue; }
+
+        size_t var_start = j;
+        while (j < n && cc_is_ident_char(src[j])) j++;
+        size_t var_len = j - var_start;
+        size_t after = cc_skip_ws_and_comments(src, n, j);
+        if (after < n && src[after] == ',' && var_len > 0 && var_len < 128) {
+            char var_name[128];
+            memcpy(var_name, src + var_start, var_len);
+            var_name[var_len] = '\0';
+            cc_type_registry_add_var(reg, var_name, "CCArena*");
+        }
+        si++;
+    }
+}
+
+/* Parser-survival shim for CCFile UFCS only.
+   This exists because methods like read/write/close collide with libc/POSIX
+   names during TCC parsing. Final emitted C still comes from the AST-aware
+   UFCS path in `visitor/ufcs.c`. */
+char* cc_rewrite_file_ufcs_survival(const char* src, size_t n) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!src || n == 0 || !reg) return NULL;
+
+    cc__seed_ufcs_receiver_types(src, n);
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!cc_is_ident_start(src[i])) { i++; continue; }
+
+        size_t ident_start = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        size_t ident_end = i;
+        if (ident_end - ident_start >= 128) continue;
+
+        size_t j = cc_skip_ws_and_comments(src, n, ident_end);
+        int is_arrow = 0;
+        if (j < n && src[j] == '.') {
+            j = cc_skip_ws_and_comments(src, n, j + 1);
+        } else if (j + 1 < n && src[j] == '-' && src[j + 1] == '>') {
+            is_arrow = 1;
+            j = cc_skip_ws_and_comments(src, n, j + 2);
+        } else {
+            continue;
+        }
+        if (j >= n || !cc_is_ident_start(src[j])) continue;
+
+        size_t method_start = j;
+        while (j < n && cc_is_ident_char(src[j])) j++;
+        size_t method_len = j - method_start;
+        size_t k = cc_skip_ws_and_comments(src, n, j);
+        if (k >= n || src[k] != '(') continue;
+
+        char var_name[128];
+        memcpy(var_name, src + ident_start, ident_end - ident_start);
+        var_name[ident_end - ident_start] = '\0';
+        const char* type_name = cc_type_registry_lookup_var(reg, var_name);
+        if (!type_name ||
+            !(strcmp(type_name, "CCFile") == 0 || strcmp(type_name, "CCFile*") == 0)) {
+            continue;
+        }
+
+        char method_name[32];
+        if (method_len == 0 || method_len >= sizeof(method_name)) continue;
+        memcpy(method_name, src + method_start, method_len);
+        method_name[method_len] = '\0';
+        if (!(strcmp(method_name, "read") == 0 || strcmp(method_name, "write") == 0 ||
+              strcmp(method_name, "sync") == 0 || strcmp(method_name, "close") == 0)) {
+            continue;
+        }
+
+        size_t paren_end = 0;
+        if (!cc_find_matching_paren(src, n, k, &paren_end)) continue;
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_file_");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+        if (is_arrow || strcmp(type_name, "CCFile*") == 0) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+            cc_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_end - ident_start);
+        } else {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
+            cc_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_end - ident_start);
+        }
+
+        size_t args_start = k + 1;
+        size_t args_end = paren_end;
+        while (args_start < args_end && (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n')) args_start++;
+        while (args_end > args_start && (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n')) args_end--;
+        if (args_end > args_start) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+
+        last_emit = paren_end + 1;
+        i = paren_end + 1;
+    }
+
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+typedef struct {
+    char name[128];
+    char type[256];
+} CCResultUfcsVar;
+
+char* cc_rewrite_result_ufcs_survival(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+
+    CCResultUfcsVar vars[256];
+    size_t var_count = 0;
+
+    /* Pass 1: collect local identifiers declared with a concrete CCResult_* type. */
+    {
+        size_t i = 0;
+        CCScannerState scan;
+        cc_scanner_init(&scan);
+        while (i < n) {
+            if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+            if (!(i + 9 < n && memcmp(src + i, "CCResult_", 9) == 0)) {
+                i++;
+                continue;
+            }
+            if (i > 0 && cc_is_ident_char(src[i - 1])) {
+                i++;
+                continue;
+            }
+
+            size_t type_start = i;
+            i += 9;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            size_t type_end = i;
+            if (type_end - type_start >= sizeof(vars[0].type)) continue;
+
+            size_t j = cc_skip_ws_and_comments(src, n, type_end);
+            if (j < n && src[j] == '*') {
+                /* Result UFCS is by-value; skip pointer declarations here. */
+                i = j + 1;
+                continue;
+            }
+            if (j >= n || !cc_is_ident_start(src[j])) {
+                i = j;
+                continue;
+            }
+
+            size_t var_start = j;
+            while (j < n && cc_is_ident_char(src[j])) j++;
+            size_t var_end = j;
+            if (var_end - var_start >= sizeof(vars[0].name)) {
+                i = j;
+                continue;
+            }
+
+            int exists = 0;
+            for (size_t vi = 0; vi < var_count; vi++) {
+                if ((var_end - var_start) == strlen(vars[vi].name) &&
+                    memcmp(vars[vi].name, src + var_start, var_end - var_start) == 0) {
+                    exists = 1;
+                    break;
+                }
+            }
+            if (!exists && var_count < (sizeof(vars) / sizeof(vars[0]))) {
+                memcpy(vars[var_count].type, src + type_start, type_end - type_start);
+                vars[var_count].type[type_end - type_start] = '\0';
+                memcpy(vars[var_count].name, src + var_start, var_end - var_start);
+                vars[var_count].name[var_end - var_start] = '\0';
+                var_count++;
+            }
+
+            i = j;
+        }
+    }
+
+    if (var_count == 0) return NULL;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    CCScannerState scan;
+    cc_scanner_init(&scan);
+
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!cc_is_ident_start(src[i])) {
+            i++;
+            continue;
+        }
+
+        size_t ident_start = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        size_t ident_end = i;
+        if (ident_end - ident_start >= 128) continue;
+
+        char var_name[128];
+        memcpy(var_name, src + ident_start, ident_end - ident_start);
+        var_name[ident_end - ident_start] = '\0';
+
+        const char* type_name = NULL;
+        for (size_t vi = 0; vi < var_count; vi++) {
+            if (strcmp(vars[vi].name, var_name) == 0) {
+                type_name = vars[vi].type;
+                break;
+            }
+        }
+        if (!type_name) continue;
+
+        size_t j = cc_skip_ws_and_comments(src, n, ident_end);
+        if (j >= n || src[j] != '.') continue;
+        j = cc_skip_ws_and_comments(src, n, j + 1);
+        if (j >= n || !cc_is_ident_start(src[j])) continue;
+
+        size_t method_start = j;
+        while (j < n && cc_is_ident_char(src[j])) j++;
+        size_t method_end = j;
+        size_t k = cc_skip_ws_and_comments(src, n, method_end);
+        if (k >= n || src[k] != '(') continue;
+
+        char method_name[32];
+        size_t method_len = method_end - method_start;
+        if (method_len == 0 || method_len >= sizeof(method_name)) continue;
+        memcpy(method_name, src + method_start, method_len);
+        method_name[method_len] = '\0';
+
+        const char* lowered_method = NULL;
+        int lower_error_as_macro = 0;
+        if (strcmp(method_name, "value") == 0) lowered_method = "unwrap";
+        else if (strcmp(method_name, "error") == 0) {
+            lowered_method = "unwrap_err";
+            lower_error_as_macro = 1;
+        }
+        else if (strcmp(method_name, "unwrap") == 0 ||
+                 strcmp(method_name, "unwrap_err") == 0 ||
+                 strcmp(method_name, "unwrap_or") == 0 ||
+                 strcmp(method_name, "is_ok") == 0 ||
+                 strcmp(method_name, "is_err") == 0) {
+            lowered_method = method_name;
+            if (strcmp(method_name, "unwrap_err") == 0) lower_error_as_macro = 1;
+        }
+        else continue;
+
+        size_t paren_end = 0;
+        if (!cc_find_matching_paren(src, n, k, &paren_end)) continue;
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+        if (lower_error_as_macro) {
+            const char* err_type = strrchr(type_name, '_');
+            if (err_type && err_type[1]) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_unwrap_err_as(");
+                cc_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_end - ident_start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, err_type + 1);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                last_emit = paren_end + 1;
+                i = paren_end + 1;
+                continue;
+            }
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, lowered_method);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+        cc_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_end - ident_start);
+
+        size_t args_start = k + 1;
+        size_t args_end = paren_end;
+        while (args_start < args_end &&
+               (src[args_start] == ' ' || src[args_start] == '\t' ||
+                src[args_start] == '\n' || src[args_start] == '\r')) {
+            args_start++;
+        }
+        while (args_end > args_start &&
+               (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' ||
+                src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
+            args_end--;
+        }
+        if (args_end > args_start) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+
+        last_emit = paren_end + 1;
+        i = paren_end + 1;
+    }
+
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* out_qual, size_t out_cap) {
     /* Returns the new start offset after consuming leading qualifiers; writes qualifiers (with trailing space) into out_qual. */
     if (!s || !out_qual || out_cap == 0) return ty_start;
@@ -1415,12 +1792,14 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else if (c == '*') {
             if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
-        } else if (c == '[' || c == ']') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else if (c == '<' || c == '>' || c == ',') {
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '_') {
+            out[j++] = c;
+        } else if (c == '[' || c == ']' || c == '<' || c == '>' || c == ',' ||
+                   c == '(' || c == ')' || c == '!' || c == ':' || c == '?') {
             if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         } else {
-            out[j++] = c;
+            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
         }
     }
     /* Remove trailing underscore */
@@ -2129,159 +2508,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
     return out;
 }
 
-/* Generic UFCS rewrite for typed variables:
-   v.push(x)    -> Vec_int_push(&v, x)      (Vec methods take pointer)
-   m.get(k)     -> Map_K_V_get(m, k)        (Map by value)
-   r.unwrap()   -> CCResult_T_E_unwrap(r)   (Result by value)
-   r.is_ok()    -> CCResult_T_E_is_ok(r)
-   
-   Any type registered in the type registry gets UFCS support.
-   The type registry is populated during type lowering passes
-   (Vec<T>, Map<K,V>, T!E, T?, etc.). */
-char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* input_path) {
-    (void)input_path;
-    if (!src || n == 0) return NULL;
-    
-    CCTypeRegistry* reg = cc_type_registry_get_global();
-    if (!reg) return NULL;
-    
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    size_t last_emit = 0;
-    CCScannerState scanner;
-    cc_scanner_init(&scanner);
-    
-    while (i < n) {
-        /* Skip comments and strings using shared helper */
-        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
-        
-        char c = src[i];
-        /* Look for identifier followed by '.' or '->' - potential UFCS call */
-        if (cc_is_ident_start(c)) {
-            size_t ident_start = i;
-            while (i < n && cc_is_ident_char(src[i])) i++;
-            size_t ident_end = i;
-            size_t ident_len = ident_end - ident_start;
-            
-            /* Check for '.' or '->' after identifier (skip whitespace) */
-            size_t j = cc_skip_ws_and_comments(src, n, ident_end);
-            int is_arrow = 0;
-            if (j < n && src[j] == '.') {
-                j = cc_skip_ws_and_comments(src, n, j + 1);
-            } else if (j + 1 < n && src[j] == '-' && src[j + 1] == '>') {
-                is_arrow = 1;
-                j = cc_skip_ws_and_comments(src, n, j + 2);
-            } else {
-                /* Not a UFCS pattern, continue */
-                continue;
-            }
-            
-            /* Found 'ident.' or 'ident->' - check if it's a method call */
-            /* Look for method name */
-            if (j < n && cc_is_ident_start(src[j])) {
-                size_t method_start = j;
-                while (j < n && cc_is_ident_char(src[j])) j++;
-                size_t method_end = j;
-                size_t method_len = method_end - method_start;
-                
-                /* Check for '(' after method name */
-                size_t k = cc_skip_ws_and_comments(src, n, method_end);
-                if (k < n && src[k] == '(') {
-                    /* Extract identifier name and look up in registry */
-                    char var_name[128];
-                    if (ident_len < sizeof(var_name)) {
-                        memcpy(var_name, src + ident_start, ident_len);
-                        var_name[ident_len] = 0;
-                        
-                        const char* type_name = cc_type_registry_lookup_var(reg, var_name);
-                        if (type_name) {
-                            /* Generic UFCS: rewrite var.method(...) to Type_method(...).
-                               Receiver passing convention based on type:
-                               - Vec with . : pass &var (needs pointer)
-                               - All others (Map, Result, etc.): pass by value or as-is
-                               - Pointer receivers (->): pass as-is
-                               Handle chained access like obj.field or ptr->field by scanning back.
-                               Limitation: doesn't handle (expr).field, arr[i].field, or func().field. */
-                            int is_vec = strncmp(type_name, "Vec_", 4) == 0;
-                            size_t recv_start = cc_scan_back_for_member_access(src, ident_start, last_emit);
-                            
-                            char full_recv[256];
-                            size_t recv_len = ident_end - recv_start;
-                            if (recv_len >= sizeof(full_recv)) recv_len = sizeof(full_recv) - 1;
-                            memcpy(full_recv, src + recv_start, recv_len);
-                            full_recv[recv_len] = 0;
-                            
-                            char method_name[64];
-                            if (method_len < sizeof(method_name)) {
-                                memcpy(method_name, src + method_start, method_len);
-                                method_name[method_len] = 0;
-                                
-                                /* Find matching close paren */
-                                size_t paren_end = 0;
-                                if (cc_find_matching_paren(src, n, k, &paren_end)) {
-                                    /* Emit everything up to recv_start (not ident_start) */
-                                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
-                                    
-                                    /* Emit: Type_method(...) with appropriate receiver handling */
-                                    cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                                    cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
-                                    cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
-                                    
-                                    /* Receiver handling:
-                                       - Vec with . needs & (methods take pointer)
-                                       - Everything else: pass by value (arrow already pointer) */
-                                    if (is_vec && !is_arrow) {
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(&");
-                                    } else {
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                                    }
-                                    cc_sb_append_cstr(&out, &out_len, &out_cap, full_recv);
-                                    
-                                    /* Extract args (content between parens) */
-                                    size_t args_start = k + 1;
-                                    size_t args_end = paren_end;
-                                    size_t args_len = args_end - args_start;
-                                    
-                                    /* Skip leading whitespace in args */
-                                    while (args_start < args_end && (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n')) {
-                                        args_start++;
-                                        args_len--;
-                                    }
-                                    
-                                    if (args_len > 0) {
-                                        cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                                        cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_len);
-                                    }
-                                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
-                                    
-                                    last_emit = paren_end + 1;
-                                    i = paren_end + 1;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            /* Not a UFCS call, continue from after identifier */
-            continue;
-        }
-        
-        i++;
-    }
-    
-    if (last_emit == 0) {
-        /* No changes made */
-        return NULL;
-    }
-    
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
-/* Rewrite cc_std_out.write() and cc_std_err.write() UFCS patterns.
-   These are synthetic receivers (not real variables), so need special handling.
+/* Rewrite synthetic stdio receivers:
+   cc_std_out.write(...) and cc_std_err.write(...).
+   These are not ordinary typed UFCS receivers, so they use a dedicated
+   text rewrite rather than the typed UFCS pipeline.
    
    Rewrites:
    - cc_std_out.write("literal") -> cc_std_out_write(cc_slice_from_buffer("literal", sizeof("literal") - 1))
@@ -2289,7 +2519,7 @@ char* cc_rewrite_ufcs_container_calls(const char* src, size_t n, const char* inp
    - cc_std_out.write(expr) -> cc_std_out_write(expr) (for other expressions)
    - cc_std_err.write(...) similarly
 */
-char* cc_rewrite_std_io_ufcs(const char* src, size_t n) {
+char* cc_rewrite_synthetic_std_io_receivers(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     
     char* out = NULL;
@@ -4294,10 +4524,8 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     CC_CHAIN(chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path));
     /* P5: generic containers Vec<T> -> Vec_T */
     CC_CHAIN(chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path));
-    /* P6: container UFCS v.push(x) -> Vec_T_push(&v, x) */
-    CC_CHAIN(chain, cc_rewrite_ufcs_container_calls(chain.src, chain.len, input_path));
-    /* P7: std I/O UFCS std_out.write() -> printf */
-    CC_CHAIN(chain, cc_rewrite_std_io_ufcs(chain.src, chain.len));
+    /* Legacy UFCS text rewriting removed: raw UFCS now survives parsing and is
+       lowered later by the AST-aware UFCS pass. */
     /* P8: optional types T? -> CCOptional_T */
     CC_CHAIN(chain, cc__rewrite_optional_types(chain.src, chain.len, input_path));
     /* P9: optional constructors for parser mode */
@@ -4306,6 +4534,9 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     CC_CHAIN(chain, cc__rewrite_inferred_result_ctors(chain.src, chain.len));
     /* P11: result types T!>(E) -> CCResult_T_E */
     CC_CHAIN(chain, cc__rewrite_result_types(chain.src, chain.len, input_path));
+    cc__seed_ufcs_receiver_types(chain.src, chain.len);
+    CC_CHAIN(chain, cc_rewrite_file_ufcs_survival(chain.src, chain.len));
+    CC_CHAIN(chain, cc_rewrite_result_ufcs_survival(chain.src, chain.len));
     /* P12: result constructors for parser mode */
     CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
     /* P13: normalize if @try ( -> if (try */
@@ -4500,10 +4731,8 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     CC_CHAIN(chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path));
     /* P5: generic containers Vec<T> -> Vec_T */
     CC_CHAIN(chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path));
-    /* P6: container UFCS v.push(x) -> Vec_T_push(&v, x) */
-    CC_CHAIN(chain, cc_rewrite_ufcs_container_calls(chain.src, chain.len, input_path));
-    /* P7: std I/O UFCS std_out.write() -> printf */
-    CC_CHAIN(chain, cc_rewrite_std_io_ufcs(chain.src, chain.len));
+    /* Legacy UFCS text rewriting removed: raw UFCS now survives parsing and is
+       lowered later by the AST-aware UFCS pass. */
     /* P8: optional types T? -> CCOptional_T */
     CC_CHAIN(chain, cc__rewrite_optional_types(chain.src, chain.len, input_path));
     /* P9: optional constructors for parser mode */
@@ -4512,6 +4741,9 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     CC_CHAIN(chain, cc__rewrite_inferred_result_ctors(chain.src, chain.len));
     /* P11: result types T!>(E) -> CCResult_T_E */
     CC_CHAIN(chain, cc__rewrite_result_types(chain.src, chain.len, input_path));
+    cc__seed_ufcs_receiver_types(chain.src, chain.len);
+    CC_CHAIN(chain, cc_rewrite_file_ufcs_survival(chain.src, chain.len));
+    CC_CHAIN(chain, cc_rewrite_result_ufcs_survival(chain.src, chain.len));
     /* P12: result constructors for parser mode */
     CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
     /* P13: normalize if @try ( -> if (try */
@@ -4847,6 +5079,19 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         cur_len = strlen(cur);
         buf_idx++;
     }
+    cc__seed_ufcs_receiver_types(cur, cur_len);
+    buffers[buf_idx] = cc_rewrite_file_ufcs_survival(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    buffers[buf_idx] = cc_rewrite_result_ufcs_survival(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
     
     /* Pass 4: Rewrite slice types T[:] -> CCSlice */
     buffers[buf_idx] = cc__rewrite_slice_types(cur, cur_len, input_path);
@@ -4892,14 +5137,6 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     
     /* Pass 10: Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V */
     buffers[buf_idx] = cc_rewrite_generic_containers(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 11: Rewrite UFCS container calls (v.push(x) -> Vec_int_push(&v, x)) */
-    buffers[buf_idx] = cc_rewrite_ufcs_container_calls(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);

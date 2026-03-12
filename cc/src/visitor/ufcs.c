@@ -70,6 +70,13 @@ static int is_addr_of_ident(const char* s) {
     return is_ident_only(s);
 }
 
+static const char* cc__result_err_type_suffix(const char* type_name) {
+    if (!type_name || strncmp(type_name, "CCResult_", 9) != 0) return NULL;
+    const char* last_us = strrchr(type_name, '_');
+    if (!last_us || !last_us[1]) return NULL;
+    return last_us + 1;
+}
+
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
 typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice method, CCSliceArray argv, CCArena *arena);
 
@@ -200,6 +207,17 @@ static int emit_desugared_call(char* out,
         }
     }
 
+    if (recv_type_name && strcmp(recv_type_name, "CCFile") == 0) {
+        if (has_args) {
+            if (recv_is_ptr || !recv_is_simple)
+                return snprintf(out, cap, "cc_file_%s(%s, ", method, recv);
+            return snprintf(out, cap, "cc_file_%s(&%s, ", method, recv);
+        }
+        if (recv_is_ptr || !recv_is_simple)
+            return snprintf(out, cap, "cc_file_%s(%s)", method, recv);
+        return snprintf(out, cap, "cc_file_%s(&%s)", method, recv);
+    }
+
     if (typed_chan_type) {
         if (g_ufcs_await_context &&
             (strcmp(method, "send") == 0 || strcmp(method, "recv") == 0)) {
@@ -283,29 +301,16 @@ static int emit_desugared_call(char* out,
     if (strcmp(method, "close") == 0) {
         return snprintf(out, cap, "CC_TYPED_CHAN_CLOSE((%s%s))", recv_is_ptr ? "*" : "", recv);
     }
-    if (strcmp(method, "free") == 0) {
-        /* If receiver's resolved type is a pointer (e.g., CCChan*), call cc_channel_free directly.
-           Otherwise use chan_free macro which expects a handle with .raw field. */
-        if (g_ufcs_recv_type_is_ptr) {
-            return snprintf(out, cap, "cc_channel_free(%s%s)", recv_is_ptr ? "*":"", recv);
-        }
-        return snprintf(out, cap, "CC_TYPED_CHAN_FREE((%s%s))", recv_is_ptr ? "*" : "", recv);
-    }
-
     /* Special cases for stdlib convenience (String methods).
        
        IMPORTANT: These String-specific handlers run BEFORE the type-qualified
        dispatch below (g_ufcs_recv_type check at ~line 305). This means "push"
        on a String will be handled here, not via Type_push().
        
-       This ordering is safe because:
-       1. Container UFCS (Vec/Map) is handled by preprocessing (cc_rewrite_ufcs_container_calls)
-          before this code ever sees it - the type registry routes v.push() to Vec_T_push().
-       2. Pointer receiver UFCS (vp->push) is also handled by preprocessing.
-       3. Only String UFCS actually reaches this code path for "push"/"append".
-       
-       If preprocessing is ever bypassed for containers, this would cause incorrect
-       dispatch (Vec.push would become cc_string_push). The tests catch this. */
+       Raw UFCS now survives parsing through the patched TCC tolerance path, and
+       final emitted C comes from this file's AST-aware lowering. Keep
+       String-specific dispatch narrow so it does not steal other families'
+       methods. */
     if (strcmp(method, "as_slice") == 0) {
         return recv_is_ptr ? snprintf(out, cap, "cc_string_as_slice(%s)", recv)
                            : snprintf(out, cap, "cc_string_as_slice(&%s)", recv);
@@ -415,21 +420,43 @@ static int emit_desugared_call(char* out,
                            : snprintf(out, cap, "CCSlice_eq(&%s, %s)", recv, args_rewritten);
     }
     
-    /* Arena UFCS methods: arena.detach(), arena.reset(), arena.remaining() */
-    if (strcmp(method, "detach") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_arena_detach(%s)", recv)
-                           : snprintf(out, cap, "cc_arena_detach(&%s)", recv);
+    /* Arena UFCS methods: arena.free(), arena.detach(), arena.reset(), arena.remaining() */
+    if (recv_type_name &&
+        (strcmp(recv_type_name, "CCArena") == 0 || strcmp(recv_type_name, "CCArena*") == 0)) {
+        int arena_recv_is_ptr = recv_is_ptr || strcmp(recv_type_name, "CCArena*") == 0;
+        if (strcmp(method, "free") == 0) {
+            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_free(%s)", recv)
+                                     : snprintf(out, cap, "cc_arena_free(&%s)", recv);
+        }
+        if (strcmp(method, "detach") == 0) {
+            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_detach(%s)", recv)
+                                     : snprintf(out, cap, "cc_arena_detach(&%s)", recv);
+        }
+        if (strcmp(method, "reset") == 0) {
+            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_reset(%s)", recv)
+                                     : snprintf(out, cap, "cc_arena_reset(&%s)", recv);
+        }
+        if (strcmp(method, "remaining") == 0) {
+            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_remaining(%s)", recv)
+                                     : snprintf(out, cap, "cc_arena_remaining(&%s)", recv);
+        }
+        if (strcmp(method, "checkpoint") == 0) {
+            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_checkpoint(%s)", recv)
+                                     : snprintf(out, cap, "cc_arena_checkpoint(&%s)", recv);
+        }
     }
-    if (strcmp(method, "reset") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_arena_reset(%s)", recv)
-                           : snprintf(out, cap, "cc_arena_reset(&%s)", recv);
+
+    if (strcmp(method, "free") == 0) {
+        /* If receiver's resolved type is a pointer (e.g., CCChan*), call cc_channel_free directly.
+           Otherwise use chan_free macro which expects a handle with .raw field. */
+        if (g_ufcs_recv_type_is_ptr) {
+            return snprintf(out, cap, "cc_channel_free(%s%s)", recv_is_ptr ? "*":"", recv);
+        }
+        return snprintf(out, cap, "CC_TYPED_CHAN_FREE((%s%s))", recv_is_ptr ? "*" : "", recv);
     }
-    if (strcmp(method, "remaining") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_arena_remaining(%s)", recv)
-                           : snprintf(out, cap, "cc_arena_remaining(&%s)", recv);
-    }
-    
-    if (strcmp(recv, "std_out") == 0 && strcmp(method, "write") == 0) {
+
+    if ((strcmp(recv, "std_out") == 0 || strcmp(recv, "cc_std_out") == 0) &&
+        strcmp(method, "write") == 0) {
         /* Overload selection lives in the compiler:
            - String: cc_std_out_write_string(&s) (or pass-through if already &s)
            - "literal"/char[:]: cc_std_out_write(cc_slice_from_buffer("lit", sizeof("lit")-1))
@@ -453,7 +480,8 @@ static int emit_desugared_call(char* out,
         }
         return snprintf(out, cap, "cc_std_out_write(");
     }
-    if (strcmp(recv, "std_err") == 0 && strcmp(method, "write") == 0) {
+    if ((strcmp(recv, "std_err") == 0 || strcmp(recv, "cc_std_err") == 0) &&
+        strcmp(method, "write") == 0) {
         if (!has_args || !args_rewritten) return snprintf(out, cap, "cc_std_err_write(");
         char tmp[512];
         strncpy(tmp, args_rewritten, sizeof(tmp) - 1);
@@ -471,23 +499,36 @@ static int emit_desugared_call(char* out,
         return snprintf(out, cap, "cc_std_err_write(");
     }
 
-    /* Container UFCS: check type registry for Vec_T/Map_K_V types */
+    /* Family UFCS: check type registry for known by-pointer/by-value families. */
     if (reg && is_ident_only(recv)) {
         const char* type_name = cc_type_registry_lookup_var(reg, recv);
         if (type_name) {
-            /* Check if it's a container type (starts with Vec_ or Map_) */
             int is_vec = (strncmp(type_name, "Vec_", 4) == 0);
             int is_map = (strncmp(type_name, "Map_", 4) == 0);
-            if (is_vec || is_map) {
-                /* Container method: emit TypeName_method(recv, ...) or TypeName_method(&recv, ...) */
-                if (has_args) {
-                    if (recv_is_ptr || !recv_is_simple)
-                        return snprintf(out, cap, "%s_%s(%s, ", type_name, method, recv);
-                    return snprintf(out, cap, "%s_%s(&%s, ", type_name, method, recv);
+            int is_result = (strncmp(type_name, "CCResult_", 9) == 0);
+            int is_optional = (strncmp(type_name, "CCOptional_", 11) == 0);
+            if (is_vec || is_map || is_result || is_optional) {
+                int by_value = is_map || is_result || is_optional;
+                const char* family_method = method;
+                if (is_result) {
+                    if (!has_args &&
+                        (strcmp(method, "error") == 0 || strcmp(method, "unwrap_err") == 0)) {
+                        const char* err_type = cc__result_err_type_suffix(type_name);
+                        if (err_type) {
+                            return snprintf(out, cap, "cc_unwrap_err_as(%s, %s)", recv, err_type);
+                        }
+                    }
+                    if (strcmp(method, "value") == 0) family_method = "unwrap";
+                    else if (strcmp(method, "error") == 0) family_method = "unwrap_err";
                 }
-                if (recv_is_ptr || !recv_is_simple)
-                    return snprintf(out, cap, "%s_%s(%s)", type_name, method, recv);
-                return snprintf(out, cap, "%s_%s(&%s)", type_name, method, recv);
+                if (has_args) {
+                    if (recv_is_ptr || !recv_is_simple || by_value)
+                        return snprintf(out, cap, "%s_%s(%s, ", type_name, family_method, recv);
+                    return snprintf(out, cap, "%s_%s(&%s, ", type_name, family_method, recv);
+                }
+                if (recv_is_ptr || !recv_is_simple || by_value)
+                    return snprintf(out, cap, "%s_%s(%s)", type_name, family_method, recv);
+                return snprintf(out, cap, "%s_%s(&%s)", type_name, family_method, recv);
             }
         }
     }

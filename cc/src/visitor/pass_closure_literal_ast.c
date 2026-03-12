@@ -8,6 +8,7 @@
 
 #include "util/path.h"
 #include "util/text.h"
+#include "preprocess/preprocess.h"
 #include "visitor/pass_common.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_type_syntax.h"
@@ -2233,10 +2234,15 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             if (!lowered2) lowered2 = strdup(lowered_body);
             /* Rewrite T!E result types in closure body */
             char* lowered3 = cc__rewrite_result_types_text(ctx, lowered2, strlen(lowered2));
+            /* Lower Result UFCS in closure bodies after concrete CCResult_* types
+               have been materialized. Generated closures bypass the main TU UFCS
+               sweep, so they need a local survival rewrite here. */
+            char* lowered3b = cc_rewrite_result_ufcs_survival(lowered3 ? lowered3 : lowered2,
+                                                              strlen(lowered3 ? lowered3 : lowered2));
             /* Rewrite @defer in closure body */
             char* lowered4 = NULL;
             size_t lowered4_len = 0;
-            const char* src_for_defer = lowered3 ? lowered3 : lowered2;
+            const char* src_for_defer = lowered3b ? lowered3b : (lowered3 ? lowered3 : lowered2);
             if (cc__rewrite_defer_syntax(ctx, src_for_defer, strlen(src_for_defer), &lowered4, &lowered4_len) > 0 && lowered4) {
                 /* Rewrite captured closure calls in the body */
                 char* lowered5 = cc__rewrite_captured_closure_calls_in_body(lowered4, d);
@@ -2257,6 +2263,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", src_for_defer);
                 }
             }
+            free(lowered3b);
             free(lowered3);
             free(lowered2);
         } else {

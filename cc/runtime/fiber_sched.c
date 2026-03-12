@@ -4214,8 +4214,14 @@ static inline int worker_run_fiber(fiber_task* f) {
         atomic_store_explicit(&f->last_transition, run_tsc, memory_order_relaxed);
     }
     tls_current_fiber = f;
-    f->last_worker_id = wid;  /* Record affinity hint */
-    f->last_worker_src = 1;
+    /* Only base workers should refresh run affinity. Replacement/timer workers
+     * are emergency executors, not ownership targets; letting wid<0 overwrite
+     * the last base-worker hint drops channel locality and later forces
+     * no-affinity unparks under constrained worker counts. */
+    if (wid >= 0) {
+        f->last_worker_id = wid;
+        f->last_worker_src = 1;
+    }
     /* Restore the fiber's saved nursery context on this thread so that
      * cc_cancelled() works correctly even when the fiber migrates to a
      * different OS thread (e.g. a replacement or timer-service worker).

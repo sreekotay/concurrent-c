@@ -9,6 +9,7 @@
 
 #include "tcc_bridge.h"
 #include "preprocess/preprocess.h"
+#include "visitor/pass_channel_syntax.h"
 #include "util/path.h"
 
 static int cc__match_kw_parse(const char* src, size_t n, size_t pos, const char* kw) {
@@ -120,6 +121,16 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     free(file_buf);
     if (!pp_buf) {
         return -1;
+    }
+
+    {
+        size_t st_len = 0;
+        char* st = cc__rewrite_chan_send_task_text(NULL, pp_buf, strlen(pp_buf), &st_len);
+        if (st) {
+            free(pp_buf);
+            pp_buf = st;
+            (void)st_len;
+        }
     }
 
     /* Debug: dump preprocessed output if requested */

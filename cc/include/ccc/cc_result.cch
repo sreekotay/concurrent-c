@@ -78,10 +78,13 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
  * Uses named union 'u' for TCC compatibility.
  *
  * UFCS methods (via Type_method pattern):
- *   r.unwrap()    - returns value or aborts if error
+ *   r.value()     - returns value or aborts if error
+ *   r.error()     - returns error or aborts if ok
+ *   r.unwrap()    - legacy alias for value()
  *   r.is_ok()     - returns true if success
  *   r.is_err()    - returns true if error
  *   r.unwrap_or(default) - returns value or default if error
+ *   r.unwrap_err()       - legacy alias for error()
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +122,15 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
     /* UFCS method: r.unwrap_or(default) -> name##_unwrap_or(r, default) */         \
     static inline OkType name##_unwrap_or(name r, OkType def) {                     \
         return r.ok ? r.u.value : def;                                              \
+    }                                                                               \
+    /* UFCS method: r.unwrap_err() -> name##_unwrap_err(r) */                       \
+    static inline ErrType name##_unwrap_err(name r) {                               \
+        if (r.ok) {                                                                 \
+            fprintf(stderr, "CC: unwrap_err failed on %s at %s:%d\n",               \
+                    #name, __FILE__, __LINE__);                                     \
+            abort();                                                                \
+        }                                                                           \
+        return r.u.error;                                                           \
     }
 
 /* Generic cc_ok / cc_err macros for results */
@@ -185,6 +197,14 @@ static inline void CCResult_void_CCError_unwrap(CCResult_void_CCError r) {
 }
 static inline bool CCResult_void_CCError_is_ok(CCResult_void_CCError r) { return r.ok; }
 static inline bool CCResult_void_CCError_is_err(CCResult_void_CCError r) { return !r.ok; }
+static inline CCError CCResult_void_CCError_unwrap_err(CCResult_void_CCError r) {
+    if (r.ok) {
+        fprintf(stderr, "CC: unwrap_err failed on CCResult_void_CCError at %s:%d\n",
+                __FILE__, __LINE__);
+        abort();
+    }
+    return r.u.error;
+}
 #endif /* CCResult_void_CCError_DEFINED */
 #endif /* CC_PARSER_MODE */
 
@@ -220,6 +240,16 @@ typedef struct __CCGenericError {
     char __pad[48];
 } __CCGenericError;
 #endif
+
+/* Parser-mode UFCS method stubs for raw method syntax before result UFCS
+   has been lowered to Type_method(...) calls. */
+static intptr_t unwrap();
+static intptr_t value();
+static bool is_ok();
+static bool is_err();
+static intptr_t unwrap_or();
+static __CCGenericError unwrap_err();
+static __CCGenericError error();
 
 
 /* Generic result placeholder struct - used for ALL result types during parsing.
@@ -269,10 +299,14 @@ static inline __CCResultGeneric __cc_result_generic_err(void) {
 }
 
 /* Generic UFCS methods for parser mode - code compiles but doesn't run.
-   These handle r.unwrap(), r.is_ok(), r.is_err(), r.unwrap_or(default) via UFCS. */
-static inline intptr_t __CCResultGeneric_unwrap(__CCResultGeneric r) {
+   These handle r.value(), r.error(), r.unwrap(), r.is_ok(), r.is_err(),
+   r.unwrap_or(default), and r.unwrap_err() via UFCS. */
+static inline intptr_t __CCResultGeneric_value(__CCResultGeneric r) {
     (void)r;
     return 0;
+}
+static inline intptr_t __CCResultGeneric_unwrap(__CCResultGeneric r) {
+    return __CCResultGeneric_value(r);
 }
 static inline bool __CCResultGeneric_is_ok(__CCResultGeneric r) {
     return r.ok;
@@ -283,6 +317,14 @@ static inline bool __CCResultGeneric_is_err(__CCResultGeneric r) {
 static inline intptr_t __CCResultGeneric_unwrap_or(__CCResultGeneric r, intptr_t def) {
     (void)r; (void)def;
     return 0;
+}
+static inline __CCGenericError __CCResultGeneric_error(__CCResultGeneric r) {
+    (void)r;
+    __CCGenericError e = {0};
+    return e;
+}
+static inline __CCGenericError __CCResultGeneric_unwrap_err(__CCResultGeneric r) {
+    return __CCResultGeneric_error(r);
 }
 
 /* Macro-based ok/err that accept any type - parser mode just validates types.
