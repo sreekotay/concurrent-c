@@ -8,16 +8,17 @@ Workers: 16 | CPU Hogs: 15
 [Heartbeat] Tick 2
 [Heartbeat] Tick 3
 [Heartbeat] Tick 4
-Initial heartbeats: 4 (Healthy)
+[Heartbeat] Tick 5
+Initial heartbeats: 5 (Healthy)
 
 !!! Unleashing CPU Hogs !!!
-[Hog 0] Started CPU-intensive loop...
 [Hog 1] Started CPU-intensive loop...
-[Hog 4] Started CPU-intensive loop...
-[Hog 2] Started CPU-intensive loop...
-[Hog 5] Started CPU-intensive loop...
 [Hog 3] Started CPU-intensive loop...
+[Hog 0] Started CPU-intensive loop...
 [Hog 6] Started CPU-intensive loop...
+[Hog 4] Started CPU-intensive loop...
+[Hog 5] Started CPU-intensive loop...
+[Hog 2] Started CPU-intensive loop...
 [Hog 7] Started CPU-intensive loop...
 [Hog 8] Started CPU-intensive loop...
 [Hog 9] Started CPU-intensive loop...
@@ -26,7 +27,6 @@ Initial heartbeats: 4 (Healthy)
 [Hog 12] Started CPU-intensive loop...
 [Hog 13] Started CPU-intensive loop...
 [Hog 14] Started CPU-intensive loop...
-[Heartbeat] Tick 5
 [Heartbeat] Tick 6
 [Heartbeat] Tick 7
 [Heartbeat] Tick 8
@@ -71,28 +71,33 @@ Initial heartbeats: 4 (Healthy)
 [Heartbeat] Tick 47
 [Heartbeat] Tick 48
 [Heartbeat] Tick 49
+[Heartbeat] Tick 50
+[Heartbeat] Tick 51
+[Heartbeat] Tick 52
+[Heartbeat] Tick 53
+[Heartbeat] Tick 54
 
 Stopping test...
 [Hog 8] Stopped
-[Hog 13] Stopped
-[Hog 3] Stopped
-[Hog 6] Stopped
-[Hog 11] Stopped
-[Hog 2] Stopped
-[Hog 7] Stopped
-[Hog 0] Stopped
-[Hog 9] Stopped
-[Hog 12] Stopped
 [Hog 5] Stopped
-[Hog 1] Stopped
+[Hog 3] Stopped
+[Hog 12] Stopped
+[Hog 0] Stopped
+[Hog 11] Stopped
 [Hog 14] Stopped
+[Hog 13] Stopped
 [Hog 4] Stopped
+[Hog 9] Stopped
 [Hog 10] Stopped
-[Heartbeat] Tick 50
+[Hog 7] Stopped
+[Hog 1] Stopped
+[Hog 2] Stopped
+[Hog 6] Stopped
+[Heartbeat] Tick 55
 [Heartbeat] Cancelled, exiting
 
 =================================================================
 FINAL RESULTS
-Total Heartbeats: 50
+Total Heartbeats: 55
 RESULT: PASS - The scheduler is fair even with CPU hogs!
 =================================================================

@@ -2,24 +2,18 @@
  * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
  *
  * Demonstrates the ordered channel + chan_send_task pattern:
- *   CompressedResult*[~N >] tx;
- *   CompressedResult*[~N ordered <] rx;
+ *   CompressedResult* !>(CCIoError)[~N >] tx;
+ *   CompressedResult* !>(CCIoError)[~N ordered <] rx;
  *   CCChan* ch = channel_pair(&tx, &rx);
- *   chan_send_task(tx, () => [blk] compress_block_unwrapped(blk, 6));
- *   CompressedResult* r;
+ *   chan_send_task(tx, () => [blk] { auto r = compress_block(blk, 6); ...; return r; });
+ *   CompressedResult* !>(CCIoError) r;
  *   while (cc_io_avail(chan_recv(rx, &r))) { use(r); }
  *
  * The 'ordered' flag on the channel ensures results are delivered in
  * submission order (FIFO) even though tasks execute concurrently.
  * chan_recv on an ordered channel awaits the next queued task and
- * extracts the typed result automatically (no manual ordered_recv needed).
- *
- * NOTE: chan_send_task boxes the closure result as a pointer-sized value
- * via fiber-local storage.  compress_block returns T!>(E); we unwrap it
- * inside the closure with a thin helper so chan_send_task receives a plain
- * CompressedResult* (NULL on error, since error info is currently erased).
- * Full typed-result propagation through chan_send_task is a planned future
- * enhancement (see spec-progress/language-patterns-v3.md §7).
+ * extracts the typed result automatically, including rich `T !>(E)` payloads
+ * stored in the task result buffer (no manual ordered_recv or glue helper).
  */
 
 #include <ccc/std/prelude.cch>
@@ -105,19 +99,9 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         cc_atomic_fetch_add(&g_bytes_out, pos);
         cc_atomic_fetch_add(&g_blocks_done, 1);
 
-        res->arena = cc_arena_detach(res_arena);
+        res->arena = res_arena->detach();
         return cc_ok(res);
     }
-}
-
-/* Thin unwrapping helper passed to chan_send_task.
- * chan_send_task boxes the return value as a pointer-sized result.
- * Returning NULL on error loses the error type; full T!>(E) propagation
- * through chan_send_task is a planned future enhancement. */
-static CompressedResult* compress_block_unwrapped(Block* blk, int level) {
-    CompressedResult* !>(CCIoError) res = compress_block(blk, level);
-    cc_arena_free(&blk->arena);
-    return cc_is_err(res) ? NULL : cc_unwrap_as(res, CompressedResult*);
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {
@@ -128,20 +112,20 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         fprintf(stderr, "Failed to open input: %s\n", in_path);
         return 1;
     }
-    @defer cc_file_close(&in_file);
+    @defer in_file.close();
 
     CCFile out_file;
     if (cc_file_open(&out_file, out_path, "wb") != 0) {
         fprintf(stderr, "Failed to open output: %s\n", out_path);
         return 1;
     }
-    @defer cc_file_close(&out_file);
+    @defer out_file.close();
 
-    /* Ordered channel of CompressedResult*.  'ordered' is a recv-side flag:
+    /* Ordered channel of CompressedResult* !>(CCIoError).  'ordered' is a recv-side flag:
      * chan_recv awaits queued tasks in FIFO submission order.  The tx handle
      * is a plain sender — ordering is irrelevant at the send site. */
-    CompressedResult*[~CHAN_CAP >] results_tx;
-    CompressedResult*[~CHAN_CAP ordered <] results_rx;
+    CompressedResult* !>(CCIoError)[~CHAN_CAP >] results_tx;
+    CompressedResult* !>(CCIoError)[~CHAN_CAP ordered <] results_rx;
     CCChan* ch = channel_pair(&results_tx, &results_rx);
     @defer cc_chan_free(ch);
 
@@ -150,19 +134,23 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
     @nursery {
         /* Consumer: chan_recv on ordered channel awaits each task in
-         * submission order and delivers the typed CompressedResult*. */
+         * submission order and delivers the typed Result payload. */
         spawn(() => [out_ptr, results_rx] {
-            CompressedResult* r;
+            CompressedResult* !>(CCIoError) r;
             long expect_seq = 0;
             while (cc_io_avail(chan_recv(results_rx, &r))) {
-                if (r) {
-                    if (r->seq != expect_seq) {
-                        fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, r->seq);
-                    }
-                    expect_seq++;
-                    cc_file_write(out_ptr, r->data);
-                    cc_arena_free(&r->arena);
+                if (r.is_err()) {
+                    CCIoError err = r.error();
+                    fprintf(stderr, "compress error kind=%d os=%d\n", err.kind, err.os_code);
+                    continue;
                 }
+                CompressedResult* item = r.value();
+                if (item->seq != expect_seq) {
+                    fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, item->seq);
+                }
+                expect_seq++;
+                (void)out_ptr->write(item->data);
+                cc_arena_free(&item->arena);
             }
         });
 
@@ -174,16 +162,16 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 while (true) {
                     CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
                     CCSlice data;
-                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
+                    bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
                     
-                    if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
-                        cc_arena_free(&blk_arena);
+                    if (read_res.is_err() || !cc_io_avail(read_res)) {
+                        blk_arena.free();
                         break;
                     }
                     
                     Block* blk = arena_alloc1(Block, &blk_arena);
                     if (!blk) {
-                        cc_arena_free(&blk_arena);
+                        blk_arena.free();
                         break;
                     }
                     
@@ -193,7 +181,11 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                     blk->arena = blk_arena;
                     
                     bool is_last = blk->is_last;
-                    chan_send_task(results_tx, () => [blk] compress_block_unwrapped(blk, 6));
+                    chan_send_task(results_tx, () => [blk] {
+                        CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+                        cc_arena_free(&blk->arena);
+                        res;
+                    });
                     
                     if (is_last) break;
                 }
@@ -201,7 +193,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         }
     }
 
-    cc_file_sync(&out_file);
+    (void)out_file.sync();
     return 0;
 }
 

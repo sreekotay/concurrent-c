@@ -12,6 +12,11 @@ intptr_t compute(intptr_t x) {
     return x * 2;
 }
 
+int !>(CCIoError) compute_result(int x) {
+    if (x < 0) return cc_err(cc_io_error(CC_IO_OTHER));
+    return cc_ok(x * 3);
+}
+
 /* -----------------------------------------------------------------------
  * 1. Legacy: explicit CCTask channel + ordered_recv
  * ----------------------------------------------------------------------- */
@@ -119,12 +124,56 @@ static int test_typed_ordered_expr_form(void) {
     return 1;
 }
 
+/* -----------------------------------------------------------------------
+ * 4. Ordered task channel preserves rich result types without glue helpers
+ * ----------------------------------------------------------------------- */
+static int test_ordered_result_payload(void) {
+    int !>(CCIoError)[~8 >] result_tx;
+    int !>(CCIoError)[~8 ordered <] result_rx;
+    CCChan* ch = channel_pair(&result_tx, &result_rx);
+
+    int values[] = {2, -1, 5};
+    int expected_ok[] = {6, 0, 15};
+    int expected_is_err[] = {0, 1, 0};
+    int n = sizeof(values) / sizeof(values[0]);
+
+    @closing(result_tx) {
+        for (int i = 0; i < n; i++) {
+            int v = values[i];
+            chan_send_task(result_tx, () => [v] compute_result(v));
+        }
+    }
+
+    int !>(CCIoError) result;
+    int idx = 0;
+    while (cc_io_avail(chan_recv(result_rx, &result)) && idx < n) {
+        if (expected_is_err[idx]) {
+            if (!cc_is_err(result)) {
+                printf("FAIL result-payload: pos %d expected error\n", idx);
+                cc_chan_free(ch);
+                return 0;
+            }
+        } else {
+            if (cc_is_err(result) || cc_unwrap(result) != expected_ok[idx]) {
+                printf("FAIL result-payload: pos %d expected %d\n", idx, expected_ok[idx]);
+                cc_chan_free(ch);
+                return 0;
+            }
+        }
+        idx++;
+    }
+    cc_chan_free(ch);
+    if (idx != n) { printf("FAIL result-payload: got %d values, expected %d\n", idx, n); return 0; }
+    return 1;
+}
+
 int main(void) {
     int ok = 1;
 
     if (!test_legacy_ordered_recv())     { ok = 0; }
     if (!test_typed_ordered_stmt_form()) { ok = 0; }
     if (!test_typed_ordered_expr_form()) { ok = 0; }
+    if (!test_ordered_result_payload())  { ok = 0; }
 
     if (ok) {
         printf("ordered_channel_smoke: PASS\n");

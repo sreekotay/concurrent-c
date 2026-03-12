@@ -156,6 +156,27 @@ const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_nam
     return NULL;
 }
 
+const char* cc_type_registry_lookup_channel_elem_type(CCTypeRegistry* reg, const char* handle_type_name) {
+    const char* mangled = NULL;
+    if (!reg || !handle_type_name) return NULL;
+
+    if (strncmp(handle_type_name, "CCChanTx_", 9) == 0) {
+        mangled = handle_type_name + 9;
+    } else if (strncmp(handle_type_name, "CCChanRx_", 9) == 0) {
+        mangled = handle_type_name + 9;
+    } else {
+        return NULL;
+    }
+
+    if (!*mangled) return NULL;
+    for (size_t i = 0; i < reg->chan_count; i++) {
+        if (strcmp(reg->channels[i].mangled_name, mangled) == 0) {
+            return reg->channels[i].type1;
+        }
+    }
+    return NULL;
+}
+
 /* Ensure capacity for vec entries */
 static int ensure_vec_capacity(CCTypeRegistry* reg, size_t needed) {
     if (reg->vec_capacity >= needed) return 0;

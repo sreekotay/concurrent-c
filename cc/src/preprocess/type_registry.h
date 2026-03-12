@@ -32,6 +32,7 @@ void cc_type_registry_clear(CCTypeRegistry* reg);
 /* Variable type tracking */
 int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const char* type_name);
 const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_name);
+const char* cc_type_registry_lookup_channel_elem_type(CCTypeRegistry* reg, const char* handle_type_name);
 
 /* Generic type instantiation tracking (for emitting macro decls) */
 int cc_type_registry_add_vec(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);
