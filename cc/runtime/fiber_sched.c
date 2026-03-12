@@ -150,6 +150,7 @@ static _Atomic uint64_t g_cc_join_park_loops = 0;
 static _Atomic uint64_t g_cc_join_help_attempts = 0;  /* help-first steal attempts */
 static _Atomic uint64_t g_cc_join_help_hits = 0;      /* help-first steal successes */
 static _Atomic size_t g_total_timed_parked = 0;
+static _Atomic int g_cc_join_help_mode = -1;          /* -1 unknown, 0 off, 1 on */
 
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
     if (out_calls) {
@@ -176,6 +177,22 @@ void cc__fiber_join_help_stats(uint64_t* out_attempts, uint64_t* out_hits) {
     if (out_hits) {
         *out_hits = atomic_load_explicit(&g_cc_join_help_hits, memory_order_relaxed);
     }
+}
+
+static inline int cc_join_help_enabled(void) {
+    int mode = atomic_load_explicit(&g_cc_join_help_mode, memory_order_acquire);
+    if (mode >= 0) return mode;
+    const char* env = getenv("CC_JOIN_HELP");
+    mode = (!env || env[0] != '0') ? 1 : 0;
+    int expected = -1;
+    if (!atomic_compare_exchange_strong_explicit(&g_cc_join_help_mode,
+                                                 &expected,
+                                                 mode,
+                                                 memory_order_release,
+                                                 memory_order_acquire)) {
+        mode = atomic_load_explicit(&g_cc_join_help_mode, memory_order_acquire);
+    }
+    return mode;
 }
 
 static int spawn_timing_enabled(void) {
@@ -362,6 +379,7 @@ typedef struct fiber_task {
     void* result;             /* Return value */
     char result_buf[48];      /* Fiber-local storage for struct results (avoids malloc) */
     _Atomic int64_t control;  /* Unified control word (see encoding above) */
+    _Atomic uint64_t generation; /* Monotonic incarnation tag for pooled reuse */
     _Atomic int done;
     _Atomic uint64_t wake_counter; /* Debug-only wake counter */
     _Atomic uint64_t wait_ticket;  /* Monotonic ticket for waiter ABA defense */
@@ -423,6 +441,39 @@ typedef struct fiber_task {
     struct fiber_task* next;  /* For free list / queues */
     struct fiber_task* debug_next;  /* For all-fibers debug list (deadlock dump) */
 } fiber_task;
+
+typedef struct {
+    fiber_task* fiber;
+    uint64_t generation;
+} runnable_ref;
+
+typedef struct {
+    fiber_task* _Atomic fiber;
+    _Atomic uint64_t generation;
+} runnable_slot;
+
+typedef struct fiber_overflow_node {
+    runnable_ref ref;
+    struct fiber_overflow_node* next;
+} fiber_overflow_node;
+
+static inline runnable_ref runnable_ref_null(void) {
+    runnable_ref ref = {0};
+    return ref;
+}
+
+static inline runnable_ref runnable_ref_snapshot(fiber_task* f) {
+    runnable_ref ref = {
+        .fiber = f,
+        .generation = atomic_load_explicit(&f->generation, memory_order_relaxed),
+    };
+    return ref;
+}
+
+static inline int runnable_ref_matches_current(runnable_ref ref) {
+    if (!ref.fiber) return 0;
+    return atomic_load_explicit(&ref.fiber->generation, memory_order_acquire) == ref.generation;
+}
 
 typedef enum {
     CC_WL_ACTIVE = 0,
@@ -722,14 +773,14 @@ static inline void cc_v3_worker_stats_maybe_init(void) {
 * ============================================================================ */
 
 typedef struct {
-    fiber_task* _Atomic slots[CC_FIBER_QUEUE_INITIAL];
+    runnable_slot slots[CC_FIBER_QUEUE_INITIAL];
     _Atomic size_t head;
     _Atomic size_t tail;
     _Atomic int nonempty_hint;  /* 0 likely empty, 1 maybe non-empty */
     /* Overflow list for when ring is full */
     pthread_mutex_t overflow_mu;
-    fiber_task* overflow_head;
-    fiber_task* overflow_tail;
+    fiber_overflow_node* overflow_head;
+    fiber_overflow_node* overflow_tail;
     _Atomic size_t overflow_count;
 } fiber_queue;
 
@@ -747,6 +798,7 @@ static void fq_init(fiber_queue* q) {
 /* Try to push to the lock-free ring. Returns 0 on success, -1 if full. */
 static int fq_push_ring(fiber_queue* q, fiber_task* f) {
     cc_v3_assert_enqueue_runnable(f, "global_ring");
+    runnable_ref ref = runnable_ref_snapshot(f);
     for (int retry = 0; retry < 64; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
         size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
@@ -758,7 +810,9 @@ static int fq_push_ring(fiber_queue* q, fiber_task* f) {
         if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
                                                 memory_order_release,
                                                 memory_order_relaxed)) {
-            atomic_store_explicit(&q->slots[tail % CC_FIBER_QUEUE_INITIAL], f, memory_order_release);
+            size_t idx = tail % CC_FIBER_QUEUE_INITIAL;
+            atomic_store_explicit(&q->slots[idx].generation, ref.generation, memory_order_relaxed);
+            atomic_store_explicit(&q->slots[idx].fiber, ref.fiber, memory_order_release);
             atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
             return 0;
         }
@@ -771,15 +825,23 @@ static int fq_push_ring(fiber_queue* q, fiber_task* f) {
 static void fq_push_blocking(fiber_queue* q, fiber_task* f) {
     if (fq_push_ring(q, f) == 0) return;
     
-    /* Ring full — use overflow list */
-    f->next = NULL;
+    /* Ring full — use overflow list with a publication snapshot. */
+    fiber_overflow_node* node = (fiber_overflow_node*)malloc(sizeof(*node));
+    if (!node) {
+        while (fq_push_ring(q, f) != 0) {
+            sched_yield();
+        }
+        return;
+    }
+    node->ref = runnable_ref_snapshot(f);
+    node->next = NULL;
     pthread_mutex_lock(&q->overflow_mu);
     if (q->overflow_tail) {
-        q->overflow_tail->next = f;
+        q->overflow_tail->next = node;
     } else {
-        q->overflow_head = f;
+        q->overflow_head = node;
     }
-    q->overflow_tail = f;
+    q->overflow_tail = node;
     atomic_fetch_add_explicit(&q->overflow_count, 1, memory_order_relaxed);
     atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
     pthread_mutex_unlock(&q->overflow_mu);
@@ -801,24 +863,26 @@ static int fq_peek(fiber_queue* q) {
 }
 
 /* Pop from overflow list (caller should try ring first). */
-static fiber_task* fq_pop_overflow(fiber_queue* q) {
+static runnable_ref fq_pop_overflow(fiber_queue* q) {
     if (atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0)
-        return NULL;
+        return runnable_ref_null();
     pthread_mutex_lock(&q->overflow_mu);
-    fiber_task* f = q->overflow_head;
-    if (f) {
-        q->overflow_head = f->next;
+    fiber_overflow_node* node = q->overflow_head;
+    runnable_ref ref = runnable_ref_null();
+    if (node) {
+        q->overflow_head = node->next;
         if (!q->overflow_head) q->overflow_tail = NULL;
-        f->next = NULL;
         atomic_fetch_sub_explicit(&q->overflow_count, 1, memory_order_relaxed);
+        ref = node->ref;
     }
     pthread_mutex_unlock(&q->overflow_mu);
-    return f;
+    if (node) free(node);
+    return ref;
 }
 
-static fiber_task* fq_pop(fiber_queue* q) {
+static runnable_ref fq_pop(fiber_queue* q) {
     if (!atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
-        return NULL;
+        return runnable_ref_null();
     }
     /* Try lock-free ring first */
     for (int retry = 0; retry < 1000; retry++) {
@@ -828,14 +892,14 @@ static fiber_task* fq_pop(fiber_queue* q) {
         if (head >= tail) break;  /* Ring empty, try overflow */
         
         size_t idx = head % CC_FIBER_QUEUE_INITIAL;
-        fiber_task* f = atomic_load_explicit(&q->slots[idx], memory_order_acquire);
+        fiber_task* f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
         
         if (!f) {
             /* Writer incremented tail but hasn't written slot yet.
             * Spin-wait for the slot to be populated. */
             for (int i = 0; i < 100; i++) {
                 cpu_pause();
-                f = atomic_load_explicit(&q->slots[idx], memory_order_acquire);
+                f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
                 if (f) break;
             }
             if (!f) continue;
@@ -844,33 +908,43 @@ static fiber_task* fq_pop(fiber_queue* q) {
         if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed,
                                                 memory_order_relaxed)) {
-            atomic_store_explicit(&q->slots[idx], NULL, memory_order_relaxed);
+            runnable_ref ref = {
+                .fiber = f,
+                .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
+            };
+            atomic_store_explicit(&q->slots[idx].fiber, NULL, memory_order_relaxed);
+            atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
             size_t new_head = head + 1;
             size_t cur_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
             if (new_head >= cur_tail &&
                 atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
                 atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
             }
-            return f;
+            if (!runnable_ref_matches_current(ref)) continue;
+            return ref;
         }
     }
     /* Ring empty — check overflow */
-    fiber_task* of = fq_pop_overflow(q);
-    if (!of) {
+    runnable_ref of = fq_pop_overflow(q);
+    while (of.fiber && !runnable_ref_matches_current(of)) {
+        of = fq_pop_overflow(q);
+    }
+    if (!of.fiber) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
         size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
         if (head >= tail &&
             atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
             atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
         }
+        return runnable_ref_null();
     }
     return of;
 }
 
 /* Global run-queue helpers (implemented after scheduler state declaration). */
 static inline int sched_global_push(fiber_task* f, int preferred_worker);
-static inline fiber_task* sched_global_pop_any(void);
-static inline fiber_task* sched_global_pop_for_worker(int worker_id);
+static inline runnable_ref sched_global_pop_any(void);
+static inline runnable_ref sched_global_pop_for_worker(int worker_id);
 static inline int sched_global_peek_any(void);
 
 /* ============================================================================
@@ -1060,13 +1134,13 @@ static size_t tpq_drain(void) {
 #define INBOX_QUEUE_SIZE 1024
 
 typedef struct {
-    fiber_task* _Atomic slots[LOCAL_QUEUE_SIZE];
+    runnable_slot slots[LOCAL_QUEUE_SIZE];
     _Atomic size_t head;
     _Atomic size_t tail;
 } local_queue;
 
 typedef struct {
-    fiber_task* _Atomic slots[INBOX_QUEUE_SIZE];
+    runnable_slot slots[INBOX_QUEUE_SIZE];
     _Atomic size_t head;
     _Atomic size_t tail;
 } inbox_queue;
@@ -1111,6 +1185,7 @@ static void cc__fiber_dump_queue_state(void);
 static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
     if (was_empty) *was_empty = 0;
     cc_v3_assert_enqueue_runnable(f, "inbox");
+    runnable_ref ref = runnable_ref_snapshot(f);
     int pause_round = 0;
     for (int retry = 0; retry < 1000; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
@@ -1127,7 +1202,9 @@ static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
         if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
                                                 memory_order_release,
                                                 memory_order_relaxed)) {
-            atomic_store_explicit(&q->slots[tail % INBOX_QUEUE_SIZE], f, memory_order_release);
+            size_t idx = tail % INBOX_QUEUE_SIZE;
+            atomic_store_explicit(&q->slots[idx].generation, ref.generation, memory_order_relaxed);
+            atomic_store_explicit(&q->slots[idx].fiber, ref.fiber, memory_order_release);
             if (was_empty) *was_empty = (tail == head);
             return 0;
         }
@@ -1160,20 +1237,20 @@ static inline size_t iq_depth(inbox_queue* q) {
     return (tail > head) ? (tail - head) : 0;
 }
 
-static fiber_task* iq_pop(inbox_queue* q) {
+static runnable_ref iq_pop(inbox_queue* q) {
     for (int retry = 0; retry < 1000; retry++) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
         size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        if (head >= tail) return NULL;
+        if (head >= tail) return runnable_ref_null();
         size_t idx = head % INBOX_QUEUE_SIZE;
-        fiber_task* f = atomic_load_explicit(&q->slots[idx], memory_order_acquire);
+        fiber_task* f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
         if (!f) {
             /* Writer incremented tail but hasn't written slot yet.
             * Spin-wait for the slot to be populated. This window is very short
             * (just a single store instruction), so we spin aggressively. */
             for (int i = 0; i < 100; i++) {
                 cpu_pause();
-                f = atomic_load_explicit(&q->slots[idx], memory_order_acquire);
+                f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
                 if (f) break;
             }
             if (!f) continue;  /* Retry from the top */
@@ -1181,11 +1258,17 @@ static fiber_task* iq_pop(inbox_queue* q) {
         if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed,
                                                 memory_order_relaxed)) {
-            atomic_store_explicit(&q->slots[idx], NULL, memory_order_relaxed);
-            return f;
+            runnable_ref ref = {
+                .fiber = f,
+                .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
+            };
+            atomic_store_explicit(&q->slots[idx].fiber, NULL, memory_order_relaxed);
+            atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
+            if (!runnable_ref_matches_current(ref)) continue;
+            return ref;
         }
     }
-    return NULL;
+    return runnable_ref_null();
 }
 
 typedef struct {
@@ -2060,8 +2143,8 @@ static inline void spawn_mark_global_pop(fiber_task* f) {
     }
 }
 
-static inline fiber_task* sched_global_pop_any(void) {
-    if (!g_sched.run_queue) return NULL;
+static inline runnable_ref sched_global_pop_any(void) {
+    if (!g_sched.run_queue) return runnable_ref_null();
     const int gap_stats = cc_worker_gap_stats_enabled();
     if (gap_stats) {
         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_attempts, 1, memory_order_relaxed);
@@ -2076,20 +2159,20 @@ static inline fiber_task* sched_global_pop_any(void) {
             }
             continue;
         }
-        fiber_task* f = fq_pop(&g_sched.run_queue[idx]);
-        if (f) {
+        runnable_ref ref = fq_pop(&g_sched.run_queue[idx]);
+        if (ref.fiber) {
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
             }
-            spawn_mark_global_pop(f);
-            return f;
+            spawn_mark_global_pop(ref.fiber);
+            return ref;
         }
     }
-    return NULL;
+    return runnable_ref_null();
 }
 
-static inline fiber_task* sched_global_pop_for_worker(int worker_id) {
-    if (!g_sched.run_queue) return NULL;
+static inline runnable_ref sched_global_pop_for_worker(int worker_id) {
+    if (!g_sched.run_queue) return runnable_ref_null();
     const int gap_stats = cc_worker_gap_stats_enabled();
     if (gap_stats) {
         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_attempts, 1, memory_order_relaxed);
@@ -2100,43 +2183,43 @@ static inline fiber_task* sched_global_pop_for_worker(int worker_id) {
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
             }
-            return NULL;
+            return runnable_ref_null();
         }
-        fiber_task* f0 = fq_pop(&g_sched.run_queue[0]);
-        if (f0 && gap_stats) {
+        runnable_ref ref0 = fq_pop(&g_sched.run_queue[0]);
+        if (ref0.fiber && gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
         }
-        if (f0) spawn_mark_global_pop(f0);
-        return f0;
+        if (ref0.fiber) spawn_mark_global_pop(ref0.fiber);
+        return ref0;
     }
 
     size_t p = sched_primary_shard_for_worker(worker_id);
-    fiber_task* f = NULL;
+    runnable_ref ref = runnable_ref_null();
     if (atomic_load_explicit(&g_sched.run_queue[p].nonempty_hint, memory_order_acquire)) {
-        f = fq_pop(&g_sched.run_queue[p]);
+        ref = fq_pop(&g_sched.run_queue[p]);
     } else if (gap_stats) {
         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
     }
-    if (f) {
+    if (ref.fiber) {
         if (gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
         }
-        spawn_mark_global_pop(f);
-        return f;
+        spawn_mark_global_pop(ref.fiber);
+        return ref;
     }
     size_t s = sched_secondary_shard_for_worker(worker_id);
     if (s != p) {
         if (atomic_load_explicit(&g_sched.run_queue[s].nonempty_hint, memory_order_acquire)) {
-            f = fq_pop(&g_sched.run_queue[s]);
+            ref = fq_pop(&g_sched.run_queue[s]);
         } else if (gap_stats) {
             atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hint_skips, 1, memory_order_relaxed);
         }
-        if (f) {
+        if (ref.fiber) {
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
             }
-            spawn_mark_global_pop(f);
-            return f;
+            spawn_mark_global_pop(ref.fiber);
+            return ref;
         }
     }
     size_t start = (size_t)atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed);
@@ -2149,16 +2232,16 @@ static inline fiber_task* sched_global_pop_for_worker(int worker_id) {
             }
             continue;
         }
-        f = fq_pop(&g_sched.run_queue[idx]);
-        if (f) {
+        ref = fq_pop(&g_sched.run_queue[idx]);
+        if (ref.fiber) {
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits, 1, memory_order_relaxed);
             }
-            spawn_mark_global_pop(f);
-            return f;
+            spawn_mark_global_pop(ref.fiber);
+            return ref;
         }
     }
-    return NULL;
+    return runnable_ref_null();
 }
 
 static inline int sched_global_peek_any(void) {
@@ -2722,12 +2805,15 @@ void cc__deadlock_thread_unblock(void) {
 /* Fast local queue push (single producer) */
 static inline int lq_push(local_queue* q, fiber_task* f) {
     cc_v3_assert_enqueue_runnable(f, "local");
+    runnable_ref ref = runnable_ref_snapshot(f);
     size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
     size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
     if (tail - head >= LOCAL_QUEUE_SIZE) return -1;  /* Full */
     /* Use release on slot store to ensure closure contents are visible to consumer.
     * The consumer uses acquire on the exchange, creating a release-acquire pair. */
-    atomic_store_explicit(&q->slots[tail % LOCAL_QUEUE_SIZE], f, memory_order_release);
+    size_t idx = tail % LOCAL_QUEUE_SIZE;
+    atomic_store_explicit(&q->slots[idx].generation, ref.generation, memory_order_relaxed);
+    atomic_store_explicit(&q->slots[idx].fiber, ref.fiber, memory_order_release);
     atomic_store_explicit(&q->tail, tail + 1, memory_order_release);
     return 0;
 }
@@ -2749,30 +2835,36 @@ static inline size_t lq_depth(local_queue* q) {
 /* Fast local queue pop (owner only - but must handle concurrent stealers) 
 * Uses atomic exchange to claim slot first, then try to advance head once.
 * Limited retries to avoid infinite loop under pathological contention. */
-static inline fiber_task* lq_pop(local_queue* q) {
+static inline runnable_ref lq_pop(local_queue* q) {
     for (int retry = 0; retry < 64; retry++) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
         size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        if (head >= tail) return NULL;  /* Empty */
+        if (head >= tail) return runnable_ref_null();  /* Empty */
         
         size_t idx = head % LOCAL_QUEUE_SIZE;
         
         /* Atomically exchange slot with NULL to claim it */
-        fiber_task* f = atomic_exchange_explicit(&q->slots[idx], NULL, memory_order_acquire);
+        fiber_task* f = atomic_exchange_explicit(&q->slots[idx].fiber, NULL, memory_order_acquire);
         if (!f) {
             /* Lost race with stealer - they cleared slot, try to help advance head */
             atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed, memory_order_relaxed);
             continue;
         }
+        runnable_ref ref = {
+            .fiber = f,
+            .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
+        };
+        atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
         
         /* We got the task. Try to advance head once.
         * If CAS fails, someone else advanced it for us - that's fine. */
         atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                             memory_order_relaxed, memory_order_relaxed);
-        return f;
+        if (!runnable_ref_matches_current(ref)) continue;
+        return ref;
     }
-    return NULL;  /* Too much contention, let caller try global queue */
+    return runnable_ref_null();  /* Too much contention, let caller try global queue */
 }
 
 static inline void wake_one_if_sleeping(int timing, cc_wake_reason reason) {
@@ -3000,16 +3092,21 @@ static inline int cc__task_should_stay_on_owner_local(fiber_task* f, int target_
     return 0;
 }
 
-static inline fiber_task* lq_steal(local_queue* q, int target_worker) {
+static inline runnable_ref lq_steal(local_queue* q, int target_worker) {
     size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
     size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    if (head >= tail) return NULL;  /* Empty */
+    if (head >= tail) return runnable_ref_null();  /* Empty */
     
     size_t idx = head % LOCAL_QUEUE_SIZE;
     
     /* Atomically exchange slot with NULL to claim it */
-    fiber_task* f = atomic_exchange_explicit(&q->slots[idx], NULL, memory_order_acquire);
-    if (!f) return NULL;  /* Lost race */
+    fiber_task* f = atomic_exchange_explicit(&q->slots[idx].fiber, NULL, memory_order_acquire);
+    if (!f) return runnable_ref_null();  /* Lost race */
+    runnable_ref ref = {
+        .fiber = f,
+        .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
+    };
+    atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
     
     /* We got the task. Now try to advance head. If we fail, someone else advanced it. */
     if (!atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
@@ -3027,17 +3124,20 @@ static inline fiber_task* lq_steal(local_queue* q, int target_worker) {
             }
         }
     }
+    if (!runnable_ref_matches_current(ref)) {
+        return runnable_ref_null();
+    }
     if (cc__task_should_stay_on_owner_local(f, target_worker) &&
         cc__restore_inbox_task((size_t)target_worker, f)) {
-        return NULL;
+        return runnable_ref_null();
     }
-    return f;
+    return ref;
 }
 
 /* Batch work stealing: steal up to half the victim's queue.
 * This amortizes the cost of coordinating the steal across multiple tasks.
 * Returns number of tasks stolen (stored in out_tasks array). */
-static inline size_t lq_steal_batch(local_queue* q, int target_worker, fiber_task** out_tasks, size_t max_steal) {
+static inline size_t lq_steal_batch(local_queue* q, int target_worker, runnable_ref* out_tasks, size_t max_steal) {
     size_t stolen = 0;
     
     /* Read queue bounds - we'll try to steal up to half */
@@ -3062,13 +3162,18 @@ static inline size_t lq_steal_batch(local_queue* q, int target_worker, fiber_tas
         size_t idx = head % LOCAL_QUEUE_SIZE;
         
         /* Atomically claim slot */
-        fiber_task* f = atomic_exchange_explicit(&q->slots[idx], NULL, memory_order_acquire);
+        fiber_task* f = atomic_exchange_explicit(&q->slots[idx].fiber, NULL, memory_order_acquire);
         if (!f) {
             /* Lost race - try to help advance head and continue */
             atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed, memory_order_relaxed);
             continue;
         }
+        runnable_ref ref = {
+            .fiber = f,
+            .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
+        };
+        atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
         
         /* Got a task - try to advance head */
         atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
@@ -3082,11 +3187,14 @@ static inline size_t lq_steal_batch(local_queue* q, int target_worker, fiber_tas
                 }
             }
         }
+        if (!runnable_ref_matches_current(ref)) {
+            continue;
+        }
         if (cc__task_should_stay_on_owner_local(f, target_worker) &&
             cc__restore_inbox_task((size_t)target_worker, f)) {
             continue;
         }
-        out_tasks[stolen++] = f;
+        out_tasks[stolen++] = ref;
     }
     
     return stolen;
@@ -3146,6 +3254,7 @@ static fiber_task* fiber_alloc(void) {
         if (atomic_compare_exchange_weak_explicit(&g_sched.free_list, &f, next,
                                                 memory_order_release,
                                                 memory_order_acquire)) {
+            atomic_fetch_add_explicit(&f->generation, 1, memory_order_relaxed);
             /* Reuse pooled fiber - reset state but KEEP the coro and fiber_id.
             * CRITICAL: We must reset join_cv_initialized to 0. The join_cv itself
             * can be reused (it's just a pthread_cond_t), but the initialized flag
@@ -3198,6 +3307,7 @@ static fiber_task* fiber_alloc(void) {
     /* Allocate new fiber */
     fiber_task* nf = (fiber_task*)calloc(1, sizeof(fiber_task));
     if (nf) {
+        atomic_store_explicit(&nf->generation, 1, memory_order_relaxed);
         atomic_store_explicit(&nf->join_cv_initialized, 0, memory_order_relaxed);
         atomic_store_explicit(&nf->wake_counter, 0, memory_order_relaxed);
         atomic_store_explicit(&nf->wait_ticket, 0, memory_order_relaxed);
@@ -3477,8 +3587,8 @@ static int sysmon_has_pending_work(void) {
     return 0;
 }
 
-static inline int worker_run_fiber(fiber_task* f);
-static inline int worker_run_fiber_accounted(fiber_task* f);
+static inline int worker_run_fiber(runnable_ref ref);
+static inline int worker_run_fiber_accounted(runnable_ref ref);
 static inline void cc__trace_unpark_pickup(int worker_id,
                                         const char* source,
                                         int detail,
@@ -3531,20 +3641,20 @@ static _Atomic uint32_t g_timer_worker_active = 0;  /* 0=none, 1=one running */
 * a runnable fiber.  Used by replacement_worker at every work-finding
 * point so inbox-routed fibers (e.g. timer wakeups) are always found
 * before the global queue. */
-static inline fiber_task* replacement_scan_inboxes(uint64_t* rng) {
-    if (g_sched.num_workers == 0) return NULL;
+static inline runnable_ref replacement_scan_inboxes(uint64_t* rng) {
+    if (g_sched.num_workers == 0) return runnable_ref_null();
     size_t start = xorshift64(rng) % g_sched.num_workers;
     for (size_t s = 0; s < g_sched.num_workers; s++) {
         size_t w = (start + s) % g_sched.num_workers;
-        fiber_task* f = iq_pop(&g_sched.inbox_queues[w]);
-        if (f) {
-            cc__trace_unpark_pickup(-1, "replacement_inbox", (int)w, f);
-            return f;
+        runnable_ref ref = iq_pop(&g_sched.inbox_queues[w]);
+        if (ref.fiber) {
+            cc__trace_unpark_pickup(-1, "replacement_inbox", (int)w, ref.fiber);
+            return ref;
         }
-        f = lq_steal(&g_sched.local_queues[w], (int)w);
-        if (f) return f;
+        ref = lq_steal(&g_sched.local_queues[w], (int)w);
+        if (ref.fiber) return ref;
     }
-    return NULL;
+    return runnable_ref_null();
 }
 
 static _Atomic uint64_t g_cc_trace_fiber_migrate_count = 0;
@@ -3563,16 +3673,16 @@ static void* timer_service_worker(void* arg) {
     * all future emergency spawns.  sq_drain_sysmon routes timer-woken
     * fibers exclusively to inboxes, so inbox-only is sufficient. */
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
-        fiber_task* f = NULL;
+        runnable_ref f = runnable_ref_null();
         if (g_sched.num_workers > 0) {
             size_t start = xorshift64(&rng_state) % g_sched.num_workers;
-            for (size_t s = 0; s < g_sched.num_workers && !f; s++) {
+            for (size_t s = 0; s < g_sched.num_workers && !f.fiber; s++) {
                 size_t w = (start + s) % g_sched.num_workers;
                 f = iq_pop(&g_sched.inbox_queues[w]);
-                if (f) cc__trace_unpark_pickup(-2, "timer_inbox", (int)w, f);
+                if (f.fiber) cc__trace_unpark_pickup(-2, "timer_inbox", (int)w, f.fiber);
             }
         }
-        if (!f) break;  /* All inboxes empty — exit */
+        if (!f.fiber) break;  /* All inboxes empty — exit */
         worker_run_fiber_accounted(f);
     }
     atomic_store_explicit(&g_timer_worker_active, 0, memory_order_release);
@@ -3595,9 +3705,9 @@ static void* replacement_worker(void* arg) {
     const int gap_stats = cc_worker_gap_stats_enabled();
 
     while (atomic_load_explicit(&g_sched.running, memory_order_acquire)) {
-        fiber_task* f = replacement_scan_inboxes(&rng_state);
+        runnable_ref f = replacement_scan_inboxes(&rng_state);
         int nohint_fast_idle = 0;
-        if (!f) {
+        if (!f.fiber) {
             int has_hint = sched_global_has_hint_any();
             int allow_probe = ((global_probe_gate++ & 3u) == 0u);
             if (has_hint && allow_probe) {
@@ -3605,9 +3715,9 @@ static void* replacement_worker(void* arg) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
                 }
                 f = sched_global_pop_any();
-                if (f) {
+                if (f.fiber) {
                     if (gap_stats) {
-                        replacement_record_global_hit(f);
+                        replacement_record_global_hit(f.fiber);
                     }
                 } else {
                     if (gap_stats) {
@@ -3625,22 +3735,22 @@ static void* replacement_worker(void* arg) {
                 nohint_fast_idle = 1;
             }
         }
-        if (f && join_debug_enabled()) {
-            fprintf(stderr, "[temp%d] got fiber=%lu from global\n", my_temp_id, (unsigned long)f->fiber_id);
+        if (f.fiber && join_debug_enabled()) {
+            fprintf(stderr, "[temp%d] got fiber=%lu from global\n", my_temp_id, (unsigned long)f.fiber->fiber_id);
             fflush(stderr);
         }
         
-        if (f) {
+        if (f.fiber) {
             consecutive_idle = 0;
             worker_run_fiber_accounted(f);
         } else {
             /* Brief spin then short sleep - balance responsiveness vs CPU burn */
             if (!nohint_fast_idle) {
                 for (int spin = 0; spin < 64; spin++) {
-                    f = NULL;
+                    f = runnable_ref_null();
                     int from_global_probe = 0;
                     f = replacement_scan_inboxes(&rng_state);
-                    if (!f) {
+                    if (!f.fiber) {
                         if ((spin & 7) != 0) {
                             if (gap_stats) {
                                 CC_REPL_PROBE_COUNT_ADD(global_pop_repl_spin_deferred, 1);
@@ -3653,9 +3763,9 @@ static void* replacement_worker(void* arg) {
                                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
                                 }
                                 f = sched_global_pop_any();
-                                if (gap_stats && !f) {
+                                if (gap_stats && !f.fiber) {
                                     CC_REPL_PROBE_COUNT_ADD(global_pop_repl_hint_miss, 1);
-                                } else if (f) {
+                                } else if (f.fiber) {
                                     from_global_probe = 1;
                                 }
                             } else if (has_hint) {
@@ -3667,10 +3777,10 @@ static void* replacement_worker(void* arg) {
                             }
                         }
                     }
-                    if (f && gap_stats && from_global_probe) {
-                        replacement_record_global_hit(f);
+                    if (f.fiber && gap_stats && from_global_probe) {
+                        replacement_record_global_hit(f.fiber);
                     }
-                    if (f) goto got_work;
+                    if (f.fiber) goto got_work;
                     cpu_pause();
                 }
             } else if (gap_stats) {
@@ -3682,7 +3792,7 @@ static void* replacement_worker(void* arg) {
             /* Re-check queue after incrementing sleeping to close race window */
             f = replacement_scan_inboxes(&rng_state);
             int from_global_probe = 0;
-            if (!f) {
+            if (!f.fiber) {
                 int has_hint = sched_global_has_hint_any();
                 int allow_probe = ((global_probe_gate++ & 3u) == 0u);
                 if (has_hint && allow_probe) {
@@ -3690,9 +3800,9 @@ static void* replacement_worker(void* arg) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_replacement, 1, memory_order_relaxed);
                     }
                     f = sched_global_pop_any();
-                    if (gap_stats && !f) {
+                    if (gap_stats && !f.fiber) {
                         CC_REPL_PROBE_COUNT_ADD(global_pop_repl_hint_miss, 1);
-                    } else if (f) {
+                    } else if (f.fiber) {
                         from_global_probe = 1;
                     }
                 } else if (has_hint) {
@@ -3703,10 +3813,10 @@ static void* replacement_worker(void* arg) {
                     CC_REPL_PROBE_COUNT_ADD(global_pop_repl_nohint, 1);
                 }
             }
-            if (f && gap_stats && from_global_probe) {
-                replacement_record_global_hit(f);
+            if (f.fiber && gap_stats && from_global_probe) {
+                replacement_record_global_hit(f.fiber);
             }
-            if (f) {
+            if (f.fiber) {
                 atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
                 goto got_work;
             }
@@ -3726,12 +3836,12 @@ static void* replacement_worker(void* arg) {
         got_work:
             consecutive_idle = 0;
             if (join_debug_enabled()) {
-                fprintf(stderr, "[temp%d] running fiber=%lu\n", my_temp_id, (unsigned long)f->fiber_id);
+                fprintf(stderr, "[temp%d] running fiber=%lu\n", my_temp_id, (unsigned long)f.fiber->fiber_id);
                 fflush(stderr);
             }
             worker_run_fiber_accounted(f);
             if (join_debug_enabled()) {
-                fprintf(stderr, "[temp%d] finished fiber=%lu\n", my_temp_id, (unsigned long)f->fiber_id);
+                fprintf(stderr, "[temp%d] finished fiber=%lu\n", my_temp_id, (unsigned long)f.fiber->fiber_id);
                 fflush(stderr);
             }
         }
@@ -4116,7 +4226,10 @@ static void* sysmon_main(void* arg) {
 /* Forward declaration — defined after park helpers */
 static void worker_commit_park(fiber_task* f, int wid);
 
-static inline int worker_run_fiber(fiber_task* f) {
+static inline int worker_run_fiber(runnable_ref ref) {
+    fiber_task* f = ref.fiber;
+    if (!f) return 0;
+    if (!runnable_ref_matches_current(ref)) return 0;
     int wid = tls_worker_id;
     int64_t expected = CTRL_QUEUED;
     int64_t owned = (wid >= 0) ? CTRL_OWNED(wid) : CTRL_OWNED_TEMP;
@@ -4338,9 +4451,9 @@ static inline int worker_run_fiber(fiber_task* f) {
     return 1;
 }
 
-static inline int worker_run_fiber_accounted(fiber_task* f) {
+static inline int worker_run_fiber_accounted(runnable_ref ref) {
     atomic_fetch_add_explicit(&g_sched.active, 1, memory_order_relaxed);
-    int rc = worker_run_fiber(f);
+    int rc = worker_run_fiber(ref);
     atomic_fetch_sub_explicit(&g_sched.active, 1, memory_order_relaxed);
     sched_maybe_promote_run_phase();
     return rc;
@@ -4376,18 +4489,19 @@ static inline int cc__restore_inbox_task(size_t victim, fiber_task* f) {
     return 0;
 }
 
-static inline fiber_task* worker_try_steal_one(int worker_id, uint64_t* rng_state) {
-    if (g_sched.num_workers <= 1) return NULL;
+static inline runnable_ref worker_try_steal_one(int worker_id, uint64_t* rng_state) {
+    if (g_sched.num_workers <= 1) return runnable_ref_null();
     size_t victim = (size_t)(xorshift64(rng_state) % g_sched.num_workers);
-    if ((int)victim == worker_id) return NULL;
-    fiber_task* f = iq_pop(&g_sched.inbox_queues[victim]);
+    if ((int)victim == worker_id) return runnable_ref_null();
+    runnable_ref ref = iq_pop(&g_sched.inbox_queues[victim]);
+    fiber_task* f = ref.fiber;
     if (f) {
         if (cc__task_should_stay_on_target_inbox(f, (int)victim) &&
             cc__restore_inbox_task(victim, f)) {
             return lq_steal(&g_sched.local_queues[victim], (int)victim);
         }
         cc__trace_unpark_pickup(worker_id, "steal_inbox", (int)victim, f);
-        return f;
+        return ref;
     }
     return lq_steal(&g_sched.local_queues[victim], (int)victim);
 }
@@ -4422,8 +4536,8 @@ static void* worker_main(void* arg) {
     tls_worker_id = worker_id;
     tls_sched_worker_ctx = 1;
     local_queue* my_queue = &g_sched.local_queues[worker_id];
-    fiber_task* batch[WORKER_BATCH_SIZE];
-    fiber_task* steal_buf[STEAL_BATCH_SIZE];
+    runnable_ref batch[WORKER_BATCH_SIZE];
+    runnable_ref steal_buf[STEAL_BATCH_SIZE];
     
     /* Initialize TSan fiber context for the scheduler thread.
     * This models user-space fiber switches for TSan. */
@@ -4466,8 +4580,8 @@ static void* worker_main(void* arg) {
             if (gap_stats) {
                 atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_fairness, 1, memory_order_relaxed);
             }
-            fiber_task* gf = sched_global_pop_for_worker(worker_id);
-            if (gf) {
+            runnable_ref gf = sched_global_pop_for_worker(worker_id);
+            if (gf.fiber) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_fairness, 1, memory_order_relaxed);
                 }
@@ -4484,7 +4598,7 @@ static void* worker_main(void* arg) {
         if (count == 0) {
             fiber_task* v3_next = cc_sched_worker_next();
             if (v3_next) {
-                batch[count++] = v3_next;
+                batch[count++] = runnable_ref_snapshot(v3_next);
 #if CC_V3_DIAGNOSTICS
                 if (v3_stats) {
                     atomic_fetch_add_explicit(&g_cc_v3_wm_seed_v3_batches, 1, memory_order_relaxed);
@@ -4496,9 +4610,9 @@ static void* worker_main(void* arg) {
         /* Startup deterministic service: always probe own inbox then one global
         * before bulk local drain. This bounds startup service lag for both lanes. */
         if (count == 0 && startup_phase) {
-            fiber_task* sf = iq_pop(&g_sched.inbox_queues[worker_id]);
-            if (sf) {
-                cc__trace_unpark_pickup(worker_id, "own_inbox_startup", worker_id, sf);
+            runnable_ref sf = iq_pop(&g_sched.inbox_queues[worker_id]);
+            if (sf.fiber) {
+                cc__trace_unpark_pickup(worker_id, "own_inbox_startup", worker_id, sf.fiber);
                 batch[count++] = sf;
             }
             if (count < WORKER_BATCH_SIZE && sched_global_has_hint_any()) {
@@ -4506,7 +4620,7 @@ static void* worker_main(void* arg) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
                 }
                 sf = sched_global_pop_for_worker(worker_id);
-                if (sf) {
+                if (sf.fiber) {
                     if (gap_stats) {
                         atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
                     }
@@ -4517,8 +4631,8 @@ static void* worker_main(void* arg) {
         /* Priority 1-4: acquire runnable work */
         /* Priority 1: Pop from local queue (no contention) */
         while (count < WORKER_BATCH_SIZE) {
-            fiber_task* f = lq_pop(my_queue);
-            if (!f) break;
+            runnable_ref f = lq_pop(my_queue);
+            if (!f.fiber) break;
             batch[count++] = f;
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
             if (v3_stats) {
@@ -4529,9 +4643,9 @@ static void* worker_main(void* arg) {
         
         /* Priority 2: Pop from inbox queue */
         while (count < WORKER_BATCH_SIZE) {
-            fiber_task* f = iq_pop(&g_sched.inbox_queues[worker_id]);
-            if (!f) break;
-            cc__trace_unpark_pickup(worker_id, "own_inbox", worker_id, f);
+            runnable_ref f = iq_pop(&g_sched.inbox_queues[worker_id]);
+            if (!f.fiber) break;
+            cc__trace_unpark_pickup(worker_id, "own_inbox", worker_id, f.fiber);
             batch[count++] = f;
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
             if (v3_stats) {
@@ -4548,14 +4662,14 @@ static void* worker_main(void* arg) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
                 }
-                fiber_task* f = sched_global_pop_for_worker(worker_id);
-                if (!f) break;
+                runnable_ref f = sched_global_pop_for_worker(worker_id);
+                if (!f.fiber) break;
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
                 }
                 if (join_debug_enabled()) {
                     fprintf(stderr, "[worker%d] main_loop got fiber=%lu from global\n",
-                            worker_id, (unsigned long)f->fiber_id);
+                            worker_id, (unsigned long)f.fiber->fiber_id);
                 }
                 batch[count++] = f;
 #if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
@@ -4583,10 +4697,10 @@ static void* worker_main(void* arg) {
                         continue;
                     }
                     
-                    fiber_task* f = iq_pop(&g_sched.inbox_queues[victim]);
-                    if (f) {
-                        if (cc__task_should_stay_on_target_inbox(f, (int)victim) &&
-                            cc__restore_inbox_task(victim, f)) {
+                    runnable_ref f = iq_pop(&g_sched.inbox_queues[victim]);
+                    if (f.fiber) {
+                        if (cc__task_should_stay_on_target_inbox(f.fiber, (int)victim) &&
+                            cc__restore_inbox_task(victim, f.fiber)) {
                             continue;
                         }
                         batch[count++] = f;
@@ -4618,9 +4732,9 @@ static void* worker_main(void* arg) {
                         }
                         /* Any remaining stolen tasks go to our local queue */
                         for (size_t s = count; s < stolen; s++) {
-                            if (lq_push(my_queue, steal_buf[s]) != 0) {
+                            if (lq_push(my_queue, steal_buf[s].fiber) != 0) {
                                 /* Local queue full, put overflow in global */
-                            sched_global_push(steal_buf[s], worker_id);
+                            sched_global_push(steal_buf[s].fiber, worker_id);
                             }
                         }
                         break;  /* Got work, stop stealing */
@@ -4643,12 +4757,12 @@ static void* worker_main(void* arg) {
             /* Batch execute */
             for (size_t i = 0; i < count; i++) {
                 if (join_debug_enabled()) {
-                    fprintf(stderr, "[worker%d] running fiber=%lu\n", worker_id, (unsigned long)batch[i]->fiber_id);
+                    fprintf(stderr, "[worker%d] running fiber=%lu\n", worker_id, (unsigned long)batch[i].fiber->fiber_id);
                     fflush(stderr);
                 }
                 worker_run_fiber_accounted(batch[i]);
                 if (join_debug_enabled()) {
-                    fprintf(stderr, "[worker%d] finished fiber=%lu\n", worker_id, (unsigned long)batch[i]->fiber_id);
+                    fprintf(stderr, "[worker%d] finished fiber=%lu\n", worker_id, (unsigned long)batch[i].fiber->fiber_id);
                     fflush(stderr);
                 }
             }
@@ -4667,7 +4781,7 @@ static void* worker_main(void* arg) {
                 if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "idle_probe_hit");
                 atomic_store_explicit(&g_sched.worker_heartbeat[worker_id].heartbeat, rdtsc(), memory_order_relaxed);
                 local_only_batches++;
-                worker_run_fiber_accounted(idle_probe);
+                worker_run_fiber_accounted(runnable_ref_snapshot(idle_probe));
                 continue;
             }
         }
@@ -4701,17 +4815,17 @@ static void* worker_main(void* arg) {
             fflush(stderr);
         }
         for (int spin = 0; spin < spin_iters; spin++) {
-            fiber_task* f = lq_pop(my_queue);
-            if (!f) {
+            runnable_ref f = lq_pop(my_queue);
+            if (!f.fiber) {
                 f = iq_pop(&g_sched.inbox_queues[worker_id]);
-                if (f) cc__trace_unpark_pickup(worker_id, "own_inbox_spin", worker_id, f);
-                if (f && join_debug_enabled()) {
-                    fprintf(stderr, "[worker%d] spin got fiber=%lu from inbox\n", worker_id, (unsigned long)f->fiber_id);
+                if (f.fiber) cc__trace_unpark_pickup(worker_id, "own_inbox_spin", worker_id, f.fiber);
+                if (f.fiber && join_debug_enabled()) {
+                    fprintf(stderr, "[worker%d] spin got fiber=%lu from inbox\n", worker_id, (unsigned long)f.fiber->fiber_id);
                     fflush(stderr);
                 }
             }
-            if (f) spin_found_work = 1;
-            if (f) {
+            if (f.fiber) spin_found_work = 1;
+            if (f.fiber) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.spin_found_work, 1, memory_order_relaxed);
                 }
@@ -4731,21 +4845,21 @@ static void* worker_main(void* arg) {
         int yield_iters = SPIN_YIELD_ITERS;
         for (int y = 0; y < yield_iters; y++) {
             sched_yield();
-            fiber_task* f = lq_pop(my_queue);
-            if (!f) {
+            runnable_ref f = lq_pop(my_queue);
+            if (!f.fiber) {
                 f = iq_pop(&g_sched.inbox_queues[worker_id]);
-                if (f) cc__trace_unpark_pickup(worker_id, "own_inbox_yield", worker_id, f);
+                if (f.fiber) cc__trace_unpark_pickup(worker_id, "own_inbox_yield", worker_id, f.fiber);
             }
-            if (!f && y == yield_iters - 1 && sched_global_has_hint_any()) {
+            if (!f.fiber && y == yield_iters - 1 && sched_global_has_hint_any()) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
                 }
                 f = sched_global_pop_for_worker(worker_id);
-                if (f && gap_stats) {
+                if (f.fiber && gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
                 }
             }
-            if (f) {
+            if (f.fiber) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.yield_found_work, 1, memory_order_relaxed);
                 }
@@ -4762,26 +4876,26 @@ static void* worker_main(void* arg) {
         * were backlog-promoted to global and whose wake signal fired while
         * we were still in the spin/yield phase above. */
         {
-            fiber_task* f = NULL;
+            runnable_ref f = runnable_ref_null();
             if (sched_global_has_hint_any()) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_calls_mainloop, 1, memory_order_relaxed);
                 }
                 f = sched_global_pop_for_worker(worker_id);
-                if (f && gap_stats) {
+                if (f.fiber && gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.global_pop_hits_mainloop, 1, memory_order_relaxed);
                 }
             }
-            if (!f && g_sched.num_workers > 1) {
+            if (!f.fiber && g_sched.num_workers > 1) {
                 if (gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_attempts, 1, memory_order_relaxed);
                 }
                 f = worker_try_steal_one(worker_id, &rng_state);
-                if (f && gap_stats) {
+                if (f.fiber && gap_stats) {
                     atomic_fetch_add_explicit(&g_cc_worker_gap_stats.pre_sleep_steal_hits, 1, memory_order_relaxed);
                 }
             }
-            if (f) {
+            if (f.fiber) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 if (lifecycle_track) cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "pre_sleep_steal");
                 worker_run_fiber_accounted(f);
@@ -4833,14 +4947,14 @@ static void* worker_main(void* arg) {
         * - If spawner already pushed, we see the work and process it
         * - If spawner pushes after this check, it will see sleeping>0 and wake us */
         {
-            fiber_task* f = lq_pop(my_queue);
-            if (!f) {
+            runnable_ref f = lq_pop(my_queue);
+            if (!f.fiber) {
                 f = iq_pop(&g_sched.inbox_queues[worker_id]);
-                if (f) cc__trace_unpark_pickup(worker_id, "own_inbox_sleep_recheck", worker_id, f);
+                if (f.fiber) cc__trace_unpark_pickup(worker_id, "own_inbox_sleep_recheck", worker_id, f.fiber);
             }
-            if (f) {
+            if (f.fiber) {
                 if (join_debug_enabled()) {
-                    fprintf(stderr, "[worker%d] post-sleep-inc found fiber=%lu\n", worker_id, (unsigned long)f->fiber_id);
+                    fprintf(stderr, "[worker%d] post-sleep-inc found fiber=%lu\n", worker_id, (unsigned long)f.fiber->fiber_id);
                     fflush(stderr);
                 }
                 atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
@@ -4975,10 +5089,10 @@ static void* worker_main(void* arg) {
             for (size_t j = 0; j < g_sched.num_workers - 1; j++) {
                 size_t victim = (start + j) % g_sched.num_workers;
                 if ((int)victim == worker_id) continue;
-                fiber_task* peer = iq_pop(&g_sched.inbox_queues[victim]);
-                if (!peer) continue;
-                if (cc__task_should_stay_on_target_inbox(peer, (int)victim) &&
-                    cc__restore_inbox_task(victim, peer)) {
+                runnable_ref peer = iq_pop(&g_sched.inbox_queues[victim]);
+                if (!peer.fiber) continue;
+                if (cc__task_should_stay_on_target_inbox(peer.fiber, (int)victim) &&
+                    cc__restore_inbox_task(victim, peer.fiber)) {
                     continue;
                 }
                 worker_run_fiber_accounted(peer);
@@ -5196,24 +5310,24 @@ void cc_fiber_sched_shutdown(void) {
     
     /* Drain queues and free pending tasks to avoid leaks */
     if (g_sched.run_queue) {
-        fiber_task* f;
-        while ((f = sched_global_pop_any())) {
-            fiber_free(f);
+        runnable_ref ref;
+        while ((ref = sched_global_pop_any()).fiber) {
+            fiber_free(ref.fiber);
         }
     }
     if (g_sched.local_queues) {
         for (size_t i = 0; i < g_sched.num_workers; i++) {
-            fiber_task* f;
-            while ((f = lq_pop(&g_sched.local_queues[i]))) {
-                fiber_free(f);
+            runnable_ref ref;
+            while ((ref = lq_pop(&g_sched.local_queues[i])).fiber) {
+                fiber_free(ref.fiber);
             }
         }
     }
     if (g_sched.inbox_queues) {
         for (size_t i = 0; i < g_sched.num_workers; i++) {
-            fiber_task* f;
-            while ((f = iq_pop(&g_sched.inbox_queues[i]))) {
-                fiber_free(f);
+            runnable_ref ref;
+            while ((ref = iq_pop(&g_sched.inbox_queues[i])).fiber) {
+                fiber_free(ref.fiber);
             }
         }
     }
@@ -5272,23 +5386,6 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     f->fn = fn;
     f->arg = arg;
-    f->enqueue_src = 2;
-    f->enqueue_ctrl = 0; /* CTRL_IDLE */
-    int64_t expected_state = CTRL_IDLE;
-    if (!atomic_compare_exchange_strong_explicit(&f->control, &expected_state, CTRL_QUEUED,
-                                                memory_order_release,
-                                                memory_order_relaxed)) {
-        /* Unexpected state - avoid enqueuing a stale fiber. */
-        if (join_debug_enabled()) {
-            fprintf(stderr, "[spawn] unexpected control=%lld for fiber=%lu (expected IDLE)\n",
-                    (long long)expected_state, (unsigned long)f->fiber_id);
-        }
-        fiber_free(f);
-        return NULL;
-    }
-    
-    /* TSan release: establish synchronization with acquire in fiber_entry */
-    TSAN_RELEASE(arg);
     
     /* Reuse existing coro if available (pooling), otherwise create new */
     int reused = 0;
@@ -5383,6 +5480,26 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
             return NULL;
         }
     }
+
+    /* Publish runnable state only after the coroutine is fully initialized.
+     * Otherwise a stale queue entry from a previous incarnation can observe
+     * CTRL_QUEUED and resume a coroutine that is still DEAD / half-reset. */
+    f->enqueue_src = 2;
+    f->enqueue_ctrl = 0; /* CTRL_IDLE */
+    int64_t expected_state = CTRL_IDLE;
+    if (!atomic_compare_exchange_strong_explicit(&f->control, &expected_state, CTRL_QUEUED,
+                                                memory_order_release,
+                                                memory_order_relaxed)) {
+        if (join_debug_enabled()) {
+            fprintf(stderr, "[spawn] unexpected control=%lld for fiber=%lu (expected IDLE)\n",
+                    (long long)expected_state, (unsigned long)f->fiber_id);
+        }
+        fiber_free(f);
+        return NULL;
+    }
+
+    /* TSan release: establish synchronization with acquire in fiber_entry */
+    TSAN_RELEASE(arg);
     
     if (timing) t2 = rdtsc();
     
@@ -6049,7 +6166,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         * step 2 and step 3, their CAS wins; our inbox push adds a harmless stale
         * entry that also fails CAS.  No double-execution is possible. */
         int my_wid = tls_worker_id;
-        if (my_wid >= 0 && g_sched.inbox_queues) {
+        if (cc_join_help_enabled() && my_wid >= 0 && g_sched.inbox_queues) {
             atomic_fetch_add_explicit(&g_cc_join_help_attempts, 1, memory_order_relaxed);
             int64_t ctrl = CTRL_QUEUED;
             int64_t owned = CTRL_OWNED(my_wid);

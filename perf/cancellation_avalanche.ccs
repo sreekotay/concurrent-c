@@ -1,0 +1,408 @@
+/*
+ * cancellation_avalanche.ccs - Mixed blocked wait-tree teardown benchmark
+ *
+ * A nested task tree parks leaves in three wait classes:
+ *   1. recv from never-written channel
+ *   2. send to permanently full channel
+ *   3. deadline-scoped recv from never-written channel
+ *
+ * After a short delay, the parent closes the channels and measures how quickly
+ * the runtime tears the whole tree down while preserving cleanup correctness.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define DEFAULT_DEPTH 2
+#define DEFAULT_WIDTH 6
+#define DEFAULT_ITERATIONS 5
+#define DEFAULT_CANCEL_DELAY_MS 20
+
+enum {
+    WAIT_RECV = 0,
+    WAIT_SEND = 1,
+    WAIT_DEADLINE = 2,
+    WAIT_MIXED = 3,
+    WAIT_RECV_SEND = 4,
+    WAIT_RECV_DEADLINE = 5,
+    WAIT_SEND_DEADLINE = 6,
+    WAIT_RECV_SHARDED = 7,
+    WAIT_RECV_DEADLINE_SHARED = 8,
+};
+
+cc_atomic_int g_allocated = 0;
+cc_atomic_int g_freed = 0;
+cc_atomic_int g_started = 0;
+cc_atomic_int g_finished = 0;
+cc_atomic_int g_recv_waiters = 0;
+cc_atomic_int g_send_waiters = 0;
+cc_atomic_int g_deadline_waiters = 0;
+cc_atomic_int g_recv_finished = 0;
+cc_atomic_int g_send_finished = 0;
+cc_atomic_int g_deadline_finished = 0;
+
+typedef struct {
+    int id;
+    void* data;
+} Resource;
+
+static int g_depth = DEFAULT_DEPTH;
+static int g_width = DEFAULT_WIDTH;
+static int g_iterations = DEFAULT_ITERATIONS;
+static int g_cancel_delay_ms = DEFAULT_CANCEL_DELAY_MS;
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
+
+static int expected_leaf_count(void) {
+    int leaves = 1;
+    for (int i = 0; i <= g_depth; i++) leaves *= g_width;
+    return leaves;
+}
+
+static const char* mode_name(int mode) {
+    switch (mode) {
+        case WAIT_RECV: return "recv";
+        case WAIT_SEND: return "send";
+        case WAIT_DEADLINE: return "deadline";
+        case WAIT_RECV_SEND: return "recv_send";
+        case WAIT_RECV_DEADLINE: return "recv_deadline";
+        case WAIT_SEND_DEADLINE: return "send_deadline";
+        case WAIT_RECV_SHARDED: return "recv_sharded";
+        case WAIT_RECV_DEADLINE_SHARED: return "recv_deadline_shared";
+        default: return "mixed";
+    }
+}
+
+static int parse_mode(void) {
+    const char* v = getenv("CC_AVALANCHE_MODE");
+    if (!v || !*v) return WAIT_MIXED;
+    if (strcmp(v, "recv") == 0) return WAIT_RECV;
+    if (strcmp(v, "send") == 0) return WAIT_SEND;
+    if (strcmp(v, "deadline") == 0) return WAIT_DEADLINE;
+    if (strcmp(v, "recv_send") == 0) return WAIT_RECV_SEND;
+    if (strcmp(v, "recv_deadline") == 0) return WAIT_RECV_DEADLINE;
+    if (strcmp(v, "send_deadline") == 0) return WAIT_SEND_DEADLINE;
+    if (strcmp(v, "recv_sharded") == 0) return WAIT_RECV_SHARDED;
+    if (strcmp(v, "recv_deadline_shared") == 0) return WAIT_RECV_DEADLINE_SHARED;
+    return WAIT_MIXED;
+}
+
+static int leaf_kind_for_mode(int mode, int leaf_id) {
+    switch (mode) {
+        case WAIT_RECV:
+        case WAIT_SEND:
+        case WAIT_DEADLINE:
+            return mode;
+        case WAIT_RECV_SEND:
+            return (leaf_id & 1) == 0 ? WAIT_RECV : WAIT_SEND;
+        case WAIT_RECV_DEADLINE:
+            return (leaf_id & 1) == 0 ? WAIT_RECV : WAIT_DEADLINE;
+        case WAIT_SEND_DEADLINE:
+            return (leaf_id & 1) == 0 ? WAIT_SEND : WAIT_DEADLINE;
+        case WAIT_RECV_SHARDED:
+            return WAIT_RECV;
+        case WAIT_RECV_DEADLINE_SHARED:
+            return (leaf_id & 1) == 0 ? WAIT_RECV : WAIT_DEADLINE;
+        default:
+            return leaf_id % 3;
+    }
+}
+
+static void reset_counters(void) {
+    cc_atomic_store(&g_allocated, 0);
+    cc_atomic_store(&g_freed, 0);
+    cc_atomic_store(&g_started, 0);
+    cc_atomic_store(&g_finished, 0);
+    cc_atomic_store(&g_recv_waiters, 0);
+    cc_atomic_store(&g_send_waiters, 0);
+    cc_atomic_store(&g_deadline_waiters, 0);
+    cc_atomic_store(&g_recv_finished, 0);
+    cc_atomic_store(&g_send_finished, 0);
+    cc_atomic_store(&g_deadline_finished, 0);
+}
+
+Resource* alloc_resource(int id) {
+    Resource* r = malloc(sizeof(Resource));
+    if (!r) return NULL;
+    r->id = id;
+    r->data = malloc(1024);
+    if (!r->data) {
+        free(r);
+        return NULL;
+    }
+    cc_atomic_fetch_add(&g_allocated, 1);
+    return r;
+}
+
+void free_resource(Resource* r) {
+    if (r) {
+        free(r->data);
+        free(r);
+        cc_atomic_fetch_add(&g_freed, 1);
+    }
+}
+
+void recv_leaf(int id, CCChanRx rx) {
+    Resource* res = alloc_resource(id);
+    if (!res) return;
+    @defer free_resource(res);
+
+    cc_atomic_fetch_add(&g_started, 1);
+    cc_atomic_fetch_add(&g_recv_waiters, 1);
+
+    int ignored = 0;
+    int rc = cc_chan_recv(rx.raw, &ignored, sizeof(int));
+    if (rc != 0 && rc != EPIPE && rc != ECANCELED) {
+        fprintf(stderr, "FAIL: recv_leaf rc=%d\n", rc);
+        exit(2);
+    }
+
+    cc_atomic_fetch_add(&g_finished, 1);
+    cc_atomic_fetch_add(&g_recv_finished, 1);
+}
+
+void send_leaf(int id, CCChanTx tx) {
+    Resource* res = alloc_resource(id);
+    if (!res) return;
+    @defer free_resource(res);
+
+    cc_atomic_fetch_add(&g_started, 1);
+    cc_atomic_fetch_add(&g_send_waiters, 1);
+
+    int value = id;
+    int rc = cc_chan_send(tx.raw, &value, sizeof(value));
+    if (rc != 0 && rc != EPIPE && rc != ECANCELED) {
+        fprintf(stderr, "FAIL: send_leaf rc=%d\n", rc);
+        exit(2);
+    }
+
+    cc_atomic_fetch_add(&g_finished, 1);
+    cc_atomic_fetch_add(&g_send_finished, 1);
+}
+
+void deadline_leaf(int id, CCChanRx rx) {
+    Resource* res = alloc_resource(id);
+    if (!res) return;
+    @defer free_resource(res);
+
+    cc_atomic_fetch_add(&g_started, 1);
+    cc_atomic_fetch_add(&g_deadline_waiters, 1);
+
+    int ignored = 0;
+    int rc = 0;
+    @with_deadline(seconds(30)) {
+        rc = cc_chan_recv(rx.raw, &ignored, sizeof(int));
+    }
+    if (rc != 0 && rc != EPIPE && rc != ECANCELED && rc != ETIMEDOUT) {
+        fprintf(stderr, "FAIL: deadline_leaf rc=%d\n", rc);
+        exit(2);
+    }
+
+    cc_atomic_fetch_add(&g_finished, 1);
+    cc_atomic_fetch_add(&g_deadline_finished, 1);
+}
+
+void nested_scope(int depth, int base_id, int mode, CCChanRx recv_rx, CCChanRx recv_rx_alt, CCChanTx send_tx, CCChanRx deadline_rx) {
+    @nursery {
+        for (int i = 0; i < g_width; i++) {
+            int leaf_id = base_id + i;
+            CCChanRx rr = recv_rx;
+            CCChanRx rr_alt = recv_rx_alt;
+            CCChanTx st = send_tx;
+            CCChanRx dr = deadline_rx;
+            if (depth == 0) {
+                int kind = leaf_kind_for_mode(mode, leaf_id);
+                if (kind == WAIT_RECV) {
+                    CCChanRx leaf_rx = (mode == WAIT_RECV_SHARDED && (leaf_id & 1)) ? rr_alt : rr;
+                    spawn(() => [leaf_id, leaf_rx] { recv_leaf(leaf_id, leaf_rx); });
+                } else if (kind == WAIT_SEND) {
+                    spawn(() => [leaf_id, st] { send_leaf(leaf_id, st); });
+                } else {
+                    CCChanRx deadline_wait_rx = (mode == WAIT_RECV_DEADLINE_SHARED) ? rr : dr;
+                    spawn(() => [leaf_id, deadline_wait_rx] { deadline_leaf(leaf_id, deadline_wait_rx); });
+                }
+            } else {
+                int child_depth = depth - 1;
+                int child_base = base_id + i * 100;
+                int child_mode = mode;
+                spawn(() => [child_depth, child_base, child_mode, rr, rr_alt, st, dr] {
+                    nested_scope(child_depth, child_base, child_mode, rr, rr_alt, st, dr);
+                });
+            }
+        }
+    }
+}
+
+int main(void) {
+    cc_sched_set_num_workers(8);
+    int mode = parse_mode();
+    g_depth = env_int_or("CC_AVALANCHE_DEPTH", DEFAULT_DEPTH);
+    g_width = env_int_or("CC_AVALANCHE_WIDTH", DEFAULT_WIDTH);
+    g_iterations = env_int_or("CC_AVALANCHE_ITERATIONS", DEFAULT_ITERATIONS);
+    g_cancel_delay_ms = env_int_or("CC_AVALANCHE_CANCEL_DELAY_MS", DEFAULT_CANCEL_DELAY_MS);
+
+    printf("Cancellation Avalanche Challenge - CC\n");
+    printf("Mode: %s | Depth: %d | Width: %d | Iterations: %d | Cancel delay: %dms\n",
+           mode_name(mode), g_depth, g_width, g_iterations, g_cancel_delay_ms);
+
+    int expected = expected_leaf_count();
+    double total_teardown_ms = 0.0;
+    double max_teardown_ms = 0.0;
+    double total_recv_close_ms = 0.0;
+    double total_send_close_ms = 0.0;
+    double total_deadline_close_ms = 0.0;
+    double total_post_close_join_ms = 0.0;
+    double max_recv_close_ms = 0.0;
+    double max_send_close_ms = 0.0;
+    double max_deadline_close_ms = 0.0;
+    double max_post_close_join_ms = 0.0;
+    int total_recv = 0;
+    int total_send = 0;
+    int total_deadline = 0;
+
+    for (int iter = 0; iter < g_iterations; iter++) {
+        reset_counters();
+
+        int[~ >] recv_tx_h;
+        int[~ <] recv_rx_h;
+        CCChan* recv_ch = channel_pair(&recv_tx_h, &recv_rx_h);
+
+        int[~ >] recv_tx2_h;
+        int[~ <] recv_rx2_h;
+        CCChan* recv_ch2 = channel_pair(&recv_tx2_h, &recv_rx2_h);
+
+        int[~1 >] send_tx_h;
+        int[~1 <] send_rx_h;
+        CCChan* send_ch = channel_pair(&send_tx_h, &send_rx_h);
+
+        int[~ >] deadline_tx_h;
+        int[~ <] deadline_rx_h;
+        CCChan* deadline_ch = channel_pair(&deadline_tx_h, &deadline_rx_h);
+
+        int[~ >] recv_tx = recv_tx_h;
+        int[~ >] recv_tx2 = recv_tx2_h;
+        int[~1 >] send_tx = send_tx_h;
+        int[~ >] deadline_tx = deadline_tx_h;
+        int[~ <] recv_rx = recv_rx_h;
+        int[~ <] recv_rx2 = recv_rx2_h;
+        int[~ <] deadline_rx = deadline_rx_h;
+
+        (void)send_tx.send(-1);
+
+        double teardown_start = 0.0;
+        double recv_close_ms = 0.0;
+        double send_close_ms = 0.0;
+        double deadline_close_ms = 0.0;
+        double post_close_join_ms = 0.0;
+
+        @nursery {
+            CCChanRx rr = recv_rx;
+            CCChanRx rr2 = recv_rx2;
+            CCChanTx st = send_tx;
+            CCChanRx dr = deadline_rx;
+            int root_base = iter * 10000;
+            int root_mode = mode;
+            spawn(() => [rr, rr2, st, dr, root_base, root_mode] {
+                nested_scope(g_depth, root_base, root_mode, rr, rr2, st, dr);
+            });
+            cc_sleep_ms(g_cancel_delay_ms);
+            teardown_start = now_ms();
+            double t = now_ms();
+            recv_tx.close();
+            recv_tx2.close();
+            recv_close_ms = now_ms() - t;
+            t = now_ms();
+            send_tx.close();
+            send_close_ms = now_ms() - t;
+            t = now_ms();
+            deadline_tx.close();
+            deadline_close_ms = now_ms() - t;
+            post_close_join_ms = now_ms() - teardown_start - recv_close_ms - send_close_ms - deadline_close_ms;
+        }
+
+        double teardown_ms = now_ms() - teardown_start;
+        total_teardown_ms += teardown_ms;
+        if (teardown_ms > max_teardown_ms) max_teardown_ms = teardown_ms;
+        total_recv_close_ms += recv_close_ms;
+        total_send_close_ms += send_close_ms;
+        total_deadline_close_ms += deadline_close_ms;
+        total_post_close_join_ms += post_close_join_ms;
+        if (recv_close_ms > max_recv_close_ms) max_recv_close_ms = recv_close_ms;
+        if (send_close_ms > max_send_close_ms) max_send_close_ms = send_close_ms;
+        if (deadline_close_ms > max_deadline_close_ms) max_deadline_close_ms = deadline_close_ms;
+        if (post_close_join_ms > max_post_close_join_ms) max_post_close_join_ms = post_close_join_ms;
+
+        cc_chan_free(recv_ch);
+        cc_chan_free(recv_ch2);
+        cc_chan_free(send_ch);
+        cc_chan_free(deadline_ch);
+
+        int allocated = cc_atomic_load(&g_allocated);
+        int freed = cc_atomic_load(&g_freed);
+        int started = cc_atomic_load(&g_started);
+        int finished = cc_atomic_load(&g_finished);
+        int recv_waiters = cc_atomic_load(&g_recv_waiters);
+        int send_waiters = cc_atomic_load(&g_send_waiters);
+        int deadline_waiters = cc_atomic_load(&g_deadline_waiters);
+        int recv_finished = cc_atomic_load(&g_recv_finished);
+        int send_finished = cc_atomic_load(&g_send_finished);
+        int deadline_finished = cc_atomic_load(&g_deadline_finished);
+
+        total_recv += recv_waiters;
+        total_send += send_waiters;
+        total_deadline += deadline_waiters;
+
+        if (started != expected || finished != expected || allocated != freed ||
+            recv_waiters != recv_finished || send_waiters != send_finished ||
+            deadline_waiters != deadline_finished) {
+            fprintf(stderr,
+                    "FAIL: iter=%d started=%d finished=%d allocated=%d freed=%d leak_of=%d recv=%d/%d send=%d/%d deadline=%d/%d\n",
+                    iter, started, finished, allocated, freed, allocated - freed,
+                    recv_finished, recv_waiters, send_finished, send_waiters,
+                    deadline_finished, deadline_waiters);
+            return 1;
+        }
+
+        printf("Iter %d: started=%d finished=%d allocated=%d freed=%d recv=%d send=%d deadline=%d teardown_ms=%.3f recv_close_ms=%.3f send_close_ms=%.3f deadline_close_ms=%.3f post_close_join_ms=%.3f\n",
+               iter + 1, started, finished, allocated, freed,
+               recv_waiters, send_waiters, deadline_waiters, teardown_ms,
+               recv_close_ms, send_close_ms, deadline_close_ms, post_close_join_ms);
+    }
+
+    printf("SUMMARY status=clean mode=%s leaks=0 started=%d finished=%d avg_teardown_ms=%.3f max_teardown_ms=%.3f avg_recv_close_ms=%.3f avg_send_close_ms=%.3f avg_deadline_close_ms=%.3f avg_post_close_join_ms=%.3f max_recv_close_ms=%.3f max_send_close_ms=%.3f max_deadline_close_ms=%.3f max_post_close_join_ms=%.3f recv=%d send=%d deadline=%d\n",
+           mode_name(mode),
+           expected * g_iterations,
+           expected * g_iterations,
+           total_teardown_ms / (double)g_iterations,
+           max_teardown_ms,
+           total_recv_close_ms / (double)g_iterations,
+           total_send_close_ms / (double)g_iterations,
+           total_deadline_close_ms / (double)g_iterations,
+           total_post_close_join_ms / (double)g_iterations,
+           max_recv_close_ms,
+           max_send_close_ms,
+           max_deadline_close_ms,
+           max_post_close_join_ms,
+           total_recv,
+           total_send,
+           total_deadline);
+    return 0;
+}
