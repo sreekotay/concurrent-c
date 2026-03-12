@@ -109,36 +109,36 @@ CCSchedFiber* cc_sched_v3_worker_next_impl(void) {
     if (worker_id >= 0 && (size_t)worker_id < g_sched.num_workers) {
         local_queue* my_queue = &g_sched.local_queues[worker_id];
 
-        fiber_task* f = lq_pop(my_queue);
-        if (f) {
+        runnable_ref ref = lq_pop(my_queue);
+        if (ref.fiber) {
             if (cc_sched_v3_stats_enabled()) {
                 atomic_fetch_add_explicit(&g_cc_sched_v3_src_local, 1, memory_order_relaxed);
             }
-            return (CCSchedFiber*)f;
+            return (CCSchedFiber*)ref.fiber;
         }
 
-        f = iq_pop(&g_sched.inbox_queues[worker_id]);
-        if (f) {
+        ref = iq_pop(&g_sched.inbox_queues[worker_id]);
+        if (ref.fiber) {
             if (cc_sched_v3_stats_enabled()) {
                 atomic_fetch_add_explicit(&g_cc_sched_v3_src_inbox, 1, memory_order_relaxed);
             }
-            return (CCSchedFiber*)f;
+            return (CCSchedFiber*)ref.fiber;
         }
     }
 
     if (g_sched.run_queue) {
-        fiber_task* f = fq_pop(g_sched.run_queue);
-        if (f) {
+        runnable_ref ref = fq_pop(g_sched.run_queue);
+        if (ref.fiber) {
             if (cc_sched_v3_stats_enabled()) {
                 atomic_fetch_add_explicit(&g_cc_sched_v3_src_global, 1, memory_order_relaxed);
             }
             if (worker_id >= 0 && (size_t)worker_id < g_sched.num_workers) {
                 local_queue* my_queue = &g_sched.local_queues[worker_id];
                 for (int i = 0; i < CC_SCHED_V3_GLOBAL_PREFETCH; i++) {
-                    fiber_task* extra = fq_pop(g_sched.run_queue);
-                    if (!extra) break;
-                    if (lq_push(my_queue, extra) != 0) {
-                        fq_push_blocking(g_sched.run_queue, extra);
+                    runnable_ref extra = fq_pop(g_sched.run_queue);
+                    if (!extra.fiber) break;
+                    if (lq_push(my_queue, extra.fiber) != 0) {
+                        fq_push_blocking(g_sched.run_queue, extra.fiber);
                         break;
                     }
                     if (cc_sched_v3_stats_enabled()) {
@@ -146,7 +146,7 @@ CCSchedFiber* cc_sched_v3_worker_next_impl(void) {
                     }
                 }
             }
-            return (CCSchedFiber*)f;
+            return (CCSchedFiber*)ref.fiber;
         }
     }
 
@@ -155,7 +155,7 @@ CCSchedFiber* cc_sched_v3_worker_next_impl(void) {
             cc_sched_v3_tls_rng_state = (uint64_t)worker_id * 0x9E3779B97F4A7C15ULL + rdtsc();
         }
         local_queue* my_queue = &g_sched.local_queues[worker_id];
-        fiber_task* steal_buf[CC_SCHED_V3_STEAL_PREFETCH];
+        runnable_ref steal_buf[CC_SCHED_V3_STEAL_PREFETCH];
         size_t victim = (size_t)(xorshift64(&cc_sched_v3_tls_rng_state) % g_sched.num_workers);
         if ((int)victim == worker_id) {
             victim = (victim + 1) % g_sched.num_workers;
@@ -167,8 +167,8 @@ CCSchedFiber* cc_sched_v3_worker_next_impl(void) {
                                        CC_SCHED_V3_STEAL_PREFETCH);
         if (stolen > 0) {
             for (size_t i = 1; i < stolen; i++) {
-                if (lq_push(my_queue, steal_buf[i]) != 0) {
-                    fq_push_blocking(g_sched.run_queue, steal_buf[i]);
+                if (lq_push(my_queue, steal_buf[i].fiber) != 0) {
+                    fq_push_blocking(g_sched.run_queue, steal_buf[i].fiber);
                 } else if (cc_sched_v3_stats_enabled()) {
                     atomic_fetch_add_explicit(&g_cc_sched_v3_prefetch_steal_local, 1, memory_order_relaxed);
                 }
@@ -176,7 +176,7 @@ CCSchedFiber* cc_sched_v3_worker_next_impl(void) {
             if (cc_sched_v3_stats_enabled()) {
                 atomic_fetch_add_explicit(&g_cc_sched_v3_src_steal, 1, memory_order_relaxed);
             }
-            return (CCSchedFiber*)steal_buf[0];
+            return (CCSchedFiber*)steal_buf[0].fiber;
         }
     }
 

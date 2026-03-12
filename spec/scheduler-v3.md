@@ -531,6 +531,32 @@ Stale waiter handling:
 - On ticket mismatch, the waker MUST NOT perform wake-claim and MUST NOT enqueue `f`.
 - A waiter node MUST NOT be reclaimed or reused until no concurrent waker can still observe it (e.g., via ticket/epoch/hazard discipline).
 
+### 8.4 Runnable Publication Generation (MUST)
+
+Run queues have the same pooled-frame ABA problem as wait lists. A stale runnable
+publication from an older incarnation of a pooled `Fiber*` MUST NOT become valid
+again just because the frame was recycled for a new fiber.
+
+Required rule:
+
+- Each pooled fiber frame MUST carry a monotonic incarnation counter
+  (`generation`, wrap-safe 64-bit).
+- Every runnable publication into any scheduler queue (local deque, inbox,
+  global queue, overflow node, steal buffer, or equivalent handoff structure)
+  MUST snapshot `(fiber*, generation_at_publish)`.
+- Any dequeuer / runner / wake handoff path that consumes a runnable
+  publication MUST validate `f.generation == generation_at_publish` before
+  treating the entry as a live `RUNNABLE` instance.
+- On generation mismatch, the publication MUST be treated as stale and dropped;
+  it MUST NOT attempt `RUNNABLE -> RUNNING`, wake, restore, or re-enqueue based
+  on the recycled pointer alone.
+
+Interpretation:
+
+- `CTRL_QUEUED` (or equivalent runnable control state) is not by itself a
+  sufficient identity proof for pooled fibers.
+- Raw pointer equality is insufficient once pooling/reuse is enabled.
+
 ---
 
 ## 9. Transition Legality Matrix (1-page)
@@ -597,8 +623,8 @@ This table defines minimal ordering for correctness. Stronger orderings are allo
 
 | Event / LP         | Operation                               | Required order                                                                | Why                                                             |
 | ------------------ | --------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| Enqueue RUNNABLE   | publish run-queue node + state RUNNABLE | state store\_release before enqueue publish OR combined under queue’s release | ensures dequeuer sees RUNNABLE and initialized closure pointers |
-| Dequeue to RUNNING | take from queue                         | acquire on queue pop; then store\_release RUNNING                             | ensures visibility of fiber fields and owner handoff           |
+| Enqueue RUNNABLE   | publish run-queue node + state RUNNABLE | state store\_release before enqueue publish OR combined under queue’s release | ensures dequeuer sees RUNNABLE, initialized closure pointers, and the published generation snapshot |
+| Dequeue to RUNNING | take from queue                         | acquire on queue pop; then store\_release RUNNING                             | ensures visibility of fiber fields, published generation, and owner handoff |
 | Enter PARKING      | state = PARKING                         | store\_release                                                                | wakers that see waiter must not reorder before this             |
 | Waiter publish LP  | publish into wait structure             | release (within publish)                                                      | ensures wakers see waiter node contents and ticket              |
 | Commit PARKED      | CAS PARKING->PARKED                     | CAS with release on success                                                   | establishes parked-ness before yielding                         |
@@ -620,8 +646,8 @@ for LPs while preserving the contract above. LP/code anchors:
 
 | LP | Current code anchor(s) | Substrate note |
 | -- | -- | -- |
-| Enqueue RUNNABLE | `cc/runtime/fiber_sched.c`: `cc_fiber_spawn()` (`CTRL_IDLE -> CTRL_QUEUED` + queue push), `cc__fiber_unpark()` queued path, `worker_commit_park()` self-recovery enqueue | RUNNABLE publication is represented by `CTRL_QUEUED` plus queue visibility |
-| Dequeue to RUNNING | `cc/runtime/fiber_sched.c`: `worker_run_fiber()` CAS `CTRL_QUEUED -> CTRL_OWNED(...)` | Ownership claim and RUNNING handoff are combined in control-word CAS |
+| Enqueue RUNNABLE | `cc/runtime/fiber_sched.c`: `cc_fiber_spawn()` (`CTRL_IDLE -> CTRL_QUEUED` + queue push), `cc__fiber_unpark()` queued path, `worker_commit_park()` self-recovery enqueue | RUNNABLE publication is represented by `CTRL_QUEUED` plus queue visibility, and queued entries carry a generation snapshot per §8.4 |
+| Dequeue to RUNNING | `cc/runtime/fiber_sched.c`: `worker_run_fiber()` CAS `CTRL_QUEUED -> CTRL_OWNED(...)` | Ownership claim and RUNNING handoff are combined in control-word CAS after validating the published generation snapshot |
 | Waiter publish LP | `cc/runtime/channel.c`: `cc__chan_add_waiter()` (`node->in_wait_list = 1` after list link under `ch->mu`); boundary path `cc/runtime/fiber_sched_boundary.c`: `cc_sched_fiber_wait()` publish call | Channel wait-list linkage under mutex is publish LP for channel waiters |
 | Commit PARKED | `cc/runtime/fiber_sched.c`: `worker_commit_park()` CAS `CTRL_OWNED -> CTRL_PARKED` | Park commit occurs in trampoline after stack quiescence |
 | Post-commit check | `cc/runtime/fiber_sched.c`: `worker_commit_park()` `atomic_exchange(pending_unpark, 0, seq_cst)` | Implements wake-pending recovery after park commit |
