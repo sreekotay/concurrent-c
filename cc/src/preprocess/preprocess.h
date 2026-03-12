@@ -51,5 +51,17 @@ char* cc_rewrite_file_ufcs_survival(const char* src, size_t n);
 // AST-aware UFCS sweep.
 char* cc_rewrite_result_ufcs_survival(const char* src, size_t n);
 
+// Rewrite concrete generic/container UFCS that survives into later parsing:
+//   v.get(i) / v.pop() / m.get(k) / c.items.get(i) -> Vec_T_get(...) / Map_K_V_get(...)
+// Used as a parser/codegen survival pass when concrete family receiver types are
+// already visible in source text.
+char* cc_rewrite_generic_family_ufcs_survival(const char* src, size_t n);
+
+// Rewrite parser-style generic family types in final lowered source to concrete
+// family calls:
+//   __CC_VEC(int) v; v.get(1) -> Vec_int_get(&v, 1)
+//   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
+char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
+
 #endif // CC_PREPROCESS_H
 

@@ -1535,6 +1535,543 @@ typedef struct {
     char type[256];
 } CCResultUfcsVar;
 
+typedef struct {
+    char name[128];
+    char type[256];
+} CCUfcsVarInfo;
+
+typedef struct {
+    char struct_name[128];
+    char field_name[128];
+    char field_type[256];
+} CCUfcsFieldInfo;
+
+static void cc__trim_span_ws(const char** start, const char** end) {
+    if (!start || !end || !*start || !*end) return;
+    while (*start < *end && (**start == ' ' || **start == '\t' || **start == '\n' || **start == '\r')) (*start)++;
+    while (*end > *start) {
+        char c = (*end)[-1];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') (*end)--;
+        else break;
+    }
+}
+
+static int cc__type_is_generic_family(const char* type_name) {
+    if (!type_name || !type_name[0]) return 0;
+    return strncmp(type_name, "Vec_", 4) == 0 ||
+           strncmp(type_name, "Map_", 4) == 0 ||
+           strncmp(type_name, "CCOptional_", 11) == 0 ||
+           strncmp(type_name, "CCResult_", 9) == 0;
+}
+
+static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) {
+    size_t len = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name) return;
+    len = strlen(type_name);
+    while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t')) len--;
+    while (len > 0 && type_name[len - 1] == '*') len--;
+    while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t')) len--;
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, type_name, len);
+    out[len] = '\0';
+}
+
+static int cc__type_is_parser_vec(const char* type_name) {
+    return type_name && strncmp(type_name, "__CC_VEC", 8) == 0;
+}
+
+static int cc__type_is_parser_map(const char* type_name) {
+    return type_name && strncmp(type_name, "__CC_MAP", 8) == 0;
+}
+
+static const char* cc__lookup_ufcs_var_type(const CCUfcsVarInfo* vars, size_t var_count, const char* name) {
+    if (!vars || !name) return NULL;
+    for (size_t i = 0; i < var_count; i++) {
+        if (strcmp(vars[i].name, name) == 0) return vars[i].type;
+    }
+    return NULL;
+}
+
+static const char* cc__lookup_ufcs_field_type(const CCUfcsFieldInfo* fields,
+                                              size_t field_count,
+                                              const char* struct_name,
+                                              const char* field_name) {
+    if (!fields || !struct_name || !field_name) return NULL;
+    for (size_t i = 0; i < field_count; i++) {
+        if (strcmp(fields[i].struct_name, struct_name) == 0 &&
+            strcmp(fields[i].field_name, field_name) == 0) {
+            return fields[i].field_type;
+        }
+    }
+    return NULL;
+}
+
+static void cc__record_ufcs_var(CCUfcsVarInfo* vars,
+                                size_t* var_count,
+                                size_t var_cap,
+                                const char* name,
+                                const char* type_name) {
+    if (!vars || !var_count || !name || !type_name || !name[0] || !type_name[0]) return;
+    for (size_t i = 0; i < *var_count; i++) {
+        if (strcmp(vars[i].name, name) == 0) {
+            strncpy(vars[i].type, type_name, sizeof(vars[i].type) - 1);
+            vars[i].type[sizeof(vars[i].type) - 1] = '\0';
+            return;
+        }
+    }
+    if (*var_count >= var_cap) return;
+    strncpy(vars[*var_count].name, name, sizeof(vars[*var_count].name) - 1);
+    vars[*var_count].name[sizeof(vars[*var_count].name) - 1] = '\0';
+    strncpy(vars[*var_count].type, type_name, sizeof(vars[*var_count].type) - 1);
+    vars[*var_count].type[sizeof(vars[*var_count].type) - 1] = '\0';
+    (*var_count)++;
+}
+
+static void cc__record_ufcs_field(CCUfcsFieldInfo* fields,
+                                  size_t* field_count,
+                                  size_t field_cap,
+                                  const char* struct_name,
+                                  const char* field_name,
+                                  const char* field_type) {
+    if (!fields || !field_count || !struct_name || !field_name || !field_type) return;
+    if (*field_count >= field_cap) return;
+    strncpy(fields[*field_count].struct_name, struct_name, sizeof(fields[*field_count].struct_name) - 1);
+    fields[*field_count].struct_name[sizeof(fields[*field_count].struct_name) - 1] = '\0';
+    strncpy(fields[*field_count].field_name, field_name, sizeof(fields[*field_count].field_name) - 1);
+    fields[*field_count].field_name[sizeof(fields[*field_count].field_name) - 1] = '\0';
+    strncpy(fields[*field_count].field_type, field_type, sizeof(fields[*field_count].field_type) - 1);
+    fields[*field_count].field_type[sizeof(fields[*field_count].field_type) - 1] = '\0';
+    (*field_count)++;
+}
+
+static void cc__parse_decl_name_and_type(const char* stmt,
+                                         const char* stmt_end,
+                                         char* out_name,
+                                         size_t out_name_sz,
+                                         char* out_type,
+                                         size_t out_type_sz) {
+    const char* p = stmt;
+    const char* semi = stmt_end;
+    const char* name_s = NULL;
+    size_t name_n = 0;
+    const char* cur;
+    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
+    out_name[0] = '\0';
+    out_type[0] = '\0';
+    while (p < semi && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p >= semi) return;
+    cur = p;
+    while (cur < semi) {
+        if (*cur == '"' || *cur == '\'') {
+            char q = *cur++;
+            while (cur < semi) {
+                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                if (*cur == q) { cur++; break; }
+                cur++;
+            }
+            continue;
+        }
+        if (*cur == '=' || *cur == ';') break;
+        if (!cc_is_ident_start(*cur)) { cur++; continue; }
+        {
+            const char* s = cur++;
+            while (cur < semi && cc_is_ident_char(*cur)) cur++;
+            name_s = s;
+            name_n = (size_t)(cur - s);
+        }
+    }
+    if (!name_s || name_n == 0) return;
+    {
+        const char* ty_s = p;
+        const char* ty_e = name_s;
+        while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
+        while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
+        if (ty_e <= ty_s) return;
+        {
+            size_t type_len = (size_t)(ty_e - ty_s);
+            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
+            memcpy(out_type, ty_s, type_len);
+            out_type[type_len] = '\0';
+        }
+        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
+        memcpy(out_name, name_s, name_n);
+        out_name[name_n] = '\0';
+    }
+}
+
+static void cc__collect_generic_ufcs_types(const char* src,
+                                           size_t n,
+                                           CCUfcsVarInfo* vars,
+                                           size_t* var_count,
+                                           size_t var_cap,
+                                           CCUfcsFieldInfo* fields,
+                                           size_t* field_count,
+                                           size_t field_cap) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    size_t i = 0;
+    CCScannerState scan;
+    if (!src) return;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (i + 6 <= n && memcmp(src + i, "typedef", 7) == 0 && !cc_is_ident_char(src[i + 7])) {
+            size_t j = cc_skip_ws_and_comments(src, n, i + 7);
+            if (j + 5 <= n && memcmp(src + j, "struct", 6) == 0 && !cc_is_ident_char(src[j + 6])) {
+                size_t body_l = cc_skip_ws_and_comments(src, n, j + 6);
+                size_t body_r = 0;
+                if (body_l < n && src[body_l] == '{' && cc_find_matching_brace(src, n, body_l, &body_r)) {
+                    size_t name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
+                    if (name_pos < n && cc_is_ident_start(src[name_pos])) {
+                        char struct_name[128];
+                        size_t sn = 0;
+                        size_t p = name_pos;
+                        while (p < n && cc_is_ident_char(src[p])) {
+                            if (sn + 1 < sizeof(struct_name)) struct_name[sn] = src[p];
+                            sn++;
+                            p++;
+                        }
+                        struct_name[sn < sizeof(struct_name) ? sn : sizeof(struct_name) - 1] = '\0';
+                        {
+                            const char* body = src + body_l + 1;
+                            const char* body_end = src + body_r;
+                            const char* stmt = body;
+                            while (stmt < body_end) {
+                                const char* semi = memchr(stmt, ';', (size_t)(body_end - stmt));
+                                if (!semi) break;
+                                char field_name[128];
+                                char field_type[256];
+                                cc__parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name), field_type, sizeof(field_type));
+                                if (field_name[0] && field_type[0]) {
+                                    cc__record_ufcs_field(fields, field_count, field_cap, struct_name, field_name, field_type);
+                                }
+                                stmt = semi + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!cc_is_ident_start(src[i])) { i++; continue; }
+        {
+            size_t type_start = i;
+            while (i < n && cc_is_ident_char(src[i])) i++;
+            size_t type_end = i;
+            if (type_end - type_start == sizeof("__CC_VEC") - 1 &&
+                memcmp(src + type_start, "__CC_VEC", sizeof("__CC_VEC") - 1) == 0) {
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
+                size_t macro_r = 0;
+                if (macro_l < n && src[macro_l] == '(' && cc_find_matching_paren(src, n, macro_l, &macro_r)) {
+                    type_end = macro_r + 1;
+                }
+            } else if (type_end - type_start == sizeof("__CC_MAP") - 1 &&
+                       memcmp(src + type_start, "__CC_MAP", sizeof("__CC_MAP") - 1) == 0) {
+                size_t macro_l = cc_skip_ws_and_comments(src, n, type_end);
+                size_t macro_r = 0;
+                if (macro_l < n && src[macro_l] == '(' && cc_find_matching_paren(src, n, macro_l, &macro_r)) {
+                    type_end = macro_r + 1;
+                }
+            }
+            size_t j = cc_skip_ws_and_comments(src, n, type_end);
+            while (j < n && src[j] == '*') {
+                j++;
+                j = cc_skip_ws_and_comments(src, n, j);
+            }
+            if (j < n && cc_is_ident_start(src[j])) {
+                size_t var_start = j;
+                while (j < n && cc_is_ident_char(src[j])) j++;
+                if (cc_skip_ws_and_comments(src, n, j) < n && src[cc_skip_ws_and_comments(src, n, j)] != '(') {
+                    char type_name[256];
+                    char var_name[128];
+                    size_t tn = type_end - type_start;
+                    size_t vn = j - var_start;
+                    if (tn >= sizeof(type_name)) tn = sizeof(type_name) - 1;
+                    if (vn >= sizeof(var_name)) vn = sizeof(var_name) - 1;
+                    memcpy(type_name, src + type_start, tn);
+                    type_name[tn] = '\0';
+                    memcpy(var_name, src + var_start, vn);
+                    var_name[vn] = '\0';
+                    {
+                        size_t k = cc_skip_ws_and_comments(src, n, type_end);
+                        while (k < var_start && (src[k] == '*' || src[k] == ' ' || src[k] == '\t')) {
+                            if (src[k] == '*') strncat(type_name, "*", sizeof(type_name) - strlen(type_name) - 1);
+                            k++;
+                        }
+                    }
+                    cc__record_ufcs_var(vars, var_count, var_cap, var_name, type_name);
+                    if (reg) {
+                        const char* existing = cc_type_registry_lookup_var(reg, var_name);
+                        if (!existing) cc_type_registry_add_var(reg, var_name, type_name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
+                                                  const CCUfcsVarInfo* vars,
+                                                  size_t var_count,
+                                                  const CCUfcsFieldInfo* fields,
+                                                  size_t field_count,
+                                                  char* out_type,
+                                                  size_t out_type_sz,
+                                                  int* out_recv_is_ptr) {
+    char expr[256];
+    size_t len;
+    char root[128];
+    const char* p;
+    const char* type_name;
+    int recv_is_ptr = 0;
+    if (!recv || !out_type || out_type_sz == 0) return 0;
+    out_type[0] = '\0';
+    if (out_recv_is_ptr) *out_recv_is_ptr = 0;
+    while (*recv == ' ' || *recv == '\t' || *recv == '\n' || *recv == '\r') recv++;
+    len = strlen(recv);
+    while (len > 0 && (recv[len - 1] == ' ' || recv[len - 1] == '\t' || recv[len - 1] == '\n' || recv[len - 1] == '\r')) len--;
+    if (len == 0 || len >= sizeof(expr)) return 0;
+    memcpy(expr, recv, len);
+    expr[len] = '\0';
+    p = expr;
+    if (*p == '&') {
+        recv_is_ptr = 1;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (!cc_is_ident_start(*p)) return 0;
+    {
+        size_t rn = 0;
+        while (cc_is_ident_char(p[rn])) rn++;
+        if (rn >= sizeof(root)) rn = sizeof(root) - 1;
+        memcpy(root, p, rn);
+        root[rn] = '\0';
+        p += rn;
+    }
+    type_name = cc__lookup_ufcs_var_type(vars, var_count, root);
+    if (!type_name) return 0;
+    strncpy(out_type, type_name, out_type_sz - 1);
+    out_type[out_type_sz - 1] = '\0';
+    while (*p) {
+        char field_name[128];
+        char base_type[256];
+        size_t fn = 0;
+        int is_arrow = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '.' ) {
+            p++;
+        } else if (*p == '-' && p[1] == '>') {
+            is_arrow = 1;
+            recv_is_ptr = 1;
+            p += 2;
+        } else {
+            break;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+        if (!cc_is_ident_start(*p)) return 0;
+        while (cc_is_ident_char(*p)) {
+            if (fn + 1 < sizeof(field_name)) field_name[fn] = *p;
+            fn++;
+            p++;
+        }
+        field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
+        cc__copy_type_base(base_type, sizeof(base_type), out_type);
+        if (is_arrow && base_type[0] == '\0') return 0;
+        type_name = cc__lookup_ufcs_field_type(fields, field_count, base_type, field_name);
+        if (!type_name) return 0;
+        strncpy(out_type, type_name, out_type_sz - 1);
+        out_type[out_type_sz - 1] = '\0';
+    }
+    if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(out_type, '*') != NULL;
+    return 1;
+}
+
+static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
+    CCUfcsVarInfo vars[512];
+    CCUfcsFieldInfo fields[256];
+    size_t var_count = 0, field_count = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc__collect_generic_ufcs_types(src, n, vars, &var_count, sizeof(vars) / sizeof(vars[0]),
+                                   fields, &field_count, sizeof(fields) / sizeof(fields[0]));
+    if (var_count == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t sep_pos;
+        size_t method_start;
+        size_t method_end;
+        size_t recv_start;
+        size_t paren_pos;
+        size_t paren_end = 0;
+        char method_name[64];
+        char recv_expr[256];
+        char recv_type[256];
+        char recv_type_base[256];
+        int recv_is_ptr = 0;
+        int family_by_value = 0;
+        int parser_vec = 0;
+        int parser_map = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (src[i] == '.') {
+            sep_pos = i;
+            method_start = cc_skip_ws_and_comments(src, n, i + 1);
+        } else if (i + 1 < n && src[i] == '-' && src[i + 1] == '>') {
+            sep_pos = i;
+            method_start = cc_skip_ws_and_comments(src, n, i + 2);
+        } else {
+            i++;
+            continue;
+        }
+        if (method_start >= n || !cc_is_ident_start(src[method_start])) { i++; continue; }
+        method_end = method_start;
+        while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+        if (method_end - method_start >= sizeof(method_name)) { i++; continue; }
+        memcpy(method_name, src + method_start, method_end - method_start);
+        method_name[method_end - method_start] = '\0';
+        paren_pos = cc_skip_ws_and_comments(src, n, method_end);
+        if (paren_pos >= n || src[paren_pos] != '(') { i++; continue; }
+        if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i++; continue; }
+        recv_start = cc_scan_back_for_member_access(src, method_start, 0);
+        if (recv_start >= sep_pos || sep_pos - recv_start >= sizeof(recv_expr)) { i++; continue; }
+        {
+            const char* recv_s = src + recv_start;
+            const char* recv_e = src + sep_pos;
+            cc__trim_span_ws(&recv_s, &recv_e);
+            if (recv_e <= recv_s || (size_t)(recv_e - recv_s) >= sizeof(recv_expr)) { i++; continue; }
+            memcpy(recv_expr, recv_s, (size_t)(recv_e - recv_s));
+            recv_expr[recv_e - recv_s] = '\0';
+        }
+        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, vars, var_count, fields, field_count,
+                                                    recv_type, sizeof(recv_type), &recv_is_ptr)) {
+            i++;
+            continue;
+        }
+        cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
+        parser_vec = cc__type_is_parser_vec(recv_type_base);
+        parser_map = cc__type_is_parser_map(recv_type_base);
+        if (!(strncmp(recv_type_base, "Vec_", 4) == 0 ||
+              strncmp(recv_type_base, "Map_", 4) == 0 ||
+              parser_vec || parser_map ||
+              strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
+              strncmp(recv_type_base, "CCResult_", 9) == 0)) {
+            i++;
+            continue;
+        }
+        if (parser_safe && (parser_vec || parser_map) &&
+            !(strcmp(method_name, "push") == 0 ||
+              strcmp(method_name, "insert") == 0 ||
+              strcmp(method_name, "get") == 0 ||
+              strcmp(method_name, "pop") == 0 ||
+              strcmp(method_name, "get_ptr") == 0 ||
+              strcmp(method_name, "len") == 0 ||
+              strcmp(method_name, "remove") == 0)) {
+            i++;
+            continue;
+        }
+        family_by_value = (strncmp(recv_type_base, "Map_", 4) == 0 ||
+                           strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
+                           strncmp(recv_type_base, "CCResult_", 9) == 0);
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+        {
+            char concrete_type[256];
+            concrete_type[0] = '\0';
+            if (parser_vec || parser_map) {
+                const char* lp = strchr(recv_type_base, '(');
+                const char* rp = lp ? strrchr(recv_type_base, ')') : NULL;
+                if (parser_vec && lp && rp && rp > lp + 1) {
+                    char mangled_elem[128];
+                    cc__mangle_type_name(lp + 1, (size_t)(rp - (lp + 1)), mangled_elem, sizeof(mangled_elem));
+                    snprintf(concrete_type, sizeof(concrete_type), "Vec_%s", mangled_elem);
+                } else if (parser_map && lp && rp && rp > lp + 1) {
+                    const char* comma = NULL;
+                    int par = 0, br = 0, brc = 0;
+                    for (const char* q = lp + 1; q < rp; q++) {
+                        if (*q == '(') par++;
+                        else if (*q == ')' && par > 0) par--;
+                        else if (*q == '[') br++;
+                        else if (*q == ']' && br > 0) br--;
+                        else if (*q == '{') brc++;
+                        else if (*q == '}' && brc > 0) brc--;
+                        else if (*q == ',' && par == 0 && br == 0 && brc == 0) {
+                            comma = q;
+                            break;
+                        }
+                    }
+                    if (comma) {
+                        const char* key_s = lp + 1;
+                        const char* key_e = comma;
+                        const char* val_s = comma + 1;
+                        const char* val_e = rp;
+                        char mangled_key[128];
+                        char mangled_val[128];
+                        cc__trim_span_ws(&key_s, &key_e);
+                        cc__trim_span_ws(&val_s, &val_e);
+                        cc__mangle_type_name(key_s, (size_t)(key_e - key_s), mangled_key, sizeof(mangled_key));
+                        cc__mangle_type_name(val_s, (size_t)(val_e - val_s), mangled_val, sizeof(mangled_val));
+                        snprintf(concrete_type, sizeof(concrete_type), "Map_%s_%s", mangled_key, mangled_val);
+                    }
+                }
+            }
+            if (concrete_type[0]) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, concrete_type);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else if (parser_vec && parser_safe) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__cc_vec_generic_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else if (parser_map && parser_safe) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__cc_map_generic_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type_base);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            }
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+        if (family_by_value || recv_is_ptr) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+        } else {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+        }
+        {
+            size_t args_start = paren_pos + 1;
+            size_t args_end = paren_end;
+            while (args_start < args_end &&
+                   (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n' || src[args_start] == '\r')) {
+                args_start++;
+            }
+            while (args_end > args_start &&
+                   (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
+                args_end--;
+            }
+            if (args_end > args_start) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+            }
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+        last_emit = paren_end + 1;
+        i = paren_end + 1;
+    }
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+char* cc_rewrite_generic_family_ufcs_survival(const char* src, size_t n) {
+    return cc__rewrite_generic_family_ufcs_impl(src, n, 1);
+}
+
+char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n) {
+    return cc__rewrite_generic_family_ufcs_impl(src, n, 0);
+}
+
 char* cc_rewrite_result_ufcs_survival(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
 
@@ -1962,7 +2499,7 @@ static char* cc__rewrite_optional_types(const char* src, size_t n, const char* i
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, orig_type);
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, " value; } u; } CCOptional_");
                                 cc_sb_append_cstr(&out, &out_len, &out_cap, mangled);
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, "; ");
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n");
                             }
                             
                             /* Emit CCOptional_T - type name */
@@ -2072,18 +2609,23 @@ static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
             
             if (is_some) {
-                /* cc_some_CCOptional_T(v) -> ((void)(v), (CCOptional_T){.has = 1})
-                   Use comma expression that evaluates arg (for AST) and returns typed result */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)(");
+                /* Keep a parser-visible generic constructor call in the comma lhs,
+                   but make the value of the full expression the typed optional. */
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)__CC_OPTIONAL_SOME(");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
                 cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_end - arg_start);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "), (CCOptional_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 1})");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 1, .u.value = ");
+                cc_sb_append(&out, &out_len, &out_cap, src + arg_start, arg_end - arg_start);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "})");
             } else {
-                /* cc_none_CCOptional_T() -> (CCOptional_T){.has = 0} */
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "(CCOptional_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)__CC_OPTIONAL_NONE(");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 0}");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "), (CCOptional_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, type_name);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "){.has = 0})");
             }
             
             last_emit = j;  /* skip past ')' */
@@ -4537,6 +5079,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     cc__seed_ufcs_receiver_types(chain.src, chain.len);
     CC_CHAIN(chain, cc_rewrite_file_ufcs_survival(chain.src, chain.len));
     CC_CHAIN(chain, cc_rewrite_result_ufcs_survival(chain.src, chain.len));
+    CC_CHAIN(chain, cc_rewrite_generic_family_ufcs_survival(chain.src, chain.len));
     /* P12: result constructors for parser mode */
     CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
     /* P13: normalize if @try ( -> if (try */
@@ -4744,6 +5287,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     cc__seed_ufcs_receiver_types(chain.src, chain.len);
     CC_CHAIN(chain, cc_rewrite_file_ufcs_survival(chain.src, chain.len));
     CC_CHAIN(chain, cc_rewrite_result_ufcs_survival(chain.src, chain.len));
+    CC_CHAIN(chain, cc_rewrite_generic_family_ufcs_survival(chain.src, chain.len));
     /* P12: result constructors for parser mode */
     CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
     /* P13: normalize if @try ( -> if (try */
@@ -5087,6 +5631,12 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     buffers[buf_idx] = cc_rewrite_result_ufcs_survival(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    buffers[buf_idx] = cc_rewrite_generic_family_ufcs_survival(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);

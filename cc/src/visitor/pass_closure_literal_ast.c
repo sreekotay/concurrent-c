@@ -29,6 +29,13 @@ static int cc__is_internal_generated_name(const char* s, size_t n) {
     return s && n >= 5 && strncmp(s, "__cc_", 5) == 0;
 }
 
+static int cc__skip_generated_name_for_capture_scan(const char* s, size_t n) {
+    if (!cc__is_internal_generated_name(s, n)) return 0;
+    /* Auto-block rewrite temps must remain capturable by lowered closures. */
+    if (n >= 8 && strncmp(s, "__cc_ab_", 8) == 0) return 0;
+    return 1;
+}
+
 static size_t cc__find_closure_start_from_arrow(const char* src, size_t span_start, size_t arrow_off) {
     if (!src) return span_start;
     if (arrow_off <= span_start) return span_start;
@@ -409,7 +416,7 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
         while (cur < semi && cc__is_ident_char2(*cur)) cur++;
         size_t n = (size_t)(cur - s);
         if (n == 0 || cc__is_keyword_tok(s, n)) continue;
-        if (cc__is_internal_generated_name(s, n)) continue;
+        if (cc__skip_generated_name_for_capture_scan(s, n)) continue;
         name_s = s;
         name_n = n;
     }
@@ -516,7 +523,39 @@ static void cc__maybe_record_decl(char*** scope_names,
     if (!scope_names || !scope_types || !scope_flags || !scope_counts || depth < 0 || depth >= 256 || !line) return;
     const char* stmt = line;
     while (*stmt) {
-        const char* semi = strchr(stmt, ';');
+        const char* semi = NULL;
+        const char* cur = stmt;
+        int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
+        int in_str = 0, in_chr = 0;
+        while (*cur) {
+            char c = *cur;
+            char c2 = cur[1];
+            if (in_str) {
+                if (c == '\\' && c2) { cur += 2; continue; }
+                if (c == '"') in_str = 0;
+                cur++;
+                continue;
+            }
+            if (in_chr) {
+                if (c == '\\' && c2) { cur += 2; continue; }
+                if (c == '\'') in_chr = 0;
+                cur++;
+                continue;
+            }
+            if (c == '"') { in_str = 1; cur++; continue; }
+            if (c == '\'') { in_chr = 1; cur++; continue; }
+            if (c == '(') { paren_depth++; cur++; continue; }
+            if (c == ')') { if (paren_depth > 0) paren_depth--; cur++; continue; }
+            if (c == '{') { brace_depth++; cur++; continue; }
+            if (c == '}') { if (brace_depth > 0) brace_depth--; cur++; continue; }
+            if (c == '[') { bracket_depth++; cur++; continue; }
+            if (c == ']') { if (bracket_depth > 0) bracket_depth--; cur++; continue; }
+            if (c == ';' && paren_depth == 0 && brace_depth == 0 && bracket_depth == 0) {
+                semi = cur;
+                break;
+            }
+            cur++;
+        }
         if (!semi) break;
         cc__maybe_record_decl_stmt(scope_names, scope_types, scope_flags, scope_counts, depth, stmt, semi);
         stmt = semi + 1;
@@ -574,7 +613,7 @@ static void cc__collect_caps_from_block(char*** scope_names,
         while (cc__is_ident_char2(*p)) p++;
         size_t n = (size_t)(p - s);
         if (cc__is_keyword_tok(s, n)) continue;
-        if (cc__is_internal_generated_name(s, n)) continue;
+        if (cc__skip_generated_name_for_capture_scan(s, n)) continue;
         if (ignore_name0 && strlen(ignore_name0) == n && strncmp(ignore_name0, s, n) == 0) continue;
         if (ignore_name1 && strlen(ignore_name1) == n && strncmp(ignore_name1, s, n) == 0) continue;
         {

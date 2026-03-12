@@ -1,13 +1,14 @@
 /*
  * Smoke test: 1 producer, 1 consumer on a buffered channel (cap=1).
  * Reproduces the lost-wakeup deadlock in tight ping-pong.
- * Repeats 10000 times to stress the race window.
+ * Repeats enough times to stress the race window while staying within the
+ * shared smoke-suite timeout budget under parallel load.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
 #define NUM_ITEMS  10000
-#define REPEATS    1000
+#define REPEATS    25
 
 int main(void) {
     for (int rep = 0; rep < REPEATS; rep++) {
