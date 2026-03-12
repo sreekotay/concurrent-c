@@ -1,0 +1,72 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct {
+    int value;
+#ifdef CC_PARSER_MODE
+    int (*bump)();
+    int (*bump_by)();
+#endif
+} NamedToy;
+
+typedef struct {
+    int value;
+#ifdef CC_PARSER_MODE
+    int (*bump)();
+#endif
+} LambdaToy;
+
+static void named_toy_bump(NamedToy* toy) {
+    toy->value += 1;
+}
+
+static void named_toy_bump_by(NamedToy* toy, int delta) {
+    toy->value += delta;
+}
+
+static void lambda_toy_bump(LambdaToy* toy) {
+    toy->value += 10;
+}
+
+static CCSlice named_toy_ufcs_rewrite(CCSlice method, CCSliceArray argv, CCArena* arena) {
+    CCSlice recv_type = argv.len > 0 ? argv.items[0] : cc_slice_empty();
+    if (recv_type.len == sizeof("NamedToy") - 1 &&
+        memcmp(recv_type.ptr, "NamedToy", recv_type.len) == 0) {
+        return cc_concat(arena, "named_toy_", method);
+    }
+    return cc_concat(arena, "broken_", method);
+}
+
+@comptime {
+    (void)cc_ufcs_register("NamedToy", named_toy_ufcs_rewrite);
+    (void)cc_ufcs_register("LambdaToy",
+        (method, argv, arena) => cc_concat(arena,
+            ((argv.len > 0 &&
+              argv.items[0].len == sizeof("LambdaToy") - 1 &&
+              memcmp(argv.items[0].ptr, "LambdaToy", argv.items[0].len) == 0)
+                 ? cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1)
+                 : cc_slice_from_buffer("broken_", sizeof("broken_") - 1)),
+            method));
+}
+
+int main(void) {
+    @arena {
+        NamedToy named = { 1 };
+        LambdaToy lambda = { 2 };
+        CCString s = cc_string_new(arena);
+
+        named.bump();
+        named.bump_by(4);
+        lambda.bump();
+        s.append("ok");
+
+        assert(named.value == 6);
+        assert(lambda.value == 12);
+        assert(s.len == 2);
+    }
+
+    printf("comptime_prelude_ufcs_smoke: PASS\n");
+    return 0;
+}

@@ -1844,7 +1844,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
-
+        {
+            char* rew_family = cc_rewrite_generic_family_ufcs_concrete(src_ufcs, src_ufcs_len);
+            if (rew_family) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rew_family;
+                src_ufcs_len = strlen(src_ufcs);
+            }
+        }
         /* Final UFCS sweep: earlier statement/syntax rewrites can synthesize new
            method-call surface syntax (notably via @defer / spawn / nursery
            lowering). Reparse the current source and lower any remaining UFCS
@@ -1874,6 +1881,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             cc_edit_buffer_free(&eb);
             cc_tcc_bridge_free_ast(final_ufcs_root);
+        }
+
+        /* Main-source result UFCS can survive the AST sweep in concrete
+           CCResult_* form, especially after earlier type rewrites materialize
+           the receiver type but before C emission. Mirror the closure-body
+           survival rewrite here so methods like r.is_ok() and r.unwrap()
+           always lower before final C compilation. */
+        {
+            char* rewritten = cc_rewrite_result_ufcs_survival(src_ufcs, src_ufcs_len);
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = strlen(src_ufcs);
+            }
         }
         
         /* Insert result type declarations INTO the source at the right position.
