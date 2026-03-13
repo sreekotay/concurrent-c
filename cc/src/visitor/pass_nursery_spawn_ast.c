@@ -159,6 +159,42 @@ static void cc__append_fmt(char** out, size_t* out_len, size_t* out_cap, const c
     free(big);
 }
 
+static char* cc__rewrite_closure_make_for_nursery(const char* s, size_t n, const char* nursery_expr) {
+    if (!s || !nursery_expr) return NULL;
+    size_t lo = 0, hi = n;
+    while (lo < hi && (s[lo] == ' ' || s[lo] == '\t' || s[lo] == '\r' || s[lo] == '\n')) lo++;
+    while (hi > lo && (s[hi - 1] == ' ' || s[hi - 1] == '\t' || s[hi - 1] == '\r' || s[hi - 1] == '\n')) hi--;
+    if (hi <= lo) return NULL;
+
+    size_t fn_s = lo;
+    if (!(isalpha((unsigned char)s[fn_s]) || s[fn_s] == '_')) return NULL;
+    size_t fn_e = fn_s + 1;
+    while (fn_e < hi && (isalnum((unsigned char)s[fn_e]) || s[fn_e] == '_')) fn_e++;
+    if ((fn_e - fn_s) <= 18 || memcmp(s + fn_s, "__cc_closure_make_", 18) != 0) return NULL;
+
+    size_t p = fn_e;
+    while (p < hi && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p >= hi || s[p] != '(' || s[hi - 1] != ')') return NULL;
+
+    size_t args_s = p + 1;
+    size_t args_e = hi - 1;
+    while (args_s < args_e && (s[args_s] == ' ' || s[args_s] == '\t')) args_s++;
+    while (args_e > args_s && (s[args_e - 1] == ' ' || s[args_e - 1] == '\t')) args_e--;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    cc__append_str(&out, &out_len, &out_cap, "__cc_closure_make_nursery_");
+    cc__append_n(&out, &out_len, &out_cap, s + fn_s + 18, fn_e - fn_s - 18);
+    cc__append_str(&out, &out_len, &out_cap, "(");
+    cc__append_str(&out, &out_len, &out_cap, nursery_expr);
+    if (args_e > args_s) {
+        cc__append_str(&out, &out_len, &out_cap, ", ");
+        cc__append_n(&out, &out_len, &out_cap, s + args_s, args_e - args_s);
+    }
+    cc__append_str(&out, &out_len, &out_cap, ")");
+    return out;
+}
+
 /* Local aliases for the shared helpers */
 #define cc__is_ident_start cc_is_ident_start
 #define cc__is_ident_char cc_is_ident_char
@@ -613,31 +649,46 @@ int cc__rewrite_spawn_stmts_with_nodes(const CCASTRoot* root,
                 if (comma_n == 2) cc__trim_span(stmt, &c2_off, &c2_len);
 
                 if (comma_n == 1) {
+                    char nursery_name[32];
+                    snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery%d", nid);
+                    char* nursery_make = cc__rewrite_closure_make_for_nursery(stmt + c0_off, c0_len, nursery_name);
                     cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure1 __c = ");
-                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
+                    if (nursery_make) cc__append_str(&repl, &repl_len, &repl_cap, nursery_make);
+                    else cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
                     cc__append_fmt(&repl, &repl_len, &repl_cap,
                                    "; cc_nursery_spawn_closure1(__cc_nursery%d, __c, (intptr_t)(", nid);
                     cc__append_n(&repl, &repl_len, &repl_cap, stmt + c1_off, c1_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
+                    free(nursery_make);
                 } else {
+                    char nursery_name[32];
+                    snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery%d", nid);
+                    char* nursery_make = cc__rewrite_closure_make_for_nursery(stmt + c0_off, c0_len, nursery_name);
                     cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure2 __c = ");
-                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
+                    if (nursery_make) cc__append_str(&repl, &repl_len, &repl_cap, nursery_make);
+                    else cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
                     cc__append_fmt(&repl, &repl_len, &repl_cap,
                                    "; cc_nursery_spawn_closure2(__cc_nursery%d, __c, (intptr_t)(", nid);
                     cc__append_n(&repl, &repl_len, &repl_cap, stmt + c1_off, c1_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, "), (intptr_t)(");
                     cc__append_n(&repl, &repl_len, &repl_cap, stmt + c2_off, c2_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
+                    free(nursery_make);
                 }
             } else {
                 /* CCClosure0 - use __cc_ns_c prefix so async pass can skip hoisting */
+                char nursery_name[32];
+                snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery%d", nid);
+                char* nursery_make = cc__rewrite_closure_make_for_nursery(stmt + arg_off, arg_len, nursery_name);
                 cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
                 cc__append_fmt(&repl, &repl_len, &repl_cap, "{ CCClosure0 __cc_ns_c%d = ", nid);
-                cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
+                if (nursery_make) cc__append_str(&repl, &repl_len, &repl_cap, nursery_make);
+                else cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
                 cc__append_fmt(&repl, &repl_len, &repl_cap,
                                "; cc_nursery_spawn_closure0(__cc_nursery%d, __cc_ns_c%d); }\n", nid, nid);
+                free(nursery_make);
             }
         }
 
@@ -1229,31 +1280,46 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
                 if (comma_n == 2) cc__trim_span(stmt, &c2_off, &c2_len);
 
                 if (comma_n == 1) {
+                    char nursery_name[32];
+                    snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery%d", nid);
+                    char* nursery_make = cc__rewrite_closure_make_for_nursery(stmt + c0_off, c0_len, nursery_name);
                     cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure1 __c = ");
-                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
+                    if (nursery_make) cc__append_str(&repl, &repl_len, &repl_cap, nursery_make);
+                    else cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
                     cc__append_fmt(&repl, &repl_len, &repl_cap,
                                    "; cc_nursery_spawn_closure1(__cc_nursery%d, __c, (intptr_t)(", nid);
                     cc__append_n(&repl, &repl_len, &repl_cap, stmt + c1_off, c1_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
+                    free(nursery_make);
                 } else {
+                    char nursery_name[32];
+                    snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery%d", nid);
+                    char* nursery_make = cc__rewrite_closure_make_for_nursery(stmt + c0_off, c0_len, nursery_name);
                     cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, "{ CCClosure2 __c = ");
-                    cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
+                    if (nursery_make) cc__append_str(&repl, &repl_len, &repl_cap, nursery_make);
+                    else cc__append_n(&repl, &repl_len, &repl_cap, stmt + c0_off, c0_len);
                     cc__append_fmt(&repl, &repl_len, &repl_cap,
                                    "; cc_nursery_spawn_closure2(__cc_nursery%d, __c, (intptr_t)(", nid);
                     cc__append_n(&repl, &repl_len, &repl_cap, stmt + c1_off, c1_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, "), (intptr_t)(");
                     cc__append_n(&repl, &repl_len, &repl_cap, stmt + c2_off, c2_len);
                     cc__append_str(&repl, &repl_len, &repl_cap, ")); }\n");
+                    free(nursery_make);
                 }
             } else {
                 /* CCClosure0 - use __cc_ns_c prefix so async pass can skip hoisting */
+                char nursery_name[32];
+                snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery%d", nid);
+                char* nursery_make = cc__rewrite_closure_make_for_nursery(stmt + arg_off, arg_len, nursery_name);
                 cc__append_n(&repl, &repl_len, &repl_cap, indent, ind_len);
                 cc__append_fmt(&repl, &repl_len, &repl_cap, "{ CCClosure0 __cc_ns_c%d = ", nid);
-                cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
+                if (nursery_make) cc__append_str(&repl, &repl_len, &repl_cap, nursery_make);
+                else cc__append_n(&repl, &repl_len, &repl_cap, stmt + arg_off, arg_len);
                 cc__append_fmt(&repl, &repl_len, &repl_cap,
                                "; cc_nursery_spawn_closure0(__cc_nursery%d, __cc_ns_c%d); }\n", nid, nid);
+                free(nursery_make);
             }
         }
 
