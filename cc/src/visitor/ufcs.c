@@ -26,7 +26,7 @@ static int is_ident_char(char c) {
 static _Thread_local int g_ufcs_await_context = 0;
 
 // Thread-local context: set to 1 when receiver's resolved type is a pointer.
-// Used for free() dispatch: ptr.free() -> cc_channel_free(ptr) vs handle.free() -> chan_free(handle).
+// Used only by explicit type-driven channel dispatch.
 static _Thread_local int g_ufcs_recv_type_is_ptr = 0;
 
 // Thread-local context: receiver type name from TCC (e.g., "Point", "Vec_int").
@@ -171,6 +171,12 @@ static int cc__is_parser_map_recv_type(const char* type_name) {
             strcmp(type_name, "__CCMapGeneric*") == 0);
 }
 
+static int cc__is_untyped_channel_recv_type(const char* type_name) {
+    return type_name &&
+           (strcmp(type_name, "CCChan") == 0 ||
+            strcmp(type_name, "CCChan*") == 0);
+}
+
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
 typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice method, CCSliceArray argv, CCArena *arena);
 
@@ -263,20 +269,24 @@ static int cc__emit_registered_callable(char* out,
 static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     const char* reg_type_name = NULL;
+    int reg_recv_is_ptr = 0;
     if (!ctx) return;
     memset(ctx, 0, sizeof(*ctx));
     ctx->recv_is_simple = is_ident_only(recv) || is_addr_of_ident(recv);
     ctx->recv_is_addressable = ctx->recv_is_simple || cc__is_addressable_lvalue_expr(recv);
     ctx->recv_type_name = g_ufcs_recv_type;
-    if (reg && is_ident_only(recv)) {
-        reg_type_name = cc_type_registry_lookup_var(reg, recv);
+    if (reg) {
+        reg_type_name = cc_type_registry_resolve_receiver_expr(reg, recv, &reg_recv_is_ptr);
         if (!ctx->recv_type_name ||
             ((cc__is_parser_vec_recv_type(ctx->recv_type_name) ||
-              cc__is_parser_map_recv_type(ctx->recv_type_name)) &&
+              cc__is_parser_map_recv_type(ctx->recv_type_name) ||
+              strcmp(ctx->recv_type_name, "CCChanTx") == 0 ||
+              strcmp(ctx->recv_type_name, "CCChanRx") == 0) &&
              reg_type_name && reg_type_name[0])) {
             ctx->recv_type_name = reg_type_name;
         }
     }
+    if (reg_recv_is_ptr) g_ufcs_recv_type_is_ptr = 1;
     if (ctx->recv_type_name &&
         (strncmp(ctx->recv_type_name, "CCChanTx_", 9) == 0 ||
          strncmp(ctx->recv_type_name, "CCChanRx_", 9) == 0)) {
@@ -356,6 +366,18 @@ static int cc__emit_type_driven_dispatch(char* out,
             }
             return snprintf(out, cap, "%s_%s(%s%s, %s)", ctx->typed_chan_type, method,
                             recv_is_ptr ? "*" : "", recv, args_rewritten);
+        }
+    }
+    if (cc__is_untyped_channel_recv_type(ctx->recv_type_name)) {
+        int chan_recv_is_ptr = recv_is_ptr || g_ufcs_recv_type_is_ptr ||
+                               strcmp(ctx->recv_type_name, "CCChan*") == 0;
+        if (strcmp(method, "close") == 0) {
+            return chan_recv_is_ptr ? snprintf(out, cap, "cc_channel_close(%s)", recv)
+                                    : snprintf(out, cap, "cc_channel_close(&%s)", recv);
+        }
+        if (strcmp(method, "free") == 0) {
+            return chan_recv_is_ptr ? snprintf(out, cap, "cc_channel_free(%s)", recv)
+                                    : snprintf(out, cap, "cc_channel_free(&%s)", recv);
         }
     }
     if (cc__is_parser_vec_recv_type(ctx->recv_type_name)) {
@@ -443,7 +465,9 @@ static int cc__emit_type_driven_dispatch(char* out,
     }
     if (ctx->recv_type_name && ctx->recv_type_name[0] &&
         !cc__is_string_recv_type(ctx->recv_type_name) &&
-        !cc__is_slice_recv_type(ctx->recv_type_name)) {
+        !cc__is_slice_recv_type(ctx->recv_type_name) &&
+        strcmp(ctx->recv_type_name, "CCChanTx") != 0 &&
+        strcmp(ctx->recv_type_name, "CCChanRx") != 0) {
         if (has_args) {
             if (cc__recv_pass_direct(ctx, recv_is_ptr))
                 return snprintf(out, cap, "%s_%s(%s, ", ctx->recv_type_name, method, recv);
@@ -685,16 +709,6 @@ static int emit_desugared_call(char* out,
         return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq(%s, %s)", recv, args_rewritten)
                            : snprintf(out, cap, "CCSlice_eq(&%s, %s)", recv, args_rewritten);
     }
-    
-    if (strcmp(method, "free") == 0) {
-        /* If receiver's resolved type is a pointer (e.g., CCChan*), call cc_channel_free directly.
-           Otherwise use chan_free macro which expects a handle with .raw field. */
-        if (g_ufcs_recv_type_is_ptr) {
-            return snprintf(out, cap, "cc_channel_free(%s%s)", recv_is_ptr ? "*":"", recv);
-        }
-        return snprintf(out, cap, "CC_TYPED_CHAN_FREE((%s%s))", recv_is_ptr ? "*" : "", recv);
-    }
-
     // Generic UFCS (fallback): method(recv, ...) or method(&recv, ...)
     if (has_args) {
         if (cc__recv_pass_direct(&ctx, recv_is_ptr))

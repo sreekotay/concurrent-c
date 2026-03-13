@@ -1556,14 +1556,6 @@ static void cc__trim_span_ws(const char** start, const char** end) {
     }
 }
 
-static int cc__type_is_generic_family(const char* type_name) {
-    if (!type_name || !type_name[0]) return 0;
-    return strncmp(type_name, "Vec_", 4) == 0 ||
-           strncmp(type_name, "Map_", 4) == 0 ||
-           strncmp(type_name, "CCOptional_", 11) == 0 ||
-           strncmp(type_name, "CCResult_", 9) == 0;
-}
-
 static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) {
     size_t len = 0;
     if (!out || out_sz == 0) return;
@@ -2568,7 +2560,6 @@ static char* cc__rewrite_optional_constructors(const char* src, size_t n) {
                 continue;
             }
             
-            size_t paren_open = j;
             j++;  /* skip '(' */
             
             /* Find matching ')' */
@@ -3319,7 +3310,6 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                 return NULL;
             }
             if (j < n && src[j] == '(') {
-                size_t paren_open = j;
                 j++;  /* skip '(' */
                 
                 /* Skip whitespace inside parens */

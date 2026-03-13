@@ -12,16 +12,16 @@ The Concurrent-C Standard Library (`<std/...>`) provides minimal, composable wra
 
 **Philosophy:** Stay small (only battle-tested essentials), be explicit (allocations visible, arenas passed), leverage CC features (T!>(E) for errors, slices for views, channels for streaming), remain optional (header-only, no mandatory linkage), and **use UFCS for natural, discoverable APIs**.
 
-**UFCS Pattern:** All types use method syntax via UFCS. Free functions exist for genericity and composition but methods are primary for users.
+**UFCS Pattern:** Method syntax is primary. UFCS dispatch is resolved from the concrete receiver type, and stdlib families own their lowering contract.
 
 ```c
 // UFCS-first (user API)
 int len = s.len();
 s.trim().split(",").map(process);
 
-// Free function (normative, for genericity)
-int len(&s);
-split(&s, ",");
+// Direct library-call style (when exposed)
+char[:] trimmed = cc_slice_trim(s);
+String built = string_from(&arena, trimmed);
 ```
 
 **Phase 1 Focus:** String manipulation and file I/O—the most commonly requested operations that reduce verbosity in real code.
@@ -32,8 +32,8 @@ split(&s, ",");
 
 ## Design Principles
 
-1. **UFCS-First API:** Methods on types are primary; free functions are normative forms. Users write `s.len()` not `string_length(s)`.
-   - For ordinary stdlib types, UFCS methods desugar to free functions; custom UFCS registrations may define family-specific lowering where documented.
+1. **UFCS-First API:** Methods on types are primary. Users write `s.len()` not `string_length(s)`.
+   - Lowering is normative: each stdlib type or family defines the callee selected for UFCS, including whether the receiver is passed by address or by value.
 
 2. **Header-Only:** All Phase 1 functions defined in headers; no compilation required.
 3. **Explicit Allocation:** All allocations via `Arena*` passed as explicit parameters. No hidden allocators.
@@ -46,6 +46,15 @@ split(&s, ",");
 10. **Prefixed C ABI:** Public C names are prefixed (`CCString`, `CCArena`, `cc_file_*`) to avoid collisions. The compiler automatically resolves short aliases to their prefixed forms. Header implementations are `static inline` to keep stdlib header-only.
 11. **Arena-first collections:** Collections default to arena-backed, bounded growth. Vectors/maps grow by allocating new buffers/tables in the provided arena and reusing them; old buffers remain until the arena resets. Growth fails if the arena is exhausted. Heap-backed helpers (kvec/khash style) are optional, tool-only, and never used by generated code unless explicitly included.
 12. **Async backend auto-probe:** The runtime may auto-select a native async backend (io_uring/kqueue/poll) with a safe fallback to the portable executor. An environment override (e.g., `CC_RUNTIME_BACKEND=executor|poll|io_uring`) can force selection; otherwise a best-available backend is chosen lazily.
+
+### UFCS Lowering Contract
+
+For the standard library, UFCS lowering is part of the normative API surface:
+
+- Dispatch is chosen from the resolved receiver type and the full receiver expression to the left of `.` or `->`.
+- Stdlib families may use ordinary receiver-type method families or `cc_ufcs_register(...)`-owned family lowering.
+- Constructors and helper calls such as `string_new(...)`, `string_from(...)`, `file_open(...)`, `vec_new<T>(...)`, and `map_new<K, V>(...)` are direct library calls, not UFCS.
+- Exact generated helper names are normative where this document names them explicitly; otherwise, the family-level lowering contract is normative.
 
 ### Type Notation Precedence
 
@@ -260,13 +269,13 @@ s.append("Hello")
 
 **Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer (a Vec<char>). Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
 
-**Factory (free function)**
+**Direct library-call constructors**
 
 ```c
 String string_new(Arena* a);
 String string_from(Arena* a, char[:] initial);
 
-// UFCS Methods only
+// UFCS surface methods
 String* String.append(char[:] data);          // Append data, return for chaining
 String* String.push(char[:] data);            // Alias of append
 String* String.push_char(char c);             // Append single character
@@ -278,6 +287,16 @@ char[:] String.as_slice();                    // Get immutable view
 size_t String.len();                          // Length in bytes (Vec<T> UFCS)
 size_t String.cap();                          // Capacity (Vec<T> UFCS)
 ```
+
+**Normative lowering:**
+- `s.append(data)` and `s.push(data)` lower to `cc_string_push(&s, data)`.
+- `s.push_char(c)` lowers to `cc_string_push_char(&s, c)`.
+- `s.push_int(v)` lowers to `cc_string_push_int(&s, v)`.
+- `s.push_uint(v)` lowers to `cc_string_push_uint(&s, v)`.
+- `s.push_float(v)` lowers to `cc_string_push_float(&s, v)`.
+- `s.clear()` lowers to `cc_string_clear(&s)`.
+- `s.as_slice()` lowers to `cc_string_as_slice(&s)`.
+- `s.len()` / `s.cap()` lower through the `String` / `Vec<char>` family UFCS definition.
 
 **Slice Lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
 
@@ -332,6 +351,8 @@ if (has_filter_age)
 #### 1.3 String Slice Operations (char[:])
 
 UFCS methods on immutable `char[:]` views. These are allocation-free and work with any slice.
+
+**Normative lowering:** `char[:]` methods dispatch on the slice family itself. Representative emitted callees include `cc_slice_trim(...)`, `cc_slice_trim_set(...)`, and related `cc_slice_*` helpers for query, transform, and parsing operations.
 
 ##### Core Methods
 
@@ -509,11 +530,11 @@ enum ParseError {
 // Opaque file handle
 typedef struct File File;
 
-// Factory (free function)
+// Direct library-call constructors
 File! file_open(Arena* a, char[:] path, char[:] mode);  // "r", "w", "a"
 @async File! file_open_async(Arena* a, char[:] path, char[:] mode);
 
-// UFCS Methods
+// UFCS surface methods
 
 // Streaming read: returns slice with data, empty slice on EOF.
 // Reads up to n bytes; returns slice of actual bytes read.
@@ -558,6 +579,16 @@ void            File.close();
 @async char[:]!IoError File.read_all_async(Arena* a);
 @async size_t!IoError  File.write_async(char[:] data);
 ```
+
+**Normative lowering:**
+- `file.read(a, n)` lowers to `cc_file_read(&file, a, n, &out)` through the file UFCS family contract.
+- `file.read_line(a)` lowers to `cc_file_read_line(&file, a, &out)`.
+- `file.read_all(a)` lowers to `cc_file_read_all(&file, a)`.
+- `file.write(data)` lowers to `cc_file_write(&file, data)`.
+- `file.read_buf(buf, n)` lowers to `cc_file_read_buf(&file, buf, n, &out)`.
+- `file.write_buf(buf, n)` lowers to `cc_file_write_buf(&file, buf, n)`.
+- `file.seek(off, whence)` / `file.tell()` / `file.size()` / `file.sync()` / `file.close()` lower to the corresponding `cc_file_*` symbol with `&file` as receiver.
+- Async file methods lower through the same file family contract to the corresponding `cc_file_*_async` operation.
 
 **EOF Semantics (Unified):**
 
@@ -631,6 +662,12 @@ void! std_err.write(String s);
 // Overload resolution is handled by UFCS lowering; the compiler selects the
 // best match and emits prefixed C ABI calls (`cc_std_out_write` or
 // `cc_std_out_write_string`) with pointer-based signatures.
+
+**Normative lowering:**
+- `std_out.write(slice)` lowers to `cc_std_out_write(slice)`.
+- `std_err.write(slice)` lowers to `cc_std_err_write(slice)`.
+- `std_out.write(str)` lowers to `cc_std_out_write_string(&str)`.
+- `std_err.write(str)` lowers to `cc_std_err_write_string(&str)`.
 
 **UFCS receiver conversion (general rule):**
 - Overload selection prefers an exact receiver type match.
@@ -788,11 +825,11 @@ CC's collections are **arena-backed**, **generic** (via `<T>` syntax), and **UFC
 // Generic dynamic array type (arena-backed)
 typedef struct Vec<T> Vec<T>;
 
-// Factories (free functions)
+// Direct library-call constructors
 Vec<T> vec_new<T>(Arena* a);
 Vec<T> vec_with_capacity<T>(Arena* a, size_t capacity);
 
-// UFCS Methods only
+// UFCS surface methods
 void    Vec<T>.push(T value);                // Add element (grows as needed)
 T?      Vec<T>.pop();                        // Remove and return last
 T?      Vec<T>.get(size_t index);            // Bounds-safe get (None if out of bounds)
@@ -815,6 +852,8 @@ struct VecIter<T> {
 VecIter<T> Vec<T>.iter();
 T?         VecIter<T>.next();
 ```
+
+**Normative lowering:** `Vec<T>` first lowers to a concrete monomorphized container family. UFCS on that family then lowers to the corresponding concrete method symbol, such as `Vec_int_push(&v, x)` or `Vec_int_get(&v, i)`.
 
 **Examples:**
 
@@ -862,10 +901,10 @@ if (data.len() > 0) {
 // Generic hash map (arena-backed)
 typedef struct Map<K, V> Map<K, V>;
 
-// Factory (free function)
+// Direct library-call constructor
 Map<K, V> map_new<K, V>(Arena* a);
 
-// UFCS Methods only
+// UFCS surface methods
 void    Map<K, V>.insert(K key, V value);    // Insert or update
 V?      Map<K, V>.get(K key);                // Lookup (returns optional)
 V*      Map<K, V>.get_mut(K key);            // Mutable reference
@@ -874,6 +913,8 @@ void    Map<K, V>.clear();                   // Clear all entries
 size_t  Map<K, V>.len();                     // Number of entries
 size_t  Map<K, V>.cap();                     // Capacity
 ```
+
+**Normative lowering:** `Map<K, V>` first lowers to a concrete monomorphized container family. UFCS on that family then lowers to the corresponding concrete method symbol, such as `Map_int_char_ptr_insert(&m, k, v)` or `Map_int_char_ptr_get(&m, k)`.
 
 **Note on Iteration:** Map iteration is intentionally deferred to Phase 2 to avoid prematurely locking in traversal order semantics. Phase 1 focuses on insertion, lookup, and removal.
 
@@ -1326,16 +1367,16 @@ Runtime.set_blocking_pool(
 
 The pattern is consistent with the language:
 
-> **The free function form is normative. `s.len()` is UFCS sugar for `len(&s)`.**
+> **The lowering contract is normative. `s.len()` dispatches from the resolved receiver type and lowers to that type family's stdlib callee contract.**
 
 For each method on a type `T`:
 
 ```c
-// Normative free function
-size_t len(T* self);
+// Direct library-call / C ABI shape for a pointer-style family
+size_t T_len(T* self);
 
-// UFCS method (syntactic sugar)
-size_t T.len();  // desugars to len(&self)
+// UFCS surface form
+size_t T.len();  // lowers through T's UFCS family
 ```
 
 This allows both function composition and ergonomic method chaining.
