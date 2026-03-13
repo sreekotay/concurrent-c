@@ -196,6 +196,54 @@ static inline CCRes(size_t, CCIoError) cc_file_size(CCFile *file) {
     return CCRes_ok(size_t, CCIoError, (size_t)end);
 }
 
+/* Canonical UFCS family wrappers. These preserve the CC surface signatures while
+   still lowering to the explicit C ABI helpers above. */
+static inline int cc_file_ufcs_open(CCFile *file, const char *path, const char *mode) {
+    return cc_file_open(file, path, mode);
+}
+static inline CCRes(CCSlice, CCIoError) cc_file_ufcs_read(CCFile *file, CCArena *arena, size_t n) {
+    CCSlice out = cc_slice_empty();
+    CCRes(bool, CCIoError) status = cc_file_read(file, arena, n, &out);
+    if (cc_is_err(status)) return CCRes_err(CCSlice, CCIoError, cc_error(status));
+    return CCRes_ok(CCSlice, CCIoError, out);
+}
+static inline CCRes(CCSlice, CCIoError) cc_file_ufcs_read_line(CCFile *file, CCArena *arena) {
+    CCSlice out = cc_slice_empty();
+    CCRes(bool, CCIoError) status = cc_file_read_line(file, arena, &out);
+    if (cc_is_err(status)) return CCRes_err(CCSlice, CCIoError, cc_error(status));
+    return CCRes_ok(CCSlice, CCIoError, out);
+}
+static inline CCRes(CCSlice, CCIoError) cc_file_ufcs_read_all(CCFile *file, CCArena *arena) {
+    return cc_file_read_all(file, arena);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_write(CCFile *file, CCSlice data) {
+    return cc_file_write(file, data);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_read_buf(CCFile *file, void *buf, size_t n) {
+    size_t out = 0;
+    CCRes(bool, CCIoError) status = cc_file_read_buf(file, buf, n, &out);
+    if (cc_is_err(status)) return CCRes_err(size_t, CCIoError, cc_error(status));
+    return CCRes_ok(size_t, CCIoError, out);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_write_buf(CCFile *file, const void *buf, size_t n) {
+    return cc_file_write_buf(file, buf, n);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_seek(CCFile *file, long offset, int whence) {
+    return cc_file_seek(file, offset, whence);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_tell(CCFile *file) {
+    return cc_file_tell(file);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_size(CCFile *file) {
+    return cc_file_size(file);
+}
+static inline CCRes(size_t, CCIoError) cc_file_ufcs_sync(CCFile *file) {
+    return cc_file_sync(file);
+}
+static inline void cc_file_ufcs_close(CCFile *file) {
+    cc_file_close(file);
+}
+
 // Stdout/Stderr convenience
 CCRes(size_t, CCIoError) cc_std_out_write(CCSlice data);
 CCRes(size_t, CCIoError) cc_std_err_write(CCSlice data);
@@ -211,6 +259,34 @@ static inline CCRes(size_t, CCIoError) cc_std_out_write_string(const CCString* s
 static inline CCRes(size_t, CCIoError) cc_std_err_write_string(const CCString* s) {
     return cc_std_err_write(cc_string_as_slice(s));
 }
+static inline CCRes(size_t, CCIoError) cc_std_out_write_string_value(CCString s) {
+    return cc_std_out_write_string(&s);
+}
+static inline CCRes(size_t, CCIoError) cc_std_err_write_string_value(CCString s) {
+    return cc_std_err_write_string(&s);
+}
+static inline CCRes(size_t, CCIoError) cc_std_out_write_cstr(const char* s) {
+    return cc_std_out_write(cc__concat_from_cstr(s));
+}
+static inline CCRes(size_t, CCIoError) cc_std_err_write_cstr(const char* s) {
+    return cc_std_err_write(cc__concat_from_cstr(s));
+}
+#define cc_std_out_write_auto(x) _Generic((x), \
+    CCSlice: cc_std_out_write, \
+    char *: cc_std_out_write_cstr, \
+    const char *: cc_std_out_write_cstr, \
+    CCString: cc_std_out_write_string_value, \
+    CCString *: cc_std_out_write_string, \
+    const CCString *: cc_std_out_write_string \
+)(x)
+#define cc_std_err_write_auto(x) _Generic((x), \
+    CCSlice: cc_std_err_write, \
+    char *: cc_std_err_write_cstr, \
+    const char *: cc_std_err_write_cstr, \
+    CCString: cc_std_err_write_string_value, \
+    CCString *: cc_std_err_write_string, \
+    const CCString *: cc_std_err_write_string \
+)(x)
 
 // ------------------------- Path helpers ------------------------------------
 

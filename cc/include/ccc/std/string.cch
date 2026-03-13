@@ -273,6 +273,12 @@ CCString* cc_string_push(CCString *str, CCSlice data);
 CCString* cc_string_clear(CCString *str);
 CCSlice cc_string_as_slice(const CCString *str);
 const char *cc_string_cstr(CCString *str);
+static inline size_t cc_string_len(const CCString *str) {
+    return str ? str->len : 0;
+}
+static inline size_t cc_string_cap(const CCString *str) {
+    return str ? str->cap : 0;
+}
 
 static inline CCString* cc_string_push_char(CCString *str, char c) {
     CCSlice s = cc_slice_from_buffer(&c, 1);
@@ -331,6 +337,12 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
     CCString *: cc__concat_from_string_ptr, \
     const CCString *: cc__concat_from_string_ptr \
 )(x)
+
+#define cc_string_ufcs_append(str, data) cc_string_push((str), cc__concat_arg(data))
+#define cc_string_ufcs_push(str, data) cc_string_push((str), cc__concat_arg(data))
+#define cc_string_ufcs_as_slice(str) cc_string_as_slice((str))
+#define cc_string_ufcs_len(str) cc_string_len((str))
+#define cc_string_ufcs_cap(str) cc_string_cap((str))
 
 #define cc__concat_args_1(a1) \
     cc__concat_arg(a1)
@@ -451,43 +463,69 @@ static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
 }
 
 /*
- * UFCS-compatible slice methods.
- * These allow: s.len(), s.trim(), s.at(i), etc.
- * UFCS transforms s.method() to CCSlice_method(&s).
+ * Canonical slice helpers for UFCS lowering.
+ * These operate on value receivers so the compiler can emit readable
+ * `cc_slice_*` calls while preserving the old CCSlice_* compatibility layer.
  */
-static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
-static inline CCSlice CCSlice_trim(CCSlice* s) {
-    if (!s) return cc_slice_empty();
-    size_t start = cc__trim_left_idx(*s);
-    CCSlice sub = cc_slice_sub(*s, start, s->len);
+static inline size_t cc_slice_len(CCSlice s) { return s.len; }
+static inline CCSlice cc_slice_trim(CCSlice s) {
+    size_t start = cc__trim_left_idx(s);
+    CCSlice sub = cc_slice_sub(s, start, s.len);
     size_t end = cc__trim_right_idx(sub);
     return cc_slice_sub(sub, 0, end);
 }
+static inline CCSlice cc_slice_trim_left(CCSlice s) {
+    return cc_slice_sub(s, cc__trim_left_idx(s), s.len);
+}
+static inline CCSlice cc_slice_trim_right(CCSlice s) {
+    size_t end = cc__trim_right_idx(s);
+    return cc_slice_sub(s, 0, end);
+}
+static inline char cc_slice_at(CCSlice s, size_t idx) {
+    if (idx >= s.len || !s.ptr) return 0;
+    return ((char*)s.ptr)[idx];
+}
+static inline bool cc_slice_starts_with(CCSlice s, CCSlice prefix) {
+    return s.len >= prefix.len && memcmp(s.ptr, prefix.ptr, prefix.len) == 0;
+}
+static inline bool cc_slice_ends_with(CCSlice s, CCSlice suffix) {
+    return s.len >= suffix.len &&
+        memcmp((uint8_t *)s.ptr + (s.len - suffix.len), suffix.ptr, suffix.len) == 0;
+}
+static inline bool cc_slice_eq(CCSlice s, CCSlice other) {
+    return cc__slice_eq(s, other);
+}
+
+/*
+ * UFCS-compatible slice methods.
+ * These allow: s.len(), s.trim(), s.at(i), etc.
+ * UFCS transforms legacy parser-mode or compatibility calls to CCSlice_method(&s).
+ */
+static inline size_t CCSlice_len(CCSlice* s) { return s ? cc_slice_len(*s) : 0; }
+static inline CCSlice CCSlice_trim(CCSlice* s) {
+    return s ? cc_slice_trim(*s) : cc_slice_empty();
+}
 static inline CCSlice CCSlice_trim_left(CCSlice* s) {
-    return s ? cc_slice_sub(*s, cc__trim_left_idx(*s), s->len) : cc_slice_empty();
+    return s ? cc_slice_trim_left(*s) : cc_slice_empty();
 }
 static inline CCSlice CCSlice_trim_right(CCSlice* s) {
-    if (!s) return cc_slice_empty();
-    size_t end = cc__trim_right_idx(*s);
-    return cc_slice_sub(*s, 0, end);
+    return s ? cc_slice_trim_right(*s) : cc_slice_empty();
 }
-static inline bool CCSlice_is_empty(CCSlice* s) { return !s || s->len == 0; }
-static inline char CCSlice_at(CCSlice* s, size_t idx) { 
-    if (!s || idx >= s->len || !s->ptr) return 0;
-    return ((char*)s->ptr)[idx];
+static inline bool CCSlice_is_empty(CCSlice* s) { return !s || cc_slice_is_empty(*s); }
+static inline char CCSlice_at(CCSlice* s, size_t idx) {
+    return s ? cc_slice_at(*s, idx) : 0;
 }
 static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
     return s ? cc_slice_sub(*s, start, end) : cc_slice_empty();
 }
 static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) {
-    return s && s->len >= prefix.len && memcmp(s->ptr, prefix.ptr, prefix.len) == 0;
+    return s ? cc_slice_starts_with(*s, prefix) : false;
 }
 static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
-    return s && s->len >= suffix.len &&
-        memcmp((uint8_t *)s->ptr + (s->len - suffix.len), suffix.ptr, suffix.len) == 0;
+    return s ? cc_slice_ends_with(*s, suffix) : false;
 }
 static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
-    return s && cc__slice_eq(*s, other);
+    return s ? cc_slice_eq(*s, other) : false;
 }
 
 #endif // CC_STD_STRING_H

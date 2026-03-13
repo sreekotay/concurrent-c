@@ -5043,7 +5043,7 @@ This section defines the core standard library using **UFCS-first design**: meth
 - The compiler resolves the receiver to a concrete type before choosing a UFCS lowering rule.
 - Field access and mixed member chains participate normally: `holder.arena.free()` dispatches on `holder.arena`; `ptr->arena.free()` dispatches on `ptr->arena`.
 - When multiple links appear in a chain, the nearest concrete typed receiver in the chain determines dispatch.
-- Exact generated C helper names are backend details unless a specific library section says otherwise.
+- Standard-library families define canonical lowered C namespaces (`cc_file_*`, `cc_arena_*`, `cc_string_*`, `cc_slice_*`, `cc_channel_*`); internal erased-core helpers remain implementation details.
 
 **UFCS Equivalence (Normative):**
 
@@ -5051,7 +5051,7 @@ For named types that use ordinary fallback UFCS, method syntax lowers to the rec
 - Pointer-style APIs receive the address of a value receiver and the pointer itself for a pointer receiver.
 - By-value APIs receive the receiver value directly.
 
-For types or families that register custom UFCS lowering with `cc_ufcs_register(...)`, `x.method(args)` lowers according to the registered handler instead. Libraries may still expose ordinary free-function entry points, but those are a separate API choice rather than the universal rule.
+For types or families that register custom UFCS lowering with `cc_ufcs_register(...)`, `x.method(args)` lowers according to the registered handler instead. Standard-library families may be implemented either by preloaded registrations or by equivalent built-in family contracts; the resulting receiver-type-driven lowering is the normative behavior.
 
 This enables two usage styles:
 
@@ -5101,7 +5101,6 @@ CCUfcsRegistration cc_ufcs_register(const char* pattern, CCUfcsRewriteFn rewrite
 
 **Registration rules:**
 - Registrations appear in `@comptime { ... }` code.
-- Registrations from imported headers or the prelude participate exactly like local registrations in the current translation unit.
 - `pattern` is either an exact type name such as `"CCFile"` or a simple trailing-wildcard family such as `"CCChanTx_*"`.
 - Handlers may be named functions or non-capturing lambdas.
 - Matching is type-based: the resolved receiver type is compared against the registered pattern.
@@ -5121,7 +5120,7 @@ CCUfcsRegistration cc_ufcs_register(const char* pattern, CCUfcsRewriteFn rewrite
 ```c
 static CCSlice cc_file_ufcs(CCSlice method, CCSliceArray argv, CCArena* arena) {
     (void)argv;
-    return cc_concat(arena, "cc_file_", method);
+    return cc_concat(arena, "cc_file_ufcs_", method);
 }
 
 @comptime {
@@ -5133,7 +5132,7 @@ static CCSlice cc_file_ufcs(CCSlice method, CCSliceArray argv, CCArena* arena) {
 }
 ```
 
-This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, optionals, and results. Family-specific naming and lowering remain library policy rather than compiler policy.
+This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, optionals, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 
 ---
 
@@ -5171,8 +5170,8 @@ String* s.push_uint(u64 value);
 String* s.push_float(f64 value);
 String* s.clear();
 char[:] s.as_slice();
-size_t  s.len();                       // Vec<T> UFCS
-size_t  s.cap();                       // Vec<T> UFCS
+size_t  s.len();
+size_t  s.cap();
 ```
 
 **Slice lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `push()`, `clear()`). For stable references, use `.clone(a)`.
@@ -6108,7 +6107,7 @@ V? x = m.get(key);
 m.remove(key);
 ```
 
-**Implementation note:** The `Vec<T>` and `Map<K,V>` syntax is compile-time sugar that lowers to concrete C types (e.g., `Vec<int>` → `Vec_int`). UFCS method calls on containers also lower to function calls (e.g., `v.push(x)` → `Vec_int_push(&v, x)`). See the stdlib spec for full lowering rules.
+**Implementation note:** The `Vec<T>` and `Map<K,V>` syntax is compile-time sugar that lowers to concrete C family types (e.g., `Vec<int>` → `Vec_int`). UFCS method calls on containers lower through that family contract; implementations may use direct concrete symbols such as `Vec_int_push(&v, x)` or thin family wrappers over shared erased-core helpers. See the stdlib spec for full lowering rules.
 
 ---
 

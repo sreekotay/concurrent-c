@@ -289,14 +289,14 @@ size_t String.cap();                          // Capacity (Vec<T> UFCS)
 ```
 
 **Normative lowering:**
-- `s.append(data)` and `s.push(data)` lower to `cc_string_push(&s, data)`.
+- `s.append(data)` and `s.push(data)` lower to `cc_string_ufcs_push(&s, data)`.
 - `s.push_char(c)` lowers to `cc_string_push_char(&s, c)`.
 - `s.push_int(v)` lowers to `cc_string_push_int(&s, v)`.
 - `s.push_uint(v)` lowers to `cc_string_push_uint(&s, v)`.
 - `s.push_float(v)` lowers to `cc_string_push_float(&s, v)`.
 - `s.clear()` lowers to `cc_string_clear(&s)`.
-- `s.as_slice()` lowers to `cc_string_as_slice(&s)`.
-- `s.len()` / `s.cap()` lower through the `String` / `Vec<char>` family UFCS definition.
+- `s.as_slice()` lowers to `cc_string_ufcs_as_slice(&s)`.
+- `s.len()` / `s.cap()` lower to `cc_string_ufcs_len(&s)` / `cc_string_ufcs_cap(&s)`.
 
 **Slice Lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
 
@@ -581,14 +581,15 @@ void            File.close();
 ```
 
 **Normative lowering:**
-- `file.read(a, n)` lowers to `cc_file_read(&file, a, n, &out)` through the file UFCS family contract.
-- `file.read_line(a)` lowers to `cc_file_read_line(&file, a, &out)`.
-- `file.read_all(a)` lowers to `cc_file_read_all(&file, a)`.
-- `file.write(data)` lowers to `cc_file_write(&file, data)`.
-- `file.read_buf(buf, n)` lowers to `cc_file_read_buf(&file, buf, n, &out)`.
-- `file.write_buf(buf, n)` lowers to `cc_file_write_buf(&file, buf, n)`.
-- `file.seek(off, whence)` / `file.tell()` / `file.size()` / `file.sync()` / `file.close()` lower to the corresponding `cc_file_*` symbol with `&file` as receiver.
-- Async file methods lower through the same file family contract to the corresponding `cc_file_*_async` operation.
+- `file.open(path, mode)` lowers to `cc_file_ufcs_open(&file, path, mode)`, then to the underlying `cc_file_open(...)` ABI.
+- `file.read(a, n)` lowers to `cc_file_ufcs_read(&file, a, n)`, which performs the out-parameter ABI call internally.
+- `file.read_line(a)` lowers to `cc_file_ufcs_read_line(&file, a)`.
+- `file.read_all(a)` lowers to `cc_file_ufcs_read_all(&file, a)`.
+- `file.write(data)` lowers to `cc_file_ufcs_write(&file, data)`.
+- `file.read_buf(buf, n)` lowers to `cc_file_ufcs_read_buf(&file, buf, n)`.
+- `file.write_buf(buf, n)` lowers to `cc_file_ufcs_write_buf(&file, buf, n)`.
+- `file.seek(off, whence)` / `file.tell()` / `file.size()` / `file.sync()` / `file.close()` lower to the corresponding `cc_file_ufcs_*` family wrapper with `&file` as receiver.
+- Async file methods use the same file family contract; implementations may lower them through direct `cc_file_*_async` calls or equivalent family wrappers.
 
 **EOF Semantics (Unified):**
 
@@ -853,7 +854,7 @@ VecIter<T> Vec<T>.iter();
 T?         VecIter<T>.next();
 ```
 
-**Normative lowering:** `Vec<T>` first lowers to a concrete monomorphized container family. UFCS on that family then lowers to the corresponding concrete method symbol, such as `Vec_int_push(&v, x)` or `Vec_int_get(&v, i)`.
+**Normative lowering:** `Vec<T>` first lowers to a concrete container family such as `Vec_int`. UFCS then lowers to that family contract. Implementations may realize the concrete family with direct symbols such as `Vec_int_push(&v, x)` or with thin wrappers/macros over a shared erased core; the family contract is normative, the erased core is an implementation detail.
 
 **Examples:**
 
@@ -914,7 +915,7 @@ size_t  Map<K, V>.len();                     // Number of entries
 size_t  Map<K, V>.cap();                     // Capacity
 ```
 
-**Normative lowering:** `Map<K, V>` first lowers to a concrete monomorphized container family. UFCS on that family then lowers to the corresponding concrete method symbol, such as `Map_int_char_ptr_insert(&m, k, v)` or `Map_int_char_ptr_get(&m, k)`.
+**Normative lowering:** `Map<K, V>` first lowers to a concrete container family such as `Map_int_char_ptr`. UFCS then lowers to that family contract. Implementations may realize the concrete family with direct symbols such as `Map_int_char_ptr_insert(&m, k, v)` or with thin wrappers/macros over a shared erased core; the family contract is normative, the erased core is an implementation detail.
 
 **Note on Iteration:** Map iteration is intentionally deferred to Phase 2 to avoid prematurely locking in traversal order semantics. Phase 1 focuses on insertion, lookup, and removal.
 
@@ -1383,7 +1384,7 @@ This allows both function composition and ergonomic method chaining.
 
 ### Generic Container Syntax Lowering
 
-The `Vec<T>` and `Map<K, V>` syntax is **compile-time sugar** that lowers to concrete C types via macro-based monomorphization:
+The `Vec<T>` and `Map<K, V>` syntax is **compile-time sugar** that lowers to concrete C family types. Those family names are stable at the C boundary even when the implementation routes the actual storage/manipulation work through shared erased-core helpers:
 
 ```c
 // CC source code
