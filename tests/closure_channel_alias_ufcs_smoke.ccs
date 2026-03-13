@@ -1,0 +1,32 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+int main(void) {
+    int[~8 >] tx_h;
+    int[~8 <] rx_h;
+    CCChan* ch = channel_pair(&tx_h, &rx_h);
+    CCChanTx tx = tx_h;
+    CCChanRx rx = rx_h;
+    int got = 0;
+    int* got_ptr = &got;
+
+    assert(ch != NULL);
+
+    @closing(tx_h) {
+        spawn(() => [tx] {
+            tx.send(1);
+        });
+        spawn(() => [rx, got_ptr] {
+            int v = 0;
+            rx.recv(&v);
+            *got_ptr = v;
+        });
+    }
+
+    assert(got == 1);
+    ch.free();
+
+    printf("closure_channel_alias_ufcs_smoke: PASS\n");
+    return 0;
+}

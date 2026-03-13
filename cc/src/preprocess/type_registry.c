@@ -6,6 +6,7 @@
  */
 #include "type_registry.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,12 @@ typedef struct {
     char* var_name;
     char* type_name;
 } CCVarTypeEntry;
+
+typedef struct {
+    char* struct_name;
+    char* field_name;
+    char* field_type;
+} CCFieldTypeEntry;
 
 /* Type instantiation storage (stores CCTypeInstantiation with owned strings) */
 typedef struct {
@@ -28,6 +35,11 @@ struct CCTypeRegistry {
     CCVarTypeEntry* vars;
     size_t var_count;
     size_t var_capacity;
+
+    /* Struct field types */
+    CCFieldTypeEntry* fields;
+    size_t field_count;
+    size_t field_capacity;
 
     /* Vec instantiations */
     CCTypeInstEntry* vecs;
@@ -73,6 +85,14 @@ static void free_var_entries(CCVarTypeEntry* entries, size_t count) {
     }
 }
 
+static void free_field_entries(CCFieldTypeEntry* entries, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(entries[i].struct_name);
+        free(entries[i].field_name);
+        free(entries[i].field_type);
+    }
+}
+
 static void free_inst_entries(CCTypeInstEntry* entries, size_t count) {
     for (size_t i = 0; i < count; i++) {
         free(entries[i].mangled_name);
@@ -85,6 +105,8 @@ void cc_type_registry_free(CCTypeRegistry* reg) {
     if (!reg) return;
     free_var_entries(reg->vars, reg->var_count);
     free(reg->vars);
+    free_field_entries(reg->fields, reg->field_count);
+    free(reg->fields);
     free_inst_entries(reg->vecs, reg->vec_count);
     free(reg->vecs);
     free_inst_entries(reg->maps, reg->map_count);
@@ -100,6 +122,8 @@ void cc_type_registry_clear(CCTypeRegistry* reg) {
     if (!reg) return;
     free_var_entries(reg->vars, reg->var_count);
     reg->var_count = 0;
+    free_field_entries(reg->fields, reg->field_count);
+    reg->field_count = 0;
     free_inst_entries(reg->vecs, reg->vec_count);
     reg->vec_count = 0;
     free_inst_entries(reg->maps, reg->map_count);
@@ -122,12 +146,29 @@ static int ensure_var_capacity(CCTypeRegistry* reg, size_t needed) {
     return 0;
 }
 
+static int ensure_field_capacity(CCTypeRegistry* reg, size_t needed) {
+    if (reg->field_capacity >= needed) return 0;
+    size_t new_cap = reg->field_capacity ? reg->field_capacity * 2 : 32;
+    while (new_cap < needed) new_cap *= 2;
+    CCFieldTypeEntry* nv = (CCFieldTypeEntry*)realloc(reg->fields, new_cap * sizeof(CCFieldTypeEntry));
+    if (!nv) return -1;
+    reg->fields = nv;
+    reg->field_capacity = new_cap;
+    return 0;
+}
+
 int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const char* type_name) {
     if (!reg || !var_name || !type_name) return -1;
 
     /* Check for existing entry and update */
     for (size_t i = 0; i < reg->var_count; i++) {
         if (strcmp(reg->vars[i].var_name, var_name) == 0) {
+            if (((strncmp(reg->vars[i].type_name, "CCChanTx_", 9) == 0 &&
+                  strcmp(type_name, "CCChanTx") == 0) ||
+                 (strncmp(reg->vars[i].type_name, "CCChanRx_", 9) == 0 &&
+                  strcmp(type_name, "CCChanRx") == 0))) {
+                return 0;
+            }
             free(reg->vars[i].type_name);
             reg->vars[i].type_name = strdup(type_name);
             return reg->vars[i].type_name ? 0 : -1;
@@ -154,6 +195,137 @@ const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_nam
         }
     }
     return NULL;
+}
+
+int cc_type_registry_add_field(CCTypeRegistry* reg,
+                               const char* struct_name,
+                               const char* field_name,
+                               const char* field_type) {
+    if (!reg || !struct_name || !field_name || !field_type) return -1;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (strcmp(reg->fields[i].struct_name, struct_name) == 0 &&
+            strcmp(reg->fields[i].field_name, field_name) == 0) {
+            free(reg->fields[i].field_type);
+            reg->fields[i].field_type = strdup(field_type);
+            return reg->fields[i].field_type ? 0 : -1;
+        }
+    }
+    if (ensure_field_capacity(reg, reg->field_count + 1) != 0) return -1;
+    reg->fields[reg->field_count].struct_name = strdup(struct_name);
+    reg->fields[reg->field_count].field_name = strdup(field_name);
+    reg->fields[reg->field_count].field_type = strdup(field_type);
+    if (!reg->fields[reg->field_count].struct_name ||
+        !reg->fields[reg->field_count].field_name ||
+        !reg->fields[reg->field_count].field_type) {
+        free(reg->fields[reg->field_count].struct_name);
+        free(reg->fields[reg->field_count].field_name);
+        free(reg->fields[reg->field_count].field_type);
+        return -1;
+    }
+    reg->field_count++;
+    return 0;
+}
+
+const char* cc_type_registry_lookup_field(CCTypeRegistry* reg,
+                                          const char* struct_name,
+                                          const char* field_name) {
+    if (!reg || !struct_name || !field_name) return NULL;
+    for (size_t i = 0; i < reg->field_count; i++) {
+        if (strcmp(reg->fields[i].struct_name, struct_name) == 0 &&
+            strcmp(reg->fields[i].field_name, field_name) == 0) {
+            return reg->fields[i].field_type;
+        }
+    }
+    return NULL;
+}
+
+static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) {
+    size_t len = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name) return;
+    len = strlen(type_name);
+    while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t')) len--;
+    while (len > 0 && type_name[len - 1] == '*') len--;
+    while (len > 0 && (type_name[len - 1] == ' ' || type_name[len - 1] == '\t')) len--;
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, type_name, len);
+    out[len] = '\0';
+}
+
+const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
+                                                   const char* recv_expr,
+                                                   int* out_recv_is_ptr) {
+    static _Thread_local char resolved_type[256];
+    char expr[256];
+    char root[128];
+    const char* p;
+    const char* type_name;
+    int recv_is_ptr = 0;
+    size_t len;
+    if (out_recv_is_ptr) *out_recv_is_ptr = 0;
+    if (!reg || !recv_expr) return NULL;
+    while (*recv_expr == ' ' || *recv_expr == '\t' || *recv_expr == '\n' || *recv_expr == '\r') recv_expr++;
+    len = strlen(recv_expr);
+    while (len > 0 &&
+           (recv_expr[len - 1] == ' ' || recv_expr[len - 1] == '\t' ||
+            recv_expr[len - 1] == '\n' || recv_expr[len - 1] == '\r')) len--;
+    if (len == 0 || len >= sizeof(expr)) return NULL;
+    memcpy(expr, recv_expr, len);
+    expr[len] = '\0';
+    p = expr;
+    if (*p == '&') {
+        recv_is_ptr = 1;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (!(isalnum((unsigned char)*p) || *p == '_') || !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
+        return NULL;
+    {
+        size_t rn = 0;
+        while (p[rn] && (isalnum((unsigned char)p[rn]) || p[rn] == '_')) rn++;
+        if (rn >= sizeof(root)) rn = sizeof(root) - 1;
+        memcpy(root, p, rn);
+        root[rn] = '\0';
+        p += rn;
+    }
+    type_name = cc_type_registry_lookup_var(reg, root);
+    if (!type_name) return NULL;
+    strncpy(resolved_type, type_name, sizeof(resolved_type) - 1);
+    resolved_type[sizeof(resolved_type) - 1] = '\0';
+    while (*p) {
+        char field_name[128];
+        char base_type[256];
+        size_t fn = 0;
+        int is_arrow = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '.') {
+            p++;
+        } else if (*p == '-' && p[1] == '>') {
+            is_arrow = 1;
+            recv_is_ptr = 1;
+            p += 2;
+        } else {
+            break;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+        if (!(isalnum((unsigned char)*p) || *p == '_') || !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
+            return NULL;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
+            if (fn + 1 < sizeof(field_name)) field_name[fn] = *p;
+            fn++;
+            p++;
+        }
+        field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
+        cc__copy_type_base(base_type, sizeof(base_type), resolved_type);
+        if (is_arrow && base_type[0] == '\0') return NULL;
+        type_name = cc_type_registry_lookup_field(reg, base_type, field_name);
+        if (!type_name) return NULL;
+        strncpy(resolved_type, type_name, sizeof(resolved_type) - 1);
+        resolved_type[sizeof(resolved_type) - 1] = '\0';
+    }
+    if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(resolved_type, '*') != NULL;
+    return resolved_type;
 }
 
 const char* cc_type_registry_lookup_channel_elem_type(CCTypeRegistry* reg, const char* handle_type_name) {

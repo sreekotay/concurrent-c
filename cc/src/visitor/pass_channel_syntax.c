@@ -118,6 +118,77 @@ static int cc__lookup_channel_elem_type_for_expr(const char* src,
     return 1;
 }
 
+static void cc__record_chan_handle_alias_decls(const char* src, size_t n) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    size_t i = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    if (!src || n == 0 || !reg) return;
+
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        if ((i == 0 || !cc__is_ident_char_local2(src[i - 1])) &&
+            ((i + 8 <= n && memcmp(src + i, "CCChanTx", 8) == 0 &&
+              (i + 8 == n || !cc__is_ident_char_local2(src[i + 8]))) ||
+             (i + 8 <= n && memcmp(src + i, "CCChanRx", 8) == 0 &&
+              (i + 8 == n || !cc__is_ident_char_local2(src[i + 8]))))) {
+            const char* generic_type = src + i;
+            size_t generic_len = 8;
+            size_t p = i + generic_len;
+            size_t var_start, var_end, rhs_start, rhs_end;
+            char var_name[128];
+            char rhs_name[128];
+            const char* rhs_type;
+            int is_tx = (memcmp(generic_type, "CCChanTx", 8) == 0);
+
+            while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p >= n || !cc__is_ident_start_local2(src[p])) { i++; continue; }
+            var_start = p;
+            while (p < n && cc__is_ident_char_local2(src[p])) p++;
+            var_end = p;
+            while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p >= n || src[p] != '=') { i++; continue; }
+            p++;
+            while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p >= n || !cc__is_ident_start_local2(src[p])) { i++; continue; }
+            rhs_start = p;
+            while (p < n && cc__is_ident_char_local2(src[p])) p++;
+            rhs_end = p;
+            while (p < n && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p >= n || src[p] != ';') { i++; continue; }
+
+            if (var_end - var_start >= sizeof(var_name) || rhs_end - rhs_start >= sizeof(rhs_name)) { i++; continue; }
+            memcpy(var_name, src + var_start, var_end - var_start);
+            var_name[var_end - var_start] = 0;
+            memcpy(rhs_name, src + rhs_start, rhs_end - rhs_start);
+            rhs_name[rhs_end - rhs_start] = 0;
+
+            rhs_type = cc_type_registry_lookup_var(reg, rhs_name);
+            if (!rhs_type || !rhs_type[0]) { i++; continue; }
+            if (is_tx) {
+                if (strncmp(rhs_type, "CCChanTx_", 9) != 0) { i++; continue; }
+            } else {
+                if (strncmp(rhs_type, "CCChanRx_", 9) != 0) { i++; continue; }
+            }
+
+            cc_type_registry_add_var(reg, var_name, rhs_type);
+            i = p + 1;
+            continue;
+        }
+
+        i++;
+    }
+}
+
 static void cc__format_channel_task_value_type(const char* elem_ty, char* out, size_t out_cap) {
     const char* bang = NULL;
     const char* lpar = NULL;
@@ -1342,6 +1413,7 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
     if (last_emit < n) {
         cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
     }
+    if (out) cc__record_chan_handle_alias_decls(out, out_len);
     return out;
 }
 

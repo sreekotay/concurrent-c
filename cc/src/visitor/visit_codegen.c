@@ -47,6 +47,7 @@
 #define cc__is_ident_char_local cc_is_ident_char
 
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n);
+static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
 
 /* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
@@ -773,6 +774,7 @@ static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n
 static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     if (!symbols || !reg || !src) return;
+    cc__collect_ufcs_field_and_var_types(src, n);
     for (size_t ui = 0; ui < cc_symbols_ufcs_count(symbols); ++ui) {
         int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
         const char* type_name = cc_symbols_ufcs_pattern(symbols, ui);
@@ -796,6 +798,7 @@ static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const 
                 p = cc__skip_ws_codegen(src, n, p);
                 if (p < n && (isalpha((unsigned char)src[p]) || src[p] == '_')) {
                     char var_name[128];
+                    const char* final_type_name = type_name;
                     size_t v = p;
                     size_t vn = 0;
                     while (v < n && (isalnum((unsigned char)src[v]) || src[v] == '_')) {
@@ -806,11 +809,148 @@ static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const 
                     var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
                     v = cc__skip_ws_codegen(src, n, v);
                     if (v < n && src[v] == '(') continue; /* function decl, not variable */
-                    cc_type_registry_add_var(reg, var_name, type_name);
+                    if ((strcmp(type_name, "CCChanTx") == 0 || strcmp(type_name, "CCChanRx") == 0) &&
+                        v < n && src[v] == '=') {
+                        size_t rhs = cc__skip_ws_codegen(src, n, v + 1);
+                        if (rhs < n && (isalpha((unsigned char)src[rhs]) || src[rhs] == '_')) {
+                            char rhs_name[128];
+                            size_t rn = 0;
+                            size_t r = rhs;
+                            while (r < n && (isalnum((unsigned char)src[r]) || src[r] == '_')) {
+                                if (rn + 1 < sizeof(rhs_name)) rhs_name[rn] = src[r];
+                                rn++;
+                                r++;
+                            }
+                            rhs_name[rn < sizeof(rhs_name) ? rn : sizeof(rhs_name) - 1] = '\0';
+                            if (rhs_name[0]) {
+                                const char* rhs_type_name = cc_type_registry_lookup_var(reg, rhs_name);
+                                if (rhs_type_name &&
+                                    ((strcmp(type_name, "CCChanTx") == 0 && strncmp(rhs_type_name, "CCChanTx_", 9) == 0) ||
+                                     (strcmp(type_name, "CCChanRx") == 0 && strncmp(rhs_type_name, "CCChanRx_", 9) == 0))) {
+                                    final_type_name = rhs_type_name;
+                                }
+                            }
+                        }
+                    }
+                    cc_type_registry_add_var(reg, var_name, final_type_name);
                 }
             }
             i += type_len ? (type_len - 1) : 0;
         }
+    }
+}
+
+static void cc__parse_decl_name_and_type_codegen(const char* stmt,
+                                                 const char* stmt_end,
+                                                 char* out_name,
+                                                 size_t out_name_sz,
+                                                 char* out_type,
+                                                 size_t out_type_sz) {
+    const char* p = stmt;
+    const char* semi = stmt_end;
+    const char* name_s = NULL;
+    size_t name_n = 0;
+    const char* cur;
+    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
+    out_name[0] = '\0';
+    out_type[0] = '\0';
+    while (p < semi && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    if (p >= semi) return;
+    cur = p;
+    while (cur < semi) {
+        if (*cur == '"' || *cur == '\'') {
+            char q = *cur++;
+            while (cur < semi) {
+                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                if (*cur == q) { cur++; break; }
+                cur++;
+            }
+            continue;
+        }
+        if (*cur == '=' || *cur == ';') break;
+        if (!(isalpha((unsigned char)*cur) || *cur == '_')) { cur++; continue; }
+        {
+            const char* s = cur++;
+            while (cur < semi && (isalnum((unsigned char)*cur) || *cur == '_')) cur++;
+            name_s = s;
+            name_n = (size_t)(cur - s);
+        }
+    }
+    if (!name_s || name_n == 0) return;
+    {
+        const char* ty_s = p;
+        const char* ty_e = name_s;
+        while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
+        while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
+        if (ty_e <= ty_s) return;
+        {
+            size_t type_len = (size_t)(ty_e - ty_s);
+            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
+            memcpy(out_type, ty_s, type_len);
+            out_type[type_len] = '\0';
+        }
+        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
+        memcpy(out_name, name_s, name_n);
+        out_name[name_n] = '\0';
+    }
+}
+
+static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!reg || !src) return;
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        if (i + 7 < n && memcmp(src + i, "typedef", 7) == 0 && !isalnum((unsigned char)src[i + 7]) && src[i + 7] != '_') {
+            size_t j = cc__skip_ws_codegen(src, n, i + 7);
+            if (j + 6 < n && memcmp(src + j, "struct", 6) == 0 && !isalnum((unsigned char)src[j + 6]) && src[j + 6] != '_') {
+                size_t body_l = cc__skip_ws_codegen(src, n, j + 6);
+                size_t body_r = 0;
+                if (body_l < n && src[body_l] == '{' && cc__find_matching_brace_codegen(src, n, body_l, &body_r)) {
+                    size_t name_pos = cc__skip_ws_codegen(src, n, body_r + 1);
+                    if (name_pos < n && (isalpha((unsigned char)src[name_pos]) || src[name_pos] == '_')) {
+                        char struct_name[128];
+                        size_t sn = 0;
+                        size_t p = name_pos;
+                        while (p < n && (isalnum((unsigned char)src[p]) || src[p] == '_')) {
+                            if (sn + 1 < sizeof(struct_name)) struct_name[sn] = src[p];
+                            sn++;
+                            p++;
+                        }
+                        struct_name[sn < sizeof(struct_name) ? sn : sizeof(struct_name) - 1] = '\0';
+                        {
+                            const char* body = src + body_l + 1;
+                            const char* body_end = src + body_r;
+                            const char* stmt = body;
+                            while (stmt < body_end) {
+                                const char* semi = memchr(stmt, ';', (size_t)(body_end - stmt));
+                                if (!semi) break;
+                                char field_name[128];
+                                char field_type[256];
+                                cc__parse_decl_name_and_type_codegen(stmt, semi, field_name, sizeof(field_name),
+                                                                     field_type, sizeof(field_type));
+                                if (field_name[0] && field_type[0]) {
+                                    cc_type_registry_add_field(reg, struct_name, field_name, field_type);
+                                }
+                                stmt = semi + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i++;
     }
 }
 

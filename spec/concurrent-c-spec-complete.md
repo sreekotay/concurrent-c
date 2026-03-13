@@ -601,7 +601,7 @@ int ! IoError read_int (char [ : ] data) {
 
 ### Method Call Style
 
-Both UFCS and free function forms are valid and equivalent. Choose based on context:
+UFCS is the primary surface style for receiver-oriented APIs. Direct library-call forms may also be provided where they improve composition or readability.
 
 **Use UFCS for method chains:**
 ```c
@@ -611,16 +611,16 @@ char[:] result = input
     .slice(0, 10);
 ```
 
-**Use free functions for composition:**
+**Use direct library calls for composition:**
 ```c
 char[:] result = slice(lower(trim(input), &arena), 0, 10);
 ```
 
 **Mix as needed:**
 ```c
-// Both valid; choose based on readability
+// Choose the style the library exposes and that reads best
 x.method(y)       // UFCS style
-method(x, y)      // Free function style
+method(x, y)      // Direct library call style
 ```
 
 ### Attribute Placement
@@ -929,7 +929,7 @@ if (cc_is_err(res)) {
 int value = cc_value(res);
 ```
 
-**Lowering:** `r.unwrap()` → `CCResult_T_E_unwrap(r)`, etc.
+**Lowering:** `r.unwrap()` lowers through the result-family UFCS definition for `T!>(E)`; a backend may emit symbols such as `CCResult_T_E_unwrap(r)` or an equivalent family helper.
 
 **Rule (unwrap panic):** Calling `.unwrap()` on an error result prints an error message and aborts. Use `.unwrap_or(default)` or check `.is_ok()` first if error is possible.
 
@@ -2193,7 +2193,7 @@ Key properties:
 * `send` / `send_take` are non-fatal on closed channels
 * Slices are copied by default; transfer is explicit
 
-**Rule:** Channels participate in the ordinary UFCS model at the **language surface**, but use receiver-first operations with explicit output storage rather than zero-argument receive.
+**Rule:** Channels participate in the ordinary UFCS model at the **language surface**, but use explicit send/receive operations with caller-provided output storage rather than zero-argument receive.
 
 The normative surface form is:
 
@@ -2202,11 +2202,11 @@ The normative surface form is:
 * `h.close()`
 * `h.free()`
 
-**Rule (lowering contract):** UFCS lowering is part of the language contract. By default, ordinary UFCS calls follow receiver-first lowering. Libraries may override that lowering with `cc_ufcs_register(...)` (see **§8 Standard Library / UFCS**). The emitted callee symbol and whether the receiver is passed by address or by value are both part of the contract.
+**Rule (dispatch):** UFCS dispatch is selected from the resolved receiver type, not from the method name alone. The receiver is the full expression to the left of `.` or `->`.
 
-**Current channel note:** The standard library channel families use library-owned UFCS lowering over shared runtime helpers. Generated C may target helpers such as `cc_channel_ufcs_*`, `CC_TYPED_CHAN_*`, `cc_channel_send_task`, and `cc_channel_recv_task`; those names are backend details, but the surface operations above are normative.
+**Rule (channel families):** Standard channels are library-owned UFCS families keyed by the concrete channel handle type (`CCChanTx_*`, `CCChanRx_*`). The surface operations above are normative; exact generated helper names are backend details.
 
-**Intended DX:**
+**Examples:**
 
 ```c
 // Native CCC (preferred)
@@ -2215,11 +2215,11 @@ await rx.recv(&result);
 rx.close();
 ch.free();
 
-// Equivalent language-level lowering
-send(tx, job);
-await recv(rx, &result);
-close(rx);
-free(ch);
+// Dispatch uses the resolved receiver expression
+ctx.tx.send(job);
+worker->rx.recv(&result);
+holder.handle.close();
+ptr->handle.free();
 ```
 
 **Rule:** `await` is only valid inside `@async` functions.
@@ -5034,17 +5034,22 @@ The blocking model is intentionally conservative:
 
 ## 8. Standard Library (UFCS-First Design)
 
-This section defines the core standard library using **UFCS-first design**: method syntax is primary and ergonomic, free functions are normative.
+This section defines the core standard library using **UFCS-first design**: method syntax is primary and UFCS lowering is type-directed and library-owned.
 
-**Design principle:** The free function form remains the ordinary fallback for generic code, composition, and functional programming. UFCS method syntax is the primary API for most users; by default it desugars to free functions, but libraries may supply custom lowering where documented.
+**Design principle:** UFCS is resolved from the concrete receiver type. The library owning that type or family defines the callee contract, including whether the receiver is passed by address or by value. Direct library-call forms may also be exposed, but they are API choices rather than the definition of UFCS itself.
 
-**Channel note:** Channels follow the same language-level UFCS rule, but their method lowering is library-owned via `cc_ufcs_register(...)`. In practice this corresponds to receiver-first operations such as `send(tx, v)` and `recv(rx, &out)`, though the exact emitted helper symbol may differ.
+**Core UFCS rules (normative):**
+- The receiver is the full expression to the left of `.` or `->`.
+- The compiler resolves the receiver to a concrete type before choosing a UFCS lowering rule.
+- Field access and mixed member chains participate normally: `holder.arena.free()` dispatches on `holder.arena`; `ptr->arena.free()` dispatches on `ptr->arena`.
+- When multiple links appear in a chain, the nearest concrete typed receiver in the chain determines dispatch.
+- Exact generated C helper names are backend details unless a specific library section says otherwise.
 
 **UFCS Equivalence (Normative):**
 
-For types that use ordinary UFCS fallback, both forms are equivalent:
-- `x.method(args)` is syntactic sugar for `method(x, args)` (when `x` is a pointer or struct)
-- `x.method(args)` with value `x` desugars to `method(&x, args)` (taking a pointer)
+For named types that use ordinary fallback UFCS, method syntax lowers to the receiver-type method family for that type.
+- Pointer-style APIs receive the address of a value receiver and the pointer itself for a pointer receiver.
+- By-value APIs receive the receiver value directly.
 
 For types or families that register custom UFCS lowering with `cc_ufcs_register(...)`, `x.method(args)` lowers according to the registered handler instead. Libraries may still expose ordinary free-function entry points, but those are a separate API choice rather than the universal rule.
 
@@ -5055,17 +5060,17 @@ This enables two usage styles:
 char[:] result = input.trim().lower(arena);
 size_t len = result.len();
 
-// Free function style (preferred for composition and generic code)
+// Direct library-call style (preferred for composition and generic code)
 char[:] result = lower(trim(input), arena);
 size_t len = len(result);
 
 // Both styles can mix freely
 char[:] trimmed = input.trim();              // UFCS
-size_t sz = len(trimmed);                    // Free function
-char[:] final = lower(trimmed, arena);       // Free function
+size_t sz = len(trimmed);                    // Direct library call
+char[:] final = lower(trimmed, arena);       // Direct library call
 ```
 
-Functional composition becomes natural with free functions:
+Functional composition becomes natural with direct library calls:
 
 ```c
 // Map over a vector using free functions
@@ -5086,20 +5091,27 @@ UFCS is an extensible language feature. Libraries may declare custom lowering ru
 ```c
 typedef CCSlice (*CCUfcsRewriteFn)(CCSlice method, CCSliceArray argv, CCArena* arena);
 
-bool cc_ufcs_register(char[:] pattern, CCUfcsRewriteFn handler);
+typedef struct {
+    CCSlice pattern;
+    CCUfcsRewriteFn rewrite;
+} CCUfcsRegistration;
+
+CCUfcsRegistration cc_ufcs_register(const char* pattern, CCUfcsRewriteFn rewrite);
 ```
 
 **Registration rules:**
 - Registrations appear in `@comptime { ... }` code.
+- Registrations from imported headers or the prelude participate exactly like local registrations in the current translation unit.
 - `pattern` is either an exact type name such as `"CCFile"` or a simple trailing-wildcard family such as `"CCChanTx_*"`.
 - Handlers may be named functions or non-capturing lambdas.
+- Matching is type-based: the resolved receiver type is compared against the registered pattern.
 - The handler returns the lowered callee symbol as a slice. Returning the empty slice means "no custom rewrite; fall back to ordinary UFCS lowering".
 
 **Handler contract:**
 - `method` is the invoked method name.
 - `argv[0]` is the receiver type name.
 - `argv[1]` is the receiver expression text.
-- `argv[2...]` are the argument expression texts plus lowering context slots defined by the language/runtime.
+- `argv[2...]` are the rewritten argument expression texts.
 - `arena` is temporary compile-time storage for constructing the returned symbol.
 
 **By-value receiver lowering:** If a registration wants the receiver passed by value rather than by address, it must return the lowered symbol via `cc_ufcs_emit_value(...)` or `cc_ufcs_emit_value_cstr(...)`.
@@ -5121,7 +5133,7 @@ static CCSlice cc_file_ufcs(CCSlice method, CCSliceArray argv, CCArena* arena) {
 }
 ```
 
-This same contract is intended to generalize to future library-owned families such as `Vec`, `Map`, `Optional`, and `Result`, so container-style UFCS lowering and family-specific naming remain library policy rather than compiler policy.
+This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, optionals, and results. Family-specific naming and lowering remain library policy rather than compiler policy.
 
 ---
 
@@ -5139,7 +5151,7 @@ This same contract is intended to generalize to future library-owned families su
 #### 8.1.1 Core API
 
 ```c
-// Normative (free function form)
+// Direct library-call constructors and C ABI
 String  string_new(Arena* a);
 String  string_from(Arena* a, char[:] initial);
 String* cc_string_push(String* s, char[:] data);
@@ -5629,16 +5641,18 @@ This section documents syntactic sugar and conventions:
 
 **Methods / UFCS:**
 
-`x.method(args)` uses UFCS lowering. For ordinary fallback UFCS, this is syntax sugar for the corresponding receiver-first free function. Libraries may override the emitted callee via `cc_ufcs_register(...)`. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`String_push(&s, x)`).
+`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries may define custom lowering via `cc_ufcs_register(...)`. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`String_push(&s, x)`).
 
 ```c
 tx.send(v);        // lowers to send(tx, v)
 rx.recv(&out);     // lowers to recv(rx, &out)
 tx.close();        // lowers to close(tx)
+holder.arena.free();   // dispatches on holder.arena
+ptr->arena.free();     // dispatches on ptr->arena
 slice.len;         // field access (not a call)
 ```
 
-**Rule:** Ordinary UFCS fallback uses the receiver-first free function form. Registered UFCS families use the callee chosen by their handler. Channels use receiver-first surface forms such as `send(tx, v)` and `recv(rx, &out)`; generated C may lower those further to `cc_channel_*` or other registered helpers.
+**Rule:** The full expression to the left of `.` or `->` is the receiver. Registered UFCS families use the callee chosen by their handler; ordinary fallback UFCS uses the receiver-type method family for the resolved type. Channels use receiver-first surface forms such as `send(tx, v)` and `recv(rx, &out)`; generated C may lower those further to `cc_channel_*`, `CC_TYPED_CHAN_*`, or other registered helpers.
 
 **UFCS receiver syntax:**
 
@@ -5646,12 +5660,16 @@ UFCS uses the receiver operator honestly:
 
 - `x.method(...)` is for value receivers
 - `p->method(...)` is for pointer receivers
+- `ptr->field.method(...)` is valid when `field` is a value receiver
 - `p.method(...)` where `p` has pointer type is invalid
 
 ```c
 int[~10 >]* tx_ptr = &tx;
 tx_ptr->send(42);   // lowers to send(tx_ptr, 42)
 tx_ptr->close();    // lowers to close(tx_ptr)
+
+ArenaHolder* holder_ptr = &holder;
+holder_ptr->arena.free();   // dispatches on holder_ptr->arena
 ```
 
 **Rule (UFCS in defer):** UFCS works uniformly in `defer` statements regardless of whether the receiver is a value or pointer:

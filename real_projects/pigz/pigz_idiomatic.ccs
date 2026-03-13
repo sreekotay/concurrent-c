@@ -108,14 +108,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     (void)level;
     
     CCFile in_file;
-    if (cc_file_open(&in_file, in_path, "rb") != 0) {
+    if (in_file.open(in_path, "rb") != 0) {
         fprintf(stderr, "Failed to open input: %s\n", in_path);
         return 1;
     }
     @defer in_file.close();
 
     CCFile out_file;
-    if (cc_file_open(&out_file, out_path, "wb") != 0) {
+    if (out_file.open(out_path, "wb") != 0) {
         fprintf(stderr, "Failed to open output: %s\n", out_path);
         return 1;
     }
@@ -127,7 +127,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CompressedResult* !>(CCIoError)[~CHAN_CAP >] results_tx;
     CompressedResult* !>(CCIoError)[~CHAN_CAP ordered <] results_rx;
     CCChan* ch = channel_pair(&results_tx, &results_rx);
-    @defer cc_chan_free(ch);
+    @defer ch.free();
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
@@ -150,7 +150,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 }
                 expect_seq++;
                 (void)out_ptr->write(item->data);
-                cc_arena_free(&item->arena);
+                item->arena.free();
             }
         });
 
@@ -183,7 +183,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                     bool is_last = blk->is_last;
                     chan_send_task(results_tx, () => [blk] {
                         CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
-                        cc_arena_free(&blk->arena);
+                        blk->arena.free();
                         res;
                     });
                     
