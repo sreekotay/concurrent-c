@@ -1,0 +1,137 @@
+/*
+ * Buffered channel core benchmark using public C APIs directly.
+ *
+ * Goal: minimize language sugar overhead by using:
+ * - cc_chan_pair_create_returning()
+ * - cc_chan_send()/cc_chan_recv()
+ * - cc_fiber_spawn_task()
+ * - cc_block_on_intptr()
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#define DEFAULT_ITERATIONS 200000
+#define DEFAULT_SAMPLES 5
+#define CHANNEL_CAPACITY 1000
+
+static int g_iterations = DEFAULT_ITERATIONS;
+static int g_samples = DEFAULT_SAMPLES;
+static CCChan* g_channel = NULL;
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static void* producer_main(void* arg) {
+    (void)arg;
+    for (int i = 0; i < g_iterations; i++) {
+        if (cc_chan_send(g_channel, &i, sizeof(i)) != 0) {
+            fprintf(stderr, "cc_chan_send failed\n");
+            abort();
+        }
+    }
+    return NULL;
+}
+
+static void* consumer_main(void* arg) {
+    (void)arg;
+    int v = 0;
+    int64_t checksum = 0;
+    for (int i = 0; i < g_iterations; i++) {
+        if (cc_chan_recv(g_channel, &v, sizeof(v)) != 0) {
+            fprintf(stderr, "cc_chan_recv failed\n");
+            abort();
+        }
+        checksum += v;
+    }
+    if (checksum < 0) {
+        fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
+    }
+    return NULL;
+}
+
+static double run_once(void) {
+    CCChanTx tx = {0};
+    CCChanRx rx = {0};
+    g_channel = cc_chan_pair_create_returning(CHANNEL_CAPACITY,
+                                              CC_CHAN_MODE_BLOCK,
+                                              false,
+                                              sizeof(int),
+                                              false,
+                                              CC_CHAN_TOPO_DEFAULT,
+                                              false,
+                                              &tx,
+                                              &rx);
+    if (!g_channel) {
+        fprintf(stderr, "cc_chan_pair_create_returning failed\n");
+        abort();
+    }
+
+    double start = time_now_ms();
+    CCTask producer = cc_fiber_spawn_task(producer_main, NULL);
+    CCTask consumer = cc_fiber_spawn_task(consumer_main, NULL);
+    (void)cc_block_on_intptr(producer);
+    (void)cc_block_on_intptr(consumer);
+    double elapsed = time_now_ms() - start;
+
+    cc_chan_close(g_channel);
+    cc_chan_free(g_channel);
+    g_channel = NULL;
+    return elapsed;
+}
+
+int main(void) {
+    if (cc_scheduler_init() != 0) {
+        fprintf(stderr, "cc_scheduler_init failed\n");
+        return 1;
+    }
+
+    g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
+    g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
+    printf("perf_buffered_core: cap=%d iters=%d samples=%d\n", CHANNEL_CAPACITY, g_iterations, g_samples);
+
+    (void)run_once();
+
+    double elapsed_ms[g_samples];
+    double ops_sec[g_samples];
+    for (int i = 0; i < g_samples; i++) {
+        elapsed_ms[i] = run_once();
+        ops_sec[i] = (g_iterations * 2.0) / (elapsed_ms[i] / 1000.0);
+        printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
+    }
+
+    sort_doubles(ops_sec, g_samples);
+    sort_doubles(elapsed_ms, g_samples);
+    int mid = g_samples / 2;
+    printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
+    printf("perf_buffered_core: DONE\n");
+
+    cc_scheduler_shutdown();
+    return 0;
+}

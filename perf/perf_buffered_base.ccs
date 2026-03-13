@@ -8,9 +8,23 @@
 #include <stdio.h>
 #include <time.h>
 #include <stdint.h>
+#include <stdlib.h>
 
-#define ITERATIONS 100000
-#define SAMPLES 7
+#define DEFAULT_ITERATIONS 100000
+#define DEFAULT_SAMPLES 7
+#define CHANNEL_CAPACITY 1000
+
+static int g_iterations = DEFAULT_ITERATIONS;
+static int g_samples = DEFAULT_SAMPLES;
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
 
 static double time_now_ms(void) {
     struct timespec ts;
@@ -35,22 +49,19 @@ static double run_once(void) {
     int[~1000 <] rx_h;
     channel_pair(&tx_h, &rx_h);
 
-    CCChanTx tx = tx_h;
-    CCChanRx rx = rx_h;
-
     double start = time_now_ms();
     @closing(tx_h) {
-        spawn(() => [tx] {
-            for (int i = 0; i < ITERATIONS; i++) {
-                tx.send(i);
+        spawn(() => {
+            for (int i = 0; i < g_iterations; i++) {
+                tx_h.send(i);
             }
         });
 
-        spawn(() => [rx] {
+        spawn(() => {
             int v = 0;
             int64_t checksum = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
-                rx.recv(&v);
+            for (int i = 0; i < g_iterations; i++) {
+                rx_h.recv(&v);
                 checksum += v;
             }
             /* Keep the checksum live so the loop cannot be elided. */
@@ -63,22 +74,24 @@ static double run_once(void) {
 }
 
 int main(void) {
-    printf("perf_buffered_base: cap=1000 iters=%d\n", ITERATIONS);
+    g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
+    g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
+    printf("perf_buffered_base: cap=%d iters=%d samples=%d\n", CHANNEL_CAPACITY, g_iterations, g_samples);
 
     /* Warmup to reduce first-run noise. */
     (void)run_once();
 
-    double elapsed_ms[SAMPLES] = {0};
-    double ops_sec[SAMPLES] = {0};
-    for (int i = 0; i < SAMPLES; i++) {
+    double elapsed_ms[g_samples];
+    double ops_sec[g_samples];
+    for (int i = 0; i < g_samples; i++) {
         elapsed_ms[i] = run_once();
-        ops_sec[i] = (ITERATIONS * 2.0) / (elapsed_ms[i] / 1000.0);
+        ops_sec[i] = (g_iterations * 2.0) / (elapsed_ms[i] / 1000.0);
         printf("  run %d: %.0f ops/sec (%.2f ms)\n", i + 1, ops_sec[i], elapsed_ms[i]);
     }
 
-    sort_doubles(ops_sec, SAMPLES);
-    sort_doubles(elapsed_ms, SAMPLES);
-    int mid = SAMPLES / 2;
+    sort_doubles(ops_sec, g_samples);
+    sort_doubles(elapsed_ms, g_samples);
+    int mid = g_samples / 2;
     printf("  median: %.0f ops/sec (%.2f ms)\n", ops_sec[mid], elapsed_ms[mid]);
     printf("perf_buffered_base: DONE\n");
     return 0;

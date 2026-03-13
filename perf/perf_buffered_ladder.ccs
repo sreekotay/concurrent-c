@@ -11,9 +11,23 @@
 #include <stdio.h>
 #include <time.h>
 #include <stdint.h>
+#include <stdlib.h>
 
-#define ITERATIONS 2000000
-#define SAMPLES 7
+#define DEFAULT_ITERATIONS 2000000
+#define DEFAULT_SAMPLES 7
+#define CHANNEL_CAPACITY 1000
+
+static int g_iterations = DEFAULT_ITERATIONS;
+static int g_samples = DEFAULT_SAMPLES;
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
 
 static double time_now_ms(void) {
     struct timespec ts;
@@ -37,7 +51,7 @@ static double bench_loop_local_once(void) {
     volatile int64_t checksum_a = 0;
     volatile int64_t checksum_b = 0;
     double start = time_now_ms();
-    for (int i = 0; i < ITERATIONS; i++) {
+    for (int i = 0; i < g_iterations; i++) {
         checksum_a += i;
         checksum_b += i;
     }
@@ -46,7 +60,7 @@ static double bench_loop_local_once(void) {
         fprintf(stderr, "impossible checksums=%lld,%lld\n",
                 (long long)checksum_a, (long long)checksum_b);
     }
-    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+    return (g_iterations * 2.0) / (elapsed / 1000.0);
 }
 
 static double bench_loop_two_fiber_once(void) {
@@ -54,7 +68,7 @@ static double bench_loop_two_fiber_once(void) {
     @nursery {
         spawn(() => {
             volatile int64_t local = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
+            for (int i = 0; i < g_iterations; i++) {
                 local += i;
             }
             if (local < 0) {
@@ -63,7 +77,7 @@ static double bench_loop_two_fiber_once(void) {
         });
         spawn(() => {
             volatile int64_t local = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
+            for (int i = 0; i < g_iterations; i++) {
                 local += i;
             }
             if (local < 0) {
@@ -72,30 +86,28 @@ static double bench_loop_two_fiber_once(void) {
         });
     }
     double elapsed = time_now_ms() - start;
-    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+    return (g_iterations * 2.0) / (elapsed / 1000.0);
 }
 
 static double bench_chan_single_once(void) {
     int[~1000 >] tx_h;
     int[~1000 <] rx_h;
     channel_pair(&tx_h, &rx_h);
-    CCChanTx tx = tx_h;
-    CCChanRx rx = rx_h;
 
     double start = time_now_ms();
     int64_t checksum = 0;
     int v = 0;
-    for (int i = 0; i < ITERATIONS; i++) {
-        tx.send(i);
-        rx.recv(&v);
+    for (int i = 0; i < g_iterations; i++) {
+        tx_h.send(i);
+        rx_h.recv(&v);
         checksum += v;
     }
     double elapsed = time_now_ms() - start;
     if (checksum < 0) {
         fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
     }
-    tx.close();
-    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+    tx_h.close();
+    return (g_iterations * 2.0) / (elapsed / 1000.0);
 }
 
 static double bench_chan_two_fiber_once(void) {
@@ -103,22 +115,19 @@ static double bench_chan_two_fiber_once(void) {
     int[~1000 <] rx_h;
     channel_pair(&tx_h, &rx_h);
 
-    CCChanTx tx = tx_h;
-    CCChanRx rx = rx_h;
-
     double start = time_now_ms();
     @closing(tx_h) {
-        spawn(() => [tx] {
-            for (int i = 0; i < ITERATIONS; i++) {
-                tx.send(i);
+        spawn(() => {
+            for (int i = 0; i < g_iterations; i++) {
+                tx_h.send(i);
             }
         });
 
-        spawn(() => [rx] {
+        spawn(() => {
             int v = 0;
             int64_t checksum = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
-                rx.recv(&v);
+            for (int i = 0; i < g_iterations; i++) {
+                rx_h.recv(&v);
                 checksum += v;
             }
             if (checksum < 0) {
@@ -127,20 +136,22 @@ static double bench_chan_two_fiber_once(void) {
         });
     }
     double elapsed = time_now_ms() - start;
-    return (ITERATIONS * 2.0) / (elapsed / 1000.0);
+    return (g_iterations * 2.0) / (elapsed / 1000.0);
 }
 
 static double median_ops(double (*fn)(void)) {
-    double ops[SAMPLES] = {0};
-    for (int i = 0; i < SAMPLES; i++) {
+    double ops[g_samples];
+    for (int i = 0; i < g_samples; i++) {
         ops[i] = fn();
     }
-    sort_doubles(ops, SAMPLES);
-    return ops[SAMPLES / 2];
+    sort_doubles(ops, g_samples);
+    return ops[g_samples / 2];
 }
 
 int main(void) {
-    printf("perf_buffered_ladder: iters=%d\n", ITERATIONS);
+    g_iterations = env_int_or("CC_BUF_ITERS", DEFAULT_ITERATIONS);
+    g_samples = env_int_or("CC_BUF_SAMPLES", DEFAULT_SAMPLES);
+    printf("perf_buffered_ladder: cap=%d iters=%d samples=%d\n", CHANNEL_CAPACITY, g_iterations, g_samples);
     (void)bench_chan_two_fiber_once(); /* warmup */
 
     double loop_local = median_ops(bench_loop_local_once);

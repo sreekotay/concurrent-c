@@ -1,0 +1,178 @@
+/*
+ * Spawn overhead ladder.
+ *
+ * Goal: separate raw batched fiber spawn/join cost from nursery bookkeeping.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <time.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#define DEFAULT_TOTAL_SPAWNS 100000
+#define DEFAULT_BATCH_SIZE 1000
+#define DEFAULT_SAMPLES 7
+
+struct fiber_task;
+extern struct fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
+extern int cc_fiber_join(struct fiber_task* t, void** out_result);
+extern void cc_fiber_task_free(struct fiber_task* t);
+
+static int g_total_spawns = DEFAULT_TOTAL_SPAWNS;
+static int g_batch_size = DEFAULT_BATCH_SIZE;
+static int g_samples = DEFAULT_SAMPLES;
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double t = arr[i];
+                arr[i] = arr[j];
+                arr[j] = t;
+            }
+        }
+    }
+}
+
+static int total_batches(void) {
+    return g_total_spawns / g_batch_size;
+}
+
+static void* noop_task(void* arg) {
+    return arg;
+}
+
+static double bench_empty_nursery_once(void) {
+    double start = time_now_ms();
+    for (int batch = 0; batch < total_batches(); batch++) {
+        @nursery {
+        }
+    }
+    return time_now_ms() - start;
+}
+
+static double bench_nursery_spawn_once(void) {
+    double start = time_now_ms();
+    for (int batch = 0; batch < total_batches(); batch++) {
+        @nursery {
+            for (int i = 0; i < g_batch_size; i++) {
+                spawn(() => {
+                    (void)noop_task(NULL);
+                });
+            }
+        }
+    }
+    return time_now_ms() - start;
+}
+
+static double bench_raw_batch_once(void) {
+    double start = time_now_ms();
+    for (int batch = 0; batch < total_batches(); batch++) {
+        CCTask tasks[g_batch_size];
+        intptr_t results[g_batch_size];
+        for (int i = 0; i < g_batch_size; i++) {
+            tasks[i] = cc_fiber_spawn_task(noop_task, NULL);
+        }
+        if (cc_block_all(g_batch_size, tasks, results) != 0) {
+            fprintf(stderr, "cc_block_all failed\n");
+            abort();
+        }
+    }
+    return time_now_ms() - start;
+}
+
+static double bench_raw_join_loop_once(void) {
+    double start = time_now_ms();
+    for (int batch = 0; batch < total_batches(); batch++) {
+        CCTask tasks[g_batch_size];
+        for (int i = 0; i < g_batch_size; i++) {
+            tasks[i] = cc_fiber_spawn_task(noop_task, NULL);
+        }
+        for (int i = 0; i < g_batch_size; i++) {
+            (void)cc_block_on_intptr(tasks[i]);
+        }
+    }
+    return time_now_ms() - start;
+}
+
+static double bench_direct_fiber_batch_once(void) {
+    double start = time_now_ms();
+    for (int batch = 0; batch < total_batches(); batch++) {
+        struct fiber_task* tasks[g_batch_size];
+        for (int i = 0; i < g_batch_size; i++) {
+            tasks[i] = cc_fiber_spawn(noop_task, NULL);
+        }
+        for (int i = 0; i < g_batch_size; i++) {
+            if (tasks[i]) {
+                cc_fiber_join(tasks[i], NULL);
+                cc_fiber_task_free(tasks[i]);
+            }
+        }
+    }
+    return time_now_ms() - start;
+}
+
+static double median_ops(double (*fn)(void)) {
+    double ops[g_samples];
+    for (int i = 0; i < g_samples; i++) {
+        double elapsed_ms = fn();
+        ops[i] = g_total_spawns / (elapsed_ms / 1000.0);
+    }
+    sort_doubles(ops, g_samples);
+    return ops[g_samples / 2];
+}
+
+int main(void) {
+    if (cc_scheduler_init() != 0) {
+        fprintf(stderr, "cc_scheduler_init failed\n");
+        return 1;
+    }
+
+    g_total_spawns = env_int_or("CC_SPAWN_TOTAL", DEFAULT_TOTAL_SPAWNS);
+    g_batch_size = env_int_or("CC_SPAWN_BATCH", DEFAULT_BATCH_SIZE);
+    g_samples = env_int_or("CC_SPAWN_SAMPLES", DEFAULT_SAMPLES);
+    if (g_total_spawns < g_batch_size) g_total_spawns = g_batch_size;
+    g_total_spawns = (g_total_spawns / g_batch_size) * g_batch_size;
+
+    printf("perf_spawn_ladder: total=%d batch=%d samples=%d\n",
+           g_total_spawns, g_batch_size, g_samples);
+
+    (void)bench_nursery_spawn_once();
+
+    double empty_nursery = median_ops(bench_empty_nursery_once);
+    double nursery_spawn = median_ops(bench_nursery_spawn_once);
+    double raw_batch = median_ops(bench_raw_batch_once);
+    double raw_join_loop = median_ops(bench_raw_join_loop_once);
+    double direct_fiber_batch = median_ops(bench_direct_fiber_batch_once);
+
+    printf("  empty nursery batches: %.0f batch-ops/sec\n", empty_nursery);
+    printf("  nursery spawn+join:    %.0f spawns/sec\n", nursery_spawn);
+    printf("  raw fiber block_all:   %.0f spawns/sec\n", raw_batch);
+    printf("  raw fiber join loop:   %.0f spawns/sec\n", raw_join_loop);
+    printf("  direct fiber batch:    %.0f spawns/sec\n", direct_fiber_batch);
+    printf("  nursery vs block_all:  %.1f%%\n",
+           raw_batch > 0.0 ? (nursery_spawn / raw_batch) * 100.0 : 0.0);
+    printf("  nursery vs join loop:  %.1f%%\n",
+           raw_join_loop > 0.0 ? (nursery_spawn / raw_join_loop) * 100.0 : 0.0);
+    printf("  nursery vs direct:     %.1f%%\n",
+           direct_fiber_batch > 0.0 ? (nursery_spawn / direct_fiber_batch) * 100.0 : 0.0);
+    printf("perf_spawn_ladder: DONE\n");
+
+    cc_scheduler_shutdown();
+    return 0;
+}
