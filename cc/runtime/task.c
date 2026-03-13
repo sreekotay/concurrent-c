@@ -637,9 +637,14 @@ CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg) {
     memset(&out, 0, sizeof(out));
     if (!fn) return out;
 
-    /* Attempt pool dispatch */
+    /* Attempt pool dispatch only from fiber context.
+     *
+     * The pool helps when an already-running fiber spawns more fiber tasks and
+     * wants to avoid another spawn/route/wake cycle. For top-level callers
+     * (non-fiber context), direct cc_fiber_spawn() is consistently faster in
+     * batch-spawn microbenches and matches the substrate used by nursery spawn. */
     cc_fpool_ensure_init();
-    if (atomic_load_explicit(&g_fpool.ready, memory_order_acquire)) {
+    if (cc__fiber_in_context() && atomic_load_explicit(&g_fpool.ready, memory_order_acquire)) {
         int slot_idx = cc_pool_alloc_slot();
         if (slot_idx >= 0) {
             CCPoolSlot* slot = &g_fpool.slots[slot_idx];
@@ -898,6 +903,20 @@ static void* cc__block_all_worker(void* arg) {
     return NULL;
 }
 
+static int cc__task_kind_inline_block_safe(CCTask t) {
+    switch (t.kind) {
+        case CC_TASK_KIND_INVALID:
+        case CC_TASK_KIND_SPAWN:
+        case CC_TASK_KIND_FIBER:
+        case CC_TASK_KIND_POOL:
+            return 1;
+        case CC_TASK_KIND_FUTURE:
+        case CC_TASK_KIND_POLL:
+        default:
+            return 0;
+    }
+}
+
 /* Block until all tasks complete. Runs tasks concurrently using a nursery.
    Returns 0 on success, error code if any task fails.
    Results are stored in the results array (must be at least count elements).
@@ -905,6 +924,26 @@ static void* cc__block_all_worker(void* arg) {
 int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
     if (count <= 0) return 0;
     if (!tasks) return EINVAL;
+
+    /* Fast path: tasks that are already started/running can be joined inline.
+     * This avoids spawning a second layer of waiter fibers just to call
+     * cc_block_on_intptr() on existing fiber/spawn/pool tasks. Keep the
+     * nursery-wrapper path for FUTURE/POLL tasks so lazy async state machines
+     * still make progress concurrently. */
+    int inline_safe = 1;
+    for (int i = 0; i < count; i++) {
+        if (!cc__task_kind_inline_block_safe(tasks[i])) {
+            inline_safe = 0;
+            break;
+        }
+    }
+    if (inline_safe) {
+        for (int i = 0; i < count; i++) {
+            intptr_t r = cc_block_on_intptr(tasks[i]);
+            if (results) results[i] = r;
+        }
+        return 0;
+    }
 
     CCNursery* n = cc_nursery_create();
     if (!n) return ENOMEM;
@@ -920,7 +959,7 @@ int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
         slots[i].result_slot = results ? &results[i] : NULL;
     }
 
-    /* Spawn a thread for each task */
+    /* Spawn a waiter fiber for each task */
     for (int i = 0; i < count; i++) {
         int err = cc_nursery_spawn(n, cc__block_all_worker, &slots[i]);
         if (err != 0) {

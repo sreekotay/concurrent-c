@@ -78,8 +78,8 @@ static void bench_unbuffered(void) {
 
 /* Single-threaded throughput (no contention) */
 static void bench_single_thread(void) {
-    int[~10 >] tx;
-    int[~10 <] rx;
+    int[~1000 >] tx;
+    int[~1000 <] rx;
     channel_pair(&tx, &rx);
     
     double start = time_now_ms();
