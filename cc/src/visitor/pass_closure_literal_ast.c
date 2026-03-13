@@ -249,6 +249,42 @@ static void cc__append_fmt(char** buf, size_t* len, size_t* cap, const char* fmt
     cc__append_n(buf, len, cap, tmp, (size_t)n);
 }
 
+static char* cc__rewrite_closure_make_for_nursery(const char* s, size_t n, const char* nursery_expr) {
+    if (!s || !nursery_expr) return NULL;
+    size_t lo = 0, hi = n;
+    while (lo < hi && (s[lo] == ' ' || s[lo] == '\t' || s[lo] == '\r' || s[lo] == '\n')) lo++;
+    while (hi > lo && (s[hi - 1] == ' ' || s[hi - 1] == '\t' || s[hi - 1] == '\r' || s[hi - 1] == '\n')) hi--;
+    if (hi <= lo) return NULL;
+
+    size_t fn_s = lo;
+    if (!(isalpha((unsigned char)s[fn_s]) || s[fn_s] == '_')) return NULL;
+    size_t fn_e = fn_s + 1;
+    while (fn_e < hi && (isalnum((unsigned char)s[fn_e]) || s[fn_e] == '_')) fn_e++;
+    if ((fn_e - fn_s) <= 18 || memcmp(s + fn_s, "__cc_closure_make_", 18) != 0) return NULL;
+
+    size_t p = fn_e;
+    while (p < hi && (s[p] == ' ' || s[p] == '\t')) p++;
+    if (p >= hi || s[p] != '(' || s[hi - 1] != ')') return NULL;
+
+    size_t args_s = p + 1;
+    size_t args_e = hi - 1;
+    while (args_s < args_e && (s[args_s] == ' ' || s[args_s] == '\t')) args_s++;
+    while (args_e > args_s && (s[args_e - 1] == ' ' || s[args_e - 1] == '\t')) args_e--;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    cc__append_str(&out, &out_len, &out_cap, "__cc_closure_make_nursery_");
+    cc__append_n(&out, &out_len, &out_cap, s + fn_s + 18, fn_e - fn_s - 18);
+    cc__append_str(&out, &out_len, &out_cap, "(");
+    cc__append_str(&out, &out_len, &out_cap, nursery_expr);
+    if (args_e > args_s) {
+        cc__append_str(&out, &out_len, &out_cap, ", ");
+        cc__append_n(&out, &out_len, &out_cap, s + args_s, args_e - args_s);
+    }
+    cc__append_str(&out, &out_len, &out_cap, ")");
+    return out;
+}
+
 typedef struct {
     int id;
     int brace_depth_after_open;
@@ -327,11 +363,16 @@ static char* cc__lower_nursery_spawn_in_body_text(int closure_id, const char* bo
             while (a0 < a1 && (*a0 == ' ' || *a0 == '\t')) a0++;
             while (a1 > a0 && (a1[-1] == ' ' || a1[-1] == '\t')) a1--;
             int nid = stack[top].id;
+            char nursery_name[64];
+            snprintf(nursery_name, sizeof(nursery_name), "__cc_nursery_body%d_%d", closure_id, nid);
+            char* nursery_make = cc__rewrite_closure_make_for_nursery(a0, (size_t)(a1 - a0), nursery_name);
             cc__append_fmt(&out, &out_len, &out_cap, "%.*s{ CCClosure0 __c = ", (int)ind, line_start);
-            cc__append_n(&out, &out_len, &out_cap, a0, (size_t)(a1 - a0));
+            if (nursery_make) cc__append_str(&out, &out_len, &out_cap, nursery_make);
+            else cc__append_n(&out, &out_len, &out_cap, a0, (size_t)(a1 - a0));
             cc__append_fmt(&out, &out_len, &out_cap,
                            "; cc_nursery_spawn_closure0(__cc_nursery_body%d_%d, __c); }\n",
                            closure_id, nid);
+            free(nursery_make);
             cur = nl ? (nl + 1) : line_end;
             continue;
         }
@@ -2092,6 +2133,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         /* Use macro for simple CCClosure0 with no captures */
         if (d->param_count == 0 && d->cap_count == 0) {
             cc__append_fmt(&protos, &protos_len, &protos_cap, "CC_CLOSURE0_DECL(%d);\n", d->id);
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "static CCClosure0 __cc_closure_make_nursery_%d(CCNursery* __cc_nursery);\n", d->id);
         } else {
             if (d->param_count == 0) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*);\n", d->id);
             else if (d->param_count == 1) cc__append_fmt(&protos, &protos_len, &protos_cap, "static void* __cc_closure_entry_%d(void*, intptr_t);\n", d->id);
@@ -2117,6 +2159,20 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                         const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
                         cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s", ty, nm);
                     }
+                }
+            }
+            cc__append_str(&protos, &protos_len, &protos_cap, ");\n");
+            cc__append_fmt(&protos, &protos_len, &protos_cap, "static %s __cc_closure_make_nursery_%d(CCNursery* __cc_nursery", cty_p, d->id);
+            for (int ci = 0; ci < d->cap_count; ci++) {
+                cc__append_str(&protos, &protos_len, &protos_cap, ", ");
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types && d->cap_types[ci] ? d->cap_types[ci] : "int";
+                if (cc__capture_needs_opaque(is_ref, ty)) {
+                    cc__append_str(&protos, &protos_len, &protos_cap,
+                                   cc__capture_needs_const_opaque(is_ref, ty) ? "const void*" : "void*");
+                } else {
+                    const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                    cc__append_fmt(&protos, &protos_len, &protos_cap, "%s %s", ty, nm);
                 }
             }
             cc__append_str(&protos, &protos_len, &protos_cap, ");\n");
@@ -2148,6 +2204,9 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             cc__append_fmt(&defs, &defs_len, &defs_cap, "__cc_closure_env_%d;\n", d->id);
             cc__append_fmt(&defs, &defs_len, &defs_cap,
                            "static void __cc_closure_env_%d_drop(void* p) { if (p) free(p); }\n",
+                           d->id);
+            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                           "static void __cc_closure_env_%d_nursery_drop(void* p) { (void)p; }\n",
                            d->id);
 
             cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s __cc_closure_make_%d(", cty, d->id);
@@ -2199,6 +2258,51 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                            "  return %s(__cc_closure_entry_%d, __env, __cc_closure_env_%d_drop);\n",
                            mkfn, d->id, d->id);
             cc__append_str(&defs, &defs_len, &defs_cap, "}\n");
+
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "static %s __cc_closure_make_nursery_%d(CCNursery* __cc_nursery", cty, d->id);
+            for (int ci = 0; ci < d->cap_count; ci++) {
+                cc__append_str(&defs, &defs_len, &defs_cap, ", ");
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (cc__capture_needs_opaque(is_ref, ty)) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "%s __cc_opaque_%s",
+                                   cc__capture_needs_const_opaque(is_ref, ty) ? "const void*" : "void*",
+                                   nm);
+                } else if (is_ref) {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "%s* %s", ty, nm);
+                } else {
+                    cc__append_fmt(&defs, &defs_len, &defs_cap, "%s %s", ty, nm);
+                }
+            }
+            cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
+            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                           "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)cc_nursery_closure_env_alloc(__cc_nursery, sizeof(__cc_closure_env_%d), _Alignof(__cc_closure_env_%d));\n",
+                           d->id, d->id, d->id, d->id);
+            cc__append_str(&defs, &defs_len, &defs_cap, "  if (!__env) abort();\n");
+            for (int ci = 0; ci < d->cap_count; ci++) {
+                int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
+                const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
+                const char* nm = d->cap_names[ci] ? d->cap_names[ci] : "__cap";
+                if (cc__capture_needs_opaque(is_ref, ty)) {
+                    if (is_ref) {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s* %s = (%s*)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                    } else {
+                        cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s %s = (%s)__cc_opaque_%s;\n", ty, nm, ty, nm);
+                    }
+                }
+            }
+            for (int ci = 0; ci < d->cap_count; ci++) {
+                cc__append_fmt(&defs, &defs_len, &defs_cap,
+                               "  __env->%s = %s;\n",
+                               d->cap_names[ci] ? d->cap_names[ci] : "__cap",
+                               d->cap_names[ci] ? d->cap_names[ci] : "__cap");
+            }
+            cc__append_str(&defs, &defs_len, &defs_cap, "  CC_TSAN_RELEASE(__env);\n");
+            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                           "  return %s(__cc_closure_entry_%d, __env, __cc_closure_env_%d_nursery_drop);\n",
+                           mkfn, d->id, d->id);
+            cc__append_str(&defs, &defs_len, &defs_cap, "}\n");
         } else {
             /* Use macro for simple CCClosure0 with no captures */
             if (d->param_count == 0) {
@@ -2207,6 +2311,9 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                 cc__append_fmt(&defs, &defs_len, &defs_cap,
                                "static %s __cc_closure_make_%d(void) { return %s(__cc_closure_entry_%d, NULL, NULL); }\n",
                                cty, d->id, mkfn, d->id);
+                cc__append_fmt(&defs, &defs_len, &defs_cap,
+                               "static %s __cc_closure_make_nursery_%d(CCNursery* __cc_nursery) { (void)__cc_nursery; return __cc_closure_make_%d(); }\n",
+                               cty, d->id, d->id);
             }
         }
 
@@ -2317,6 +2424,11 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             }
         }
         cc__append_str(&defs, &defs_len, &defs_cap, "  return NULL;\n}\n\n");
+        if (simple_closure0) {
+            cc__append_fmt(&defs, &defs_len, &defs_cap,
+                           "static CCClosure0 __cc_closure_make_nursery_%d(CCNursery* __cc_nursery) { (void)__cc_nursery; return __cc_closure_make_%d(); }\n\n",
+                           d->id, d->id);
+        }
 
         char* call = cc__make_call_expr(d);
         if (!call) continue;

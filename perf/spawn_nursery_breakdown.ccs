@@ -1,0 +1,231 @@
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define DEFAULT_TOTAL_SPAWNS 100000
+#define DEFAULT_BATCH_SIZE 1000
+#define DEFAULT_SAMPLES 7
+
+typedef struct {
+    cc_atomic_int* counter_ptr;
+} CapturedEnv;
+
+typedef struct {
+    double construct_ms;
+    double spawn_ms;
+    double wait_ms;
+    double total_ms;
+} Breakdown;
+
+static int g_total_spawns = DEFAULT_TOTAL_SPAWNS;
+static int g_batch_size = DEFAULT_BATCH_SIZE;
+static int g_samples = DEFAULT_SAMPLES;
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double tmp = arr[i];
+                arr[i] = arr[j];
+                arr[j] = tmp;
+            }
+        }
+    }
+}
+
+static int total_batches(void) {
+    return g_total_spawns / g_batch_size;
+}
+
+static void* captured_increment(void* arg) {
+    CapturedEnv* env = (CapturedEnv*)arg;
+    cc_atomic_fetch_add(env->counter_ptr, 1);
+    return NULL;
+}
+
+static void captured_env_drop(void* arg) {
+    if (arg) free(arg);
+}
+
+static void captured_env_nursery_drop(void* arg) {
+    (void)arg;
+}
+
+static double bench_syntax_once(void) {
+    double start = time_now_ms();
+    cc_atomic_int counter = 0;
+    cc_atomic_int* counter_ptr = &counter;
+
+    for (int batch = 0; batch < total_batches(); batch++) {
+        @nursery {
+            for (int i = 0; i < g_batch_size; i++) {
+                spawn(() => [counter_ptr] {
+                    cc_atomic_fetch_add(counter_ptr, 1);
+                });
+            }
+        }
+    }
+
+    int total = cc_atomic_load(counter_ptr);
+    if (total != g_total_spawns) {
+        fprintf(stderr, "syntax benchmark count mismatch: got=%d expected=%d\n", total, g_total_spawns);
+        abort();
+    }
+    return time_now_ms() - start;
+}
+
+static Breakdown bench_manual_once(int use_nursery_env) {
+    Breakdown out = {0};
+    cc_atomic_int counter = 0;
+
+    for (int batch = 0; batch < total_batches(); batch++) {
+        CCNursery* n = cc_nursery_create();
+        if (!n) {
+            fprintf(stderr, "cc_nursery_create failed\n");
+            abort();
+        }
+
+        CCClosure0 closures[g_batch_size];
+
+        double t0 = time_now_ms();
+        for (int i = 0; i < g_batch_size; i++) {
+            CapturedEnv* env = use_nursery_env
+                ? (CapturedEnv*)cc_nursery_closure_env_alloc(n, sizeof(CapturedEnv), _Alignof(CapturedEnv))
+                : (CapturedEnv*)malloc(sizeof(CapturedEnv));
+            if (!env) {
+                fprintf(stderr, "closure env alloc failed\n");
+                abort();
+            }
+            env->counter_ptr = &counter;
+            closures[i] = cc_closure0_make(
+                captured_increment,
+                env,
+                use_nursery_env ? captured_env_nursery_drop : captured_env_drop);
+        }
+        double t1 = time_now_ms();
+
+        for (int i = 0; i < g_batch_size; i++) {
+            if (cc_nursery_spawn_closure0(n, closures[i]) != 0) {
+                fprintf(stderr, "cc_nursery_spawn_closure0 failed\n");
+                abort();
+            }
+        }
+        double t2 = time_now_ms();
+
+        if (cc_nursery_wait(n) != 0) {
+            fprintf(stderr, "cc_nursery_wait failed\n");
+            abort();
+        }
+        cc_nursery_free(n);
+        double t3 = time_now_ms();
+
+        out.construct_ms += (t1 - t0);
+        out.spawn_ms += (t2 - t1);
+        out.wait_ms += (t3 - t2);
+        out.total_ms += (t3 - t0);
+    }
+
+    int total = cc_atomic_load(&counter);
+    if (total != g_total_spawns) {
+        fprintf(stderr, "manual benchmark count mismatch: got=%d expected=%d\n", total, g_total_spawns);
+        abort();
+    }
+    return out;
+}
+
+static Breakdown median_breakdown(int use_nursery_env) {
+    double construct[g_samples];
+    double spawn_phase[g_samples];
+    double wait[g_samples];
+    double total[g_samples];
+
+    for (int i = 0; i < g_samples; i++) {
+        Breakdown sample = bench_manual_once(use_nursery_env);
+        construct[i] = sample.construct_ms;
+        spawn_phase[i] = sample.spawn_ms;
+        wait[i] = sample.wait_ms;
+        total[i] = sample.total_ms;
+    }
+
+    sort_doubles(construct, g_samples);
+    sort_doubles(spawn_phase, g_samples);
+    sort_doubles(wait, g_samples);
+    sort_doubles(total, g_samples);
+
+    Breakdown out = {
+        .construct_ms = construct[g_samples / 2],
+        .spawn_ms = spawn_phase[g_samples / 2],
+        .wait_ms = wait[g_samples / 2],
+        .total_ms = total[g_samples / 2],
+    };
+    return out;
+}
+
+static double median_syntax_ms(void) {
+    double samples[g_samples];
+    for (int i = 0; i < g_samples; i++) {
+        samples[i] = bench_syntax_once();
+    }
+    sort_doubles(samples, g_samples);
+    return samples[g_samples / 2];
+}
+
+static void print_breakdown(const char* label, Breakdown b) {
+    double ops = g_total_spawns / (b.total_ms / 1000.0);
+    double pct_construct = b.total_ms > 0.0 ? (100.0 * b.construct_ms / b.total_ms) : 0.0;
+    double pct_spawn = b.total_ms > 0.0 ? (100.0 * b.spawn_ms / b.total_ms) : 0.0;
+    double pct_wait = b.total_ms > 0.0 ? (100.0 * b.wait_ms / b.total_ms) : 0.0;
+
+    printf("%s\n", label);
+    printf("  total:      %.1f ms  (%.0f spawns/sec)\n", b.total_ms, ops);
+    printf("  construct:  %.1f ms  (%4.1f%%)\n", b.construct_ms, pct_construct);
+    printf("  spawn:      %.1f ms  (%4.1f%%)\n", b.spawn_ms, pct_spawn);
+    printf("  wait/free:  %.1f ms  (%4.1f%%)\n", b.wait_ms, pct_wait);
+}
+
+int main(void) {
+    g_total_spawns = env_int_or("CC_SPAWN_TOTAL", DEFAULT_TOTAL_SPAWNS);
+    g_batch_size = env_int_or("CC_SPAWN_BATCH", DEFAULT_BATCH_SIZE);
+    g_samples = env_int_or("CC_SPAWN_SAMPLES", DEFAULT_SAMPLES);
+    if (g_total_spawns < g_batch_size) g_total_spawns = g_batch_size;
+    g_total_spawns = (g_total_spawns / g_batch_size) * g_batch_size;
+
+    printf("spawn_nursery_breakdown: total=%d batch=%d samples=%d\n",
+           g_total_spawns, g_batch_size, g_samples);
+
+    double syntax_ms = median_syntax_ms();
+    Breakdown heap = median_breakdown(0);
+    Breakdown nursery = median_breakdown(1);
+
+    printf("syntax captured\n");
+    printf("  total:      %.1f ms  (%.0f spawns/sec)\n",
+           syntax_ms, g_total_spawns / (syntax_ms / 1000.0));
+    print_breakdown("manual heap captured", heap);
+    print_breakdown("manual nursery captured", nursery);
+
+    printf("nursery env vs heap env\n");
+    printf("  total:      %5.1f%%\n", heap.total_ms > 0.0 ? (100.0 * nursery.total_ms / heap.total_ms) : 0.0);
+    printf("  construct:  %5.1f%%\n", heap.construct_ms > 0.0 ? (100.0 * nursery.construct_ms / heap.construct_ms) : 0.0);
+    printf("  spawn:      %5.1f%%\n", heap.spawn_ms > 0.0 ? (100.0 * nursery.spawn_ms / heap.spawn_ms) : 0.0);
+    printf("  wait/free:  %5.1f%%\n", heap.wait_ms > 0.0 ? (100.0 * nursery.wait_ms / heap.wait_ms) : 0.0);
+    printf("spawn_nursery_breakdown: DONE\n");
+    return 0;
+}

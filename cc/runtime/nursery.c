@@ -7,6 +7,7 @@
 
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_channel.cch>
+#include <ccc/cc_arena.cch>
 
 #include "wake_primitive.h"
 
@@ -136,6 +137,7 @@ struct CCNursery {
     CCChan** closing;
     size_t closing_count;
     size_t closing_cap;
+    CCArena closure_env_arena;
     pthread_mutex_t mu;
     wake_primitive cancel_wake;  /* Broadcast on cancel for O(1) wake */
 };
@@ -164,7 +166,25 @@ CCNursery* cc_nursery_create(void) {
     n->closing = NULL;
     n->closing_cap = 0;
     n->closing_count = 0;
+    n->closure_env_arena = cc_arena_heap(1024);
+    if (!n->closure_env_arena.base) {
+        pthread_mutex_destroy(&n->mu);
+        wake_primitive_destroy(&n->cancel_wake);
+        free(n->tasks);
+        free(n);
+        return NULL;
+    }
     return n;
+}
+
+void* cc_nursery_closure_env_alloc(CCNursery* n, size_t size, size_t align) {
+    if (!n || size == 0) return NULL;
+    /* TODO: The arena-backed path gives closures under a nursery a clean,
+       deterministic lifetime model, but the spawn benchmark breakdown showed
+       env alloc/free is not the throughput bottleneck. If we revisit this for
+       performance, prototype a nursery-scoped reclaimable allocator (local heap
+       or pooled size classes) under the same explicit lowering shape. */
+    return cc_arena_alloc(&n->closure_env_arena, size, align);
 }
 
 void cc_nursery_cancel(CCNursery* n) {
@@ -380,6 +400,7 @@ void cc_nursery_free(CCNursery* n) {
     }
     free(n->tasks);
     free(n->closing);
+    cc_arena_free(&n->closure_env_arena);
     pthread_mutex_destroy(&n->mu);
     wake_primitive_destroy(&n->cancel_wake);
     free(n);

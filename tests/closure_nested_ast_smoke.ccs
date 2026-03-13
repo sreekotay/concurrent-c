@@ -3,7 +3,7 @@
 int g = 0;
 int x = 1;
 
-void main() {
+int main(void) {
     @nursery {
         spawn (() => {
             @nursery {
@@ -11,5 +11,6 @@ void main() {
             }
         });
     }
+    return 0;
 }
 
