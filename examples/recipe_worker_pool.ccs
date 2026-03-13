@@ -24,8 +24,8 @@ int main(void) {
     int[~NUM_JOBS >] done_tx;  /* capacity >= NUM_JOBS to avoid deadlock */
     int[~NUM_JOBS <] done_rx;
 
-    CCChan* jobs_ch = channel_pair(&jobs_tx, &jobs_rx);
-    CCChan* done_ch = channel_pair(&done_tx, &done_rx);
+    CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx);
+    CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx);
 
     @nursery {
         /* Workers: pull jobs, send completion to done channel. */

@@ -2176,7 +2176,7 @@ int v = data.load(.relaxed);      // guaranteed to see 42
 This section defines message-passing and coordination primitives:
 
 - **§6.1 Channel Types** — topologies and views
-- **§6.2 Ordered Channels** — `ordered` flag and `chan_send_task`
+- **§6.2 Ordered Channels** — `ordered` flag and `cc_channel_send_task`
 - **§6.3 Semantics** — buffering and termination
 - **§6.4 Copy vs Transfer** — `send` vs `send_take`
 - **§6.5 Select** — multiplexing operations
@@ -2305,11 +2305,11 @@ Channels are created by producing a `(tx, rx)` pair:
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = channel_pair(&tx, &rx);  // returns the underlying channel
+CCChan* ch = cc_channel_pair(&tx, &rx);  // returns the underlying channel
 ```
 
 Notes:
-- `channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
+- `cc_channel_pair` initializes both handles to the same underlying channel and returns a pointer to it.
 - `tx` and `rx` are **capability handles** (typed views), not resources. They do not need to be freed.
 - `close(tx)` / `close(rx)` (or `closing(tx)` in a nursery) closes the underlying channel.
 - `cc_channel_free(ch)` frees the channel. Always free the channel, not the handles.
@@ -2318,7 +2318,7 @@ Notes:
 ```c
 int[~10 >] tx;
 int[~10 <] rx;
-CCChan* ch = channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx);
 
 @nursery {
     spawn(consumer(rx));
@@ -2337,11 +2337,11 @@ Channels can carry results using `T!>(E)` as the element type:
 ```c
 int!>(ParseError)[~100 >] results_tx;        // async sender of Result<int, ParseError>
 int!>(ParseError)[~100 <] results_rx;        // async receiver of Result<int, ParseError>
-CCChan* results_ch = channel_pair(&results_tx, &results_rx);
+CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx);
 
 int!>(ParseError)[~100 sync >] sync_results_tx;   // sync sender
 int!>(ParseError)[~100 sync <] sync_results_rx;   // sync receiver
-CCChan* sync_results_ch = channel_pair(&sync_results_tx, &sync_results_rx);
+CCChan* sync_results_ch = cc_channel_pair(&sync_results_tx, &sync_results_rx);
 ```
 
 **Rule (recv result type):** `recv(&out)` returns `bool !>(CCIoError)`.
@@ -2387,7 +2387,7 @@ int[~10 1:N sync <] sync_sub = sync_events.subscribe();  // subscribe to sync
 
 ### 6.2 Ordered Channels and Task Sending
 
-Channels support an `ordered` flag for FIFO result delivery in task-parallel pipelines. Combined with `chan_send_task`, this enables clean producer-consumer patterns.
+Channels support an `ordered` flag for FIFO result delivery in task-parallel pipelines. Combined with `cc_channel_send_task`, this enables clean producer-consumer patterns.
 
 **Ordered channel declaration:**
 
@@ -2398,14 +2398,14 @@ T[~N ordered <] rx;    // ordered receiver
 
 The `ordered` flag ensures that `recv` returns results in submission order, not completion order. This is essential for pipelines where output order must match input order (e.g., parallel compression).
 
-**`chan_send_task` — spawn and queue:**
+**`cc_channel_send_task` — spawn and queue:**
 
 ```c
-chan_send_task(tx, () => expr);           // spawn task, queue result
-chan_send_task(tx, () => [captures] expr); // with captures
+cc_channel_send_task(tx, () => expr);            // spawn task, queue result
+cc_channel_send_task(tx, () => [captures] expr); // with captures
 ```
 
-`chan_send_task` spawns a fiber immediately to execute the closure, then queues the task handle in the channel. The receiver's `chan_recv` awaits the task internally and extracts the result.
+`cc_channel_send_task` spawns a fiber immediately to execute the closure, then queues the task handle in the channel. The receiver's typed `recv` awaits the task internally and extracts the result.
 
 **How it works:**
 
@@ -2421,13 +2421,13 @@ Both execute tasks immediately. The difference is purely in `recv` sequencing.
 ```c
 CompressedResult*[~16 ordered >] results_tx;
 CompressedResult*[~16 ordered <] results_rx;
-CCChan* ch = channel_pair(&results_tx, &results_rx);
+CCChan* ch = cc_channel_pair(&results_tx, &results_rx);
 
 @nursery {
     // Consumer: receives results in submission order
     spawn(() => [results_rx, out] {
         CompressedResult* r;
-        while (chan_recv(results_rx, &r)) {
+        while (cc_io_avail(results_rx.recv(&r))) {
             cc_file_write(out, r->data);
             cc_arena_free(&r->arena);
         }
@@ -2436,12 +2436,12 @@ CCChan* ch = channel_pair(&results_tx, &results_rx);
     // Producer: spawn tasks, results queued in order
     @closing(results_tx) {
         while (read_block(&blk)) {
-            chan_send_task(results_tx, () => [blk] compress_block(blk));
+            cc_channel_send_task(results_tx, () => [blk] compress_block(blk));
         }
     }
 }
 
-cc_chan_free(ch);
+cc_channel_free(ch);
 ```
 
 **Error propagation:**
@@ -2449,14 +2449,14 @@ cc_chan_free(ch);
 When the closure returns `T!>(E)`, errors flow through:
 
 ```c
-chan_send_task(results_tx, () => {
+cc_channel_send_task(results_tx, () => {
     CompressedResult*!>(CCIoError) res = compress_block(blk);
     return res;  // Error preserved!
 });
 
 // Consumer can propagate errors with ?
 CompressedResult* r;
-while (chan_recv(results_rx, &r)?) {
+while (results_rx.recv(&r)?) {
     use(r);
 }
 ```
@@ -2667,7 +2667,7 @@ replaced_5 Channel API
 // Creation (normative): produce a (tx, rx) pair. Combined channels are not allowed.
 int[~10 >] tx;
 int[~10 <] rx;
-channel_pair(&tx, &rx);
+cc_channel_pair(&tx, &rx);
 
 // === ASYNC CHANNELS (int[~ ... >] / int[~ ... <]) ===
 // send/recv operations require await in @async code
@@ -2699,7 +2699,7 @@ T? x = await recv_timeout(&rx, Duration d);
 
 int[~10 sync >] stx;
 int[~10 sync <] srx;
-channel_pair(&stx, &srx);
+cc_channel_pair(&stx, &srx);
 
 // Core operations (no await, blocks)
 bool ok = send(&stx, value);            // blocks OS thread until sent
@@ -2853,13 +2853,13 @@ CCArena[~4 owned {
 
 // Borrow: recv from pool
 CCArena arena;
-chan_recv(arena_pool, &arena);  // Creates if empty, else returns existing
+arena_pool.recv(&arena);  // Creates if empty, else returns existing
 
 // Use the resource
 // ...
 
 // Return: send back to pool (auto-reset via .reset)
-chan_send(arena_pool, arena);   // Calls .reset before re-adding to pool
+arena_pool.send(arena);   // Calls .reset before re-adding to pool
 ```
 
 **Rule (create on empty):** When `recv` is called on an empty owned channel and capacity allows, `.create` is invoked to produce a new item. If capacity is reached and all items are borrowed, `recv` blocks until an item is returned.
@@ -2901,12 +2901,12 @@ CCArena[~4 owned {
     // Worker borrows arena, uses it, returns it
     spawn(() => [arena_pool] {
         CCArena arena;
-        chan_recv(arena_pool, &arena);  // Borrow
+        arena_pool.recv(&arena);  // Borrow
         
         // Use arena for allocations
         void* p = cc_arena_alloc(&arena, 100);
         
-        chan_send(arena_pool, arena);   // Return (auto-reset)
+        arena_pool.send(arena);   // Return (auto-reset)
     });
 }
 // Pool destroyed here: .destroy called for each arena
@@ -2928,10 +2928,10 @@ Connection[~10 owned {
 
 // Borrow connection
 Connection conn;
-chan_recv(conn_pool, &conn);
+conn_pool.recv(&conn);
 send_request(conn.fd, req);
 Response resp = recv_response(conn.fd);
-chan_send(conn_pool, conn);  // Return to pool
+conn_pool.send(conn);  // Return to pool
 ```
 
 #### 6.7.7 Comparison: Plain vs Owned Channels
@@ -2945,7 +2945,7 @@ chan_send(conn_pool, conn);  // Return to pool
 | Direction | Required (`>` or `<`) | Forbidden (implicit bidirectional) |
 | API | `send`/`recv` | `send`/`recv` (same!) |
 
-**Rule (same API):** Owned channels use the same `chan_send`/`chan_recv` API as plain channels. The semantic difference (transfer vs borrow) is determined by the `owned` modifier at declaration time.
+**Rule (same API):** Owned channels use the same `send`/`recv` UFCS surface as plain channels. The semantic difference (transfer vs borrow) is determined by the `owned` modifier at declaration time.
 
 ---
 
@@ -3572,7 +3572,7 @@ Async channels **suspend cooperatively** and require `await`. They are used in `
 ```c
 int[~ >] tx;
 int[~ <] rx;
-CCChan* ch = channel_pair(&tx, &rx);
+CCChan* ch = cc_channel_pair(&tx, &rx);
 
 // Must use await
 int x;
@@ -3586,7 +3586,7 @@ bool !>(Cancelled) ok2 = await send_cancellable(tx, 42);
 recv(rx, &x);                             // ❌ ERROR: missing await
 send(tx, 42);                             // ❌ ERROR: missing await
 
-chan_free(ch);                            // free the channel when done
+cc_channel_free(ch);                      // free the channel when done
 ```
 
 **Rule:** All operations on async channels require `await`. Omitting `await` is a compile error (regardless of context).
@@ -3617,7 +3617,7 @@ Sync channels **block the OS thread** and do NOT use `await`. They are used for 
 ```c
 int[~ sync >] tx;
 int[~ sync <] rx;
-channel_pair(&tx, &rx);
+cc_channel_pair(&tx, &rx);
 
 // No await allowed
 int x;
@@ -3766,7 +3766,7 @@ Same error handling semantics; only difference is blocking vs suspending.
 ```c
 int[~ >] work_tx;
 int[~ <] work_rx;
-CCChan* work_ch = channel_pair(&work_tx, &work_rx);
+CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
 
 @async void producer() {
     for (int i = 0; i < 100; i++) {
@@ -3787,7 +3787,7 @@ CCChan* work_ch = channel_pair(&work_tx, &work_rx);
     spawn (consumer());
 }
 
-chan_free(work_ch);
+cc_channel_free(work_ch);
 ```
 
 **Pattern 2: Thread Pool (Sync)**
@@ -3795,11 +3795,11 @@ chan_free(work_ch);
 ```c
 int[~ sync >] requests_tx;
 int[~ sync <] requests_rx;
-CCChan* req_ch = channel_pair(&requests_tx, &requests_rx);
+CCChan* req_ch = cc_channel_pair(&requests_tx, &requests_rx);
 
 int[~ sync >] responses_tx;
 int[~ sync <] responses_rx;
-CCChan* resp_ch = channel_pair(&responses_tx, &responses_rx);
+CCChan* resp_ch = cc_channel_pair(&responses_tx, &responses_rx);
 
 void worker_thread() {
     while (true) {
@@ -3820,8 +3820,8 @@ void main() {
     
     t.join();
     
-    chan_free(req_ch);
-    chan_free(resp_ch);
+    cc_channel_free(req_ch);
+    cc_channel_free(resp_ch);
 }
 ```
 
@@ -3870,13 +3870,13 @@ recv(ch, &x);          // What does this do? Depends on context?
 ```c
 int[~ >] tx;
 int[~ <] rx;
-channel_pair(&tx, &rx);
+cc_channel_pair(&tx, &rx);
 int x = 0;
 await recv(rx, &x);       // Async receive handle, must await (always)
 
 int[~ sync >] stx;
 int[~ sync <] srx;
-channel_pair(&stx, &srx);
+cc_channel_pair(&stx, &srx);
 int y = 0;
 recv(srx, &y);            // Sync receive handle, no await (always)
 ```
@@ -4324,7 +4324,7 @@ Streaming uses explicit channel parameters:
 @async void consume() {
     int[~10 >] tx;
     int[~10 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     @closing(tx) {
         spawn (produce(100, &tx));
         @for await (int x : rx) use(x);
@@ -4553,7 +4553,7 @@ CC_DEADLOCK_DETECT=0 ./my_program
 ║ 2 thread(s) blocked for 3.0+ seconds with no progress.     ║
 ╚══════════════════════════════════════════════════════════════╝
   Thread 0: blocked on cc_block_on (waiting for async task)
-  Thread 1: blocked on chan_recv (channel empty, waiting for sender)
+  Thread 1: blocked on recv (channel empty, waiting for sender)
 
 Common causes:
   • cc_block_on() inside spawn() or @nursery
@@ -5118,17 +5118,18 @@ CCUfcsRegistration cc_ufcs_register(const char* pattern, CCUfcsRewriteFn rewrite
 **Examples:**
 
 ```c
-static CCSlice cc_file_ufcs(CCSlice method, CCSliceArray argv, CCArena* arena) {
-    (void)argv;
-    return cc_concat(arena, "cc_file_ufcs_", method);
-}
-
 @comptime {
-    (void)cc_ufcs_register("CCFile", cc_file_ufcs);
+    (void)cc_ufcs_register("CCFile",
+        (method, argv, arena) => {
+            (void)argv;
+            return cc_ufcs_concat2(arena,
+                cc_slice_from_buffer("cc_file_", sizeof("cc_file_") - 1),
+                method);
+        });
     (void)cc_ufcs_register("CCChanTx_*",
-        (method, argv, arena) => cc_channel_tx_ufcs_rewrite(method, argv, arena));
+        (method, argv, arena) => cc_channel_tx_lower_c(method, argv, arena));
     (void)cc_ufcs_register("CCChanRx_*",
-        (method, argv, arena) => cc_channel_rx_ufcs_rewrite(method, argv, arena));
+        (method, argv, arena) => cc_channel_rx_lower_c(method, argv, arena));
 }
 ```
 
@@ -5386,7 +5387,7 @@ This is syntactic sugar for:
 Result*!>(IoError) res_val = compress_block(blk, level);
 if (res_val.is_ok()) {
     Result* res = res_val.unwrap();
-    chan_send(results_tx, res);
+    results_tx.send(res);
 } else {
     fprintf(stderr, "error\n");
 }
@@ -5394,7 +5395,7 @@ if (res_val.is_ok()) {
 // Write:
 Result*!>(IoError) res_val = compress_block(blk, level);
 if @try (Result* res = res_val) {
-    chan_send(results_tx, res);
+    results_tx.send(res);
 } else {
     fprintf(stderr, "error\n");
 }
@@ -5640,7 +5641,7 @@ This section documents syntactic sugar and conventions:
 
 **Methods / UFCS:**
 
-`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries may define custom lowering via `cc_ufcs_register(...)`. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`String_push(&s, x)`).
+`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries may define custom lowering via `cc_ufcs_register(...)`. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`cc_string_push(&s, x)`).
 
 ```c
 tx.send(v);        // lowers to send(tx, v)
@@ -6965,20 +6966,16 @@ struct Duration {
 
 **Channel operations:**
 
-Channel operations (`send`, `recv`, `close`) are function calls to runtime library functions:
+Channel operations are lowered from typed-handle methods and constructor syntax:
 
 ```c
-// Async variant
-@async void chan_send<T>(T[~ >]* tx, T value);
-@async T? chan_recv<T>(T[~ <]* rx);
-void chan_close<T>(T[~ >]* tx);
-
-// Sync variant
-void chan_send_blocking<T>(T[~ sync >]* tx, T value);
-T? chan_recv_blocking<T>(T[~ sync <]* rx);
+CCChan* cc_channel_pair(CCChanTx* tx, CCChanRx* rx);
+CCResult_bool_CCIoError cc_channel_send(CCChanTx tx, T value);
+CCResult_bool_CCIoError cc_channel_recv(CCChanRx rx, T* out);
+void cc_channel_close(CCChanTx tx);
 ```
 
-The channel handle is passed as the first argument.
+Surface `tx.send(value)`, `rx.recv(&out)`, `tx.close()`, and `cc_channel_pair(&tx, &rx)` lower to these channel-family contracts.
 
 ### D.3 Alignment Requirements
 

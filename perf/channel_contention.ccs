@@ -140,7 +140,7 @@ static void trace_trial_marker(const char* phase, int trial, const char* event, 
 static double run_single_pair(int trial) {
     int[~CAP >] tx;
     int[~CAP <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     long long sum = 0;
     trace_worker_state_reset();
     trace_trial_marker("baseline", trial, "begin", -1.0);
@@ -176,8 +176,8 @@ static double run_two_pairs(int trial) {
     int[~CAP <] rx1;
     int[~CAP >] tx2;
     int[~CAP <] rx2;
-    channel_pair(&tx1, &rx1);
-    channel_pair(&tx2, &rx2);
+    cc_channel_pair(&tx1, &rx1);
+    cc_channel_pair(&tx2, &rx2);
     long long sum1 = 0;
     long long sum2 = 0;
     trace_worker_state_reset();

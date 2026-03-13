@@ -51,9 +51,9 @@ static int cc__parse_lowered_match_call(const char* hdr,
     memcpy(fn_name, hdr, fn_len);
     fn_name[fn_len] = '\0';
     cc__match_trim_ws(fn_name);
-    if (strcmp(fn_name, "cc_channel_ufcs_recv") == 0 || cc__match_has_suffix(fn_name, "_recv")) {
+    if (strcmp(fn_name, "cc_channel_recv") == 0 || cc__match_has_suffix(fn_name, "_recv")) {
         *out_kind = 1;
-    } else if (strcmp(fn_name, "cc_channel_ufcs_send") == 0 || cc__match_has_suffix(fn_name, "_send")) {
+    } else if (strcmp(fn_name, "cc_channel_send") == 0 || cc__match_has_suffix(fn_name, "_send")) {
         *out_kind = 0;
     } else {
         return 0;

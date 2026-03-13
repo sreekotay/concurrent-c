@@ -14,7 +14,7 @@
 int main(void) {
     int[~ >] tx;  /* Unbuffered */
     int[~ <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
 
     @closing(tx) {
         /* 2 senders, each sends 10 messages */

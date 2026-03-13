@@ -5,7 +5,7 @@
 int main(void) {
     int[~8 >] tx_h;
     int[~8 <] rx_h;
-    CCChan* ch = channel_pair(&tx_h, &rx_h);
+    CCChan* ch = cc_channel_pair(&tx_h, &rx_h);
     CCChanTx tx = tx_h;
     CCChanRx rx = rx_h;
     int got = 0;

@@ -80,6 +80,29 @@ static double bench_nursery_spawn_once(void) {
     return time_now_ms() - start;
 }
 
+static double bench_nursery_api_once(void) {
+    double start = time_now_ms();
+    for (int batch = 0; batch < total_batches(); batch++) {
+        CCNursery* n = cc_nursery_create();
+        if (!n) {
+            fprintf(stderr, "cc_nursery_create failed\n");
+            abort();
+        }
+        for (int i = 0; i < g_batch_size; i++) {
+            if (cc_nursery_spawn(n, noop_task, NULL) != 0) {
+                fprintf(stderr, "cc_nursery_spawn failed\n");
+                abort();
+            }
+        }
+        if (cc_nursery_wait(n) != 0) {
+            fprintf(stderr, "cc_nursery_wait failed\n");
+            abort();
+        }
+        cc_nursery_free(n);
+    }
+    return time_now_ms() - start;
+}
+
 static double bench_raw_batch_once(void) {
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
@@ -156,15 +179,19 @@ int main(void) {
 
     double empty_nursery = median_ops(bench_empty_nursery_once);
     double nursery_spawn = median_ops(bench_nursery_spawn_once);
+    double nursery_api = median_ops(bench_nursery_api_once);
     double raw_batch = median_ops(bench_raw_batch_once);
     double raw_join_loop = median_ops(bench_raw_join_loop_once);
     double direct_fiber_batch = median_ops(bench_direct_fiber_batch_once);
 
     printf("  empty nursery batches: %.0f batch-ops/sec\n", empty_nursery);
     printf("  nursery spawn+join:    %.0f spawns/sec\n", nursery_spawn);
+    printf("  nursery api direct:    %.0f spawns/sec\n", nursery_api);
     printf("  raw fiber block_all:   %.0f spawns/sec\n", raw_batch);
     printf("  raw fiber join loop:   %.0f spawns/sec\n", raw_join_loop);
     printf("  direct fiber batch:    %.0f spawns/sec\n", direct_fiber_batch);
+    printf("  nursery syntax vs api: %.1f%%\n",
+           nursery_api > 0.0 ? (nursery_spawn / nursery_api) * 100.0 : 0.0);
     printf("  nursery vs block_all:  %.1f%%\n",
            raw_batch > 0.0 ? (nursery_spawn / raw_batch) * 100.0 : 0.0);
     printf("  nursery vs join loop:  %.1f%%\n",

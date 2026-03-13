@@ -42,7 +42,7 @@ int main(void) {
 
     CCTask[~CHAN_CAP >] tx;
     CCTask[~CHAN_CAP <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     @nursery {
         /* Producer: spawn OS tasks, send CCTask handles into channel */

@@ -24,8 +24,8 @@ int main(void) {
     int[~ <] work_rx;
     int[~ >] done_tx;
     int[~ <] done_rx;
-    CCChan* work_ch = channel_pair(&work_tx, &work_rx);
-    CCChan* done_ch = channel_pair(&done_tx, &done_rx);
+    CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
+    CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx);
 
     @nursery {
         /* Collector: must run in parallel with workers for unbuffered channels */

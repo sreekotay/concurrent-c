@@ -289,14 +289,14 @@ size_t String.cap();                          // Capacity (Vec<T> UFCS)
 ```
 
 **Normative lowering:**
-- `s.append(data)` and `s.push(data)` lower to `cc_string_ufcs_push(&s, data)`.
+- `s.append(data)` and `s.push(data)` lower to `cc_string_push(&s, data)`.
 - `s.push_char(c)` lowers to `cc_string_push_char(&s, c)`.
 - `s.push_int(v)` lowers to `cc_string_push_int(&s, v)`.
 - `s.push_uint(v)` lowers to `cc_string_push_uint(&s, v)`.
 - `s.push_float(v)` lowers to `cc_string_push_float(&s, v)`.
 - `s.clear()` lowers to `cc_string_clear(&s)`.
-- `s.as_slice()` lowers to `cc_string_ufcs_as_slice(&s)`.
-- `s.len()` / `s.cap()` lower to `cc_string_ufcs_len(&s)` / `cc_string_ufcs_cap(&s)`.
+- `s.as_slice()` lowers to `cc_string_as_slice(&s)`.
+- `s.len()` / `s.cap()` lower to `cc_string_len(&s)` / `cc_string_cap(&s)`.
 
 **Slice Lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
 
@@ -581,14 +581,14 @@ void            File.close();
 ```
 
 **Normative lowering:**
-- `file.open(path, mode)` lowers to `cc_file_ufcs_open(&file, path, mode)`, then to the underlying `cc_file_open(...)` ABI.
-- `file.read(a, n)` lowers to `cc_file_ufcs_read(&file, a, n)`, which performs the out-parameter ABI call internally.
-- `file.read_line(a)` lowers to `cc_file_ufcs_read_line(&file, a)`.
-- `file.read_all(a)` lowers to `cc_file_ufcs_read_all(&file, a)`.
-- `file.write(data)` lowers to `cc_file_ufcs_write(&file, data)`.
-- `file.read_buf(buf, n)` lowers to `cc_file_ufcs_read_buf(&file, buf, n)`.
-- `file.write_buf(buf, n)` lowers to `cc_file_ufcs_write_buf(&file, buf, n)`.
-- `file.seek(off, whence)` / `file.tell()` / `file.size()` / `file.sync()` / `file.close()` lower to the corresponding `cc_file_ufcs_*` family wrapper with `&file` as receiver.
+- `file.open(path, mode)` lowers to `cc_file_open(&file, path, mode)`.
+- `file.read(a, n)` lowers to `cc_file_read(&file, a, n)`.
+- `file.read_line(a)` lowers to `cc_file_read_line(&file, a)`.
+- `file.read_all(a)` lowers to `cc_file_read_all(&file, a)`.
+- `file.write(data)` lowers to `cc_file_write(&file, data)`.
+- `file.read_buf(buf, n)` lowers to `cc_file_read_buf(&file, buf, n)`.
+- `file.write_buf(buf, n)` lowers to `cc_file_write_buf(&file, buf, n)`.
+- `file.seek(off, whence)` / `file.tell()` / `file.size()` / `file.sync()` / `file.close()` lower to the corresponding `cc_file_*` family function with `&file` as receiver.
 - Async file methods use the same file family contract; implementations may lower them through direct `cc_file_*_async` calls or equivalent family wrappers.
 
 **EOF Semantics (Unified):**
@@ -2707,7 +2707,7 @@ int main(void) {
 - Porting existing C code that uses atomics
 
 **Prefer channels and nurseries when:**
-- Coordinating producer/consumer patterns → use `chan_send`/`chan_recv`
+- Coordinating producer/consumer patterns → use channel `send`/`recv` UFCS
 - Aggregating results from tasks → use channels or return values
 - Synchronizing task completion → use `@nursery` structured concurrency
 

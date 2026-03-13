@@ -1878,6 +1878,17 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
     return 1;
 }
 
+static int cc__ufcs_preceded_by_await(const char* src, size_t recv_start) {
+    size_t j;
+    if (!src || recv_start == 0) return 0;
+    j = recv_start;
+    while (j > 0 && (src[j - 1] == ' ' || src[j - 1] == '\t' || src[j - 1] == '\n' || src[j - 1] == '\r')) j--;
+    if (j < 5) return 0;
+    if (memcmp(src + j - 5, "await", 5) != 0) return 0;
+    if (j > 5 && cc_is_ident_char(src[j - 6])) return 0;
+    return 1;
+}
+
 static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int parser_safe) {
     CCUfcsVarInfo vars[512];
     CCUfcsFieldInfo fields[256];
@@ -1907,6 +1918,8 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int family_by_value = 0;
         int parser_vec = 0;
         int parser_map = 0;
+        int chan_tx = 0;
+        int chan_rx = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
         if (src[i] == '.') {
             sep_pos = i;
@@ -1945,11 +1958,22 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
         parser_vec = cc__type_is_parser_vec(recv_type_base);
         parser_map = cc__type_is_parser_map(recv_type_base);
+        chan_tx = (strncmp(recv_type_base, "CCChanTx_", 9) == 0 ||
+                   strcmp(recv_type_base, "CCChanTx") == 0 ||
+                   strcmp(recv_type_base, "CCChanTx*") == 0);
+        chan_rx = (strncmp(recv_type_base, "CCChanRx_", 9) == 0 ||
+                   strcmp(recv_type_base, "CCChanRx") == 0 ||
+                   strcmp(recv_type_base, "CCChanRx*") == 0);
         if (!(strncmp(recv_type_base, "Vec_", 4) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map ||
+              chan_tx || chan_rx ||
               strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
+            i++;
+            continue;
+        }
+        if ((chan_tx || chan_rx) && cc__ufcs_preceded_by_await(src, recv_start)) {
             i++;
             continue;
         }
@@ -1961,6 +1985,19 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
               strcmp(method_name, "get_ptr") == 0 ||
               strcmp(method_name, "len") == 0 ||
               strcmp(method_name, "remove") == 0)) {
+            i++;
+            continue;
+        }
+        if ((chan_tx || chan_rx) &&
+            !((chan_tx && (strcmp(method_name, "send") == 0 ||
+                           strcmp(method_name, "try_send") == 0 ||
+                           strcmp(method_name, "send_take") == 0 ||
+                           strcmp(method_name, "close") == 0 ||
+                           strcmp(method_name, "free") == 0)) ||
+              (chan_rx && (strcmp(method_name, "recv") == 0 ||
+                           strcmp(method_name, "try_recv") == 0 ||
+                           strcmp(method_name, "close") == 0 ||
+                           strcmp(method_name, "free") == 0)))) {
             i++;
             continue;
         }
@@ -2008,7 +2045,15 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     }
                 }
             }
-            if (concrete_type[0]) {
+            if (chan_tx || chan_rx) {
+                if (strcmp(method_name, "send") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_send");
+                else if (strcmp(method_name, "recv") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_recv");
+                else if (strcmp(method_name, "try_send") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_try_send");
+                else if (strcmp(method_name, "try_recv") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_try_recv");
+                else if (strcmp(method_name, "send_take") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_send_take");
+                else if (strcmp(method_name, "close") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_close");
+                else if (strcmp(method_name, "free") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_free");
+            } else if (concrete_type[0]) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, concrete_type);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
@@ -2025,7 +2070,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             }
         }
         cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-        if (family_by_value || recv_is_ptr) {
+        if (chan_tx || chan_rx || family_by_value || recv_is_ptr) {
             cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
         } else {
             cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
@@ -2062,6 +2107,122 @@ char* cc_rewrite_generic_family_ufcs_survival(const char* src, size_t n) {
 
 char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n) {
     return cc__rewrite_generic_family_ufcs_impl(src, n, 0);
+}
+
+static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
+    CCUfcsVarInfo vars[512];
+    CCUfcsFieldInfo fields[256];
+    size_t var_count = 0, field_count = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    CCScannerState scan;
+    if (!src || n == 0) return NULL;
+    cc__collect_generic_ufcs_types(src, n, vars, &var_count, sizeof(vars) / sizeof(vars[0]),
+                                   fields, &field_count, sizeof(fields) / sizeof(fields[0]));
+    if (var_count == 0) return NULL;
+    cc_scanner_init(&scan);
+    while (i < n) {
+        size_t recv_start = i;
+        size_t recv_end;
+        size_t sep_pos;
+        size_t method_start;
+        size_t method_end;
+        size_t paren_pos;
+        size_t paren_end = 0;
+        char recv_expr[128];
+        char recv_type[256];
+        char recv_type_base[256];
+        char method_name[64];
+        const char* callee = NULL;
+        int recv_is_ptr = 0;
+        int chan_tx = 0;
+        int chan_rx = 0;
+        if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
+        if (!cc_is_ident_start(src[i])) { i++; continue; }
+        recv_end = i;
+        while (recv_end < n && cc_is_ident_char(src[recv_end])) recv_end++;
+        if (recv_end - recv_start >= sizeof(recv_expr)) { i = recv_end; continue; }
+        memcpy(recv_expr, src + recv_start, recv_end - recv_start);
+        recv_expr[recv_end - recv_start] = '\0';
+        sep_pos = cc_skip_ws_and_comments(src, n, recv_end);
+        if (sep_pos >= n || (src[sep_pos] != '.' && !(sep_pos + 1 < n && src[sep_pos] == '-' && src[sep_pos + 1] == '>'))) {
+            i = recv_end;
+            continue;
+        }
+        method_start = cc_skip_ws_and_comments(src, n, sep_pos + (src[sep_pos] == '.' ? 1 : 2));
+        if (method_start >= n || !cc_is_ident_start(src[method_start])) { i = recv_end; continue; }
+        method_end = method_start;
+        while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+        if (method_end - method_start >= sizeof(method_name)) { i = recv_end; continue; }
+        memcpy(method_name, src + method_start, method_end - method_start);
+        method_name[method_end - method_start] = '\0';
+        if (cc__ufcs_preceded_by_await(src, recv_start)) { i = recv_end; continue; }
+        paren_pos = cc_skip_ws_and_comments(src, n, method_end);
+        if (paren_pos >= n || src[paren_pos] != '(') { i = recv_end; continue; }
+        if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i = recv_end; continue; }
+        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, vars, var_count, fields, field_count,
+                                                    recv_type, sizeof(recv_type), &recv_is_ptr)) {
+            i = recv_end;
+            continue;
+        }
+        cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
+        chan_tx = (strncmp(recv_type_base, "CCChanTx_", 9) == 0 ||
+                   strcmp(recv_type_base, "CCChanTx") == 0 ||
+                   strcmp(recv_type_base, "CCChanTx*") == 0 ||
+                   strcmp(recv_type_base, "CCChan") == 0 ||
+                   strcmp(recv_type_base, "CCChan*") == 0);
+        chan_rx = (strncmp(recv_type_base, "CCChanRx_", 9) == 0 ||
+                   strcmp(recv_type_base, "CCChanRx") == 0 ||
+                   strcmp(recv_type_base, "CCChanRx*") == 0 ||
+                   strcmp(recv_type_base, "CCChan") == 0 ||
+                   strcmp(recv_type_base, "CCChan*") == 0);
+        if (chan_tx && strcmp(method_name, "send") == 0) callee = "cc_channel_send";
+        else if (chan_tx && strcmp(method_name, "try_send") == 0) callee = "cc_channel_try_send";
+        else if (chan_tx && strcmp(method_name, "send_take") == 0) callee = "cc_channel_send_take";
+        else if (chan_rx && strcmp(method_name, "recv") == 0) callee = "cc_channel_recv";
+        else if (chan_rx && strcmp(method_name, "try_recv") == 0) callee = "cc_channel_try_recv";
+        else if ((chan_tx || chan_rx) && strcmp(method_name, "close") == 0) callee = "cc_channel_close";
+        else if ((chan_tx || chan_rx) && strcmp(method_name, "free") == 0) callee = "cc_channel_free";
+        if (!callee) { i = recv_end; continue; }
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, callee);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+        {
+            size_t args_start = paren_pos + 1;
+            size_t args_end = paren_end;
+            while (args_start < args_end &&
+                   (src[args_start] == ' ' || src[args_start] == '\t' || src[args_start] == '\n' || src[args_start] == '\r')) {
+                args_start++;
+            }
+            while (args_end > args_start &&
+                   (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
+                args_end--;
+            }
+            if (args_end > args_start) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+            }
+        }
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+        last_emit = paren_end + 1;
+        i = paren_end + 1;
+        (void)recv_is_ptr;
+    }
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+char* cc_rewrite_channel_ufcs_survival(const char* src, size_t n) {
+    return cc__rewrite_channel_ufcs_impl(src, n);
+}
+
+char* cc_rewrite_channel_ufcs_concrete(const char* src, size_t n) {
+    return cc__rewrite_channel_ufcs_impl(src, n);
 }
 
 char* cc_rewrite_result_ufcs_survival(const char* src, size_t n) {
@@ -5070,6 +5231,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
     CC_CHAIN(chain, cc_rewrite_file_ufcs_survival(chain.src, chain.len));
     CC_CHAIN(chain, cc_rewrite_result_ufcs_survival(chain.src, chain.len));
     CC_CHAIN(chain, cc_rewrite_generic_family_ufcs_survival(chain.src, chain.len));
+    CC_CHAIN(chain, cc_rewrite_channel_ufcs_survival(chain.src, chain.len));
     /* P12: result constructors for parser mode */
     CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
     /* P13: normalize if @try ( -> if (try */
@@ -5278,6 +5440,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     CC_CHAIN(chain, cc_rewrite_file_ufcs_survival(chain.src, chain.len));
     CC_CHAIN(chain, cc_rewrite_result_ufcs_survival(chain.src, chain.len));
     CC_CHAIN(chain, cc_rewrite_generic_family_ufcs_survival(chain.src, chain.len));
+    CC_CHAIN(chain, cc_rewrite_channel_ufcs_survival(chain.src, chain.len));
     /* P12: result constructors for parser mode */
     CC_CHAIN(chain, cc__rewrite_result_constructors(chain.src, chain.len));
     /* P13: normalize if @try ( -> if (try */
@@ -5627,6 +5790,12 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     buffers[buf_idx] = cc_rewrite_generic_family_ufcs_survival(cur, cur_len);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    buffers[buf_idx] = cc_rewrite_channel_ufcs_survival(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);

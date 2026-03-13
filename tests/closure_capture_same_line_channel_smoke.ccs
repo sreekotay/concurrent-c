@@ -6,7 +6,7 @@ static int g_value = -1;
 
 int main(void) {
     int[~1 >] tx; int[~1 <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     @nursery {
         spawn(() => [rx] {

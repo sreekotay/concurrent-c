@@ -41,7 +41,7 @@ int main(void) {
     
     int[~ >] tx;  /* Unbuffered channel - requires rendezvous */
     int[~ <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
     
     /* THIS IS THE BAD PATTERN */
     /* cc_block_on inside spawn blocks the spawn's thread,

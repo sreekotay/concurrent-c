@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
     /* Create work channel */
     WorkItem[~buffer_size >] work_tx;
     WorkItem[~buffer_size <] work_rx;
-    channel_pair(&work_tx, &work_rx);
+    cc_channel_pair(&work_tx, &work_rx);
     
     @nursery {
         /* Spawn workers - unroll since capture from loop var not supported */

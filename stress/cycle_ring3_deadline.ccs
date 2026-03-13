@@ -34,9 +34,9 @@ int main(void) {
         int[~ >] tx3;
         int[~ <] rx3;
 
-        CCChan* ch1 = channel_pair(&tx1, &rx1);
-        CCChan* ch2 = channel_pair(&tx2, &rx2);
-        CCChan* ch3 = channel_pair(&tx3, &rx3);
+        CCChan* ch1 = cc_channel_pair(&tx1, &rx1);
+        CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
+        CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
         @nursery {
             spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });

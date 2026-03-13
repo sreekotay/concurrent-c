@@ -1,0 +1,54 @@
+/* Regression test for typed CCTask channel recv returning bool !>(CCIoError).
+ *
+ * Pigz uses this shape inside a spawned closure:
+ *   while (cc_io_avail(cc_channel_recv(tasks_rx, &task))) { ... }
+ *
+ * Existing task/channel smokes covered ordered_recv(), raw cc_chan_recv_task(),
+ * and await rx.recv(&val), but not direct typed cc_channel_recv() on a
+ * CCTask[~N <] handle captured into a spawn closure.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+cc_atomic_int g_ok = 0;
+
+static void* compute(void* arg) {
+    int value = (int)(intptr_t)arg;
+    return (void*)(intptr_t)(value * 2);
+}
+
+int main(void) {
+    CCTask[~2 >] tx;
+    CCTask[~2 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    @nursery {
+        spawn(() => [tx] {
+            CCTask task = cc_fiber_spawn_task(compute, (void*)21);
+            (void)chan_send(tx, task);
+            chan_close(tx);
+        });
+
+        spawn(() => [rx] {
+            CCTask task;
+            if (cc_io_avail(cc_channel_recv(rx, &task))) {
+                intptr_t result = cc_block_on_intptr(task);
+                if (result == 42) {
+                    cc_atomic_store(&g_ok, 1);
+                }
+            }
+        });
+    }
+
+    cc_chan_free(ch);
+
+    if (!cc_atomic_load(&g_ok)) {
+        printf("task_channel_typed_recv_smoke: FAIL\n");
+        return 1;
+    }
+
+    printf("task_channel_typed_recv_smoke: PASS\n");
+    return 0;
+}

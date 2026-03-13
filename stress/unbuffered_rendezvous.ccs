@@ -52,7 +52,7 @@ CCChan* g_ch;
 int main(void) {
     printf("unbuffered_rendezvous: %d pairs x %d msgs\n", NUM_PAIRS, MSGS_PER_PAIR);
 
-    g_ch = channel_pair(&g_tx, &g_rx);
+    g_ch = cc_channel_pair(&g_tx, &g_rx);
 
     CCTaskIntptr tasks[NUM_PAIRS * 2];
     intptr_t results[NUM_PAIRS * 2];

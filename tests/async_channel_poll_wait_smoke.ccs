@@ -8,7 +8,7 @@
 int main(void) {
     int[~ >] tx;
     int[~ <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     int sent = 0;
     int received = 0;

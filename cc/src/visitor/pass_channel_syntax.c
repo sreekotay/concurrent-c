@@ -783,13 +783,15 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
         if (c == '"') { in_str = 1; i++; col++; continue; }
         if (c == '\'') { in_chr = 1; i++; col++; continue; }
 
-        /* Look for channel_pair token */
-        if (c == 'c' && i + 12 < len && memcmp(src + i, "channel_pair", 12) == 0) {
+        /* Look for canonical channel-pair constructor token. */
+        if (c == 'c' && i + 15 < len && memcmp(src + i, "cc_channel_pair", 15) == 0) {
+            const size_t pair_name_len = 15;
             char pre = (i == 0) ? 0 : src[i - 1];
-            char post = (i + 12 < len) ? src[i + 12] : 0;
-            if ((i == 0 || !cc__is_ident_char_local2(pre)) && (i + 12 == len || !cc__is_ident_char_local2(post))) {
+            char post = (i + pair_name_len < len) ? src[i + pair_name_len] : 0;
+            if ((i == 0 || !cc__is_ident_char_local2(pre)) &&
+                (i + pair_name_len == len || !cc__is_ident_char_local2(post))) {
                 size_t call_start = i;
-                const char* p = src + i + 12;
+                const char* p = src + i + pair_name_len;
                 p = cc__skip_ws_local2(p);
                 if (*p != '(') { i++; col++; continue; }
                 p++;
@@ -797,7 +799,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (*p != '&') {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair expects '&tx, &rx'");
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair expects '&tx, &rx'");
                     free(out);
                     return NULL;
                 }
@@ -847,7 +849,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (!is_expression && *after != ';') {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair must be used as statement or expression");
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair must be used as statement or expression");
                     free(out);
                     return NULL;
                 }
@@ -863,7 +865,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     !cc__find_chan_decl_before(src, len, call_start, rx_name, &rx_lbr, &rx_rbr, &rx_ts)) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair could not find declarations for '%s' and '%s'", tx_name, rx_name);
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair could not find declarations for '%s' and '%s'", tx_name, rx_name);
                     fprintf(stderr, "  note: ensure both channel handles are declared before this call\n");
                     fprintf(stderr, "  hint: use 'T[~N >] %s; T[~N <] %s;' to declare send/recv handles\n", tx_name, rx_name);
                     free(out);
@@ -898,11 +900,11 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (!tx_is_tx || tx_is_rx || !rx_is_rx || rx_is_tx) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair requires send handle (>) first, then recv handle (<)");
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair requires send handle (>) first, then recv handle (<)");
                     fprintf(stderr, "  note: '%s' is %s, '%s' is %s\n",
                             tx_name, tx_is_tx ? "send (>)" : tx_is_rx ? "recv (<)" : "unknown",
                             rx_name, rx_is_rx ? "recv (<)" : rx_is_tx ? "send (>)" : "unknown");
-                    fprintf(stderr, "  hint: use channel_pair(&tx, &rx) where tx is T[~N >] and rx is T[~N <]\n");
+                    fprintf(stderr, "  hint: use cc_channel_pair(&tx, &rx) where tx is T[~N >] and rx is T[~N <]\n");
                     free(out);
                     return NULL;
                 }
@@ -910,7 +912,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (tx_unknown || rx_unknown) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair unknown token in spec");
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair unknown token in spec");
                     free(out);
                     return NULL;
                 }
@@ -930,7 +932,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (tx_mode != rx_mode) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair mode mismatch (tx=%d, rx=%d)", tx_mode, rx_mode);
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair mode mismatch (tx=%d, rx=%d)", tx_mode, rx_mode);
                     fprintf(stderr, "  hint: both handles must have the same mode specifier\n");
                     free(out);
                     return NULL;
@@ -939,7 +941,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (tx_has_topo != rx_has_topo || (tx_has_topo && strcmp(tx_topo, rx_topo) != 0)) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair topology mismatch (tx='%s', rx='%s')", tx_has_topo ? tx_topo : "(none)", rx_has_topo ? rx_topo : "(none)");
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair topology mismatch (tx='%s', rx='%s')", tx_has_topo ? tx_topo : "(none)", rx_has_topo ? rx_topo : "(none)");
                     fprintf(stderr, "  hint: both handles must have the same topology (mpmc, spsc, etc.)\n");
                     free(out);
                     return NULL;
@@ -950,7 +952,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 if (tx_bp != rx_bp) {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                            line, col, CC_ERR_CHANNEL, "channel_pair backpressure mismatch (tx=%d, rx=%d)", tx_bp, rx_bp);
+                            line, col, CC_ERR_CHANNEL, "cc_channel_pair backpressure mismatch (tx=%d, rx=%d)", tx_bp, rx_bp);
                     fprintf(stderr, "  hint: both handles must have the same backpressure setting\n");
                     free(out);
                     return NULL;
@@ -964,7 +966,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     if (strcmp(tx_cap_expr, rx_cap_expr) != 0) {
                         char rel[1024];
                         cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),
-                                line, col, CC_ERR_CHANNEL, "channel_pair capacity mismatch");
+                                line, col, CC_ERR_CHANNEL, "cc_channel_pair capacity mismatch");
                         free(out);
                         return NULL;
                     }
@@ -974,7 +976,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 } else {
                     cc_pass_error_cat(ctx && ctx->input_path ? ctx->input_path : "<input>",
                             line, col, CC_ERR_CHANNEL,
-                            "channel_pair capacity mismatch (tx=%lld, rx=%lld)", tx_cap, rx_cap);
+                            "cc_channel_pair capacity mismatch (tx=%lld, rx=%lld)", tx_cap, rx_cap);
                     free(out);
                     return NULL;
                 }
@@ -991,7 +993,7 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                 int allow_take = cc__elem_type_implies_take(elem_ty, &elem_sz_expr);
 
                 /* Ordered channels store CCTask values internally, regardless of the
-                   declared element type.  Override elem_size so chan_send_task and the
+                   declared element type. Override elem_size so cc_channel_send_task and the
                    ordered recv helper always agree on the wire size. */
                 if (rx_ordered) {
                     elem_sz_expr = "sizeof(CCTask)";
@@ -1019,15 +1021,15 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
+                             "/* cc_channel_pair */ cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ do { CCChan* __cc_ch = cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
-                             "if (!__cc_ch) { fprintf(stderr, \"CC: channel_pair failed\\n\"); abort(); } } while(0);",
+                             "/* cc_channel_pair */ do { CCChan* __cc_ch = cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
+                             "if (!__cc_ch) { fprintf(stderr, \"CC: cc_channel_pair failed\\n\"); abort(); } } while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
@@ -1418,10 +1420,10 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
 }
 
 /* ============================================================================
- * chan_send_task rewriting (v3 syntax: captures AFTER arrow)
+ * cc_channel_send_task rewriting (v3 syntax: captures AFTER arrow)
  * ============================================================================
  * 
- * Transforms: chan_send_task(ch, () => [captures] body)
+ * Transforms: cc_channel_send_task(ch, () => [captures] body)
  * Into: { CCClosure0 c = () => [captures] { wrapper(body) }; spawn; send; }
  */
 
@@ -1480,14 +1482,14 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
     size_t o_len = 0, o_cap = 0;
     size_t last_emit = 0;
     
-    for (size_t i = 0; i + 14 < len; i++) {
-        /* Look for chan_send_task( */
-        if (memcmp(src + i, "chan_send_task", 14) != 0) continue;
+    for (size_t i = 0; i + 20 < len; i++) {
+        /* Look for cc_channel_send_task( */
+        if (memcmp(src + i, "cc_channel_send_task", 20) != 0) continue;
         if (i > 0 && cc__is_ident_char_local2(src[i - 1])) continue;
-        if (i + 14 < len && cc__is_ident_char_local2(src[i + 14])) continue;
+        if (i + 20 < len && cc__is_ident_char_local2(src[i + 20])) continue;
         
         size_t call_start = i;
-        const char* p = src + i + 14;
+        const char* p = src + i + 20;
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
         if (*p != '(') continue;
         
@@ -1495,7 +1497,7 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         size_t paren_end = cc__find_matching_delim(src, len, paren_start, '(', ')');
         if (paren_end == 0) continue;
         
-        /* Parse: chan_send_task(channel, closure) */
+        /* Parse: cc_channel_send_task(channel, closure) */
         p++;  /* skip ( */
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
         

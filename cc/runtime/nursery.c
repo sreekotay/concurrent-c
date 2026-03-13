@@ -39,11 +39,18 @@ static inline uint64_t nursery_rdtsc(void) {
 }
 
 typedef struct {
-    _Atomic uint64_t thunk_alloc_cycles;
+    _Atomic uint64_t setup_cycles;
     _Atomic uint64_t fiber_spawn_cycles;
     _Atomic uint64_t mutex_cycles;
-    _Atomic uint64_t total_cycles;
-    _Atomic size_t count;
+    _Atomic uint64_t spawn_total_cycles;
+    _Atomic uint64_t wait_join_cycles;
+    _Atomic uint64_t wait_free_cycles;
+    _Atomic uint64_t wait_close_cycles;
+    _Atomic uint64_t wait_total_cycles;
+    _Atomic size_t spawn_count;
+    _Atomic size_t wait_calls;
+    _Atomic size_t wait_tasks_joined;
+    _Atomic size_t wait_channels_closed;
 } nursery_timing;
 
 static nursery_timing g_nursery_timing = {0};
@@ -57,21 +64,54 @@ static int nursery_timing_enabled(void) {
 }
 
 void cc_nursery_dump_timing(void) {
-    size_t count = atomic_load(&g_nursery_timing.count);
-    if (count == 0) return;
-    
-    uint64_t thunk = atomic_load(&g_nursery_timing.thunk_alloc_cycles);
+    size_t spawn_count = atomic_load(&g_nursery_timing.spawn_count);
+    size_t wait_calls = atomic_load(&g_nursery_timing.wait_calls);
+    uint64_t setup = atomic_load(&g_nursery_timing.setup_cycles);
     uint64_t spawn = atomic_load(&g_nursery_timing.fiber_spawn_cycles);
     uint64_t mutex = atomic_load(&g_nursery_timing.mutex_cycles);
-    uint64_t total = atomic_load(&g_nursery_timing.total_cycles);
-    
-    fprintf(stderr, "\n=== NURSERY SPAWN TIMING (%zu spawns) ===\n", count);
-    fprintf(stderr, "  Total:        %8.1f cycles/spawn (100.0%%)\n", (double)total / count);
-    fprintf(stderr, "  Breakdown:\n");
-    fprintf(stderr, "    thunk_alloc: %8.1f cycles/spawn (%5.1f%%)\n", (double)thunk / count, 100.0 * thunk / total);
-    fprintf(stderr, "    fiber_spawn: %8.1f cycles/spawn (%5.1f%%)\n", (double)spawn / count, 100.0 * spawn / total);
-    fprintf(stderr, "    mutex:       %8.1f cycles/spawn (%5.1f%%)\n", (double)mutex / count, 100.0 * mutex / total);
-    fprintf(stderr, "==========================================\n\n");
+    uint64_t spawn_total = atomic_load(&g_nursery_timing.spawn_total_cycles);
+    uint64_t wait_join = atomic_load(&g_nursery_timing.wait_join_cycles);
+    uint64_t wait_free = atomic_load(&g_nursery_timing.wait_free_cycles);
+    uint64_t wait_close = atomic_load(&g_nursery_timing.wait_close_cycles);
+    uint64_t wait_total = atomic_load(&g_nursery_timing.wait_total_cycles);
+    size_t wait_tasks = atomic_load(&g_nursery_timing.wait_tasks_joined);
+    size_t wait_closes = atomic_load(&g_nursery_timing.wait_channels_closed);
+
+    if (spawn_count) {
+        fprintf(stderr, "\n=== NURSERY SPAWN TIMING (%zu spawns) ===\n", spawn_count);
+        fprintf(stderr, "  Total:        %8.1f cycles/spawn (100.0%%)\n", (double)spawn_total / spawn_count);
+        fprintf(stderr, "  Breakdown:\n");
+        fprintf(stderr, "    setup:       %8.1f cycles/spawn (%5.1f%%)\n",
+                (double)setup / spawn_count, 100.0 * setup / spawn_total);
+        fprintf(stderr, "    fiber_spawn: %8.1f cycles/spawn (%5.1f%%)\n",
+                (double)spawn / spawn_count, 100.0 * spawn / spawn_total);
+        fprintf(stderr, "    mutex:       %8.1f cycles/spawn (%5.1f%%)\n",
+                (double)mutex / spawn_count, 100.0 * mutex / spawn_total);
+    }
+    if (wait_calls) {
+        fprintf(stderr, "\n=== NURSERY WAIT TIMING (%zu waits) ===\n", wait_calls);
+        fprintf(stderr, "  Total:        %8.1f cycles/wait (100.0%%)\n", (double)wait_total / wait_calls);
+        fprintf(stderr, "  Tasks joined: %8.1f tasks/wait\n",
+                wait_calls ? (double)wait_tasks / wait_calls : 0.0);
+        fprintf(stderr, "  Ch closed:    %8.1f chans/wait\n",
+                wait_calls ? (double)wait_closes / wait_calls : 0.0);
+        fprintf(stderr, "  Breakdown:\n");
+        fprintf(stderr, "    join:        %8.1f cycles/wait (%5.1f%%)  %.1f cycles/task\n",
+                (double)wait_join / wait_calls,
+                wait_total ? 100.0 * wait_join / wait_total : 0.0,
+                wait_tasks ? (double)wait_join / wait_tasks : 0.0);
+        fprintf(stderr, "    free:        %8.1f cycles/wait (%5.1f%%)  %.1f cycles/task\n",
+                (double)wait_free / wait_calls,
+                wait_total ? 100.0 * wait_free / wait_total : 0.0,
+                wait_tasks ? (double)wait_free / wait_tasks : 0.0);
+        fprintf(stderr, "    close:       %8.1f cycles/wait (%5.1f%%)  %.1f cycles/chan\n",
+                (double)wait_close / wait_calls,
+                wait_total ? 100.0 * wait_close / wait_total : 0.0,
+                wait_closes ? (double)wait_close / wait_closes : 0.0);
+    }
+    if (spawn_count || wait_calls) {
+        fprintf(stderr, "==========================================\n\n");
+    }
 }
 
 /* Forward declaration for fiber_task */
@@ -81,6 +121,7 @@ typedef struct fiber_task fiber_task;
 fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
 int cc_fiber_join(fiber_task* t, void** out_result);
 void cc_fiber_task_free(fiber_task* t);
+void cc_fiber_set_spawn_nursery_override(CCNursery* nursery);
 
 /* Thread-local: current nursery for code running inside nursery-spawned tasks.
    Used by optional runtime deadlock guard in channel.c. */
@@ -104,61 +145,6 @@ void cc__chan_set_autoclose_owner(CCChan* ch, CCNursery* owner);
 
 int cc_nursery_add_closing_tx(CCNursery* n, CCChanTx tx) {
     return cc_nursery_add_closing_chan(n, tx.raw);
-}
-
-typedef struct CCNurseryThunk {
-    CCNursery* n;
-    void* (*fn)(void*);
-    void* arg;
-    struct CCNurseryThunk* next;  /* For free list pooling */
-} CCNurseryThunk;
-
-/* Lock-free thunk pool (Treiber stack) */
-static CCNurseryThunk* _Atomic g_thunk_free_list = NULL;
-
-static CCNurseryThunk* thunk_alloc(void) {
-    CCNurseryThunk* th = atomic_load_explicit(&g_thunk_free_list, memory_order_acquire);
-    while (th) {
-        CCNurseryThunk* next = th->next;
-        if (atomic_compare_exchange_weak_explicit(&g_thunk_free_list, &th, next,
-                                                   memory_order_release,
-                                                   memory_order_acquire)) {
-            th->next = NULL;
-            return th;
-        }
-    }
-    return (CCNurseryThunk*)malloc(sizeof(CCNurseryThunk));
-}
-
-static void thunk_free(CCNurseryThunk* th) {
-    if (!th) return;
-    CCNurseryThunk* head;
-    do {
-        head = atomic_load_explicit(&g_thunk_free_list, memory_order_relaxed);
-        th->next = head;
-    } while (!atomic_compare_exchange_weak_explicit(&g_thunk_free_list, &head, th,
-                                                     memory_order_release,
-                                                     memory_order_relaxed));
-}
-
-static void* cc__nursery_task_trampoline(void* p) {
-    CCNurseryThunk* th = (CCNurseryThunk*)p;
-    if (!th) return NULL;
-    CCNursery* nn = th->n;
-    void* (*ff)(void*) = th->fn;
-    void* aa = th->arg;
-    thunk_free(th);  /* Return to pool instead of free */
-    
-    /* Pattern: (cancelled && no_work) => exit
-     * If nursery is cancelled, don't start new work - exit immediately. */
-    if (cc_nursery_is_cancelled(nn)) {
-        return NULL;
-    }
-    
-    cc__tls_current_nursery = nn;
-    void* r = ff ? ff(aa) : NULL;
-    cc__tls_current_nursery = NULL;
-    return r;
 }
 
 CCNursery* cc_nursery_create(void) {
@@ -282,21 +268,16 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     
     if (timing) t0 = nursery_rdtsc();
 
-    CCNurseryThunk* th = thunk_alloc();
-    if (!th) return ENOMEM;
-    th->n = n;
-    th->fn = fn;
-    th->arg = arg;
-
-    if (timing) t1 = nursery_rdtsc();
+    if (timing) t1 = t0;
 
     /* Spawn task on fiber scheduler.
      * Non-worker sibling grouping is runtime-gated because it can help some
      * startup locality cases but regress broader workloads like pigz. */
     cc_sched_nonworker_spawn_group_hint((const void*)n, 2);
-    fiber_task* t = cc_fiber_spawn(cc__nursery_task_trampoline, th);
+    cc_fiber_set_spawn_nursery_override(n);
+    fiber_task* t = cc_fiber_spawn(fn, arg);
+    cc_fiber_set_spawn_nursery_override(NULL);
     if (!t) {
-        free(th);
         return ENOMEM;
     }
 
@@ -309,7 +290,6 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
         if (grow_err != 0) {
             pthread_mutex_unlock(&n->mu);
             cc_fiber_task_free(t);
-            free(th);
             return grow_err;
         }
     }
@@ -318,11 +298,11 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     
     if (timing) {
         t3 = nursery_rdtsc();
-        atomic_fetch_add_explicit(&g_nursery_timing.thunk_alloc_cycles, t1 - t0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.setup_cycles, t1 - t0, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_nursery_timing.fiber_spawn_cycles, t2 - t1, memory_order_relaxed);
         atomic_fetch_add_explicit(&g_nursery_timing.mutex_cycles, t3 - t2, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_nursery_timing.total_cycles, t3 - t0, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_nursery_timing.count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.spawn_total_cycles, t3 - t0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.spawn_count, 1, memory_order_relaxed);
     }
     
     return 0;
@@ -331,25 +311,59 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
     int first_err = 0;
+    int timing = nursery_timing_enabled();
+    uint64_t t0 = 0;
+    uint64_t join_cycles = 0;
+    uint64_t free_cycles = 0;
+    uint64_t close_cycles = 0;
+    size_t joined = 0;
+    size_t closed = 0;
+    if (timing) t0 = nursery_rdtsc();
     
     /* Join all tasks - spec: join children first, then close channels.
      * If cancelled, fibers should exit promptly when they check cc_cancelled()
      * or when channel operations return ECANCELED. */
     for (size_t i = 0; i < n->count; ++i) {
         if (!n->tasks[i]) continue;
+        uint64_t step0 = timing ? nursery_rdtsc() : 0;
         int err = cc_fiber_join(n->tasks[i], NULL);
+        uint64_t step1 = timing ? nursery_rdtsc() : 0;
         if (first_err == 0 && err != 0) {
             first_err = err;
         }
         cc_fiber_task_free(n->tasks[i]);
+        uint64_t step2 = timing ? nursery_rdtsc() : 0;
+        if (timing) {
+            join_cycles += step1 - step0;
+            free_cycles += step2 - step1;
+        }
         n->tasks[i] = NULL;
+        joined++;
     }
     
     /* Close registered channels */
     for (size_t i = 0; i < n->closing_count; ++i) {
-        if (n->closing[i]) cc_chan_close(n->closing[i]);
+        if (n->closing[i]) {
+            uint64_t step0 = timing ? nursery_rdtsc() : 0;
+            cc_chan_close(n->closing[i]);
+            uint64_t step1 = timing ? nursery_rdtsc() : 0;
+            if (timing) {
+                close_cycles += step1 - step0;
+            }
+            closed++;
+        }
     }
     n->count = 0;
+    if (timing) {
+        uint64_t t1 = nursery_rdtsc();
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_join_cycles, join_cycles, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_free_cycles, free_cycles, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_close_cycles, close_cycles, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_total_cycles, t1 - t0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_calls, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_tasks_joined, joined, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.wait_channels_closed, closed, memory_order_relaxed);
+    }
     return first_err;
 }
 

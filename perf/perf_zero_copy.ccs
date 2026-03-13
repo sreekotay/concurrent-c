@@ -33,7 +33,7 @@ typedef struct {
 static void bench_int(void) {
     int[~100 >] tx;
     int[~100 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     double start = time_now_ms();
     long sum = 0;
@@ -55,7 +55,7 @@ static void bench_int(void) {
 static void bench_small(void) {
     Small[~100 >] tx;
     Small[~100 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     double start = time_now_ms();
     
@@ -78,7 +78,7 @@ static void bench_small(void) {
 static void bench_medium(void) {
     Medium[~100 >] tx;
     Medium[~100 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     double start = time_now_ms();
     
@@ -102,7 +102,7 @@ static void bench_medium(void) {
 static void bench_large(void) {
     Large[~50 >] tx;  /* Smaller buffer for large payloads */
     Large[~50 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     int iterations = ITERATIONS / 2;
     double start = time_now_ms();

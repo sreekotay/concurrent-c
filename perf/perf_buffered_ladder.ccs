@@ -92,7 +92,7 @@ static double bench_loop_two_fiber_once(void) {
 static double bench_chan_single_once(void) {
     int[~1000 >] tx_h;
     int[~1000 <] rx_h;
-    channel_pair(&tx_h, &rx_h);
+    cc_channel_pair(&tx_h, &rx_h);
 
     double start = time_now_ms();
     int64_t checksum = 0;
@@ -113,7 +113,7 @@ static double bench_chan_single_once(void) {
 static double bench_chan_two_fiber_once(void) {
     int[~1000 >] tx_h;
     int[~1000 <] rx_h;
-    channel_pair(&tx_h, &rx_h);
+    cc_channel_pair(&tx_h, &rx_h);
 
     double start = time_now_ms();
     @closing(tx_h) {

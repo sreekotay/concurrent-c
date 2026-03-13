@@ -37,13 +37,13 @@ static CCSlice named_toy_prefix(CCSlice recv_type) {
 
 static CCSlice named_toy_ufcs_rewrite(CCSlice method, CCSliceArray argv, CCArena *arena) {
     CCSlice recv_type = argv.len > 0 ? argv.items[0] : cc_slice_empty();
-    return cc_concat(arena, named_toy_prefix(recv_type), method);
+    return cc_ufcs_concat2(arena, named_toy_prefix(recv_type), method);
 }
 
 @comptime {
     (void)cc_ufcs_register("NamedToy", named_toy_ufcs_rewrite);
     (void)cc_ufcs_register("LambdaToy",
-        (method, argv, arena) => cc_concat(arena,
+        (method, argv, arena) => cc_ufcs_concat2(arena,
             ((argv.len > 0 &&
               argv.items[0].len == sizeof("LambdaToy") - 1 &&
               memcmp(argv.items[0].ptr, "LambdaToy", argv.items[0].len) == 0)

@@ -38,7 +38,7 @@ int test_consumer_outside(void) {
     /* Buffer large enough for all items (producers don't block) */
     int[~100 >] tx;
     int[~100 <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
     
     /* Producers inside nursery - channel closed when they all finish */
     @closing(tx) {

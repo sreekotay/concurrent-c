@@ -7,7 +7,7 @@
 int main(void) {
     int[~NUM_ITEMS >] tx;
     int[~NUM_ITEMS <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
     
     // Send NUM_ITEMS values
     for (int i = 0; i < NUM_ITEMS; i++) {

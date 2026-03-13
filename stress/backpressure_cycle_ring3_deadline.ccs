@@ -34,9 +34,9 @@ int main(void) {
         int[~1 >] tx3;
         int[~1 <] rx3;
 
-        CCChan* ch1 = channel_pair(&tx1, &rx1);
-        CCChan* ch2 = channel_pair(&tx2, &rx2);
-        CCChan* ch3 = channel_pair(&tx3, &rx3);
+        CCChan* ch1 = cc_channel_pair(&tx1, &rx1);
+        CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
+        CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
         int seed1 = 11;
         int seed2 = 22;

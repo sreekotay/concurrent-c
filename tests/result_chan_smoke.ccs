@@ -20,7 +20,7 @@ int !> (CCError) make_err_result(void) {
 }
 
 int main(void) {
-    g_ch = channel_pair(&results_tx, &results_rx);
+    g_ch = cc_channel_pair(&results_tx, &results_rx);
     
     // Send a success (use non-UFCS form due to parser limitation)
     CCResult_int_CCError ok_result = make_ok_result();

@@ -4,7 +4,7 @@
 int main(void) {
     int[~1 >, DropOld] tx;
     int[~1 <, DropOld] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
 
     // Fill then overwrite
     assert(cc_io_avail(chan_send(tx, 1)));

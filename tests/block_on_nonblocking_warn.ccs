@@ -20,7 +20,7 @@
 int main(void) {
     int[~10 >] tx;
     int[~10 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     /* This should warn - producer has loop with channel ops */
     int rc1 = cc_block_on(int, producer(tx, 5));

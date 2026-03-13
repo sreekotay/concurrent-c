@@ -1,17 +1,17 @@
 /*
  * pigz_idiomatic.ccs -- Parallel gzip compression in IDIOMATIC Concurrent-C
  *
- * Demonstrates the ordered channel + chan_send_task pattern:
+ * Demonstrates the ordered channel + cc_channel_send_task pattern:
  *   CompressedResult* !>(CCIoError)[~N >] tx;
  *   CompressedResult* !>(CCIoError)[~N ordered <] rx;
- *   CCChan* ch = channel_pair(&tx, &rx);
- *   chan_send_task(tx, () => [blk] { auto r = compress_block(blk, 6); ...; return r; });
+ *   CCChan* ch = cc_channel_pair(&tx, &rx);
+ *   cc_channel_send_task(tx, () => [blk] { auto r = compress_block(blk, 6); ...; return r; });
  *   CompressedResult* !>(CCIoError) r;
- *   while (cc_io_avail(chan_recv(rx, &r))) { use(r); }
+ *   while (cc_io_avail(rx.recv(&r))) { use(r); }
  *
  * The 'ordered' flag on the channel ensures results are delivered in
  * submission order (FIFO) even though tasks execute concurrently.
- * chan_recv on an ordered channel awaits the next queued task and
+ * recv on an ordered channel awaits the next queued task and
  * extracts the typed result automatically, including rich `T !>(E)` payloads
  * stored in the task result buffer (no manual ordered_recv or glue helper).
  */
@@ -122,23 +122,23 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     @defer out_file.close();
 
     /* Ordered channel of CompressedResult* !>(CCIoError).  'ordered' is a recv-side flag:
-     * chan_recv awaits queued tasks in FIFO submission order.  The tx handle
+     * recv awaits queued tasks in FIFO submission order. The tx handle
      * is a plain sender — ordering is irrelevant at the send site. */
     CompressedResult* !>(CCIoError)[~CHAN_CAP >] results_tx;
     CompressedResult* !>(CCIoError)[~CHAN_CAP ordered <] results_rx;
-    CCChan* ch = channel_pair(&results_tx, &results_rx);
+    CCChan* ch = cc_channel_pair(&results_tx, &results_rx);
     @defer ch.free();
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
     @nursery {
-        /* Consumer: chan_recv on ordered channel awaits each task in
+        /* Consumer: recv on ordered channel awaits each task in
          * submission order and delivers the typed Result payload. */
         spawn(() => [out_ptr, results_rx] {
             CompressedResult* !>(CCIoError) r;
             long expect_seq = 0;
-            while (cc_io_avail(chan_recv(results_rx, &r))) {
+            while (cc_io_avail(cc_channel_recv(results_rx, &r))) {
                 if (r.is_err()) {
                     CCIoError err = r.error();
                     fprintf(stderr, "compress error kind=%d os=%d\n", err.kind, err.os_code);
@@ -154,7 +154,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             }
         });
 
-        /* Producer: chan_send_task spawns each block concurrently and
+        /* Producer: cc_channel_send_task spawns each block concurrently and
          * enqueues the task handle in submission order. */
         @closing(results_tx) {
             spawn(() => [in_ptr, results_tx] {
@@ -181,7 +181,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                     blk->arena = blk_arena;
                     
                     bool is_last = blk->is_last;
-                    chan_send_task(results_tx, () => [blk] {
+                    cc_channel_send_task(results_tx, () => [blk] {
                         CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
                         blk->arena.free();
                         res;

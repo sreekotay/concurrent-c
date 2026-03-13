@@ -1069,7 +1069,7 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
                 nn = snprintf(b, sizeof(b),
                     "%.*s{ /* spawn into(%s)? () => %s(%s) */\n"
                     "%.*s  CCTask __task = __spawn_into_call((void*(*)(void*))%s, (void*)%s);\n"
-                    "%.*s  if (!cc_io_avail(chan_send(%s, __task))) cc_task_free(&__task);\n"
+                    "%.*s  if (!cc_io_avail(cc_channel_send(%s, __task))) cc_task_free(&__task);\n"
                     "%.*s}\n",
                     (int)ind_len, indent, chan_name, func_name, func_arg,
                     (int)ind_len, indent, func_name, func_arg,
@@ -1079,7 +1079,7 @@ int cc__collect_spawn_edits(const CCASTRoot* root,
                 nn = snprintf(b, sizeof(b),
                     "%.*s{ /* spawn into(%s) () => %s(%s) */\n"
                     "%.*s  CCTask __task = __spawn_into_call((void*(*)(void*))%s, (void*)%s);\n"
-                    "%.*s  (void)chan_send(%s, __task);\n"
+                    "%.*s  (void)cc_channel_send(%s, __task);\n"
                     "%.*s}\n",
                     (int)ind_len, indent, chan_name, func_name, func_arg,
                     (int)ind_len, indent, func_name, func_arg,

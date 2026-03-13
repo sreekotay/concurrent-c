@@ -63,7 +63,7 @@ int test_close_while_recv(void) {
     for (int round = 0; round < 10; round++) {
         int[~4 >] tx;
         int[~4 <] rx;
-        CCChan* ch = channel_pair(&tx, &rx);
+        CCChan* ch = cc_channel_pair(&tx, &rx);
         
         /* Note: We need TWO spawns - one to recv, one to close.
            The closing(tx) clause runs AFTER children, which would deadlock.
@@ -98,7 +98,7 @@ int test_concurrent_close(void) {
     for (int round = 0; round < NUM_ROUNDS; round++) {
         int[~4 >] tx;
         int[~4 <] rx;
-        CCChan* ch = channel_pair(&tx, &rx);
+        CCChan* ch = cc_channel_pair(&tx, &rx);
         
         @nursery {
             spawn(() => { chan_close(tx); });

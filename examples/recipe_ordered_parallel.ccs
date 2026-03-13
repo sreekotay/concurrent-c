@@ -46,7 +46,7 @@ void* process_item(void* arg) {
 int main(void) {
     CCTask[~CHAN_CAP >] tasks_tx;
     CCTask[~CHAN_CAP <] tasks_rx;
-    CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+    CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx);
 
     printf("=== Ordered Parallel Processing ===\n");
     printf("Processing %d items with variable delays...\n\n", NUM_ITEMS);

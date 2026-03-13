@@ -69,7 +69,7 @@ int main(void) {
            NUM_SENDERS, NUM_RECEIVERS, MSGS_PER);
     fflush(stdout);
 
-    g_ch = channel_pair(&g_tx, &g_rx);
+    g_ch = cc_channel_pair(&g_tx, &g_rx);
 
     CCTaskIntptr tasks[NUM_SENDERS + NUM_RECEIVERS];
     intptr_t results[NUM_SENDERS + NUM_RECEIVERS];

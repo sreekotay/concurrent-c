@@ -3,7 +3,15 @@
 
 #include <string.h>
 
-#include <ccc/std/string.cch>
+#include <ccc/cc_arena.cch>
+
+#ifndef CC_CCSLICEARRAY_DEFINED
+#define CC_CCSLICEARRAY_DEFINED 1
+typedef struct {
+    CCSlice *items;
+    size_t len;
+} CCSliceArray;
+#endif
 
 #ifdef CC_PARSER_MODE
 typedef CCSlice (*CCUfcsRewriteFn)();
@@ -24,11 +32,27 @@ static inline bool cc_ufcs_slice_eq_cstr(CCSlice s, const char *cstr) {
 }
 
 static inline CCSlice cc_ufcs_emit_value(CCArena *arena, CCSlice callee) {
-    return cc_concat(arena, CC_UFCS_VALUE_TAG, callee);
+    size_t prefix_len = sizeof(CC_UFCS_VALUE_TAG) - 1;
+    size_t total = prefix_len + callee.len;
+    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
+    if (!buf) return cc_slice_empty();
+    memcpy(buf, CC_UFCS_VALUE_TAG, prefix_len);
+    if (callee.len > 0 && callee.ptr) memcpy(buf + prefix_len, callee.ptr, callee.len);
+    return cc_slice_from_buffer(buf, total);
 }
 
 static inline CCSlice cc_ufcs_emit_value_cstr(CCArena *arena, const char *callee) {
-    return cc_concat(arena, CC_UFCS_VALUE_TAG, callee ? callee : "");
+    CCSlice callee_slice = callee ? cc_slice_from_buffer((void *)callee, strlen(callee)) : cc_slice_empty();
+    return cc_ufcs_emit_value(arena, callee_slice);
+}
+
+static inline CCSlice cc_ufcs_concat2(CCArena *arena, CCSlice left, CCSlice right) {
+    size_t total = left.len + right.len;
+    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
+    if (!buf) return cc_slice_empty();
+    if (left.len > 0 && left.ptr) memcpy(buf, left.ptr, left.len);
+    if (right.len > 0 && right.ptr) memcpy(buf + left.len, right.ptr, right.len);
+    return cc_slice_from_buffer(buf, total);
 }
 
 static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRewriteFn rewrite) {

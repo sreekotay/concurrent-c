@@ -8,7 +8,7 @@ int main(void) {
     /* Create a channel */
     int[~4 >] tx;
     int[~4 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
 
     /* Test 1: Send task - non-blocking (channel has capacity) */
     int send_val = 42;

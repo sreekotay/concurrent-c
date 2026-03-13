@@ -4,7 +4,7 @@
 int main(void) {
     int[~1 >] tx;
     int[~1 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
 
     (void)chan_send(tx, 7);
 

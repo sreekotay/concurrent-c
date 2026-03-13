@@ -269,7 +269,7 @@ static inline CCSlice cc_slice_concat_many(CCArena *arena, const CCSlice *parts,
 
 CCString cc_string_new(CCArena *arena);
 CCString cc_string_from_slice(CCArena *arena, CCSlice slice);
-CCString* cc_string_push(CCString *str, CCSlice data);
+CCString* cc_string_push_slice(CCString *str, CCSlice data);
 CCString* cc_string_clear(CCString *str);
 CCSlice cc_string_as_slice(const CCString *str);
 const char *cc_string_cstr(CCString *str);
@@ -282,25 +282,25 @@ static inline size_t cc_string_cap(const CCString *str) {
 
 static inline CCString* cc_string_push_char(CCString *str, char c) {
     CCSlice s = cc_slice_from_buffer(&c, 1);
-    return cc_string_push(str, s);
+    return cc_string_push_slice(str, s);
 }
 static inline CCString* cc_string_push_int(CCString *str, int64_t v) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%lld", (long long)v);
     if (n < 0) return NULL;
-    return cc_string_push(str, cc_slice_from_buffer(buf, (size_t)n));
+    return cc_string_push_slice(str, cc_slice_from_buffer(buf, (size_t)n));
 }
 static inline CCString* cc_string_push_uint(CCString *str, uint64_t v) {
     char buf[32];
     int n = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
     if (n < 0) return NULL;
-    return cc_string_push(str, cc_slice_from_buffer(buf, (size_t)n));
+    return cc_string_push_slice(str, cc_slice_from_buffer(buf, (size_t)n));
 }
 static inline CCString* cc_string_push_float(CCString *str, double v) {
     char buf[64];
     int n = snprintf(buf, sizeof(buf), "%g", v);
     if (n < 0) return NULL;
-    return cc_string_push(str, cc_slice_from_buffer(buf, (size_t)n));
+    return cc_string_push_slice(str, cc_slice_from_buffer(buf, (size_t)n));
 }
 
 // Convenience wrappers matching CC surface API (no explicit arena argument).
@@ -308,7 +308,7 @@ static inline CCString string_new(CCArena *arena) { return cc_string_new(arena);
 static inline CCString* string_append(CCString *str, const char *cstr) {
     if (!cstr) return str;
     CCSlice s = cc_slice_from_buffer((void *)cstr, strlen(cstr));
-    return cc_string_push(str, s);
+    return cc_string_push_slice(str, s);
 }
 static inline CCSlice string_as_slice(const CCString *str) { return cc_string_as_slice(str); }
 
@@ -338,11 +338,8 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
     const CCString *: cc__concat_from_string_ptr \
 )(x)
 
-#define cc_string_ufcs_append(str, data) cc_string_push((str), cc__concat_arg(data))
-#define cc_string_ufcs_push(str, data) cc_string_push((str), cc__concat_arg(data))
-#define cc_string_ufcs_as_slice(str) cc_string_as_slice((str))
-#define cc_string_ufcs_len(str) cc_string_len((str))
-#define cc_string_ufcs_cap(str) cc_string_cap((str))
+#define cc_string_push(str, data) cc_string_push_slice((str), cc__concat_arg(data))
+#define cc_string_append(str, data) cc_string_push((str), (data))
 
 #define cc__concat_args_1(a1) \
     cc__concat_arg(a1)

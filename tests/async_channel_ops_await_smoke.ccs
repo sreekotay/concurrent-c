@@ -18,7 +18,7 @@
 int main(void) {
     int[~1 >] tx;
     int[~1 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
 
     int r = cc_block_on(int, f(tx, rx));
     chan_free(tx);

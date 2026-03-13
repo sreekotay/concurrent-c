@@ -56,8 +56,8 @@ int main(void) {
 
     int[~ >] tx1_h, tx2_h;
     int[~ <] rx1_h, rx2_h;
-    channel_pair(&tx1_h, &rx1_h); // Unbuffered by default
-    channel_pair(&tx2_h, &rx2_h);
+    cc_channel_pair(&tx1_h, &rx1_h); // Unbuffered by default
+    cc_channel_pair(&tx2_h, &rx2_h);
 
     int[~ >] tx1 = tx1_h; int[~ >] tx2 = tx2_h;
     int[~ <] rx1 = rx1_h; int[~ <] rx2 = rx2_h;

@@ -283,19 +283,19 @@ int main(void) {
 
         int[~ >] recv_tx_h;
         int[~ <] recv_rx_h;
-        CCChan* recv_ch = channel_pair(&recv_tx_h, &recv_rx_h);
+        CCChan* recv_ch = cc_channel_pair(&recv_tx_h, &recv_rx_h);
 
         int[~ >] recv_tx2_h;
         int[~ <] recv_rx2_h;
-        CCChan* recv_ch2 = channel_pair(&recv_tx2_h, &recv_rx2_h);
+        CCChan* recv_ch2 = cc_channel_pair(&recv_tx2_h, &recv_rx2_h);
 
         int[~1 >] send_tx_h;
         int[~1 <] send_rx_h;
-        CCChan* send_ch = channel_pair(&send_tx_h, &send_rx_h);
+        CCChan* send_ch = cc_channel_pair(&send_tx_h, &send_rx_h);
 
         int[~ >] deadline_tx_h;
         int[~ <] deadline_rx_h;
-        CCChan* deadline_ch = channel_pair(&deadline_tx_h, &deadline_rx_h);
+        CCChan* deadline_ch = cc_channel_pair(&deadline_tx_h, &deadline_rx_h);
 
         int[~ >] recv_tx = recv_tx_h;
         int[~ >] recv_tx2 = recv_tx2_h;
