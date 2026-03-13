@@ -16,6 +16,9 @@ struct CC__UFCSSpan {
 };
 
 static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, size_t sep_pos);
+static int cc__is_ident_start_char(char c);
+static int cc__is_ident_char_char(char c);
+static size_t cc__scan_member_chain_start_left(const char* s, size_t range_start, size_t sep_pos);
 static int cc__span_from_anchor_and_end(const char* s,
                                        size_t range_start,
                                        size_t sep_pos,
@@ -223,9 +226,53 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
     return 1;
 }
 
+static int cc__is_ident_start_char(char c) {
+    return isalpha((unsigned char)c) || c == '_';
+}
+
+static int cc__is_ident_char_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static size_t cc__scan_member_chain_start_left(const char* s, size_t range_start, size_t sep_pos) {
+    size_t r_end = sep_pos;
+    size_t seg_start;
+    size_t q;
+    if (!s || sep_pos <= range_start) return sep_pos;
+    while (r_end > range_start && isspace((unsigned char)s[r_end - 1])) r_end--;
+    if (r_end == range_start) return sep_pos;
+
+    seg_start = r_end;
+    while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
+    if (seg_start == r_end || !cc__is_ident_start_char(s[seg_start])) return sep_pos;
+
+    for (;;) {
+        q = seg_start;
+        while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
+        if (q > range_start && s[q - 1] == '.') {
+            q--;
+        } else if (q > range_start + 1 && s[q - 2] == '-' && s[q - 1] == '>') {
+            q -= 2;
+        } else {
+            break;
+        }
+        while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
+        if (q <= range_start || !cc__is_ident_char_char(s[q - 1])) break;
+        seg_start = q;
+        while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;
+        if (!cc__is_ident_start_char(s[seg_start])) return sep_pos;
+    }
+
+    return seg_start;
+}
+
 
 static size_t cc__scan_receiver_start_left(const char* s, size_t range_start, size_t sep_pos) {
     if (!s || sep_pos <= range_start) return range_start;
+    {
+        size_t chain_start = cc__scan_member_chain_start_left(s, range_start, sep_pos);
+        if (chain_start < sep_pos) return chain_start;
+    }
     size_t r_end = sep_pos;
     while (r_end > range_start && isspace((unsigned char)s[r_end - 1])) r_end--;
     if (r_end == range_start) return range_start;

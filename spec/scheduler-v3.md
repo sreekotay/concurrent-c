@@ -9,11 +9,23 @@
 
 **Hard rule:** Channel lifetime / close is independent of nursery cancellation and arena lifetime.
 
+### Admission Boundary Rule
+
+Across the runtime, cancel / close / terminate follows the same pattern:
+
+- once the boundary flips, no new work is admitted past that point
+- work already admitted before that point is not silently discarded; it resolves
+  through its normal completion path for that object (success, `CLOSED`,
+  cancellation, drain-to-exit, etc.)
+
+This is the intended reading for nursery cancellation, channel close, and worker
+draining/retirement.
+
 ### Runtime Modeling Decision (Recorded)
 
 - `§4` park/wake protocol is the correctness contract for wait transitions and
   wake ownership (`PARKING/PARKED/WAKING`, publish/unpublish, wake-claim rules).
-- The existing control-word scheduler machinery may remain as an implementation
+- The existing control-word scheduler machinery remains as an implementation
   substrate for hot-path execution ownership, provided it preserves all `§4`
   externally observable guarantees.
 - This is an intentional hybrid: explicit wait correctness model + optimized
@@ -70,6 +82,8 @@ Cancellation model (SHOULD):
 
 - Nursery cancellation is lazy/cooperative. Setting `closing = true` does not
   require immediate wake of all parked fibers.
+- Nursery cancellation closes further admission into that nursery; it does not
+  retroactively revoke fibers already admitted to the nursery.
 - Fibers observe cancellation at their next resume or cooperative yield point.
 - Nursery join waits for `live_fibers == 0`.
 - Implementations MAY add an optional per-nursery parked-fiber index for eager
@@ -291,15 +305,12 @@ After Close LP:
 - Sends not yet admitted MUST fail.
 - Recvs with no available data MUST fail.
 - All published waiters MUST be woken with `CLOSED`.
-
-Admission note (testable):
-
 - A sender/receiver that was already admitted before Close LP MAY still complete per §5.1/§5.2 admission rules.
 - A sender/receiver not admitted before Close LP MUST fail with `CLOSED` and MUST NOT transfer data.
 
-### 5.4 Queue Admission Rules After Close (Normative)
+### 5.4 Admitted Waiters and Cancellation
 
-After Close LP, waitable publish rules MUST enforce:
+After Close LP, waitable publish rules enforce:
 
 - `publish()` for new send/recv admissions returns failure (or equivalent) once
   `CLOSED` is observed at the publish LP.
@@ -309,6 +320,16 @@ After Close LP, waitable publish rules MUST enforce:
   must not cause duplicate scheduler enqueues of the same waiter.
 - Wakers processing close-induced wakeups MUST use standard wake-claim semantics
   (`PARKED -> WAKING -> RUNNABLE` logical path, or fused equivalent) and MUST NOT bypass F4.
+
+For channel operations:
+
+- admission is not revoked in place
+- an admitted operation may complete normally, even if cancellation is requested later
+- cancellation is observed at the next cooperative point after that operation resolves
+
+Invariant:
+
+- A parked channel waiter has exactly one completion owner: match, close, or cancellation-wake through the wait path.
 
 ### 5.5 Rendezvous-first Algorithm (Non-normative sketch)
 
@@ -352,50 +373,17 @@ DEAD
 
 ### 6.3 OS-Thread Blocking Robustness (Current runtime)
 
-#### Problem: raw-syscall "kidnapping"
+Current strategy:
 
-When user fibers call blocking OS syscalls directly (e.g. raw `sleep()`, blocking
-`read()`), the worker OS thread is captured for the duration of the syscall.
-All M base workers may be simultaneously OS-blocked, leaving no worker available
-to run cooperative fibers (e.g. timer-woken heartbeats).
+- Sysmon may spawn replacement workers when base workers are OS-blocked by raw
+  syscalls.
+- Replacement workers probe inboxes before global so timer-routed work stays
+  ahead of bulk global work.
+- If all workers are blocked while timer work is pending, sysmon may spawn a
+  short-lived inbox-only timer-service worker.
+- `sq_drain_sysmon()` routes expired sleepers to inboxes rather than global.
 
-#### Replacement workers (existing mechanism)
-
-Sysmon detects stuck workers (stale heartbeats older than `ORPHAN_THRESHOLD_CYCLES`)
-and spawns additional OS threads (`replacement_worker`) up to `MAX_EXTRA_WORKERS`.
-Replacement workers probe all worker inboxes before the global queue, ensuring
-timer-woken fibers routed to inboxes are found before bulk-spawned tasks.
-
-Stuck base workers expire naturally when their OS syscall returns; they rejoin
-the pool without any special cleanup. This is intentional: replacement workers
-are parallel, not in-place substitutes.
-
-#### Emergency timer-service worker
-
-When the sleep queue drains an expired fiber (`sq_drain_sysmon`) and all workers —
-base and replacement — are OS-blocked (`sleeping == 0 && spinning == 0`), sysmon
-spawns a **timer-service worker**:
-
-- Scans ALL worker inbox queues only (never global queue).
-- Runs any fiber it finds and immediately exits when inboxes are empty.
-- Holds `g_timer_worker_active = 1` while alive; a CAS gate prevents concurrent
-  duplicates.
-- Because it never touches the global queue it cannot be kidnapped by a
-  raw-syscall fiber, so it always completes quickly and releases the gate.
-
-The gate is time-bounded: `last_sleepq_emerg_cycles` prevents re-spawn faster
-than `4 × ORPHAN_COOLDOWN_CYCLES` (~330 µs), far below any typical timer interval.
-
-#### `sq_drain_sysmon` — inbox-priority routing
-
-Sysmon uses `sq_drain_sysmon()` (not the worker-loop `sq_drain()`) when draining
-the sleep queue. `sq_drain_sysmon` routes each woken fiber to the inbox of the
-least-stale base worker (preferred-affinity first, then freshest-heartbeat scan)
-rather than to the global queue. Inbox routing guarantees the fiber is found at
-Priority 2 in the next worker work-finding pass, ahead of the global queue at
-Priority 3.
-
-#### Nursery context portability (correctness invariant)
+#### Nursery context portability
 
 `cc__tls_current_nursery` is a thread-local variable set by each fiber's nursery
 entry thunk on first resume. Because fibers can migrate across OS threads (base,
@@ -421,8 +409,7 @@ any number of OS-thread migrations.
 
 ### 6.4 Startup-to-Run Phase Behavior (Current runtime)
 
-The active v3 runtime currently uses a one-way startup protocol to reduce
-timing-sensitive startup starvation:
+Current startup policy:
 
 - Scheduler starts in explicit `STARTUP` phase, then promotes once to `RUN`.
 - Promotion is driven by completed fiber runs (`startup_run_count`) against a
@@ -431,12 +418,6 @@ timing-sensitive startup starvation:
   generation; overflow deterministically spills to global.
 - In `RUN`, non-worker inbox publish readiness is open (normal steady-state
   routing).
-- Legacy startup spill-mode state has been retired; startup policy is defined by
-  phase + wake-wave admission quota rather than spill-mode hysteresis.
-
-Implementation note:
-- This is an implementation policy layered on top of the normative lifecycle
-  rules above; it does not alter parking/waking correctness contracts in §4.
 
 ### 6.5 Spawn-task join wait protocol (Current runtime)
 
@@ -457,10 +438,6 @@ while (atomic_load_explicit(&task->done_atomic, memory_order_acquire) == 0) {
     CC_FIBER_PARK_IF(&task->done_atomic, 0, "spawn_join");
 }
 ```
-
-Rationale: an unrelated wake can set fiber pending-unpark and cause
-`CC_FIBER_PARK_IF` to return early. The `done_atomic` loop is the correctness
-guard that prevents reading `task->result` before completion publication.
 
 ---
 
@@ -509,35 +486,29 @@ This keeps scale decisions auditable and helps detect prolonged negative drift.
 
 Wait lists store pointers to fibers. Because fiber frames are pooled/reused, a waker can observe a stale waiter node referencing a fiber frame that has been recycled for a different fiber (“ABA”).
 
-### 8.2 Requirement: Ticket
+### 8.2 Ticket
 
-Each wait publication MUST carry an ABA-resistant `wait_ticket`.
-
-Per-fiber monotonic wait ticket (required):
+Each wait publication carries an ABA-resistant `wait_ticket`.
 
 - `f.wait_ticket` increments (wrap-safe 64-bit) each time the fiber publishes to any waitable.
 - Waiter nodes store `(fiber*, wait_ticket)`.
 - Wakers MUST validate the ticket matches before attempting wake.
 
-### 8.3 Ticket Validation Rule (MUST)
+### 8.3 Ticket Validation
 
 A waker may only attempt wake-claim on `PARKED` (`PARKED -> WAKING` logical edge, or fused equivalent) if:
 
 - it reads the waiter node ticket `t`, and
-- it reads `f.wait_ticket == t` (acquire), else it MUST treat the waiter as stale and ignore/remove it.
-
-Stale waiter handling:
+- it reads `f.wait_ticket == t` (acquire), otherwise it treats the waiter as stale and ignores/removes it.
 
 - On ticket mismatch, the waker MUST NOT perform wake-claim and MUST NOT enqueue `f`.
 - A waiter node MUST NOT be reclaimed or reused until no concurrent waker can still observe it (e.g., via ticket/epoch/hazard discipline).
 
-### 8.4 Runnable Publication Generation (MUST)
+### 8.4 Runnable Publication Generation
 
 Run queues have the same pooled-frame ABA problem as wait lists. A stale runnable
 publication from an older incarnation of a pooled `Fiber*` MUST NOT become valid
 again just because the frame was recycled for a new fiber.
-
-Required rule:
 
 - Each pooled fiber frame MUST carry a monotonic incarnation counter
   (`generation`, wrap-safe 64-bit).
@@ -547,15 +518,16 @@ Required rule:
 - Any dequeuer / runner / wake handoff path that consumes a runnable
   publication MUST validate `f.generation == generation_at_publish` before
   treating the entry as a live `RUNNABLE` instance.
-- On generation mismatch, the publication MUST be treated as stale and dropped;
-  it MUST NOT attempt `RUNNABLE -> RUNNING`, wake, restore, or re-enqueue based
-  on the recycled pointer alone.
-
-Interpretation:
+- On generation mismatch, the publication is stale and gets dropped; do not
+  attempt `RUNNABLE -> RUNNING`, wake, restore, or re-enqueue from the recycled
+  pointer alone.
 
 - `CTRL_QUEUED` (or equivalent runnable control state) is not by itself a
   sufficient identity proof for pooled fibers.
 - Raw pointer equality is insufficient once pooling/reuse is enabled.
+- In the current runtime this is centralized in `cc/runtime/fiber_sched.c`
+  through `runnable_ref`, `runnable_slot_publish()`,
+  `runnable_slot_take_exchange()`, and `runnable_ref_validate()`.
 
 ---
 
@@ -593,27 +565,17 @@ Cancellation path note:
 - Any non-RUNNABLE state enqueued into run queues
 - Waker enqueues fiber observed in PARKING
 
-### 9.1 Current Runtime Coverage Notes
+### 9.1 Runtime Coverage
 
-Current matrix coverage in the active runtime is split between runtime asserts and
-static/protocol guarantees:
-
-- Runtime note: v3 scheduler path is the default active path; v0/fallback behavior
-  is retained only as an explicit build override.
+The active runtime covers this matrix with runtime asserts plus the code paths
+anchored in §10.1. The v3 path is the default; v0/fallback remains only as an
+explicit build override.
 
 - **Runtime asserts (`CC_V3_SPEC_ASSERT=1`):**
   - `RUNNABLE -> RUNNING` claim in `cc/runtime/fiber_sched.c` `worker_run_fiber()`.
   - enqueue legality (`RUNNABLE`/`CTRL_QUEUED` only) on scheduler queue publication paths.
   - labeled wake-path matrix checks at non-racy claim points for `PARKED -> RUNNABLE`
     in `worker_commit_park()` self-recovery paths and `cc__fiber_unpark()` waker path.
-
-- **Static/protocol guarantees (documented + code anchored):**
-  - `PARKING -> PARKED` commit and `wake_pending` recovery are serialized by
-    `worker_commit_park()` protocol and LP ordering in §10.
-  - Waker on `PARKING` never enqueues; it only publishes wake-pending
-    (`cc__fiber_unpark()` PARKING branch), satisfying MUST NOT rows.
-  - Channel wake/claim paths enforce waiter-ticket validity before wake/enqueue
-    (`cc/runtime/channel.c` waiter helpers), preventing stale-node enqueue.
 
 ---
 
@@ -639,15 +601,14 @@ Notes:
 
 - Relaxing any ordering in this table is only permitted if equivalent happens-before edges are proven and documented.
 
-### 10.1 Current Runtime Code Anchors (Hybrid substrate)
+### 10.1 Runtime Code Anchors
 
-The current runtime uses control-word transitions as the implementation substrate
-for LPs while preserving the contract above. LP/code anchors:
+The runtime uses control-word transitions as the substrate for these LPs.
 
 | LP | Current code anchor(s) | Substrate note |
 | -- | -- | -- |
-| Enqueue RUNNABLE | `cc/runtime/fiber_sched.c`: `cc_fiber_spawn()` (`CTRL_IDLE -> CTRL_QUEUED` + queue push), `cc__fiber_unpark()` queued path, `worker_commit_park()` self-recovery enqueue | RUNNABLE publication is represented by `CTRL_QUEUED` plus queue visibility, and queued entries carry a generation snapshot per §8.4 |
-| Dequeue to RUNNING | `cc/runtime/fiber_sched.c`: `worker_run_fiber()` CAS `CTRL_QUEUED -> CTRL_OWNED(...)` | Ownership claim and RUNNING handoff are combined in control-word CAS after validating the published generation snapshot |
+| Enqueue RUNNABLE | `cc/runtime/fiber_sched.c`: `cc_fiber_spawn()` (`CTRL_IDLE -> CTRL_QUEUED` + queue push), `cc__fiber_unpark()` queued path, `worker_commit_park()` self-recovery enqueue | `CTRL_QUEUED` is the runnable publication point. In `cc_fiber_spawn()` it is set only after coroutine reset/create completes. Queue publication uses `runnable_ref` / `runnable_slot_publish()` (§8.4). |
+| Dequeue to RUNNING | `cc/runtime/fiber_sched.c`: queue pop/steal helpers (`fq_pop()`, `iq_pop()`, `lq_pop()`, `lq_steal()`, `lq_steal_batch()`) plus `worker_run_fiber()` CAS `CTRL_QUEUED -> CTRL_OWNED(...)` | Queue helpers validate the generation snapshot first; `worker_run_fiber()` then performs the ownership claim. |
 | Waiter publish LP | `cc/runtime/channel.c`: `cc__chan_add_waiter()` (`node->in_wait_list = 1` after list link under `ch->mu`); boundary path `cc/runtime/fiber_sched_boundary.c`: `cc_sched_fiber_wait()` publish call | Channel wait-list linkage under mutex is publish LP for channel waiters |
 | Commit PARKED | `cc/runtime/fiber_sched.c`: `worker_commit_park()` CAS `CTRL_OWNED -> CTRL_PARKED` | Park commit occurs in trampoline after stack quiescence |
 | Post-commit check | `cc/runtime/fiber_sched.c`: `worker_commit_park()` `atomic_exchange(pending_unpark, 0, seq_cst)` | Implements wake-pending recovery after park commit |
@@ -655,8 +616,12 @@ for LPs while preserving the contract above. LP/code anchors:
 | Waker claim + wake enqueue | `cc/runtime/fiber_sched.c`: `cc__fiber_unpark()` CAS `CTRL_PARKED -> CTRL_QUEUED` then affinity/global push | In substrate, claim and wake-enqueue are fused by `PARKED -> QUEUED` |
 | Close LP | `cc/runtime/channel.c`: `cc_chan_close()` / `cc_chan_close_err()` set `ch->closed = 1` under `ch->mu` | Admission observes CLOSED via channel lock/publish rules; close wake-all follows |
 
-The fused `PARKED -> QUEUED` wake path is acceptable under this spec because it
-preserves single-owner wake claim and exactly-once enqueue semantics.
+The fused `PARKED -> QUEUED` wake path preserves single-owner wake claim and
+exactly-once enqueue semantics.
+
+The v3 shim (`cc/runtime/fiber_sched_v3.c`) consumes already-validated queue
+results and returns raw `CCSchedFiber*` to the boundary layer. The generation
+snapshot does not cross that boundary today.
 
 ---
 

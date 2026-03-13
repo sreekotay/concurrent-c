@@ -13,6 +13,10 @@
 #include "preprocess/type_registry.h"
 
 // Simple identifier check (ASCII-only for now).
+static int is_ident_start(char c) {
+    return isalpha((unsigned char)c) || c == '_';
+}
+
 static int is_ident_char(char c) {
     return isalnum((unsigned char)c) || c == '_';
 }
@@ -70,6 +74,58 @@ static int is_addr_of_ident(const char* s) {
     return is_ident_only(s);
 }
 
+static int cc__skip_balanced_suffix(const char** pp, char open, char close) {
+    const char* p = *pp;
+    int depth = 1;
+    if (!p || *p != open) return 0;
+    p++;
+    while (*p && depth > 0) {
+        if (*p == '"' || *p == '\'') {
+            char q = *p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) { p += 2; continue; }
+                if (*p == q) { p++; break; }
+                p++;
+            }
+            continue;
+        }
+        if (*p == open) depth++;
+        else if (*p == close) depth--;
+        p++;
+    }
+    if (depth != 0) return 0;
+    *pp = p;
+    return 1;
+}
+
+static int cc__is_addressable_lvalue_expr(const char* s) {
+    const char* p = skip_ws(s);
+    if (!p || !is_ident_start(*p)) return 0;
+    while (is_ident_char(*p)) p++;
+    for (;;) {
+        p = skip_ws(p);
+        if (*p == '.') {
+            p = skip_ws(p + 1);
+            if (!is_ident_start(*p)) return 0;
+            while (is_ident_char(*p)) p++;
+            continue;
+        }
+        if (p[0] == '-' && p[1] == '>') {
+            p = skip_ws(p + 2);
+            if (!is_ident_start(*p)) return 0;
+            while (is_ident_char(*p)) p++;
+            continue;
+        }
+        if (*p == '[') {
+            if (!cc__skip_balanced_suffix(&p, '[', ']')) return 0;
+            continue;
+        }
+        break;
+    }
+    p = skip_ws(p);
+    return *p == '\0';
+}
+
 static const char* cc__result_err_type_suffix(const char* type_name) {
     if (!type_name || strncmp(type_name, "CCResult_", 9) != 0) return NULL;
     const char* last_us = strrchr(type_name, '_');
@@ -124,13 +180,18 @@ typedef struct {
     const char* recv_type_name;
     const char* typed_chan_type;
     int recv_is_simple;
+    int recv_is_addressable;
 } CCUFCSDispatchCtx;
+
+static int cc__recv_pass_direct(const CCUFCSDispatchCtx* ctx, bool recv_is_ptr) {
+    return recv_is_ptr || !ctx || !ctx->recv_is_addressable;
+}
 
 static int cc__emit_registered_callable(char* out,
                                         size_t cap,
                                         const char* recv,
                                         const char* method,
-                                        int recv_is_simple,
+                                        int recv_is_addressable,
                                         bool recv_is_ptr,
                                         const char* recv_type_name,
                                         const char* args_rewritten,
@@ -189,12 +250,12 @@ static int cc__emit_registered_callable(char* out,
         if (receiver_by_value) {
             return snprintf(out, cap, "%s(%s, ", lowered_name, recv);
         }
-        if (recv_is_ptr || !recv_is_simple)
+        if (recv_is_ptr || !recv_is_addressable)
             return snprintf(out, cap, "%s(%s, ", lowered_name, recv);
         return snprintf(out, cap, "%s(&%s, ", lowered_name, recv);
     }
     if (receiver_by_value) return snprintf(out, cap, "%s(%s)", lowered_name, recv);
-    if (recv_is_ptr || !recv_is_simple)
+    if (recv_is_ptr || !recv_is_addressable)
         return snprintf(out, cap, "%s(%s)", lowered_name, recv);
     return snprintf(out, cap, "%s(&%s)", lowered_name, recv);
 }
@@ -205,6 +266,7 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     if (!ctx) return;
     memset(ctx, 0, sizeof(*ctx));
     ctx->recv_is_simple = is_ident_only(recv) || is_addr_of_ident(recv);
+    ctx->recv_is_addressable = ctx->recv_is_simple || cc__is_addressable_lvalue_expr(recv);
     ctx->recv_type_name = g_ufcs_recv_type;
     if (reg && is_ident_only(recv)) {
         reg_type_name = cc_type_registry_lookup_var(reg, recv);
@@ -236,7 +298,7 @@ static int cc__emit_type_driven_dispatch(char* out,
                                          const CCUFCSDispatchCtx* ctx) {
     if (!ctx) return -1;
     if (ctx->recv_type_name) {
-        int callable_len = cc__emit_registered_callable(out, cap, recv, method, ctx->recv_is_simple,
+        int callable_len = cc__emit_registered_callable(out, cap, recv, method, ctx->recv_is_addressable,
                                                         recv_is_ptr, ctx->recv_type_name, args_rewritten, has_args);
         if (callable_len >= 0) return callable_len;
     }
@@ -249,22 +311,24 @@ static int cc__emit_type_driven_dispatch(char* out,
                         ctx->recv_type_name, registered_prefix);
             }
             if (has_args) {
-                if (recv_is_ptr || !ctx->recv_is_simple)
+                if (cc__recv_pass_direct(ctx, recv_is_ptr))
                     return snprintf(out, cap, "%s%s(%s, ", registered_prefix, method, recv);
                 return snprintf(out, cap, "%s%s(&%s, ", registered_prefix, method, recv);
             }
-            if (recv_is_ptr || !ctx->recv_is_simple)
+            if (cc__recv_pass_direct(ctx, recv_is_ptr))
                 return snprintf(out, cap, "%s%s(%s)", registered_prefix, method, recv);
             return snprintf(out, cap, "%s%s(&%s)", registered_prefix, method, recv);
         }
     }
-    if (ctx->recv_type_name && strcmp(ctx->recv_type_name, "CCFile") == 0) {
+    if (ctx->recv_type_name &&
+        (strcmp(ctx->recv_type_name, "CCFile") == 0 || strcmp(ctx->recv_type_name, "CCFile*") == 0)) {
+        int file_recv_is_ptr = recv_is_ptr || strcmp(ctx->recv_type_name, "CCFile*") == 0;
         if (has_args) {
-            if (recv_is_ptr || !ctx->recv_is_simple)
+            if (cc__recv_pass_direct(ctx, file_recv_is_ptr))
                 return snprintf(out, cap, "cc_file_%s(%s, ", method, recv);
             return snprintf(out, cap, "cc_file_%s(&%s, ", method, recv);
         }
-        if (recv_is_ptr || !ctx->recv_is_simple)
+        if (cc__recv_pass_direct(ctx, file_recv_is_ptr))
             return snprintf(out, cap, "cc_file_%s(%s)", method, recv);
         return snprintf(out, cap, "cc_file_%s(&%s)", method, recv);
     }
@@ -303,11 +367,11 @@ static int cc__emit_type_driven_dispatch(char* out,
             strcmp(method, "begin") == 0 || strcmp(method, "end") == 0 ||
             strcmp(method, "data") == 0) {
             if (has_args) {
-                if (recv_is_ptr || !ctx->recv_is_simple)
+                if (cc__recv_pass_direct(ctx, recv_is_ptr))
                     return snprintf(out, cap, "__cc_vec_generic_%s(%s, ", method, recv);
                 return snprintf(out, cap, "__cc_vec_generic_%s(&%s, ", method, recv);
             }
-            if (recv_is_ptr || !ctx->recv_is_simple)
+            if (cc__recv_pass_direct(ctx, recv_is_ptr))
                 return snprintf(out, cap, "__cc_vec_generic_%s(%s)", method, recv);
             return snprintf(out, cap, "__cc_vec_generic_%s(&%s)", method, recv);
         }
@@ -319,11 +383,11 @@ static int cc__emit_type_driven_dispatch(char* out,
             strcmp(method, "clear") == 0 || strcmp(method, "destroy") == 0 ||
             strcmp(method, "len") == 0) {
             if (has_args) {
-                if (recv_is_ptr || !ctx->recv_is_simple)
+                if (cc__recv_pass_direct(ctx, recv_is_ptr))
                     return snprintf(out, cap, "__cc_map_generic_%s(%s, ", method, recv);
                 return snprintf(out, cap, "__cc_map_generic_%s(&%s, ", method, recv);
             }
-            if (recv_is_ptr || !ctx->recv_is_simple)
+            if (cc__recv_pass_direct(ctx, recv_is_ptr))
                 return snprintf(out, cap, "__cc_map_generic_%s(%s)", method, recv);
             return snprintf(out, cap, "__cc_map_generic_%s(&%s)", method, recv);
         }
@@ -345,11 +409,11 @@ static int cc__emit_type_driven_dispatch(char* out,
             else if (strcmp(method, "error") == 0) family_method = "unwrap_err";
         }
         if (has_args) {
-            if (recv_is_ptr || !ctx->recv_is_simple || by_value)
+            if (cc__recv_pass_direct(ctx, recv_is_ptr) || by_value)
                 return snprintf(out, cap, "%s_%s(%s, ", ctx->recv_type_name, family_method, recv);
             return snprintf(out, cap, "%s_%s(&%s, ", ctx->recv_type_name, family_method, recv);
         }
-        if (recv_is_ptr || !ctx->recv_is_simple || by_value)
+        if (cc__recv_pass_direct(ctx, recv_is_ptr) || by_value)
             return snprintf(out, cap, "%s_%s(%s)", ctx->recv_type_name, family_method, recv);
         return snprintf(out, cap, "%s_%s(&%s)", ctx->recv_type_name, family_method, recv);
     }
@@ -381,11 +445,11 @@ static int cc__emit_type_driven_dispatch(char* out,
         !cc__is_string_recv_type(ctx->recv_type_name) &&
         !cc__is_slice_recv_type(ctx->recv_type_name)) {
         if (has_args) {
-            if (recv_is_ptr || !ctx->recv_is_simple)
+            if (cc__recv_pass_direct(ctx, recv_is_ptr))
                 return snprintf(out, cap, "%s_%s(%s, ", ctx->recv_type_name, method, recv);
             return snprintf(out, cap, "%s_%s(&%s, ", ctx->recv_type_name, method, recv);
         }
-        if (recv_is_ptr || !ctx->recv_is_simple)
+        if (cc__recv_pass_direct(ctx, recv_is_ptr))
             return snprintf(out, cap, "%s_%s(%s)", ctx->recv_type_name, method, recv);
         return snprintf(out, cap, "%s_%s(&%s)", ctx->recv_type_name, method, recv);
     }
@@ -633,11 +697,11 @@ static int emit_desugared_call(char* out,
 
     // Generic UFCS (fallback): method(recv, ...) or method(&recv, ...)
     if (has_args) {
-        if (recv_is_ptr || !ctx.recv_is_simple)
+        if (cc__recv_pass_direct(&ctx, recv_is_ptr))
             return snprintf(out, cap, "%s(%s, ", method, recv);
         return snprintf(out, cap, "%s(&%s, ", method, recv);
     }
-    if (recv_is_ptr || !ctx.recv_is_simple)
+    if (cc__recv_pass_direct(&ctx, recv_is_ptr))
         return snprintf(out, cap, "%s(%s)", method, recv);
     return snprintf(out, cap, "%s(&%s)", method, recv);
 }
@@ -840,6 +904,29 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
     return 0;
 }
 
+static const char* cc__recv_chain_start(const char* line_start, const char* recv_end) {
+    const char* seg_start = recv_end + 1;
+    while (seg_start > line_start && is_ident_char(*(seg_start - 1))) seg_start--;
+    if (seg_start > recv_end || !is_ident_start(*seg_start)) return NULL;
+    for (;;) {
+        const char* q = seg_start;
+        while (q > line_start && isspace((unsigned char)q[-1])) q--;
+        if (q > line_start && q[-1] == '.') {
+            q--;
+        } else if (q > line_start + 1 && q[-2] == '-' && q[-1] == '>') {
+            q -= 2;
+        } else {
+            break;
+        }
+        while (q > line_start && isspace((unsigned char)q[-1])) q--;
+        if (q <= line_start || !is_ident_char(q[-1])) return seg_start;
+        seg_start = q;
+        while (seg_start > line_start && is_ident_char(*(seg_start - 1))) seg_start--;
+        if (!is_ident_start(*seg_start)) return NULL;
+    }
+    return seg_start;
+}
+
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap) {
     if (!in || !out || out_cap == 0) return -1;
     const char* p = in;
@@ -847,12 +934,40 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
     size_t cap = out_cap;
 
     while (*p && cap > 1) {
-        const char* dot = strstr(p, ".");
-        const char* arrow = strstr(p, "->");
         const char* sep = NULL;
         bool recv_is_ptr = false;
-        if (arrow && (!dot || arrow < dot)) { sep = arrow; recv_is_ptr = true; }
-        else { sep = dot; recv_is_ptr = false; }
+        const char* scan = p;
+        while (*scan) {
+            bool cand_is_ptr = false;
+            if (*scan == '.') {
+                sep = scan;
+                cand_is_ptr = false;
+            } else if (scan[0] == '-' && scan[1] == '>') {
+                sep = scan;
+                cand_is_ptr = true;
+            } else {
+                scan++;
+                continue;
+            }
+
+            const char* m_start = sep + (cand_is_ptr ? 2 : 1);
+            while (*m_start && isspace((unsigned char)*m_start)) m_start++;
+            if (!is_ident_char(*m_start)) {
+                scan = sep + (cand_is_ptr ? 2 : 1);
+                sep = NULL;
+                continue;
+            }
+            const char* m_end = m_start;
+            while (is_ident_char(*m_end)) m_end++;
+            const char* paren = m_end;
+            while (*paren && isspace((unsigned char)*paren)) paren++;
+            if (*paren == '(') {
+                recv_is_ptr = cand_is_ptr;
+                break;
+            }
+            scan = m_end;
+            sep = NULL;
+        }
         if (!sep) break;
         // Identify receiver
         const char* r_end = sep - 1;
@@ -864,8 +979,14 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             p = sep + (recv_is_ptr ? 2 : 1);
             continue;
         }
-        const char* r_start = r_end;
-        while (r_start > p && is_ident_char(*(r_start - 1))) r_start--;
+        const char* r_start = cc__recv_chain_start(p, r_end);
+        if (!r_start) {
+            size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
+            if (chunk >= cap) chunk = cap - 1;
+            memcpy(o, p, chunk); o += chunk; cap -= chunk;
+            p = sep + (recv_is_ptr ? 2 : 1);
+            continue;
+        }
         size_t recv_len = (size_t)(r_end - r_start + 1);
 
         // Identify method
@@ -917,7 +1038,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         memcpy(o, p, prefix_len); o += prefix_len; cap -= prefix_len;
 
         // Build receiver/method strings
-        char recv[64] = {0};
+        char recv[256] = {0};
         char method[64] = {0};
         if (recv_len >= sizeof(recv) || method_len >= sizeof(method)) {
             // Too long; fall back to copying original segment.

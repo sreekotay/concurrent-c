@@ -1,0 +1,27 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+typedef struct {
+    CCArena arena;
+} ArenaHolder;
+
+int main(void) {
+    ArenaHolder holder = {0};
+    holder.arena = cc_arena_heap(kilobytes(4));
+    size_t remaining = holder.arena.remaining();
+    assert(remaining > 0);
+    CCArenaCheckpoint cp = holder.arena.checkpoint();
+    (void)cp;
+    holder.arena.free();
+
+    ArenaHolder other = {0};
+    ArenaHolder* other_ptr = &other;
+    other.arena = cc_arena_heap(kilobytes(4));
+    size_t other_remaining = other_ptr->arena.remaining();
+    assert(other_remaining > 0);
+    CCArena detached = other_ptr->arena.detach();
+    detached.free();
+
+    printf("ufcs_arena_field_access_smoke: OK\n");
+    return 0;
+}
