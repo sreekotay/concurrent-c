@@ -475,6 +475,40 @@ static inline int runnable_ref_matches_current(runnable_ref ref) {
     return atomic_load_explicit(&ref.fiber->generation, memory_order_acquire) == ref.generation;
 }
 
+static inline runnable_ref runnable_ref_validate(runnable_ref ref) {
+    return runnable_ref_matches_current(ref) ? ref : runnable_ref_null();
+}
+
+static inline void runnable_slot_publish(runnable_slot* slot, runnable_ref ref) {
+    atomic_store_explicit(&slot->generation, ref.generation, memory_order_relaxed);
+    atomic_store_explicit(&slot->fiber, ref.fiber, memory_order_release);
+}
+
+static inline fiber_task* runnable_slot_load_fiber(runnable_slot* slot) {
+    return atomic_load_explicit(&slot->fiber, memory_order_acquire);
+}
+
+static inline runnable_ref runnable_slot_snapshot_and_clear(runnable_slot* slot, fiber_task* f) {
+    runnable_ref ref = {
+        .fiber = f,
+        .generation = atomic_load_explicit(&slot->generation, memory_order_relaxed),
+    };
+    atomic_store_explicit(&slot->fiber, NULL, memory_order_relaxed);
+    atomic_store_explicit(&slot->generation, 0, memory_order_relaxed);
+    return ref;
+}
+
+static inline runnable_ref runnable_slot_take_exchange(runnable_slot* slot) {
+    fiber_task* f = atomic_exchange_explicit(&slot->fiber, NULL, memory_order_acquire);
+    if (!f) return runnable_ref_null();
+    runnable_ref ref = {
+        .fiber = f,
+        .generation = atomic_load_explicit(&slot->generation, memory_order_relaxed),
+    };
+    atomic_store_explicit(&slot->generation, 0, memory_order_relaxed);
+    return ref;
+}
+
 typedef enum {
     CC_WL_ACTIVE = 0,
     CC_WL_IDLE_SPIN = 1,
@@ -811,8 +845,7 @@ static int fq_push_ring(fiber_queue* q, fiber_task* f) {
                                                 memory_order_release,
                                                 memory_order_relaxed)) {
             size_t idx = tail % CC_FIBER_QUEUE_INITIAL;
-            atomic_store_explicit(&q->slots[idx].generation, ref.generation, memory_order_relaxed);
-            atomic_store_explicit(&q->slots[idx].fiber, ref.fiber, memory_order_release);
+            runnable_slot_publish(&q->slots[idx], ref);
             atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
             return 0;
         }
@@ -880,6 +913,16 @@ static runnable_ref fq_pop_overflow(fiber_queue* q) {
     return ref;
 }
 
+static runnable_ref fq_pop_overflow_live(fiber_queue* q) {
+    runnable_ref ref = fq_pop_overflow(q);
+    while (ref.fiber) {
+        ref = runnable_ref_validate(ref);
+        if (ref.fiber) return ref;
+        ref = fq_pop_overflow(q);
+    }
+    return runnable_ref_null();
+}
+
 static runnable_ref fq_pop(fiber_queue* q) {
     if (!atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
         return runnable_ref_null();
@@ -892,14 +935,14 @@ static runnable_ref fq_pop(fiber_queue* q) {
         if (head >= tail) break;  /* Ring empty, try overflow */
         
         size_t idx = head % CC_FIBER_QUEUE_INITIAL;
-        fiber_task* f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
+        fiber_task* f = runnable_slot_load_fiber(&q->slots[idx]);
         
         if (!f) {
             /* Writer incremented tail but hasn't written slot yet.
             * Spin-wait for the slot to be populated. */
             for (int i = 0; i < 100; i++) {
                 cpu_pause();
-                f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
+                f = runnable_slot_load_fiber(&q->slots[idx]);
                 if (f) break;
             }
             if (!f) continue;
@@ -908,27 +951,20 @@ static runnable_ref fq_pop(fiber_queue* q) {
         if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed,
                                                 memory_order_relaxed)) {
-            runnable_ref ref = {
-                .fiber = f,
-                .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
-            };
-            atomic_store_explicit(&q->slots[idx].fiber, NULL, memory_order_relaxed);
-            atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
+            runnable_ref ref = runnable_slot_snapshot_and_clear(&q->slots[idx], f);
             size_t new_head = head + 1;
             size_t cur_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
             if (new_head >= cur_tail &&
                 atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
                 atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
             }
-            if (!runnable_ref_matches_current(ref)) continue;
+            ref = runnable_ref_validate(ref);
+            if (!ref.fiber) continue;
             return ref;
         }
     }
     /* Ring empty — check overflow */
-    runnable_ref of = fq_pop_overflow(q);
-    while (of.fiber && !runnable_ref_matches_current(of)) {
-        of = fq_pop_overflow(q);
-    }
+    runnable_ref of = fq_pop_overflow_live(q);
     if (!of.fiber) {
         size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
         size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
@@ -1203,8 +1239,7 @@ static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
                                                 memory_order_release,
                                                 memory_order_relaxed)) {
             size_t idx = tail % INBOX_QUEUE_SIZE;
-            atomic_store_explicit(&q->slots[idx].generation, ref.generation, memory_order_relaxed);
-            atomic_store_explicit(&q->slots[idx].fiber, ref.fiber, memory_order_release);
+            runnable_slot_publish(&q->slots[idx], ref);
             if (was_empty) *was_empty = (tail == head);
             return 0;
         }
@@ -1243,14 +1278,14 @@ static runnable_ref iq_pop(inbox_queue* q) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
         if (head >= tail) return runnable_ref_null();
         size_t idx = head % INBOX_QUEUE_SIZE;
-        fiber_task* f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
+        fiber_task* f = runnable_slot_load_fiber(&q->slots[idx]);
         if (!f) {
             /* Writer incremented tail but hasn't written slot yet.
             * Spin-wait for the slot to be populated. This window is very short
             * (just a single store instruction), so we spin aggressively. */
             for (int i = 0; i < 100; i++) {
                 cpu_pause();
-                f = atomic_load_explicit(&q->slots[idx].fiber, memory_order_acquire);
+                f = runnable_slot_load_fiber(&q->slots[idx]);
                 if (f) break;
             }
             if (!f) continue;  /* Retry from the top */
@@ -1258,13 +1293,8 @@ static runnable_ref iq_pop(inbox_queue* q) {
         if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed,
                                                 memory_order_relaxed)) {
-            runnable_ref ref = {
-                .fiber = f,
-                .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
-            };
-            atomic_store_explicit(&q->slots[idx].fiber, NULL, memory_order_relaxed);
-            atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
-            if (!runnable_ref_matches_current(ref)) continue;
+            runnable_ref ref = runnable_ref_validate(runnable_slot_snapshot_and_clear(&q->slots[idx], f));
+            if (!ref.fiber) continue;
             return ref;
         }
     }
@@ -2812,8 +2842,7 @@ static inline int lq_push(local_queue* q, fiber_task* f) {
     /* Use release on slot store to ensure closure contents are visible to consumer.
     * The consumer uses acquire on the exchange, creating a release-acquire pair. */
     size_t idx = tail % LOCAL_QUEUE_SIZE;
-    atomic_store_explicit(&q->slots[idx].generation, ref.generation, memory_order_relaxed);
-    atomic_store_explicit(&q->slots[idx].fiber, ref.fiber, memory_order_release);
+    runnable_slot_publish(&q->slots[idx], ref);
     atomic_store_explicit(&q->tail, tail + 1, memory_order_release);
     return 0;
 }
@@ -2844,24 +2873,21 @@ static inline runnable_ref lq_pop(local_queue* q) {
         size_t idx = head % LOCAL_QUEUE_SIZE;
         
         /* Atomically exchange slot with NULL to claim it */
-        fiber_task* f = atomic_exchange_explicit(&q->slots[idx].fiber, NULL, memory_order_acquire);
+        runnable_ref ref = runnable_slot_take_exchange(&q->slots[idx]);
+        fiber_task* f = ref.fiber;
         if (!f) {
             /* Lost race with stealer - they cleared slot, try to help advance head */
             atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed, memory_order_relaxed);
             continue;
         }
-        runnable_ref ref = {
-            .fiber = f,
-            .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
-        };
-        atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
         
         /* We got the task. Try to advance head once.
         * If CAS fails, someone else advanced it for us - that's fine. */
         atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                             memory_order_relaxed, memory_order_relaxed);
-        if (!runnable_ref_matches_current(ref)) continue;
+        ref = runnable_ref_validate(ref);
+        if (!ref.fiber) continue;
         return ref;
     }
     return runnable_ref_null();  /* Too much contention, let caller try global queue */
@@ -3100,13 +3126,9 @@ static inline runnable_ref lq_steal(local_queue* q, int target_worker) {
     size_t idx = head % LOCAL_QUEUE_SIZE;
     
     /* Atomically exchange slot with NULL to claim it */
-    fiber_task* f = atomic_exchange_explicit(&q->slots[idx].fiber, NULL, memory_order_acquire);
+    runnable_ref ref = runnable_slot_take_exchange(&q->slots[idx]);
+    fiber_task* f = ref.fiber;
     if (!f) return runnable_ref_null();  /* Lost race */
-    runnable_ref ref = {
-        .fiber = f,
-        .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
-    };
-    atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
     
     /* We got the task. Now try to advance head. If we fail, someone else advanced it. */
     if (!atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
@@ -3124,7 +3146,8 @@ static inline runnable_ref lq_steal(local_queue* q, int target_worker) {
             }
         }
     }
-    if (!runnable_ref_matches_current(ref)) {
+    ref = runnable_ref_validate(ref);
+    if (!ref.fiber) {
         return runnable_ref_null();
     }
     if (cc__task_should_stay_on_owner_local(f, target_worker) &&
@@ -3162,18 +3185,14 @@ static inline size_t lq_steal_batch(local_queue* q, int target_worker, runnable_
         size_t idx = head % LOCAL_QUEUE_SIZE;
         
         /* Atomically claim slot */
-        fiber_task* f = atomic_exchange_explicit(&q->slots[idx].fiber, NULL, memory_order_acquire);
+        runnable_ref ref = runnable_slot_take_exchange(&q->slots[idx]);
+        fiber_task* f = ref.fiber;
         if (!f) {
             /* Lost race - try to help advance head and continue */
             atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
                                                 memory_order_relaxed, memory_order_relaxed);
             continue;
         }
-        runnable_ref ref = {
-            .fiber = f,
-            .generation = atomic_load_explicit(&q->slots[idx].generation, memory_order_relaxed),
-        };
-        atomic_store_explicit(&q->slots[idx].generation, 0, memory_order_relaxed);
         
         /* Got a task - try to advance head */
         atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
@@ -3187,7 +3206,8 @@ static inline size_t lq_steal_batch(local_queue* q, int target_worker, runnable_
                 }
             }
         }
-        if (!runnable_ref_matches_current(ref)) {
+        ref = runnable_ref_validate(ref);
+        if (!ref.fiber) {
             continue;
         }
         if (cc__task_should_stay_on_owner_local(f, target_worker) &&
