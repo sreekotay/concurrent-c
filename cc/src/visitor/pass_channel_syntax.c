@@ -1019,14 +1019,14 @@ char* cc__rewrite_channel_pair_calls_text(const CCVisitorCtx* ctx,
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, assign_start - last_emit);
                     cc__sb_append_local(&out, &o_len, &o_cap, src + assign_start, call_start - assign_start);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ cc_channel_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
+                             "/* channel_pair */ cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);
                     cc__sb_append_cstr_local(&out, &o_len, &o_cap, repl);
                 } else {
                     cc__sb_append_local(&out, &o_len, &o_cap, src + last_emit, call_start - last_emit);
                     snprintf(repl, sizeof(repl),
-                             "/* channel_pair */ do { CCChan* __cc_ch = cc_channel_pair_create_returning(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
+                             "/* channel_pair */ do { CCChan* __cc_ch = cc_channel_pair_create(%s, %s, %d, %s, %d, %s, %d, &%s, %s); "
                              "if (!__cc_ch) { fprintf(stderr, \"CC: channel_pair failed\\n\"); abort(); } } while(0);",
                              cap_expr, bp_enum, allow_take ? 1 : 0, elem_sz_expr,
                              (tx_mode == 1) ? 1 : 0, topo_enum, rx_ordered ? 1 : 0, tx_name, rx_arg);

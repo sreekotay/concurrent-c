@@ -305,7 +305,19 @@ CCTaskIntptr cc_chan_recv_task(CCChan* ch, void* out_value, size_t value_size);
 
 /* Preferred explicit erased-core aliases.
    These keep the runtime-facing API honest and leave room for typed wrapper
-   families such as CCChanTx_T_send / CCChanRx_T_recv above this layer. */
+   families above this layer. Generated C should target the cc_channel_* namespace. */
+static inline CCChan* cc_channel_pair_create(size_t capacity,
+                                             CCChanMode mode,
+                                             bool allow_send_take,
+                                             size_t elem_size,
+                                             bool is_sync,
+                                             int topology,
+                                             bool is_ordered,
+                                             CCChanTx* out_tx,
+                                             CCChanRx* out_rx) {
+    return cc_chan_pair_create_returning(capacity, mode, allow_send_take, elem_size,
+                                         is_sync, topology, is_ordered, out_tx, out_rx);
+}
 static inline CCChan* cc_channel_pair_create_returning(size_t capacity,
                                                        CCChanMode mode,
                                                        bool allow_send_take,
@@ -315,8 +327,8 @@ static inline CCChan* cc_channel_pair_create_returning(size_t capacity,
                                                        bool is_ordered,
                                                        CCChanTx* out_tx,
                                                        CCChanRx* out_rx) {
-    return cc_chan_pair_create_returning(capacity, mode, allow_send_take, elem_size,
-                                         is_sync, topology, is_ordered, out_tx, out_rx);
+    return cc_channel_pair_create(capacity, mode, allow_send_take, elem_size,
+                                  is_sync, topology, is_ordered, out_tx, out_rx);
 }
 static inline int cc_channel_is_ordered(CCChan* ch) { return cc_chan_is_ordered(ch); }
 static inline void cc_channel_close(CCChan* ch) { cc_chan_close(ch); }
@@ -392,7 +404,7 @@ static inline CCTaskIntptr cc_channel_recv_task(CCChan* ch, void* out_value, siz
 #define cc_channel_ufcs_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), out_ptr)
 #define cc_channel_ufcs_close(h) CC_TYPED_CHAN_CLOSE((h))
 #define cc_channel_ufcs_free(h) CC_TYPED_CHAN_FREE((h))
-#define cc_channel_ufcs_send_take(tx, value) chan_send_take((tx), value)
+#define cc_channel_ufcs_send_take(tx, value) cc_channel_send_take((tx).raw, (value))
 #if !defined(CC_PARSER_MODE)
 #define cc_channel_ufcs_await_send(tx, value) cc_channel_send_task((tx).raw, &(value), sizeof(value))
 #define cc_channel_ufcs_await_recv(rx, out_ptr) cc_channel_recv_task((rx).raw, (out_ptr), sizeof(*(out_ptr)))
