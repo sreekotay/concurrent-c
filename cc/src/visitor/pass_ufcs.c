@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "util/path.h"
 #include "visitor/pass_common.h"
 #include "visitor/ufcs.h"
 
@@ -31,6 +32,61 @@ static int cc__find_ufcs_span_in_range(const char* s,
                                        int occurrence_1based,
                                        struct CC__UFCSSpan* out_span);
 static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end);
+static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t out_cap);
+
+static void cc__trim_span(const char** start, const char** end) {
+    if (!start || !end || !*start || !*end) return;
+    while (*start < *end && isspace((unsigned char)**start)) (*start)++;
+    while (*end > *start && isspace((unsigned char)*((*end) - 1))) (*end)--;
+}
+
+static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t out_cap) {
+    const char* start = expr;
+    const char* end = expr ? expr + strlen(expr) : NULL;
+    int par = 0, br = 0, brc = 0;
+    if (!out || out_cap == 0) return;
+    out[0] = '\0';
+    if (!expr) return;
+    for (const char* p = expr; *p; p++) {
+        char c = *p;
+        if (c == '"' || c == '\'') {
+            char q = c;
+            p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) { p++; continue; }
+                if (*p == q) break;
+                p++;
+            }
+            continue;
+        }
+        if (c == '(') { par++; continue; }
+        if (c == ')' && par > 0) { par--; continue; }
+        if (c == '[') { br++; continue; }
+        if (c == ']' && br > 0) { br--; continue; }
+        if (c == '{') { brc++; continue; }
+        if (c == '}' && brc > 0) { brc--; continue; }
+        if (par || br || brc) continue;
+        if (c == '.' || (c == '-' && p[1] == '>')) {
+            const char* sep_end = p + ((c == '.') ? 1 : 2);
+            const char* method = sep_end;
+            while (*method && isspace((unsigned char)*method)) method++;
+            if (!cc__is_ident_start_char(*method)) continue;
+            while (cc__is_ident_char_char(*method)) method++;
+            while (*method && isspace((unsigned char)*method)) method++;
+            if (*method != '(') continue;
+            end = p;
+            break;
+        }
+    }
+    cc__trim_span(&start, &end);
+    if (end <= start) return;
+    {
+        size_t n = (size_t)(end - start);
+        if (n >= out_cap) n = out_cap - 1;
+        memcpy(out, start, n);
+        out[n] = '\0';
+    }
+}
 
 int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
                                      const CCVisitorCtx* ctx,
@@ -191,20 +247,52 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         if (!expr) { free(out_buf); continue; }
         memcpy(expr, cur + sp.start, expr_len);
         expr[expr_len] = '\0';
-        /* Use full rewrite with await context, type info, and receiver type */
-        if (cc_ufcs_rewrite_line_full(expr, out_buf, out_cap, nodes[i].is_under_await, 
-                                       nodes[i].recv_type_is_ptr, nodes[i].recv_type) == 0) {
-            size_t repl_len = strlen(out_buf);
-            size_t new_len = cur_len - expr_len + repl_len;
-            char* next = (char*)malloc(new_len + 1);
-            if (next) {
-                memcpy(next, cur, sp.start);
-                memcpy(next + sp.start, out_buf, repl_len);
-                memcpy(next + sp.start + repl_len, cur + sp.end, cur_len - sp.end);
-                next[new_len] = '\0';
+        /* Use full rewrite with await context, type info, and receiver type. */
+        {
+            int rewrite_rc = cc_ufcs_rewrite_line_full(expr, out_buf, out_cap, nodes[i].is_under_await,
+                                                       nodes[i].recv_type_is_ptr, nodes[i].recv_type);
+            if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED) {
+                char rel[1024];
+                char recv_expr[256];
+                const char* file = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+                int col = nodes[i].col_start > 0 ? nodes[i].col_start : 1;
+                cc__ufcs_extract_receiver_expr(expr, recv_expr, sizeof(recv_expr));
+                if (nodes[i].recv_type && nodes[i].recv_type[0]) {
+                    cc_pass_error_cat(file, nodes[i].line_start, col, CC_ERR_TYPE,
+                                      "no UFCS method '%s' for receiver type '%s'",
+                                      nodes[i].method ? nodes[i].method : "<unknown>",
+                                      nodes[i].recv_type);
+                } else {
+                    cc_pass_error_cat(file, nodes[i].line_start, col, CC_ERR_TYPE,
+                                      "cannot resolve UFCS method '%s' because the receiver type is unknown",
+                                      nodes[i].method ? nodes[i].method : "<unknown>");
+                }
+                if (recv_expr[0]) {
+                    cc_pass_note(file, nodes[i].line_start, col, "receiver expression: %s", recv_expr);
+                }
+                cc_pass_note(file, nodes[i].line_start, col, "offending call: %s", expr);
+                cc_pass_note(file, nodes[i].line_start, col,
+                             "hint: UFCS dispatch is strict; register an exact or wildcard owner, or call the lowered function explicitly");
+                free(expr);
+                free(out_buf);
+                free(nodes);
+                free(done);
                 free(cur);
-                cur = next;
-                cur_len = new_len;
+                return -1;
+            }
+            if (rewrite_rc == CC_UFCS_REWRITE_OK) {
+                size_t repl_len = strlen(out_buf);
+                size_t new_len = cur_len - expr_len + repl_len;
+                char* next = (char*)malloc(new_len + 1);
+                if (next) {
+                    memcpy(next, cur, sp.start);
+                    memcpy(next + sp.start, out_buf, repl_len);
+                    memcpy(next + sp.start + repl_len, cur + sp.end, cur_len - sp.end);
+                    next[new_len] = '\0';
+                    free(cur);
+                    cur = next;
+                    cur_len = new_len;
+                }
             }
         }
         free(expr);
@@ -463,7 +551,8 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
     size_t rewritten_len = 0;
     int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
     cc_ufcs_set_symbols(NULL);
-    if (r <= 0 || !rewritten) return 0;
+    if (r < 0) return -1;
+    if (r == 0 || !rewritten) return 0;
 
     /* UFCS does many small same-line transforms. Rather than diff, for now we use a
        single "replace all" edit which is semantically correct but coarse.

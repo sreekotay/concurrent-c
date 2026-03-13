@@ -21,7 +21,7 @@ cc_atomic_int g_duplicates = 0;
 int main(void) {
     Item[~BUFFER_SIZE >] tx;
     Item[~BUFFER_SIZE <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
     @defer cc_chan_free(ch);
     
     @nursery {

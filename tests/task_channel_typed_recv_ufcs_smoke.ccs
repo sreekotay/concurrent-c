@@ -1,0 +1,55 @@
+/* Regression test for pigz-style typed CCTask recv via UFCS inside a spawn closure.
+ *
+ * This is intentionally closer to the pigz writer loop than the direct-call smoke:
+ *   - variable channel capacity
+ *   - typed CCTask[~cap <] recv handle captured into a spawned closure
+ *   - direct UFCS recv in a cc_io_avail(...) loop condition
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+cc_atomic_int g_seen = 0;
+
+static void* compute(void* arg) {
+    int value = (int)(intptr_t)arg;
+    return (void*)(intptr_t)(value + 1);
+}
+
+int main(void) {
+    int chan_cap = 2;
+    CCTask[~chan_cap >] tx;
+    CCTask[~chan_cap <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    @nursery {
+        spawn(() => [tx] {
+            CCTask task = cc_fiber_spawn_task(compute, (void*)41);
+            (void)chan_send(tx, task);
+            chan_close(tx);
+        });
+
+        spawn(() => [rx, ch] {
+            bool write_failed = false;
+            (void)ch;
+            CCTask task;
+            while (!write_failed && cc_io_avail(rx.recv(&task))) {
+                intptr_t result = cc_block_on_intptr(task);
+                if (result == 42) {
+                    cc_atomic_store(&g_seen, 1);
+                }
+            }
+        });
+    }
+
+    cc_chan_free(ch);
+
+    if (!cc_atomic_load(&g_seen)) {
+        printf("task_channel_typed_recv_ufcs_smoke: FAIL\n");
+        return 1;
+    }
+
+    printf("task_channel_typed_recv_ufcs_smoke: PASS\n");
+    return 0;
+}

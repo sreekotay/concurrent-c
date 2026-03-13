@@ -11,8 +11,8 @@ int main(void) {
     int[~ >] pong_tx;
     int[~ <] pong_rx;
     
-    channel_pair(&ping_tx, &ping_rx);
-    channel_pair(&pong_tx, &pong_rx);
+    cc_channel_pair(&ping_tx, &ping_rx);
+    cc_channel_pair(&pong_tx, &pong_rx);
     
     int pass = 0;
     

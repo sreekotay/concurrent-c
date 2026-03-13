@@ -16,7 +16,7 @@ void* double_value(void* arg) {
 int main() {
     CCTask[~4 >] tx;
     CCTask[~4 ordered <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     // Use spawn into to spawn task and send CCTask to channel
     @closing(tx) {

@@ -20,7 +20,7 @@ int main(void) {
     // Create a buffered channel that sends Result types
     CCResult_int_ParseError[~ 4 >] tx;  // Buffer 4 items
     CCResult_int_ParseError[~ 4 <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
     
     // Create and send a success value
     int !> (ParseError) ok_val = ok_value();

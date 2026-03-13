@@ -5,10 +5,7 @@ int main(void) {
     int[~1 <] rx;
     cc_channel_pair(&tx, &rx);
 
-    @nursery closing(tx) {
-        spawn(() => {
-            (void)chan_send(tx, 1);
-        });
-    }
-    return 0;
+    int value = 0;
+    rx.missing(&value);
+    return value;
 }

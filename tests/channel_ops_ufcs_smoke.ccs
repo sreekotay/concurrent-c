@@ -3,7 +3,7 @@
 int main(void) {
     int[~3 >] tx;
     int[~3 <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     int v = 0;
     // Note: UFCS .send()/.recv() not used here due to parser limitation with statement expressions

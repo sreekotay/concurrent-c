@@ -18,7 +18,7 @@ static double time_now_ms(void) {
 static void bench_buffered(void) {
     int[~1000 >] tx;
     int[~1000 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     double start = time_now_ms();
 
@@ -49,7 +49,7 @@ static void bench_buffered(void) {
 static void bench_unbuffered(void) {
     int[~ >] tx;
     int[~ <] rx;
-    channel_pair(&tx, &rx);  /* unbuffered */
+    cc_channel_pair(&tx, &rx);  /* unbuffered */
     
     int iterations = ITERATIONS / 10;  /* Unbuffered is slower */
     double start = time_now_ms();
@@ -80,7 +80,7 @@ static void bench_unbuffered(void) {
 static void bench_single_thread(void) {
     int[~1000 >] tx;
     int[~1000 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     double start = time_now_ms();
     

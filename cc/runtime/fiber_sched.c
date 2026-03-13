@@ -233,9 +233,11 @@ void cc_fiber_dump_timing(void) {
 /* Forward declarations - defined in nursery.c */
 void cc_nursery_dump_timing(void);
 typedef struct CCNursery CCNursery;
+bool cc_nursery_is_cancelled(const CCNursery* n);
 /* cc__tls_current_nursery is the per-OS-thread nursery context pointer.
 * Fibers must restore it on migration; see worker_run_fiber(). */
 extern __thread CCNursery* cc__tls_current_nursery;
+static __thread CCNursery* cc__tls_spawn_nursery_override = NULL;
 
 #if CC_RUNTIME_V3
 struct fiber_task;
@@ -429,6 +431,7 @@ typedef struct fiber_task {
     _Atomic int timed_park_registered;   /* Timer wait is visible to the timer queue */
     _Atomic int timed_park_fired;        /* Timer path woke this fiber */
     CCNursery* saved_nursery;       /* Nursery context saved across fiber migrations */
+    CCNursery* admission_nursery;   /* Admission boundary checked on first entry */
     
     /* Debug: track who last enqueued this fiber */
     int enqueue_src;          /* Enum: 1=trampoline_yield, 2=spawn, 3=park_abort_pending,
@@ -3318,6 +3321,8 @@ static fiber_task* fiber_alloc(void) {
             f->spawn_publish_valid = 0;
             f->timed_park_requested = 0;
             f->timer_next = NULL;
+            f->saved_nursery = NULL;
+            f->admission_nursery = NULL;
             f->next = NULL;
             /* f->coro and f->fiber_id are kept for reuse! */
             return f;
@@ -3347,6 +3352,8 @@ static fiber_task* fiber_alloc(void) {
         nf->spawn_publish_forced_spill = 0;
         nf->spawn_global_pop_valid = 0;
         nf->spawn_publish_valid = 0;
+        nf->saved_nursery = NULL;
+        nf->admission_nursery = NULL;
     }
     return nf;
 }
@@ -3458,7 +3465,15 @@ static void fiber_entry(mco_coro* co) {
         * (including closure captures) are visible before we execute. */
         atomic_thread_fence(memory_order_acquire);
         TSAN_ACQUIRE(f->arg);  /* Tell TSan: sync with release on same address */
-        f->result = f->fn(f->arg);
+        /* Preserve nursery admission semantics without a spawn trampoline:
+         * cancelled nursery means no new admission, even if cancellation races
+         * after publication but before the fiber first runs. */
+        if (f->admission_nursery && cc_nursery_is_cancelled(f->admission_nursery)) {
+            f->result = NULL;
+        } else {
+            f->result = f->fn(f->arg);
+        }
+        f->admission_nursery = NULL;
     }
     /* Always use handshake lock to ensure proper ordering between
     * child setting done=1 and parent registering as waiter.
@@ -5406,6 +5421,8 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     
     f->fn = fn;
     f->arg = arg;
+    f->saved_nursery = cc__tls_spawn_nursery_override;
+    f->admission_nursery = cc__tls_spawn_nursery_override;
     
     /* Reuse existing coro if available (pooling), otherwise create new */
     int reused = 0;
@@ -6331,6 +6348,10 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
     wait_for_fiber_done_state(f);
     if (out_result) *out_result = f->result;
     return 0;
+}
+
+void cc_fiber_set_spawn_nursery_override(CCNursery* nursery) {
+    cc__tls_spawn_nursery_override = nursery;
 }
 
 void cc_fiber_task_free(fiber_task* f) {

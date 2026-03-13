@@ -26,7 +26,7 @@ static void sleep_ms(int ms) {
 int main(void) {
     int[~ >] tx;
     int[~ <] rx;
-    CCChan* ch = channel_pair(&tx, &rx); /* unbuffered */
+    CCChan* ch = cc_channel_pair(&tx, &rx); /* unbuffered */
 
     Ctx c = {0};
     c.tx = tx;

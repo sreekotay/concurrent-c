@@ -10,7 +10,7 @@ static void consumer(CCChanRx rx) {
 int main(void) {
     int[~4 >] tx;
     int[~4 <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     @nursery {
         spawn(() => consumer(rx));

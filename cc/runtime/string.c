@@ -20,7 +20,7 @@ CCString cc_string_from_slice(CCArena *arena, CCSlice slice) {
     return s;
 }
 
-CCString* cc_string_push(CCString *str, CCSlice data) {
+CCString* cc_string_push_slice(CCString *str, CCSlice data) {
     if (!str || !str->arena) return NULL;
     size_t new_len = str->len + data.len;
     if (Vec_char_reserve(str, new_len + 1) != 0) return NULL;

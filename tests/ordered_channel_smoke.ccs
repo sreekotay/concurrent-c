@@ -23,7 +23,7 @@ int !>(CCIoError) compute_result(int x) {
 static int test_legacy_ordered_recv(void) {
     CCTask[~8 >] tx;
     CCTask[~8 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
 
     intptr_t values[] = {10, 200, 30, 400, 50};
     int n = sizeof(values) / sizeof(values[0]);
@@ -31,7 +31,7 @@ static int test_legacy_ordered_recv(void) {
     @closing(tx) {
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
-            chan_send_task(tx, () => [v] compute(v));
+            cc_channel_send_task(tx, () => [v] compute(v));
         }
     }
 
@@ -60,7 +60,7 @@ static int test_legacy_ordered_recv(void) {
 static int test_typed_ordered_stmt_form(void) {
     intptr_t[~8 >] tx;
     intptr_t[~8 ordered <] rx;
-    channel_pair(&tx, &rx);   /* statement form — ordered flag must be preserved */
+    cc_channel_pair(&tx, &rx);   /* statement form — ordered flag must be preserved */
 
     intptr_t values[] = {1, 2, 3, 4, 5};
     int n = sizeof(values) / sizeof(values[0]);
@@ -68,7 +68,7 @@ static int test_typed_ordered_stmt_form(void) {
     @closing(tx) {
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
-            chan_send_task(tx, () => [v] compute(v));
+            cc_channel_send_task(tx, () => [v] compute(v));
         }
     }
 
@@ -95,7 +95,7 @@ static int test_typed_ordered_stmt_form(void) {
 static int test_typed_ordered_expr_form(void) {
     intptr_t[~8 >] tx;
     intptr_t[~8 ordered <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);   /* expression form */
+    CCChan* ch = cc_channel_pair(&tx, &rx);   /* expression form */
 
     intptr_t values[] = {7, 14, 21, 28};
     int n = sizeof(values) / sizeof(values[0]);
@@ -103,7 +103,7 @@ static int test_typed_ordered_expr_form(void) {
     @closing(tx) {
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
-            chan_send_task(tx, () => [v] compute(v));
+            cc_channel_send_task(tx, () => [v] compute(v));
         }
     }
 
@@ -130,7 +130,7 @@ static int test_typed_ordered_expr_form(void) {
 static int test_ordered_result_payload(void) {
     int !>(CCIoError)[~8 >] result_tx;
     int !>(CCIoError)[~8 ordered <] result_rx;
-    CCChan* ch = channel_pair(&result_tx, &result_rx);
+    CCChan* ch = cc_channel_pair(&result_tx, &result_rx);
 
     int values[] = {2, -1, 5};
     int expected_ok[] = {6, 0, 15};
@@ -140,7 +140,7 @@ static int test_ordered_result_payload(void) {
     @closing(result_tx) {
         for (int i = 0; i < n; i++) {
             int v = values[i];
-            chan_send_task(result_tx, () => [v] compute_result(v));
+            cc_channel_send_task(result_tx, () => [v] compute_result(v));
         }
     }
 

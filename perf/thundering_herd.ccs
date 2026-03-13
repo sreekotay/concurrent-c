@@ -28,7 +28,7 @@ void waiter(CCChanRx rx) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     
-    int[~ >] tx_h; int[~ <] rx_h; CCChan* ch = channel_pair(&tx_h, &rx_h);
+    int[~ >] tx_h; int[~ <] rx_h; CCChan* ch = cc_channel_pair(&tx_h, &rx_h);
     CCChanRx rx = rx_h;
     CCChanTx tx = tx_h;
 

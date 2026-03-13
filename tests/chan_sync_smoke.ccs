@@ -22,7 +22,7 @@ static void* sender_thread(void* arg) {
 }
 
 int main(void) {
-    g_ch = channel_pair(&tx, &rx);
+    g_ch = cc_channel_pair(&tx, &rx);
     
     pthread_t tid;
     pthread_create(&tid, NULL, sender_thread, NULL);

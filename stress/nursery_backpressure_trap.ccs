@@ -23,7 +23,7 @@ int main(void) {
     printf("=================================================================\n\n");
 
     int[~CHANNEL_CAP >] tx_h; int[~CHANNEL_CAP <] rx_h;
-    channel_pair(&tx_h, &rx_h);
+    cc_channel_pair(&tx_h, &rx_h);
     int[~CHANNEL_CAP >] tx = tx_h;
 
     // 1. Fill the channel to create backpressure

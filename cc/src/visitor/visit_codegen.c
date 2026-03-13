@@ -1427,7 +1427,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
         
         /* Collect edits from all Phase 3 passes */
-        cc__collect_ufcs_edits(root, ctx, &eb);
+        if (cc__collect_ufcs_edits(root, ctx, &eb) < 0) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
         cc__collect_closure_calls_edits(root, ctx, &eb);
         cc__collect_autoblocking_edits(root, ctx, &eb);
         cc__collect_await_normalize_edits(root, ctx, &eb);
@@ -1464,7 +1471,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* Text-based rewrites that must happen BEFORE creating root3 AST, so AST positions
        match the transformed source. These are text-based and don't need AST. */
     if (src_ufcs && ctx) {
-        /* Lower `channel_pair(&tx, &rx);` BEFORE channel type rewrite (it needs `[~]` patterns). */
+        /* Lower `cc_channel_pair(&tx, &rx);` BEFORE channel type rewrite (it needs `[~]` patterns). */
         {
             size_t rp_len = 0;
             char* rp = cc__rewrite_channel_pair_calls_text(ctx, src_ufcs, src_ufcs_len, &rp_len);
@@ -1479,7 +1486,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = rp_len;
         }
 
-        /* Rewrite chan_send_task(ch, closure) BEFORE channel type rewrite.
+        /* Rewrite cc_channel_send_task(ch, closure) BEFORE channel type rewrite.
            This wraps the closure body to store result in fiber-local storage. */
         {
             size_t st_len = 0;
@@ -1784,7 +1791,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     if (src_ufcs) {
-        /* Lower `channel_pair(&tx, &rx);` into `cc_chan_pair_create(...)` */
+        /* Lower `cc_channel_pair(&tx, &rx);` into `cc_channel_pair_create(...)` */
         {
             size_t rp_len = 0;
             char* rp = cc__rewrite_channel_pair_calls_text(ctx, src_ufcs, src_ufcs_len, &rp_len);
@@ -1796,7 +1803,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs = rp;
             src_ufcs_len = rp_len;
         }
-        /* Rewrite chan_send_task(ch, closure) */
+        /* Rewrite cc_channel_send_task(ch, closure) */
         {
             size_t st_len = 0;
             char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
@@ -1992,6 +1999,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
+        {
+            char* rew_channel = cc_rewrite_channel_ufcs_concrete(src_ufcs, src_ufcs_len);
+            if (rew_channel) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rew_channel;
+                src_ufcs_len = strlen(src_ufcs);
+            }
+        }
         /* Final UFCS sweep: earlier statement/syntax rewrites can synthesize new
            method-call surface syntax (notably via @defer / spawn / nursery
            lowering). Reparse the current source and lower any remaining UFCS
@@ -2009,7 +2024,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
             CCEditBuffer eb;
             cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
-            cc__collect_ufcs_edits(final_ufcs_root, ctx, &eb);
+            if (cc__collect_ufcs_edits(final_ufcs_root, ctx, &eb) < 0) {
+                cc_tcc_bridge_free_ast(final_ufcs_root);
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
             if (eb.count > 0) {
                 size_t new_len = 0;
                 char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
@@ -2127,6 +2150,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             {
                 char* rewritten = cc_rewrite_result_ufcs_survival(closure_defs, closure_defs_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
+            }
+            {
+                char* rewritten = cc_rewrite_generic_family_ufcs_concrete(closure_defs, closure_defs_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
+            }
+            {
+                char* rewritten = cc_rewrite_channel_ufcs_concrete(closure_defs, closure_defs_len);
                 if (rewritten) {
                     free(closure_defs);
                     closure_defs = rewritten;

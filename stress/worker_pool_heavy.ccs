@@ -35,8 +35,8 @@ int main(void) {
     Job[~ <] jobs_rx;
     Result[~ >] results_tx;
     Result[~ <] results_rx;
-    CCChan* jobs_ch = channel_pair(&jobs_tx, &jobs_rx);
-    CCChan* results_ch = channel_pair(&results_tx, &results_rx);
+    CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx);
+    CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx);
 
     @nursery {
         /* Results collector - must run in parallel for unbuffered channels */

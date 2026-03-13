@@ -38,8 +38,8 @@ static void consumer(CCChanRx rx, int count) {
 int main(void) {
     cc_sched_set_num_workers(2);
 
-    int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = channel_pair(&tx1_h, &rx1_h);
-    int[~1024 >] tx2_h; int[~1024 <] rx2_h; CCChan* ch2 = channel_pair(&tx2_h, &rx2_h);
+    int[~1024 >] tx1_h; int[~1024 <] rx1_h; CCChan* ch1 = cc_channel_pair(&tx1_h, &rx1_h);
+    int[~1024 >] tx2_h; int[~1024 <] rx2_h; CCChan* ch2 = cc_channel_pair(&tx2_h, &rx2_h);
     (void)ch1; (void)ch2;
     CCChanTx tx1 = tx1_h;
     CCChanRx rx1 = rx1_h;

@@ -131,8 +131,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
 
     CCTask[~CHAN_CAP >] tasks_tx;
     CCTask[~CHAN_CAP <] tasks_rx;
-    CCChan* ch = channel_pair(&tasks_tx, &tasks_rx);
-    @defer cc_chan_free(ch);
+    CCChan* ch = cc_channel_pair(&tasks_tx, &tasks_rx);
+    @defer cc_channel_free(ch);
 
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;

@@ -63,5 +63,12 @@ char* cc_rewrite_generic_family_ufcs_survival(const char* src, size_t n);
 //   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
 char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
 
+// Rewrite explicit channel UFCS for parser/codegen survival:
+//   tx.send(v) -> cc_channel_send(tx, v)
+//   rx.recv(&v) -> cc_channel_recv(rx, &v)
+// Await forms are intentionally left untouched for async-aware lowering later.
+char* cc_rewrite_channel_ufcs_survival(const char* src, size_t n);
+char* cc_rewrite_channel_ufcs_concrete(const char* src, size_t n);
+
 #endif // CC_PREPROCESS_H
 

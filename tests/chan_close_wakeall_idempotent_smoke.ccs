@@ -24,7 +24,7 @@ int main(void) {
         if ((rep % 100) == 0) fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
         int[~ >] tx;
         int[~ <] rx;
-        CCChan* ch = channel_pair(&tx, &rx);
+        CCChan* ch = cc_channel_pair(&tx, &rx);
 
         @nursery {
             for (int i = 0; i < WAITERS; i++) {

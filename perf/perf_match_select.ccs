@@ -20,7 +20,7 @@ static double time_now_ms(void) {
 static void bench_single_channel(void) {
     int[~100 >] tx;
     int[~100 <] rx;
-    channel_pair(&tx, &rx);
+    cc_channel_pair(&tx, &rx);
     
     /* Pre-fill some values */
     for (int i = 0; i < 50; i++) {
@@ -49,8 +49,8 @@ static void bench_single_channel(void) {
 static void bench_two_channel_one_ready(void) {
     int[~100 >] tx1, tx2;
     int[~100 <] rx1, rx2;
-    channel_pair(&tx1, &rx1);
-    channel_pair(&tx2, &rx2);
+    cc_channel_pair(&tx1, &rx1);
+    cc_channel_pair(&tx2, &rx2);
     
     double start = time_now_ms();
     
@@ -82,8 +82,8 @@ static void bench_two_channel_one_ready(void) {
 static void bench_two_channel_alternating(void) {
     int[~100 >] tx1, tx2;
     int[~100 <] rx1, rx2;
-    channel_pair(&tx1, &rx1);
-    channel_pair(&tx2, &rx2);
+    cc_channel_pair(&tx1, &rx1);
+    cc_channel_pair(&tx2, &rx2);
     
     double start = time_now_ms();
     
@@ -119,10 +119,10 @@ static void bench_two_channel_alternating(void) {
 static void bench_four_channel(void) {
     int[~100 >] tx1, tx2, tx3, tx4;
     int[~100 <] rx1, rx2, rx3, rx4;
-    channel_pair(&tx1, &rx1);
-    channel_pair(&tx2, &rx2);
-    channel_pair(&tx3, &rx3);
-    channel_pair(&tx4, &rx4);
+    cc_channel_pair(&tx1, &rx1);
+    cc_channel_pair(&tx2, &rx2);
+    cc_channel_pair(&tx3, &rx3);
+    cc_channel_pair(&tx4, &rx4);
     
     double start = time_now_ms();
     

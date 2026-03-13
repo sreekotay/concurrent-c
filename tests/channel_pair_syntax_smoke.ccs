@@ -3,7 +3,7 @@
 int main(void) {
     int[~3 >] tx;
     int[~3 <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     int v = 42;
     int out = 0;

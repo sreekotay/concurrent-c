@@ -23,11 +23,11 @@ int main(void) {
     for (int iter = 0; iter < REPEATS; iter++) {
         if (iter % 100 == 0) fprintf(stderr, "iter %d/%d\n", iter, REPEATS);
 
-        g_ch0 = channel_pair(&g_tx0, &g_rx0);
-        g_ch1 = channel_pair(&g_tx1, &g_rx1);
-        g_ch2 = channel_pair(&g_tx2, &g_rx2);
-        g_ch3 = channel_pair(&g_tx3, &g_rx3);
-        g_ch4 = channel_pair(&g_tx4, &g_rx4);
+        g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
+        g_ch1 = cc_channel_pair(&g_tx1, &g_rx1);
+        g_ch2 = cc_channel_pair(&g_tx2, &g_rx2);
+        g_ch3 = cc_channel_pair(&g_tx3, &g_rx3);
+        g_ch4 = cc_channel_pair(&g_tx4, &g_rx4);
         cc_atomic_store(&g_out_count, 0);
         cc_atomic_store(&g_out_sum, 0);
 

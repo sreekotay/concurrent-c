@@ -296,7 +296,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
 static inline void return_input_arena(CCArena* arena, CCChan* pool) {
     if (pool) {
         // Send pointer back to pool (pool stores void* which is CCArena*)
-        cc_chan_send(pool, &arena, sizeof(arena));
+        cc_channel_send(pool, &arena, sizeof(arena));
     } else {
         // No pool - free the arena and its wrapper
         cc_arena_free(arena);
@@ -460,8 +460,8 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     DecompChunk[~pipe_cap >] decompressed_tx;
     DecompChunk[~pipe_cap <] decompressed_rx;
     
-    CCChan* compressed_ch = channel_pair(&compressed_tx, &compressed_rx);
-    CCChan* decompressed_ch = channel_pair(&decompressed_tx, &decompressed_rx);
+    CCChan* compressed_ch = cc_channel_pair(&compressed_tx, &compressed_rx);
+    CCChan* decompressed_ch = cc_channel_pair(&decompressed_tx, &decompressed_rx);
     @defer compressed_ch.free();
     @defer decompressed_ch.free();
 
@@ -475,7 +475,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         /* Writer Task - writes decompressed data (runs behind) */
         spawn(() => [out_ptr, decompressed_rx, p_total_out] {
             DecompChunk chunk;
-            while (cc_io_avail(chan_recv(decompressed_rx, &chunk))) {
+            while (cc_io_avail(cc_channel_recv(decompressed_rx, &chunk))) {
                 if (chunk.data.len > 0 && !g.test && !g.list) {
                     size_t !>(CCIoError) wr = cc_file_write_buf(out_ptr, chunk.data.ptr, chunk.data.len);
                     if (wr.is_err()) {
@@ -496,7 +496,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                     fprintf(stderr, "Failed to initialize decompression\n");
                 } else {
                     DecompChunk in_chunk;
-                    while (cc_io_avail(chan_recv(compressed_rx, &in_chunk))) {
+                    while (cc_io_avail(cc_channel_recv(compressed_rx, &in_chunk))) {
                         strm.next_in = (Bytef*)in_chunk.data.ptr;
                         strm.avail_in = (uInt)in_chunk.data.len;
                         
@@ -524,7 +524,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                                     .data = cc_slice_from_parts(out_buf, have, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
                                     .arena = out_arena
                                 };
-                                (void)chan_send(decompressed_tx, out_chunk);
+                                (void)cc_channel_send(decompressed_tx, out_chunk);
                             } else {
                                 out_arena.free();
                             }
@@ -563,7 +563,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                             .data = cc_slice_from_parts(buf, bytes_read, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
                             .arena = chunk_arena
                         };
-                        (void)chan_send(compressed_tx, chunk);
+                        (void)cc_channel_send(compressed_tx, chunk);
                     }
                 });
             }
@@ -631,7 +631,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     CCTask[~chan_cap >] tasks_tx;
     CCTask[~chan_cap <] tasks_rx;
 
-    CCChan* tasks_ch = channel_pair(&tasks_tx, &tasks_rx);
+    CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx);
     @defer tasks_ch.free();
 
     // Input arena pool - reuse arenas instead of malloc/free each block
@@ -795,7 +795,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             CCIoError recv_err = {0};
             bool recv_ok = true;
             CCTask task;
-            while (!write_failed && cc_io_avail(chan_recv(tasks_rx, &task))) {
+            while (!write_failed && cc_io_avail(tasks_rx.recv(&task))) {
                 // Check for global error (e.g. SIGINT)
                 if (cc_atomic_load(&g_pipeline_error)) {
                     write_failed = true;
@@ -992,7 +992,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
             // If we failed, signal Reader to stop sending via upstream error propagation
             if (write_failed) {
-                cc_chan_rx_close_err(tasks_ch, EIO);
+                cc_channel_rx_close_err(tasks_ch, EIO);
             }
 
             // If we failed or were interrupted, delete the partial file (matches pigz.c:3600)
@@ -1021,7 +1021,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     
                     // Borrow arena from pool
                     CCArena* blk_arena = NULL;
-                    cc_chan_recv(arena_pool, &blk_arena, sizeof(blk_arena));
+                    cc_channel_recv(arena_pool, &blk_arena, sizeof(blk_arena));
                     
                     // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
                     CCSlice data;
@@ -1042,7 +1042,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             // @nursery, so the nursery check fails. Manual lowering required.
                             {
                                 CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
-                                if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                                if (!cc_io_avail(cc_channel_send(tasks_tx, task))) {
                                     cc_task_free(&task);
                                 }
                             }
@@ -1127,7 +1127,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         // but this site needs the extra cleanup before breaking.
                         {
                             CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
-                            if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                            if (!cc_io_avail(cc_channel_send(tasks_tx, task))) {
                                 cc_task_free(&task);
                                 return_input_arena(blk_arena, arena_pool);
                                 break;
@@ -1142,7 +1142,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         // requires manual lowering.
                         {
                             CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, blk);
-                            if (!cc_io_avail(chan_send(tasks_tx, task))) {
+                            if (!cc_io_avail(cc_channel_send(tasks_tx, task))) {
                                 cc_task_free(&task);
                             }
                         }

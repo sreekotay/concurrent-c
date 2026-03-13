@@ -18,7 +18,7 @@ int main(void) {
     /* Use unbuffered channel */
     int[~ >] tx;
     int[~ <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     printf("channel_flood: %d producers x %d msgs = %d total\n",
            num_producers, msgs_per, total_msgs);

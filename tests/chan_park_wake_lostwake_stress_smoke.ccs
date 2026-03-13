@@ -34,7 +34,7 @@ int main(void) {
         {
             int[~ >] tx;
             int[~ <] rx;
-            CCChan* ch = channel_pair(&tx, &rx);
+            CCChan* ch = cc_channel_pair(&tx, &rx);
             @nursery {
                 spawn(() => [rx] {
                     int v = -1;
@@ -56,7 +56,7 @@ int main(void) {
         {
             int[~ >] tx;
             int[~ <] rx;
-            CCChan* ch = channel_pair(&tx, &rx);
+            CCChan* ch = cc_channel_pair(&tx, &rx);
             @nursery {
                 spawn(() => [rx] {
                     int v = -1;
@@ -79,7 +79,7 @@ int main(void) {
         {
             int[~ >] tx;
             int[~ <] rx;
-            CCChan* ch = channel_pair(&tx, &rx);
+            CCChan* ch = cc_channel_pair(&tx, &rx);
             @nursery {
                 spawn(() => [rx] {
                     int v = -1;

@@ -19,10 +19,10 @@ CCChan* g_11_ch;
 
 int main(void) {
     // Create N:1 channel (many senders, one receiver)
-    g_n1_ch = channel_pair(&many_to_one_tx, &many_to_one_rx);
+    g_n1_ch = cc_channel_pair(&many_to_one_tx, &many_to_one_rx);
     
     // Create 1:1 channel (single producer, single consumer)
-    g_11_ch = channel_pair(&one_to_one_tx, &one_to_one_rx);
+    g_11_ch = cc_channel_pair(&one_to_one_tx, &one_to_one_rx);
     
     // Basic send/recv test on N:1 (use non-UFCS due to parser limitation)
     (void)chan_send(many_to_one_tx, 42);

@@ -8,7 +8,7 @@ int main(void) {
     {
         int[~4 >] tx1;
         int[~4 <] rx1;
-        CCChan* ch1 = channel_pair(&tx1, &rx1);
+        CCChan* ch1 = cc_channel_pair(&tx1, &rx1);
         
         // Send one value
         int val = 42;
@@ -36,7 +36,7 @@ int main(void) {
     {
         int[~4 >] tx2;
         int[~4 <] rx2;
-        CCChan* ch2 = channel_pair(&tx2, &rx2);
+        CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
         
         // Close rx side with error
         cc_chan_rx_close_err(ch2, ENOENT);
@@ -59,7 +59,7 @@ int main(void) {
     {
         int[~4 >] tx3;
         int[~4 <] rx3;
-        CCChan* ch3 = channel_pair(&tx3, &rx3);
+        CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
         
         cc_chan_close(ch3);  // Regular close
         
@@ -75,7 +75,7 @@ int main(void) {
     {
         int[~ >] tx4;  // Unbuffered
         int[~ <] rx4;
-        CCChan* ch4 = channel_pair(&tx4, &rx4);
+        CCChan* ch4 = cc_channel_pair(&tx4, &rx4);
         
         // Close with error
         cc_chan_close_err(ch4, EIO);
@@ -98,7 +98,7 @@ int main(void) {
     {
         int[~ >] tx5;  // Unbuffered
         int[~ <] rx5;
-        CCChan* ch5 = channel_pair(&tx5, &rx5);
+        CCChan* ch5 = cc_channel_pair(&tx5, &rx5);
         
         // Close rx side with error
         cc_chan_rx_close_err(ch5, EACCES);

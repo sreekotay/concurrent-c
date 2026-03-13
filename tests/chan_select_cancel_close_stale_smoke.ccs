@@ -22,8 +22,8 @@ int main(void) {
         int[~1 <] rx_data;
         int[~1 >] tx_close;
         int[~1 <] rx_close;
-        CCChan* ch_data = channel_pair(&tx_data, &rx_data);
-        CCChan* ch_close = channel_pair(&tx_close, &rx_close);
+        CCChan* ch_data = cc_channel_pair(&tx_data, &rx_data);
+        CCChan* ch_close = cc_channel_pair(&tx_close, &rx_close);
 
         int selected = 0;
         int got = 0;

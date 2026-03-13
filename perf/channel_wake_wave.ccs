@@ -104,10 +104,10 @@ int main(void) {
     for (int round = 0; round < rounds; round++) {
         reset_round_state();
 
-        int[~1 >] tx0; int[~1 <] rx0; CCChan* ch0 = channel_pair(&tx0, &rx0);
-        int[~1 >] tx1; int[~1 <] rx1; CCChan* ch1 = channel_pair(&tx1, &rx1);
-        int[~1 >] tx2; int[~1 <] rx2; CCChan* ch2 = channel_pair(&tx2, &rx2);
-        int[~1 >] tx3; int[~1 <] rx3; CCChan* ch3 = channel_pair(&tx3, &rx3);
+        int[~1 >] tx0; int[~1 <] rx0; CCChan* ch0 = cc_channel_pair(&tx0, &rx0);
+        int[~1 >] tx1; int[~1 <] rx1; CCChan* ch1 = cc_channel_pair(&tx1, &rx1);
+        int[~1 >] tx2; int[~1 <] rx2; CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
+        int[~1 >] tx3; int[~1 <] rx3; CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
         @closing(tx0, tx1, tx2, tx3) {
             @nursery {

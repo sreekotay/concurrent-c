@@ -23,7 +23,7 @@ int main(void) {
 
     int[~ >] tx;
     int[~ <] rx;
-    CCChan* ch = channel_pair(&tx, &rx);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
 
     @nursery {
         /* Receiver */

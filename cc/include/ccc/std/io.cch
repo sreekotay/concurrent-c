@@ -65,7 +65,7 @@ int cc_file_read_all_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, CC
 // - Ok(false) = EOF (no more data)
 // - Err(e) = actual error
 // Usage: while (cc_io_avail(cc_file_read(file, arena, n, &data))) { process(data); }
-static inline CCRes(bool, CCIoError) cc_file_read(CCFile *file, CCArena *arena, size_t n, CCSlice *out) {
+static inline CCRes(bool, CCIoError) cc_file_read_into(CCFile *file, CCArena *arena, size_t n, CCSlice *out) {
     if (!file || !file->handle || !arena || n == 0 || !out) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
     }
@@ -95,7 +95,7 @@ int cc_file_read_async_deadline(CCExec* ex, CCFile *file, CCArena *arena, size_t
 // - Ok(false) = EOF (no more lines)
 // - Err(e) = actual error
 // Usage: while (cc_io_avail(cc_file_read_line(file, arena, &line))) { process(line); }
-static inline CCRes(bool, CCIoError) cc_file_read_line(CCFile *file, CCArena *arena, CCSlice *out) {
+static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCArena *arena, CCSlice *out) {
     if (!file || !file->handle || !arena || !out) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
     }
@@ -132,7 +132,7 @@ int cc_file_write_async_deadline(CCExec* ex, CCFile *file, CCSlice data, size_t*
 // - Err(e) = actual error
 // For streaming scenarios where you want to reuse the same buffer.
 // Usage: while (cc_io_avail(cc_file_read_buf(file, buf, n, &got))) { process(buf, got); }
-static inline CCRes(bool, CCIoError) cc_file_read_buf(CCFile *file, void *buf, size_t n, size_t *out) {
+static inline CCRes(bool, CCIoError) cc_file_read_buf_into(CCFile *file, void *buf, size_t n, size_t *out) {
     if (!file || !file->handle || !buf || n == 0 || !out) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
     }
@@ -196,53 +196,42 @@ static inline CCRes(size_t, CCIoError) cc_file_size(CCFile *file) {
     return CCRes_ok(size_t, CCIoError, (size_t)end);
 }
 
-/* Canonical UFCS family wrappers. These preserve the CC surface signatures while
-   still lowering to the explicit C ABI helpers above. */
-static inline int cc_file_ufcs_open(CCFile *file, const char *path, const char *mode) {
-    return cc_file_open(file, path, mode);
-}
-static inline CCRes(CCSlice, CCIoError) cc_file_ufcs_read(CCFile *file, CCArena *arena, size_t n) {
+/* Canonical file-family wrappers. Methods lower to `cc_file_*`; for the read-style
+   operations, the public family returns direct values while the explicit `*_into`
+   helpers preserve the out-parameter ABI. */
+static inline CCRes(CCSlice, CCIoError) cc__file_read_value(CCFile *file, CCArena *arena, size_t n) {
     CCSlice out = cc_slice_empty();
-    CCRes(bool, CCIoError) status = cc_file_read(file, arena, n, &out);
+    CCRes(bool, CCIoError) status = cc_file_read_into(file, arena, n, &out);
     if (cc_is_err(status)) return CCRes_err(CCSlice, CCIoError, cc_error(status));
     return CCRes_ok(CCSlice, CCIoError, out);
 }
-static inline CCRes(CCSlice, CCIoError) cc_file_ufcs_read_line(CCFile *file, CCArena *arena) {
+static inline CCRes(CCSlice, CCIoError) cc__file_read_line_value(CCFile *file, CCArena *arena) {
     CCSlice out = cc_slice_empty();
-    CCRes(bool, CCIoError) status = cc_file_read_line(file, arena, &out);
+    CCRes(bool, CCIoError) status = cc_file_read_line_into(file, arena, &out);
     if (cc_is_err(status)) return CCRes_err(CCSlice, CCIoError, cc_error(status));
     return CCRes_ok(CCSlice, CCIoError, out);
 }
-static inline CCRes(CCSlice, CCIoError) cc_file_ufcs_read_all(CCFile *file, CCArena *arena) {
-    return cc_file_read_all(file, arena);
-}
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_write(CCFile *file, CCSlice data) {
-    return cc_file_write(file, data);
-}
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_read_buf(CCFile *file, void *buf, size_t n) {
+static inline CCRes(size_t, CCIoError) cc__file_read_buf_count(CCFile *file, void *buf, size_t n) {
     size_t out = 0;
-    CCRes(bool, CCIoError) status = cc_file_read_buf(file, buf, n, &out);
+    CCRes(bool, CCIoError) status = cc_file_read_buf_into(file, buf, n, &out);
     if (cc_is_err(status)) return CCRes_err(size_t, CCIoError, cc_error(status));
     return CCRes_ok(size_t, CCIoError, out);
 }
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_write_buf(CCFile *file, const void *buf, size_t n) {
-    return cc_file_write_buf(file, buf, n);
-}
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_seek(CCFile *file, long offset, int whence) {
-    return cc_file_seek(file, offset, whence);
-}
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_tell(CCFile *file) {
-    return cc_file_tell(file);
-}
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_size(CCFile *file) {
-    return cc_file_size(file);
-}
-static inline CCRes(size_t, CCIoError) cc_file_ufcs_sync(CCFile *file) {
-    return cc_file_sync(file);
-}
-static inline void cc_file_ufcs_close(CCFile *file) {
-    cc_file_close(file);
-}
+
+#define CC__FILE_SELECT_2_OR_3(_1, _2, _3, NAME, ...) NAME
+#define CC__FILE_SELECT_3_OR_4(_1, _2, _3, _4, NAME, ...) NAME
+
+#define cc_file_read2(file, arena, n) cc__file_read_value((file), (arena), (n))
+#define cc_file_read4(file, arena, n, out) cc_file_read_into((file), (arena), (n), (out))
+#define cc_file_read(...) CC__FILE_SELECT_3_OR_4(__VA_ARGS__, cc_file_read4, cc_file_read2)(__VA_ARGS__)
+
+#define cc_file_read_line2(file, arena) cc__file_read_line_value((file), (arena))
+#define cc_file_read_line3(file, arena, out) cc_file_read_line_into((file), (arena), (out))
+#define cc_file_read_line(...) CC__FILE_SELECT_2_OR_3(__VA_ARGS__, cc_file_read_line3, cc_file_read_line2)(__VA_ARGS__)
+
+#define cc_file_read_buf3(file, buf, n) cc__file_read_buf_count((file), (buf), (n))
+#define cc_file_read_buf4(file, buf, n, out) cc_file_read_buf_into((file), (buf), (n), (out))
+#define cc_file_read_buf(...) CC__FILE_SELECT_3_OR_4(__VA_ARGS__, cc_file_read_buf4, cc_file_read_buf3)(__VA_ARGS__)
 
 // Stdout/Stderr convenience
 CCRes(size_t, CCIoError) cc_std_out_write(CCSlice data);

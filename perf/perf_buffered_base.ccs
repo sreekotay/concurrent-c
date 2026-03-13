@@ -47,7 +47,7 @@ static void sort_doubles(double* arr, int n) {
 static double run_once(void) {
     int[~1000 >] tx_h;
     int[~1000 <] rx_h;
-    channel_pair(&tx_h, &rx_h);
+    cc_channel_pair(&tx_h, &rx_h);
 
     double start = time_now_ms();
     @closing(tx_h) {
