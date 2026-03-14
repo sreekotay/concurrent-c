@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    int ok = 1;
+
+    @nursery {
+        @closing(tx) {
+            CCNursery* producer = @create(NULL, () => [tx] {
+                int value = 2;
+                tx.send_task(() => [value] {
+                    value * 3;
+                });
+                return NULL;
+            }) @destroy;
+
+            if (!producer) {
+                ok = 0;
+            }
+        }
+    }
+
+    cc_chan_free(ch);
+    if (!ok) {
+        printf("channel_send_task_ufcs_capture_smoke: FAIL\n");
+        return 1;
+    }
+    printf("channel_send_task_ufcs_capture_smoke: PASS\n");
+    return 0;
+}

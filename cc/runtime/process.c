@@ -17,6 +17,7 @@
 #else
 #include <unistd.h>
 #include <signal.h>
+#include <sys/select.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <spawn.h>
@@ -28,6 +29,159 @@ extern char **environ;  /* For posix_spawn with inherited environment */
  * ============================================================================ */
 
 /* Use cc_io_from_errno() from cc_io_error.cch for error conversion. */
+
+static int cc__append_process_output(CCArena* arena, CCSlice* dst, size_t* cap, const void* data, size_t len) {
+    char* buf;
+    size_t next_cap;
+    if (!arena || !dst || !cap) return -1;
+    if (len == 0) return 0;
+
+    if (!dst->ptr) {
+        *cap = 4096;
+        while (*cap < len) *cap *= 2;
+        dst->ptr = cc_arena_alloc(arena, *cap, 1);
+        if (!dst->ptr) return -1;
+        dst->len = 0;
+    }
+
+    if (dst->len + len <= *cap) {
+        memcpy((char*)dst->ptr + dst->len, data, len);
+        dst->len += len;
+        return 0;
+    }
+
+    next_cap = *cap;
+    while (dst->len + len > next_cap) next_cap *= 2;
+    buf = cc_arena_alloc(arena, next_cap, 1);
+    if (!buf) return -1;
+    if (dst->len > 0) memcpy(buf, dst->ptr, dst->len);
+    memcpy(buf + dst->len, data, len);
+    dst->ptr = buf;
+    dst->len += len;
+    *cap = next_cap;
+    return 0;
+}
+
+#ifndef _WIN32
+static CCResult_CCProcessOutput_CCIoError cc__process_capture_posix(CCArena* arena,
+                                                                    CCProcess* proc,
+                                                                    CCSlice input) {
+    CCProcessOutput output = {0};
+    size_t stdout_cap = 0;
+    size_t stderr_cap = 0;
+    size_t input_off = 0;
+    int stdin_open = proc->stdin_fd >= 0;
+    int stdout_open = proc->stdout_fd >= 0;
+    int stderr_open = proc->stderr_fd >= 0;
+
+    if (stdin_open && input.len == 0) {
+        cc_process_close_stdin(proc);
+        stdin_open = 0;
+    }
+
+    while (stdin_open || stdout_open || stderr_open) {
+        fd_set readfds;
+        fd_set writefds;
+        fd_set* read_ptr = NULL;
+        fd_set* write_ptr = NULL;
+        int maxfd = -1;
+        int ready;
+
+        FD_ZERO(&readfds);
+        FD_ZERO(&writefds);
+
+        if (stdout_open) {
+            FD_SET(proc->stdout_fd, &readfds);
+            read_ptr = &readfds;
+            if (proc->stdout_fd > maxfd) maxfd = proc->stdout_fd;
+        }
+        if (stderr_open) {
+            FD_SET(proc->stderr_fd, &readfds);
+            read_ptr = &readfds;
+            if (proc->stderr_fd > maxfd) maxfd = proc->stderr_fd;
+        }
+        if (stdin_open && input_off < input.len) {
+            FD_SET(proc->stdin_fd, &writefds);
+            write_ptr = &writefds;
+            if (proc->stdin_fd > maxfd) maxfd = proc->stdin_fd;
+        }
+
+        ready = select(maxfd + 1, read_ptr, write_ptr, NULL, NULL);
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(errno));
+        }
+
+        if (stdin_open && write_ptr && FD_ISSET(proc->stdin_fd, &writefds)) {
+            ssize_t n;
+            do {
+                n = write(proc->stdin_fd,
+                          (const char*)input.ptr + input_off,
+                          input.len - input_off);
+            } while (n < 0 && errno == EINTR);
+            if (n < 0) {
+                cc_process_close_stdin(proc);
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(errno));
+            }
+            input_off += (size_t)n;
+            if (input_off >= input.len) {
+                cc_process_close_stdin(proc);
+                stdin_open = 0;
+            }
+        }
+
+        if (stdout_open && read_ptr && FD_ISSET(proc->stdout_fd, &readfds)) {
+            char buf[4096];
+            ssize_t n;
+            do {
+                n = read(proc->stdout_fd, buf, sizeof(buf));
+            } while (n < 0 && errno == EINTR);
+            if (n < 0) {
+                close(proc->stdout_fd);
+                proc->stdout_fd = -1;
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(errno));
+            }
+            if (n == 0) {
+                close(proc->stdout_fd);
+                proc->stdout_fd = -1;
+                stdout_open = 0;
+            } else if (cc__append_process_output(arena, &output.stdout_data, &stdout_cap, buf, (size_t)n) != 0) {
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(ENOMEM));
+            }
+        }
+
+        if (stderr_open && read_ptr && FD_ISSET(proc->stderr_fd, &readfds)) {
+            char buf[4096];
+            ssize_t n;
+            do {
+                n = read(proc->stderr_fd, buf, sizeof(buf));
+            } while (n < 0 && errno == EINTR);
+            if (n < 0) {
+                close(proc->stderr_fd);
+                proc->stderr_fd = -1;
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(errno));
+            }
+            if (n == 0) {
+                close(proc->stderr_fd);
+                proc->stderr_fd = -1;
+                stderr_open = 0;
+            } else if (cc__append_process_output(arena, &output.stderr_data, &stderr_cap, buf, (size_t)n) != 0) {
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(ENOMEM));
+            }
+        }
+    }
+
+    {
+        CCResult_CCProcessStatus_CCIoError wait_res = cc_process_wait(proc);
+        if (cc_is_err(wait_res)) {
+            return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(wait_res));
+        }
+        output.status = cc_unwrap(wait_res);
+    }
+
+    return cc_ok_CCResult_CCProcessOutput_CCIoError(output);
+}
+#endif
 
 /* ============================================================================
  * Process Spawning - POSIX
@@ -747,52 +901,102 @@ CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char* command) {
  * Convenience: Run and Capture
  * ============================================================================ */
 
-CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* program, const char** args) {
+CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena* arena, const CCProcessConfig* config) {
+    CCSlice empty = {0};
+    return cc_process_run_with_input(arena, config, empty);
+}
+
+CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
+                                                             const CCProcessConfig* config,
+                                                             CCSlice input) {
+    CCProcessConfig run_cfg;
+    CCResult_CCProcess_CCIoError spawn_res;
+    CCProcess proc;
     CCProcessOutput output = {0};
 
+    if (!arena || !config || !config->program || !config->args) {
+        return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
+    }
+
+    run_cfg = *config;
+    if (input.ptr || input.len > 0) run_cfg.pipe_stdin = true;
+
+    spawn_res = cc_process_spawn(&run_cfg);
+    if (cc_is_err(spawn_res)) {
+        return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(spawn_res));
+    }
+
+    proc = cc_unwrap(spawn_res);
+
+#ifdef _WIN32
+    if (run_cfg.pipe_stdin) {
+        while (input.len > 0) {
+            CCResult_size_t_CCIoError write_res = cc_process_write(&proc, input);
+            if (cc_is_err(write_res)) {
+                cc_process_close_stdin(&proc);
+                return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(write_res));
+            }
+            {
+                size_t wrote = cc_unwrap(write_res);
+                input = cc_slice_sub(input, wrote, input.len);
+            }
+        }
+        cc_process_close_stdin(&proc);
+    }
+
+    if (run_cfg.pipe_stdout) {
+        CCResult_CCSlice_CCIoError stdout_res = cc_process_read_all(&proc, arena);
+        if (cc_is_err(stdout_res)) {
+            if (proc.stdout_fd >= 0) {
+                _close(proc.stdout_fd);
+                proc.stdout_fd = -1;
+            }
+            return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(stdout_res));
+        }
+        output.stdout_data = cc_unwrap(stdout_res);
+        if (proc.stdout_fd >= 0) {
+            _close(proc.stdout_fd);
+            proc.stdout_fd = -1;
+        }
+    }
+
+    if (run_cfg.pipe_stderr && !run_cfg.merge_stderr) {
+        CCResult_CCSlice_CCIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
+        if (cc_is_err(stderr_res)) {
+            if (proc.stderr_fd >= 0) {
+                _close(proc.stderr_fd);
+                proc.stderr_fd = -1;
+            }
+            return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(stderr_res));
+        }
+        output.stderr_data = cc_unwrap(stderr_res);
+        if (proc.stderr_fd >= 0) {
+            _close(proc.stderr_fd);
+            proc.stderr_fd = -1;
+        }
+    }
+
+    {
+        CCResult_CCProcessStatus_CCIoError wait_res = cc_process_wait(&proc);
+        if (cc_is_err(wait_res)) {
+            return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(wait_res));
+        }
+        output.status = cc_unwrap(wait_res);
+    }
+    return cc_ok_CCResult_CCProcessOutput_CCIoError(output);
+#else
+    return cc__process_capture_posix(arena, &proc, input);
+#endif
+}
+
+CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* program, const char** args) {
     CCProcessConfig config = {
         .program = program,
         .args = args,
         .pipe_stdout = true,
         .pipe_stderr = true
     };
-
-    CCResult_CCProcess_CCIoError spawn_res = cc_process_spawn(&config);
-    if (cc_is_err(spawn_res)) {
-        return cc_err_CCResult_CCProcessOutput_CCIoError(cc_unwrap_err(spawn_res));
-    }
-
-    CCProcess proc = cc_unwrap(spawn_res);
-
-    /* Read stdout - blocks until child closes its stdout (usually on exit) */
-    CCResult_CCSlice_CCIoError stdout_res = cc_process_read_all(&proc, arena);
-    if (cc_is_ok(stdout_res)) {
-        output.stdout_data = cc_unwrap(stdout_res);
-    }
-    /* Close our end after reading */
-    if (proc.stdout_fd >= 0) {
-        close(proc.stdout_fd);
-        proc.stdout_fd = -1;
-    }
-
-    /* Read stderr */
-    CCResult_CCSlice_CCIoError stderr_res = cc_process_read_all_stderr(&proc, arena);
-    if (cc_is_ok(stderr_res)) {
-        output.stderr_data = cc_unwrap(stderr_res);
-    }
-    /* Close our end after reading */
-    if (proc.stderr_fd >= 0) {
-        close(proc.stderr_fd);
-        proc.stderr_fd = -1;
-    }
-
-    /* Wait for exit */
-    CCResult_CCProcessStatus_CCIoError wait_res = cc_process_wait(&proc);
-    if (cc_is_ok(wait_res)) {
-        output.status = cc_unwrap(wait_res);
-    }
-
-    return cc_ok_CCResult_CCProcessOutput_CCIoError(output);
+    return cc_process_run_config(arena, &config);
 }
 
 CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena* arena, const char* command) {

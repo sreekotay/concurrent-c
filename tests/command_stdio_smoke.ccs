@@ -1,0 +1,80 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/command.cch>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64));
+    CCCommand cat = cc_command(&arena, "/bin/sh");
+    CCCommand merged = cc_command(&arena, "/bin/sh");
+    CCCommand env_cmd = cc_command(&arena, "/bin/sh");
+    const char* envp[] = {
+        "CC_STDIO_SMOKE=works",
+        NULL,
+    };
+    CCResult_CCProcessOutput_CCIoError res;
+    CCProcessOutput out;
+
+    cat.arg("-c");
+    cat.arg("cat");
+    cat.stdin("hello");
+    res = cat.output(&arena);
+    if (cc_is_err(res)) {
+        cc_arena_free(&arena);
+        return 1;
+    }
+    out = cc_unwrap_as(res, CCProcessOutput);
+    if (cc_process_output_exit_code(&out) != 0) {
+        cc_arena_free(&arena);
+        return 2;
+    }
+    if (cc_process_output_stdout_len(&out) != 5 || strncmp(cc_process_output_stdout_str(&out), "hello", 5) != 0) {
+        cc_arena_free(&arena);
+        return 3;
+    }
+    if (cc_process_output_stderr_len(&out) != 0) {
+        cc_arena_free(&arena);
+        return 4;
+    }
+
+    merged.arg("-c");
+    merged.arg("printf out; printf err 1>&2");
+    merged.stderr_to_stdout();
+    res = merged.output(&arena);
+    if (cc_is_err(res)) {
+        cc_arena_free(&arena);
+        return 5;
+    }
+    out = cc_unwrap_as(res, CCProcessOutput);
+    if (cc_process_output_exit_code(&out) != 0) {
+        cc_arena_free(&arena);
+        return 6;
+    }
+    if (cc_process_output_stdout_len(&out) != 6 || strncmp(cc_process_output_stdout_str(&out), "outerr", 6) != 0) {
+        cc_arena_free(&arena);
+        return 7;
+    }
+    if (cc_process_output_stderr_len(&out) != 0) {
+        cc_arena_free(&arena);
+        return 8;
+    }
+
+    env_cmd.arg("-c");
+    env_cmd.arg("printf %s \"$CC_STDIO_SMOKE\"");
+    env_cmd.env(envp);
+    res = env_cmd.output(&arena);
+    if (cc_is_err(res)) {
+        cc_arena_free(&arena);
+        return 9;
+    }
+    out = cc_unwrap_as(res, CCProcessOutput);
+    if (cc_process_output_exit_code(&out) != 0) {
+        cc_arena_free(&arena);
+        return 10;
+    }
+    if (cc_process_output_stdout_len(&out) != 5 || strncmp(cc_process_output_stdout_str(&out), "works", 5) != 0) {
+        cc_arena_free(&arena);
+        return 11;
+    }
+
+    cc_arena_free(&arena);
+    return 0;
+}

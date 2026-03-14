@@ -25,6 +25,7 @@ void cc_result_spec_format_name(const char* mangled_ok,
 
 int cc_result_spec_is_core_builtin(const char* mangled_ok, const char* mangled_err);
 int cc_result_spec_is_stdlib_predeclared(const char* mangled_ok, const char* mangled_err);
+int cc_result_spec_is_stdlib_predeclared_name(const char* concrete_name);
 
 void cc_result_spec_table_init(CCResultSpecTable* table);
 void cc_result_spec_table_reset(CCResultSpecTable* table);

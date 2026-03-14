@@ -39,6 +39,10 @@ static const char* cc__stdlib_predeclared_result_types[] = {
     "CCResult_CCDirIterptr_CCIoError",
     "CCResult_CCDirEntry_CCIoError",
     "CCResult_bool_CCIoError",
+    "CCResult_int64_t_CC_I64ParseError",
+    "CCResult_uint64_t_CC_U64ParseError",
+    "CCResult_double_CC_F64ParseError",
+    "CCResult_bool_CC_BoolParseError",
     NULL
 };
 
@@ -127,6 +131,15 @@ int cc_result_spec_is_core_builtin(const char* mangled_ok, const char* mangled_e
 
 int cc_result_spec_is_stdlib_predeclared(const char* mangled_ok, const char* mangled_err) {
     return cc__result_key_matches(cc__stdlib_predeclared_result_types, mangled_ok, mangled_err, 1);
+}
+
+int cc_result_spec_is_stdlib_predeclared_name(const char* concrete_name) {
+    int i;
+    if (!concrete_name) return 0;
+    for (i = 0; cc__stdlib_predeclared_result_types[i]; i++) {
+        if (strcmp(cc__stdlib_predeclared_result_types[i], concrete_name) == 0) return 1;
+    }
+    return 0;
 }
 
 void cc_result_spec_table_init(CCResultSpecTable* table) {

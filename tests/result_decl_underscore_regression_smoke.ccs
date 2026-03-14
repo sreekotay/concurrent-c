@@ -1,0 +1,15 @@
+#include <ccc/std/string.cch>
+
+static bool parse_arg(CCSlice arg, int64_t* out) {
+    int64_t !> (CC_I64ParseError) parsed = cc_slice_parse_i64(arg, 10);
+    if (!out || cc_is_err(parsed)) return false;
+    *out = cc_value(parsed);
+    return true;
+}
+
+int main(void) {
+    int64_t value = 0;
+    CCSlice input = cc_slice_from_buffer("42", 2);
+    if (!parse_arg(input, &value)) return 1;
+    return value == 42 ? 0 : 2;
+}

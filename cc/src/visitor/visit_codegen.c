@@ -321,13 +321,19 @@ static char* cc__build_comptime_tu_from_preprocessed(const char* src,
     size_t i = 0;
     int line_start = 1;
     if (!src || !entry_name || !callable_name) return NULL;
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#ifndef __CC__\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#define __CC__ 1\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#endif\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#ifndef CC_PARSER_MODE\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#define CC_PARSER_MODE 1\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#endif\n");
     if (!source_is_include_expanded && repo_root && repo_root[0]) {
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, repo_root);
-        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "/cc/include/ccc/cc_ufcs.cch\"\n");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "/out/include/ccc/cc_ufcs.h\"\n");
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "#include \"");
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, repo_root);
-        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "/cc/include/ccc/std/string.cch\"\n");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "/out/include/ccc/std/string.h\"\n");
     }
     while (i < n) {
         if (line_start && src[i] == '#') {
@@ -412,9 +418,9 @@ static char* cc__build_comptime_tu_from_preprocessed(const char* src,
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\nCCSlice ");
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, entry_name);
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap,
-                          "(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {\n    return ");
+                          "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {\n    return ");
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, callable_name);
-    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(method, mode, argv, arena);\n}\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(recv_type, method, mode, argv, arena);\n}\n");
     return out;
 }
 
@@ -464,8 +470,8 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t lpar = 0, rpar = 0, body_s = 0, body_e = handler_e;
-    char params[4][64];
-    const char* param_types[4] = { "CCSlice", "CCSlice", "CCSliceArray", "CCArena *" };
+    char params[5][64];
+    const char* param_types[5] = { "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCArena *" };
     int param_count = 0;
     if (!src || !lambda_name || handler_s >= handler_e || handler_e > n) return NULL;
     cc__trim_range_codegen(src, &handler_s, &handler_e);
@@ -477,7 +483,7 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
         while (p < rpar) {
             p = cc__skip_ws_codegen(src, rpar, p);
             if (p >= rpar) break;
-            if (param_count >= 4 || !cc__parse_ident_codegen(src, rpar, &p, params[param_count], sizeof(params[param_count]))) {
+            if (param_count >= 5 || !cc__parse_ident_codegen(src, rpar, &p, params[param_count], sizeof(params[param_count]))) {
                 return NULL;
             }
             param_count++;
@@ -488,7 +494,7 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
             }
         }
     }
-    if (param_count != 4) return NULL;
+    if (param_count != 5) return NULL;
     body_s = cc__skip_ws_codegen(src, handler_e, rpar + 1);
     if (body_s + 1 >= handler_e || src[body_s] != '=' || src[body_s + 1] != '>') return NULL;
     body_s = cc__skip_ws_codegen(src, handler_e, body_s + 2);
@@ -497,7 +503,7 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "static CCSlice ");
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, lambda_name);
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(");
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         if (i) cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ", ");
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, param_types[i]);
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " ");
@@ -669,6 +675,7 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
                                                    size_t n,
                                                    const char* compile_src,
                                                    size_t compile_n,
+                                                   int compile_src_is_include_expanded,
                                                    int headers_only) {
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, line_start = 1;
     char logical_file[1024] = {0};
@@ -743,17 +750,34 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
                 if (handler_is_ident) {
                     void* owner = NULL;
                     const void* fn_ptr = NULL;
-                    if (cc__compile_named_ufcs_handler(input_path,
-                                                       compile_src ? compile_src : src,
-                                                       compile_src ? compile_n : n,
+                    const char* handler_src = compile_src ? compile_src : src;
+                    size_t handler_src_len = compile_src ? compile_n : n;
+                    const char* handler_input_path = input_path;
+                    int handler_src_is_include_expanded = compile_src_is_include_expanded;
+                    char* logical_src = NULL;
+                    if (logical_file[0] && input_path && strcmp(logical_file, input_path) != 0) {
+                        size_t logical_len = 0;
+                        cc__read_entire_file(logical_file, &logical_src, &logical_len);
+                        if (logical_src && logical_len > 0) {
+                            handler_src = logical_src;
+                            handler_src_len = logical_len;
+                            handler_input_path = logical_file;
+                            handler_src_is_include_expanded = 0;
+                        }
+                    }
+                    if (cc__compile_named_ufcs_handler(handler_input_path,
+                                                       handler_src,
+                                                       handler_src_len,
                                                        handler,
-                                                       0,
+                                                       handler_src_is_include_expanded,
                                                        &owner,
                                                        &fn_ptr) != 0) {
+                        free(logical_src);
                         fprintf(stderr, "%s: error: unsupported comptime UFCS handler '%s'; expected a plain named function compilable in the comptime subset\n",
                                 input_path ? input_path : "<input>", handler);
                         return -1;
                     }
+                    free(logical_src);
                     if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
                         fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
                                 input_path ? input_path : "<input>", pattern);
@@ -769,7 +793,7 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
                                                         n,
                                                         handler_s,
                                                         handler_e,
-                                                        headers_only,
+                                                        compile_src_is_include_expanded,
                                                         &owner,
                                                         &fn_ptr) != 0) {
                         fprintf(stderr, "%s: error: unsupported comptime UFCS lambda; expected a non-capturing lambda compilable in the comptime subset\n",
@@ -797,6 +821,7 @@ static int cc__collect_comptime_type_ufcs_registrations(CCSymbolTable* symbols,
                                                         size_t n,
                                                         const char* compile_src,
                                                         size_t compile_n,
+                                                        int compile_src_is_include_expanded,
                                                         int headers_only) {
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, line_start = 1;
     char logical_file[1024] = {0};
@@ -929,17 +954,34 @@ static int cc__collect_comptime_type_ufcs_registrations(CCSymbolTable* symbols,
                 if (handler_is_ident) {
                     void* owner = NULL;
                     const void* fn_ptr = NULL;
-                    if (cc__compile_named_ufcs_handler(input_path,
-                                                       compile_src ? compile_src : src,
-                                                       compile_src ? compile_n : n,
+                    const char* handler_src = compile_src ? compile_src : src;
+                    size_t handler_src_len = compile_src ? compile_n : n;
+                    const char* handler_input_path = input_path;
+                    int handler_src_is_include_expanded = compile_src_is_include_expanded;
+                    char* logical_src = NULL;
+                    if (logical_file[0] && input_path && strcmp(logical_file, input_path) != 0) {
+                        size_t logical_len = 0;
+                        cc__read_entire_file(logical_file, &logical_src, &logical_len);
+                        if (logical_src && logical_len > 0) {
+                            handler_src = logical_src;
+                            handler_src_len = logical_len;
+                            handler_input_path = logical_file;
+                            handler_src_is_include_expanded = 0;
+                        }
+                    }
+                    if (cc__compile_named_ufcs_handler(handler_input_path,
+                                                       handler_src,
+                                                       handler_src_len,
                                                        handler,
-                                                       0,
+                                                       handler_src_is_include_expanded,
                                                        &owner,
                                                        &fn_ptr) != 0) {
+                        free(logical_src);
                         fprintf(stderr, "%s: error: unsupported comptime UFCS handler '%s'; expected a plain named function or non-capturing lambda compilable in the comptime subset\n",
                                 input_path ? input_path : "<input>", handler);
                         return -1;
                     }
+                    free(logical_src);
                     if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
                         fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
                                 input_path ? input_path : "<input>", pattern);
@@ -954,7 +996,7 @@ static int cc__collect_comptime_type_ufcs_registrations(CCSymbolTable* symbols,
                                                         n,
                                                         expr_s,
                                                         expr_e,
-                                                        headers_only,
+                                                        compile_src_is_include_expanded,
                                                         &owner,
                                                         &fn_ptr) != 0) {
                         fprintf(stderr, "%s: error: unsupported comptime UFCS lambda; expected a non-capturing lambda compilable in the comptime subset\n",
@@ -1582,13 +1624,21 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(src_all);
             return EINVAL;
         }
-        if (cc__collect_comptime_type_ufcs_registrations(ctx->symbols, ctx->input_path, reg_src, reg_src_len, src_all, src_len, 0) != 0) {
+        if (cc__collect_comptime_type_ufcs_registrations(ctx->symbols, ctx->input_path,
+                                                         reg_src, reg_src_len,
+                                                         src_all, src_len,
+                                                         0,
+                                                         0) != 0) {
             fclose(out);
             free(src_regs);
             free(src_all);
             return EINVAL;
         }
-        if (cc__collect_comptime_ufcs_registrations(ctx->symbols, ctx->input_path, reg_src, reg_src_len, src_all, src_len, 0) != 0) {
+        if (cc__collect_comptime_ufcs_registrations(ctx->symbols, ctx->input_path,
+                                                    reg_src, reg_src_len,
+                                                    src_all, src_len,
+                                                    0,
+                                                    0) != 0) {
             fclose(out);
             free(src_regs);
             free(src_all);
@@ -1618,6 +1668,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (src_ufcs != src_all) free(src_ufcs);
             src_ufcs = lowered_includes;
             src_ufcs_len = strlen(lowered_includes);
+        }
+    }
+    if (src_ufcs && src_ufcs_len) {
+        char* lowered_system_includes = cc_rewrite_system_cch_includes_to_lowered_headers(src_ufcs, src_ufcs_len);
+        if (lowered_system_includes) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = lowered_system_includes;
+            src_ufcs_len = strlen(lowered_system_includes);
         }
     }
 
@@ -1996,7 +2054,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 fprintf(out, "/* --- CC generic container declarations --- */\n");
                 fprintf(out, "#include <ccc/std/vec.h>\n");
                 fprintf(out, "#include <ccc/std/map.h>\n");
-                fprintf(out, "#include <ccc/cc_channel.cch>\n");
+                fprintf(out, "#include <ccc/cc_channel.h>\n");
                 /* Vec/Map declarations must be skipped in parser mode where they're
                    already typedef'd to generic placeholders in vec.cch/map.cch */
                 fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -2304,6 +2362,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
+        {
+            size_t st_len = 0;
+            char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
+            if (st) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = st;
+                src_ufcs_len = st_len;
+            }
+        }
         /* Final UFCS sweep: earlier statement/syntax rewrites can synthesize new
            method-call surface syntax (notably via @defer / spawn / nursery
            lowering). Reparse the current source and lower any remaining UFCS
@@ -2462,6 +2529,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     closure_defs_len = strlen(rewritten);
                 }
             }
+            {
+                size_t rewritten_len = 0;
+                char* rewritten = cc__rewrite_chan_send_task_text(ctx, closure_defs, closure_defs_len, &rewritten_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = rewritten_len;
+                }
+            }
             
             /* Emit closure definitions at end-of-file so global names are in scope. */
             fputs("\n#line 1 \"<cc-generated:closures>\"\n", out);
@@ -2473,7 +2549,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     } else {
         // Fallback stub when input is unavailable.
         fprintf(out,
-                "#include \"std/prelude.cch\"\n"
+                "#include \"std/prelude.h\"\n"
                 "int main(void) {\n"
                 "  CCArena a = cc_heap_arena(kilobytes(1));\n"
                 "  CCString s = cc_string_new(&a);\n"

@@ -1,0 +1,15 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCNursery* task = @create(NULL, () => {
+        CCResult_int_CCError res = cc_ok_CCResult_int_CCError(123);
+        if (res.is_ok()) {
+            int value = res.value();
+            (void)value;
+        }
+        return NULL;
+    }) @destroy;
+
+    if (!task) return 1;
+    return 0;
+}

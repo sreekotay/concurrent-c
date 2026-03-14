@@ -3,7 +3,8 @@
 
 #include <ccc/std/prelude.cch>
 
-static CCSlice header_registered_arena_ufcs(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena) {
+static CCSlice header_registered_arena_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena) {
+    (void)recv_type;
     (void)mode;
     (void)argv;
     (void)arena;

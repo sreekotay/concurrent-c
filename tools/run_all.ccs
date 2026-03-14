@@ -11,6 +11,7 @@
  */
 
 #include <ccc/std/prelude.cch>
+#include <ccc/std/cli.cch>
 #include <ccc/std/command.cch>
 #include <unistd.h>
 
@@ -32,9 +33,9 @@ static inline CCSlice slice_from_cstr(const char* s) {
 static void ensure_log_dir(CCArena* arena) {
     CCCommand cmd = cc_command(arena, "mkdir");
     CCResult_int_CCIoError status;
-    cc_command_arg(&cmd, "-p");
-    cc_command_arg(&cmd, LOG_DIR);
-    status = cc_command_status(&cmd);
+    cmd.arg("-p");
+    cmd.arg(LOG_DIR);
+    status = cmd.status();
     
     (void)status;
 }
@@ -102,12 +103,12 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         CCArena test_arena = cc_arena_heap(megabytes(4));
         CCCommand cmd = cc_command(&test_arena, "ccc");
         CCResult_CCProcessOutput_CCIoError res;
-        cc_command_arg(&cmd, "run");
-        cc_command_arg_if(&cmd, timeout_sec > 0, "--timeout");
-        cc_command_arg_i32_if(&cmd, timeout_sec > 0, timeout_sec);
-        cc_command_arg(&cmd, path);
+        cmd.arg("run");
+        cmd.arg_if(timeout_sec > 0, "--timeout");
+        cmd.arg_i32_if(timeout_sec > 0, timeout_sec);
+        cmd.arg(path);
         /* Use ccc from PATH */
-        res = cc_command_output(&cmd, &test_arena);
+        res = cmd.output(&test_arena);
 
         if (cc_is_err(res)) {
             CCIoError err = cc_unwrap_err_as(res, CCIoError);
@@ -171,30 +172,33 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 }
 
 int main(int argc, char** argv) {
-    CCArena arena = cc_arena_heap(megabytes(16));
-    Stats stats = {0};
-
-    // Parse args
-    int do_examples = 0, do_stress = 0, do_perf = 0;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "examples") == 0) do_examples = 1;
-        else if (strcmp(argv[i], "stress") == 0) do_stress = 1;
-        else if (strcmp(argv[i], "perf") == 0) do_perf = 1;
-        else if (strcmp(argv[i], "all") == 0) {
-            do_examples = do_stress = do_perf = 1;
-        }
+    bool do_examples;
+    bool do_stress;
+    bool do_perf;
+    bool do_all;
+    int cli_exit_code = 0;
+    CCCliSpec cli_specs[5];
+    size_t spec_i = 0;
+    cc_cli_meta_init(&cli_specs[spec_i++], "<category>...", "Run all examples, stress tests, or performance benchmarks.");
+    cc_cli_flag_init(&cli_specs[spec_i++], &do_examples, false, cc_cli_names1("examples"), "Run all example programs");
+    cc_cli_flag_init(&cli_specs[spec_i++], &do_stress, false, cc_cli_names1("stress"), "Run all stress tests");
+    cc_cli_flag_init(&cli_specs[spec_i++], &do_perf, false, cc_cli_names1("perf"), "Run all performance benchmarks");
+    cc_cli_flag_init(&cli_specs[spec_i++], &do_all, false, cc_cli_names1("all"), "Run everything");
+    if (!cc_cli_parse_into(&cli_exit_code, argc, argv, cli_specs)) {
+        return cli_exit_code;
     }
-
+    if (do_all) {
+        do_examples = true;
+        do_stress = true;
+        do_perf = true;
+    }
     if (!do_examples && !do_stress && !do_perf) {
-        printf("Usage: ccc run tools/run_all.ccs -- <category>\n");
-        printf("\nCategories:\n");
-        printf("  examples  - run all example programs\n");
-        printf("  stress    - run all stress tests (%ds timeout)\n", STRESS_TIMEOUT_SEC);
-        printf("  perf      - run all performance benchmarks\n");
-        printf("  all       - run everything\n");
+        fprintf(stderr, "Select at least one category.\n");
+        cc_cli_print_help(stderr, argc, argv, cli_specs);
         return 1;
     }
+    CCArena arena = cc_arena_heap(megabytes(16));
+    Stats stats = {0};
 
     printf("Concurrent-C Test Runner\n");
 

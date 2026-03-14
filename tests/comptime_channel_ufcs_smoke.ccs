@@ -10,7 +10,8 @@ int[~2 <] g_rx;
 
 @comptime {
     (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
-        .ufcs = (method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arena) => {
+        (void)recv_type;
         (void)mode;
         (void)argv;
         if (cc_slice_eq_cstr(method, "send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
@@ -19,7 +20,8 @@ int[~2 <] g_rx;
         return cc_slice_empty();
     }});
     (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
-        .ufcs = (method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arena) => {
+        (void)recv_type;
         (void)argv;
         if (cc_slice_eq_cstr(method, "recv")) {
             return cc_slice_eq_cstr(mode, "await")

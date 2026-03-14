@@ -41,9 +41,30 @@ typedef struct {
 
 // Result types
 #include <ccc/cc_optional.cch>
+#ifdef CC_PARSER_MODE
+#ifndef CCResult_CCSlice_CCIoError_DEFINED
+#define CCResult_CCSlice_CCIoError_DEFINED 1
+typedef struct CCResult_CCSlice_CCIoError {
+    bool ok;
+    union { CCSlice value; CCIoError error; } u;
+} CCResult_CCSlice_CCIoError;
+#endif
+#ifndef CCResult_size_t_CCIoError_DEFINED
+#define CCResult_size_t_CCIoError_DEFINED 1
+typedef __CCResultGeneric CCResult_size_t_CCIoError;
+#endif
+#ifndef CCResult_CCOptional_CCSlice_CCIoError_DEFINED
+#define CCResult_CCOptional_CCSlice_CCIoError_DEFINED 1
+typedef struct CCResult_CCOptional_CCSlice_CCIoError {
+    bool ok;
+    union { CCOptional_CCSlice value; CCIoError error; } u;
+} CCResult_CCOptional_CCSlice_CCIoError;
+#endif
+#else
 CC_DECL_RESULT_SPEC(CCResult_CCSlice_CCIoError, CCSlice, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_size_t_CCIoError, size_t, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_CCOptional_CCSlice_CCIoError, CCOptional_CCSlice, CCIoError)
+#endif
 
 // Open a file (mode like "r", "w", "a"). Returns 0 on success.
 int cc_file_open(CCFile *file, const char *path, const char *mode);

@@ -209,8 +209,8 @@ typedef struct {
 #define cc_none_CCOptional_charptr() __cc_optional_generic_none()
 #define cc_some_CCOptional_intptr(v) __cc_optional_generic_some()
 #define cc_none_CCOptional_intptr() __cc_optional_generic_none()
-#define cc_some_CCOptional_CCSlice(v) __cc_optional_generic_some()
-#define cc_none_CCOptional_CCSlice() __cc_optional_generic_none()
+#define cc_some_CCOptional_CCSlice(v) ((CCOptional_CCSlice){ .has = 1, .u.value = (v) })
+#define cc_none_CCOptional_CCSlice() ((CCOptional_CCSlice){ .has = 0 })
 
 #else /* !CC_PARSER_MODE - real compilation */
 
@@ -266,10 +266,16 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 #include <stdlib.h>
 
 #ifdef CC_PARSER_MODE
-/* For TCC parsing: cc_unwrap_opt(x) returns ._scalar for scalar types.
-   For struct types like CCOptional_CCSlice, use .u.value directly. */
-#define cc_unwrap_opt(opt) (opt).u._scalar
-#define cc_opt_value(opt) (opt).u._scalar
+/* For TCC parsing, preserve the generic "value-shaped" union member so typed
+   optionals like CCOptional_CCSlice survive parsing consistently with the
+   parser prelude emitted by preprocess.c. */
+#define cc_unwrap_opt(opt) _Generic((opt),                                        \
+    CCOptional_CCSlice: ((opt).u.value),                                          \
+    const CCOptional_CCSlice: ((opt).u.value),                                    \
+    volatile CCOptional_CCSlice: ((opt).u.value),                                 \
+    const volatile CCOptional_CCSlice: ((opt).u.value),                           \
+    default: ((opt).u._scalar))
+#define cc_opt_value(opt) cc_unwrap_opt(opt)
 #else
 /* Real mode cc_some/cc_none - these are placeholder definitions.
    The codegen pass rewrites cc_some(v) and cc_none() to typed versions
@@ -308,7 +314,7 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
 /* Convenience macros for type names.
  * In parser mode, these expand to generic placeholders. */
 #ifdef CC_PARSER_MODE
-#define CCOpt(T) __CCOptionalGeneric
+#define CCOpt(T) CCOptional_##T
 #define CCOptPtr(T) __CCOptionalGeneric
 #else
 #define CCOpt(T) CCOptional_##T
@@ -330,16 +336,16 @@ CC_DECL_OPTIONAL(CCOptional_CCSlice, CCSlice)
  *   CCOpt_none(int)                -> cc_none_CCOptional_int()
  */
 #ifdef CC_PARSER_MODE
-#define CCRes(T, E) __CCResultGeneric
-#define CCResPtr(T, E) __CCResultGeneric
-#define CCOptRes(T, E) __CCOptionalGeneric
-#define CCResOpt(T, E) __CCResultGeneric
-#define CCRes_ok(T, E, v) __cc_result_generic_ok()
-#define CCRes_err(T, E, e) __cc_result_generic_err()
-#define CCResPtr_ok(T, E, v) __cc_result_generic_ok()
-#define CCResPtr_err(T, E, e) __cc_result_generic_err()
-#define CCResOpt_ok(T, E, v) __cc_result_generic_ok()
-#define CCResOpt_err(T, E, e) __cc_result_generic_err()
+#define CCRes(T, E) CCResult_##T##_##E
+#define CCResPtr(T, E) CCResult_##T##ptr_##E
+#define CCOptRes(T, E) CCOptional_CCResult_##T##_##E
+#define CCResOpt(T, E) CCResult_CCOptional_##T##_##E
+#define CCRes_ok(T, E, v) ((void)(v), (CCResult_##T##_##E){ .ok = 1 })
+#define CCRes_err(T, E, e) ((void)(e), (CCResult_##T##_##E){ .ok = 0 })
+#define CCResPtr_ok(T, E, v) ((void)(v), (CCResult_##T##ptr_##E){ .ok = 1 })
+#define CCResPtr_err(T, E, e) ((void)(e), (CCResult_##T##ptr_##E){ .ok = 0 })
+#define CCResOpt_ok(T, E, v) ((void)(v), (CCResult_CCOptional_##T##_##E){ .ok = 1 })
+#define CCResOpt_err(T, E, e) ((void)(e), (CCResult_CCOptional_##T##_##E){ .ok = 0 })
 #define CCOpt_some(T, v) __cc_optional_generic_some()
 #define CCOpt_none(T) __cc_optional_generic_none()
 #else

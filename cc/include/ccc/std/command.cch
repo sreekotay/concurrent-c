@@ -8,21 +8,23 @@
 #include <string.h>
 
 #include <ccc/cc_compat.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_ufcs.cch>
 #include <ccc/std/process.cch>
 #include <ccc/std/string.cch>
 #include <ccc/std/vec.cch>
-
-#ifndef CC_VEC_SIZE_T_DEFINED
-#define CC_VEC_SIZE_T_DEFINED 1
-#ifndef CC_PARSER_MODE
-CC_VEC_DECL_ARENA(size_t, Vec_size_t)
-#endif
-#endif
 
 typedef struct CCCommand {
     CCArena *arena;
     CCString storage;
     Vec_size_t offsets;
+    const char** env;
+    const char* cwd_path;
+    CCSlice stdin_data;
+    bool pipe_stdin;
+    bool pipe_stdout;
+    bool pipe_stderr;
+    bool merge_stderr;
 } CCCommand;
 
 CCCommand cc_command_new(CCArena *arena, const char *program);
@@ -38,6 +40,15 @@ const char *cc_command_program(const CCCommand *cmd);
 CCCommand *cc_command_arg(CCCommand *cmd, const char *arg);
 CCCommand *cc_command_arg_slice(CCCommand *cmd, CCSlice arg);
 CCCommand *cc_command_arg_i64(CCCommand *cmd, int64_t value);
+CCCommand *cc_command_stdin_pipe(CCCommand *cmd);
+CCCommand *cc_command_stdin_slice(CCCommand *cmd, CCSlice input);
+CCCommand *cc_command_stdin(CCCommand *cmd, const char *input);
+CCCommand *cc_command_stdout_capture(CCCommand *cmd);
+CCCommand *cc_command_stderr_capture(CCCommand *cmd);
+CCCommand *cc_command_stderr_to_stdout(CCCommand *cmd);
+CCCommand *cc_command_inherit_stdio(CCCommand *cmd);
+CCCommand *cc_command_cwd(CCCommand *cmd, const char *cwd);
+CCCommand *cc_command_env(CCCommand *cmd, const char **env);
 
 static inline CCCommand *cc_command_arg_i32(CCCommand *cmd, int value) {
     return cc_command_arg_i64(cmd, (int64_t)value);
@@ -57,9 +68,27 @@ static inline CCCommand *cc_command_arg_i32_if(CCCommand *cmd, bool cond, int va
 
 const char **cc_command_argv(CCCommand *cmd);
 CCProcessConfig cc_command_process_config(CCCommand *cmd);
-CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *cmd);
-CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *cmd, CCArena *arena);
-CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *arena);
-CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
+CCProcess !> (CCIoError) cc_command_spawn(CCCommand *cmd);
+CCProcessOutput !> (CCIoError) cc_command_run(CCCommand *cmd, CCArena *arena);
+CCProcessOutput !> (CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena);
+CCProcessOutput !> (CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
+int !> (CCIoError) cc_command_status(CCCommand *cmd);
+
+static inline char[:] cc_command_lower_c(char[:] recv_type, 
+                                         char[:] method, 
+                                         char[:] mode, 
+                                         CCSliceArray argv, CCArena *arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    return cc_ufcs_concat2(arena, cc_slice_from_buffer((void*)"cc_command_", sizeof("cc_command_") - 1), method);
+}
+
+@comptime {
+
+    (void)cc_type_register("CCCommand", (CCTypeHooks){
+        .ufcs = cc_command_lower_c,
+    });
+}
 
 #endif /* CC_STD_COMMAND_H */

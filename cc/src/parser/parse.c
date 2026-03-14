@@ -88,57 +88,6 @@ static char* cc__blank_comptime_blocks_preserve_layout_parse(const char* src, si
     return out;
 }
 
-static char* cc__rewrite_system_cch_includes_parse(const char* src, size_t n) {
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0;
-    int changed = 0;
-    if (!src) return NULL;
-    while (i < n) {
-        size_t line_end = i;
-        while (line_end < n && src[line_end] != '\n') line_end++;
-        {
-            size_t p = i;
-            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
-            if (p < line_end && src[p] == '#') {
-                p++;
-                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
-                if (p + strlen("include") < line_end &&
-                    strncmp(src + p, "include", strlen("include")) == 0) {
-                    p += strlen("include");
-                    while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
-                    if (p < line_end && src[p] == '<') {
-                        size_t close = p + 1;
-                        while (close < line_end && src[close] != '>') close++;
-                        if (close < line_end &&
-                            close >= p + 5 &&
-                            strncmp(src + close - 4, ".cch", 4) == 0) {
-                            size_t path_end = close - 4;
-                            cc_sb_append(&out, &out_len, &out_cap, src + i, path_end - i);
-                            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h");
-                            cc_sb_append(&out, &out_len, &out_cap, src + close, line_end - close);
-                            if (line_end < n && src[line_end] == '\n') {
-                                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-                            }
-                            changed = 1;
-                            i = (line_end < n) ? line_end + 1 : line_end;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
-        if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
-        i = (line_end < n) ? line_end + 1 : line_end;
-    }
-    if (!changed) {
-        free(out);
-        return NULL;
-    }
-    return out;
-}
-
 int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** out_root) {
     if (!input_path || !out_root) {
         return EINVAL;
@@ -186,7 +135,7 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     }
 
     {
-        char* lowered_system_includes = cc__rewrite_system_cch_includes_parse(file_buf, got);
+        char* lowered_system_includes = cc_rewrite_system_cch_includes_to_lowered_headers(file_buf, got);
         if (lowered_system_includes) {
             free(file_buf);
             file_buf = lowered_system_includes;

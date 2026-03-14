@@ -2481,6 +2481,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             !((chan_tx && (strcmp(method_name, "send") == 0 ||
                            strcmp(method_name, "try_send") == 0 ||
                            strcmp(method_name, "send_take") == 0 ||
+                           strcmp(method_name, "send_task") == 0 ||
                            strcmp(method_name, "close") == 0 ||
                            strcmp(method_name, "free") == 0)) ||
               (chan_rx && (strcmp(method_name, "recv") == 0 ||
@@ -2555,6 +2556,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 else if (strcmp(method_name, "try_send") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_try_send");
                 else if (strcmp(method_name, "try_recv") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_try_recv");
                 else if (strcmp(method_name, "send_take") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_send_take");
+                else if (strcmp(method_name, "send_task") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_send_task");
                 else if (strcmp(method_name, "close") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_close");
                 else if (strcmp(method_name, "free") == 0) cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_channel_free");
             } else if (concrete_type[0]) {
@@ -2689,6 +2691,7 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
         if (chan_tx && strcmp(method_name, "send") == 0) callee = "cc_channel_send";
         else if (chan_tx && strcmp(method_name, "try_send") == 0) callee = "cc_channel_try_send";
         else if (chan_tx && strcmp(method_name, "send_take") == 0) callee = "cc_channel_send_take";
+        else if (chan_tx && strcmp(method_name, "send_task") == 0) callee = "cc_channel_send_task";
         else if (chan_rx && strcmp(method_name, "recv") == 0) callee = "cc_channel_recv";
         else if (chan_rx && strcmp(method_name, "try_recv") == 0) callee = "cc_channel_try_recv";
         else if ((chan_tx || chan_rx) && strcmp(method_name, "close") == 0) callee = "cc_channel_close";
@@ -2958,30 +2961,6 @@ char* cc_rewrite_result_ufcs_survival(const char* src, size_t n) {
     return out;
 }
 
-static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* out_qual, size_t out_cap) {
-    /* Returns the new start offset after consuming leading qualifiers; writes qualifiers (with trailing space) into out_qual. */
-    if (!s || !out_qual || out_cap == 0) return ty_start;
-    out_qual[0] = 0;
-    size_t p = ty_start;
-    while (s[p] == ' ' || s[p] == '\t') p++;
-    for (;;) {
-        int matched = 0;
-        if (strncmp(s + p, "const", 5) == 0 && !cc_is_ident_char_local(s[p + 5])) {
-            strncat(out_qual, "const ", out_cap - strlen(out_qual) - 1);
-            p += 5;
-            while (s[p] == ' ' || s[p] == '\t') p++;
-            matched = 1;
-        } else if (strncmp(s + p, "volatile", 8) == 0 && !cc_is_ident_char_local(s[p + 8])) {
-            strncat(out_qual, "volatile ", out_cap - strlen(out_qual) - 1);
-            p += 8;
-            while (s[p] == ' ' || s[p] == '\t') p++;
-            matched = 1;
-        }
-        if (!matched) break;
-    }
-    return p;
-}
-
 static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
     size_t p = ty_start;
     if (!s) return p;
@@ -3015,34 +2994,6 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
    - Replaces spaces with underscores
    - Replaces '*' with 'ptr'
    - Replaces '[' and ']' with '_' */
-/* Short name to CC-prefixed name mappings for stdlib types.
-   The compiler resolves short names (e.g. "IoError") to their CC-prefixed
-   forms (e.g. "CCIoError") in generated C code. */
-static const struct { const char* short_name; const char* cc_name; } cc__preproc_type_aliases[] = {
-    { "IoError",     "CCIoError" },
-    { "IoErrorKind", "CCIoErrorKind" },
-    { "Error",       "CCError" },
-    { "ErrorKind",   "CCErrorKind" },
-    { "NetError",    "CCNetError" },
-    { "Arena",       "CCArena" },
-    { "File",        "CCFile" },
-    { "String",      "CCString" },
-    { "Slice",       "CCSlice" },
-    { NULL, NULL }
-};
-
-/* Normalize a mangled type name: map short aliases to CC-prefixed names */
-static void cc__normalize_type_alias(char* name) {
-    if (!name || !name[0]) return;
-    for (int i = 0; cc__preproc_type_aliases[i].short_name; i++) {
-        if (strcmp(name, cc__preproc_type_aliases[i].short_name) == 0) {
-            /* Safe because CC names are always longer or equal */
-            strcpy(name, cc__preproc_type_aliases[i].cc_name);
-            return;
-        }
-    }
-}
-
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
     cc_result_spec_mangle_type(src, len, out, out_sz);
 }
@@ -4170,14 +4121,12 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
                 size_t ty_start = cc__scan_back_to_delim(src, i);
                 if (ty_start < last_emit) { /* odd overlap */ }
                 else {
-                    char quals[64];
-                    size_t qual_start = ty_start;
-                    size_t after_qual = cc__strip_leading_cv_qual(src, qual_start, quals, sizeof(quals));
-                    /* Emit everything up to qual_start, keep qualifiers, then emit CCSlice-ish type. */
-                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, qual_start - last_emit);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, quals);
+                    size_t type_start = cc__skip_leading_decl_specs(src, ty_start);
+                    /* Emit everything up to the slice element type, preserving
+                       leading decl/function specifiers like `static inline`. */
+                    cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    cc_sb_append(&out, &out_len, &out_cap, src + ty_start, type_start - ty_start);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, is_unique ? "CCSliceUnique" : "CCSlice");
-                    (void)after_qual; /* intentionally drop element type tokens */
                     last_emit = k + 1; /* skip past ']' */
                 }
 
@@ -5746,9 +5695,9 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
         
         if (n_vec > 0 || n_map > 0 || n_chan > 0) {
             fprintf(out, "/* --- CC generic container declarations --- */\n");
-            fprintf(out, "#include <ccc/std/vec.cch>\n");
-            fprintf(out, "#include <ccc/std/map.cch>\n");
-            fprintf(out, "#include <ccc/cc_channel.cch>\n");
+            fprintf(out, "#include <ccc/std/vec.h>\n");
+            fprintf(out, "#include <ccc/std/map.h>\n");
+            fprintf(out, "#include <ccc/cc_channel.h>\n");
             /* Vec/Map declarations must be skipped in parser mode where they're
                already typedef'd to generic placeholders in vec.cch/map.cch */
             fprintf(out, "#ifndef CC_PARSER_MODE\n");
@@ -5834,7 +5783,7 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
         fprintf(out, "#ifndef CC_PARSER_MODE\n");
         fprintf(out, "#define CC_PARSER_MODE 1\n");
         fprintf(out, "#endif\n");
-        fprintf(out, "#include <ccc/cc_result.cch>\n");
+        fprintf(out, "#include <ccc/cc_result.h>\n");
         fprintf(out, "/* --- end result support --- */\n\n");
     }
 
@@ -5920,6 +5869,10 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         free(buf);
         return NULL;
     }
+
+    fprintf(out, "#ifndef __CC__\n");
+    fprintf(out, "#define __CC__ 1\n");
+    fprintf(out, "#endif\n");
 
     /* Emit container type declarations from type registry */
     {
@@ -6025,8 +5978,15 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
     }
 
     char rel[1024];
-    fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
-    fputs(use, out);
+    {
+        char* lowered_system_use = cc_rewrite_system_cch_includes_to_lowered_headers(use, strlen(use));
+        if (lowered_system_use) {
+            use = lowered_system_use;
+        }
+        fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(input_path ? input_path : "<string>", rel, sizeof(rel)));
+        fputs(use, out);
+        free(lowered_system_use);
+    }
     fclose(out);
 
     cc_pass_chain_free(&chain);
@@ -6236,6 +6196,86 @@ char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
     return cc__rewrite_local_cch_includes_impl(src, input_len, input_path);
 }
 
+char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int changed = 0;
+    if (!src) return NULL;
+    while (i < n) {
+        size_t line_end = i;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        {
+            size_t p = i;
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p < line_end && src[p] == '#') {
+                p++;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p + strlen("include") < line_end &&
+                    strncmp(src + p, "include", strlen("include")) == 0) {
+                    p += strlen("include");
+                    while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                    if (p < line_end && src[p] == '<') {
+                        size_t close = p + 1;
+                        while (close < line_end && src[close] != '>') close++;
+                        if (close < line_end &&
+                            close >= p + 5 &&
+                            strncmp(src + close - 4, ".cch", 4) == 0) {
+                            size_t path_end = close - 4;
+                            cc_sb_append(&out, &out_len, &out_cap, src + i, path_end - i);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h");
+                            cc_sb_append(&out, &out_len, &out_cap, src + close, line_end - close);
+                            if (line_end < n && src[line_end] == '\n') {
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                            }
+                            changed = 1;
+                            i = (line_end < n) ? line_end + 1 : line_end;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+        if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+char* cc_rewrite_header_type_syntax_shared(const char* src,
+                                           size_t input_len,
+                                           const char* input_path) {
+    CCPassChain chain;
+    char* out = NULL;
+    CCTypeRegistry* reg = NULL;
+    if (!src || input_len == 0) return NULL;
+
+    /* Header lowering should share the same type-syntax understanding as the
+       main preprocess pipeline for syntax that must not survive into plain C
+       headers. Keep this intentionally limited to header-safe rewrites. */
+    reg = cc_type_registry_get_global();
+    if (!reg) {
+        reg = cc_type_registry_new();
+        cc_type_registry_set_global(reg);
+    }
+
+    cc_pass_chain_init(&chain, src, input_len);
+    if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+
+    if (chain.src != src) out = strdup(chain.src);
+
+chain_cleanup:
+    cc_pass_chain_free(&chain);
+    return out;
+}
+
 char* cc_preprocess_include_expanded(const char* input_path) {
     char repo_root[1024];
     char cmd[4096];
@@ -6247,10 +6287,10 @@ char* cc_preprocess_include_expanded(const char* input_path) {
     repo_root[0] = '\0';
     if (cc_path_find_repo_root(input_path, repo_root, sizeof(repo_root))) {
         snprintf(cmd, sizeof(cmd),
-                 "cc -E -x c -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
+                 "cc -E -D__CC__=1 -x c -I\"%s/cc/include\" -I\"%s/out/include\" \"%s\" 2>/dev/null",
                  repo_root, repo_root, input_path);
     } else {
-        snprintf(cmd, sizeof(cmd), "cc -E -x c \"%s\" 2>/dev/null", input_path);
+        snprintf(cmd, sizeof(cmd), "cc -E -D__CC__=1 -x c \"%s\" 2>/dev/null", input_path);
     }
     pp = popen(cmd, "r");
     if (!pp) return NULL;
@@ -6415,7 +6455,7 @@ static const char* cc__parse_stubs =
     "typedef __CCMapGeneric Map_charptr_int;\n"
     /* Key macros: rewritten T? -> __CC_OPTIONAL(T), T!>(E) -> __CC_RESULT(T,E) */
     "#define __CC_OPTIONAL(T) __CCOptionalGeneric\n"
-    "#define __CC_RESULT(T, E) __CCResultGeneric\n"
+    "#define __CC_RESULT(T, E) CCResult_##T##_##E\n"
     /* Typed optional constructors for rewriting cc_some_CCOptional_T -> __CC_OPTIONAL_SOME
        These need to be function calls (not compound literals) so TCC records them in the AST.
        Using comma expressions to type-check the value while returning through the function. */

@@ -80,7 +80,14 @@ CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
 CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
 CCCN_BINARY := $(OUT_BINDIR)/cccn
 CCCN_WRAPPER := bin/cccn
-LOWER_HEADERS_SRCS := src/tools/lower_headers.c src/header/lower_header.c src/result_spec.c
+LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
+	src/header/lower_header.c \
+	src/preprocess/preprocess.c \
+	src/preprocess/type_registry.c \
+	src/result_spec.c \
+	src/comptime/symbols.c \
+	src/util/io.c \
+	src/util/path.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)
