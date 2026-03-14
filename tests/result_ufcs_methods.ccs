@@ -1,4 +1,4 @@
-// Test: Result UFCS methods (.unwrap(), .is_ok(), .is_err(), .unwrap_or())
+// Test: Result UFCS methods (.value(), .is_ok(), .is_err(), .unwrap_or())
 #include <stdio.h>
 
 int !> (CCError) succeed(int v) {
@@ -30,10 +30,10 @@ int main(void) {
         return 1;
     }
     
-    // Test unwrap() on success
+    // Test value() on success
     int !> (CCError) r3 = succeed(100);
-    int v = r3.unwrap();
-    printf("unwrap: %d\n", v);
+    int v = r3.value();
+    printf("value: %d\n", v);
     
     // Test unwrap_or() on success and error
     int !> (CCError) r4 = succeed(200);

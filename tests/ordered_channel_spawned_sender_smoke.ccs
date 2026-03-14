@@ -1,0 +1,48 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCIoError) compute_result(int value) {
+    if (value < 0) return cc_err(cc_io_error(CC_IO_OTHER));
+    return cc_ok(value * 3);
+}
+
+int main(void) {
+    int !>(CCIoError)[~4 >] tx;
+    int !>(CCIoError)[~4 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    int ok = 1;
+
+    @nursery {
+        @closing(tx) {
+            spawn(() => [tx] {
+                cc_channel_send_task(tx, () => compute_result(2));
+                cc_channel_send_task(tx, () => compute_result(-1));
+            });
+        }
+
+        int !>(CCIoError) result;
+
+        if (!cc_io_avail(rx.recv(&result)) || cc_is_err(result) || cc_unwrap(result) != 6) {
+            ok = 0;
+        }
+
+        if (!cc_io_avail(rx.recv(&result)) || !cc_is_err(result)) {
+            ok = 0;
+        }
+
+        if (cc_io_avail(rx.recv(&result))) {
+            ok = 0;
+        }
+    }
+
+    cc_chan_free(ch);
+
+    if (!ok) {
+        printf("ordered_channel_spawned_sender_smoke: FAIL\n");
+        return 1;
+    }
+
+    printf("ordered_channel_spawned_sender_smoke: PASS\n");
+    return 0;
+}

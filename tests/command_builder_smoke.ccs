@@ -1,0 +1,58 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/command.cch>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(64));
+
+    CCCommand cmd = cc_command(&arena, "ccc");
+    cc_command_arg(&cmd, "run");
+    cc_command_arg_if(&cmd, false, "--timeout");
+    cc_command_arg_i32_if(&cmd, true, 10);
+    cc_command_arg(&cmd, "tools/run_all.ccs");
+
+    if (cc_command_argc(&cmd) != 4) {
+        cc_arena_free(&arena);
+        return 1;
+    }
+    if (strcmp(cc_command_program(&cmd), "ccc") != 0) {
+        cc_arena_free(&arena);
+        return 2;
+    }
+    if (strcmp(cc_command_get(&cmd, 1), "run") != 0) {
+        cc_arena_free(&arena);
+        return 3;
+    }
+    if (strcmp(cc_command_get(&cmd, 2), "10") != 0) {
+        cc_arena_free(&arena);
+        return 4;
+    }
+    if (strcmp(cc_command_get(&cmd, 3), "tools/run_all.ccs") != 0) {
+        cc_arena_free(&arena);
+        return 5;
+    }
+
+    const char** argv = cc_command_argv(&cmd);
+    if (!argv) {
+        cc_arena_free(&arena);
+        return 6;
+    }
+    if (argv[4] != NULL) {
+        cc_arena_free(&arena);
+        return 7;
+    }
+
+    CCCommand echo = cc_command(&arena, "true");
+    CCResult_int_CCIoError status;
+    status = cc_command_status(&echo);
+    if (cc_is_err(status)) {
+        cc_arena_free(&arena);
+        return 8;
+    }
+    if (cc_unwrap(status) != 0) {
+        cc_arena_free(&arena);
+        return 9;
+    }
+
+    cc_arena_free(&arena);
+    return 0;
+}

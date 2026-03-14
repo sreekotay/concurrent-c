@@ -50,19 +50,6 @@ CC_DECL_RESULT_SPEC(CCResult_CCDirIterptr_CCIoError, CCDirIter*, CCIoError)
 CC_DECL_RESULT_SPEC(CCResult_CCDirEntry_CCIoError, CCDirEntry, CCIoError)
 /* CCResult_bool_CCIoError is declared in cc_io_error.cch (unified I/O result type) */
 
-/* Legacy aliases for compatibility */
-typedef CCResult_CCDirIterptr_CCIoError CCResultDirIterIoError;
-typedef CCResult_CCDirEntry_CCIoError CCResultDirEntryIoError;
-typedef CCResult_bool_CCIoError CCResultBoolIoError;
-
-/* Legacy function name aliases */
-#define cc_ok_CCResultDirIterIoError cc_ok_CCResult_CCDirIterptr_CCIoError
-#define cc_err_CCResultDirIterIoError cc_err_CCResult_CCDirIterptr_CCIoError
-#define cc_ok_CCResultDirEntryIoError cc_ok_CCResult_CCDirEntry_CCIoError
-#define cc_err_CCResultDirEntryIoError cc_err_CCResult_CCDirEntry_CCIoError
-#define cc_ok_CCResultBoolIoError cc_ok_CCResult_bool_CCIoError
-#define cc_err_CCResultBoolIoError cc_err_CCResult_bool_CCIoError
-
 /* ============================================================================
  * Directory Iteration
  * ============================================================================ */
@@ -72,14 +59,14 @@ typedef CCResult_bool_CCIoError CCResultBoolIoError;
  * Returns iterator that must be closed with cc_dir_close().
  * Path can be relative or absolute.
  */
-CCResultDirIterIoError cc_dir_open(CCArena* arena, const char* path);
+CCResult_CCDirIterptr_CCIoError cc_dir_open(CCArena* arena, const char* path);
 
 /*
  * Read next directory entry.
  * Returns entry with name allocated in arena.
  * Returns error with CC_IO_EOF when no more entries.
  */
-CCResultDirEntryIoError cc_dir_next(CCDirIter* iter, CCArena* arena);
+CCResult_CCDirEntry_CCIoError cc_dir_next(CCDirIter* iter, CCArena* arena);
 
 /*
  * Close directory iterator.
@@ -109,25 +96,25 @@ bool cc_path_is_file(const char* path);
  * Create directory. Does not create parents.
  * Returns 0 on success, IoError on failure.
  */
-CCResultBoolIoError cc_dir_create(const char* path);
+CCResult_bool_CCIoError cc_dir_create(const char* path);
 
 /*
  * Create directory and all parents.
  * Returns 0 on success, IoError on failure.
  */
-CCResultBoolIoError cc_dir_create_all(const char* path);
+CCResult_bool_CCIoError cc_dir_create_all(const char* path);
 
 /*
  * Remove empty directory.
  * Returns 0 on success, IoError on failure.
  */
-CCResultBoolIoError cc_dir_remove(const char* path);
+CCResult_bool_CCIoError cc_dir_remove(const char* path);
 
 /*
  * Remove file.
  * Returns 0 on success, IoError on failure.
  */
-CCResultBoolIoError cc_file_remove(const char* path);
+CCResult_bool_CCIoError cc_file_remove(const char* path);
 
 /*
  * Get current working directory.
@@ -138,7 +125,7 @@ CCSlice cc_dir_cwd(CCArena* arena);
 /*
  * Change current working directory.
  */
-CCResultBoolIoError cc_dir_chdir(const char* path);
+CCResult_bool_CCIoError cc_dir_chdir(const char* path);
 
 /* ============================================================================
  * Glob Pattern Matching

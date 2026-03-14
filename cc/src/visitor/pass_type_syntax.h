@@ -15,6 +15,7 @@
 #define CC_PASS_TYPE_SYNTAX_H
 
 #include <stddef.h>
+#include "result_spec.h"
 #include "visitor/visitor.h"
 
 /* Rewrite slice type syntax `T[:]` to `CCSlice_T`.
@@ -49,17 +50,7 @@ char* cc__rewrite_try_exprs_text(const CCVisitorCtx* ctx, const char* src, size_
 char* cc__rewrite_optional_unwrap_text(const CCVisitorCtx* ctx, const char* src, size_t n);
 
 /* Result type registry - used by codegen to emit CC_DECL_RESULT_SPEC declarations */
-typedef struct {
-    char mangled_ok[128];
-    char mangled_err[128];
-    char ok_type[128];
-    char err_type[128];
-} CCCodegenResultTypePair;
-
-/* Dynamic array - grows via realloc; count/cap managed in pass_type_syntax.c */
-extern CCCodegenResultTypePair* cc__cg_result_types;
-extern size_t cc__cg_result_type_count;
-extern size_t cc__cg_result_type_cap;
+extern CCResultSpecTable cc__cg_result_specs;
 
 /* Optional type registry - used by codegen to emit CC_DECL_OPTIONAL declarations */
 typedef struct {

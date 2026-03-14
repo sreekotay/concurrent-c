@@ -60,19 +60,6 @@ CC_DECL_RESULT_SPEC(CCResult_CCProcessStatus_CCIoError, CCProcessStatus, CCIoErr
 CC_DECL_RESULT_SPEC(CCResult_int_CCIoError, int, CCIoError)
 #endif
 
-/* Legacy aliases for type names */
-typedef CCResult_CCProcess_CCIoError CCResultProcessIoError;
-typedef CCResult_CCProcessStatus_CCIoError CCResultStatusIoError;
-typedef CCResult_int_CCIoError CCResultIntIoError;
-
-/* Legacy aliases for constructors */
-#define cc_ok_CCResultProcessIoError cc_ok_CCResult_CCProcess_CCIoError
-#define cc_err_CCResultProcessIoError cc_err_CCResult_CCProcess_CCIoError
-#define cc_ok_CCResultStatusIoError cc_ok_CCResult_CCProcessStatus_CCIoError
-#define cc_err_CCResultStatusIoError cc_err_CCResult_CCProcessStatus_CCIoError
-#define cc_ok_CCResultIntIoError cc_ok_CCResult_int_CCIoError
-#define cc_err_CCResultIntIoError cc_err_CCResult_int_CCIoError
-
 /* ============================================================================
  * Process Spawning
  * ============================================================================ */
@@ -86,7 +73,7 @@ typedef CCResult_int_CCIoError CCResultIntIoError;
  *   CCProcessConfig cfg = {.program = "ls", .args = args, .pipe_stdout = true};
  *   CCProcess proc = try cc_process_spawn(&cfg);
  */
-CCResultProcessIoError cc_process_spawn(const CCProcessConfig* config);
+CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config);
 
 /*
  * Spawn a simple command (no pipes, inherit environment).
@@ -95,7 +82,7 @@ CCResultProcessIoError cc_process_spawn(const CCProcessConfig* config);
  * Example:
  *   CCProcess proc = try cc_process_spawn_simple("ls", (const char*[]){"ls", "-la", NULL});
  */
-CCResultProcessIoError cc_process_spawn_simple(const char* program, const char** args);
+CCResult_CCProcess_CCIoError cc_process_spawn_simple(const char* program, const char** args);
 
 /*
  * Spawn a shell command (via /bin/sh -c on POSIX, cmd /c on Windows).
@@ -104,7 +91,7 @@ CCResultProcessIoError cc_process_spawn_simple(const char* program, const char**
  * Example:
  *   CCProcess proc = try cc_process_spawn_shell("ls -la | grep foo");
  */
-CCResultProcessIoError cc_process_spawn_shell(const char* command);
+CCResult_CCProcess_CCIoError cc_process_spawn_shell(const char* command);
 
 /* ============================================================================
  * Process Management
@@ -114,31 +101,31 @@ CCResultProcessIoError cc_process_spawn_shell(const char* command);
  * Wait for process to exit (blocking).
  * Returns exit status.
  */
-CCResultStatusIoError cc_process_wait(CCProcess* proc);
+CCResult_CCProcessStatus_CCIoError cc_process_wait(CCProcess* proc);
 
 /*
  * Check if process has exited (non-blocking).
  * Returns status if exited, or error with CC_IO_BUSY if still running.
  */
-CCResultStatusIoError cc_process_try_wait(CCProcess* proc);
+CCResult_CCProcessStatus_CCIoError cc_process_try_wait(CCProcess* proc);
 
 /*
  * Wait for process to exit with a timeout in milliseconds.
  * Returns CC_IO_OTHER with ETIMEDOUT when the deadline passes.
  */
-CCResultStatusIoError cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms);
+CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout_ms(CCProcess* proc, int64_t timeout_ms);
 
 /*
  * Wait for process to exit with a timeout in seconds.
  * Returns CC_IO_OTHER with ETIMEDOUT when the deadline passes.
  */
-CCResultStatusIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec);
+CCResult_CCProcessStatus_CCIoError cc_process_wait_timeout(CCProcess* proc, int timeout_sec);
 
 /*
  * Send signal to process (POSIX: signal number, Windows: TerminateProcess for SIGKILL/SIGTERM).
  * Common signals: SIGTERM (15), SIGKILL (9), SIGINT (2)
  */
-CCResultBoolIoError cc_process_kill(CCProcess* proc, int signal);
+CCResult_bool_CCIoError cc_process_kill(CCProcess* proc, int signal);
 
 /*
  * Get process ID.
@@ -234,11 +221,6 @@ static inline bool cc_process_output_success(const CCProcessOutput* o) {
 CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoError)
 #endif
 
-/* Legacy aliases */
-typedef CCResult_CCProcessOutput_CCIoError CCResultProcessOutputIoError;
-#define cc_ok_CCResultProcessOutputIoError cc_ok_CCResult_CCProcessOutput_CCIoError
-#define cc_err_CCResultProcessOutputIoError cc_err_CCResult_CCProcessOutput_CCIoError
-
 /*
  * Run command and capture all output (blocking).
  * Spawns process, captures stdout/stderr, waits for exit.
@@ -248,7 +230,7 @@ typedef CCResult_CCProcessOutput_CCIoError CCResultProcessOutputIoError;
  *   printf("stdout: %.*s\n", (int)out.stdout_data.len, out.stdout_data.ptr);
  *   printf("exit: %d\n", out.status.exit_code);
  */
-CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program, const char** args);
+CCResult_CCProcessOutput_CCIoError cc_process_run(CCArena* arena, const char* program, const char** args);
 
 /*
  * Run shell command and capture output.
@@ -256,7 +238,7 @@ CCResultProcessOutputIoError cc_process_run(CCArena* arena, const char* program,
  * Example:
  *   CCProcessOutput out = try cc_process_run_shell(arena, "ls -la | wc -l");
  */
-CCResultProcessOutputIoError cc_process_run_shell(CCArena* arena, const char* command);
+CCResult_CCProcessOutput_CCIoError cc_process_run_shell(CCArena* arena, const char* command);
 
 /* ============================================================================
  * Environment
@@ -272,11 +254,11 @@ CCSlice cc_env_get(CCArena* arena, const char* name);
 /*
  * Set environment variable for current process.
  */
-CCResultBoolIoError cc_env_set(const char* name, const char* value);
+CCResult_bool_CCIoError cc_env_set(const char* name, const char* value);
 
 /*
  * Unset environment variable for current process.
  */
-CCResultBoolIoError cc_env_unset(const char* name);
+CCResult_bool_CCIoError cc_env_unset(const char* name);
 
 #endif /* CC_STD_PROCESS_H */

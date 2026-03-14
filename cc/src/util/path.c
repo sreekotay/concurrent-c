@@ -114,3 +114,7 @@ const char* cc_path_rel_to_repo(const char* path, char* out, size_t out_cap) {
     return out;
 }
 
+int cc_path_find_repo_root(const char* path, char* out, size_t out_cap) {
+    return cc__find_repo_root_from(path, out, out_cap);
+}
+

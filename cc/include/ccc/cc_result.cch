@@ -80,11 +80,9 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
  * UFCS methods (via Type_method pattern):
  *   r.value()     - returns value or aborts if error
  *   r.error()     - returns error or aborts if ok
- *   r.unwrap()    - legacy alias for value()
  *   r.is_ok()     - returns true if success
  *   r.is_err()    - returns true if error
  *   r.unwrap_or(default) - returns value or default if error
- *   r.unwrap_err()       - legacy alias for error()
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,14 +104,18 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
         r.u.error = e;                                                              \
         return r;                                                                   \
     }                                                                               \
-    /* UFCS method: r.unwrap() -> name##_unwrap(r) */                               \
-    static inline OkType name##_unwrap(name r) {                                    \
+    /* UFCS method: r.value() -> name##_value(r) */                                 \
+    static inline OkType name##_value(name r) {                                     \
         if (!r.ok) {                                                                \
-            fprintf(stderr, "CC: unwrap failed on %s at %s:%d\n",                   \
+            fprintf(stderr, "CC: value failed on %s at %s:%d\n",                    \
                     #name, __FILE__, __LINE__);                                     \
             abort();                                                                \
         }                                                                           \
         return r.u.value;                                                           \
+    }                                                                               \
+    /* Internal compatibility helper for legacy lowered code. */                    \
+    static inline OkType name##_unwrap(name r) {                                    \
+        return name##_value(r);                                                     \
     }                                                                               \
     /* UFCS method: r.is_ok() -> name##_is_ok(r) */                                 \
     static inline bool name##_is_ok(name r) { return r.ok; }                        \
@@ -123,14 +125,18 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
     static inline OkType name##_unwrap_or(name r, OkType def) {                     \
         return r.ok ? r.u.value : def;                                              \
     }                                                                               \
-    /* UFCS method: r.unwrap_err() -> name##_unwrap_err(r) */                       \
-    static inline ErrType name##_unwrap_err(name r) {                               \
+    /* UFCS method: r.error() -> name##_error(r) */                                 \
+    static inline ErrType name##_error(name r) {                                    \
         if (r.ok) {                                                                 \
-            fprintf(stderr, "CC: unwrap_err failed on %s at %s:%d\n",               \
+            fprintf(stderr, "CC: error failed on %s at %s:%d\n",                    \
                     #name, __FILE__, __LINE__);                                     \
             abort();                                                                \
         }                                                                           \
         return r.u.error;                                                           \
+    }                                                                               \
+    /* Internal compatibility helper for legacy lowered code. */                    \
+    static inline ErrType name##_unwrap_err(name r) {                               \
+        return name##_error(r);                                                     \
     }
 
 /* Generic cc_ok / cc_err macros for results */
@@ -278,6 +284,27 @@ typedef struct __CCResultGeneric {
     static inline name cc_err_##name(ErrType e) {                      \
         (void)e;                                                       \
         return __cc_result_generic_err();                              \
+    }                                                                  \
+    static inline intptr_t name##_value(name r) {                      \
+        return __CCResultGeneric_value(r);                             \
+    }                                                                  \
+    static inline bool name##_is_ok(name r) {                          \
+        return __CCResultGeneric_is_ok(r);                             \
+    }                                                                  \
+    static inline bool name##_is_err(name r) {                         \
+        return __CCResultGeneric_is_err(r);                            \
+    }                                                                  \
+    static inline intptr_t name##_unwrap_or(name r, intptr_t def) {    \
+        return __CCResultGeneric_unwrap_or(r, def);                    \
+    }                                                                  \
+    static inline __CCGenericError name##_error(name r) {              \
+        return __CCResultGeneric_error(r);                             \
+    }                                                                  \
+    static inline intptr_t name##_unwrap(name r) {                     \
+        return __CCResultGeneric_unwrap(r);                            \
+    }                                                                  \
+    static inline __CCGenericError name##_unwrap_err(name r) {         \
+        return __CCResultGeneric_unwrap_err(r);                        \
     }
 
 /* THE KEY MACRO: In parser mode, all result types resolve to generic.
@@ -299,8 +326,8 @@ static inline __CCResultGeneric __cc_result_generic_err(void) {
 }
 
 /* Generic UFCS methods for parser mode - code compiles but doesn't run.
-   These handle r.value(), r.error(), r.unwrap(), r.is_ok(), r.is_err(),
-   r.unwrap_or(default), and r.unwrap_err() via UFCS. */
+   These handle r.value(), r.error(), r.is_ok(), r.is_err(), and
+   r.unwrap_or(default) via UFCS. */
 static inline intptr_t __CCResultGeneric_value(__CCResultGeneric r) {
     (void)r;
     return 0;

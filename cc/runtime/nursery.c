@@ -149,7 +149,7 @@ int cc_nursery_add_closing_tx(CCNursery* n, CCChanTx tx) {
     return cc_nursery_add_closing_chan(n, tx.raw);
 }
 
-CCNursery* cc_nursery_create(void) {
+static CCNursery* cc__nursery_alloc(void) {
     CCNursery* n = (CCNursery*)malloc(sizeof(CCNursery));
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
@@ -173,6 +173,31 @@ CCNursery* cc_nursery_create(void) {
         free(n->tasks);
         free(n);
         return NULL;
+    }
+    return n;
+}
+
+CCNursery* cc_nursery_create(void) {
+    return cc__nursery_alloc();
+}
+
+CCNursery* cc_nursery_create_child(CCNursery* parent) {
+    CCNursery* n = cc__nursery_alloc();
+    if (!n) return NULL;
+    if (!parent) return n;
+
+    /* Low-risk inheritance for the new explicit nursery-handle path:
+       snapshot current parent cancellation/deadline state without creating
+       a live parent pointer dependency. This keeps the helper safe even while
+       destroy/ownership ordering is still being designed. */
+    if (cc_nursery_is_cancelled(parent)) {
+        n->cancelled = 1;
+    }
+    {
+        struct timespec inherited_deadline;
+        if (cc_nursery_deadline(parent, &inherited_deadline)) {
+            n->deadline = inherited_deadline;
+        }
     }
     return n;
 }

@@ -9,22 +9,12 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "util/text.h"
-
-/* Built-in result types that are already declared in cc_result.cch */
-static const char* cc__builtin_result_types[] = {
-    "int_CCError",
-    "bool_CCError",
-    "size_t_CCError",
-    "voidptr_CCError",
-    "charptr_CCError",
-    "void_CCError",
-    NULL
-};
 
 /* Built-in optional types that are already declared in cc_optional.cch */
 static const char* cc__builtin_optional_types[] = {
@@ -32,15 +22,6 @@ static const char* cc__builtin_optional_types[] = {
     "voidptr", "charptr", "intptr", "CCSlice",
     NULL
 };
-
-static int cc__is_builtin_result(const char* mangled_ok, const char* mangled_err) {
-    char key[256];
-    snprintf(key, sizeof(key), "%s_%s", mangled_ok, mangled_err);
-    for (int i = 0; cc__builtin_result_types[i]; i++) {
-        if (strcmp(key, cc__builtin_result_types[i]) == 0) return 1;
-    }
-    return 0;
-}
 
 static int cc__is_builtin_optional(const char* mangled) {
     for (int i = 0; cc__builtin_optional_types[i]; i++) {
@@ -76,37 +57,7 @@ static void cc__normalize_type_name(char* name) {
 
 /* Mangle a type name for use in CCResult_T_E or CCOptional_T */
 static void cc__mangle_type(const char* src, size_t len, char* out, size_t out_sz) {
-    if (!src || len == 0 || !out || out_sz == 0) {
-        if (out && out_sz > 0) out[0] = 0;
-        return;
-    }
-    
-    /* Skip leading whitespace */
-    while (len > 0 && (*src == ' ' || *src == '\t')) { src++; len--; }
-    /* Skip trailing whitespace */
-    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
-    
-    size_t j = 0;
-    for (size_t i = 0; i < len && j < out_sz - 1; i++) {
-        char c = src[i];
-        if (c == ' ' || c == '\t') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else if (c == '*') {
-            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
-        } else if (c == '[' || c == ']') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else if (c == '<' || c == '>' || c == ',') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else {
-            out[j++] = c;
-        }
-    }
-    /* Remove trailing underscore */
-    while (j > 0 && out[j - 1] == '_') j--;
-    out[j] = 0;
-    
-    /* Normalize short names to CC-prefixed names */
-    cc__normalize_type_name(out);
+    cc_result_spec_mangle_type(src, len, out, out_sz);
 }
 
 /* Scan back from position to find type start (delimited by ; { } , ( ) newline) */
@@ -124,6 +75,7 @@ static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
 void cc_lower_state_init(CCLowerState* state) {
     if (state) {
         memset(state, 0, sizeof(*state));
+        cc_result_spec_table_init(&state->result_specs);
     }
 }
 
@@ -133,34 +85,10 @@ void cc_lower_state_add_result(CCLowerState* state,
                                 const char* mangled_ok,
                                 const char* mangled_err) {
     if (!state || !ok_type || !err_type || !mangled_ok || !mangled_err) return;
-    
-    /* Skip built-in result types */
-    if (cc__is_builtin_result(mangled_ok, mangled_err)) return;
-    
-    /* Check for duplicates */
-    for (size_t i = 0; i < state->result_type_count; i++) {
-        if (strcmp(state->result_types[i].mangled_ok, mangled_ok) == 0 &&
-            strcmp(state->result_types[i].mangled_err, mangled_err) == 0) {
-            return;
-        }
-    }
-    
-    if (state->result_type_count >= 64) return;
-    
-    CCLowerResultType* p = &state->result_types[state->result_type_count++];
-    
-    if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
-    if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
-    
-    memcpy(p->ok_type, ok_type, ok_len);
-    p->ok_type[ok_len] = '\0';
-    memcpy(p->err_type, err_type, err_len);
-    p->err_type[err_len] = '\0';
-    
-    strncpy(p->mangled_ok, mangled_ok, sizeof(p->mangled_ok) - 1);
-    p->mangled_ok[sizeof(p->mangled_ok) - 1] = '\0';
-    strncpy(p->mangled_err, mangled_err, sizeof(p->mangled_err) - 1);
-    p->mangled_err[sizeof(p->mangled_err) - 1] = '\0';
+    if (cc_result_spec_is_core_builtin(mangled_ok, mangled_err)) return;
+    (void)cc_result_spec_table_add(&state->result_specs,
+                                   ok_type, ok_len, err_type, err_len,
+                                   mangled_ok, mangled_err);
 }
 
 void cc_lower_state_add_optional(CCLowerState* state,
@@ -192,7 +120,7 @@ void cc_lower_state_add_optional(CCLowerState* state,
 
 char* cc_lower_state_emit_decls(const CCLowerState* state) {
     if (!state) return NULL;
-    if (state->result_type_count == 0 && state->optional_type_count == 0) return NULL;
+    if (state->result_specs.count == 0 && state->optional_type_count == 0) return NULL;
     
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -211,17 +139,11 @@ char* cc_lower_state_emit_decls(const CCLowerState* state) {
     }
     
     /* Emit result type declarations */
-    for (size_t i = 0; i < state->result_type_count; i++) {
-        const CCLowerResultType* p = &state->result_types[i];
+    for (size_t i = 0; i < state->result_specs.count; i++) {
+        const CCResultSpec* p = cc_result_spec_table_get(&state->result_specs, i);
         char decl[512];
-        snprintf(decl, sizeof(decl),
-            "#ifndef CCResult_%s_%s_DEFINED\n"
-            "#define CCResult_%s_%s_DEFINED\n"
-            "CC_DECL_RESULT_SPEC(CCResult_%s_%s, %s, %s)\n"
-            "#endif\n",
-            p->mangled_ok, p->mangled_err,
-            p->mangled_ok, p->mangled_err,
-            p->mangled_ok, p->mangled_err, p->ok_type, p->err_type);
+        if (!p) continue;
+        cc_result_spec_emit_decl(p, decl, sizeof(decl));
         cc_sb_append_cstr(&out, &out_len, &out_cap, decl);
     }
     
@@ -493,6 +415,93 @@ static char* cc__remove_explicit_result_decls(const char* src, size_t n) {
     return out;
 }
 
+static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
+    char* out = NULL;
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src || n == 0) return NULL;
+    out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, src, n);
+    out[n] = '\0';
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && c2) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '@' && i + strlen("@comptime") < n && strncmp(src + i, "@comptime", strlen("@comptime")) == 0) {
+            size_t p = i + strlen("@comptime");
+            size_t body_l = 0, body_r = 0;
+            int depth = 0, ls = 0, lc = 0, st = 0, ch = 0;
+            while (p < n && isspace((unsigned char)src[p])) p++;
+            if (p >= n || src[p] != '{') { i++; continue; }
+            body_l = p;
+            for (p = body_l; p < n; ++p) {
+                char d = src[p];
+                char d2 = (p + 1 < n) ? src[p + 1] : 0;
+                if (lc) { if (d == '\n') lc = 0; continue; }
+                if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
+                if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
+                if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
+                if (d == '/' && d2 == '/') { lc = 1; p++; continue; }
+                if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
+                if (d == '"') { st = 1; continue; }
+                if (d == '\'') { ch = 1; continue; }
+                if (d == '{') { depth++; continue; }
+                if (d == '}') {
+                    if (depth == 0) break;
+                    depth--;
+                    if (depth == 0) { body_r = p; break; }
+                }
+            }
+            if (body_r <= body_l) { free(out); return NULL; }
+            for (size_t k = i; k <= body_r; ++k) {
+                if (out[k] != '\n') out[k] = ' ';
+            }
+            i = body_r + 1;
+            continue;
+        }
+        i++;
+    }
+    return out;
+}
+
+static char* cc__rewrite_header_includes(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    size_t i = 0;
+    if (!src || n == 0) return NULL;
+
+    while (i < n) {
+        if (i + 5 <= n && strncmp(src + i, ".cch\"", 5) == 0) {
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h\"");
+            i += 5;
+            last_emit = i;
+            continue;
+        }
+        if (i + 5 <= n && strncmp(src + i, ".cch>", 5) == 0) {
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h>");
+            i += 5;
+            last_emit = i;
+            continue;
+        }
+        i++;
+    }
+
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 char* cc_lower_header_string(const char* input, size_t input_len, const char* input_path) {
     (void)input_path;  /* For error messages - not used yet */
     
@@ -504,25 +513,33 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Current processing buffer */
     const char* cur = input;
     size_t cur_len = input_len;
-    char* buf1 = NULL;
     char* buf2 = NULL;
     char* buf3 = NULL;
+    char* buf0 = NULL;
+    char* buf_inc = NULL;
     
-    /* Pass 1: Remove existing explicit CC_DECL_RESULT_SPEC guards */
-    buf1 = cc__remove_explicit_result_decls(cur, cur_len);
-    if (buf1) {
-        cur = buf1;
-        cur_len = strlen(buf1);
+    /* Pass 0: Strip raw @comptime blocks so lowered headers are valid C. */
+    buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
+    if (buf0) {
+        cur = buf0;
+        cur_len = strlen(buf0);
     }
-    
-    /* Pass 2: Rewrite T!>(E) -> CCResult_T_E */
+
+    /* Pass 0b: Rewrite .cch includes to .h so lowered headers are self-contained C headers. */
+    buf_inc = cc__rewrite_header_includes(cur, cur_len);
+    if (buf_inc) {
+        cur = buf_inc;
+        cur_len = strlen(buf_inc);
+    }
+
+    /* Pass 1: Rewrite T!>(E) -> CCResult_T_E */
     buf2 = cc__lower_result_types(cur, cur_len, &state);
     if (buf2) {
         cur = buf2;
         cur_len = strlen(buf2);
     }
     
-    /* Pass 3: Rewrite T? -> CCOptional_T */
+    /* Pass 2: Rewrite T? -> CCOptional_T */
     buf3 = cc__lower_optional_types(cur, cur_len, &state);
     if (buf3) {
         cur = buf3;
@@ -573,9 +590,11 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     }
     
     /* Cleanup */
-    free(buf1);
+    free(buf0);
+    free(buf_inc);
     free(buf2);
     free(buf3);
+    cc_result_spec_table_free(&state.result_specs);
     
     return out;
 }

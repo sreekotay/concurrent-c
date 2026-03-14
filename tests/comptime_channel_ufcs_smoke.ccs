@@ -1,5 +1,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_ufcs.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/std/string.cch>
 #include <assert.h>
 #include <stdio.h>
 
@@ -7,20 +9,27 @@ int[~2 >] g_tx;
 int[~2 <] g_rx;
 
 @comptime {
-    (void)cc_ufcs_register("CCChanTx_*", (method, argv, arena) => {
+    (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
+        .ufcs = (method, mode, argv, arena) => {
+        (void)mode;
         (void)argv;
-        if (cc_ufcs_slice_eq_cstr(method, "send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
-        if (cc_ufcs_slice_eq_cstr(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
-        if (cc_ufcs_slice_eq_cstr(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
+        if (cc_slice_eq_cstr(method, "send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
+        if (cc_slice_eq_cstr(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
+        if (cc_slice_eq_cstr(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
         return cc_slice_empty();
-    });
-    (void)cc_ufcs_register("CCChanRx_*", (method, argv, arena) => {
+    }});
+    (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
+        .ufcs = (method, mode, argv, arena) => {
         (void)argv;
-        if (cc_ufcs_slice_eq_cstr(method, "recv")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv");
-        if (cc_ufcs_slice_eq_cstr(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
-        if (cc_ufcs_slice_eq_cstr(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
+        if (cc_slice_eq_cstr(method, "recv")) {
+            return cc_slice_eq_cstr(mode, "await")
+                ? cc_ufcs_emit_value_cstr(arena, "cc_channel_recv_task")
+                : cc_ufcs_emit_value_cstr(arena, "cc_channel_recv");
+        }
+        if (cc_slice_eq_cstr(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
+        if (cc_slice_eq_cstr(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
         return cc_slice_empty();
-    });
+    }});
 }
 
 int main(void) {

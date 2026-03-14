@@ -64,7 +64,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
 
     @arena(res_arena, arena_size) {
-        CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
+        CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
         res->seq = blk->seq;
@@ -73,7 +73,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
         size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
         if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
         unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
@@ -176,7 +176,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             break;
         }
 
-        Block* blk = arena_alloc1(Block, &blk_arena);
+        Block* blk = cc_arena_alloc_T(Block, &blk_arena);
         if (!blk) {
             cc_arena_free(&blk_arena);
             break;

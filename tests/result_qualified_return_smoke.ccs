@@ -1,0 +1,34 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static inline int !>(CCIoError) parse_value(int x) {
+    CCResult_int_CCIoError out = {0};
+    if (x < 0) {
+        *((CCIoError*)(void*)&out.u.error) = cc_io_error(CC_IO_INVALID_ARGUMENT);
+        return out;
+    }
+    out.ok = true;
+    out.u.value = x + 1;
+    return out;
+}
+
+static int io_kind(CCIoError err) {
+    return err.kind;
+}
+
+int main(void) {
+    int !>(CCIoError) ok = parse_value(4);
+    int !>(CCIoError) err = parse_value(-1);
+
+    if (ok.is_err() || ok.value() != 5) {
+        printf("result_qualified_return_smoke: FAIL ok\n");
+        return 1;
+    }
+    if (!err.is_err() || io_kind(err.error()) != CC_IO_INVALID_ARGUMENT) {
+        printf("result_qualified_return_smoke: FAIL err\n");
+        return 1;
+    }
+
+    printf("result_qualified_return_smoke: PASS\n");
+    return 0;
+}

@@ -1,0 +1,56 @@
+#ifndef CC_TYPE_H
+#define CC_TYPE_H
+
+#include <stddef.h>
+
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_arena.cch>
+
+#ifndef CC_CCSLICEARRAY_DEFINED
+#define CC_CCSLICEARRAY_DEFINED 1
+typedef struct {
+    CCSlice *items;
+    size_t len;
+} CCSliceArray;
+#endif
+
+typedef struct {
+    const char* callee;
+} CCTypeCreateHook;
+
+typedef struct {
+    const char* callee;
+} CCTypeDestroyHook;
+
+#ifdef CC_PARSER_MODE
+typedef CCSlice (*CCTypeUfcsHandler)();
+#else
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena);
+#endif
+
+typedef struct {
+    CCTypeCreateHook create1;
+    CCTypeCreateHook create2;
+    CCTypeDestroyHook destroy;
+    CCTypeUfcsHandler ufcs;
+} CCTypeHooks;
+
+static inline CCTypeCreateHook cc_type_create_call(const char* callee) {
+    CCTypeCreateHook hook = {0};
+    hook.callee = callee;
+    return hook;
+}
+
+static inline CCTypeDestroyHook cc_type_destroy_call(const char* callee) {
+    CCTypeDestroyHook hook = {0};
+    hook.callee = callee;
+    return hook;
+}
+
+static inline int cc_type_register(const char* type_name, CCTypeHooks hooks) {
+    (void)type_name;
+    (void)hooks;
+    return 0;
+}
+
+#endif

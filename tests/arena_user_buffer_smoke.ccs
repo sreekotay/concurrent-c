@@ -8,7 +8,7 @@ int main(void) {
     
     @arena_init(buffer, sizeof(buffer)) {
         // Allocate from the arena using type-safe macro
-        int* x = arena_alloc(int, arena, 1);
+        int* x = cc_arena_alloc_T(int, arena);
         assert(x != NULL);
         *x = 42;
         assert(*x == 42);

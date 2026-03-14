@@ -1,0 +1,31 @@
+#include <ccc/std/prelude.cch>
+
+static int g_heap_destroyed = 0;
+static int g_buf_destroyed = 0;
+
+int main(void) {
+    {
+        CCArena arena = @create(1024) @destroy {
+            g_heap_destroyed = 1;
+        };
+        if (!arena.base) return 1;
+        char* p = cc_arena_alloc_T_count(char, &arena, 64);
+        if (!p) return 2;
+        p[0] = 'a';
+    }
+
+    {
+        char backing[256];
+        CCArena arena = @create(backing, sizeof(backing)) @destroy {
+            g_buf_destroyed = 1;
+        };
+        if (!arena.base) return 3;
+        char* p = cc_arena_alloc_T_count(char, &arena, 32);
+        if (!p) return 4;
+        p[0] = 'b';
+    }
+
+    if (g_heap_destroyed != 1) return 5;
+    if (g_buf_destroyed != 1) return 6;
+    return 0;
+}

@@ -86,15 +86,6 @@ static int process_file(const char* cch_path, const char* h_path) {
     }
     free(h_dir);
     
-    /* Check if output is newer than input (skip if so) */
-    struct stat in_stat, out_stat;
-    if (stat(cch_path, &in_stat) == 0 && stat(h_path, &out_stat) == 0) {
-        if (out_stat.st_mtime >= in_stat.st_mtime) {
-            /* Output is up to date */
-            return 0;
-        }
-    }
-    
     printf("  %s -> %s\n", cch_path, h_path);
     return cc_lower_header(cch_path, h_path);
 }

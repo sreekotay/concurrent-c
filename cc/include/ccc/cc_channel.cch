@@ -454,17 +454,13 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
 #define cc_channel_recv_task_raw3(ch, out_value, value_size) cc_channel_raw_recv_task((ch), (out_value), (value_size))
 #define cc_channel_recv_task(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_recv_task_raw3, cc_channel_recv_task_typed)(__VA_ARGS__)
 
-static inline CCSlice cc__channel_lower_c_mode(CCSliceArray argv) {
-    return argv.len > 3 ? argv.items[3] : cc_slice_empty();
-}
-
 static inline bool cc__channel_lower_c_eq(CCSlice s, const char *cstr) {
     size_t len = cstr ? strlen(cstr) : 0;
     return cstr && s.len == len && memcmp(s.ptr, cstr, len) == 0;
 }
 
-static inline CCSlice cc_channel_tx_lower_c(CCSlice method, CCSliceArray argv, CCArena *arena) {
-    CCSlice mode = cc__channel_lower_c_mode(argv);
+static inline CCSlice cc_channel_tx_lower_c(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
+    (void)argv;
     if (cc__channel_lower_c_eq(method, "send")) {
         if (cc__channel_lower_c_eq(mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
         return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
@@ -476,8 +472,8 @@ static inline CCSlice cc_channel_tx_lower_c(CCSlice method, CCSliceArray argv, C
     return cc_slice_empty();
 }
 
-static inline CCSlice cc_channel_rx_lower_c(CCSlice method, CCSliceArray argv, CCArena *arena) {
-    CCSlice mode = cc__channel_lower_c_mode(argv);
+static inline CCSlice cc_channel_rx_lower_c(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
+    (void)argv;
     if (cc__channel_lower_c_eq(method, "recv")) {
         if (cc__channel_lower_c_eq(mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv_task");
         return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv");

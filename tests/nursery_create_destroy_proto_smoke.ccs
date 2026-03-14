@@ -1,0 +1,21 @@
+#include <ccc/std/prelude.cch>
+
+static int g_task_ran = 0;
+static int g_destroy_ran = 0;
+
+int main(void) {
+    {
+        CCNursery* n = @create(NULL, () => {
+            g_task_ran = 1;
+        }) @destroy {
+            if (g_task_ran == 1) {
+                g_destroy_ran = 1;
+            }
+        };
+        if (!n) return 1;
+    }
+
+    if (g_task_ran != 1) return 2;
+    if (g_destroy_ran != 1) return 3;
+    return 0;
+}

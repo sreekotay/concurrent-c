@@ -1,0 +1,20 @@
+#include <ccc/std/prelude.cch>
+
+static int g_detached_task_ran = 0;
+
+static CCNursery* make_detached_nursery(void) {
+    CCNursery* n = @create(NULL, () => {
+        g_detached_task_ran = 1;
+    }) @detach;
+    if (!n) return NULL;
+    return n;
+}
+
+int main(void) {
+    CCNursery* n = make_detached_nursery();
+    if (!n) return 1;
+    if (cc_nursery_wait(n) != 0) return 2;
+    cc_nursery_free(n);
+    if (g_detached_task_ran != 1) return 3;
+    return 0;
+}

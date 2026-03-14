@@ -18,6 +18,7 @@
 #include "closure.c"
 #include "task.c"
 #include "io.c"
+#include "command.c"
 #include "string.c"
 #include "exec.c"
 #include "arena_state.c"

@@ -14,6 +14,8 @@
 
 #include <stddef.h>
 
+#include "result_spec.h"
+
 /*
  * Lower a .cch file to a .h file.
  *
@@ -40,17 +42,6 @@ int cc_lower_header(const char* cch_path, const char* h_path);
 char* cc_lower_header_string(const char* input, size_t input_len, const char* input_path);
 
 /*
- * Result type pair collected during lowering.
- * Used to emit CC_DECL_RESULT_SPEC declarations.
- */
-typedef struct CCLowerResultType {
-    char ok_type[128];      /* Raw ok type: "int", "MyData*" */
-    char err_type[128];     /* Raw error type: "CCError", "CCIoError" */
-    char mangled_ok[128];   /* Mangled ok type: "int", "MyDataptr" */
-    char mangled_err[128];  /* Mangled error type: "CCError", "CCIoError" */
-} CCLowerResultType;
-
-/*
  * Optional type collected during lowering.
  * Used to emit CC_DECL_OPTIONAL declarations.
  */
@@ -63,8 +54,7 @@ typedef struct CCLowerOptionalType {
  * State for header lowering, tracking collected types.
  */
 typedef struct CCLowerState {
-    CCLowerResultType result_types[64];
-    size_t result_type_count;
+    CCResultSpecTable result_specs;
     CCLowerOptionalType optional_types[64];
     size_t optional_type_count;
 } CCLowerState;

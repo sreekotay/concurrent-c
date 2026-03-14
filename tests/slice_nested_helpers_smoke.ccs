@@ -1,0 +1,33 @@
+#include <ccc/std/prelude.cch>
+
+static int has_mode(char[::] argv, char[:] want) {
+    CCSlice* items = (CCSlice*)argv.ptr;
+    size_t n = argv.len;
+    for (size_t i = 0; i < n; ++i) {
+        char[:] item = items[i];
+        if (item.eq(want)) return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    char[:] method = cc_slice_from_buffer((void*)"recv", 4);
+    if (!method.eq_cstr("recv")) return 1;
+    if (method.is_empty()) return 2;
+
+    CCSlice items[2] = {
+        cc_slice_from_buffer((void*)"recv", 4),
+        cc_slice_from_buffer((void*)"await", 5),
+    };
+
+    char[::] argv = cc_slice_from_buffer(items, 2);
+    char[:] second = ((CCSlice*)argv.ptr)[1];
+    if (argv.len() != 2) return 3;
+    if (!second.eq_cstr("await")) return 4;
+    if (!has_mode(argv, cc_slice_from_buffer((void*)"await", 5))) return 5;
+
+    char[:::] nested = cc_slice_empty();
+    if (!nested.is_empty()) return 6;
+
+    return 0;
+}

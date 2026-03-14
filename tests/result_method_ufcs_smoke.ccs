@@ -1,0 +1,39 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static size_t !>(CCIoError) make_ok(void) {
+    return cc_ok((size_t)7);
+}
+
+static size_t !>(CCIoError) make_err(void) {
+    return cc_err(cc_io_error(CC_IO_OTHER));
+}
+
+static int io_kind(CCIoError err) {
+    return err.kind;
+}
+
+int main(void) {
+    size_t !>(CCIoError) ok = make_ok();
+    size_t !>(CCIoError) err = make_err();
+
+    if (ok.is_err()) {
+        printf("result_method_ufcs_smoke: FAIL ok.is_err\n");
+        return 1;
+    }
+    if (ok.value() != 7) {
+        printf("result_method_ufcs_smoke: FAIL ok.value\n");
+        return 1;
+    }
+    if (!err.is_err()) {
+        printf("result_method_ufcs_smoke: FAIL err.is_err\n");
+        return 1;
+    }
+    if (io_kind(err.error()) != CC_IO_OTHER) {
+        printf("result_method_ufcs_smoke: FAIL err.error\n");
+        return 1;
+    }
+
+    printf("result_method_ufcs_smoke: PASS\n");
+    return 0;
+}
