@@ -11,6 +11,7 @@
 #include <ccc/cc_result.cch>
 #include <ccc/cc_optional.cch>
 #include <ccc/cc_io_error.cch>
+#include <ccc/std/io.cch>
 
 /* Process handle (opaque, platform-specific internals) */
 typedef struct CCProcess {
@@ -218,8 +219,29 @@ static inline bool cc_process_output_success(const CCProcessOutput* o) {
 
 #ifndef CCResult_CCProcessOutput_CCIoError_DEFINED
 #define CCResult_CCProcessOutput_CCIoError_DEFINED 1
+#ifdef CC_PARSER_MODE
+typedef struct CCResult_CCProcessOutput_CCIoError {
+    bool ok;
+    union { CCProcessOutput value; CCIoError error; } u;
+} CCResult_CCProcessOutput_CCIoError;
+#else
 CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoError)
 #endif
+#endif
+
+/*
+ * Run a process using an explicit spawn configuration and capture any piped
+ * stdout/stderr streams into the provided arena.
+ */
+CCResult_CCProcessOutput_CCIoError cc_process_run_config(CCArena* arena, const CCProcessConfig* config);
+
+/*
+ * Like cc_process_run_config(), but also writes the provided stdin input and
+ * closes the child's stdin before waiting for exit.
+ */
+CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
+                                                             const CCProcessConfig* config,
+                                                             CCSlice input);
 
 /*
  * Run command and capture all output (blocking).

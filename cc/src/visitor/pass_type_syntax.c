@@ -145,81 +145,8 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
     return out;
 }
 
-/* Short name to CC-prefixed name mappings for stdlib types.
-   The compiler resolves short names (e.g. "IoError") to their CC-prefixed
-   forms (e.g. "CCIoError") in generated C code. */
-static const struct { const char* short_name; const char* cc_name; } cc__type_aliases[] = {
-    { "IoError",     "CCIoError" },
-    { "IoErrorKind", "CCIoErrorKind" },
-    { "Error",       "CCError" },
-    { "ErrorKind",   "CCErrorKind" },
-    { "NetError",    "CCNetError" },
-    { "Arena",       "CCArena" },
-    { "File",        "CCFile" },
-    { "String",      "CCString" },
-    { "Slice",       "CCSlice" },
-    { NULL, NULL }
-};
-
-/* Normalize a mangled type name: map short aliases to CC-prefixed names */
-static void cc__normalize_type_name(char* name) {
-    if (!name || !name[0]) return;
-    for (int i = 0; cc__type_aliases[i].short_name; i++) {
-        if (strcmp(name, cc__type_aliases[i].short_name) == 0) {
-            /* Safe because CC names are always longer or equal */
-            strcpy(name, cc__type_aliases[i].cc_name);
-            return;
-        }
-    }
-}
-
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
     cc_result_spec_mangle_type(src, len, out, out_sz);
-}
-
-/* Unmangle a type name: reverse of cc__mangle_type_name.
-   - Replaces trailing 'ptr' with '*' (for pointer types)
-   - Does not unmangle underscores (ambiguous with real underscores in type names)
-   Example: "CompressedResultptr" -> "CompressedResult*" */
-static void cc__unmangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
-    if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
-    
-    if (len >= sizeof(out_sz)) len = out_sz - 2; /* Leave room for '*' and '\0' */
-    
-    /* Check if type name ends with 'ptr' (pointer type) */
-    if (len >= 3 && src[len - 3] == 'p' && src[len - 2] == 't' && src[len - 1] == 'r') {
-        /* Make sure 'ptr' is not part of a known type like 'intptr_t' or 'intptr' */
-        /* Simple heuristic: if there's a preceding letter that's not '_', it's likely a pointer */
-        int is_pointer = 1;
-        
-        /* Check for known exception types that end in 'ptr' but aren't pointers */
-        static const char* non_ptr_suffixes[] = {"intptr", "uintptr", NULL};
-        for (int i = 0; non_ptr_suffixes[i]; i++) {
-            size_t slen = strlen(non_ptr_suffixes[i]);
-            if (len >= slen && strncmp(src + len - slen, non_ptr_suffixes[i], slen) == 0) {
-                /* Check if this is standalone (not part of larger word) */
-                if (len == slen || !cc__is_ident_char_local(src[len - slen - 1])) {
-                    is_pointer = 0;
-                    break;
-                }
-            }
-        }
-        
-        if (is_pointer) {
-            /* Copy everything except 'ptr', add '*' */
-            size_t copy_len = len - 3;
-            if (copy_len >= out_sz - 1) copy_len = out_sz - 2;
-            memcpy(out, src, copy_len);
-            out[copy_len] = '*';
-            out[copy_len + 1] = '\0';
-            return;
-        }
-    }
-    
-    /* No unmangling needed, just copy */
-    if (len >= out_sz) len = out_sz - 1;
-    memcpy(out, src, len);
-    out[len] = '\0';
 }
 
 /* Scan back from position `from` to find the start of a type token (delimited by ; { } , ( ) newline). */
@@ -604,76 +531,43 @@ static void cc__scan_for_existing_result_types(const char* src, size_t n) {
             continue;
         }
         
-        /* Look for CCResult_T_E struct pattern (legacy) */
+        /* Look for CCResult_T_E struct pattern (legacy). Concrete result names are
+           already mangled, so reverse-parsing them back into ok/err types is lossy
+           once either side contains underscores. Only reuse exact names we already
+           know from authoritative result-spec collection. */
         if (i + struct_prefix_len < n && strncmp(src + i, struct_prefix, struct_prefix_len) == 0) {
             /* Make sure this isn't part of a longer identifier */
             if (i > 0 && cc__is_ident_char_local(src[i-1])) {
                 i++;
                 continue;
             }
-            
-            size_t j = i + struct_prefix_len;
-            
-            /* Find the ok type (everything until next '_') */
-            size_t ok_start = j;
-            while (j < n && src[j] != '_' && cc__is_ident_char_local(src[j])) j++;
-            if (j >= n || src[j] != '_') { i++; continue; }
-            size_t ok_end = j;
-            
-            j++; /* skip '_' */
-            
-            /* Find the error type - but stop at UFCS method suffixes.
-               Methods like _unwrap, _is_ok, _is_err, _unwrap_or should not be
-               part of the error type. Look for underscore followed by known method. */
-            size_t err_start = j;
+
+            size_t j = i;
+            char concrete_name[256];
+            const CCResultSpec* spec = NULL;
+            CCResultSpecTable* global_specs = cc_result_spec_table_get_global();
             while (j < n && cc__is_ident_char_local(src[j])) j++;
-            size_t err_end = j;
-            
-            /* Check if this looks like a method call (CCResult_T_E_method) or a guard macro.
-               If so, trim off the suffix by scanning backwards for underscore
-               followed by known method names or guard patterns. */
-            static const char* methods[] = {
-                "_unwrap_or",
-                "_unwrap_err",
-                "_unwrap",
-                "_value",
-                "_error",
-                "_is_ok",
-                "_is_err",
-                "_DEFINED",
-                NULL
-            };
-            for (int m = 0; methods[m]; m++) {
-                size_t mlen = strlen(methods[m]);
-                if (err_end - err_start > mlen) {
-                    /* Check if error type ends with this method suffix */
-                    const char* candidate = src + err_end - mlen;
-                    if (strncmp(candidate, methods[m], mlen) == 0) {
-                        /* Found method suffix - this is a method call, not a type.
-                           Trim the error type to exclude the method. */
-                        err_end -= mlen;
-                        j = err_end;
-                        break;
-                    }
-                }
+            if ((size_t)(j - i) >= sizeof(concrete_name)) {
+                i = j;
+                continue;
             }
-            
-            if (ok_end > ok_start && err_end > err_start) {
-                char ok_type[128], err_type[128];
-                size_t ok_len = ok_end - ok_start;
-                size_t err_len = err_end - err_start;
-                
-                if (ok_len < sizeof(ok_type) && err_len < sizeof(err_type)) {
-                    memcpy(ok_type, src + ok_start, ok_len);
-                    ok_type[ok_len] = '\0';
-                    memcpy(err_type, src + err_start, err_len);
-                    err_type[err_len] = '\0';
-                    
-                    /* Skip built-in result types */
-                    if (strcmp(err_type, "CCError") != 0) {
-                        cc__cg_add_result_type(ok_type, ok_len, err_type, err_len, ok_type, err_type);
-                    }
-                }
+
+            memcpy(concrete_name, src + i, j - i);
+            concrete_name[j - i] = '\0';
+
+            if (cc_result_spec_is_stdlib_predeclared_name(concrete_name)) {
+                i = j;
+                continue;
+            }
+
+            spec = cc_result_spec_table_find_by_name(&cc__cg_result_specs, concrete_name);
+            if (!spec && global_specs) {
+                spec = cc_result_spec_table_find_by_name(global_specs, concrete_name);
+            }
+            if (spec) {
+                cc__cg_add_result_type(spec->ok_type, strlen(spec->ok_type),
+                                       spec->err_type, strlen(spec->err_type),
+                                       spec->mangled_ok, spec->mangled_err);
             }
             i = j;
             continue;
@@ -1105,11 +999,8 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             if (detected_type[0]) {
                 while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r' || src[j] == '*')) j++;
                 if (j < n && cc__is_ident_start_local2(src[j])) {
-                    /* Capture function name for debug */
-                    size_t fn_start = j;
                     /* Skip function name */
                     while (j < n && cc__is_ident_char_local(src[j])) j++;
-                    size_t fn_end = j;
                     while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
                     if (j < n && src[j] == '(') {
                         /* Skip params */

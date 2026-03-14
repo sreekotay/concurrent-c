@@ -43,6 +43,7 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
        cc_result.cch provides __CC_RESULT macro which handles parser-mode fallback. */
     const char* prelude =
         "#line 1 \"<cc-prelude>\"\n"
+        "#define __CC__ 1\n"
         "#define CC_PARSER_MODE 1\n"
         "#include <stdlib.h>\n"
         "#include <stdint.h>\n"
@@ -101,6 +102,7 @@ char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len) 
        (e.g. CCNursery/CCClosure0) even when user source doesn't include the headers.
        cc_result.cch provides __CC_RESULT macro which handles parser-mode fallback. */
     const char* prelude =
+        "#define __CC__ 1\n"
         "#define CC_PARSER_MODE 1\n"
         "#include <stdlib.h>\n"
         "#include <stdint.h>\n"

@@ -221,7 +221,7 @@ static int cc__is_untyped_channel_recv_type(const char* type_name) {
 }
 
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
-typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena);
+typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena);
 
 #define CC_UFCS_VALUE_TAG "__cc_ufcs_value__:"
 
@@ -352,6 +352,7 @@ static int cc__emit_registered_callable(char* out,
     CCSliceArray argv = {0};
     CCArena arena = cc_heap_arena(1024);
     CCUfcsCompiledCallable fn;
+    CCSlice recv_type_slice;
     CCSlice method_slice;
     CCSlice mode_slice;
     CCSlice lowered;
@@ -372,10 +373,11 @@ static int cc__emit_registered_callable(char* out,
     if (has_args && args_rewritten && args_rewritten[0]) {
         argv = cc__build_ufcs_arg_slices(&arena, args_rewritten);
     }
+    recv_type_slice = cc_slice_from_buffer((void*)recv_type_name, strlen(recv_type_name));
     method_slice = cc_slice_from_buffer((void*)method, strlen(method));
     mode_slice = cc_slice_from_buffer((void*)(g_ufcs_await_context ? "await" : "sync"),
                                       g_ufcs_await_context ? sizeof("await") - 1 : sizeof("sync") - 1);
-    lowered = fn(method_slice, mode_slice, argv, &arena);
+    lowered = fn(recv_type_slice, method_slice, mode_slice, argv, &arena);
     if (!lowered.ptr || lowered.len == 0) {
         cc_heap_arena_free(&arena);
         return -1;

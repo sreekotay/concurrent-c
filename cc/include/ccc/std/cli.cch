@@ -1,0 +1,572 @@
+/*
+ * Small procedural argc/argv helper plus an inline declarative spec DSL.
+ */
+#ifndef CC_STD_CLI_H
+#define CC_STD_CLI_H
+
+#include <stdio.h>
+#include <string.h>
+
+#include <ccc/cc_compat.cch>
+#include <ccc/cc_optional.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/std/string.cch>
+#include <ccc/std/vec.cch>
+
+#ifndef CC_VEC_CCSLICE_DEFINED
+#define CC_VEC_CCSLICE_DEFINED 1
+#ifdef CC_PARSER_MODE
+typedef __CCVecGeneric Vec_CCSlice;
+#define Vec_CCSlice_init(a, c) __cc_vec_generic_init((void*)(a))
+#define Vec_CCSlice_push(v, x) __cc_vec_generic_push((v), (x))
+#define Vec_CCSlice_len(v) __cc_vec_generic_len((v))
+#else
+CC_VEC_DECL_ARENA(CCSlice, Vec_CCSlice)
+#endif
+#endif
+
+typedef Vec_CCSlice CCCliPositionals;
+
+typedef struct CCCli {
+    int argc;
+    char** argv;
+    int index;
+    bool stop_options;
+    CCSlice current;
+} CCCli;
+
+typedef struct CCCliNames {
+    const char* items[5];
+    size_t len;
+} CCCliNames;
+
+typedef enum {
+    CC_CLI_SPEC_META = 1,
+    CC_CLI_SPEC_FLAG,
+    CC_CLI_SPEC_ACTION,
+    CC_CLI_SPEC_SET_INT,
+    CC_CLI_SPEC_INC_INT,
+    CC_CLI_SPEC_BIT_SET_INT,
+    CC_CLI_SPEC_BIT_CLEAR_INT,
+    CC_CLI_SPEC_I64,
+    CC_CLI_SPEC_STRING,
+    CC_CLI_SPEC_POSITIONALS,
+} CCCliSpecKind;
+
+typedef void (*CCCliActionFn)(void* out);
+
+typedef struct CCCliSpec {
+    CCCliSpecKind kind;
+    void* out;
+    const char* help;
+    const char* usage_name;
+    CCCliNames aliases;
+    CCCliActionFn action;
+    int mutate_int;
+    bool default_flag;
+    int64_t default_i64;
+    const char* default_string;
+} CCCliSpec;
+
+typedef struct CCCliParse {
+    bool ok;
+    bool help;
+    int exit_code;
+} CCCliParse;
+
+#ifdef CC_PARSER_MODE
+static CCCliNames cc_cli_names1();
+static CCCliNames cc_cli_names2();
+static CCCliNames cc_cli_names3();
+static CCCliNames cc_cli_names4();
+static CCCliNames cc_cli_names5();
+static void cc_cli_meta_init();
+static void cc_cli_flag_init();
+static void cc_cli_action_init();
+static void cc_cli_set_int_init();
+static void cc_cli_inc_int_init();
+static void cc_cli_bit_set_init();
+static void cc_cli_bit_clear_init();
+static void cc_cli_i64_init();
+static void cc_cli_string_init();
+static void cc_cli_positional_many_init();
+static bool cc_cli_parse_into_specs();
+#endif
+
+static inline CCCli cc_cli_new(int argc, char** argv) {
+    CCCli cli = {0};
+    cli.argc = argc;
+    cli.argv = argv;
+    cli.index = 1;
+    return cli;
+}
+
+static inline CCCli cc_cli(int argc, char** argv) {
+    return cc_cli_new(argc, argv);
+}
+
+static inline const char* cc_cli_prog(const CCCli* cli) {
+    if (!cli || !cli->argv || cli->argc <= 0 || !cli->argv[0]) return "";
+    return cli->argv[0];
+}
+
+static inline CCSlice cc_cli_prog_slice(const CCCli* cli) {
+    const char* prog = cc_cli_prog(cli);
+    return cc_slice_from_buffer((void*)prog, strlen(prog));
+}
+
+static inline CCSlice cc_cli_arg(const CCCli* cli) {
+    return cli ? cli->current : cc_slice_empty();
+}
+
+static inline bool cc_cli_next(CCCli* cli) {
+    if (!cli || !cli->argv) return false;
+
+    while (cli->index < cli->argc) {
+        const char* arg = cli->argv[cli->index++];
+        CCSlice current;
+        if (!arg) continue;
+        current = cc_slice_from_buffer((void*)arg, strlen(arg));
+        if (!cli->stop_options && cc_slice_eq_cstr(current, "--")) {
+            cli->stop_options = true;
+            continue;
+        }
+        cli->current = current;
+        return true;
+    }
+
+    cli->current = cc_slice_empty();
+    return false;
+}
+
+static inline bool cc_cli_is_dash(const CCCli* cli) {
+    return cli && cc_slice_eq_cstr(cli->current, "-");
+}
+
+static inline bool cc_cli_is_positional(const CCCli* cli) {
+    if (!cli) return false;
+    if (cli->stop_options) return true;
+    if (cc_cli_is_dash(cli)) return true;
+    return !(cli->current.len > 0 && ((const char*)cli->current.ptr)[0] == '-');
+}
+
+static inline CCCliNames cc_cli_names1(const char* a) {
+    CCCliNames names = {0};
+    names.items[0] = a;
+    names.len = a ? 1 : 0;
+    return names;
+}
+
+static inline CCCliNames cc_cli_names2(const char* a, const char* b) {
+    CCCliNames names = cc_cli_names1(a);
+    if (b) names.items[names.len++] = b;
+    return names;
+}
+
+static inline CCCliNames cc_cli_names3(const char* a, const char* b, const char* c) {
+    CCCliNames names = cc_cli_names2(a, b);
+    if (c) names.items[names.len++] = c;
+    return names;
+}
+
+static inline CCCliNames cc_cli_names4(const char* a, const char* b, const char* c, const char* d) {
+    CCCliNames names = cc_cli_names3(a, b, c);
+    if (d) names.items[names.len++] = d;
+    return names;
+}
+
+static inline CCCliNames cc_cli_names5(const char* a, const char* b, const char* c, const char* d, const char* e) {
+    CCCliNames names = cc_cli_names4(a, b, c, d);
+    if (e) names.items[names.len++] = e;
+    return names;
+}
+
+static inline bool cc__cli_alias_eq(CCSlice arg, const char* alias) {
+    return alias && cc_slice_eq_cstr(arg, alias);
+}
+
+static inline bool cc__cli_arg_starts_with_dash(CCSlice arg) {
+    return arg.len > 0 && ((const char*)arg.ptr)[0] == '-';
+}
+
+static inline bool cc__cli_take_value_any(CCCli* cli, CCCliNames aliases, CCOptional_CCSlice* out) {
+    CCSlice current;
+    size_t i;
+    if (out) *out = cc_none_CCOptional_CCSlice();
+    if (!cli) return false;
+
+    current = cli->current;
+    for (i = 0; i < aliases.len; i++) {
+        const char* alias = aliases.items[i];
+        size_t alias_len = strlen(alias);
+        if (cc__cli_alias_eq(current, alias)) {
+            if (cli->index < cli->argc && cli->argv && cli->argv[cli->index]) {
+                CCSlice value = cc_slice_from_buffer((void*)cli->argv[cli->index], strlen(cli->argv[cli->index]));
+                cli->index++;
+                if (out) *out = cc_some_CCOptional_CCSlice(value);
+            }
+            return true;
+        }
+        if (alias_len == 2 && alias[0] == '-' && alias[1] != '-'
+            && current.len > alias_len
+            && cc_slice_starts_with(current, cc_slice_from_buffer((void*)alias, alias_len))) {
+            if (out) *out = cc_some_CCOptional_CCSlice(cc_slice_sub(current, alias_len, current.len));
+            return true;
+        }
+        if (alias_len > 2 && alias[0] == '-' && alias[1] == '-'
+            && current.len > alias_len + 1
+            && cc_slice_starts_with(current, cc_slice_from_buffer((void*)alias, alias_len))
+            && ((const char*)current.ptr)[alias_len] == '=') {
+            if (out) *out = cc_some_CCOptional_CCSlice(cc_slice_sub(current, alias_len + 1, current.len));
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline bool cc__cli_match_flag_any(CCSlice arg, CCCliNames aliases) {
+    size_t i;
+    for (i = 0; i < aliases.len; i++) {
+        if (cc__cli_alias_eq(arg, aliases.items[i])) return true;
+    }
+    return false;
+}
+
+static inline CCCliPositionals cc_cli_positionals(CCArena* arena) {
+    return Vec_CCSlice_init(arena, 0);
+}
+
+static inline size_t cc_cli_positionals_len(const CCCliPositionals* items) {
+    return items ? items->len : 0;
+}
+
+static inline CCSlice cc_cli_positionals_get(const CCCliPositionals* items, size_t idx) {
+    if (!items || idx >= items->len) return cc_slice_empty();
+    return ((CCSlice*)items->data)[idx];
+}
+
+static inline void cc__cli_print_default(FILE* out, const CCCliSpec* spec) {
+    if (!out || !spec) return;
+    switch (spec->kind) {
+    case CC_CLI_SPEC_FLAG:
+        if (spec->default_flag) fprintf(out, " [default: true]");
+        break;
+    case CC_CLI_SPEC_I64:
+        fprintf(out, " [default: %lld]", (long long)spec->default_i64);
+        break;
+    case CC_CLI_SPEC_STRING:
+        if (spec->default_string) fprintf(out, " [default: %s]", spec->default_string);
+        break;
+    default:
+        break;
+    }
+}
+
+static inline void cc_cli_print_help_specs(FILE* out,
+                                           int argc,
+                                           char** argv,
+                                           const CCCliSpec* specs,
+                                           size_t spec_count) {
+    const char* prog = (argc > 0 && argv && argv[0]) ? argv[0] : "program";
+    const char* usage = "[options]";
+    const char* description = NULL;
+    size_t i;
+
+    if (!out || !specs) return;
+    for (i = 0; i < spec_count; i++) {
+        if (specs[i].kind != CC_CLI_SPEC_META) continue;
+        if (specs[i].usage_name) usage = specs[i].usage_name;
+        if (specs[i].help) description = specs[i].help;
+        break;
+    }
+
+    fprintf(out, "Usage: %s %s\n", prog, usage);
+    if (description && description[0]) fprintf(out, "\n%s\n", description);
+    fprintf(out, "\nOptions:\n");
+
+    for (i = 0; i < spec_count; i++) {
+        size_t j;
+        const CCCliSpec* spec = &specs[i];
+        if (spec->kind == CC_CLI_SPEC_META || spec->kind == CC_CLI_SPEC_POSITIONALS) continue;
+
+        fprintf(out, "  ");
+        for (j = 0; j < spec->aliases.len; j++) {
+            if (j > 0) fprintf(out, ", ");
+            fprintf(out, "%s", spec->aliases.items[j]);
+        }
+        if (spec->kind == CC_CLI_SPEC_I64) fprintf(out, " <int>");
+        if (spec->kind == CC_CLI_SPEC_STRING) fprintf(out, " <string>");
+        if (spec->help && spec->help[0]) fprintf(out, "  %s", spec->help);
+        cc__cli_print_default(out, spec);
+        fprintf(out, "\n");
+    }
+
+    fprintf(out, "  -h, --help  Show this help\n");
+}
+
+static inline CCCliParse cc_cli_parse_specs(int argc,
+                                            char** argv,
+                                            CCCliSpec* specs,
+                                            size_t spec_count) {
+    CCCliParse parse = { .ok = true, .help = false, .exit_code = 0 };
+    CCCli cli = cc_cli(argc, argv);
+    CCCliSpec* positional_spec = NULL;
+    size_t i;
+
+    if (!specs) return parse;
+
+    for (i = 0; i < spec_count; i++) {
+        CCCliSpec* spec = &specs[i];
+        switch (spec->kind) {
+        case CC_CLI_SPEC_FLAG:
+            if (spec->out) *(bool*)spec->out = spec->default_flag;
+            break;
+        case CC_CLI_SPEC_I64:
+            if (spec->out) *(int64_t*)spec->out = spec->default_i64;
+            break;
+        case CC_CLI_SPEC_STRING:
+            if (spec->out) *(const char**)spec->out = spec->default_string;
+            break;
+        case CC_CLI_SPEC_POSITIONALS:
+            positional_spec = spec;
+            break;
+        default:
+            break;
+        }
+    }
+
+    while (cc_cli_next(&cli)) {
+        CCSlice arg = cc_cli_arg(&cli);
+        bool consumed = false;
+
+        if (cc_slice_eq_cstr(arg, "-h") || cc_slice_eq_cstr(arg, "--help")) {
+            cc_cli_print_help_specs(stdout, argc, argv, specs, spec_count);
+            parse.help = true;
+            parse.exit_code = 0;
+            return parse;
+        }
+
+        for (i = 0; i < spec_count; i++) {
+            CCOptional_CCSlice value = cc_none_CCOptional_CCSlice();
+            CCCliSpec* spec = &specs[i];
+            if (spec->kind == CC_CLI_SPEC_META || spec->kind == CC_CLI_SPEC_POSITIONALS) continue;
+
+            if (spec->kind == CC_CLI_SPEC_FLAG
+                || spec->kind == CC_CLI_SPEC_ACTION
+                || spec->kind == CC_CLI_SPEC_SET_INT
+                || spec->kind == CC_CLI_SPEC_INC_INT
+                || spec->kind == CC_CLI_SPEC_BIT_SET_INT
+                || spec->kind == CC_CLI_SPEC_BIT_CLEAR_INT) {
+                if (cc__cli_match_flag_any(arg, spec->aliases)) {
+                    if (spec->kind == CC_CLI_SPEC_FLAG) {
+                        if (spec->out) *(bool*)spec->out = true;
+                    } else if (spec->kind == CC_CLI_SPEC_SET_INT) {
+                        if (spec->out) *(int*)spec->out = spec->mutate_int;
+                    } else if (spec->kind == CC_CLI_SPEC_INC_INT) {
+                        if (spec->out) *(int*)spec->out += spec->mutate_int;
+                    } else if (spec->kind == CC_CLI_SPEC_BIT_SET_INT) {
+                        if (spec->out) *(int*)spec->out |= spec->mutate_int;
+                    } else if (spec->kind == CC_CLI_SPEC_BIT_CLEAR_INT) {
+                        if (spec->out) *(int*)spec->out &= ~spec->mutate_int;
+                    } else if (spec->action) {
+                        spec->action(spec->out);
+                    }
+                    consumed = true;
+                    break;
+                }
+                continue;
+            }
+
+            if (!cc__cli_take_value_any(&cli, spec->aliases, &value)) continue;
+            consumed = true;
+
+            if (cc_is_none(value)) {
+                fprintf(stderr, "Missing value for %.*s\n", (int)arg.len, (const char*)arg.ptr);
+                cc_cli_print_help_specs(stderr, argc, argv, specs, spec_count);
+                parse.ok = false;
+                parse.exit_code = 1;
+                return parse;
+            }
+
+            if (spec->kind == CC_CLI_SPEC_I64) {
+                CCResult_int64_t_CC_I64ParseError parsed = cc_slice_parse_i64(cc_unwrap_opt(value), 10);
+                if (cc_is_err(parsed)) {
+                    fprintf(stderr, "Invalid integer for %.*s\n", (int)arg.len, (const char*)arg.ptr);
+                    parse.ok = false;
+                    parse.exit_code = 1;
+                    return parse;
+                }
+                if (spec->out) *(int64_t*)spec->out = cc_unwrap(parsed);
+            } else if (spec->kind == CC_CLI_SPEC_STRING) {
+                if (spec->out) *(const char**)spec->out = (const char*)cc_unwrap_opt(value).ptr;
+            }
+            break;
+        }
+
+        if (consumed) continue;
+
+        if (cc_cli_is_positional(&cli)) {
+            if (!positional_spec || !positional_spec->out || Vec_CCSlice_push((Vec_CCSlice*)positional_spec->out, arg) != 0) {
+                fprintf(stderr, "Unexpected positional: %.*s\n", (int)arg.len, (const char*)arg.ptr);
+                parse.ok = false;
+                parse.exit_code = 1;
+                return parse;
+            }
+            continue;
+        }
+
+        if (cc__cli_arg_starts_with_dash(arg)) {
+            fprintf(stderr, "Unknown option: %.*s\n", (int)arg.len, (const char*)arg.ptr);
+        } else {
+            fprintf(stderr, "Unexpected argument: %.*s\n", (int)arg.len, (const char*)arg.ptr);
+        }
+        cc_cli_print_help_specs(stderr, argc, argv, specs, spec_count);
+        parse.ok = false;
+        parse.exit_code = 1;
+        return parse;
+    }
+
+    return parse;
+}
+
+static inline void cc_cli_meta_init(CCCliSpec* spec, const char* usage, const char* description) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_META;
+    spec->usage_name = usage;
+    spec->help = description;
+}
+
+static inline void cc_cli_flag_init(CCCliSpec* spec, bool* out, bool default_value, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_FLAG;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->default_flag = default_value;
+}
+
+static inline void cc_cli_action_init(CCCliSpec* spec, void* out, CCCliNames aliases, CCCliActionFn action, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_ACTION;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->action = action;
+}
+
+static inline void cc_cli_set_int_init(CCCliSpec* spec, int* out, int value, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_SET_INT;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->mutate_int = value;
+}
+
+static inline void cc_cli_inc_int_init(CCCliSpec* spec, int* out, int delta, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_INC_INT;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->mutate_int = delta;
+}
+
+static inline void cc_cli_bit_set_init(CCCliSpec* spec, int* out, int bits, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_BIT_SET_INT;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->mutate_int = bits;
+}
+
+static inline void cc_cli_bit_clear_init(CCCliSpec* spec, int* out, int bits, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_BIT_CLEAR_INT;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->mutate_int = bits;
+}
+
+static inline void cc_cli_i64_init(CCCliSpec* spec, int64_t* out, int64_t default_value, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_I64;
+    spec->out = out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->default_i64 = default_value;
+}
+
+static inline void cc_cli_string_init(CCCliSpec* spec, const char** out, const char* default_value, CCCliNames aliases, const char* help_text) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_STRING;
+    spec->out = (void*)out;
+    spec->help = help_text;
+    spec->aliases = aliases;
+    spec->default_string = default_value;
+}
+
+static inline void cc_cli_positional_many_init(CCCliSpec* spec, CCCliPositionals* out, const char* name) {
+    if (!spec) return;
+    memset(spec, 0, sizeof(*spec));
+    spec->kind = CC_CLI_SPEC_POSITIONALS;
+    spec->out = out;
+    spec->usage_name = name;
+}
+
+#define CC__CLI_NAMES_PICK(_1,_2,_3,_4,_5,NAME,...) NAME
+#define cc_cli_aliases(...) CC__CLI_NAMES_PICK(__VA_ARGS__, cc_cli_names5, cc_cli_names4, cc_cli_names3, cc_cli_names2, cc_cli_names1)(__VA_ARGS__)
+#define cc_cli_spec_count(specs) (sizeof(specs) / sizeof((specs)[0]))
+#define cc_cli_meta(spec_ptr, usage, description) cc_cli_meta_init((spec_ptr), (usage), (description))
+#define cc_cli_flag(spec_ptr, out, default_value, aliases, help_text) cc_cli_flag_init((spec_ptr), (out), (default_value), (aliases), (help_text))
+#define cc_cli_action(spec_ptr, out, aliases, action, help_text) cc_cli_action_init((spec_ptr), (out), (aliases), (action), (help_text))
+#define cc_cli_set_int(spec_ptr, out, value, aliases, help_text) cc_cli_set_int_init((spec_ptr), (out), (value), (aliases), (help_text))
+#define cc_cli_inc_int(spec_ptr, out, delta, aliases, help_text) cc_cli_inc_int_init((spec_ptr), (out), (delta), (aliases), (help_text))
+#define cc_cli_bit_set(spec_ptr, out, bits, aliases, help_text) cc_cli_bit_set_init((spec_ptr), (out), (bits), (aliases), (help_text))
+#define cc_cli_bit_clear(spec_ptr, out, bits, aliases, help_text) cc_cli_bit_clear_init((spec_ptr), (out), (bits), (aliases), (help_text))
+#define cc_cli_i64(spec_ptr, out, default_value, aliases, help_text) cc_cli_i64_init((spec_ptr), (out), (default_value), (aliases), (help_text))
+#define cc_cli_string(spec_ptr, out, default_value, aliases, help_text) cc_cli_string_init((spec_ptr), (out), (default_value), (aliases), (help_text))
+#define cc_cli_positional_many(spec_ptr, out, name) cc_cli_positional_many_init((spec_ptr), (out), (name))
+#define cc_cli_print_help(out, argc, argv, specs) cc_cli_print_help_specs((out), (argc), (argv), (specs), cc_cli_spec_count(specs))
+
+#define cc_cli_parse(argc, argv, ...) \
+    cc_cli_parse_specs((argc), (argv), \
+        (CCCliSpec[]){ __VA_ARGS__ }, \
+        sizeof((CCCliSpec[]){ __VA_ARGS__ }) / sizeof(CCCliSpec))
+
+static inline bool cc_cli_parse_into_specs(int* exit_code,
+                                           int argc,
+                                           char** argv,
+                                           CCCliSpec* specs,
+                                           size_t spec_count) {
+    CCCliParse parse = cc_cli_parse_specs(argc, argv, specs, spec_count);
+    if (parse.ok && !parse.help) return true;
+    if (exit_code) *exit_code = parse.exit_code;
+    return false;
+}
+
+#define cc_cli_parse_into(exit_code, argc, argv, specs) \
+    cc_cli_parse_into_specs((exit_code), (argc), (argv), (specs), cc_cli_spec_count(specs))
+
+#define cc_cli_parse_or_return(argc, argv, ...) \
+    do { \
+        int __cc_cli_exit_code = 0; \
+        if (!cc_cli_parse_into_specs(&__cc_cli_exit_code, (argc), (argv), \
+            (CCCliSpec[]){ __VA_ARGS__ }, \
+            sizeof((CCCliSpec[]){ __VA_ARGS__ }) / sizeof(CCCliSpec))) { \
+            return __cc_cli_exit_code; \
+        } \
+    } while (0)
+
+#endif /* CC_STD_CLI_H */

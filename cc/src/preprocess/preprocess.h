@@ -45,6 +45,15 @@ char* cc_preprocess_comptime_source(const char* input_path);
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path);
+char* cc_rewrite_system_cch_includes_to_lowered_headers(const char* src,
+                                                        size_t input_len);
+
+// Shared header-safe type-syntax lowering used by both preprocessing and
+// `.cch -> .h` lowering. Rewrites syntax that must not leak into plain C
+// headers, such as slice, typed channel handles, and generic container types.
+char* cc_rewrite_header_type_syntax_shared(const char* src,
+                                           size_t input_len,
+                                           const char* input_path);
 
 // Simple preprocessing for cccn: only adds #line directive, no CC syntax rewrites.
 // All CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.

@@ -305,6 +305,13 @@ typedef __CCVecGeneric Vec_intptr;
  */
 #define CC_VEC_DECL_ARENA(T, Name) CC_VEC_DECL_ARENA_FULL(T, Name, CCOptional_##T)
 
+#ifndef CC_PARSER_MODE
+#ifndef CC_VEC_SIZE_T_DEFINED
+#define CC_VEC_SIZE_T_DEFINED 1
+CC_VEC_DECL_ARENA(size_t, Vec_size_t)
+#endif
+#endif
+
 /* Iteration helper */
 #define CC_VEC_FOREACH(vptr, idx_var, item_var)                                   \
     for (size_t idx_var = 0; (vptr) && idx_var < (vptr)->len && (((item_var) = (vptr)->data[idx_var]), 1); ++idx_var)

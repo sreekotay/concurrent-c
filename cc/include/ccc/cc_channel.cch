@@ -459,7 +459,8 @@ static inline bool cc__channel_lower_c_eq(CCSlice s, const char *cstr) {
     return cstr && s.len == len && memcmp(s.ptr, cstr, len) == 0;
 }
 
-static inline CCSlice cc_channel_tx_lower_c(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
+static inline CCSlice cc_channel_tx_lower_c(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
+    (void)recv_type;
     (void)argv;
     if (cc__channel_lower_c_eq(method, "send")) {
         if (cc__channel_lower_c_eq(mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
@@ -467,12 +468,14 @@ static inline CCSlice cc_channel_tx_lower_c(CCSlice method, CCSlice mode, CCSlic
     }
     if (cc__channel_lower_c_eq(method, "try_send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send");
     if (cc__channel_lower_c_eq(method, "send_take")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_take");
+    if (cc__channel_lower_c_eq(method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
     if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
     if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();
 }
 
-static inline CCSlice cc_channel_rx_lower_c(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
+static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
+    (void)recv_type;
     (void)argv;
     if (cc__channel_lower_c_eq(method, "recv")) {
         if (cc__channel_lower_c_eq(mode, "await")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_recv_task");

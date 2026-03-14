@@ -25,7 +25,7 @@ typedef struct {
 #ifdef CC_PARSER_MODE
 typedef CCSlice (*CCTypeUfcsHandler)();
 #else
-typedef CCSlice (*CCTypeUfcsHandler)(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena);
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena);
 #endif
 
 typedef struct {

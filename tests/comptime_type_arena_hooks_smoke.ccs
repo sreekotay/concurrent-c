@@ -12,7 +12,8 @@ static size_t arena_avail(CCArena* arena) {
         .create1 = cc_type_create_call("cc_arena_create"),
         .create2 = cc_type_create_call("cc_arena_create_init"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
-        .ufcs = (method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arena) => {
+            (void)recv_type;
             (void)mode;
             (void)argv;
             (void)arena;

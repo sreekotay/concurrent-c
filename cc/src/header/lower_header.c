@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/preprocess.h"
 #include "util/text.h"
 
 /* Built-in optional types that are already declared in cc_optional.cch */
@@ -28,31 +29,6 @@ static int cc__is_builtin_optional(const char* mangled) {
         if (strcmp(mangled, cc__builtin_optional_types[i]) == 0) return 1;
     }
     return 0;
-}
-
-/* Short name to CC-prefixed name mappings for stdlib types */
-static const struct { const char* short_name; const char* cc_name; } cc__type_aliases[] = {
-    { "IoError",     "CCIoError" },
-    { "IoErrorKind", "CCIoErrorKind" },
-    { "Error",       "CCError" },
-    { "ErrorKind",   "CCErrorKind" },
-    { "NetError",    "CCNetError" },
-    { "Arena",       "CCArena" },
-    { "File",        "CCFile" },
-    { "String",      "CCString" },
-    { "Slice",       "CCSlice" },
-    { NULL, NULL }
-};
-
-/* Normalize a mangled type name: map short aliases to CC-prefixed names */
-static void cc__normalize_type_name(char* name) {
-    if (!name || !name[0]) return;
-    for (int i = 0; cc__type_aliases[i].short_name; i++) {
-        if (strcmp(name, cc__type_aliases[i].short_name) == 0) {
-            strcpy(name, cc__type_aliases[i].cc_name);
-            return;
-        }
-    }
 }
 
 /* Mangle a type name for use in CCResult_T_E or CCOptional_T */
@@ -325,96 +301,6 @@ static char* cc__lower_optional_types(const char* src, size_t n, CCLowerState* s
     return out;
 }
 
-/*
- * Remove explicit CC_DECL_RESULT_SPEC calls (they'll be auto-generated).
- * This handles the case where existing .cch files have manual declarations.
- */
-static char* cc__remove_explicit_result_decls(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    size_t i = 0, last_emit = 0;
-    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
-    
-    while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; continue; }
-        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        
-        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
-        /* Look for CC_DECL_RESULT_SPEC( pattern that's part of a guarded block */
-        if (c == '#' && i + 7 < n) {
-            /* Check for #ifndef CCResult_..._DEFINED pattern */
-            size_t j = i + 1;
-            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-            
-            if (j + 6 < n && strncmp(src + j, "ifndef", 6) == 0) {
-                j += 6;
-                while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-                
-                if (j + 9 < n && strncmp(src + j, "CCResult_", 9) == 0) {
-                    /* Find _DEFINED */
-                    size_t guard_start = i;
-                    while (j < n && src[j] != '\n') j++;
-                    
-                    /* Scan for matching #endif */
-                    int depth = 1;
-                    size_t k = j;
-                    while (k < n && depth > 0) {
-                        if (src[k] == '#') {
-                            size_t m = k + 1;
-                            while (m < n && (src[m] == ' ' || src[m] == '\t')) m++;
-                            if (m + 5 < n && strncmp(src + m, "endif", 5) == 0 &&
-                                (m + 5 >= n || !cc_is_ident_char(src[m + 5]))) {
-                                depth--;
-                                if (depth == 0) {
-                                    /* Found the end - skip to end of line */
-                                    k = m + 5;
-                                    while (k < n && src[k] != '\n') k++;
-                                    if (k < n) k++;  /* Include newline */
-                                    break;
-                                }
-                            } else if (m + 2 < n && strncmp(src + m, "if", 2) == 0 &&
-                                       (m + 2 >= n || !cc_is_ident_char(src[m + 2]))) {
-                                depth++;
-                            }
-                        }
-                        k++;
-                    }
-                    
-                    if (depth == 0) {
-                        /* Check if this block contains CC_DECL_RESULT_SPEC */
-                        const char* block_start = src + guard_start;
-                        size_t block_len = k - guard_start;
-                        if (memmem(block_start, block_len, "CC_DECL_RESULT_SPEC", 19)) {
-                            /* Remove this entire guarded block */
-                            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, guard_start - last_emit);
-                            last_emit = k;
-                            i = k;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        
-        i++;
-    }
-    
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
 static char* cc__strip_comptime_blocks_header(const char* src, size_t n) {
     char* out = NULL;
     size_t i = 0;
@@ -513,10 +399,11 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Current processing buffer */
     const char* cur = input;
     size_t cur_len = input_len;
-    char* buf2 = NULL;
-    char* buf3 = NULL;
     char* buf0 = NULL;
     char* buf_inc = NULL;
+    char* buf_types = NULL;
+    char* buf2 = NULL;
+    char* buf3 = NULL;
     
     /* Pass 0: Strip raw @comptime blocks so lowered headers are valid C. */
     buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
@@ -530,6 +417,15 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     if (buf_inc) {
         cur = buf_inc;
         cur_len = strlen(buf_inc);
+    }
+
+    /* Pass 0c: Share header-safe type-syntax lowering with preprocess.c so
+       constructs like `char[:]` and generic container types lower the same
+       way they do in the main compiler pipeline. */
+    buf_types = cc_rewrite_header_type_syntax_shared(cur, cur_len, input_path);
+    if (buf_types) {
+        cur = buf_types;
+        cur_len = strlen(buf_types);
     }
 
     /* Pass 1: Rewrite T!>(E) -> CCResult_T_E */
@@ -592,6 +488,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Cleanup */
     free(buf0);
     free(buf_inc);
+    free(buf_types);
     free(buf2);
     free(buf3);
     cc_result_spec_table_free(&state.result_specs);

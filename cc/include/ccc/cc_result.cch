@@ -307,10 +307,9 @@ typedef struct __CCResultGeneric {
         return __CCResultGeneric_unwrap_err(r);                        \
     }
 
-/* THE KEY MACRO: In parser mode, all result types resolve to generic.
-   Usage: __CC_RESULT(int, CCIoError) expands to __CCResultGeneric
-   Codegen rewrites this to CCResult_int_CCIoError */
-#define __CC_RESULT(T, E) __CCResultGeneric
+/* In parser mode, preserve the concrete result name so headers that provide
+   typed parser-mode declarations (for struct payloads) keep their value shape. */
+#define __CC_RESULT(T, E) CCResult_##T##_##E
 
 /* Generic ok/err constructors - parser mode doesn't actually run,
    so these just return a zeroed struct for type checking. */
@@ -384,6 +383,11 @@ typedef __CCResultGeneric CCResult_size_t_CCError;
 typedef __CCResultGeneric CCResult_voidptr_CCError;
 typedef __CCResultGeneric CCResult_charptr_CCError;
 typedef __CCResultGeneric CCResult_void_CCError;
+typedef __CCResultGeneric CCResult_int_CCIoError;
+typedef __CCResultGeneric CCResult_bool_CCIoError;
+typedef __CCResultGeneric CCResult_size_t_CCIoError;
+typedef __CCResultGeneric CCResult_CCDirIterptr_CCIoError;
+typedef __CCResultGeneric CCResult_CCDirEntry_CCIoError;
 #define cc_ok_CCResult_int_CCError(v) __cc_result_generic_ok()
 #define cc_err_CCResult_int_CCError(e) __cc_result_generic_err()
 #define cc_ok_CCResult_bool_CCError(v) __cc_result_generic_ok()

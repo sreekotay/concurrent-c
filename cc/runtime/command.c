@@ -73,6 +73,69 @@ CCCommand *cc_command_arg_i64(CCCommand *cmd, int64_t value) {
     return cc_command_arg_slice(cmd, cc_slice_from_buffer(buf, (size_t)n));
 }
 
+CCCommand *cc_command_stdin_pipe(CCCommand *cmd) {
+    if (!cmd) return NULL;
+    cmd->pipe_stdin = true;
+    cmd->stdin_data = cc_slice_empty();
+    return cmd;
+}
+
+CCCommand *cc_command_stdin_slice(CCCommand *cmd, CCSlice input) {
+    if (!cmd) return NULL;
+    cmd->pipe_stdin = true;
+    cmd->stdin_data = input;
+    return cmd;
+}
+
+CCCommand *cc_command_stdin(CCCommand *cmd, const char *input) {
+    if (!cmd) return NULL;
+    if (!input) return cc_command_stdin_pipe(cmd);
+    return cc_command_stdin_slice(cmd, cc_slice_from_buffer((void*)input, strlen(input)));
+}
+
+CCCommand *cc_command_stdout_capture(CCCommand *cmd) {
+    if (!cmd) return NULL;
+    cmd->pipe_stdout = true;
+    return cmd;
+}
+
+CCCommand *cc_command_stderr_capture(CCCommand *cmd) {
+    if (!cmd) return NULL;
+    cmd->pipe_stderr = true;
+    cmd->merge_stderr = false;
+    return cmd;
+}
+
+CCCommand *cc_command_stderr_to_stdout(CCCommand *cmd) {
+    if (!cmd) return NULL;
+    cmd->pipe_stdout = true;
+    cmd->pipe_stderr = false;
+    cmd->merge_stderr = true;
+    return cmd;
+}
+
+CCCommand *cc_command_inherit_stdio(CCCommand *cmd) {
+    if (!cmd) return NULL;
+    cmd->pipe_stdin = false;
+    cmd->stdin_data = cc_slice_empty();
+    cmd->pipe_stdout = false;
+    cmd->pipe_stderr = false;
+    cmd->merge_stderr = false;
+    return cmd;
+}
+
+CCCommand *cc_command_cwd(CCCommand *cmd, const char *cwd) {
+    if (!cmd) return NULL;
+    cmd->cwd_path = cwd;
+    return cmd;
+}
+
+CCCommand *cc_command_env(CCCommand *cmd, const char **env) {
+    if (!cmd) return NULL;
+    cmd->env = env;
+    return cmd;
+}
+
 const char **cc_command_argv(CCCommand *cmd) {
     const char **argv;
     size_t argc;
@@ -95,10 +158,16 @@ CCProcessConfig cc_command_process_config(CCCommand *cmd) {
     CCProcessConfig cfg = {0};
     cfg.program = cc_command_program(cmd);
     cfg.args = cc_command_argv(cmd);
+    cfg.env = cmd ? cmd->env : NULL;
+    cfg.cwd = cmd ? cmd->cwd_path : NULL;
+    cfg.pipe_stdin = cmd ? cmd->pipe_stdin : false;
+    cfg.pipe_stdout = cmd ? cmd->pipe_stdout : false;
+    cfg.pipe_stderr = cmd ? cmd->pipe_stderr : false;
+    cfg.merge_stderr = cmd ? cmd->merge_stderr : false;
     return cfg;
 }
 
-CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *cmd) {
+__CC_RESULT(CCProcess, CCIoError) cc_command_spawn(CCCommand *cmd) {
     CCProcessConfig cfg = cc_command_process_config(cmd);
     if (!cfg.program || !cfg.args) {
         return cc_err_CCResult_CCProcess_CCIoError(cc_io_from_errno(EINVAL));
@@ -106,19 +175,38 @@ CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *cmd) {
     return cc_process_spawn(&cfg);
 }
 
-CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *cmd, CCArena *arena) {
+__CC_RESULT(CCProcessOutput, CCIoError) cc_command_run(CCCommand *cmd, CCArena *arena) {
+    return cc_command_output(cmd, arena);
+}
+
+__CC_RESULT(CCProcessOutput, CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input) {
     CCProcessConfig cfg = cc_command_process_config(cmd);
+    CCSlice stdin_data = input;
     if (!arena || !cfg.program || !cfg.args) {
         return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
     }
-    return cc_process_run(arena, cfg.program, cfg.args);
+
+    if ((!stdin_data.ptr && stdin_data.len == 0) && cmd) {
+        stdin_data = cmd->stdin_data;
+    }
+    if (stdin_data.ptr || stdin_data.len > 0) {
+        cfg.pipe_stdin = true;
+    }
+
+    if (!cfg.pipe_stdout && !cfg.pipe_stderr && !cfg.merge_stderr) {
+        cfg.pipe_stdout = true;
+        cfg.pipe_stderr = true;
+    }
+
+    return cc_process_run_with_input(arena, &cfg, stdin_data);
 }
 
-CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *arena) {
-    return cc_command_run(cmd, arena);
+__CC_RESULT(CCProcessOutput, CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena) {
+    CCSlice empty = {0};
+    return cc_command_output_with_input(cmd, arena, empty);
 }
 
-CCResult_int_CCIoError cc_command_status(CCCommand *cmd) {
+__CC_RESULT(int, CCIoError) cc_command_status(CCCommand *cmd) {
     CCProcessConfig cfg = cc_command_process_config(cmd);
     CCResult_CCProcess_CCIoError spawn_res;
     CCResult_CCProcessStatus_CCIoError wait_res;
@@ -129,12 +217,30 @@ CCResult_int_CCIoError cc_command_status(CCCommand *cmd) {
         return cc_err_CCResult_int_CCIoError(cc_io_from_errno(EINVAL));
     }
 
+    cfg.pipe_stdout = false;
+    cfg.pipe_stderr = false;
+    cfg.merge_stderr = false;
+
     spawn_res = cc_process_spawn(&cfg);
     if (cc_is_err(spawn_res)) {
         return cc_err_CCResult_int_CCIoError(cc_unwrap_err(spawn_res));
     }
 
     proc = cc_unwrap(spawn_res);
+
+    if (cfg.pipe_stdin) {
+        CCSlice input = cmd ? cmd->stdin_data : cc_slice_empty();
+        while (input.len > 0) {
+            CCResult_size_t_CCIoError write_res = cc_process_write(&proc, input);
+            if (cc_is_err(write_res)) {
+                cc_process_close_stdin(&proc);
+                return cc_err_CCResult_int_CCIoError(cc_unwrap_err(write_res));
+            }
+            input = cc_slice_sub(input, cc_unwrap(write_res), input.len);
+        }
+        cc_process_close_stdin(&proc);
+    }
+
     wait_res = cc_process_wait(&proc);
     if (cc_is_err(wait_res)) {
         return cc_err_CCResult_int_CCIoError(cc_unwrap_err(wait_res));

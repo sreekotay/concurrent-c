@@ -96,6 +96,38 @@ static void cc_skip_closure_body(int is_block) {
 
 static void cc_parse_closure_body_ex(int has_typed_params) {
     int saved_ncw = nocode_wanted;
+    int saved_last_member_tok = 0;
+    int saved_last_member_flags = 0;
+    int saved_last_member_line = 0;
+    int saved_last_member_col = 0;
+    int saved_ufcs_active = 0;
+    int saved_ufcs_seq_line = 0;
+    int saved_ufcs_seq_count = 0;
+    char saved_last_recv_type[128] = {0};
+
+    if (tcc_state) {
+        saved_last_member_tok = tcc_state->cc_last_member_tok;
+        saved_last_member_flags = tcc_state->cc_last_member_flags;
+        saved_last_member_line = tcc_state->cc_last_member_line;
+        saved_last_member_col = tcc_state->cc_last_member_col;
+        saved_ufcs_active = tcc_state->cc_ufcs_active;
+        saved_ufcs_seq_line = tcc_state->cc_ufcs_seq_line;
+        saved_ufcs_seq_count = tcc_state->cc_ufcs_seq_count;
+        memcpy(saved_last_recv_type, tcc_state->cc_last_recv_type, sizeof(saved_last_recv_type));
+
+        /* UFCS state is expression-scoped. A closure body parsed as an argument must
+           not inherit the surrounding call's receiver, and inner UFCS must not leak
+           back out to the enclosing call after the closure literal finishes. */
+        tcc_state->cc_last_member_tok = 0;
+        tcc_state->cc_last_member_flags = 0;
+        tcc_state->cc_last_member_line = 0;
+        tcc_state->cc_last_member_col = 0;
+        tcc_state->cc_last_recv_type[0] = '\0';
+        tcc_state->cc_ufcs_active = 0;
+        tcc_state->cc_ufcs_seq_line = 0;
+        tcc_state->cc_ufcs_seq_count = 0;
+    }
+
     ++nocode_wanted;
     if (tcc_state) tcc_state->cc_in_closure_body++;
     
@@ -144,6 +176,16 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
     
     if (tcc_state) tcc_state->cc_in_closure_body--;
     nocode_wanted = saved_ncw;
+    if (tcc_state) {
+        tcc_state->cc_last_member_tok = saved_last_member_tok;
+        tcc_state->cc_last_member_flags = saved_last_member_flags;
+        tcc_state->cc_last_member_line = saved_last_member_line;
+        tcc_state->cc_last_member_col = saved_last_member_col;
+        memcpy(tcc_state->cc_last_recv_type, saved_last_recv_type, sizeof(saved_last_recv_type));
+        tcc_state->cc_ufcs_active = saved_ufcs_active;
+        tcc_state->cc_ufcs_seq_line = saved_ufcs_seq_line;
+        tcc_state->cc_ufcs_seq_count = saved_ufcs_seq_count;
+    }
 }
 
 /* Backward-compatible wrapper for closures without typed params */
@@ -183,7 +225,6 @@ static int cc_try_cc_closure(void) {
     int start_col = (tok == '@') ? tok_col : tcc_state->cc_paren_start_col;
     
     /* Handle @unsafe prefix: @unsafe () => [captures] body */
-    int is_unsafe = 0;
     if (tok == '@') {
         next(); /* consume '@' */
         const char* kw = get_tok_str(tok, NULL);
@@ -191,7 +232,6 @@ static int cc_try_cc_closure(void) {
             tcc_error("unexpected '@' in expression (expected '@unsafe')");
             return 0;
         }
-        is_unsafe = 1;
         next(); /* consume 'unsafe' */
         
         /* Now expect '(' for the closure params */

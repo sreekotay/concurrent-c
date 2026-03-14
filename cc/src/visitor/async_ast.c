@@ -1713,11 +1713,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
             q = type_start;
             const char* var_start = NULL;
             const char* var_end = NULL;
-            const char* prev_start = NULL;
-            const char* prev_end = NULL;
             while (cc__is_ident_start(*q)) {
-                prev_start = var_start;
-                prev_end = var_end;
                 var_start = q;
                 while (cc__is_ident_char(*q)) q++;
                 var_end = q;

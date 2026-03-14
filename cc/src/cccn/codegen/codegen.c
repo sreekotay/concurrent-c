@@ -59,13 +59,6 @@ static void register_typedef_name(const char* name) {
     g_typedef_names.names[g_typedef_names.count++] = strdup(name);
 }
 
-static int is_typedef_for_anon_struct(const char* name) {
-    for (int i = 0; i < g_typedef_names.count; i++) {
-        if (strcmp(g_typedef_names.names[i], name) == 0) return 1;
-    }
-    return 0;
-}
-
 static void clear_typedef_names(void) {
     for (int i = 0; i < g_typedef_names.count; i++) {
         free((void*)g_typedef_names.names[i]);
