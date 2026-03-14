@@ -47,5 +47,20 @@ int cc_symbols_lookup_ufcs_callable(CCSymbolTable* t, const char* pattern, const
 size_t cc_symbols_ufcs_count(CCSymbolTable* t);
 const char* cc_symbols_ufcs_pattern(CCSymbolTable* t, size_t idx);
 
+ /* Exact-type hooks for declaration lifecycle and declarative UFCS lowering. */
+ int cc_symbols_add_type_create_call(CCSymbolTable* t, const char* type_name, int arity, const char* callee);
+ int cc_symbols_lookup_type_create_call(CCSymbolTable* t, const char* type_name, int arity, const char** out_callee);
+ int cc_symbols_set_type_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee);
+ int cc_symbols_lookup_type_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
+ int cc_symbols_add_type_ufcs_value(CCSymbolTable* t, const char* type_name, const char* method, const char* callee);
+ int cc_symbols_lookup_type_ufcs_value(CCSymbolTable* t,
+                                      const char* type_name,
+                                      const char* method,
+                                      const char** out_callee);
+ int cc_symbols_collect_type_registrations(CCSymbolTable* t,
+                                           const char* input_path,
+                                           const char* src,
+                                           size_t n);
+
 #endif // CC_COMPTIME_SYMBOLS_H
 

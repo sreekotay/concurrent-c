@@ -28,7 +28,7 @@ int main(void) {
 
             /* Checkpoints: reclaim temporary allocations without resetting the whole arena. */
             CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
-            char* scratch = arena_alloc(char, arena, 64);
+            char* scratch = cc_arena_alloc_T_count(char, arena, 64);
             if (scratch) {
                 scratch[0] = '\0';
             }

@@ -1,5 +1,6 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_ufcs.cch>
+#include <ccc/cc_type.cch>
 #include <assert.h>
 #include <stdio.h>
 
@@ -30,29 +31,27 @@ static void lambda_toy_bump(LambdaToy* toy) {
     toy->value += 10;
 }
 
-static CCSlice named_toy_ufcs_rewrite(CCSlice method, CCSliceArray argv, CCArena* arena) {
-    CCSlice recv_type = argv.len > 0 ? argv.items[0] : cc_slice_empty();
-    if (recv_type.len == sizeof("NamedToy") - 1 &&
-        memcmp(recv_type.ptr, "NamedToy", recv_type.len) == 0) {
-        return cc_ufcs_concat2(arena,
-            cc_slice_from_buffer("named_toy_", sizeof("named_toy_") - 1),
-            method);
-    }
+static CCSlice named_toy_ufcs_rewrite(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena) {
+    (void)mode;
+    (void)argv;
     return cc_ufcs_concat2(arena,
-        cc_slice_from_buffer("broken_", sizeof("broken_") - 1),
+        cc_slice_from_buffer("named_toy_", sizeof("named_toy_") - 1),
         method);
 }
 
 @comptime {
-    (void)cc_ufcs_register("NamedToy", named_toy_ufcs_rewrite);
-    (void)cc_ufcs_register("LambdaToy",
-        (method, argv, arena) => cc_ufcs_concat2(arena,
-            ((argv.len > 0 &&
-              argv.items[0].len == sizeof("LambdaToy") - 1 &&
-              memcmp(argv.items[0].ptr, "LambdaToy", argv.items[0].len) == 0)
-                 ? cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1)
-                 : cc_slice_from_buffer("broken_", sizeof("broken_") - 1)),
-            method));
+    (void)cc_type_register("NamedToy", (CCTypeHooks){
+        .ufcs = named_toy_ufcs_rewrite,
+    });
+    (void)cc_type_register("LambdaToy", (CCTypeHooks){
+        .ufcs = (method, mode, argv, arena) => {
+            (void)mode;
+            (void)argv;
+            return cc_ufcs_concat2(arena,
+                cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1),
+                method);
+        },
+    });
 }
 
 int main(void) {

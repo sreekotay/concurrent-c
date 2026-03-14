@@ -11,6 +11,7 @@
  */
 
 #include <ccc/std/prelude.cch>
+#include <ccc/std/command.cch>
 #include <unistd.h>
 
 /* Default timeout for stress tests (seconds) */
@@ -29,13 +30,13 @@ static inline CCSlice slice_from_cstr(const char* s) {
 }
 
 static void ensure_log_dir(CCArena* arena) {
-    const char* args[4];
-    int argc = 0;
-    args[argc++] = "mkdir";
-    args[argc++] = "-p";
-    args[argc++] = LOG_DIR;
-    args[argc] = NULL;
-    (void)cc_process_run(arena, "mkdir", args);
+    CCCommand cmd = cc_command(arena, "mkdir");
+    CCResult_int_CCIoError status;
+    cc_command_arg(&cmd, "-p");
+    cc_command_arg(&cmd, LOG_DIR);
+    status = cc_command_status(&cmd);
+    
+    (void)status;
 }
 
 static void write_log(CCArena* arena, const char* path, const char* suffix,
@@ -97,25 +98,16 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         /* Small delay between tests to avoid resource contention */
         usleep(1000);  /* 1ms */
 
-        /* Build args: ccc run [--timeout N] path */
-        const char* args[6];
-        int argc = 0;
-        args[argc++] = "ccc";
-        args[argc++] = "run";
-        
-        char timeout_str[16];
-        if (timeout_sec > 0) {
-            args[argc++] = "--timeout";
-            snprintf(timeout_str, sizeof(timeout_str), "%d", timeout_sec);
-            args[argc++] = timeout_str;
-        }
-        args[argc++] = path;
-        args[argc] = NULL;
-
         /* Use a fresh temp arena for each test to avoid accumulation */
         CCArena test_arena = cc_arena_heap(megabytes(4));
+        CCCommand cmd = cc_command(&test_arena, "ccc");
+        CCResult_CCProcessOutput_CCIoError res;
+        cc_command_arg(&cmd, "run");
+        cc_command_arg_if(&cmd, timeout_sec > 0, "--timeout");
+        cc_command_arg_i32_if(&cmd, timeout_sec > 0, timeout_sec);
+        cc_command_arg(&cmd, path);
         /* Use ccc from PATH */
-        CCResultProcessOutputIoError res = cc_process_run(&test_arena, "ccc", args);
+        res = cc_command_output(&cmd, &test_arena);
 
         if (cc_is_err(res)) {
             CCIoError err = cc_unwrap_err_as(res, CCIoError);

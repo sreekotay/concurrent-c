@@ -1,0 +1,52 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int !>(CCIoError) compute_result(int value) {
+    if (value < 0) return cc_err(cc_io_error(CC_IO_OTHER));
+    return cc_ok(value * 3);
+}
+
+static int io_kind(CCIoError err) {
+    return err.kind;
+}
+
+int main(void) {
+    int !>(CCIoError)[~4 >] tx;
+    int !>(CCIoError)[~4 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    int ok = 1;
+
+    @nursery {
+        @closing(tx) {
+            spawn(() => [tx] {
+                cc_channel_send_task(tx, () => {
+                    int !>(CCIoError) res = compute_result(2);
+                    res;
+                });
+                cc_channel_send_task(tx, () => {
+                    int !>(CCIoError) res = compute_result(-1);
+                    res;
+                });
+            });
+        }
+
+        int !>(CCIoError) result;
+        if (!cc_io_avail(rx.recv(&result)) || result.is_err() || result.value() != 6) {
+            ok = 0;
+        }
+        if (!cc_io_avail(rx.recv(&result)) || !result.is_err() || io_kind(result.error()) != CC_IO_OTHER) {
+            ok = 0;
+        }
+        if (cc_io_avail(rx.recv(&result))) {
+            ok = 0;
+        }
+    }
+
+    cc_chan_free(ch);
+    if (!ok) {
+        printf("channel_send_task_block_result_smoke: FAIL\n");
+        return 1;
+    }
+    printf("channel_send_task_block_result_smoke: PASS\n");
+    return 0;
+}

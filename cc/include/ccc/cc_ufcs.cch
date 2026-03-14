@@ -16,7 +16,7 @@ typedef struct {
 #ifdef CC_PARSER_MODE
 typedef CCSlice (*CCUfcsRewriteFn)();
 #else
-typedef CCSlice (*CCUfcsRewriteFn)(CCSlice method, CCSliceArray argv, CCArena *arena);
+typedef CCSlice (*CCUfcsRewriteFn)(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena);
 #endif
 
 typedef struct {
@@ -63,17 +63,18 @@ static inline CCUfcsRegistration cc_ufcs_register(const char *pattern, CCUfcsRew
 }
 
 #ifdef CC_PARSER_MODE
-static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice method, CCSliceArray argv, CCArena *arena) {
+ static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
     (void)reg;
     (void)method;
+    (void)mode;
     (void)argv;
     (void)arena;
     return cc_slice_empty();
 }
 #else
-static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice method, CCSliceArray argv, CCArena *arena) {
+static inline CCSlice cc_ufcs_apply(CCUfcsRegistration reg, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {
     if (!reg.rewrite) return cc_slice_empty();
-    return reg.rewrite(method, argv, arena);
+    return reg.rewrite(method, mode, argv, arena);
 }
 #endif
 

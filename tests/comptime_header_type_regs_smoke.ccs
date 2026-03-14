@@ -1,0 +1,26 @@
+#include "comptime_header_type_regs_shared.cch"
+
+static int g_destroyed = 0;
+
+int main(void) {
+    {
+        CCArena arena = @create(128) @destroy {
+            g_destroyed += 1;
+        };
+        if (!arena.base) return 1;
+        if (arena.avail() == 0) return 2;
+        if (!cc_arena_alloc_T_count(char, &arena, 16)) return 3;
+    }
+
+    if (g_destroyed != 1) return 4;
+
+    {
+        char backing[64];
+        CCArena arena = @create(backing, sizeof(backing)) @detach;
+        if (!arena.base) return 5;
+        if (arena.avail() != sizeof(backing)) return 6;
+        cc_arena_destroy(&arena);
+    }
+
+    return 0;
+}

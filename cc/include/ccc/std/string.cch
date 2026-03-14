@@ -53,22 +53,6 @@ CC_DECL_RESULT_SPEC(CCResult_uint64_t_CC_U64ParseError, uint64_t, CC_U64ParseErr
 CC_DECL_RESULT_SPEC(CCResult_double_CC_F64ParseError, double, CC_F64ParseError)
 CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
 
-/* Legacy aliases for type names */
-typedef CCResult_int64_t_CC_I64ParseError CCResultI64Parse;
-typedef CCResult_uint64_t_CC_U64ParseError CCResultU64Parse;
-typedef CCResult_double_CC_F64ParseError CCResultF64Parse;
-typedef CCResult_bool_CC_BoolParseError CCResultBoolParse;
-
-/* Legacy aliases for constructors */
-#define cc_ok_CCResultI64Parse cc_ok_CCResult_int64_t_CC_I64ParseError
-#define cc_err_CCResultI64Parse cc_err_CCResult_int64_t_CC_I64ParseError
-#define cc_ok_CCResultU64Parse cc_ok_CCResult_uint64_t_CC_U64ParseError
-#define cc_err_CCResultU64Parse cc_err_CCResult_uint64_t_CC_U64ParseError
-#define cc_ok_CCResultF64Parse cc_ok_CCResult_double_CC_F64ParseError
-#define cc_err_CCResultF64Parse cc_err_CCResult_double_CC_F64ParseError
-#define cc_ok_CCResultBoolParse cc_ok_CCResult_bool_CC_BoolParseError
-#define cc_err_CCResultBoolParse cc_err_CCResult_bool_CC_BoolParseError
-
 // ------------------------- Slice helpers ----------------------------------
 
 #ifndef CC_CCSLICEARRAY_DEFINED
@@ -94,6 +78,7 @@ static CCSlice sub();
 static char at();
 static bool starts_with();
 static bool ends_with();
+static bool eq_cstr();
 /* len, is_empty, eq already return int/bool which matches TCC's implicit decl */
 #endif
 
@@ -381,58 +366,58 @@ static inline CCSlice cc__concat_from_string_ptr(const CCString *str) {
 
 // ------------------------- Parse helpers ----------------------------------
 
-static inline CCResultI64Parse cc_slice_parse_i64(CCSlice s, int base) {
-    if (!s.ptr || s.len == 0) return cc_err_CCResultI64Parse(CC_I64_PARSE_INVALID_CHAR);
+static inline CCResult_int64_t_CC_I64ParseError cc_slice_parse_i64(CCSlice s, int base) {
+    if (!s.ptr || s.len == 0) return cc_err_CCResult_int64_t_CC_I64ParseError(CC_I64_PARSE_INVALID_CHAR);
     char *end = NULL;
     char *buf = (char *)alloca(s.len + 1);
     memcpy(buf, s.ptr, s.len); buf[s.len] = '\0';
     errno = 0;
     long long v = strtoll(buf, &end, base);
-    if (end == buf) return cc_err_CCResultI64Parse(CC_I64_PARSE_INVALID_CHAR);
+    if (end == buf) return cc_err_CCResult_int64_t_CC_I64ParseError(CC_I64_PARSE_INVALID_CHAR);
     if ((v == LLONG_MAX || v == LLONG_MIN) && errno == ERANGE) {
-        return cc_err_CCResultI64Parse(v == LLONG_MAX ? CC_I64_PARSE_OVERFLOW : CC_I64_PARSE_UNDERFLOW);
+        return cc_err_CCResult_int64_t_CC_I64ParseError(v == LLONG_MAX ? CC_I64_PARSE_OVERFLOW : CC_I64_PARSE_UNDERFLOW);
     }
-    return cc_ok_CCResultI64Parse((int64_t)v);
+    return cc_ok_CCResult_int64_t_CC_I64ParseError((int64_t)v);
 }
 
-static inline CCResultU64Parse cc_slice_parse_u64(CCSlice s, int base) {
-    if (!s.ptr || s.len == 0) return cc_err_CCResultU64Parse(CC_U64_PARSE_INVALID_CHAR);
+static inline CCResult_uint64_t_CC_U64ParseError cc_slice_parse_u64(CCSlice s, int base) {
+    if (!s.ptr || s.len == 0) return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_INVALID_CHAR);
     char *end = NULL;
     char *buf = (char *)alloca(s.len + 1);
     memcpy(buf, s.ptr, s.len); buf[s.len] = '\0';
     errno = 0;
     unsigned long long v = strtoull(buf, &end, base);
-    if (end == buf) return cc_err_CCResultU64Parse(CC_U64_PARSE_INVALID_CHAR);
+    if (end == buf) return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_INVALID_CHAR);
     if (v == ULLONG_MAX && errno == ERANGE) {
-        return cc_err_CCResultU64Parse(CC_U64_PARSE_OVERFLOW);
+        return cc_err_CCResult_uint64_t_CC_U64ParseError(CC_U64_PARSE_OVERFLOW);
     }
-    return cc_ok_CCResultU64Parse((uint64_t)v);
+    return cc_ok_CCResult_uint64_t_CC_U64ParseError((uint64_t)v);
 }
 
-static inline CCResultF64Parse cc_slice_parse_f64(CCSlice s) {
-    if (!s.ptr || s.len == 0) return cc_err_CCResultF64Parse(CC_F64_PARSE_INVALID_CHAR);
+static inline CCResult_double_CC_F64ParseError cc_slice_parse_f64(CCSlice s) {
+    if (!s.ptr || s.len == 0) return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_INVALID_CHAR);
     char *end = NULL;
     char *buf = (char *)alloca(s.len + 1);
     memcpy(buf, s.ptr, s.len); buf[s.len] = '\0';
     errno = 0;
     double v = strtod(buf, &end);
-    if (end == buf) return cc_err_CCResultF64Parse(CC_F64_PARSE_INVALID_CHAR);
+    if (end == buf) return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_INVALID_CHAR);
     if ((v == HUGE_VAL || v == -HUGE_VAL) && errno == ERANGE) {
-        return cc_err_CCResultF64Parse(CC_F64_PARSE_OVERFLOW);
+        return cc_err_CCResult_double_CC_F64ParseError(CC_F64_PARSE_OVERFLOW);
     }
-    return cc_ok_CCResultF64Parse(v);
+    return cc_ok_CCResult_double_CC_F64ParseError(v);
 }
 
-static inline CCResultBoolParse cc_slice_parse_bool(CCSlice s) {
+static inline CCResult_bool_CC_BoolParseError cc_slice_parse_bool(CCSlice s) {
     static const char *true_lit = "true";
     static const char *false_lit = "false";
     if (s.len == 4 && memcmp(s.ptr, true_lit, 4) == 0) {
-        return cc_ok_CCResultBoolParse(true);
+        return cc_ok_CCResult_bool_CC_BoolParseError(true);
     }
     if (s.len == 5 && memcmp(s.ptr, false_lit, 5) == 0) {
-        return cc_ok_CCResultBoolParse(false);
+        return cc_ok_CCResult_bool_CC_BoolParseError(false);
     }
-    return cc_err_CCResultBoolParse(CC_BOOL_PARSE_INVALID_VALUE);
+    return cc_err_CCResult_bool_CC_BoolParseError(CC_BOOL_PARSE_INVALID_VALUE);
 }
 
 // ------------------------- Hash helpers ------------------------------------
@@ -492,6 +477,14 @@ static inline bool cc_slice_ends_with(CCSlice s, CCSlice suffix) {
 static inline bool cc_slice_eq(CCSlice s, CCSlice other) {
     return cc__slice_eq(s, other);
 }
+static inline bool cc_slice_eq_cstr(CCSlice s, const char* cstr) {
+    size_t len = cstr ? strlen(cstr) : 0;
+    if (!cstr) return false;
+    if (s.len != len) return false;
+    if (s.len == 0) return true;
+    if (!s.ptr) return false;
+    return memcmp(s.ptr, cstr, len) == 0;
+}
 
 /*
  * UFCS-compatible slice methods.
@@ -523,6 +516,9 @@ static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
 }
 static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
     return s ? cc_slice_eq(*s, other) : false;
+}
+static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) {
+    return s ? cc_slice_eq_cstr(*s, cstr) : false;
 }
 
 #endif // CC_STD_STRING_H

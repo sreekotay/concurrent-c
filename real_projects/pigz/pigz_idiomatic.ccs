@@ -52,7 +52,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
     @arena(res_arena, arena_size) {
-        CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
+        CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         
         res->seq = blk->seq;
@@ -61,7 +61,7 @@ CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
         res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
         size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
         if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
         unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
@@ -132,65 +132,68 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    @nursery {
-        /* Consumer: recv on ordered channel awaits each task in
-         * submission order and delivers the typed Result payload. */
-        spawn(() => [out_ptr, results_rx] {
-            CompressedResult* !>(CCIoError) r;
-            long expect_seq = 0;
-            while (cc_io_avail(cc_channel_recv(results_rx, &r))) {
-                if (r.is_err()) {
-                    CCIoError err = r.error();
-                    fprintf(stderr, "compress error kind=%d os=%d\n", err.kind, err.os_code);
-                    continue;
-                }
-                CompressedResult* item = r.value();
-                if (item->seq != expect_seq) {
-                    fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, item->seq);
-                }
-                expect_seq++;
-                (void)out_ptr->write(item->data);
-                item->arena.free();
+    /* Prototype explicit nursery handles:
+     * consumer declared first, producer second, so producer destroy runs first. */
+    CCNursery* consumer = @create(NULL, () => [out_ptr, results_rx] {
+        CompressedResult* !>(CCIoError) r;
+        long expect_seq = 0;
+        while (cc_io_avail(results_rx.recv(&r))) {
+            if (r.is_err()) {
+                CCIoError err = cc_unwrap_err_as(r, CCIoError);
+                fprintf(stderr, "compress error kind=%d os=%d\n", err.kind, err.os_code);
+                continue;
             }
-        });
-
-        /* Producer: cc_channel_send_task spawns each block concurrently and
-         * enqueues the task handle in submission order. */
-        @closing(results_tx) {
-            spawn(() => [in_ptr, results_tx] {
-                long seq = 0;
-                while (true) {
-                    CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
-                    CCSlice data;
-                    bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
-                    
-                    if (read_res.is_err() || !cc_io_avail(read_res)) {
-                        blk_arena.free();
-                        break;
-                    }
-                    
-                    Block* blk = arena_alloc1(Block, &blk_arena);
-                    if (!blk) {
-                        blk_arena.free();
-                        break;
-                    }
-                    
-                    blk->seq = seq++;
-                    blk->data = data;
-                    blk->is_last = (data.len < BLOCK_SIZE);
-                    blk->arena = blk_arena;
-                    
-                    bool is_last = blk->is_last;
-                    cc_channel_send_task(results_tx, () => [blk] {
-                        CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
-                        blk->arena.free();
-                        res;
-                    });
-                    
-                    if (is_last) break;
-                }
-            });
+            CompressedResult* item = r.value();
+            if (item->seq != expect_seq) {
+                fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, item->seq);
+            }
+            expect_seq++;
+            (void)out_ptr->write(item->data);
+            item->arena.free();
         }
+    }) @destroy;
+    if (!consumer) {
+        fprintf(stderr, "Failed to create consumer nursery\n");
+        return 1;
+    }
+
+    CCNursery* producer = @create(consumer, () => [in_ptr, results_tx] {
+        long seq = 0;
+        while (true) {
+            CCArena blk_arena = @create(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
+            CCSlice data;
+            bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
+            
+            if (read_res.is_err() || !cc_io_avail(read_res)) {
+                break;
+            }
+            
+            Block* blk = cc_arena_alloc_T(Block, &blk_arena);
+            if (!blk) {
+                break;
+            }
+            
+            blk->seq = seq++;
+            blk->data = data;
+            blk->is_last = (data.len < BLOCK_SIZE);
+            blk->arena = blk_arena.detach();
+            
+            bool is_last = blk->is_last;
+            cc_channel_send_task(results_tx, () => [blk] {
+                CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+                blk->arena.free();
+                res;
+            });
+            
+            if (is_last) break;
+        }
+    }) @destroy {
+        results_tx.close();
+    };
+    if (!producer) {
+        results_tx.close();
+        fprintf(stderr, "Failed to create producer nursery\n");
+        return 1;
     }
 
     (void)out_file.sync();

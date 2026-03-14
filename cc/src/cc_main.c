@@ -412,9 +412,13 @@ static void cc_init_paths(const char* argv0) {
     }
     cc_set_out_dir(NULL, NULL);
 
-    // Set CC_INCLUDE_PATH for TCC to find CC headers when running from external projects.
-    // TCC checks this env var in cc_tcc_parse_to_ast().
-    if (g_cc_include[0]) {
+    // Set CC_INCLUDE_PATH for TCC parser mode. Parser-lowered local/system
+    // headers can reference both raw `.cch` headers and lowered `.h` headers.
+    if (g_cc_include[0] && g_cc_lowered_include[0]) {
+        char include_path[sizeof(g_cc_include) + sizeof(g_cc_lowered_include) + 2];
+        snprintf(include_path, sizeof(include_path), "%s:%s", g_cc_lowered_include, g_cc_include);
+        setenv("CC_INCLUDE_PATH", include_path, 1);
+    } else if (g_cc_include[0]) {
         setenv("CC_INCLUDE_PATH", g_cc_include, 1);
     }
 }

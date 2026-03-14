@@ -13,7 +13,7 @@ int main(void) {
 
         // Allocate enough to force several growths
         for (int i = 0; i < 100; i++) {
-            int *p = arena_alloc(int, &a, 10);  // 40 bytes per alloc
+            int *p = cc_arena_alloc_T_count(int, &a, 10);  // 40 bytes per alloc
             if (!p) { printf("FAIL: growth alloc at i=%d\n", i); return 1; }
             for (int j = 0; j < 10; j++) p[j] = i * 10 + j;
         }
@@ -29,7 +29,7 @@ int main(void) {
         if (!a.base) return 2;
 
         for (int i = 0; i < 50; i++) {
-            arena_alloc(int, &a, 10);
+            cc_arena_alloc_T_count(int, &a, 10);
         }
         int saved_idx = a.block_idx;
         if (saved_idx == 0) { printf("FAIL: no growth before reset\n"); return 2; }
@@ -48,7 +48,7 @@ int main(void) {
         if (!a.base) return 3;
 
         // Allocate in block 0
-        int *p0 = arena_alloc(int, &a, 4);
+        int *p0 = cc_arena_alloc_T_count(int, &a, 4);
         if (!p0) return 3;
         for (int i = 0; i < 4; i++) p0[i] = i;
 
@@ -58,7 +58,7 @@ int main(void) {
 
         // Force growth past block 0
         for (int i = 0; i < 50; i++) {
-            arena_alloc(int, &a, 10);
+            cc_arena_alloc_T_count(int, &a, 10);
         }
         int grown_idx = a.block_idx;
         if (grown_idx == 0) { printf("FAIL: expected growth\n"); return 3; }
@@ -84,7 +84,7 @@ int main(void) {
         // Keep allocating until budget is exhausted
         int alloc_count = 0;
         while (alloc_count < 10000) {
-            int *p = arena_alloc(int, &a, 10);
+            int *p = cc_arena_alloc_T_count(int, &a, 10);
             if (!p) break;
             alloc_count++;
         }
@@ -104,11 +104,11 @@ int main(void) {
         if (a.block_max != 1) { printf("FAIL: init should be fixed\n"); return 5; }
 
         // Fill it up
-        int *p = arena_alloc(int, &a, 30);  // 120 bytes
+        int *p = cc_arena_alloc_T_count(int, &a, 30);  // 120 bytes
         if (!p) { printf("FAIL: initial alloc\n"); return 5; }
 
         // This should fail (fixed arena, no growth)
-        int *q = arena_alloc(int, &a, 30);
+        int *q = cc_arena_alloc_T_count(int, &a, 30);
         if (q != NULL) { printf("FAIL: fixed arena should not grow\n"); return 5; }
         printf("  fixed: correctly rejected overflow OK\n");
         // No cc_arena_free needed (user-backed)

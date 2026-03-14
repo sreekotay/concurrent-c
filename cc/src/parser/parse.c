@@ -8,7 +8,9 @@
 #include <ctype.h>
 
 #include "tcc_bridge.h"
+#include "comptime/symbols.h"
 #include "preprocess/preprocess.h"
+#include "util/text.h"
 #include "visitor/pass_channel_syntax.h"
 #include "util/path.h"
 
@@ -86,6 +88,57 @@ static char* cc__blank_comptime_blocks_preserve_layout_parse(const char* src, si
     return out;
 }
 
+static char* cc__rewrite_system_cch_includes_parse(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    int changed = 0;
+    if (!src) return NULL;
+    while (i < n) {
+        size_t line_end = i;
+        while (line_end < n && src[line_end] != '\n') line_end++;
+        {
+            size_t p = i;
+            while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+            if (p < line_end && src[p] == '#') {
+                p++;
+                while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                if (p + strlen("include") < line_end &&
+                    strncmp(src + p, "include", strlen("include")) == 0) {
+                    p += strlen("include");
+                    while (p < line_end && (src[p] == ' ' || src[p] == '\t')) p++;
+                    if (p < line_end && src[p] == '<') {
+                        size_t close = p + 1;
+                        while (close < line_end && src[close] != '>') close++;
+                        if (close < line_end &&
+                            close >= p + 5 &&
+                            strncmp(src + close - 4, ".cch", 4) == 0) {
+                            size_t path_end = close - 4;
+                            cc_sb_append(&out, &out_len, &out_cap, src + i, path_end - i);
+                            cc_sb_append_cstr(&out, &out_len, &out_cap, ".h");
+                            cc_sb_append(&out, &out_len, &out_cap, src + close, line_end - close);
+                            if (line_end < n && src[line_end] == '\n') {
+                                cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+                            }
+                            changed = 1;
+                            i = (line_end < n) ? line_end + 1 : line_end;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        cc_sb_append(&out, &out_len, &out_cap, src + i, line_end - i);
+        if (line_end < n && src[line_end] == '\n') cc_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        i = (line_end < n) ? line_end + 1 : line_end;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
 int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** out_root) {
     if (!input_path || !out_root) {
         return EINVAL;
@@ -110,10 +163,52 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     file_buf[got] = '\0';
     fclose(f);
 
+    /* Phase 1 -> 2: build canonical CC for comptime, then collect the current
+       comptime-visible effects (today: type registrations) from that source
+       before phase 3 lowers the main TU for TCC/host-C consumption. */
+    char* reg_src = cc_preprocess_comptime_source(input_path);
+    const char* use_src = reg_src ? reg_src : file_buf;
+    size_t use_len = reg_src ? strlen(reg_src) : got;
+    if (symbols && cc_symbols_collect_type_registrations(symbols, input_path, use_src, use_len) != 0) {
+        free(reg_src);
+        free(file_buf);
+        return -1;
+    }
+    free(reg_src);
+
+    {
+        char* lowered_includes = cc_rewrite_local_cch_includes_to_lowered_headers(file_buf, got, input_path);
+        if (lowered_includes) {
+            free(file_buf);
+            file_buf = lowered_includes;
+            got = strlen(file_buf);
+        }
+    }
+
+    {
+        char* lowered_system_includes = cc__rewrite_system_cch_includes_parse(file_buf, got);
+        if (lowered_system_includes) {
+            free(file_buf);
+            file_buf = lowered_system_includes;
+            got = strlen(file_buf);
+        }
+    }
+
     char* parse_buf = cc__blank_comptime_blocks_preserve_layout_parse(file_buf, got);
     if (parse_buf) {
         free(file_buf);
         file_buf = parse_buf;
+    }
+
+    char* nursery_proto = cc_rewrite_nursery_create_destroy_proto_ex(file_buf, got, input_path, symbols);
+    if (nursery_proto == (char*)-1) {
+        free(file_buf);
+        return -1;
+    }
+    if (nursery_proto) {
+        free(file_buf);
+        file_buf = nursery_proto;
+        got = strlen(file_buf);
     }
 
     /* Preprocess to string (no temp file) */

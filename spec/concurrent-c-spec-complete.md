@@ -9,16 +9,16 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
 **Draft Version:** 1.0-draft.11  
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-03-13
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
 ## The Principle of Orthogonal Concerns
 The key goal: (as much as possible) the compiler enforces the Shape of the program (Memory/Tasks), while the runtime monitors the Flow of the program (Channels).
 
-* The Skeleton (Structure): Nurseries and Arenas are hierarchical. They define the Ownership Tree. Their lifetimes are lexical and enforced by the compiler.
-* The Circulatory System (Flow): Channels are a graph. They define the Communication Topology. Their lifetimes are dynamic and can "cross-cut" the ownership tree.
-
+* The Skeleton (Structure): Nurseries and Arenas et al are hierarchical. They define the Ownership Tree. Their lifetimes are lexical and enforced by the compiler.
+* The Circulatory System (Flow): Channels et al are a graph. They define the Communication Topology. Their lifetimes are dynamic and can "cross-cut" the ownership tree. The provenance model is what makes the graph safe. 
+ p
 ---
 
 ## Quick Reference: Keywords and Constructs
@@ -119,7 +119,8 @@ Result types (`T!>(E)`) support these methods via UFCS:
 |--------|---------|---------|
 | `r.is_ok()` | Check if success | `if (r.is_ok()) { ... }` |
 | `r.is_err()` | Check if error | `if (r.is_err()) handle(cc_error(r));` |
-| `r.unwrap()` | Get value or abort | `int v = r.unwrap();` |
+| `r.value()` | Get value or abort | `int v = r.value();` |
+| `r.error()` | Get error or abort | `CCIoError e = r.error();` |
 | `r.unwrap_or(def)` | Get value or default | `int v = r.unwrap_or(0);` |
 
 **Macro helpers (for C interop/generated code):**
@@ -576,12 +577,15 @@ This section documents recommended style for Concurrent-C code.
 | Optional | `T?` | `T ?` |
 | Result | `T!>(E)` | `T ! E` or `T! E` |
 | Slice | `char[:]` | `char [:]` or `char[ : ]` |
+| Nested slice | `char[::]`, `char[:::]` | `char[:: ]` or C-array spellings |
 | Unique slice | `char[:!]` | `char[: !]` |
 | Generic type | `Vec<int>` | `Vec < int >` |
 | Nested generic | `Map<K, V>` | `Map < K, V >` (spaces ok inside `<>` for args) |
 | Function return | `fn() -> T!>(E)` | `fn ( ) -> T !> (E)` |
 
 **Examples:**
+
+**Nested slice note:** `T[::]`, `T[:::]`, and deeper forms mean nested slice ranks (`T[:]`, `T[:][:]`, `T[:][:][:]`, etc.). These are slice/view types, not C arrays.
 
 ```c
 // Correct
@@ -873,7 +877,8 @@ Result types support the following methods via UFCS (Uniform Function Call Synta
 |--------|---------|-------------|
 | `r.is_ok()` | `bool` | Returns `true` if result is success |
 | `r.is_err()` | `bool` | Returns `true` if result is error |
-| `r.unwrap()` | `T` | Returns value if success, **aborts** if error |
+| `r.value()` | `T` | Returns value if success, **aborts** if error |
+| `r.error()` | `E` | Returns error if present, **aborts** if success |
 | `r.unwrap_or(default)` | `T` | Returns value if success, `default` if error |
 
 **Macro helpers:**
@@ -908,7 +913,7 @@ int!>(CCError) r = parse("42");
 
 // Method-style access (UFCS)
 if (r.is_ok()) {
-    int v = r.unwrap();      // safe after is_ok() check
+    int v = r.value();      // safe after is_ok() check
     use(v);
 }
 
@@ -929,9 +934,9 @@ if (cc_is_err(res)) {
 int value = cc_value(res);
 ```
 
-**Lowering:** `r.unwrap()` lowers through the result-family UFCS definition for `T!>(E)`; a backend may emit symbols such as `CCResult_T_E_unwrap(r)` or an equivalent family helper.
+**Lowering:** `r.value()` and `r.error()` lower through the result-family UFCS definition for `T!>(E)`; a backend may emit generic result helper macros or equivalent family helpers.
 
-**Rule (unwrap panic):** Calling `.unwrap()` on an error result prints an error message and aborts. Use `.unwrap_or(default)` or check `.is_ok()` first if error is possible.
+**Rule (value/error panic):** Calling `.value()` on an error result or `.error()` on a success result prints an error message and aborts. Use `.unwrap_or(default)` or check `.is_ok()` / `.is_err()` first when failure is possible.
 
 **Declaring custom Result types in headers:**
 
@@ -5038,6 +5043,8 @@ This section defines the core standard library using **UFCS-first design**: meth
 
 **Design principle:** UFCS is resolved from the concrete receiver type. The library owning that type or family defines the callee contract, including whether the receiver is passed by address or by value. Direct library-call forms may also be exposed, but they are API choices rather than the definition of UFCS itself.
 
+**IMPORTANT DESIGN CONSIDERATION:** Concurrent-C generally orders parameters by semantic driver, with support context following unless the context itself is the controlling operand. This is especially visible in UFCS lowering, where the receiver is ordinarily the semantic subject. Accordingly, support context such as allocators usually appears last in direct-call APIs.
+
 **Core UFCS rules (normative):**
 - The receiver is the full expression to the left of `.` or `->`.
 - The compiler resolves the receiver to a concrete type before choosing a UFCS lowering rule.
@@ -5051,7 +5058,7 @@ For named types that use ordinary fallback UFCS, method syntax lowers to the rec
 - Pointer-style APIs receive the address of a value receiver and the pointer itself for a pointer receiver.
 - By-value APIs receive the receiver value directly.
 
-For types or families that register custom UFCS lowering with `cc_ufcs_register(...)`, `x.method(args)` lowers according to the registered handler instead. Standard-library families may be implemented either by preloaded registrations or by equivalent built-in family contracts; the resulting receiver-type-driven lowering is the normative behavior.
+For types or families that register custom UFCS lowering with the type-registration machinery, `x.method(args)` lowers according to the registered handler instead. Standard-library families may be implemented either by ordinary `cc_type_register(...)` calls in `@comptime` code or by equivalent built-in family contracts; the resulting receiver-type-driven lowering is the normative behavior.
 
 This enables two usage styles:
 
@@ -5084,54 +5091,74 @@ Vec<int> result = vec_map(vec_filter(input, is_even), double);
 
 ### 8.0 UFCS Registration and Custom Lowering
 
-UFCS is an extensible language feature. Libraries may declare custom lowering rules at compile time with `cc_ufcs_register(...)`.
+UFCS is a type-owned extensible language feature. Libraries declare custom lowering rules at compile time by registering hooks for a concrete type or type family.
 
-**Surface API:**
+**Primary registration API:**
 
 ```c
-typedef CCSlice (*CCUfcsRewriteFn)(CCSlice method, CCSliceArray argv, CCArena* arena);
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena);
 
 typedef struct {
-    CCSlice pattern;
-    CCUfcsRewriteFn rewrite;
-} CCUfcsRegistration;
+    const char* callee;
+} CCTypeCreateHook;
 
-CCUfcsRegistration cc_ufcs_register(const char* pattern, CCUfcsRewriteFn rewrite);
+typedef struct {
+    const char* callee;
+} CCTypeDestroyHook;
+
+typedef struct {
+    CCTypeCreateHook create1;
+    CCTypeCreateHook create2;
+    CCTypeDestroyHook destroy;
+    CCTypeUfcsHandler ufcs;
+} CCTypeHooks;
+
+int cc_type_register(const char* type_name, CCTypeHooks hooks);
 ```
 
-**Registration rules:**
-- Registrations appear in `@comptime { ... }` code.
-- `pattern` is either an exact type name such as `"CCFile"` or a simple trailing-wildcard family such as `"CCChanTx_*"`.
+**Registration rules (normative):**
+- Registrations appear in ordinary `@comptime { ... }` code.
+- `type_name` is either an exact concrete type name such as `"CCArena"` or a trailing-wildcard family such as `"CCChanTx_*"` or `"CCChanRx_*"`.
+- Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
 - Handlers may be named functions or non-capturing lambdas.
-- Matching is type-based: the resolved receiver type is compared against the registered pattern.
-- The handler returns the lowered callee symbol as a slice. Returning the empty slice means "no custom rewrite; fall back to ordinary UFCS lowering".
+- The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
+- Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 
-**Handler contract:**
+**UFCS handler contract (normative):**
 - `method` is the invoked method name.
-- `argv[0]` is the receiver type name.
-- `argv[1]` is the receiver expression text.
-- `argv[2...]` are the rewritten argument expression texts.
-- `arena` is temporary compile-time storage for constructing the returned symbol.
+- `mode` is an optional lowering mode chosen by the language surface. For example, async-aware families may distinguish ordinary calls from `await`-driven lowering here. If unused, handlers should ignore it.
+- `argv` is the rewritten argument-expression list only. It does not include the receiver.
+- `arena` is temporary compile-time storage for constructing the returned callee name.
 
-**By-value receiver lowering:** If a registration wants the receiver passed by value rather than by address, it must return the lowered symbol via `cc_ufcs_emit_value(...)` or `cc_ufcs_emit_value_cstr(...)`.
+**By-value receiver lowering:** A UFCS handler normally selects an address-style receiver-family callee. If a family wants the receiver passed by value instead, it must return the lowered symbol via `cc_ufcs_emit_value(...)` or `cc_ufcs_emit_value_cstr(...)`.
 
-**Examples:**
+**Preferred registration style:**
 
 ```c
 @comptime {
-    (void)cc_ufcs_register("CCFile",
-        (method, argv, arena) => {
+    (void)cc_type_register("CCFile", (CCTypeHooks){
+        .ufcs = (method, mode, argv, arena) => {
+            (void)mode;
             (void)argv;
             return cc_ufcs_concat2(arena,
                 cc_slice_from_buffer("cc_file_", sizeof("cc_file_") - 1),
                 method);
-        });
-    (void)cc_ufcs_register("CCChanTx_*",
-        (method, argv, arena) => cc_channel_tx_lower_c(method, argv, arena));
-    (void)cc_ufcs_register("CCChanRx_*",
-        (method, argv, arena) => cc_channel_rx_lower_c(method, argv, arena));
+        },
+    });
+
+    (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
+        .ufcs = cc_channel_tx_lower_c,
+    });
+
+    (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
+        .ufcs = cc_channel_rx_lower_c,
+    });
 }
 ```
+
+**Design note:** The UFCS registration substrate is shared with typed lifecycle hooks (`create1`, `create2`, `destroy`). UFCS is stage one of that model; the same type-owned registration machinery is intended to support typed birth and cleanup.
+
+**Legacy compatibility:** `cc_ufcs_register(...)` is a legacy compatibility helper for direct UFCS-only registration. New code should prefer `cc_type_register(...)` so UFCS and lifecycle hooks share one registration model.
 
 This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, optionals, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 
@@ -5386,7 +5413,7 @@ This is syntactic sugar for:
 // Instead of:
 Result*!>(IoError) res_val = compress_block(blk, level);
 if (res_val.is_ok()) {
-    Result* res = res_val.unwrap();
+    Result* res = res_val.value();
     results_tx.send(res);
 } else {
     fprintf(stderr, "error\n");
@@ -6257,6 +6284,17 @@ comptime {
     }
 }
 ```
+
+**Registration and lowering note (normative):**
+- `@comptime` blocks are also the place where libraries publish compile-time registrations such as `cc_type_register(...)`.
+- Registrations must work from ordinary source files and ordinary included headers. User code must not need special registration-only macros or source guards.
+- A conforming implementation may preprocess and canonicalize CC source before executing compile-time registration code, and may use hidden ephemeral lowered headers or equivalent internal forms while collecting registrations from the full translation unit.
+- The observable rule is source-first: registrations written in normal CC source participate in the same build without requiring a separate user-maintained registration artifact.
+
+**Pipeline note (informative):** One valid implementation strategy is:
+1. Canonicalize/preprocess CC for compile-time discovery.
+2. Execute compile-time code and collect registrations for the whole translation unit, including included local headers.
+3. Lower the translation unit to ordinary C using the collected registrations.
 
 **Rule:** A `comptime {}` block may assign only to:
 - `comptime` variables
@@ -7469,6 +7507,14 @@ The following patterns emerged but are deferred to Phase 2:
 **MuxConn abstraction:** HTTP/2 and gRPC multiplex many independent streams over one TCP/TLS connection. A future `MuxConn` will wrap a Duplex, accept per-stream Duplex + stream_arena, and integrate with server_loop. For Phase 1.0, Duplex assumes 1:1 connection-to-stream; Protocol layers (HTTP/2, gRPC) implement multiplexing above Duplex.
 
 **Errdefer / conditional defer:** Go idiom for "defer cleanup only on error path". Useful for partial upgrades (WebSocket handshake cleanup). Deferred pending further language design.
+
+**Typed lifecycle declarations:** A future lifecycle design may introduce declaration-oriented ownership syntax on top of the same cleanup substrate as `@defer`. The intended semantics are:
+
+- `@create` means typed birth: construct or acquire a value using the declared type as the lifecycle key.
+- `@destroy` means auto-register cleanup on the same machinery as `@defer`.
+- `@detach` means do not auto-register cleanup; lifecycle becomes manual from that point onward.
+
+This note is semantic direction only. Exact syntax, registration API, and diagnostics remain deferred pending the UFCS cleanup phase.
 
 ---
 

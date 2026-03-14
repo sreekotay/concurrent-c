@@ -45,6 +45,34 @@ static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* ou
     return p;
 }
 
+static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
+    size_t p = ty_start;
+    if (!s) return p;
+    while (s[p] == ' ' || s[p] == '\t') p++;
+    for (;;) {
+        int matched = 0;
+        if (strncmp(s + p, "static", 6) == 0 && !cc__is_ident_char_local(s[p + 6])) {
+            p += 6;
+            matched = 1;
+        } else if (strncmp(s + p, "inline", 6) == 0 && !cc__is_ident_char_local(s[p + 6])) {
+            p += 6;
+            matched = 1;
+        } else if (strncmp(s + p, "extern", 6) == 0 && !cc__is_ident_char_local(s[p + 6])) {
+            p += 6;
+            matched = 1;
+        } else if (strncmp(s + p, "const", 5) == 0 && !cc__is_ident_char_local(s[p + 5])) {
+            p += 5;
+            matched = 1;
+        } else if (strncmp(s + p, "volatile", 8) == 0 && !cc__is_ident_char_local(s[p + 8])) {
+            p += 8;
+            matched = 1;
+        }
+        if (!matched) break;
+        while (s[p] == ' ' || s[p] == '\t') p++;
+    }
+    return p;
+}
+
 char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
@@ -75,6 +103,7 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
             while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
             if (j < n && src[j] == ':') {
                 size_t k = j + 1;
+                while (k < n && src[k] == ':') k++;
                 while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
                 int is_unique = 0;
                 if (k < n && src[k] == '!') { is_unique = 1; k++; }
@@ -144,38 +173,8 @@ static void cc__normalize_type_name(char* name) {
     }
 }
 
-/* Mangle a type name for use in CCOptional_T or CCResult_T_E. */
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz) {
-    if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
-    
-    /* Skip leading whitespace */
-    while (len > 0 && (*src == ' ' || *src == '\t')) { src++; len--; }
-    /* Skip trailing whitespace */
-    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t')) len--;
-    
-    size_t j = 0;
-    for (size_t i = 0; i < len && j < out_sz - 1; i++) {
-        char c = src[i];
-        if (c == ' ' || c == '\t') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else if (c == '*') {
-            if (j + 3 < out_sz - 1) { out[j++] = 'p'; out[j++] = 't'; out[j++] = 'r'; }
-        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                   (c >= '0' && c <= '9') || c == '_') {
-            out[j++] = c;
-        } else if (c == '[' || c == ']' || c == '<' || c == '>' || c == ',' ||
-                   c == '(' || c == ')' || c == '!' || c == ':' || c == '?') {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        } else {
-            if (j > 0 && out[j - 1] != '_') out[j++] = '_';
-        }
-    }
-    /* Remove trailing underscore */
-    while (j > 0 && out[j - 1] == '_') j--;
-    out[j] = 0;
-    
-    /* Normalize short names to CC-prefixed names */
-    cc__normalize_type_name(out);
+    cc_result_spec_mangle_type(src, len, out, out_sz);
 }
 
 /* Unmangle a type name: reverse of cc__mangle_type_name.
@@ -286,7 +285,7 @@ static void cc__cg_add_optional_type(const char* mangled, const char* raw, size_
  * The old implicit per-call reset made registries non-accumulative across calls. */
 void cc__cg_reset_type_registries(void) {
     cc__cg_optional_type_count = 0;
-    cc__cg_result_type_count = 0;
+    cc_result_spec_table_reset(&cc__cg_result_specs);
 }
 
 /* Scan for optional type patterns and collect types (ACCUMULATES - does not reset).
@@ -447,62 +446,15 @@ char* cc__rewrite_optional_types_text(const CCVisitorCtx* ctx, const char* src, 
 
 /* Collection of result type pairs for CC_DECL_RESULT_SPEC emission (extern in header).
  * Dynamic array: starts NULL, grows via realloc on demand. */
-CCCodegenResultTypePair* cc__cg_result_types = NULL;
-size_t cc__cg_result_type_count = 0;
-size_t cc__cg_result_type_cap = 0;
-
-/* Built-in result types already declared in stdlib headers (io.cch, dir.cch, etc.) */
-static const char* cc__builtin_result_types[] = {
-    "CCResult_CCSlice_CCIoError",           /* io.cch: cc_file_read */
-    "CCResult_size_t_CCIoError",            /* io.cch: cc_file_write */
-    "CCResult_CCOptional_CCSlice_CCIoError",/* io.cch */
-    "CCResult_CCDirIterptr_CCIoError",      /* dir.cch: cc_dir_open */
-    "CCResult_CCDirEntry_CCIoError",        /* dir.cch: cc_dir_next */
-    "CCResult_bool_CCIoError",              /* dir.cch, channel: unified I/O result */
-    NULL
-};
-
-static int cc__is_builtin_result_type(const char* mangled_ok, const char* mangled_err) {
-    char type_name[256];
-    snprintf(type_name, sizeof(type_name), "CCResult_%s_%s", mangled_ok, mangled_err);
-    for (int i = 0; cc__builtin_result_types[i]; i++) {
-        if (strcmp(type_name, cc__builtin_result_types[i]) == 0) return 1;
-    }
-    return 0;
-}
+CCResultSpecTable cc__cg_result_specs = {0};
 
 static void cc__cg_add_result_type(const char* ok, size_t ok_len, const char* err, size_t err_len,
                                     const char* mangled_ok, const char* mangled_err) {
     /* Check if this is a built-in type (in stdlib headers) - skip to avoid redefinition */
-    if (cc__is_builtin_result_type(mangled_ok, mangled_err)) return;
-    
-    /* Check for duplicates */
-    for (size_t i = 0; i < cc__cg_result_type_count; i++) {
-        if (strcmp(cc__cg_result_types[i].mangled_ok, mangled_ok) == 0 &&
-            strcmp(cc__cg_result_types[i].mangled_err, mangled_err) == 0) {
-            return; /* Already have this type */
-        }
-    }
-    /* Grow the array if needed */
-    if (cc__cg_result_type_count >= cc__cg_result_type_cap) {
-        size_t new_cap = cc__cg_result_type_cap ? cc__cg_result_type_cap * 2 : 16;
-        CCCodegenResultTypePair* nb = (CCCodegenResultTypePair*)realloc(
-            cc__cg_result_types, new_cap * sizeof(CCCodegenResultTypePair));
-        if (!nb) return;
-        cc__cg_result_types = nb;
-        cc__cg_result_type_cap = new_cap;
-    }
-    CCCodegenResultTypePair* p = &cc__cg_result_types[cc__cg_result_type_count++];
-    if (ok_len >= sizeof(p->ok_type)) ok_len = sizeof(p->ok_type) - 1;
-    if (err_len >= sizeof(p->err_type)) err_len = sizeof(p->err_type) - 1;
-    memcpy(p->ok_type, ok, ok_len);
-    p->ok_type[ok_len] = '\0';
-    memcpy(p->err_type, err, err_len);
-    p->err_type[err_len] = '\0';
-    strncpy(p->mangled_ok, mangled_ok, sizeof(p->mangled_ok) - 1);
-    p->mangled_ok[sizeof(p->mangled_ok) - 1] = '\0';
-    strncpy(p->mangled_err, mangled_err, sizeof(p->mangled_err) - 1);
-    p->mangled_err[sizeof(p->mangled_err) - 1] = '\0';
+    if (cc_result_spec_is_stdlib_predeclared(mangled_ok, mangled_err)) return;
+    (void)cc_result_spec_table_add(&cc__cg_result_specs,
+                                   ok, ok_len, err, err_len,
+                                   mangled_ok, mangled_err);
 }
 
 /* Scan for result type patterns and collect type pairs.
@@ -807,6 +759,7 @@ char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, si
                     while (ty_end > 0 && (src[ty_end - 1] == ' ' || src[ty_end - 1] == '\t')) ty_end--;
                     
                     size_t ty_start = cc__scan_back_to_type_start(src, ty_end);
+                    ty_start = cc__skip_leading_decl_specs(src, ty_start);
                     
                     if (ty_start < ty_end && err_start < err_end) {
                         size_t ty_len = ty_end - ty_start;

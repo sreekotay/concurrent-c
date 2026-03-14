@@ -44,6 +44,17 @@ int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
     return err;
 }
 
+CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c) {
+    if (!c.fn) return NULL;
+    CCNursery* child = cc_nursery_create_child(parent);
+    if (!child) return NULL;
+    if (cc_nursery_spawn_closure0(child, c) != 0) {
+        cc_nursery_free(child);
+        return NULL;
+    }
+    return child;
+}
+
 typedef struct {
     CCClosure1 c;
     intptr_t arg0;
@@ -75,6 +86,17 @@ int cc_nursery_spawn_closure1(CCNursery* n, CCClosure1 c, intptr_t arg0) {
     int err = cc_nursery_spawn(n, cc__closure1_trampoline, h);
     if (err != 0) free(h);
     return err;
+}
+
+CCNursery* cc_nursery_spawn_child_closure1(CCNursery* parent, CCClosure1 c, intptr_t arg0) {
+    if (!c.fn) return NULL;
+    CCNursery* child = cc_nursery_create_child(parent);
+    if (!child) return NULL;
+    if (cc_nursery_spawn_closure1(child, c, arg0) != 0) {
+        cc_nursery_free(child);
+        return NULL;
+    }
+    return child;
 }
 
 typedef struct {
@@ -111,6 +133,17 @@ int cc_nursery_spawn_closure2(CCNursery* n, CCClosure2 c, intptr_t arg0, intptr_
     int err = cc_nursery_spawn(n, cc__closure2_trampoline, h);
     if (err != 0) free(h);
     return err;
+}
+
+CCNursery* cc_nursery_spawn_child_closure2(CCNursery* parent, CCClosure2 c, intptr_t arg0, intptr_t arg1) {
+    if (!c.fn) return NULL;
+    CCNursery* child = cc_nursery_create_child(parent);
+    if (!child) return NULL;
+    if (cc_nursery_spawn_closure2(child, c, arg0, arg1) != 0) {
+        cc_nursery_free(child);
+        return NULL;
+    }
+    return child;
 }
 
 int cc_run_blocking_closure0(CCClosure0 c) {

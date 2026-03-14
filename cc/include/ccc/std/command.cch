@@ -1,0 +1,65 @@
+/*
+ * Arena-backed process command builder for Concurrent-C stdlib.
+ */
+#ifndef CC_STD_COMMAND_H
+#define CC_STD_COMMAND_H
+
+#include <errno.h>
+#include <string.h>
+
+#include <ccc/cc_compat.cch>
+#include <ccc/std/process.cch>
+#include <ccc/std/string.cch>
+#include <ccc/std/vec.cch>
+
+#ifndef CC_VEC_SIZE_T_DEFINED
+#define CC_VEC_SIZE_T_DEFINED 1
+#ifndef CC_PARSER_MODE
+CC_VEC_DECL_ARENA(size_t, Vec_size_t)
+#endif
+#endif
+
+typedef struct CCCommand {
+    CCArena *arena;
+    CCString storage;
+    Vec_size_t offsets;
+} CCCommand;
+
+CCCommand cc_command_new(CCArena *arena, const char *program);
+
+static inline CCCommand cc_command(CCArena *arena, const char *program) {
+    return cc_command_new(arena, program);
+}
+
+size_t cc_command_argc(const CCCommand *cmd);
+const char *cc_command_get(const CCCommand *cmd, size_t idx);
+const char *cc_command_program(const CCCommand *cmd);
+
+CCCommand *cc_command_arg(CCCommand *cmd, const char *arg);
+CCCommand *cc_command_arg_slice(CCCommand *cmd, CCSlice arg);
+CCCommand *cc_command_arg_i64(CCCommand *cmd, int64_t value);
+
+static inline CCCommand *cc_command_arg_i32(CCCommand *cmd, int value) {
+    return cc_command_arg_i64(cmd, (int64_t)value);
+}
+
+static inline CCCommand *cc_command_arg_if(CCCommand *cmd, bool cond, const char *arg) {
+    return cond ? cc_command_arg(cmd, arg) : cmd;
+}
+
+static inline CCCommand *cc_command_arg_i64_if(CCCommand *cmd, bool cond, int64_t value) {
+    return cond ? cc_command_arg_i64(cmd, value) : cmd;
+}
+
+static inline CCCommand *cc_command_arg_i32_if(CCCommand *cmd, bool cond, int value) {
+    return cond ? cc_command_arg_i32(cmd, value) : cmd;
+}
+
+const char **cc_command_argv(CCCommand *cmd);
+CCProcessConfig cc_command_process_config(CCCommand *cmd);
+CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *cmd);
+CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *cmd, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *arena);
+CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
+
+#endif /* CC_STD_COMMAND_H */

@@ -173,6 +173,13 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
     return NULL;  // budget exhausted or OOM
 }
 
+#define cc_arena_alloc_T(T, arena) \
+    ((T*)cc_arena_alloc((arena), sizeof(T), _Alignof(T)))
+
+#define cc_arena_alloc_T_count(T, arena, count) \
+    ((T*)cc_arena_alloc((arena), sizeof(T) * (size_t)(count), _Alignof(T)))
+
+
 // Allocate a growable arena with heap-backed storage of given initial size.
 // block_max = 0 means unbounded growth (default for @arena).
 static inline CCArena cc_arena_heap(size_t bytes) {
@@ -184,6 +191,21 @@ static inline CCArena cc_arena_heap(size_t bytes) {
     } else if (buf) {
         a._flags |= CC_ARENA_FLAG_HEAP_OWNED;
         a.block_max = 0;
+    }
+    return a;
+}
+
+/* Prototype lifecycle helpers for declaration-oriented lowering. */
+static inline CCArena cc_arena_create(size_t bytes) {
+    return cc_arena_heap(bytes);
+}
+
+static inline CCArena cc_arena_create_init(void *buffer, size_t capacity) {
+    CCArena a = {0};
+    if (!buffer || capacity == 0) return a;
+    if (cc_arena_init(&a, buffer, capacity) != 0) {
+        CCArena empty = {0};
+        return empty;
     }
     return a;
 }
@@ -220,6 +242,10 @@ static inline void cc_arena_free(CCArena* a) {
     if (base && (flags & CC_ARENA_FLAG_HEAP_OWNED)) {
         free(base);
     }
+}
+
+static inline void cc_arena_destroy(CCArena* a) {
+    cc_arena_free(a);
 }
 
 static inline CCArena cc_heap_arena(size_t bytes) {
@@ -390,27 +416,12 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     // len/alen expressed in element count, per slice ABI convention.
     return cc_slice_from_parts(ptr, count, id, count);
 }
-
-/*
- * Spec-aligned type-safe arena allocation macros.
- * Usage:
- *   int* arr = arena_alloc(int, arena, 100);   // allocate 100 ints
- *   char* buf = arena_alloc(char, arena, 256); // allocate 256 chars
- *
- * These are sugar for cc_arena_alloc(arena, count * sizeof(T), alignof(T)).
- */
-#define arena_alloc(T, arena, count) \
-    ((T*)cc_arena_alloc((arena), (count) * sizeof(T), _Alignof(T)))
-
-/* Single-element version */
-#define arena_alloc1(T, arena) arena_alloc(T, arena, 1)
-
 /* Non-atomic versions for per-fiber/per-thread exclusive arenas.
    Use when no other thread will touch the arena concurrently. */
-#define arena_alloc_local(T, arena, count) \
+#define cc_arena_alloc_T_count_local(T, arena, count) \
     ((T*)cc_arena_alloc_local((arena), (count) * sizeof(T), _Alignof(T)))
 
-#define arena_alloc1_local(T, arena) arena_alloc_local(T, arena, 1)
+#define cc_arena_alloc_T_local(T, arena) cc_arena_alloc_T_count_local(T, arena, 1)
 
 #endif // CC_ARENA_H
 

@@ -1,0 +1,34 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    int[~2 >] tx;
+    int[~2 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    int value = 0;
+
+    if (cc_is_err(cc_channel_send(tx, 42))) {
+        printf("raw_channel_recv_ufcs_smoke: FAIL send\n");
+        cc_chan_free(ch);
+        return 1;
+    }
+
+    bool !>(CCIoError) recv_res = ch.recv(&value);
+    if (recv_res.is_err() || !recv_res.value() || value != 42) {
+        printf("raw_channel_recv_ufcs_smoke: FAIL recv\n");
+        cc_chan_free(ch);
+        return 1;
+    }
+
+    cc_chan_close(ch);
+    recv_res = ch.recv(&value);
+    cc_chan_free(ch);
+
+    if (recv_res.is_err() || recv_res.value()) {
+        printf("raw_channel_recv_ufcs_smoke: FAIL closed\n");
+        return 1;
+    }
+
+    printf("raw_channel_recv_ufcs_smoke: PASS\n");
+    return 0;
+}

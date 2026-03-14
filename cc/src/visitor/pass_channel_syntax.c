@@ -1470,6 +1470,116 @@ static size_t cc__find_arrow(const char* src, size_t start, size_t end) {
     return 0;
 }
 
+static int cc__span_is_blank(const char* src, size_t start, size_t end) {
+    if (!src) return 1;
+    while (start < end) {
+        char c = src[start];
+        if (!(c == ' ' || c == '\t' || c == '\n' || c == '\r')) return 0;
+        start++;
+    }
+    return 1;
+}
+
+static void cc__trim_span_local(const char* src, size_t* start, size_t* end) {
+    if (!src || !start || !end) return;
+    while (*start < *end &&
+           (src[*start] == ' ' || src[*start] == '\t' || src[*start] == '\n' || src[*start] == '\r')) {
+        (*start)++;
+    }
+    while (*end > *start &&
+           (src[*end - 1] == ' ' || src[*end - 1] == '\t' || src[*end - 1] == '\n' || src[*end - 1] == '\r')) {
+        (*end)--;
+    }
+}
+
+static int cc__starts_with_keyword_local(const char* src, size_t start, size_t end, const char* kw) {
+    size_t kw_len;
+    if (!src || !kw) return 0;
+    kw_len = strlen(kw);
+    if (end - start < kw_len) return 0;
+    if (memcmp(src + start, kw, kw_len) != 0) return 0;
+    if (start + kw_len < end && cc__is_ident_char_local2(src[start + kw_len])) return 0;
+    return 1;
+}
+
+static int cc__extract_block_tail_expr(const char* src,
+                                       size_t len,
+                                       size_t body_start,
+                                       size_t closure_end,
+                                       size_t* prefix_start,
+                                       size_t* prefix_end,
+                                       size_t* expr_start,
+                                       size_t* expr_end) {
+    size_t block_end;
+    size_t inner_start;
+    size_t stmt_boundary;
+    size_t last_stmt_start = 0, last_stmt_end = 0;
+    int par = 0, sq = 0, br = 0;
+    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+
+    if (!src || body_start >= len || src[body_start] != '{') return 0;
+    block_end = cc__find_matching_delim(src, len, body_start, '{', '}');
+    if (block_end == 0) return 0;
+    if (!cc__span_is_blank(src, block_end + 1, closure_end)) return 0;
+
+    inner_start = body_start + 1;
+    stmt_boundary = inner_start;
+    for (size_t i = inner_start; i < block_end; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < block_end) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < block_end) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < block_end) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '(') { par++; continue; }
+        if (c == ')' && par > 0) { par--; continue; }
+        if (c == '[') { sq++; continue; }
+        if (c == ']' && sq > 0) { sq--; continue; }
+        if (c == '{') { br++; continue; }
+        if (c == '}' && br > 0) { br--; continue; }
+        if (c == ';' && par == 0 && sq == 0 && br == 0) {
+            size_t s = stmt_boundary;
+            size_t e = i;
+            cc__trim_span_local(src, &s, &e);
+            if (e > s) {
+                last_stmt_start = s;
+                last_stmt_end = e;
+            }
+            stmt_boundary = i + 1;
+        }
+    }
+
+    if (last_stmt_end <= last_stmt_start) return 0;
+    if (cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "if") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "for") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "while") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "switch") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "do") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "break") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "continue") ||
+        cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "goto")) {
+        return 0;
+    }
+    if (cc__starts_with_keyword_local(src, last_stmt_start, last_stmt_end, "return")) {
+        size_t s = last_stmt_start + 6;
+        size_t e = last_stmt_end;
+        cc__trim_span_local(src, &s, &e);
+        if (e <= s) return 0;
+        *expr_start = s;
+        *expr_end = e;
+    } else {
+        *expr_start = last_stmt_start;
+        *expr_end = last_stmt_end;
+    }
+    *prefix_start = inner_start;
+    *prefix_end = last_stmt_start;
+    return 1;
+}
+
 char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
                                       const char* src,
                                       size_t len,
@@ -1595,26 +1705,52 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         /* Emit closure body wrapper.
          * For typed channel handles, preserve the declared element type in the
          * task result buffer so ordered recv can memcpy the full payload out.
-         * Fallback to the legacy pointer-sized path when the channel expression
-         * is too complex to resolve through the type registry. */
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ ");
-        if (has_typed_result) {
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "* __cc_st_r = (");
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*)cc_task_result_ptr(sizeof(");
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); if (!__cc_st_r) return NULL; *__cc_st_r = (");
-        } else {
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*)); ");
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+         * Block-bodied closures are normalized so the final top-level expression
+         * statement becomes the stored task result rather than being pasted into
+         * an assignment context verbatim. */
+        {
+            size_t prefix_start = 0, prefix_end = 0, expr_s = 0, expr_e = 0;
+            int lowered_block_tail = cc__extract_block_tail_expr(src, len, body_start, closure_end,
+                                                                 &prefix_start, &prefix_end,
+                                                                 &expr_s, &expr_e);
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ ");
+            if (has_typed_result) {
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "* __cc_st_r = (");
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*)cc_task_result_ptr(sizeof(");
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); if (!__cc_st_r) return NULL; ");
+                if (lowered_block_tail) {
+                    if (prefix_end > prefix_start) {
+                        cc__sb_append_local(&out, &o_len, &o_cap, src + prefix_start, prefix_end - prefix_start);
+                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " ");
+                    }
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (");
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + expr_s, expr_e - expr_s);
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                } else {
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (");
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                }
+            } else {
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*)); ");
+                if (lowered_block_tail) {
+                    if (prefix_end > prefix_start) {
+                        cc__sb_append_local(&out, &o_len, &o_cap, src + prefix_start, prefix_end - prefix_start);
+                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " ");
+                    }
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + expr_s, expr_e - expr_s);
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                } else {
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+                    cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                }
+            }
         }
-        
-        /* Emit body (the actual expression/block) */
-        cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
-        
-        /* Return pointer to result storage so ordered recv can extract it. */
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = cc_fiber_spawn_closure0(__cc_st_c");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);

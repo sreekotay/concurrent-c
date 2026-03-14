@@ -1,0 +1,40 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+static int g_child_runs = 0;
+static int g_cancelled_child_runs = 0;
+
+static void* child_task(void* env) {
+    (void)env;
+    g_child_runs++;
+    return NULL;
+}
+
+static void* cancelled_child_task(void* env) {
+    (void)env;
+    g_cancelled_child_runs++;
+    return NULL;
+}
+
+int main(void) {
+    CCClosure0 child = cc_closure0_make(child_task, NULL, NULL);
+    CCNursery* root = cc_nursery_spawn_child_closure0(NULL, child);
+    assert(root != NULL);
+    assert(cc_nursery_wait(root) == 0);
+    cc_nursery_free(root);
+    assert(g_child_runs == 1);
+
+    CCNursery* parent = cc_nursery_create();
+    assert(parent != NULL);
+    cc_nursery_cancel(parent);
+
+    CCClosure0 cancelled_child = cc_closure0_make(cancelled_child_task, NULL, NULL);
+    CCNursery* child_from_cancelled_parent = cc_nursery_spawn_child_closure0(parent, cancelled_child);
+    assert(child_from_cancelled_parent != NULL);
+    assert(cc_nursery_wait(child_from_cancelled_parent) == 0);
+    cc_nursery_free(child_from_cancelled_parent);
+    cc_nursery_free(parent);
+    assert(g_cancelled_child_runs == 0);
+
+    return 0;
+}

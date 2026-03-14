@@ -1,0 +1,25 @@
+#ifndef TESTS_COMPTIME_HEADER_TYPE_REGS_SHARED_H
+#define TESTS_COMPTIME_HEADER_TYPE_REGS_SHARED_H
+
+#include <ccc/std/prelude.cch>
+
+static CCSlice header_registered_arena_ufcs(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena) {
+    (void)mode;
+    (void)argv;
+    (void)arena;
+    if (cc_slice_eq_cstr(method, "avail")) {
+        return cc_slice_from_buffer((void*)"cc_arena_remaining", sizeof("cc_arena_remaining") - 1);
+    }
+    return cc_slice_empty();
+}
+
+@comptime {
+    (void)cc_type_register("CCArena", (CCTypeHooks){
+        .create1 = cc_type_create_call("cc_arena_create"),
+        .create2 = cc_type_create_call("cc_arena_create_init"),
+        .destroy = cc_type_destroy_call("cc_arena_destroy"),
+        .ufcs = header_registered_arena_ufcs,
+    });
+}
+
+#endif

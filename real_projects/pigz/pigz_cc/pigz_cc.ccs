@@ -23,15 +23,44 @@ cc_atomic_int g_blocks_done = 0;
 /* Global error flag - when set, all tasks should exit ASAP */
 cc_atomic_int g_pipeline_error = 0;
 
-/* Helper for repeated write-or-fail pattern */
-static inline bool write_slice(CCFile* f, CCSlice data, const char* what) {
+/* Helpers for repeated fail-closed I/O and ownership patterns. */
+static inline void report_io_error(const char* what, CCIoError err) {
+    fprintf(stderr, "Error: %s (kind=%d os=%d)\n", what, err.kind, err.os_code);
+}
+
+static inline void mark_pipeline_error(void) {
+    cc_atomic_store(&g_pipeline_error, 1);
+}
+
+static inline bool write_all_or_fail(CCFile* f, CCSlice data, const char* what) {
     size_t !>(CCIoError) wr = cc_file_write(f, data);
     if (wr.is_err()) {
-        fprintf(stderr, "Error: failed to write %s\n", what);
-        cc_atomic_store(&g_pipeline_error, 1);
+        report_io_error(what, cc_unwrap_err_as(wr, CCIoError));
+        mark_pipeline_error();
+        return false;
+    }
+    if (wr.value() != data.len) {
+        fprintf(stderr, "Error: short write for %s (%zu/%zu bytes)\n", what, wr.value(), data.len);
+        mark_pipeline_error();
         return false;
     }
     return true;
+}
+
+static inline bool sync_file_or_fail(CCFile* f, const char* what) {
+    size_t !>(CCIoError) sync_res = cc_file_sync(f);
+    if (sync_res.is_err()) {
+        report_io_error(what, cc_unwrap_err_as(sync_res, CCIoError));
+        mark_pipeline_error();
+        return false;
+    }
+    return true;
+}
+
+static inline void destroy_input_arena(CCArena* arena) {
+    if (!arena) return;
+    cc_arena_free(arena);
+    free(arena);
 }
 
 /* ============================================================================
@@ -53,7 +82,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
     @arena(res_arena, arena_size) {
-        CompressedResult* res = arena_alloc1(CompressedResult, res_arena);
+        CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         
         res->seq = blk->seq;
@@ -83,7 +112,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
             if (blk->lens.len > 0) {
                 max_out += (blk->lens.len / sizeof(size_t)) * 10; // Extra space for sync markers
             }
-            unsigned char* out_buf = arena_alloc(unsigned char, res_arena, max_out);
+            unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
             if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
             size_t pos = 0;
@@ -221,7 +250,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
             // Prepare input = [dict_tail][block_data] so zopfli can benefit from history.
             size_t dict_len = (g.setdict ? dict.len : 0);
             size_t in_len = dict_len + blk->data.len;
-            unsigned char* z_in = arena_alloc(unsigned char, res_arena, in_len);
+            unsigned char* z_in = cc_arena_alloc_T_count(unsigned char, res_arena, in_len);
             if (!z_in) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
             if (dict_len) memcpy(z_in, dict.ptr, dict_len);
             memcpy(z_in + dict_len, blk->data.ptr, blk->data.len);
@@ -244,7 +273,7 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
                 extra += 5;                 // worst-case single marker
                 if (!g.setdict) extra += 5; // second marker when independent
             }
-            unsigned char* out_buf = arena_alloc(unsigned char, res_arena, outsize + extra);
+            unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, outsize + extra);
             if (!out_buf) {
                 free(out);
                 return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
@@ -292,39 +321,20 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
     }
 }
 
-/* Return input arena to pool (or free if no pool) */
+/* Return input arena to pool (or free if no pool). */
 static inline void return_input_arena(CCArena* arena, CCChan* pool) {
-    if (pool) {
-        // Send pointer back to pool (pool stores void* which is CCArena*)
-        cc_channel_send(pool, &arena, sizeof(arena));
-    } else {
-        // No pool - free the arena and its wrapper
-        cc_arena_free(arena);
-        free(arena);
+    if (!arena) return;
+    if (pool && cc_channel_send(pool, &arena, sizeof(arena)) == 0) {
+        return;
     }
+    destroy_input_arena(arena);
 }
 
 /* ============================================================================
- * Ordered Channel Pattern
- *
- * Worker wrapper for use with `spawn into(tx)? () => ordered_compress_wrapper(blk)`.
- * The wrapper stores its Result in fiber-local storage (cc_task_result_ptr) so the
- * consumer can extract it after cc_block_on_intptr without any heap allocation.
- *
- * Contract for spawn-into wrappers:
- *   1. Call cc_task_result_ptr(sizeof(CapturesStruct)) to claim fiber-local storage.
- *   2. Store the result (typically a Result type) at offset 0 (__result field).
- *   3. Return the storage pointer so __spawn_into_thunk detects the self-reference
- *      and does NOT overwrite the already-stored result.
+ * Compression Task Helpers
  * ============================================================================ */
 
-/* Captures struct for ordered channel pattern - __result MUST be at offset 0 */
-typedef struct {
-    CompressedResultPtr !>(CCIoError) __result;  // offset 0 - Result type preserved!
-    Block* blk;                                   // user captures follow
-} OrderedCompressCaptures;
-
-/* The actual compression work - called from wrapper */
+/* The actual compression work for one owned block. */
 CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
     // Initialize z_stream for this task if needed (level <= 9)
     z_stream strm;
@@ -348,21 +358,10 @@ CompressedResultPtr !>(CCIoError) do_compress_work(Block* blk) {
     return result;
 }
 
-/* Wrapper for ordered channel pattern: stores Result in fiber-local storage */
-void* ordered_compress_wrapper(void* arg) {
-    Block* blk = (Block*)arg;
-    
-    // Use fiber-local storage instead of malloc'd captures struct
-    OrderedCompressCaptures* cap = (OrderedCompressCaptures*)cc_task_result_ptr(sizeof(OrderedCompressCaptures));
-    cap->blk = blk;  // For debugging/consistency
-    
-    // Store Result at offset 0 - preserves error type!
-    cap->__result = do_compress_work(blk);
-    
-    // Return input arena to pool (works for both success and error)
+CompressedResultPtr !>(CCIoError) compress_owned_block(Block* blk) {
+    CompressedResultPtr !>(CCIoError) result = do_compress_work(blk);
     return_input_arena(blk->arena, blk->pool);
-    
-    return (void*)cap;
+    return result;
 }
 
 /* ============================================================================
@@ -373,7 +372,7 @@ void* ordered_compress_wrapper(void* arg) {
 DecompressedResultPtr !>(CCIoError) decompress_block(CCSlice member, long seq) {
     size_t est_size = 256 * 1024;
     @arena(res_arena, est_size + 8192) {
-        DecompressedResult* res = arena_alloc1(DecompressedResult, res_arena);
+        DecompressedResult* res = cc_arena_alloc_T(DecompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         res->seq = seq;
 
@@ -385,7 +384,7 @@ DecompressedResultPtr !>(CCIoError) decompress_block(CCSlice member, long seq) {
         strm.next_in = (Bytef*)member.ptr;
         strm.avail_in = (uInt)member.len;
 
-        unsigned char* out_buf = arena_alloc(unsigned char, res_arena, est_size);
+        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, est_size);
         if (!out_buf) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
 
         strm.next_out = out_buf;
@@ -408,6 +407,7 @@ typedef struct {
 
 int decompress_file(const char* in_path, const char* out_path, int num_workers) {
     (void)num_workers;
+    cc_atomic_store(&g_pipeline_error, 0);
     
     CCFile in_file = {0};
     const char* real_in = in_path ? in_path : "/dev/stdin";
@@ -473,30 +473,52 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 
     @nursery {
         /* Writer Task - writes decompressed data (runs behind) */
-        spawn(() => [out_ptr, decompressed_rx, p_total_out] {
+        spawn(() => [out_ptr, decompressed_rx, decompressed_ch, p_total_out] {
             DecompChunk chunk;
-            while (cc_io_avail(cc_channel_recv(decompressed_rx, &chunk))) {
+            while (true) {
+                bool !>(CCIoError) recv_res = cc_channel_recv(decompressed_rx, &chunk);
+                if (recv_res.is_err()) {
+                    report_io_error("failed to receive decompressed chunk", cc_unwrap_err_as(recv_res, CCIoError));
+                    mark_pipeline_error();
+                    cc_channel_close_err(decompressed_ch, EIO);
+                    break;
+                }
+                if (!recv_res.value()) break;
                 if (chunk.data.len > 0 && !g.test && !g.list) {
-                    size_t !>(CCIoError) wr = cc_file_write_buf(out_ptr, chunk.data.ptr, chunk.data.len);
-                    if (wr.is_err()) {
-                        fprintf(stderr, "Error writing output\n");
+                    if (!write_all_or_fail(out_ptr, chunk.data, "decompressed output")) {
+                        cc_channel_close_err(decompressed_ch, EIO);
+                        chunk.arena.free();
+                        break;
                     }
                 }
                 cc_atomic_fetch_add(p_total_out, chunk.data.len);
                 chunk.arena.free();
+                if (cc_atomic_load(&g_pipeline_error)) break;
             }
         });
 
         @closing(decompressed_tx) {
             /* Decompressor Task - CPU work in the middle */
-            spawn(() => [compressed_rx, decompressed_tx] {
+            spawn(() => [compressed_rx, decompressed_tx, compressed_ch, decompressed_ch] {
                 z_stream strm;
                 memset(&strm, 0, sizeof(strm));
                 if (inflateInit2(&strm, 15 + 16) != Z_OK) {
-                    fprintf(stderr, "Failed to initialize decompression\n");
+                    report_io_error("failed to initialize decompression", cc_io_error(CC_IO_OTHER));
+                    mark_pipeline_error();
+                    cc_channel_close_err(compressed_ch, EIO);
+                    cc_channel_close_err(decompressed_ch, EIO);
                 } else {
                     DecompChunk in_chunk;
-                    while (cc_io_avail(cc_channel_recv(compressed_rx, &in_chunk))) {
+                    while (!cc_atomic_load(&g_pipeline_error)) {
+                        bool !>(CCIoError) recv_res = cc_channel_recv(compressed_rx, &in_chunk);
+                        if (recv_res.is_err()) {
+                            report_io_error("failed to receive compressed chunk", cc_unwrap_err_as(recv_res, CCIoError));
+                            mark_pipeline_error();
+                            cc_channel_close_err(compressed_ch, EIO);
+                            cc_channel_close_err(decompressed_ch, EIO);
+                            break;
+                        }
+                        if (!recv_res.value()) break;
                         strm.next_in = (Bytef*)in_chunk.data.ptr;
                         strm.avail_in = (uInt)in_chunk.data.len;
                         
@@ -505,7 +527,7 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                         while (!error && (strm.avail_in > 0 || strm.avail_out == 0)) {
                             // Allocate output chunk
                             CCArena out_arena = cc_arena_heap(BLOCK_SIZE + 256);
-                            unsigned char* out_buf = arena_alloc(unsigned char, &out_arena, BLOCK_SIZE);
+                            unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, &out_arena, BLOCK_SIZE);
                             
                             strm.next_out = out_buf;
                             strm.avail_out = BLOCK_SIZE;
@@ -513,6 +535,9 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                             int ret = inflate(&strm, Z_NO_FLUSH);
                             if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
                                 fprintf(stderr, "Decompression error: %d\n", ret);
+                                mark_pipeline_error();
+                                cc_channel_close_err(compressed_ch, EIO);
+                                cc_channel_close_err(decompressed_ch, EIO);
                                 out_arena.free();
                                 error = true;
                                 break;
@@ -524,7 +549,23 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                                     .data = cc_slice_from_parts(out_buf, have, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
                                     .arena = out_arena
                                 };
-                                (void)cc_channel_send(decompressed_tx, out_chunk);
+                                bool !>(CCIoError) send_res = cc_channel_send(decompressed_tx, out_chunk);
+                                if (send_res.is_err()) {
+                                    report_io_error("failed to send decompressed chunk", cc_unwrap_err_as(send_res, CCIoError));
+                                    mark_pipeline_error();
+                                    cc_channel_close_err(decompressed_ch, EIO);
+                                    out_arena.free();
+                                    error = true;
+                                    break;
+                                }
+                                if (!send_res.value()) {
+                                    fprintf(stderr, "Error: decompressed output channel closed early\n");
+                                    mark_pipeline_error();
+                                    cc_channel_close_err(decompressed_ch, EIO);
+                                    out_arena.free();
+                                    error = true;
+                                    break;
+                                }
                             } else {
                                 out_arena.free();
                             }
@@ -540,21 +581,24 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
 
             /* Reader Task - reads compressed data ahead */
             @closing(compressed_tx) {
-                spawn(() => [in_ptr, compressed_tx, p_total_in] {
-                    while (true) {
+                spawn(() => [in_ptr, compressed_tx, compressed_ch, p_total_in] {
+                    while (!cc_atomic_load(&g_pipeline_error)) {
                         // Allocate chunk for this read
                         CCArena chunk_arena = cc_arena_heap(BLOCK_SIZE + 256);
-                        unsigned char* buf = arena_alloc(unsigned char, &chunk_arena, BLOCK_SIZE);
+                        unsigned char* buf = cc_arena_alloc_T_count(unsigned char, &chunk_arena, BLOCK_SIZE);
                         
                         size_t bytes_read = 0;
                         bool !>(CCIoError) read_res = cc_file_read_buf(in_ptr, buf, BLOCK_SIZE, &bytes_read);
                         if (read_res.is_err()) {
+                            report_io_error("failed to read compressed input", cc_unwrap_err_as(read_res, CCIoError));
+                            mark_pipeline_error();
+                            cc_channel_close_err(compressed_ch, EIO);
                             chunk_arena.free();
                             break;
                         }
-                        if (!cc_io_avail(read_res)) {
+                        if (!read_res.value()) {
                             chunk_arena.free();
-                            break;  // EOF or error
+                            break;
                         }
                         
                         cc_atomic_fetch_add(p_total_in, bytes_read);
@@ -563,7 +607,21 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
                             .data = cc_slice_from_parts(buf, bytes_read, CC_SLICE_ID_UNTRACKED, BLOCK_SIZE),
                             .arena = chunk_arena
                         };
-                        (void)cc_channel_send(compressed_tx, chunk);
+                        bool !>(CCIoError) send_res = cc_channel_send(compressed_tx, chunk);
+                        if (send_res.is_err()) {
+                            report_io_error("failed to send compressed chunk", cc_unwrap_err_as(send_res, CCIoError));
+                            mark_pipeline_error();
+                            cc_channel_close_err(compressed_ch, EIO);
+                            chunk_arena.free();
+                            break;
+                        }
+                        if (!send_res.value()) {
+                            fprintf(stderr, "Error: compressed input channel closed early\n");
+                            mark_pipeline_error();
+                            cc_channel_close_err(compressed_ch, EIO);
+                            chunk_arena.free();
+                            break;
+                        }
                     }
                 });
             }
@@ -578,8 +636,10 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
         printf("%10zu %10zu %6.1f%% %s\n", in_total, out_total, ratio, in_path ? in_path : "<stdin>");
     }
 
-    (void)out_file.sync();
-    return 0;
+    if (!sync_file_or_fail(&out_file, "failed to sync decompressed output")) {
+        return 1;
+    }
+    return cc_atomic_load(&g_pipeline_error) ? 1 : 0;
 }
 
 /* ============================================================================
@@ -620,7 +680,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     size_t block_size = g.block;
     g.shift = x2nmodp(g.block, 3);
     
-    // Channel for task handles (task-handle pattern: spawn per block, FIFO await)
+    // Ordered results channel: typed recv auto-awaits submitted tasks in FIFO order.
     int chan_cap = CHAN_CAP;
     if (g.max_mem > 0) {
         chan_cap = (int)(g.max_mem / (block_size + 65536));
@@ -628,11 +688,10 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         if (chan_cap > 1024) chan_cap = 1024;
     }
 
-    CCTask[~chan_cap >] tasks_tx;
-    CCTask[~chan_cap <] tasks_rx;
-
-    CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx);
-    @defer tasks_ch.free();
+    CompressedResultPtr !>(CCIoError)[~chan_cap >] results_tx;
+    CompressedResultPtr !>(CCIoError)[~chan_cap ordered <] results_rx;
+    CCChan* results_ch = cc_channel_pair(&results_tx, &results_rx);
+    @defer results_ch.free();
 
     // Input arena pool - reuse arenas instead of malloc/free each block
     size_t arena_size = block_size + BLOCK_ARENA_OVERHEAD + 65536 + (block_size / 5 * sizeof(size_t));
@@ -661,8 +720,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
     CCFile* out_ptr = &out_file;
 
     @nursery {
-        /* Writer Task - awaits task handles in FIFO order (no reorder buffer needed) */
-        spawn(() => [out_ptr, block_size, out_path, tasks_rx, tasks_ch] {
+        /* Writer Task - receives typed ordered results in submission order. */
+        spawn(() => [out_ptr, block_size, out_path, results_rx, results_ch] {
             bool write_failed = false;
 
             // gzip + zip use CRC32 init 0; zlib uses Adler-32 init 1
@@ -706,33 +765,24 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         (unsigned char)(g.level >= 9 ? 2 : g.level == 1 ? 4 : 0), // Extra flags
                         0x03         // OS = Unix
                     };
-                    size_t !>(CCIoError) hdr_wr = out_ptr->write(cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10));
-                    if (hdr_wr.is_err()) {
-                        fprintf(stderr, "Error: failed to write gzip header\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
-                        write_failed = true;
-                    }
+                    write_failed = !write_all_or_fail(out_ptr,
+                        cc_slice_from_parts(header, 10, CC_SLICE_ID_UNTRACKED, 10),
+                        "failed to write gzip header");
                     
                     // Write filename if present
                     if (!write_failed && g.name != NULL) {
                         size_t nlen = strlen(g.name) + 1;
-                        size_t !>(CCIoError) name_wr = out_ptr->write(cc_slice_from_parts(g.name, nlen, CC_SLICE_ID_UNTRACKED, nlen));
-                        if (name_wr.is_err()) {
-                            fprintf(stderr, "Error: failed to write filename to header\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            write_failed = true;
-                        }
+                        write_failed = !write_all_or_fail(out_ptr,
+                            cc_slice_from_parts(g.name, nlen, CC_SLICE_ID_UNTRACKED, nlen),
+                            "failed to write filename to header");
                     }
                     
                     // Write comment if present
                     if (!write_failed && g.comment != NULL) {
                         size_t clen = strlen(g.comment) + 1;
-                        size_t !>(CCIoError) comm_wr = out_ptr->write(cc_slice_from_parts(g.comment, clen, CC_SLICE_ID_UNTRACKED, clen));
-                        if (comm_wr.is_err()) {
-                            fprintf(stderr, "Error: failed to write comment to header\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            write_failed = true;
-                        }
+                        write_failed = !write_all_or_fail(out_ptr,
+                            cc_slice_from_parts(g.comment, clen, CC_SLICE_ID_UNTRACKED, clen),
+                            "failed to write comment to header");
                     }
                 } else if (g.form == 1) {
                     // zlib header
@@ -745,12 +795,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     unsigned char header[2];
                     header[0] = (head >> 8) & 0xff;
                     header[1] = head & 0xff;
-                    size_t !>(CCIoError) hdr_wr = out_ptr->write(cc_slice_from_parts(header, 2, CC_SLICE_ID_UNTRACKED, 2));
-                    if (hdr_wr.is_err()) {
-                        fprintf(stderr, "Error: failed to write zlib header\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
-                        write_failed = true;
-                    }
+                    write_failed = !write_all_or_fail(out_ptr,
+                        cc_slice_from_parts(header, 2, CC_SLICE_ID_UNTRACKED, 2),
+                        "failed to write zlib header");
                 } else if (g.form == 2) {
                     // zip local header (single entry; central directory written at end)
                     unsigned char header[30] = {
@@ -772,52 +819,41 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     header[13] = (unsigned char)((zip_mdate >> 8) & 0xff);
                     header[26] = (unsigned char)(zip_name_len & 0xff);
                     header[27] = (unsigned char)((zip_name_len >> 8) & 0xff);
-                    size_t !>(CCIoError) hdr_wr = out_ptr->write(cc_slice_from_parts(header, 30, CC_SLICE_ID_UNTRACKED, 30));
-                    if (hdr_wr.is_err()) {
-                        fprintf(stderr, "Error: failed to write zip header\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
-                        write_failed = true;
-                    }
+                    write_failed = !write_all_or_fail(out_ptr,
+                        cc_slice_from_parts(header, 30, CC_SLICE_ID_UNTRACKED, 30),
+                        "failed to write zip header");
                     if (!write_failed && zip_name_len) {
-                        size_t !>(CCIoError) nm_wr = out_ptr->write(cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len));
-                        if (nm_wr.is_err()) {
-                            fprintf(stderr, "Error: failed to write zip filename\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            write_failed = true;
-                        }
+                        write_failed = !write_all_or_fail(out_ptr,
+                            cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len),
+                            "failed to write zip filename");
                     }
                 }
             }
             
-            // Ordered channel pattern: await recv in FIFO order (no reorder buffer!)
-            // [LOWERED from: while (await tasks_rx.recv(&r)?)]
-            CompressedResult* r = NULL;
-            CCIoError recv_err = {0};
-            bool recv_ok = true;
-            CCTask task;
-            while (!write_failed && cc_io_avail(tasks_rx.recv(&task))) {
+            while (!write_failed) {
+                CompressedResultPtr !>(CCIoError) task_result;
+                bool !>(CCIoError) recv_res = results_rx.recv(&task_result);
+                if (recv_res.is_err()) {
+                    report_io_error("failed to receive compression result", cc_unwrap_err_as(recv_res, CCIoError));
+                    mark_pipeline_error();
+                    write_failed = true;
+                    break;
+                }
+                if (!recv_res.value()) break;
+
                 // Check for global error (e.g. SIGINT)
                 if (cc_atomic_load(&g_pipeline_error)) {
                     write_failed = true;
-                    cc_task_free(&task);
                     break;
                 }
-                
-                // Await task and extract Result from fiber-local storage
-                // NOTE: cap points to fiber-local buffer, valid until next spawn on same fiber
-                OrderedCompressCaptures* cap = (OrderedCompressCaptures*)(void*)cc_block_on_intptr(task);
-                
-                // Copy result immediately (fiber-local storage may be reused)
-                CompressedResultPtr !>(CCIoError) task_result = cap->__result;
-                // cap is now unsafe to access - fiber may be reused
-                
+
                 if (task_result.is_err()) {
-                    // Task error - preserve error type!
-                    recv_err = task_result.error();
-                    recv_ok = false;
+                    report_io_error("compression task failed", cc_unwrap_err_as(task_result, CCIoError));
+                    mark_pipeline_error();
+                    write_failed = true;
                     break;
                 }
-                r = task_result.value();
+                CompressedResult* r = task_result.value();
                 
                 // Accumulate global checksum and total length
                 if (first_block) {
@@ -834,22 +870,12 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                 // Use Result-based I/O for writing data (unless testing/listing)
                 if (!g.list && !g.test) {
-                    size_t !>(CCIoError) wr = out_ptr->write(r->data);
-                    if (wr.is_err()) {
-                        fprintf(stderr, "Error: write failed at block %ld\n", r->seq);
-                        cc_atomic_store(&g_pipeline_error, 1);
+                    if (!write_all_or_fail(out_ptr, r->data, "failed to write compressed block")) {
                         write_failed = true;
                     }
                 }
                 
                 r->arena.free();
-            }
-            
-            // Handle task errors (ordered channel preserves error type!)
-            if (!recv_ok) {
-                fprintf(stderr, "Compression task failed: error kind %d\n", recv_err.kind);
-                cc_atomic_store(&g_pipeline_error, 1);
-                write_failed = true;
             }
 
             // Write gzip/zlib trailer (matches pigz.c:1180-1210)
@@ -865,13 +891,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     trailer[5] = (total_len >> 8) & 0xff;
                     trailer[6] = (total_len >> 16) & 0xff;
                     trailer[7] = (total_len >> 24) & 0xff;
-                    
-                    size_t !>(CCIoError) tr_wr = out_ptr->write(cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8));
-                    if (tr_wr.is_err()) {
-                        fprintf(stderr, "Error: failed to write gzip trailer\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
-                        write_failed = true;
-                    }
+                    write_failed = !write_all_or_fail(out_ptr,
+                        cc_slice_from_parts(trailer, 8, CC_SLICE_ID_UNTRACKED, 8),
+                        "failed to write gzip trailer");
                 } else if (g.form == 1) {
                     // zlib trailer: Adler-32 (4 bytes)
                     unsigned char trailer[4];
@@ -879,12 +901,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     trailer[1] = (global_crc >> 16) & 0xff;
                     trailer[2] = (global_crc >> 8) & 0xff;
                     trailer[3] = global_crc & 0xff;
-                    size_t !>(CCIoError) tr_wr = out_ptr->write(cc_slice_from_parts(trailer, 4, CC_SLICE_ID_UNTRACKED, 4));
-                    if (tr_wr.is_err()) {
-                        fprintf(stderr, "Error: failed to write zlib trailer\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
-                        write_failed = true;
-                    }
+                    write_failed = !write_all_or_fail(out_ptr,
+                        cc_slice_from_parts(trailer, 4, CC_SLICE_ID_UNTRACKED, 4),
+                        "failed to write zlib trailer");
                 } else if (g.form == 2) {
                     // Proper single-entry zip: data descriptor + central directory + EOCD.
                     if (total_len > 0xffffffffu || total_comp_len > 0xffffffffu) {
@@ -910,13 +929,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                         dd[13] = (unsigned char)((usize >> 8) & 0xff);
                         dd[14] = (unsigned char)((usize >> 16) & 0xff);
                         dd[15] = (unsigned char)((usize >> 24) & 0xff);
-
-                        size_t !>(CCIoError) dd_wr = out_ptr->write(cc_slice_from_parts(dd, 16, CC_SLICE_ID_UNTRACKED, 16));
-                        if (dd_wr.is_err()) {
-                            fprintf(stderr, "Error: failed to write zip data descriptor\n");
-                            cc_atomic_store(&g_pipeline_error, 1);
-                            write_failed = true;
-                        }
+                        write_failed = !write_all_or_fail(out_ptr,
+                            cc_slice_from_parts(dd, 16, CC_SLICE_ID_UNTRACKED, 16),
+                            "failed to write zip data descriptor");
 
                         if (!write_failed) {
                             unsigned char cd[46];
@@ -946,20 +961,13 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                             cd[29] = (unsigned char)((zip_name_len >> 8) & 0xff);
                             // extra len, comment len = 0
                             // relative offset of local header = 0
-
-                            size_t !>(CCIoError) cd_wr = out_ptr->write(cc_slice_from_parts(cd, 46, CC_SLICE_ID_UNTRACKED, 46));
-                            if (cd_wr.is_err()) {
-                                fprintf(stderr, "Error: failed to write zip central directory\n");
-                                cc_atomic_store(&g_pipeline_error, 1);
-                                write_failed = true;
-                            }
+                            write_failed = !write_all_or_fail(out_ptr,
+                                cc_slice_from_parts(cd, 46, CC_SLICE_ID_UNTRACKED, 46),
+                                "failed to write zip central directory");
                             if (!write_failed && zip_name_len) {
-                                size_t !>(CCIoError) nm2_wr = out_ptr->write(cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len));
-                                if (nm2_wr.is_err()) {
-                                    fprintf(stderr, "Error: failed to write zip central directory name\n");
-                                    cc_atomic_store(&g_pipeline_error, 1);
-                                    write_failed = true;
-                                }
+                                write_failed = !write_all_or_fail(out_ptr,
+                                    cc_slice_from_parts((void*)zip_name, zip_name_len, CC_SLICE_ID_UNTRACKED, zip_name_len),
+                                    "failed to write zip central directory name");
                             }
 
                             if (!write_failed) {
@@ -977,13 +985,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                                 eocd[17] = (unsigned char)((cd_off >> 8) & 0xff);
                                 eocd[18] = (unsigned char)((cd_off >> 16) & 0xff);
                                 eocd[19] = (unsigned char)((cd_off >> 24) & 0xff);
-
-                                size_t !>(CCIoError) eocd_wr = out_ptr->write(cc_slice_from_parts(eocd, 22, CC_SLICE_ID_UNTRACKED, 22));
-                                if (eocd_wr.is_err()) {
-                                    fprintf(stderr, "Error: failed to write zip end record\n");
-                                    cc_atomic_store(&g_pipeline_error, 1);
-                                    write_failed = true;
-                                }
+                                write_failed = !write_all_or_fail(out_ptr,
+                                    cc_slice_from_parts(eocd, 22, CC_SLICE_ID_UNTRACKED, 22),
+                                    "failed to write zip end record");
                             }
                         }
                     }
@@ -992,7 +996,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
             // If we failed, signal Reader to stop sending via upstream error propagation
             if (write_failed) {
-                cc_channel_rx_close_err(tasks_ch, EIO);
+                cc_channel_rx_close_err(results_ch, EIO);
             }
 
             // If we failed or were interrupted, delete the partial file (matches pigz.c:3600)
@@ -1003,9 +1007,9 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
             }
         });
 
-        /* Reader Task - spawns compression tasks and sends handles through channel */
-        @closing(tasks_tx) {
-            spawn(() => [in_ptr, tasks_tx, arena_pool] {
+        /* Reader Task - submits compression work to the ordered result channel. */
+        @nursery {
+            spawn(() => [in_ptr, results_tx, arena_pool] {
                 long seq = 0;
                 bool hit_eof = false;
                 Block* prev_blk = NULL;
@@ -1021,38 +1025,44 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     
                     // Borrow arena from pool
                     CCArena* blk_arena = NULL;
-                    cc_channel_recv(arena_pool, &blk_arena, sizeof(blk_arena));
+                    CCResult_bool_CCIoError borrow_res =
+                        cc_chan_result_from_errno(cc_channel_recv(arena_pool, &blk_arena, sizeof(blk_arena)));
+                    if (cc_is_err(borrow_res)) {
+                        report_io_error("failed to borrow input arena", cc_unwrap_err_as(borrow_res, CCIoError));
+                        mark_pipeline_error();
+                        break;
+                    }
+                    if (!cc_unwrap(borrow_res)) {
+                        fprintf(stderr, "Error: arena pool closed unexpectedly\n");
+                        mark_pipeline_error();
+                        break;
+                    }
                     
                     // Read returns Ok(true)=data, Ok(false)=EOF, Err=error
                     CCSlice data;
                     bool !>(CCIoError) read_res = cc_file_read(in_ptr, blk_arena, block_size, &data);
                     if (read_res.is_err()) {
-                        fprintf(stderr, "Read error\n");
-                        cc_atomic_store(&g_pipeline_error, 1);
+                        report_io_error("failed to read input block", cc_unwrap_err_as(read_res, CCIoError));
+                        mark_pipeline_error();
                         return_input_arena(blk_arena, arena_pool);
                         break;
                     }
-                    if (!cc_io_avail(read_res)) {
+                    if (!read_res.value()) {
                         // EOF
                         return_input_arena(blk_arena, arena_pool);
                         if (prev_blk) {
                             prev_blk->is_last = true;
-                            // spawn into inside a spawn() closure body is not supported:
-                            // Phase 5 lifts the closure before Phase 6 can see the enclosing
-                            // @nursery, so the nursery check fails. Manual lowering required.
-                            {
-                                CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
-                                if (!cc_io_avail(cc_channel_send(tasks_tx, task))) {
-                                    cc_task_free(&task);
-                                }
-                            }
+                            cc_channel_send_task(results_tx, () => [prev_blk] {
+                                CompressedResultPtr !>(CCIoError) res = compress_owned_block(prev_blk);
+                                res;
+                            });
                             prev_blk = NULL;
                         }
                         break;  // EOF with no data
                     }
                     
                     // Block struct also lives in the arena
-                    Block* blk = arena_alloc1(Block, blk_arena);
+                    Block* blk = cc_arena_alloc_T(Block, blk_arena);
                     if (!blk) {
                         cc_atomic_store(&g_pipeline_error, 1);
                         return_input_arena(blk_arena, arena_pool);
@@ -1071,7 +1081,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     if (g.rsync) {
                         // Max hits in a block: block_size / 5 (shortest possible block is 5 bytes)
                         size_t max_hits = block_size / 5;
-                        size_t* hits = arena_alloc(size_t, blk_arena, max_hits);
+                        size_t* hits = cc_arena_alloc_T_count(size_t, blk_arena, max_hits);
                         if (!hits) {
                             fprintf(stderr, "Failed to allocate hits array\n");
                             cc_atomic_store(&g_pipeline_error, 1);
@@ -1104,7 +1114,7 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                     // Dictionary Chaining: Copying Strategy
                     if (g.setdict && last_tail_len > 0) {
-                        unsigned char* dict_mem = arena_alloc(unsigned char, blk_arena, last_tail_len);
+                        unsigned char* dict_mem = cc_arena_alloc_T_count(unsigned char, blk_arena, last_tail_len);
                         if (!dict_mem) {
                             cc_atomic_store(&g_pipeline_error, 1);
                             return_input_arena(blk_arena, arena_pool);
@@ -1121,31 +1131,19 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
 
                     // If we already have a pending block, spawn task
                     if (prev_blk) {
-                        // Manual lowering required here: channel-closed path must also
-                        // return the new block's arena to the pool and break the read loop.
-                        // spawn into(tasks_tx)? only emits cc_task_free on channel-closed,
-                        // but this site needs the extra cleanup before breaking.
-                        {
-                            CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, prev_blk);
-                            if (!cc_io_avail(cc_channel_send(tasks_tx, task))) {
-                                cc_task_free(&task);
-                                return_input_arena(blk_arena, arena_pool);
-                                break;
-                            }
-                        }
+                        cc_channel_send_task(results_tx, () => [prev_blk] {
+                            CompressedResultPtr !>(CCIoError) res = compress_owned_block(prev_blk);
+                            res;
+                        });
                     }
 
                     // If this was a short read, it's the last block.
                     if (data.len < block_size) {
                         blk->is_last = true;
-                        // Same limitation as above: spawn into inside spawn() closure body
-                        // requires manual lowering.
-                        {
-                            CCTask task = cc_fiber_spawn_task(ordered_compress_wrapper, blk);
-                            if (!cc_io_avail(cc_channel_send(tasks_tx, task))) {
-                                cc_task_free(&task);
-                            }
-                        }
+                        cc_channel_send_task(results_tx, () => [blk] {
+                            CompressedResultPtr !>(CCIoError) res = compress_owned_block(blk);
+                            res;
+                        });
                         prev_blk = NULL;
                         hit_eof = true;
                         break;
@@ -1154,15 +1152,23 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
                     // Otherwise, hold this block until we read the next one
                     prev_blk = blk;
                 }
+                if (prev_blk) {
+                    return_input_arena(prev_blk->arena, prev_blk->pool);
+                }
             });
         }
+        cc_channel_close(results_tx);
     }
 
-    (void)out_file.sync();
+    if (!sync_file_or_fail(&out_file, "failed to sync compressed output")) {
+        return 1;
+    }
     
     // Deep sync if requested (matches pigz.c:3500)
     if (g.sync) {
-        (void)out_file.sync();
+        if (!sync_file_or_fail(&out_file, "failed to deep sync compressed output")) {
+            return 1;
+        }
     }
     
     // Check if pipeline encountered an error

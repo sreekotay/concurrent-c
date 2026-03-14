@@ -18,7 +18,7 @@ void test_nursery_then_arena(void) {
     }
     
     @arena(a, kilobytes(4)) {
-        int* p = arena_alloc(int, a, 1);
+        int* p = cc_arena_alloc_T(int, a);
         *p = 42;
         printf("  arena allocated: %d\n", *p);
     }
@@ -30,7 +30,7 @@ void test_arena_then_nursery(void) {
     printf("test_arena_then_nursery:\n");
     
     @arena(a, kilobytes(4)) {
-        int* p = arena_alloc(int, a, 1);
+        int* p = cc_arena_alloc_T(int, a);
         *p = 123;
         printf("  arena allocated: %d\n", *p);
     }

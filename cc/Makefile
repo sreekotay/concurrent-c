@@ -8,7 +8,7 @@ CC_ENABLE_TLS ?= 0
 CC_RUNTIME_V3 ?= 1
 CC_V3_DIAGNOSTICS ?= 0
 BEARSSL_DIR ?= ../third_party/bearssl
-CFLAGS_COMMON := -Wall -Wextra -Isrc -Iinclude -DCC_RUNTIME_V3=$(CC_RUNTIME_V3) -DCC_V3_DIAGNOSTICS=$(CC_V3_DIAGNOSTICS)
+CFLAGS_COMMON := -Wall -Wextra -I../out/include -Isrc -Iinclude -DCC_RUNTIME_V3=$(CC_RUNTIME_V3) -DCC_V3_DIAGNOSTICS=$(CC_V3_DIAGNOSTICS)
 ifeq ($(CC_ENABLE_ASYNC),1)
   CFLAGS_COMMON += -DCC_ENABLE_ASYNC
 endif
@@ -67,10 +67,12 @@ WRAPPER := bin/ccc
 
 # CCCN (CCC Next) refactor - uses existing TCC bridge + preprocessor
 CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
+    src/header/lower_header.c \
     src/parser/tcc_bridge.c \
     src/parser/cc_ext_parser.c \
     src/preprocess/preprocess.c \
     src/preprocess/type_registry.c \
+    src/result_spec.c \
     src/comptime/symbols.c \
     src/util/io.c \
     src/util/path.c \
@@ -78,16 +80,25 @@ CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
 CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
 CCCN_BINARY := $(OUT_BINDIR)/cccn
 CCCN_WRAPPER := bin/cccn
+LOWER_HEADERS_SRCS := src/tools/lower_headers.c src/header/lower_header.c src/result_spec.c
+LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
+LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
+LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)
 
 # Lowered headers output directory
 OUT_INCLUDE := ../out/include
+LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
-all: $(WRAPPER) $(CCCN_WRAPPER) lower-headers
+all: $(WRAPPER) $(CCCN_WRAPPER) $(LOWER_HEADERS_STAMP)
 
 # Lower .cch headers to .h files (must run before examples that use generated C)
 .PHONY: lower-headers
-lower-headers:
-	@scripts/lower_headers.sh include $(OUT_INCLUDE)
+lower-headers: $(LOWER_HEADERS_STAMP)
+
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS)
+	@mkdir -p $(OUT_INCLUDE)
+	@$(LOWER_HEADERS_BINARY) include $(OUT_INCLUDE)
+	@touch $@
 
 .PHONY: test-build-stub
 test-build-stub: $(WRAPPER)
@@ -118,13 +129,20 @@ $(CCCN_WRAPPER): $(CCCN_BINARY)
 	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/cccn" "$$@"' >> $@
 	@chmod +x $@
 
+$(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS_OBJS) $(LDLIBS)
+
+$(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
+
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 clean:
-	rm -f $(WRAPPER) $(REAL_BINARY)
+	rm -f $(WRAPPER) $(REAL_BINARY) $(CCCN_WRAPPER) $(CCCN_BINARY) $(LOWER_HEADERS_BINARY)
 	rm -rf $(OBJDIR)
+	rm -rf $(OUT_INCLUDE)
 	# Clean legacy in-tree objects from earlier layouts.
 	@rm -f $(SRCS:.c=.o)
 	@rm -f bin/cc ../out/cc/bin/cc

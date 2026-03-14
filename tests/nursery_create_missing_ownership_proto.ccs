@@ -1,0 +1,7 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    CCNursery* n = @create(NULL, () => { });
+    (void)n;
+    return 0;
+}

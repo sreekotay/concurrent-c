@@ -17,6 +17,9 @@ typedef struct CCNursery CCNursery;
 
 // Create a nursery. Returns NULL on allocation failure.
 CCNursery* cc_nursery_create(void);
+// Create a child nursery handle intended for explicit ownership/lifecycle lowering.
+// The current low-risk form snapshots parent cancel/deadline state at creation time.
+CCNursery* cc_nursery_create_child(CCNursery* parent);
 
 // Cancel all tasks (sets flag; tasks must poll cooperatively).
 void cc_nursery_cancel(CCNursery* n);
@@ -52,6 +55,11 @@ void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeou
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg);
 // Spawn a CCClosure0 (env freed via drop, if provided). Returns 0 on success.
 int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c);
+// Lowered helpers for future explicit nursery-handle syntax:
+// create a child nursery, spawn the root closure into it, and return the child handle.
+CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c);
+CCNursery* cc_nursery_spawn_child_closure1(CCNursery* parent, CCClosure1 c, intptr_t arg0);
+CCNursery* cc_nursery_spawn_child_closure2(CCNursery* parent, CCClosure2 c, intptr_t arg0, intptr_t arg1);
 
 // Allocate closure environment storage owned by the nursery lifetime.
 // Memory is reclaimed when the nursery is freed; no per-closure free is required.
