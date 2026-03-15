@@ -1,0 +1,43 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_ufcs.cch>
+#include <ccc/cc_type.cch>
+#include <assert.h>
+#include <stdio.h>
+
+static int g_tx_close_calls = 0;
+
+static void tracked_tx_close(CCChanTx tx) {
+    g_tx_close_calls += 1;
+    cc_channel_close(tx);
+}
+
+int[~1 >] g_tx;
+int[~1 <] g_rx;
+
+@comptime {
+    (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
+        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
+            (void)recv_type;
+            (void)mode;
+            (void)argv;
+            (void)arg_types;
+            if (cc_slice_eq_cstr(method, "close")) {
+                return cc_ufcs_emit_value_cstr(arena, "tracked_tx_close");
+            }
+            return cc_slice_empty();
+        },
+    });
+}
+
+int main(void) {
+    CCChan* ch = cc_channel_pair(&g_tx, &g_rx);
+    assert(ch != NULL);
+
+    g_tx.close();
+    assert(g_tx_close_calls == 1);
+
+    g_rx.free();
+
+    printf("comptime_channel_family_type_ufcs_smoke: PASS\n");
+    return 0;
+}

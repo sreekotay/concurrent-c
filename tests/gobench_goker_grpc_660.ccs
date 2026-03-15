@@ -49,3 +49,57 @@ int main(void) {
     printf("gobench goker grpc660: PASS\n");
     return 0;
 }
+
+/*
+ * Original GoBench GoKer source:
+ * https://raw.githubusercontent.com/goodmorning-coder/gobench/master/gobench/goker/blocking/grpc/660/grpc660_test.go
+ *
+ * package grpc660
+ *
+ * import (
+ *  "math/rand"
+ *  "testing"
+ * )
+ *
+ * type benchmarkClient struct {
+ *  stop chan bool
+ * }
+ *
+ * func (bc *benchmarkClient) doCloseLoopUnary() {
+ *  for {
+ *   done := make(chan bool)
+ *   go func() { // G2
+ *    if rand.Intn(10) > 7 {
+ *     done <- false
+ *     return
+ *    }
+ *    done <- true
+ *   }()
+ *   select {
+ *   case <-bc.stop:
+ *    return
+ *   case <-done:
+ *   }
+ *  }
+ * }
+ *
+ * ///
+ * /// G1 G2 helper goroutine
+ * /// doCloseLoopUnary()
+ * /// bc.stop <- true
+ * /// <-bc.stop
+ * /// return
+ * /// done <-
+ * /// ----------------------G2 leak--------------------------
+ * ///
+ *
+ * func TestGrpc660(t *testing.T) {
+ *  bc := &benchmarkClient{
+ *   stop: make(chan bool),
+ *  }
+ *  go bc.doCloseLoopUnary() // G1
+ *  go func() { // helper goroutine
+ *   bc.stop <- true
+ *  }()
+ * }
+ */

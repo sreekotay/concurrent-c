@@ -177,29 +177,10 @@ static const char* cc__canonicalize_family_recv_type(const char* type_name,
     return scratch;
 }
 
-static const char* cc__result_err_type_suffix(const char* type_name) {
-    CCResultSpecTable* specs = cc_result_spec_table_get_global();
-    const CCResultSpec* spec = NULL;
-    if (specs && type_name) {
-        spec = cc_result_spec_table_find_by_name(specs, type_name);
-        if (spec) return spec->err_type;
-    }
-    if (!type_name || strncmp(type_name, "CCResult_", 9) != 0) return NULL;
-    const char* last_us = strrchr(type_name, '_');
-    if (!last_us || !last_us[1]) return NULL;
-    return last_us + 1;
-}
-
 static int cc__is_parser_result_recv_type(const char* type_name) {
     return type_name &&
            (strcmp(type_name, "__CCResultGeneric") == 0 ||
             strcmp(type_name, "__CCResultGeneric*") == 0);
-}
-
-static const CCResultSpec* cc__result_spec_lookup(const char* type_name) {
-    CCResultSpecTable* specs = cc_result_spec_table_get_global();
-    if (!specs || !type_name) return NULL;
-    return cc_result_spec_table_find_by_name(specs, type_name);
 }
 
 static int cc__is_parser_vec_recv_type(const char* type_name) {
@@ -214,14 +195,28 @@ static int cc__is_parser_map_recv_type(const char* type_name) {
             strcmp(type_name, "__CCMapGeneric*") == 0);
 }
 
-static int cc__is_untyped_channel_recv_type(const char* type_name) {
+static int cc__is_channel_tx_recv_type(const char* type_name) {
+    return type_name &&
+           (strncmp(type_name, "CCChanTx_", 9) == 0 ||
+            strcmp(type_name, "CCChanTx") == 0 ||
+            strcmp(type_name, "CCChanTx*") == 0);
+}
+
+static int cc__is_channel_rx_recv_type(const char* type_name) {
+    return type_name &&
+           (strncmp(type_name, "CCChanRx_", 9) == 0 ||
+            strcmp(type_name, "CCChanRx") == 0 ||
+            strcmp(type_name, "CCChanRx*") == 0);
+}
+
+static int cc__is_raw_channel_recv_type(const char* type_name) {
     return type_name &&
            (strcmp(type_name, "CCChan") == 0 ||
             strcmp(type_name, "CCChan*") == 0);
 }
 
 static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_cap);
-typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena);
+typedef CCSlice (*CCUfcsCompiledCallable)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena);
 
 #define CC_UFCS_VALUE_TAG "__cc_ufcs_value__:"
 
@@ -234,15 +229,17 @@ typedef struct {
 
 static const void* cc__lookup_builtin_ufcs_callable(const char* recv_type_name) {
     if (!recv_type_name || !recv_type_name[0]) return NULL;
-    if (strncmp(recv_type_name, "CCChanTx_", 9) == 0 ||
-        strcmp(recv_type_name, "CCChanTx") == 0 ||
-        strcmp(recv_type_name, "CCChanTx*") == 0) {
+    if (cc__is_channel_tx_recv_type(recv_type_name)) {
         return (const void*)cc_channel_tx_lower_c;
     }
-    if (strncmp(recv_type_name, "CCChanRx_", 9) == 0 ||
-        strcmp(recv_type_name, "CCChanRx") == 0 ||
-        strcmp(recv_type_name, "CCChanRx*") == 0) {
+    if (cc__is_channel_rx_recv_type(recv_type_name)) {
         return (const void*)cc_channel_rx_lower_c;
+    }
+    if (strcmp(recv_type_name, "CCFile") == 0 || strcmp(recv_type_name, "CCFile*") == 0) {
+        return (const void*)cc_file_lower_c;
+    }
+    if (strcmp(recv_type_name, "CCArena") == 0 || strcmp(recv_type_name, "CCArena*") == 0) {
+        return (const void*)cc_arena_lower_c;
     }
     return NULL;
 }
@@ -339,6 +336,38 @@ static CCSliceArray cc__build_ufcs_arg_slices(CCArena* arena, const char* args_s
     return argv;
 }
 
+static CCSliceArray cc__build_ufcs_arg_type_slices(CCArena* arena, const char* args_src) {
+    CCSliceArray argv = cc__build_ufcs_arg_slices(arena, args_src);
+    CCSlice* items = NULL;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!arena || !argv.items || argv.len == 0) {
+        CCSliceArray empty = {0};
+        return empty;
+    }
+    items = (CCSlice*)cc_arena_alloc(arena, argv.len * sizeof(CCSlice), _Alignof(CCSlice));
+    if (!items) {
+        CCSliceArray empty = {0};
+        return empty;
+    }
+    for (size_t i = 0; i < argv.len; ++i) {
+        const char* type_name = NULL;
+        size_t len = 0;
+        char* buf = NULL;
+        if (reg && argv.items[i].ptr && argv.items[i].len > 0) {
+            buf = (char*)cc_arena_alloc(arena, argv.items[i].len + 1, 1);
+            if (buf) {
+                memcpy(buf, argv.items[i].ptr, argv.items[i].len);
+                buf[argv.items[i].len] = '\0';
+                type_name = cc_type_registry_resolve_expr_type(reg, buf);
+            }
+        }
+        len = type_name ? strlen(type_name) : 0;
+        items[i] = (type_name && len > 0) ? cc_slice_from_buffer((void*)type_name, len) : cc_slice_empty();
+    }
+    argv.items = items;
+    return argv;
+}
+
 static int cc__emit_registered_callable(char* out,
                                         size_t cap,
                                         const char* recv,
@@ -350,6 +379,7 @@ static int cc__emit_registered_callable(char* out,
                                         bool has_args) {
     const void* fn_ptr = NULL;
     CCSliceArray argv = {0};
+    CCSliceArray arg_types = {0};
     CCArena arena = cc_heap_arena(1024);
     CCUfcsCompiledCallable fn;
     CCSlice recv_type_slice;
@@ -362,7 +392,14 @@ static int cc__emit_registered_callable(char* out,
     if (!recv_type_name) return -1;
     /* Real comptime UFCS path for callable registrations collected from named
        handlers and non-capturing lambdas. */
-    if (!g_ufcs_symbols || cc_symbols_lookup_ufcs_callable(g_ufcs_symbols, recv_type_name, &fn_ptr) != 0 || !fn_ptr) {
+    if (g_ufcs_symbols) {
+        if (cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, recv_type_name, &fn_ptr) == 0 && fn_ptr) {
+            /* authoritative per-type callable */
+        } else {
+            fn_ptr = NULL;
+        }
+    }
+    if (!fn_ptr) {
         fn_ptr = cc__lookup_builtin_ufcs_callable(recv_type_name);
         if (!fn_ptr) {
             cc_heap_arena_free(&arena);
@@ -372,12 +409,13 @@ static int cc__emit_registered_callable(char* out,
     fn = (CCUfcsCompiledCallable)fn_ptr;
     if (has_args && args_rewritten && args_rewritten[0]) {
         argv = cc__build_ufcs_arg_slices(&arena, args_rewritten);
+        arg_types = cc__build_ufcs_arg_type_slices(&arena, args_rewritten);
     }
     recv_type_slice = cc_slice_from_buffer((void*)recv_type_name, strlen(recv_type_name));
     method_slice = cc_slice_from_buffer((void*)method, strlen(method));
     mode_slice = cc_slice_from_buffer((void*)(g_ufcs_await_context ? "await" : "sync"),
                                       g_ufcs_await_context ? sizeof("await") - 1 : sizeof("sync") - 1);
-    lowered = fn(recv_type_slice, method_slice, mode_slice, argv, &arena);
+    lowered = fn(recv_type_slice, method_slice, mode_slice, argv, arg_types, &arena);
     if (!lowered.ptr || lowered.len == 0) {
         cc_heap_arena_free(&arena);
         return -1;
@@ -451,6 +489,9 @@ static int cc__emit_type_driven_dispatch(char* out,
                                          const char* args_rewritten,
                                          bool has_args,
                                          const CCUFCSDispatchCtx* ctx) {
+    CCUfcsChannelKind channel_kind = CC_UFCS_CHANNEL_KIND_NONE;
+    int channel_recv_by_value = 0;
+    const char* channel_callee = NULL;
     if (!ctx) return -1;
     if (g_ufcs_symbols && ctx->recv_type_name) {
         const char* registered_value = NULL;
@@ -471,59 +512,28 @@ static int cc__emit_type_driven_dispatch(char* out,
                                                         recv_is_ptr, ctx->recv_type_name, args_rewritten, has_args);
         if (callable_len >= 0) return callable_len;
     }
-    if (g_ufcs_symbols && ctx->recv_type_name) {
-        const char* registered_prefix = NULL;
-        if (cc_symbols_lookup_ufcs_prefix(g_ufcs_symbols, ctx->recv_type_name, &registered_prefix) == 0 &&
-            registered_prefix && registered_prefix[0]) {
-            if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
-                fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: receiver type %s uses prefix %s\n",
-                        ctx->recv_type_name, registered_prefix);
-            }
-            if (has_args) {
-                if (cc__recv_pass_direct(ctx, recv_is_ptr))
-                    return snprintf(out, cap, "%s%s(%s, ", registered_prefix, method, recv);
-                return snprintf(out, cap, "%s%s(&%s, ", registered_prefix, method, recv);
-            }
-            if (cc__recv_pass_direct(ctx, recv_is_ptr))
-                return snprintf(out, cap, "%s%s(%s)", registered_prefix, method, recv);
-            return snprintf(out, cap, "%s%s(&%s)", registered_prefix, method, recv);
+    channel_callee = cc_ufcs_channel_callee(ctx->recv_type_name, method, g_ufcs_await_context,
+                                            &channel_kind, &channel_recv_by_value);
+    if (channel_callee && channel_kind == CC_UFCS_CHANNEL_KIND_RAW) {
+        if (has_args && args_rewritten &&
+            (strcmp(method, "recv") == 0 || strcmp(method, "try_recv") == 0)) {
+            const char* raw_fn = (strcmp(method, "recv") == 0)
+                ? (g_ufcs_await_context ? "cc_channel_raw_recv_task" : "cc_channel_raw_recv")
+                : "cc_channel_raw_try_recv";
+            int chan_recv_is_ptr = recv_is_ptr || g_ufcs_recv_type_is_ptr ||
+                                   strcmp(ctx->recv_type_name, "CCChan*") == 0;
+            return chan_recv_is_ptr
+                ? snprintf(out, cap, "%s(%s, %s, sizeof(*%s))", raw_fn, recv, args_rewritten, args_rewritten)
+                : snprintf(out, cap, "%s(&%s, %s, sizeof(*%s))", raw_fn, recv, args_rewritten, args_rewritten);
         }
-    }
-    if (ctx->recv_type_name &&
-        (strcmp(ctx->recv_type_name, "CCFile") == 0 || strcmp(ctx->recv_type_name, "CCFile*") == 0)) {
-        int file_recv_is_ptr = recv_is_ptr || strcmp(ctx->recv_type_name, "CCFile*") == 0;
         if (has_args) {
-            if (cc__recv_pass_direct(ctx, file_recv_is_ptr))
-                return snprintf(out, cap, "cc_file_%s(%s, ", method, recv);
-            return snprintf(out, cap, "cc_file_%s(&%s, ", method, recv);
+            if (channel_recv_by_value || cc__recv_pass_direct(ctx, recv_is_ptr))
+                return snprintf(out, cap, "%s(%s, ", channel_callee, recv);
+            return snprintf(out, cap, "%s(&%s, ", channel_callee, recv);
         }
-        if (cc__recv_pass_direct(ctx, file_recv_is_ptr))
-            return snprintf(out, cap, "cc_file_%s(%s)", method, recv);
-        return snprintf(out, cap, "cc_file_%s(&%s)", method, recv);
-    }
-    if (cc__is_untyped_channel_recv_type(ctx->recv_type_name)) {
-        int chan_recv_is_ptr = recv_is_ptr || g_ufcs_recv_type_is_ptr ||
-                               strcmp(ctx->recv_type_name, "CCChan*") == 0;
-        if (has_args && args_rewritten) {
-            if (strcmp(method, "recv") == 0) {
-                return chan_recv_is_ptr
-                    ? snprintf(out, cap, "cc_channel_recv(%s, %s, sizeof(*%s))", recv, args_rewritten, args_rewritten)
-                    : snprintf(out, cap, "cc_channel_recv(&%s, %s, sizeof(*%s))", recv, args_rewritten, args_rewritten);
-            }
-            if (strcmp(method, "try_recv") == 0) {
-                return chan_recv_is_ptr
-                    ? snprintf(out, cap, "cc_channel_try_recv(%s, %s, sizeof(*%s))", recv, args_rewritten, args_rewritten)
-                    : snprintf(out, cap, "cc_channel_try_recv(&%s, %s, sizeof(*%s))", recv, args_rewritten, args_rewritten);
-            }
-        }
-        if (strcmp(method, "close") == 0) {
-            return chan_recv_is_ptr ? snprintf(out, cap, "cc_channel_close(%s)", recv)
-                                    : snprintf(out, cap, "cc_channel_close(&%s)", recv);
-        }
-        if (strcmp(method, "free") == 0) {
-            return chan_recv_is_ptr ? snprintf(out, cap, "cc_channel_free(%s)", recv)
-                                    : snprintf(out, cap, "cc_channel_free(&%s)", recv);
-        }
+        if (channel_recv_by_value || cc__recv_pass_direct(ctx, recv_is_ptr))
+            return snprintf(out, cap, "%s(%s)", channel_callee, recv);
+        return snprintf(out, cap, "%s(&%s)", channel_callee, recv);
     }
     if (cc__is_parser_vec_recv_type(ctx->recv_type_name)) {
         if (strcmp(method, "push") == 0 || strcmp(method, "get") == 0 ||
@@ -568,24 +578,20 @@ static int cc__emit_type_driven_dispatch(char* out,
                         strncmp(family_type_name, "CCOptional_", 11) == 0);
         const char* family_method = method;
         if (strncmp(family_type_name, "CCResult_", 9) == 0) {
-            const CCResultSpec* spec = cc__result_spec_lookup(family_type_name);
-            const char* ok_type = spec ? spec->ok_type : NULL;
-            const char* err_type = spec ? spec->err_type : cc__result_err_type_suffix(ctx->recv_type_name);
-            if (!has_args && strcmp(method, "value") == 0 && ok_type) {
-                return snprintf(out, cap, "cc_unwrap_as(%s, %s)", recv, ok_type);
+            if (!has_args && strcmp(method, "value") == 0) {
+                return snprintf(out, cap, "%s_unwrap(%s)", family_type_name, recv);
             }
-            if (!has_args && strcmp(method, "error") == 0 && err_type) {
-                return snprintf(out, cap, "cc_unwrap_err_as(%s, %s)", recv, err_type);
+            if (!has_args && strcmp(method, "error") == 0) {
+                return snprintf(out, cap, "%s_error(%s)", family_type_name, recv);
             }
             if (!has_args && strcmp(method, "is_ok") == 0) {
-                return snprintf(out, cap, "cc_is_ok(%s)", recv);
+                return snprintf(out, cap, "%s_is_ok(%s)", family_type_name, recv);
             }
             if (!has_args && strcmp(method, "is_err") == 0) {
-                return snprintf(out, cap, "cc_is_err(%s)", recv);
+                return snprintf(out, cap, "%s_is_err(%s)", family_type_name, recv);
             }
-            if (has_args && strcmp(method, "unwrap_or") == 0 && ok_type) {
-                return snprintf(out, cap, "(cc_is_ok(%s) ? cc_unwrap_as(%s, %s) : ",
-                                recv, recv, ok_type);
+            if (has_args && strcmp(method, "unwrap_or") == 0) {
+                return snprintf(out, cap, "%s_unwrap_or(%s, ", family_type_name, recv);
             }
             if (!(strcmp(method, "value") == 0 ||
                   strcmp(method, "error") == 0 ||
@@ -604,34 +610,10 @@ static int cc__emit_type_driven_dispatch(char* out,
             return snprintf(out, cap, "%s_%s(%s)", family_type_name, family_method, recv);
         return snprintf(out, cap, "%s_%s(&%s)", family_type_name, family_method, recv);
     }
-    if (ctx->recv_type_name &&
-        (strcmp(ctx->recv_type_name, "CCArena") == 0 || strcmp(ctx->recv_type_name, "CCArena*") == 0)) {
-        int arena_recv_is_ptr = recv_is_ptr || strcmp(ctx->recv_type_name, "CCArena*") == 0;
-        if (strcmp(method, "free") == 0) {
-            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_free(%s)", recv)
-                                     : snprintf(out, cap, "cc_arena_free(&%s)", recv);
-        }
-        if (strcmp(method, "detach") == 0) {
-            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_detach(%s)", recv)
-                                     : snprintf(out, cap, "cc_arena_detach(&%s)", recv);
-        }
-        if (strcmp(method, "reset") == 0) {
-            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_reset(%s)", recv)
-                                     : snprintf(out, cap, "cc_arena_reset(&%s)", recv);
-        }
-        if (strcmp(method, "remaining") == 0) {
-            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_remaining(%s)", recv)
-                                     : snprintf(out, cap, "cc_arena_remaining(&%s)", recv);
-        }
-        if (strcmp(method, "checkpoint") == 0) {
-            return arena_recv_is_ptr ? snprintf(out, cap, "cc_arena_checkpoint(%s)", recv)
-                                     : snprintf(out, cap, "cc_arena_checkpoint(&%s)", recv);
-        }
-    }
     if (ctx->recv_type_name && ctx->recv_type_name[0] &&
         !cc__is_string_recv_type(ctx->recv_type_name) &&
         !cc__is_slice_recv_type(ctx->recv_type_name) &&
-        !cc__is_untyped_channel_recv_type(ctx->recv_type_name) &&
+        !cc__is_raw_channel_recv_type(ctx->recv_type_name) &&
         strcmp(ctx->recv_type_name, "CCChanTx") != 0 &&
         strcmp(ctx->recv_type_name, "CCChanTx*") != 0 &&
         strcmp(ctx->recv_type_name, "CCChanRx") != 0 &&

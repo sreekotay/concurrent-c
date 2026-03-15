@@ -8,9 +8,11 @@
 #include <ctype.h>
 
 #include "tcc_bridge.h"
+#include "comptime/hook_compile.h"
 #include "comptime/symbols.h"
 #include "preprocess/preprocess.h"
 #include "util/text.h"
+#include "visitor/pass_create.h"
 #include "visitor/pass_channel_syntax.h"
 #include "util/path.h"
 
@@ -88,6 +90,44 @@ static char* cc__blank_comptime_blocks_preserve_layout_parse(const char* src, si
     return out;
 }
 
+typedef struct {
+    const char* registration_src;
+    size_t registration_len;
+} CCParseTypeCreateCompileCtx;
+
+static int cc__compile_type_create_registration(CCSymbolTable* symbols,
+                                                const char* registration_input_path,
+                                                const char* logical_file,
+                                                const char* type_name,
+                                                const char* expr_src,
+                                                size_t expr_len,
+                                                void* user_ctx) {
+    CCParseTypeCreateCompileCtx* ctx = (CCParseTypeCreateCompileCtx*)user_ctx;
+    void* owner = NULL;
+    const void* fn_ptr = NULL;
+    if (!symbols || !registration_input_path || !type_name || !expr_src || expr_len == 0 || !ctx) return -1;
+    if (cc_comptime_compile_type_hook_callable(registration_input_path,
+                                               logical_file,
+                                               ctx->registration_src,
+                                               ctx->registration_len,
+                                               expr_src,
+                                               expr_len,
+                                               CC_COMPTIME_TYPE_HOOK_CREATE,
+                                               &owner,
+                                               &fn_ptr) != 0) {
+        fprintf(stderr, "%s: error: failed to compile create hook for '%s'\n",
+                registration_input_path, type_name);
+        return -1;
+    }
+    if (cc_symbols_set_type_create_callable(symbols, type_name, fn_ptr, owner, cc_comptime_type_hook_owner_free) != 0) {
+        fprintf(stderr, "%s: error: failed to record create hook for '%s'\n",
+                registration_input_path, type_name);
+        cc_comptime_type_hook_owner_free(owner);
+        return -1;
+    }
+    return 0;
+}
+
 int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** out_root) {
     if (!input_path || !out_root) {
         return EINVAL;
@@ -118,10 +158,23 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
     char* reg_src = cc_preprocess_comptime_source(input_path);
     const char* use_src = reg_src ? reg_src : file_buf;
     size_t use_len = reg_src ? strlen(reg_src) : got;
-    if (symbols && cc_symbols_collect_type_registrations(symbols, input_path, use_src, use_len) != 0) {
-        free(reg_src);
-        free(file_buf);
-        return -1;
+    if (symbols) {
+        CCParseTypeCreateCompileCtx create_ctx = {
+            .registration_src = use_src,
+            .registration_len = use_len,
+        };
+        if (cc_symbols_collect_type_registrations_ex(symbols,
+                                                     input_path,
+                                                     use_src,
+                                                     use_len,
+                                                     cc__compile_type_create_registration,
+                                                     &create_ctx,
+                                                     NULL,
+                                                     NULL) != 0) {
+            free(reg_src);
+            free(file_buf);
+            return -1;
+        }
     }
     free(reg_src);
 
@@ -149,7 +202,7 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
         file_buf = parse_buf;
     }
 
-    char* nursery_proto = cc_rewrite_nursery_create_destroy_proto_ex(file_buf, got, input_path, symbols);
+    char* nursery_proto = cc_rewrite_nursery_create_destroy_proto(file_buf, got, input_path);
     if (nursery_proto == (char*)-1) {
         free(file_buf);
         return -1;
@@ -158,6 +211,19 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
         free(file_buf);
         file_buf = nursery_proto;
         got = strlen(file_buf);
+    }
+
+    if (symbols) {
+        char* registered_create = cc_rewrite_registered_type_create_destroy(file_buf, got, input_path, symbols);
+        if (registered_create == (char*)-1) {
+            free(file_buf);
+            return -1;
+        }
+        if (registered_create) {
+            free(file_buf);
+            file_buf = registered_create;
+            got = strlen(file_buf);
+        }
     }
 
     /* Preprocess to string (no temp file) */

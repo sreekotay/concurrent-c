@@ -10,19 +10,21 @@ int[~2 <] g_rx;
 
 @comptime {
     (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
-        .ufcs = (recv_type, method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
         (void)recv_type;
         (void)mode;
         (void)argv;
+        (void)arg_types;
         if (cc_slice_eq_cstr(method, "send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
         if (cc_slice_eq_cstr(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
         if (cc_slice_eq_cstr(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
         return cc_slice_empty();
     }});
     (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
-        .ufcs = (recv_type, method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
         (void)recv_type;
         (void)argv;
+        (void)arg_types;
         if (cc_slice_eq_cstr(method, "recv")) {
             return cc_slice_eq_cstr(mode, "await")
                 ? cc_ufcs_emit_value_cstr(arena, "cc_channel_recv_task")

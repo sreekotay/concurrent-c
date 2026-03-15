@@ -68,6 +68,28 @@ typedef struct CCCliSpec {
     const char* default_string;
 } CCCliSpec;
 
+typedef struct CCOptional_CCCliSpec {
+    bool has;
+    union {
+        CCCliSpec value;
+    } u;
+} CCOptional_CCCliSpec;
+
+#ifndef CC_VEC_CCCLISPEC_DEFINED
+#define CC_VEC_CCCLISPEC_DEFINED 1
+#ifdef CC_PARSER_MODE
+typedef __CCVecGeneric Vec_CCCliSpec;
+#define Vec_CCCliSpec_init(a, c) __cc_vec_generic_init((void*)(a))
+#define Vec_CCCliSpec_push(v, x) __cc_vec_generic_push((v), (x))
+#define Vec_CCCliSpec_push_ptr(v) __cc_vec_generic_push_ptr((v))
+#define Vec_CCCliSpec_len(v) __cc_vec_generic_len((v))
+#else
+CC_VEC_DECL_ARENA_FULL(CCCliSpec, Vec_CCCliSpec, CCOptional_CCCliSpec)
+#endif
+#endif
+
+typedef Vec_CCCliSpec CCCliSpecs;
+
 typedef struct CCCliParse {
     bool ok;
     bool help;
@@ -91,6 +113,10 @@ static void cc_cli_i64_init();
 static void cc_cli_string_init();
 static void cc_cli_positional_many_init();
 static bool cc_cli_parse_into_specs();
+static CCCliSpecs cc_cli_specs();
+static CCCliSpec* cc_cli_add();
+static bool cc_cli_parse_into_list();
+static void cc_cli_print_help_list();
 #endif
 
 static inline CCCli cc_cli_new(int argc, char** argv) {
@@ -243,6 +269,15 @@ static inline size_t cc_cli_positionals_len(const CCCliPositionals* items) {
 static inline CCSlice cc_cli_positionals_get(const CCCliPositionals* items, size_t idx) {
     if (!items || idx >= items->len) return cc_slice_empty();
     return ((CCSlice*)items->data)[idx];
+}
+
+static inline CCCliSpecs cc_cli_specs(CCArena* arena) {
+    return Vec_CCCliSpec_init(arena, 0);
+}
+
+static inline CCCliSpec* cc_cli_add(CCCliSpecs* specs) {
+    if (!specs) return NULL;
+    return (CCCliSpec*)Vec_CCCliSpec_push_ptr((Vec_CCCliSpec*)specs);
 }
 
 static inline void cc__cli_print_default(FILE* out, const CCCliSpec* spec) {
@@ -554,6 +589,22 @@ static inline bool cc_cli_parse_into_specs(int* exit_code,
     if (parse.ok && !parse.help) return true;
     if (exit_code) *exit_code = parse.exit_code;
     return false;
+}
+
+static inline bool cc_cli_parse_into_list(int* exit_code,
+                                          int argc,
+                                          char** argv,
+                                          CCCliSpecs* specs) {
+    if (!specs) return false;
+    return cc_cli_parse_into_specs(exit_code, argc, argv, (CCCliSpec*)specs->data, specs->len);
+}
+
+static inline void cc_cli_print_help_list(FILE* out,
+                                          int argc,
+                                          char** argv,
+                                          const CCCliSpecs* specs) {
+    if (!specs) return;
+    cc_cli_print_help_specs(out, argc, argv, (const CCCliSpec*)specs->data, specs->len);
 }
 
 #define cc_cli_parse_into(exit_code, argc, argv, specs) \

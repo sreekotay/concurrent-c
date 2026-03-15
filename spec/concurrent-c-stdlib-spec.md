@@ -1,8 +1,8 @@
 # Concurrent-C Standard Library Specification
 
-**Version:** 1.0 (Phase 1: Strings & I/O, UFCS-First)  
+**Version:** 1.0  
 **Date:** 2026-01-07  
-**Status:** UFCS-optimized specification for header-only implementation
+**Status:** Normative standard-library and lowering specification
 
 ---
 
@@ -24,9 +24,7 @@ char[:] trimmed = cc_slice_trim(s);
 String built = string_from(&arena, trimmed);
 ```
 
-**Phase 1 Focus:** String manipulation and file I/O—the most commonly requested operations that reduce verbosity in real code.
-
-**Future Phases:** Collections (v1.1), concurrency patterns (v1.2), others as community feedback drives.
+**Scope:** This document defines the standard-library surface APIs together with their normative lowering contracts at the C boundary.
 
 ---
 
@@ -52,7 +50,7 @@ String built = string_from(&arena, trimmed);
 For the standard library, UFCS lowering is part of the normative API surface:
 
 - Dispatch is chosen from the resolved receiver type and the full receiver expression to the left of `.` or `->`.
-- Stdlib families may use ordinary receiver-type method families or `cc_ufcs_register(...)`-owned family lowering.
+- Stdlib families normally define custom lowering through type-owned registration such as `cc_type_register(...)`. `cc_ufcs_register(...)` remains a compatibility mechanism for UFCS-only registration.
 - Constructors and helper calls such as `string_new(...)`, `string_from(...)`, `file_open(...)`, `vec_new<T>(...)`, and `map_new<K, V>(...)` are direct library calls, not UFCS.
 - Exact generated helper names are normative where this document names them explicitly; otherwise, the family-level lowering contract is normative.
 
@@ -102,7 +100,7 @@ Convenience macros for constructing Optional and Result type names in C (interop
 | `.cch` header files | `CCRes(T, E)` macro | `CCRes(int, CCIoError) read_int(...)` |
 | C interop headers | Explicit type name | `CCResult_int_CCIoError read_int(...)` |
 
-The `CCRes(T, E)` macros work in both TCC parser mode (for `.cch` files) and regular C compilation.
+The `CCRes(T, E)` macros are part of the C interop contract for headers and generated C. Implementations may use parser-only stubs internally, but that machinery does not change the visible family naming contract.
 
 ### Result Helpers
 
@@ -131,7 +129,7 @@ Macros for working with `T!>(E)` Result types:
 
 **Result struct layout:**
 
-All Result types use a unified struct layout:
+All Result family contracts use a unified C-visible struct layout:
 
 ```c
 struct CCResult_T_E {
@@ -1364,9 +1362,9 @@ Runtime.set_blocking_pool(
 
 **No eviction:** Pending operations are not killed on saturation. Bounded queue + fail-fast is safer than eviction (which risks corrupting `@scoped` resources, transactions, or in-flight cleanup).
 
-### UFCS Implementation
+### UFCS Lowering Model
 
-The pattern is consistent with the language:
+The pattern is consistent with the language and with the main specification's type-owned UFCS model:
 
 > **The lowering contract is normative. `s.len()` dispatches from the resolved receiver type and lowers to that type family's stdlib callee contract.**
 

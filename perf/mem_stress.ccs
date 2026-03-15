@@ -5,7 +5,7 @@
 static _Atomic int g_completed = 0;
 
 int main() {
-    const int count = 100000;
+    const int count = 5000;
     printf("START. Spawning %d fibers...\n", count);
     fflush(stdout);
     
@@ -15,7 +15,7 @@ int main() {
                 cc_sleep_ms(1000);
                 atomic_fetch_add(&g_completed, 1);
             });
-            if ((i + 1) % 10000 == 0) {
+            if ((i + 1) % 1000 == 0) {
                 printf("  %d / %d spawned...\n", i + 1, count);
                 fflush(stdout);
             }

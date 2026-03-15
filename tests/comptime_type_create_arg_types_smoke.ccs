@@ -1,0 +1,47 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_type.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int value;
+} CreateToy;
+
+static CreateToy create_toy_from_int(int value) {
+    return (CreateToy){ .value = value + 1 };
+}
+
+static CreateToy create_toy_from_cstr(const char* text) {
+    return (CreateToy){ .value = (int)strlen(text) };
+}
+
+static CCSlice create_toy_create(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+    (void)type_name;
+    (void)argv;
+    if (arg_types.len == 1 && cc_slice_eq_cstr(arg_types.items[0], "int")) {
+        return cc_slice_from_buffer((void*)"create_toy_from_int", sizeof("create_toy_from_int") - 1);
+    }
+    if (arg_types.len == 1 && cc_slice_eq_cstr(arg_types.items[0], "const char*")) {
+        return cc_slice_from_buffer((void*)"create_toy_from_cstr", sizeof("create_toy_from_cstr") - 1);
+    }
+    (void)arena;
+    return cc_slice_empty();
+}
+
+@comptime {
+    (void)cc_type_register("CreateToy", (CCTypeHooks){
+        .create = cc_type_create_hook(create_toy_create),
+    });
+}
+
+int main(void) {
+    CreateToy from_int = @create(4) @detach;
+    CreateToy from_cstr = @create("hello") @detach;
+
+    assert(from_int.value == 5);
+    assert(from_cstr.value == 5);
+
+    printf("comptime_type_create_arg_types_smoke: PASS\n");
+    return 0;
+}

@@ -2,6 +2,7 @@
 #define CC_VISITOR_UFCS_H
 
 #include <stddef.h>
+#include <string.h>
 
 #include "ast/ast.h"
 #include "comptime/symbols.h"
@@ -12,6 +13,13 @@ enum {
     CC_UFCS_REWRITE_UNRESOLVED = 2,
     CC_UFCS_REWRITE_ERROR = -1,
 };
+
+typedef enum {
+    CC_UFCS_CHANNEL_KIND_NONE = 0,
+    CC_UFCS_CHANNEL_KIND_TX,
+    CC_UFCS_CHANNEL_KIND_RX,
+    CC_UFCS_CHANNEL_KIND_RAW,
+} CCUfcsChannelKind;
 
 // UFCS rewrite: transforms x.method(a, b) -> method(&x, a, b) (with small
 // built-in mappings for std string and stdout helpers). Operates on source text
@@ -39,6 +47,63 @@ int cc_ufcs_rewrite_line_full(const char* in, char* out, size_t out_cap,
 
 /* Provide the active compile-time symbol table for UFCS registry lookups. */
 void cc_ufcs_set_symbols(CCSymbolTable* symbols);
+
+/* Resolve builtin channel UFCS lowering from receiver type + method + mode. */
+static inline const char* cc_ufcs_channel_callee(const char* recv_type_name,
+                                                 const char* method,
+                                                 int is_await,
+                                                 CCUfcsChannelKind* out_kind,
+                                                 int* out_recv_by_value) {
+    int is_tx = 0;
+    int is_rx = 0;
+    int is_raw = 0;
+
+    if (out_kind) *out_kind = CC_UFCS_CHANNEL_KIND_NONE;
+    if (out_recv_by_value) *out_recv_by_value = 0;
+    if (!recv_type_name || !method) return NULL;
+
+    is_tx = (strncmp(recv_type_name, "CCChanTx_", 9) == 0 ||
+             strcmp(recv_type_name, "CCChanTx") == 0 ||
+             strcmp(recv_type_name, "CCChanTx*") == 0);
+    is_rx = (strncmp(recv_type_name, "CCChanRx_", 9) == 0 ||
+             strcmp(recv_type_name, "CCChanRx") == 0 ||
+             strcmp(recv_type_name, "CCChanRx*") == 0);
+    is_raw = (strcmp(recv_type_name, "CCChan") == 0 ||
+              strcmp(recv_type_name, "CCChan*") == 0);
+
+    if (is_tx) {
+        if (out_kind) *out_kind = CC_UFCS_CHANNEL_KIND_TX;
+        if (out_recv_by_value) *out_recv_by_value = 1;
+        if (strcmp(method, "send") == 0) return is_await ? "cc_channel_send_task" : "cc_channel_send";
+        if (strcmp(method, "try_send") == 0) return "cc_channel_try_send";
+        if (strcmp(method, "send_take") == 0) return "cc_channel_send_take";
+        if (strcmp(method, "send_task") == 0) return "cc_channel_send_task";
+        if (strcmp(method, "close") == 0) return "cc_channel_close";
+        if (strcmp(method, "free") == 0) return "cc_channel_free";
+        return NULL;
+    }
+
+    if (is_rx) {
+        if (out_kind) *out_kind = CC_UFCS_CHANNEL_KIND_RX;
+        if (out_recv_by_value) *out_recv_by_value = 1;
+        if (strcmp(method, "recv") == 0) return is_await ? "cc_channel_recv_task" : "cc_channel_recv";
+        if (strcmp(method, "try_recv") == 0) return "cc_channel_try_recv";
+        if (strcmp(method, "close") == 0) return "cc_channel_close";
+        if (strcmp(method, "free") == 0) return "cc_channel_free";
+        return NULL;
+    }
+
+    if (is_raw) {
+        if (out_kind) *out_kind = CC_UFCS_CHANNEL_KIND_RAW;
+        if (out_recv_by_value) *out_recv_by_value = 1;
+        if (strcmp(method, "recv") == 0) return is_await ? "cc_channel_recv_task" : "cc_channel_recv";
+        if (strcmp(method, "try_recv") == 0) return "cc_channel_try_recv";
+        if (strcmp(method, "close") == 0) return "cc_channel_close";
+        if (strcmp(method, "free") == 0) return "cc_channel_free";
+    }
+
+    return NULL;
+}
 
 #endif // CC_VISITOR_UFCS_H
 

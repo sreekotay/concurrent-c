@@ -77,10 +77,13 @@ int !> (CCIoError) cc_command_status(CCCommand *cmd);
 static inline char[:] cc_command_lower_c(char[:] recv_type, 
                                          char[:] method, 
                                          char[:] mode, 
-                                         CCSliceArray argv, CCArena *arena) {
+                                         CCSliceArray argv,
+                                         CCSliceArray arg_types,
+                                         CCArena *arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;
+    (void)arg_types;
     return cc_ufcs_concat2(arena, cc_slice_from_buffer((void*)"cc_command_", sizeof("cc_command_") - 1), method);
 }
 

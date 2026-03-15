@@ -328,6 +328,55 @@ const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
     return resolved_type;
 }
 
+const char* cc_type_registry_resolve_expr_type(CCTypeRegistry* reg, const char* expr) {
+    static _Thread_local char resolved_type[256];
+    const char* p = expr;
+    size_t len = 0;
+    int recv_is_ptr = 0;
+    const char* resolved = NULL;
+    if (!reg || !expr) return NULL;
+    while (*p && isspace((unsigned char)*p)) p++;
+    len = strlen(p);
+    while (len > 0 && isspace((unsigned char)p[len - 1])) len--;
+    if (len == 0 || len >= sizeof(resolved_type)) return NULL;
+
+    if (p[0] == '"' || (len > 1 && p[0] == 'L' && p[1] == '"')) return "const char*";
+    if (p[0] == '\'') return "char";
+    if ((len == 4 && memcmp(p, "true", 4) == 0) ||
+        (len == 5 && memcmp(p, "false", 5) == 0)) {
+        return "bool";
+    }
+    if (len == 4 && memcmp(p, "NULL", 4) == 0) return "void*";
+    if (len >= 7 && memcmp(p, "sizeof(", 7) == 0) return "size_t";
+
+    if ((isdigit((unsigned char)p[0])) ||
+        ((p[0] == '+' || p[0] == '-') && len > 1 && isdigit((unsigned char)p[1]))) {
+        int saw_dot = 0;
+        int saw_exp = 0;
+        for (size_t i = 0; i < len; ++i) {
+            char c = p[i];
+            if (c == '.') saw_dot = 1;
+            else if (c == 'e' || c == 'E') saw_exp = 1;
+        }
+        return (saw_dot || saw_exp) ? "double" : "int";
+    }
+
+    resolved = cc_type_registry_resolve_receiver_expr(reg, p, &recv_is_ptr);
+    if (resolved && resolved[0]) return resolved;
+
+    if (p[0] == '&') {
+        const char* inner = cc_type_registry_resolve_expr_type(reg, p + 1);
+        size_t inner_len = inner ? strlen(inner) : 0;
+        if (!inner || inner_len == 0 || inner_len + 1 >= sizeof(resolved_type)) return NULL;
+        memcpy(resolved_type, inner, inner_len);
+        resolved_type[inner_len] = '*';
+        resolved_type[inner_len + 1] = '\0';
+        return resolved_type;
+    }
+
+    return NULL;
+}
+
 const char* cc_type_registry_lookup_channel_elem_type(CCTypeRegistry* reg, const char* handle_type_name) {
     const char* mangled = NULL;
     if (!reg || !handle_type_name) return NULL;

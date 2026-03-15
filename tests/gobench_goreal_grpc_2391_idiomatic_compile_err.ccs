@@ -1,53 +1,31 @@
-/*
- * GoBench GoReal: grpc#2391 (channel deadlock on GOAWAY + close).
- * Simplified port: close path fails to signal channel, leaving reader blocked.
- */
 #include <ccc/cc_runtime.cch>
-#include <pthread.h>
-#include <stdio.h>
-#include <errno.h>
+#include <ccc/cc_channel.cch>
 
-static CCChan* g_goaway_ch = NULL;
-static CCChan* g_done_ch = NULL;
-
-static void* reader_thread(void* arg) {
-    (void)arg;
-    int v = 0;
-    (void)cc_chan_recv(g_goaway_ch, &v, sizeof(v)); /* waits for GOAWAY */
-    v = 1;
-    cc_chan_send(g_done_ch, &v, sizeof(v));
-    return NULL;
-}
-
+/*
+ * Idiomatic CC analog of a gRPC shutdown/GOAWAY bug:
+ * the reader waits for the GOAWAY/control channel to close, but the close
+ * would only happen after owned tasks exit.
+ */
 int main(void) {
-    CCChan* goaway_ch = cc_chan_create(0);
-    CCChan* done_ch = cc_chan_create(1);
-    if (!goaway_ch || !done_ch) return 2;
-    if (cc_chan_init_elem(goaway_ch, sizeof(int)) != 0) return 3;
-    if (cc_chan_init_elem(done_ch, sizeof(int)) != 0) return 4;
+    CCChanTx goaway_tx;
+    CCChanRx goaway_rx;
+    CCChanTx done_tx;
+    CCChanRx done_rx;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &goaway_tx, &goaway_rx) != 0) return 2;
+    if (cc_chan_pair_create(1, CC_CHAN_MODE_BLOCK, false, sizeof(int), &done_tx, &done_rx) != 0) return 3;
 
-    pthread_t tid;
-    g_goaway_ch = goaway_ch;
-    g_done_ch = done_ch;
-    pthread_create(&tid, NULL, reader_thread, NULL);
-
-    /* Close path forgets to send GOAWAY. */
-    int v = 0;
-    int rc = 0;
-    @with_deadline(millis(20)) {
-        rc = cc_chan_recv(done_ch, &v, sizeof(v));
+    @closing(goaway_tx, done_tx) {
+        spawn(() => {
+            int code = 0;
+            while (cc_io_avail(chan_recv(goaway_rx, &code))) {
+                (void)code;
+            }
+            (void)chan_send(done_tx, 1);
+        });
     }
 
-    if (rc != ETIMEDOUT) return 10;
-
-    /* Cleanup: send GOAWAY and join. */
-    v = 9;
-    cc_chan_send(goaway_ch, &v, sizeof(v));
-    pthread_join(tid, NULL);
-
-    cc_chan_free(goaway_ch);
-    cc_chan_free(done_ch);
-    printf("gobench goreal grpc2391: PASS\n");
+    chan_free(goaway_tx);
+    chan_free(done_tx);
     return 0;
 }
 

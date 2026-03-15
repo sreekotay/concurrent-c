@@ -17,14 +17,6 @@ typedef struct {
 } CCFuncAttrEntry;
 
 typedef struct {
-    char* pattern;
-    char* prefix;
-    const void* fn_ptr;
-    void* owner;
-    CCOwnedResourceFreeFn owner_free;
-} CCUfcsEntry;
-
-typedef struct {
     char* method;
     char* callee;
 } CCTypeUfcsEntry;
@@ -32,7 +24,14 @@ typedef struct {
 typedef struct {
     char* type_name;
     char* create_calls[5];
+    const void* create_callable;
+    void* create_owner;
+    CCOwnedResourceFreeFn create_owner_free;
     char* destroy_call;
+    const void* ufcs_callable;
+    int ufcs_callable_is_legacy_compat;
+    void* ufcs_owner;
+    CCOwnedResourceFreeFn ufcs_owner_free;
     CCTypeUfcsEntry* ufcs;
     size_t ufcs_count;
     size_t ufcs_capacity;
@@ -46,10 +45,6 @@ struct CCSymbolTable {
     CCFuncAttrEntry* fn_attrs;
     size_t fn_count;
     size_t fn_capacity;
-
-    CCUfcsEntry* ufcs;
-    size_t ufcs_count;
-    size_t ufcs_capacity;
 
     CCTypeEntry* types;
     size_t type_count;
@@ -79,17 +74,6 @@ static int ensure_fn_capacity(CCSymbolTable* t, size_t needed) {
     if (!nv) return ENOMEM;
     t->fn_attrs = nv;
     t->fn_capacity = new_cap;
-    return 0;
-}
-
-static int ensure_ufcs_capacity(CCSymbolTable* t, size_t needed) {
-    if (t->ufcs_capacity >= needed) return 0;
-    size_t new_cap = t->ufcs_capacity ? t->ufcs_capacity * 2 : 8;
-    while (new_cap < needed) new_cap *= 2;
-    CCUfcsEntry* nv = (CCUfcsEntry*)realloc(t->ufcs, new_cap * sizeof(CCUfcsEntry));
-    if (!nv) return ENOMEM;
-    t->ufcs = nv;
-    t->ufcs_capacity = new_cap;
     return 0;
 }
 
@@ -171,19 +155,18 @@ void cc_symbols_free(CCSymbolTable* t) {
     for (size_t i = 0; i < t->fn_count; ++i) {
         free(t->fn_attrs[i].name);
     }
-    for (size_t i = 0; i < t->ufcs_count; ++i) {
-        free(t->ufcs[i].pattern);
-        free(t->ufcs[i].prefix);
-        if (t->ufcs[i].owner && t->ufcs[i].owner_free) {
-            t->ufcs[i].owner_free(t->ufcs[i].owner);
-        }
-    }
     for (size_t i = 0; i < t->type_count; ++i) {
         free(t->types[i].type_name);
         for (size_t a = 0; a < sizeof(t->types[i].create_calls) / sizeof(t->types[i].create_calls[0]); ++a) {
             free(t->types[i].create_calls[a]);
         }
+        if (t->types[i].create_owner && t->types[i].create_owner_free) {
+            t->types[i].create_owner_free(t->types[i].create_owner);
+        }
         free(t->types[i].destroy_call);
+        if (t->types[i].ufcs_owner && t->types[i].ufcs_owner_free) {
+            t->types[i].ufcs_owner_free(t->types[i].ufcs_owner);
+        }
         for (size_t u = 0; u < t->types[i].ufcs_count; ++u) {
             free(t->types[i].ufcs[u].method);
             free(t->types[i].ufcs[u].callee);
@@ -192,7 +175,6 @@ void cc_symbols_free(CCSymbolTable* t) {
     }
     free(t->entries);
     free(t->fn_attrs);
-    free(t->ufcs);
     free(t->types);
     free(t);
 }
@@ -281,120 +263,6 @@ int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int*
     return ENOENT;
 }
 
-int cc_symbols_add_ufcs_prefix(CCSymbolTable* t, const char* pattern, const char* prefix) {
-    if (!t || !pattern || !prefix) return EINVAL;
-    for (size_t i = 0; i < t->ufcs_count; ++i) {
-        if (strcmp(t->ufcs[i].pattern, pattern) == 0) {
-            char* copy = strdup(prefix);
-            if (!copy) return ENOMEM;
-            free(t->ufcs[i].prefix);
-            t->ufcs[i].prefix = copy;
-            t->ufcs[i].fn_ptr = NULL;
-            return 0;
-        }
-    }
-    int err = ensure_ufcs_capacity(t, t->ufcs_count + 1);
-    if (err != 0) return err;
-    char* pattern_copy = strdup(pattern);
-    char* prefix_copy = strdup(prefix);
-    if (!pattern_copy || !prefix_copy) {
-        free(pattern_copy);
-        free(prefix_copy);
-        return ENOMEM;
-    }
-    t->ufcs[t->ufcs_count].pattern = pattern_copy;
-    t->ufcs[t->ufcs_count].prefix = prefix_copy;
-    t->ufcs[t->ufcs_count].fn_ptr = NULL;
-    t->ufcs[t->ufcs_count].owner = NULL;
-    t->ufcs[t->ufcs_count].owner_free = NULL;
-    t->ufcs_count += 1;
-    return 0;
-}
-
-int cc_symbols_lookup_ufcs_prefix(CCSymbolTable* t, const char* pattern, const char** out_prefix) {
-    if (!t || !pattern || !out_prefix) return EINVAL;
-    size_t best_len = 0;
-    const char* best_prefix = NULL;
-    for (size_t i = 0; i < t->ufcs_count; ++i) {
-        if (t->ufcs[i].prefix && cc__ufcs_pattern_matches(t->ufcs[i].pattern, pattern)) {
-            size_t plen = strlen(t->ufcs[i].pattern);
-            size_t score = (plen > 0 && t->ufcs[i].pattern[plen - 1] == '*') ? plen - 1 : plen;
-            if (!best_prefix || score > best_len) {
-                best_prefix = t->ufcs[i].prefix;
-                best_len = score;
-            }
-        }
-    }
-    if (best_prefix) {
-        *out_prefix = best_prefix;
-        return 0;
-    }
-    return ENOENT;
-}
-
-int cc_symbols_add_ufcs_callable(CCSymbolTable* t,
-                                 const char* pattern,
-                                 const void* fn_ptr,
-                                 void* owner,
-                                 CCOwnedResourceFreeFn owner_free) {
-    if (!t || !pattern || !fn_ptr) return EINVAL;
-    for (size_t i = 0; i < t->ufcs_count; ++i) {
-        if (strcmp(t->ufcs[i].pattern, pattern) == 0) {
-            if (t->ufcs[i].owner && t->ufcs[i].owner_free) {
-                t->ufcs[i].owner_free(t->ufcs[i].owner);
-            }
-            t->ufcs[i].fn_ptr = fn_ptr;
-            t->ufcs[i].owner = owner;
-            t->ufcs[i].owner_free = owner_free;
-            return 0;
-        }
-    }
-    {
-        int err = ensure_ufcs_capacity(t, t->ufcs_count + 1);
-        char* pattern_copy;
-        if (err != 0) return err;
-        pattern_copy = strdup(pattern);
-        if (!pattern_copy) return ENOMEM;
-        t->ufcs[t->ufcs_count].pattern = pattern_copy;
-        t->ufcs[t->ufcs_count].prefix = NULL;
-        t->ufcs[t->ufcs_count].fn_ptr = fn_ptr;
-        t->ufcs[t->ufcs_count].owner = owner;
-        t->ufcs[t->ufcs_count].owner_free = owner_free;
-        t->ufcs_count += 1;
-    }
-    return 0;
-}
-
-int cc_symbols_lookup_ufcs_callable(CCSymbolTable* t, const char* pattern, const void** out_fn_ptr) {
-    if (!t || !pattern || !out_fn_ptr) return EINVAL;
-    size_t best_len = 0;
-    const void* best_fn = NULL;
-    for (size_t i = 0; i < t->ufcs_count; ++i) {
-        if (t->ufcs[i].fn_ptr && cc__ufcs_pattern_matches(t->ufcs[i].pattern, pattern)) {
-            size_t plen = strlen(t->ufcs[i].pattern);
-            size_t score = (plen > 0 && t->ufcs[i].pattern[plen - 1] == '*') ? plen - 1 : plen;
-            if (!best_fn || score > best_len) {
-                best_fn = t->ufcs[i].fn_ptr;
-                best_len = score;
-            }
-        }
-    }
-    if (best_fn) {
-        *out_fn_ptr = best_fn;
-        return 0;
-    }
-    return ENOENT;
-}
-
-size_t cc_symbols_ufcs_count(CCSymbolTable* t) {
-    return t ? t->ufcs_count : 0;
-}
-
-const char* cc_symbols_ufcs_pattern(CCSymbolTable* t, size_t idx) {
-    if (!t || idx >= t->ufcs_count) return NULL;
-    return t->ufcs[idx].pattern;
-}
-
 int cc_symbols_add_type_create_call(CCSymbolTable* t, const char* type_name, int arity, const char* callee) {
     CCTypeEntry* entry = NULL;
     char* copy = NULL;
@@ -415,6 +283,36 @@ int cc_symbols_lookup_type_create_call(CCSymbolTable* t, const char* type_name, 
     entry = cc__find_type_entry(t, type_name);
     if (!entry || !entry->create_calls[arity]) return ENOENT;
     *out_callee = entry->create_calls[arity];
+    return 0;
+}
+
+int cc_symbols_set_type_create_callable(CCSymbolTable* t,
+                                        const char* type_name,
+                                        const void* fn_ptr,
+                                        void* owner,
+                                        CCOwnedResourceFreeFn owner_free) {
+    CCTypeEntry* entry = NULL;
+    int err;
+    if (!t || !type_name || !fn_ptr) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    if (entry->create_owner && entry->create_owner_free) {
+        entry->create_owner_free(entry->create_owner);
+    }
+    entry->create_callable = fn_ptr;
+    entry->create_owner = owner;
+    entry->create_owner_free = owner_free;
+    return 0;
+}
+
+int cc_symbols_lookup_type_create_callable(CCSymbolTable* t,
+                                           const char* type_name,
+                                           const void** out_fn_ptr) {
+    CCTypeEntry* entry = NULL;
+    if (!t || !type_name || !out_fn_ptr) return EINVAL;
+    entry = cc__find_type_entry(t, type_name);
+    if (!entry || !entry->create_callable) return ENOENT;
+    *out_fn_ptr = entry->create_callable;
     return 0;
 }
 
@@ -477,17 +375,103 @@ int cc_symbols_lookup_type_ufcs_value(CCSymbolTable* t,
                                       const char* type_name,
                                       const char* method,
                                       const char** out_callee) {
-    CCTypeEntry* entry = NULL;
+    CCTypeEntry* best_entry = NULL;
+    size_t best_len = 0;
     if (!t || !type_name || !method || !out_callee) return EINVAL;
-    entry = cc__find_type_entry(t, type_name);
-    if (!entry) return ENOENT;
-    for (size_t i = 0; i < entry->ufcs_count; ++i) {
-        if (strcmp(entry->ufcs[i].method, method) == 0) {
-            *out_callee = entry->ufcs[i].callee;
-            return 0;
+    for (size_t ti = 0; ti < t->type_count; ++ti) {
+        CCTypeEntry* entry = &t->types[ti];
+        size_t plen;
+        size_t score;
+        if (!entry->ufcs_count) continue;
+        if (!cc__ufcs_pattern_matches(entry->type_name, type_name)) continue;
+        plen = strlen(entry->type_name);
+        score = (plen > 0 && entry->type_name[plen - 1] == '*') ? plen - 1 : plen;
+        for (size_t i = 0; i < entry->ufcs_count; ++i) {
+            if (strcmp(entry->ufcs[i].method, method) != 0) continue;
+            if (!best_entry || score > best_len) {
+                best_entry = entry;
+                best_len = score;
+                *out_callee = entry->ufcs[i].callee;
+            }
         }
     }
-    return ENOENT;
+    return best_entry ? 0 : ENOENT;
+}
+
+int cc_symbols_set_type_ufcs_callable(CCSymbolTable* t,
+                                      const char* type_name,
+                                      const void* fn_ptr,
+                                      void* owner,
+                                      CCOwnedResourceFreeFn owner_free) {
+    CCTypeEntry* entry = NULL;
+    int err;
+    if (!t || !type_name || !fn_ptr) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    if (entry->ufcs_owner && entry->ufcs_owner_free) {
+        entry->ufcs_owner_free(entry->ufcs_owner);
+    }
+    entry->ufcs_callable = fn_ptr;
+    entry->ufcs_callable_is_legacy_compat = 0;
+    entry->ufcs_owner = owner;
+    entry->ufcs_owner_free = owner_free;
+    return 0;
+}
+
+int cc_symbols_add_legacy_type_ufcs_callable(CCSymbolTable* t,
+                                             const char* type_name,
+                                             const void* fn_ptr,
+                                             void* owner,
+                                             CCOwnedResourceFreeFn owner_free) {
+    CCTypeEntry* entry = NULL;
+    int err;
+    if (!t || !type_name || !fn_ptr) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    if (entry->ufcs_callable && !entry->ufcs_callable_is_legacy_compat) {
+        if (owner && owner_free) owner_free(owner);
+        return 0;
+    }
+    if (entry->ufcs_owner && entry->ufcs_owner_free) {
+        entry->ufcs_owner_free(entry->ufcs_owner);
+    }
+    entry->ufcs_callable = fn_ptr;
+    entry->ufcs_callable_is_legacy_compat = 1;
+    entry->ufcs_owner = owner;
+    entry->ufcs_owner_free = owner_free;
+    return 0;
+}
+
+int cc_symbols_lookup_type_ufcs_callable(CCSymbolTable* t,
+                                         const char* type_name,
+                                         const void** out_fn_ptr) {
+    CCTypeEntry* best_entry = NULL;
+    size_t best_len = 0;
+    if (!t || !type_name || !out_fn_ptr) return EINVAL;
+    for (size_t ti = 0; ti < t->type_count; ++ti) {
+        CCTypeEntry* entry = &t->types[ti];
+        size_t plen;
+        size_t score;
+        if (!entry->ufcs_callable) continue;
+        if (!cc__ufcs_pattern_matches(entry->type_name, type_name)) continue;
+        plen = strlen(entry->type_name);
+        score = (plen > 0 && entry->type_name[plen - 1] == '*') ? plen - 1 : plen;
+        if (!best_entry || score > best_len) {
+            best_entry = entry;
+            best_len = score;
+            *out_fn_ptr = entry->ufcs_callable;
+        }
+    }
+    return best_entry ? 0 : ENOENT;
+}
+
+size_t cc_symbols_type_count(CCSymbolTable* t) {
+    return t ? t->type_count : 0;
+}
+
+const char* cc_symbols_type_name(CCSymbolTable* t, size_t idx) {
+    if (!t || idx >= t->type_count) return NULL;
+    return t->types[idx].type_name;
 }
 
 static int cc__match_kw_reg(const char* src, size_t n, size_t pos, const char* kw) {
@@ -589,12 +573,45 @@ static int cc__parse_helper_call_1(const char* src,
     return 1;
 }
 
+static int cc__parse_helper_call_2(const char* src,
+                                   size_t n,
+                                   size_t* io_pos,
+                                   const char* helper,
+                                   char* out_a,
+                                   size_t out_a_sz,
+                                   char* out_b,
+                                   size_t out_b_sz) {
+    size_t p = cc__skip_ws_reg(src, n, *io_pos);
+    size_t lpar = 0, rpar = 0;
+    if (!cc__match_kw_reg(src, n, p, helper)) return 0;
+    p += strlen(helper);
+    p = cc__skip_ws_reg(src, n, p);
+    if (p >= n || src[p] != '(') return 0;
+    lpar = p;
+    if (!cc__find_matching_reg(src, n, lpar, '(', ')', &rpar)) return 0;
+    p = cc__skip_ws_reg(src, rpar, lpar + 1);
+    if (!cc__parse_string_literal_reg(src, rpar, &p, out_a, out_a_sz)) return 0;
+    p = cc__skip_ws_reg(src, rpar, p);
+    if (p >= rpar || src[p] != ',') return 0;
+    p = cc__skip_ws_reg(src, rpar, p + 1);
+    if (!cc__parse_string_literal_reg(src, rpar, &p, out_b, out_b_sz)) return 0;
+    p = cc__skip_ws_reg(src, rpar, p);
+    if (p != rpar) return 0;
+    *io_pos = rpar + 1;
+    return 1;
+}
+
 static int cc__parse_type_hooks_object(CCSymbolTable* t,
                                        const char* input_path,
+                                       const char* logical_file,
                                        const char* type_name,
                                        const char* src,
                                        size_t obj_l,
-                                       size_t obj_r) {
+                                       size_t obj_r,
+                                       CCTypeRegistrationCreateCallback create_callback,
+                                       void* create_user_ctx,
+                                       CCTypeRegistrationUfcsCallback ufcs_callback,
+                                       void* ufcs_user_ctx) {
     size_t p = obj_l + 1;
     while (p < obj_r) {
         char create_callee[256];
@@ -611,6 +628,97 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
             return -1;
         }
         p++;
+        if (cc__match_kw_reg(src, obj_r, p, "create")) {
+            char create_callee2[256];
+            size_t expr_s = 0;
+            size_t expr_e = 0;
+            size_t scan = 0;
+            size_t depth = 0;
+            int in_str = 0, in_chr = 0;
+            size_t parse_pos = 0;
+            p += strlen("create");
+            p = cc__skip_ws_reg(src, obj_r, p);
+            if (p >= obj_r || src[p] != '=') return -1;
+            p = cc__skip_ws_reg(src, obj_r, p + 1);
+            expr_s = p;
+            scan = p;
+            while (scan < obj_r) {
+                char c = src[scan];
+                char c2 = (scan + 1 < obj_r) ? src[scan + 1] : 0;
+                if (in_str) {
+                    if (c == '\\' && c2) { scan += 2; continue; }
+                    if (c == '"') in_str = 0;
+                    scan++;
+                    continue;
+                }
+                if (in_chr) {
+                    if (c == '\\' && c2) { scan += 2; continue; }
+                    if (c == '\'') in_chr = 0;
+                    scan++;
+                    continue;
+                }
+                if (c == '"') { in_str = 1; scan++; continue; }
+                if (c == '\'') { in_chr = 1; scan++; continue; }
+                if (c == '(' || c == '{' || c == '[') { depth++; scan++; continue; }
+                if (c == ')' || c == '}' || c == ']') {
+                    if (depth == 0) break;
+                    depth--;
+                    scan++;
+                    continue;
+                }
+                if (c == ',' && depth == 0) break;
+                scan++;
+            }
+            expr_e = scan;
+            while (expr_s < expr_e && isspace((unsigned char)src[expr_s])) expr_s++;
+            while (expr_e > expr_s && isspace((unsigned char)src[expr_e - 1])) expr_e--;
+            parse_pos = expr_s;
+            if (cc__parse_helper_call_2(src, expr_e, &parse_pos, "cc_type_create_overloads",
+                                        create_callee, sizeof(create_callee),
+                                        create_callee2, sizeof(create_callee2)) &&
+                parse_pos == expr_e) {
+                if (cc_symbols_add_type_create_call(t, type_name, 1, create_callee) != 0) return -1;
+                if (cc_symbols_add_type_create_call(t, type_name, 2, create_callee2) != 0) return -1;
+                p = scan;
+                continue;
+            }
+            parse_pos = expr_s;
+            if (cc__parse_helper_call_1(src, expr_e, &parse_pos, "cc_type_create_call", create_callee, sizeof(create_callee)) &&
+                parse_pos == expr_e) {
+                if (cc_symbols_add_type_create_call(t, type_name, 1, create_callee) != 0) return -1;
+                p = scan;
+                continue;
+            }
+            if (cc__match_kw_reg(src, expr_e, expr_s, "cc_type_create_hook")) {
+                size_t hook_pos = cc__skip_ws_reg(src, expr_e, expr_s + strlen("cc_type_create_hook"));
+                size_t hook_rpar = 0;
+                if (hook_pos < expr_e && src[hook_pos] == '(' &&
+                    cc__find_matching_reg(src, expr_e, hook_pos, '(', ')', &hook_rpar)) {
+                    size_t inner_s = cc__skip_ws_reg(src, hook_rpar, hook_pos + 1);
+                    size_t inner_e = hook_rpar;
+                    while (inner_e > inner_s && isspace((unsigned char)src[inner_e - 1])) inner_e--;
+                    if (cc__skip_ws_reg(src, expr_e, hook_rpar + 1) == expr_e) {
+                        expr_s = inner_s;
+                        expr_e = inner_e;
+                    }
+                }
+            }
+            if (create_callback && expr_e > expr_s) {
+                if (create_callback(t,
+                                    input_path,
+                                    logical_file,
+                                    type_name,
+                                    src + expr_s,
+                                    expr_e - expr_s,
+                                    create_user_ctx) != 0) {
+                    return -1;
+                }
+                p = scan;
+                continue;
+            }
+            p = scan;
+            continue;
+        }
         if (cc__match_kw_reg(src, obj_r, p, "create1")) {
             p += strlen("create1");
             p = cc__skip_ws_reg(src, obj_r, p);
@@ -639,12 +747,15 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
             continue;
         }
         if (cc__match_kw_reg(src, obj_r, p, "ufcs")) {
+            size_t expr_s = 0;
+            size_t expr_e = 0;
             size_t depth = 0;
             int in_str = 0, in_chr = 0;
             p += strlen("ufcs");
             p = cc__skip_ws_reg(src, obj_r, p);
             if (p >= obj_r || src[p] != '=') return -1;
             p = cc__skip_ws_reg(src, obj_r, p + 1);
+            expr_s = p;
             while (p < obj_r) {
                 char c = src[p];
                 char c2 = (p + 1 < obj_r) ? src[p + 1] : 0;
@@ -675,6 +786,22 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
                 }
                 p++;
             }
+            expr_e = p;
+            while (expr_s < expr_e && isspace((unsigned char)src[expr_s])) expr_s++;
+            while (expr_e > expr_s && isspace((unsigned char)src[expr_e - 1])) expr_e--;
+            if (expr_e > expr_s && src[expr_e - 1] == ',') expr_e--;
+            while (expr_e > expr_s && isspace((unsigned char)src[expr_e - 1])) expr_e--;
+            if (ufcs_callback && expr_e > expr_s) {
+                if (ufcs_callback(t,
+                                  input_path,
+                                  logical_file,
+                                  type_name,
+                                  src + expr_s,
+                                  expr_e - expr_s,
+                                  ufcs_user_ctx) != 0) {
+                    return -1;
+                }
+            }
             continue;
         }
         fprintf(stderr, "%s: error: unsupported cc_type_register hook field for '%s'\n",
@@ -684,15 +811,37 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
     return 0;
 }
 
-int cc_symbols_collect_type_registrations(CCSymbolTable* t,
-                                          const char* input_path,
-                                          const char* src,
-                                          size_t n) {
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+int cc_symbols_collect_type_registrations_ex(CCSymbolTable* t,
+                                             const char* input_path,
+                                             const char* src,
+                                             size_t n,
+                                             CCTypeRegistrationCreateCallback create_callback,
+                                             void* create_user_ctx,
+                                             CCTypeRegistrationUfcsCallback ufcs_callback,
+                                             void* ufcs_user_ctx) {
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, line_start = 1;
+    char logical_file[1024] = {0};
     if (!t || !src) return 0;
     for (size_t i = 0; i < n; ++i) {
         char c = src[i];
         char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (line_start && c == '#') {
+            size_t p = i + 1;
+            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
+            while (p < n && isdigit((unsigned char)src[p])) p++;
+            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
+            if (p < n && src[p] == '"') {
+                size_t q = p + 1;
+                size_t out = 0;
+                while (q < n && src[q] && src[q] != '"' && out + 1 < sizeof(logical_file)) {
+                    logical_file[out++] = src[q++];
+                }
+                logical_file[out] = '\0';
+            }
+            while (i < n && src[i] != '\n') i++;
+            line_start = 1;
+            continue;
+        }
         if (in_lc) { if (c == '\n') in_lc = 0; continue; }
         if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
         if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
@@ -701,6 +850,7 @@ int cc_symbols_collect_type_registrations(CCSymbolTable* t,
         if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
         if (c == '"') { in_str = 1; continue; }
         if (c == '\'') { in_chr = 1; continue; }
+        line_start = (c == '\n');
         if (c != '@' || !cc__match_kw_reg(src, n, i + 1, "comptime")) continue;
         {
             size_t body_l = cc__skip_ws_reg(src, n, i + 1 + strlen("comptime"));
@@ -739,7 +889,17 @@ int cc_symbols_collect_type_registrations(CCSymbolTable* t,
                 }
                 obj_l = p;
                 if (!cc__find_matching_reg(src, body_r, obj_l, '{', '}', &obj_r)) return -1;
-                if (cc__parse_type_hooks_object(t, input_path, type_name, src, obj_l, obj_r) != 0) {
+                if (cc__parse_type_hooks_object(t,
+                                                input_path,
+                                                logical_file[0] ? logical_file : NULL,
+                                                type_name,
+                                                src,
+                                                obj_l,
+                                                obj_r,
+                                                create_callback,
+                                                create_user_ctx,
+                                                ufcs_callback,
+                                                ufcs_user_ctx) != 0) {
                     fprintf(stderr, "%s: error: failed to record type hooks for '%s'\n",
                             input_path ? input_path : "<input>", type_name);
                     return -1;
@@ -750,4 +910,11 @@ int cc_symbols_collect_type_registrations(CCSymbolTable* t,
         }
     }
     return 0;
+}
+
+int cc_symbols_collect_type_registrations(CCSymbolTable* t,
+                                          const char* input_path,
+                                          const char* src,
+                                          size_t n) {
+    return cc_symbols_collect_type_registrations_ex(t, input_path, src, n, NULL, NULL, NULL, NULL);
 }

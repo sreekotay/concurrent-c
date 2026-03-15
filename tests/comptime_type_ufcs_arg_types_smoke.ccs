@@ -1,0 +1,55 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_ufcs.cch>
+#include <ccc/cc_type.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    int value;
+#ifdef CC_PARSER_MODE
+    int (*mix)();
+#endif
+} ArgToy;
+
+static void arg_toy_mix_int(ArgToy* toy, int delta) {
+    toy->value += delta;
+}
+
+static void arg_toy_mix_cstr(ArgToy* toy, const char* text) {
+    toy->value += (int)strlen(text);
+}
+
+static CCSlice arg_toy_ufcs(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    if (!cc_slice_eq_cstr(method, "mix") || arg_types.len != 1) {
+        return cc_slice_empty();
+    }
+    if (cc_slice_eq_cstr(arg_types.items[0], "int")) {
+        return cc_slice_from_buffer((void*)"arg_toy_mix_int", sizeof("arg_toy_mix_int") - 1);
+    }
+    if (cc_slice_eq_cstr(arg_types.items[0], "const char*")) {
+        return cc_slice_from_buffer((void*)"arg_toy_mix_cstr", sizeof("arg_toy_mix_cstr") - 1);
+    }
+    return cc_slice_empty();
+}
+
+@comptime {
+    (void)cc_type_register("ArgToy", (CCTypeHooks){
+        .ufcs = arg_toy_ufcs,
+    });
+}
+
+int main(void) {
+    ArgToy toy = { 1 };
+
+    toy.mix(4);
+    toy.mix("abc");
+
+    assert(toy.value == 8);
+
+    printf("comptime_type_ufcs_arg_types_smoke: PASS\n");
+    return 0;
+}
