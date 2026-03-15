@@ -101,14 +101,14 @@ char* cc_rewrite_generic_family_ufcs_survival(const char* src, size_t n);
 //   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
 char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
 
-// Rewrite explicit channel UFCS for parser/codegen survival:
-//   tx.send(v) -> cc_channel_send(tx, v)
-//   rx.recv(&v) -> cc_channel_recv(rx, &v)
-// Await forms are intentionally left untouched for async-aware lowering later.
+// Rewrite raw CCChan UFCS for parser/codegen survival:
+//   ch.recv(&v) -> cc_chan_result_from_errno(cc_channel_raw_recv(ch, &v, sizeof(*&v)))
+// Typed channel handles intentionally stay untouched here so the AST-aware/type-owned
+// UFCS path remains authoritative.
 char* cc_rewrite_channel_ufcs_survival(const char* src, size_t n);
 char* cc_rewrite_channel_ufcs_concrete(const char* src, size_t n);
 
-// Prototype rewrite for explicit nursery-handle declarations:
+// Prototype rewrite for builtin nursery/arena declarations:
 //   CCNursery* n = @create(parent, closure) @destroy;
 //   CCNursery* n = @create(parent, closure) @destroy { ... };
 // Returns newly allocated string on change, NULL on no-op, (char*)-1 on error.

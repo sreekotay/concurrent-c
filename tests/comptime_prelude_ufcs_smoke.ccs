@@ -31,10 +31,11 @@ static void lambda_toy_bump(LambdaToy* toy) {
     toy->value += 10;
 }
 
-static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena) {
+static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;
+    (void)arg_types;
     return cc_ufcs_concat2(arena,
         cc_slice_from_buffer("named_toy_", sizeof("named_toy_") - 1),
         method);
@@ -45,10 +46,11 @@ static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice
         .ufcs = named_toy_ufcs_rewrite,
     });
     (void)cc_type_register("LambdaToy", (CCTypeHooks){
-        .ufcs = (recv_type, method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
             (void)recv_type;
             (void)mode;
             (void)argv;
+            (void)arg_types;
             return cc_ufcs_concat2(arena,
                 cc_slice_from_buffer("lambda_toy_", sizeof("lambda_toy_") - 1),
                 method);

@@ -13,12 +13,12 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
-## The Principle of Orthogonal Concerns
+## The CC Principle of Orthogonal Concerns
 The key goal: (as much as possible) the compiler enforces the Shape of the program (Memory/Tasks), while the runtime monitors the Flow of the program (Channels).
 
 * The Skeleton (Structure): Nurseries and Arenas et al are hierarchical. They define the Ownership Tree. Their lifetimes are lexical and enforced by the compiler.
 * The Circulatory System (Flow): Channels et al are a graph. They define the Communication Topology. Their lifetimes are dynamic and can "cross-cut" the ownership tree. The provenance model is what makes the graph safe. 
- p
+ 
 ---
 
 ## Quick Reference: Keywords and Constructs
@@ -2248,9 +2248,8 @@ Channels are categorized by **mode** (async vs sync) and **topology/direction**.
 | `T[~ ... async ...]` | async channel (default) |
 | `T[~ ... sync ...]` | sync channel (blocking) |
 
-**Spec change (breaking): Combined channels removed**
+**Split handle model:**
 
-- The combined channel type `T[~...]` (which could both send and receive) is **no longer allowed**.
 - A channel is represented by **two distinct handles**:
   - `T[~... >]` — **send-only** handle (tx)
   - `T[~... <]` — **recv-only** handle (rx)
@@ -3862,31 +3861,25 @@ No manual polling or timeouts in reader. Cancellation handles it.
 
 ---
 
-#### 6.4.9 Migration from Dual-Mode
+#### 6.4.9 Split Handle Model
 
-**Before (confusing, legacy combined channel):**
-```c
-int[~] ch;
-int x = 0;
-recv(ch, &x);          // What does this do? Depends on context?
-```
+Each channel value has one clear capability:
 
-**After (clear):**
 ```c
 int[~ >] tx;
 int[~ <] rx;
 cc_channel_pair(&tx, &rx);
-int x = 0;
-await recv(rx, &x);       // Async receive handle, must await (always)
+
+await rx.recv(&x);        // async receive handle
+tx.send(v);               // send handle
 
 int[~ sync >] stx;
 int[~ sync <] srx;
 cc_channel_pair(&stx, &srx);
-int y = 0;
-recv(srx, &y);            // Sync receive handle, no await (always)
+srx.recv(&y);             // sync receive handle, no await
 ```
 
-Each channel type has one clear set of operations. No context-dependent surprises.
+The language model does not include a combined send/recv channel handle. A program works with the capability it holds (`tx` or `rx`), and the operation set follows from that handle type.
 
 ---
 
@@ -4523,9 +4516,7 @@ block_on(producer(tx, 5));     // ⚠ WARNING: producer is not @nonblocking
                                //   hint: use cc_concurrent for peer-dependent tasks
 ```
 
-**Phase-in:**
-- Phase 1 (current): Warning
-- Phase 2 (future): Error (requires explicit opt-out or `cc_concurrent`)
+**Diagnostic policy:** An implementation must emit a compile-time diagnostic for `block_on(task)` when `task` is not proven `@nonblocking`. An implementation may treat this as a warning or an error, but silent acceptance is not conforming.
 
 #### Runtime Deadlock Detection
 
@@ -5096,10 +5087,13 @@ UFCS is a type-owned extensible language feature. Libraries declare custom lower
 **Primary registration API:**
 
 ```c
-typedef CCSlice (*CCTypeUfcsHandler)(CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena);
+typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 
 typedef struct {
-    const char* callee;
+    const char* callee1;
+    const char* callee2;
+    const void* callable;
 } CCTypeCreateHook;
 
 typedef struct {
@@ -5107,8 +5101,7 @@ typedef struct {
 } CCTypeDestroyHook;
 
 typedef struct {
-    CCTypeCreateHook create1;
-    CCTypeCreateHook create2;
+    CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
 } CCTypeHooks;
@@ -5121,25 +5114,40 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `type_name` is either an exact concrete type name such as `"CCArena"` or a trailing-wildcard family such as `"CCChanTx_*"` or `"CCChanRx_*"`.
 - Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
 - Handlers may be named functions or non-capturing lambdas.
+- `.create` is the type-owned construction hook. The compiler selects the overload from the declared type plus the `@create(...)` argument list.
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
+- `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
 
 **UFCS handler contract (normative):**
+- `recv_type` is the resolved receiver type name used for dispatch.
 - `method` is the invoked method name.
 - `mode` is an optional lowering mode chosen by the language surface. For example, async-aware families may distinguish ordinary calls from `await`-driven lowering here. If unused, handlers should ignore it.
 - `argv` is the rewritten argument-expression list only. It does not include the receiver.
+- `arg_types` is the compile-time inferred type list for `argv`, positionally aligned with it.
 - `arena` is temporary compile-time storage for constructing the returned callee name.
 
 **By-value receiver lowering:** A UFCS handler normally selects an address-style receiver-family callee. If a family wants the receiver passed by value instead, it must return the lowered symbol via `cc_ufcs_emit_value(...)` or `cc_ufcs_emit_value_cstr(...)`.
+
+**Create hook contract (normative):**
+- `.create` is selected from the declared type that appears on the left-hand side of `name = @create(...)`.
+- The compiler implicitly selects the registered creation overload from the `@create(...)` argument count.
+- Current language-defined `@create(...)` forms use one or two explicit arguments.
+- `cc_type_create_call("callee")` registers the one-argument form.
+- `cc_type_create_overloads("callee1", "callee2")` registers one- and two-argument forms on the same `.create` hook.
+- `cc_type_create_hook(handler)` registers a callable create hook; it receives `type_name`, `argv`, `arg_types`, and `arena`, and must return the lowered callee name as a slice.
+- `arg_types` for `.create` is inferred from the early `@create(...)` lowering path. Literal and simple direct expressions are the intended fast path; more complex local expressions may currently be left unknown by an implementation.
 
 **Preferred registration style:**
 
 ```c
 @comptime {
     (void)cc_type_register("CCFile", (CCTypeHooks){
-        .ufcs = (method, mode, argv, arena) => {
+        .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
+            (void)recv_type;
             (void)mode;
             (void)argv;
+            (void)arg_types;
             return cc_ufcs_concat2(arena,
                 cc_slice_from_buffer("cc_file_", sizeof("cc_file_") - 1),
                 method);
@@ -5156,7 +5164,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 }
 ```
 
-**Design note:** The UFCS registration substrate is shared with typed lifecycle hooks (`create1`, `create2`, `destroy`). UFCS is stage one of that model; the same type-owned registration machinery is intended to support typed birth and cleanup.
+**Design note:** The UFCS registration substrate is shared with typed lifecycle hooks (`create`, `destroy`). UFCS is stage one of that model; the same type-owned registration machinery is intended to support typed birth and cleanup.
 
 **Legacy compatibility:** `cc_ufcs_register(...)` is a legacy compatibility helper for direct UFCS-only registration. New code should prefer `cc_type_register(...)` so UFCS and lifecycle hooks share one registration model.
 
@@ -5668,7 +5676,7 @@ This section documents syntactic sugar and conventions:
 
 **Methods / UFCS:**
 
-`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries may define custom lowering via `cc_ufcs_register(...)`. Depending on the API, lowering may pass the receiver by value (`send(tx, v)`) or by pointer (`cc_string_push(&s, x)`).
+`x.method(args)` uses UFCS lowering. Dispatch is selected from the resolved receiver type, and libraries define custom lowering through type-owned registration, normally `cc_type_register(...)`. Depending on the API, the lowered call may pass the receiver by value or by pointer; that is family policy rather than surface syntax.
 
 ```c
 tx.send(v);        // lowers to send(tx, v)
@@ -5679,7 +5687,7 @@ ptr->arena.free();     // dispatches on ptr->arena
 slice.len;         // field access (not a call)
 ```
 
-**Rule:** The full expression to the left of `.` or `->` is the receiver. Registered UFCS families use the callee chosen by their handler; ordinary fallback UFCS uses the receiver-type method family for the resolved type. Channels use receiver-first surface forms such as `send(tx, v)` and `recv(rx, &out)`; generated C may lower those further to `cc_channel_*`, `CC_TYPED_CHAN_*`, or other registered helpers.
+**Rule:** The full expression to the left of `.` or `->` is the receiver. Registered UFCS families use the callee chosen by their handler; ordinary fallback UFCS uses the receiver-type method family for the resolved type. Channels follow the same model: the surface form is `tx.send(v)` / `rx.recv(&out)`, while generated C may lower those further to `cc_channel_*`, `CC_TYPED_CHAN_*`, or other family-owned helpers.
 
 **UFCS receiver syntax:**
 
@@ -7370,11 +7378,11 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 
 ---
 
-## Appendix I: Candidate Phase 1.1 Hoists
+## Appendix I: Non-Normative Future Directions
 
-Phase 1.0 is complete and canonical for unary request/response and long-lived connection patterns. However, early stdlib exploration (especially `<std/server.cch>`) has revealed three patterns that appear repeatedly and suggest language-level hoists for Phase 1.1.
+This appendix records recurring patterns that may justify future language or stdlib features. It is non-normative and does not alter the canonical rules in the main body of the specification.
 
-### I.1 Implicit Cancellation Checks at Await Points (High Priority)
+### I.1 Implicit Cancellation Checks at Await Points
 
 **Pattern:**
 
@@ -7391,9 +7399,9 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 }
 ```
 
-**Current behavior (§ 7.5, § 3.2):** Inside an active `with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit @match scaffolding. The compiler enforces these checks at compilation time (as per § 3.2); the runtime behavior is defined in § 7.5.
+**Current behavior (§ 7.5, § 3.2):** Inside an active `with_deadline()` scope, suspension points must check for cancellation before and after suspension, requiring explicit `@match` scaffolding. The compiler enforces these checks at compilation time (as per § 3.2); the runtime behavior is defined in § 7.5.
 
-**Proposed Phase 1.1 change:** Inside an active `with_deadline()` scope, all await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
+**Possible direction:** Inside an active `with_deadline()` scope, all await points become implicitly cancellation-aware. On cancellation, the suspension point returns `err(Cancelled)` in-band. The loop naturally exits via `try` propagation without explicit `@match` scaffolding.
 
 **Motivation:**
 - Every long-lived loop (WebSocket, gRPC bidirectional stream, streaming read) needs this
@@ -7405,7 +7413,7 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 
 ---
 
-### I.2 Async Iteration / For-Await Construct (High Priority)
+### I.2 Async Iteration / For-Await Construct
 
 **Pattern:**
 
@@ -7431,7 +7439,7 @@ while (char[:]?!>(IoError) frame = try await ws.read_frame(arena)) {
 }
 ```
 
-**Proposed Phase 1.1 hoisting:** A language-level async iterator protocol and declarative for-await syntax:
+**Possible direction:** A language-level async iterator protocol and declarative for-await syntax:
 
 ```c
 struct AsyncIterator<T> {
@@ -7461,7 +7469,7 @@ while (char[:]?!>(IoError) chunk_opt = try await req.body.next(arena)) {
 
 ---
 
-### I.3 Half-Close and Shutdown Modes on Duplex (Medium Priority, Stdlib)
+### I.3 Half-Close and Shutdown Modes on Duplex
 
 **Pattern:**
 
@@ -7494,17 +7502,17 @@ Real protocols often need unidirectional closure: proxies (forward until upstrea
 
 **Impact:** Proxies, gRPC bidirectional streams, and TLS multiplexing all become safe and idiomatic.
 
-**Note:** This is stdlib-level, not language-level. Already implemented in Phase 1.0 `<std/server.cch>`.
+**Note:** This is stdlib-level rather than language-level; it remains here as a design note because half-close semantics are a recurring protocol requirement.
 
 ---
 
-### I.4 Future Candidates (Phase 2+)
+### I.4 Additional Future Candidates
 
-The following patterns emerged but are deferred to Phase 2:
+The following patterns emerged but remain deferred:
 
-**Arena checkpoint helpers:** Long-lived connections (WebSocket, gRPC streaming, HTTP/2) can run for hours. A stdlib helper (`with_arena_checkpoint()` or per-message `arena.reset()`) prevents unbounded growth. Stdlib pattern guideline is in `<std/server.cch>` design notes; full stdlib support in Phase 2.
+**Arena checkpoint helpers:** Long-lived connections (WebSocket, gRPC streaming, HTTP/2) can run for hours. A stdlib helper (`with_arena_checkpoint()` or per-message `arena.reset()`) prevents unbounded growth. Stdlib pattern guidance exists in `<std/server.cch>` design notes.
 
-**MuxConn abstraction:** HTTP/2 and gRPC multiplex many independent streams over one TCP/TLS connection. A future `MuxConn` will wrap a Duplex, accept per-stream Duplex + stream_arena, and integrate with server_loop. For Phase 1.0, Duplex assumes 1:1 connection-to-stream; Protocol layers (HTTP/2, gRPC) implement multiplexing above Duplex.
+**MuxConn abstraction:** HTTP/2 and gRPC multiplex many independent streams over one TCP/TLS connection. A future `MuxConn` may wrap a Duplex, accept per-stream Duplex + stream_arena, and integrate with `server_loop`. Today, `Duplex` assumes 1:1 connection-to-stream; protocol layers (HTTP/2, gRPC) implement multiplexing above it.
 
 **Errdefer / conditional defer:** Go idiom for "defer cleanup only on error path". Useful for partial upgrades (WebSocket handshake cleanup). Deferred pending further language design.
 
@@ -7514,7 +7522,7 @@ The following patterns emerged but are deferred to Phase 2:
 - `@destroy` means auto-register cleanup on the same machinery as `@defer`.
 - `@detach` means do not auto-register cleanup; lifecycle becomes manual from that point onward.
 
-This note is semantic direction only. Exact syntax, registration API, and diagnostics remain deferred pending the UFCS cleanup phase.
+This note is semantic direction only. Exact syntax, registration API, and diagnostics remain deferred.
 
 ---
 
@@ -7842,20 +7850,12 @@ These rules prevent ABI surprises and ensure the implementation can generate bor
 
 ---
 
-## Summary: Path to Phase 1.1
+## Summary
 
-**Phase 1.0 (current):**
-- ✅ Core language: §§ 1–12, deadline-aware cancellation at suspension points, core concurrency primitives
-- ✅ Stdlib: Strings, I/O, Collections, Server shell (with Duplex, Takeover, arena split, TLS, keep-alive, shutdown)
-- ✅ Result: Safe, ergonomic unary and long-lived connection patterns
+The core language and lowering contract are defined in the main body of this specification. The appendices above separate three kinds of material:
 
-**Phase 1.1 candidates (high-value, low-risk):**
-- ⏳ Implicit cancellation at all await points inside with_deadline (language)
-- ⏳ Async iteration / for-await (language)
-- ✅ Half-close / Duplex.shutdown() + ConnectionClosed (stdlib, already in Phase 1.0)
+- **Normative appendices** such as the C lowering strategy and ABI notes, which are part of the language contract.
+- **Non-normative design notes** that capture recurring patterns and possible future directions without changing current semantics.
+- **Engineering guidance** for producing readable, stable generated C and predictable diagnostics.
 
-**Phase 2:**
-- Arena checkpoint helpers (stdlib)
-- MuxConn abstraction (stdlib)
-- Graceful shutdown via cancellation signals (language + stdlib)
-- Errdefer or conditional defer (language)
+This separation keeps the canonical language model stable while still recording useful design pressure for later work.

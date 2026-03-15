@@ -1,10 +1,8 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_ufcs.cch>
 #include <ccc/cc_type.cch>
-#include <ccc/std/string.cch>
 #include <assert.h>
 #include <stdio.h>
-#include <string.h>
 
 typedef struct {
     int value;
@@ -20,15 +18,15 @@ typedef struct {
 #endif
 } LambdaToy;
 
-static void named_toy_ping(NamedToy *toy) {
+static void named_toy_ping(NamedToy* toy) {
     toy->value += 1;
 }
 
-static void lambda_toy_ping(LambdaToy *toy) {
+static void lambda_toy_ping(LambdaToy* toy) {
     toy->value += 10;
 }
 
-static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {
+static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
     (void)recv_type;
     (void)mode;
     (void)argv;
@@ -56,24 +54,15 @@ static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice
 }
 
 int main(void) {
-    @arena {
-        // Mixed inputs stay ergonomic: literals + CCString + literals.
-        CCString suffix = cc_string_new(arena);
-        suffix.append("send");
+    NamedToy named = { 1 };
+    LambdaToy lambda = { 2 };
 
-        CCSlice channel_send = cc_concat(arena, "cc_channel_", &suffix, "_task");
-        assert(channel_send.len == sizeof("cc_channel_send_task") - 1);
-        assert(memcmp(channel_send.ptr, "cc_channel_send_task", channel_send.len) == 0);
+    named.ping();
+    lambda.ping();
 
-        // Both handler forms now go through real comptime execution.
-        NamedToy named = { 1 };
-        LambdaToy lambda = { 2 };
-        named.ping();
-        lambda.ping();
-        assert(named.value == 2);
-        assert(lambda.value == 12);
-    }
+    assert(named.value == 2);
+    assert(lambda.value == 12);
 
-    printf("concat_slice_smoke: PASS\n");
+    printf("comptime_type_register_ufcs_smoke: PASS\n");
     return 0;
 }

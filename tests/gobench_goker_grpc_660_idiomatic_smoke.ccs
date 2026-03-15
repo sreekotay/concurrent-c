@@ -1,0 +1,103 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+
+#include <errno.h>
+#include <stdio.h>
+
+/*
+ * Idiomatic CC analog of grpc#660:
+ * a worker reports "done" on an unbuffered side channel before reporting
+ * progress, but the parent never drains that side channel until after it
+ * times out waiting for progress.
+ */
+int main(void) {
+    int[~ >] done_tx;
+    int[~ <] done_rx;
+    int[~1 >] progress_tx;
+    int[~1 <] progress_rx;
+    CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx);
+    CCChan* progress_ch = cc_channel_pair(&progress_tx, &progress_rx);
+
+    int v = 0;
+    int first_err = 0;
+
+    @nursery {
+        spawn(() => {
+            if (cc_io_avail(chan_send(done_tx, 1))) {
+                (void)chan_send(progress_tx, 2);
+            }
+        });
+
+        CCResult_bool_CCIoError progress_res;
+        @with_deadline(millis(20)) {
+            progress_res = chan_recv(progress_rx, &v);
+        }
+
+        first_err = cc_is_ok(progress_res) ? 0 : cc_unwrap_err(progress_res).os_code;
+        if (first_err != ETIMEDOUT) return 10;
+
+        if (!cc_io_avail(chan_recv(done_rx, &v))) return 11;
+        if (v != 1) return 12;
+        if (!cc_io_avail(chan_recv(progress_rx, &v))) return 13;
+        if (v != 2) return 14;
+    }
+
+    cc_chan_free(done_ch);
+    cc_chan_free(progress_ch);
+    printf("gobench goker grpc660 idiomatic: PASS\n");
+    return 0;
+}
+
+/*
+ * Original GoBench GoKer source:
+ * https://raw.githubusercontent.com/goodmorning-coder/gobench/master/gobench/goker/blocking/grpc/660/grpc660_test.go
+ *
+ * package grpc660
+ *
+ * import (
+ *  "math/rand"
+ *  "testing"
+ * )
+ *
+ * type benchmarkClient struct {
+ *  stop chan bool
+ * }
+ *
+ * func (bc *benchmarkClient) doCloseLoopUnary() {
+ *  for {
+ *   done := make(chan bool)
+ *   go func() { // G2
+ *    if rand.Intn(10) > 7 {
+ *     done <- false
+ *     return
+ *    }
+ *    done <- true
+ *   }()
+ *   select {
+ *   case <-bc.stop:
+ *    return
+ *   case <-done:
+ *   }
+ *  }
+ * }
+ *
+ * ///
+ * /// G1 G2 helper goroutine
+ * /// doCloseLoopUnary()
+ * /// bc.stop <- true
+ * /// <-bc.stop
+ * /// return
+ * /// done <-
+ * /// ----------------------G2 leak--------------------------
+ * ///
+ *
+ * func TestGrpc660(t *testing.T) {
+ *  bc := &benchmarkClient{
+ *   stop: make(chan bool),
+ *  }
+ *  go bc.doCloseLoopUnary() // G1
+ *  go func() { // helper goroutine
+ *   bc.stop <- true
+ *  }()
+ * }
+ */

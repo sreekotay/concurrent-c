@@ -21,12 +21,14 @@
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_channel_syntax.h"
+#include "visitor/pass_create.h"
 #include "visitor/pass_type_syntax.h"
 #include "visitor/pass_match_syntax.h"
 #include "visitor/pass_with_deadline_syntax.h"
 #include "visitor/edit_buffer.h"
 #include "visitor/visitor_fileutil.h"
 #include "visitor/text_span.h"
+#include "header/lower_header.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
@@ -48,20 +50,51 @@
 
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n);
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
+static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n);
 
 /* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
                                             const char* input_path, CCSymbolTable* symbols) {
-    char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto_ex(src, src_len, input_path, symbols);
+    char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto(src, src_len, input_path);
+    char* registered_create = NULL;
     const char* pp_in = nursery_rewritten ? nursery_rewritten : src;
     size_t pp_in_len = nursery_rewritten ? strlen(nursery_rewritten) : src_len;
+    if (symbols) {
+        registered_create = cc_rewrite_registered_type_create_destroy(pp_in, pp_in_len, input_path, symbols);
+        if (registered_create == (char*)-1) {
+            if (nursery_rewritten) free(nursery_rewritten);
+            return NULL;
+        }
+        if (registered_create) {
+            pp_in = registered_create;
+            pp_in_len = strlen(registered_create);
+        }
+    }
     char* pp_buf = cc_preprocess_to_string_ex(pp_in, pp_in_len, input_path, 1);
     if (nursery_rewritten) free(nursery_rewritten);
+    if (registered_create) free(registered_create);
     if (!pp_buf) return NULL;
+    {
+        size_t st_len = 0;
+        char* st = cc__rewrite_chan_send_task_text(NULL, pp_buf, strlen(pp_buf), &st_len);
+        if (st) {
+            free(pp_buf);
+            pp_buf = st;
+            (void)st_len;
+        }
+    }
     size_t pp_len = strlen(pp_buf);
     char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len);
     free(pp_buf);
     if (!prep) return NULL;
+    {
+        char* parser_helpers = cc__rewrite_result_helper_calls_for_parser(prep, pp_len);
+        if (parser_helpers) {
+            free(prep);
+            prep = parser_helpers;
+            pp_len = strlen(prep);
+        }
+    }
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
     CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
@@ -102,6 +135,98 @@ static void cc__cg_sb_append(char** out, size_t* out_len, size_t* out_cap, const
 
 static void cc__cg_sb_append_cstr(char** out, size_t* out_len, size_t* out_cap, const char* s) {
     if (s) cc__cg_sb_append(out, out_len, out_cap, s, strlen(s));
+}
+
+static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n) {
+    if (!src || n == 0) return NULL;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    while (i < n) {
+        i = cc_skip_ws_and_comments(src, n, i);
+        if (i >= n) break;
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) {
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) {
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            continue;
+        }
+        if (!cc_is_ident_start(src[i])) {
+            i++;
+            continue;
+        }
+
+        size_t ident_start = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        size_t ident_end = i;
+        if (ident_end - ident_start <= 9 || memcmp(src + ident_start, "CCResult_", 9) != 0) continue;
+
+        size_t j = cc_skip_ws_and_comments(src, n, ident_end);
+        if (j >= n || src[j] != '(') continue;
+
+        size_t ident_len = ident_end - ident_start;
+        const char* parser_method = NULL;
+        size_t suffix_len = 0;
+        if (ident_len > 10 && memcmp(src + ident_end - 10, "_unwrap_or", 10) == 0) {
+            parser_method = "unwrap_or";
+            suffix_len = 10;
+        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_is_err", 7) == 0) {
+            parser_method = "is_err";
+            suffix_len = 7;
+        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_is_ok", 6) == 0) {
+            parser_method = "is_ok";
+            suffix_len = 6;
+        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_unwrap", 7) == 0) {
+            parser_method = "unwrap";
+            suffix_len = 7;
+        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_error", 6) == 0) {
+            parser_method = "error";
+            suffix_len = 6;
+        } else {
+            continue;
+        }
+
+        size_t paren_end = 0;
+        if (!cc_find_matching_paren(src, n, j, &paren_end)) continue;
+
+        /* Skip helper declarations/definitions like:
+           CCResult_T_E_error(CCResult_T_E r);
+           We only want to rewrite expression call sites. */
+        {
+            size_t p = cc_skip_ws_and_comments(src, n, j + 1);
+            if (p < paren_end && cc_is_ident_start(src[p])) {
+                size_t first_tok_end = p + 1;
+                while (first_tok_end < paren_end && cc_is_ident_char(src[first_tok_end])) first_tok_end++;
+                p = cc_skip_ws_and_comments(src, n, first_tok_end);
+                if (p < paren_end && (cc_is_ident_start(src[p]) || src[p] == '*')) {
+                    i = paren_end + 1;
+                    continue;
+                }
+            }
+        }
+
+        cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "__cc_parser_result_");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, parser_method);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "_");
+        cc__cg_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_len - suffix_len);
+        last_emit = ident_end;
+    }
+
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
 }
 
 static int cc__find_matching_paren_codegen(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
@@ -418,9 +543,9 @@ static char* cc__build_comptime_tu_from_preprocessed(const char* src,
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\nCCSlice ");
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, entry_name);
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap,
-                          "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena *arena) {\n    return ");
+                          "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {\n    return ");
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, callable_name);
-    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(recv_type, method, mode, argv, arena);\n}\n");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(recv_type, method, mode, argv, arg_types, arena);\n}\n");
     return out;
 }
 
@@ -470,8 +595,8 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
     size_t lpar = 0, rpar = 0, body_s = 0, body_e = handler_e;
-    char params[5][64];
-    const char* param_types[5] = { "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCArena *" };
+    char params[6][64];
+    const char* param_types[6] = { "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena *" };
     int param_count = 0;
     if (!src || !lambda_name || handler_s >= handler_e || handler_e > n) return NULL;
     cc__trim_range_codegen(src, &handler_s, &handler_e);
@@ -483,7 +608,7 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
         while (p < rpar) {
             p = cc__skip_ws_codegen(src, rpar, p);
             if (p >= rpar) break;
-            if (param_count >= 5 || !cc__parse_ident_codegen(src, rpar, &p, params[param_count], sizeof(params[param_count]))) {
+            if (param_count >= 6 || !cc__parse_ident_codegen(src, rpar, &p, params[param_count], sizeof(params[param_count]))) {
                 return NULL;
             }
             param_count++;
@@ -494,7 +619,7 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
             }
         }
     }
-    if (param_count != 5) return NULL;
+    if (param_count != 6) return NULL;
     body_s = cc__skip_ws_codegen(src, handler_e, rpar + 1);
     if (body_s + 1 >= handler_e || src[body_s] != '=' || src[body_s + 1] != '>') return NULL;
     body_s = cc__skip_ws_codegen(src, handler_e, body_s + 2);
@@ -503,7 +628,7 @@ static char* cc__build_lambda_handler_definition_codegen(const char* src,
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "static CCSlice ");
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, lambda_name);
     cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(");
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         if (i) cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ", ");
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, param_types[i]);
         cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " ");
@@ -547,10 +672,12 @@ static int cc__compile_ufcs_handler_host_backend(const char* input_path,
     char compile_cmd[4096];
     CCComptimeDlModule* module = NULL;
     int rc = -1;
+    int used_lowered_header = 0;
     if (!input_path || !original_src || !symbol_stem || !callable_name || !out_owner || !out_fn_ptr) return -1;
     *out_owner = NULL;
     *out_fn_ptr = NULL;
     repo_root[0] = '\0';
+    (void)cc__find_repo_root_codegen(input_path, repo_root, sizeof(repo_root));
     blanked_src = cc__blank_comptime_blocks_preserve_layout(original_src, original_len);
     if (!blanked_src) goto done;
     {
@@ -560,14 +687,42 @@ static int cc__compile_ufcs_handler_host_backend(const char* input_path,
             blanked_src = lowered_includes;
         }
     }
-    pp_src = cc_preprocess_to_string_ex(blanked_src, strlen(blanked_src), input_path, 1);
+    if (input_path) {
+        size_t path_len = strlen(input_path);
+        if (path_len >= 4 && strcmp(input_path + path_len - 4, ".cch") == 0) {
+            pp_src = cc_lower_header_string(blanked_src, strlen(blanked_src), input_path);
+            used_lowered_header = (pp_src != NULL);
+        }
+    }
+    if (!pp_src) {
+        pp_src = cc_preprocess_to_string_ex(blanked_src, strlen(blanked_src), input_path, 1);
+    }
     if (!pp_src) goto done;
     snprintf(entry_name, sizeof(entry_name), "__cc_comptime_ufcs_%s", symbol_stem);
-    tu_src = cc__build_comptime_tu_from_preprocessed(pp_src, strlen(pp_src),
-                                                     cc__find_repo_root_codegen(input_path, repo_root, sizeof(repo_root)) ? repo_root : NULL,
-                                                     extra_defs, entry_name, callable_name,
-                                                     include_top_level_defs,
-                                                     source_is_include_expanded);
+    if (used_lowered_header) {
+        size_t tu_len = 0, tu_cap = 0;
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#ifndef __CC__\n");
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#define __CC__ 1\n");
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "#endif\n");
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, pp_src);
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+        if (extra_defs && extra_defs[0]) {
+            cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, extra_defs);
+            cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\n");
+        }
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "\nCCSlice ");
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, entry_name);
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap,
+                              "(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena *arena) {\n    return ");
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, callable_name);
+        cc__cg_sb_append_cstr(&tu_src, &tu_len, &tu_cap, "(recv_type, method, mode, argv, arg_types, arena);\n}\n");
+    } else {
+        tu_src = cc__build_comptime_tu_from_preprocessed(pp_src, strlen(pp_src),
+                                                         repo_root[0] ? repo_root : NULL,
+                                                         extra_defs, entry_name, callable_name,
+                                                         include_top_level_defs,
+                                                         source_is_include_expanded);
+    }
     if (!tu_src) goto done;
     cc__dirname_codegen(input_path, input_dir, sizeof(input_dir));
     {
@@ -667,6 +822,176 @@ static int cc__compile_lambda_ufcs_handler(const char* input_path,
                                                out_owner, out_fn_ptr);
     free(lambda_def);
     return rc;
+}
+
+static char* cc__build_type_ufcs_lambda_definition(const char* expr_src,
+                                                   size_t expr_len,
+                                                   const char* lambda_name) {
+    static const char* param_types[6] = {
+        "CCSlice", "CCSlice", "CCSlice", "CCSliceArray", "CCSliceArray", "CCArena *"
+    };
+    char params[6][64];
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t lpar = 0, rpar = 0, p = 0;
+    size_t body_s = 0, body_e = expr_len;
+    int param_count = 0;
+    if (!expr_src || !lambda_name || expr_len == 0) return NULL;
+    p = cc__skip_ws_codegen(expr_src, expr_len, 0);
+    if (p >= expr_len || expr_src[p] != '(') return NULL;
+    lpar = p;
+    if (!cc__find_matching_paren_codegen(expr_src, expr_len, lpar, &rpar)) return NULL;
+    p = lpar + 1;
+    while (p < rpar) {
+        p = cc__skip_ws_codegen(expr_src, rpar, p);
+        if (p >= rpar) break;
+        if (param_count >= 6 || !cc__parse_ident_codegen(expr_src, rpar, &p, params[param_count], sizeof(params[param_count]))) {
+            return NULL;
+        }
+        param_count++;
+        p = cc__skip_ws_codegen(expr_src, rpar, p);
+        if (p < rpar) {
+            if (expr_src[p] != ',') return NULL;
+            p++;
+        }
+    }
+    if (param_count != 6) return NULL;
+    body_s = cc__skip_ws_codegen(expr_src, expr_len, rpar + 1);
+    if (body_s + 1 >= expr_len || expr_src[body_s] != '=' || expr_src[body_s + 1] != '>') return NULL;
+    body_s = cc__skip_ws_codegen(expr_src, expr_len, body_s + 2);
+    cc__trim_range_codegen(expr_src, &body_s, &body_e);
+    if (body_s >= body_e) return NULL;
+
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "static CCSlice ");
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, lambda_name);
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "(");
+    for (int i = 0; i < 6; ++i) {
+        if (i) cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, param_types[i]);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, " ");
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, params[i]);
+    }
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ") ");
+    if (expr_src[body_s] == '{') {
+        size_t body_r = 0;
+        if (!cc__find_matching_brace_codegen(expr_src, expr_len, body_s, &body_r)) {
+            free(out);
+            return NULL;
+        }
+        cc__cg_sb_append(&out, &out_len, &out_cap, expr_src + body_s, body_r + 1 - body_s);
+        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n");
+        return out;
+    }
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "{ return ");
+    cc__cg_sb_append(&out, &out_len, &out_cap, expr_src + body_s, body_e - body_s);
+    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "; }\n");
+    return out;
+}
+
+static int cc__compile_lambda_ufcs_handler_expr(const char* input_path,
+                                                const char* original_src,
+                                                size_t original_len,
+                                                const char* expr_src,
+                                                size_t expr_len,
+                                                int source_is_include_expanded,
+                                                void** out_owner,
+                                                const void** out_fn_ptr) {
+    char lambda_name[128];
+    char* lambda_def = NULL;
+    int rc = -1;
+    if (!input_path || !original_src || !expr_src || expr_len == 0 || !out_owner || !out_fn_ptr) return -1;
+    snprintf(lambda_name, sizeof(lambda_name), "__cc_ufcs_lambda_expr_%zu", expr_len);
+    lambda_def = cc__build_type_ufcs_lambda_definition(expr_src, expr_len, lambda_name);
+    if (!lambda_def) return -1;
+    rc = cc__compile_ufcs_handler_host_backend(input_path, original_src, original_len,
+                                               lambda_name, lambda_name, lambda_def, 0,
+                                               source_is_include_expanded,
+                                               out_owner, out_fn_ptr);
+    free(lambda_def);
+    return rc;
+}
+
+typedef struct {
+    const char* registration_src;
+    size_t registration_n;
+    const char* compile_src;
+    size_t compile_n;
+    int compile_src_is_include_expanded;
+} CCTypeUfcsCompileCtx;
+
+static int cc__compile_type_ufcs_registration(CCSymbolTable* symbols,
+                                              const char* registration_input_path,
+                                              const char* logical_file,
+                                              const char* type_name,
+                                              const char* expr_src,
+                                              size_t expr_len,
+                                              void* user_ctx) {
+    CCTypeUfcsCompileCtx* ctx = (CCTypeUfcsCompileCtx*)user_ctx;
+    const char* handler_src = (ctx && ctx->compile_src) ? ctx->compile_src : expr_src;
+    size_t handler_src_len = (ctx && ctx->compile_src) ? ctx->compile_n : expr_len;
+    const char* handler_input_path = registration_input_path;
+    int handler_src_is_include_expanded = ctx ? ctx->compile_src_is_include_expanded : 0;
+    char handler[128];
+    size_t p = 0;
+    int handler_is_ident = 0;
+    char* logical_src = NULL;
+    size_t logical_len = 0;
+    void* owner = NULL;
+    const void* fn_ptr = NULL;
+
+    if (!symbols || !type_name || !expr_src || expr_len == 0) return -1;
+    if (logical_file && logical_file[0] && registration_input_path &&
+        strcmp(logical_file, registration_input_path) != 0) {
+        cc__read_entire_file(logical_file, &logical_src, &logical_len);
+        if (logical_src && logical_len > 0) {
+            handler_src = logical_src;
+            handler_src_len = logical_len;
+            handler_input_path = logical_file;
+            handler_src_is_include_expanded = 0;
+        }
+    }
+
+    if (cc__parse_ident_codegen(expr_src, expr_len, &p, handler, sizeof(handler)) && p == expr_len) {
+        handler_is_ident = 1;
+    }
+    if (handler_is_ident) {
+        if (cc__compile_named_ufcs_handler(handler_input_path,
+                                           handler_src,
+                                           handler_src_len,
+                                           handler,
+                                           handler_src_is_include_expanded,
+                                           &owner,
+                                           &fn_ptr) != 0) {
+            free(logical_src);
+            fprintf(stderr, "%s: error: unsupported comptime UFCS handler '%s'; expected a plain named function or non-capturing lambda compilable in the comptime subset\n",
+                    registration_input_path ? registration_input_path : "<input>", handler);
+            return -1;
+        }
+    } else {
+        const char* lambda_src = (ctx && ctx->registration_src) ? ctx->registration_src : handler_src;
+        size_t lambda_src_len = (ctx && ctx->registration_src) ? ctx->registration_n : handler_src_len;
+        if (cc__compile_lambda_ufcs_handler_expr(registration_input_path,
+                                                 lambda_src,
+                                                 lambda_src_len,
+                                                 expr_src,
+                                                 expr_len,
+                                                 handler_src_is_include_expanded,
+                                                 &owner,
+                                                 &fn_ptr) != 0) {
+            free(logical_src);
+            fprintf(stderr, "%s: error: unsupported comptime UFCS lambda; expected a non-capturing lambda compilable in the comptime subset\n",
+                    registration_input_path ? registration_input_path : "<input>");
+            return -1;
+        }
+    }
+    free(logical_src);
+    if (cc_symbols_set_type_ufcs_callable(symbols, type_name, fn_ptr, owner, cc__dl_module_free) != 0) {
+        fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
+                registration_input_path ? registration_input_path : "<input>", type_name);
+        cc__dl_module_free(owner);
+        return -1;
+    }
+    return 0;
 }
 
 static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
@@ -778,7 +1103,7 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
                         return -1;
                     }
                     free(logical_src);
-                    if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
+                    if (cc_symbols_add_legacy_type_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
                         fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
                                 input_path ? input_path : "<input>", pattern);
                         cc__dl_module_free(owner);
@@ -800,7 +1125,7 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
                                 input_path ? input_path : "<input>");
                         return -1;
                     }
-                    if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
+                    if (cc_symbols_add_legacy_type_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
                         fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
                                 input_path ? input_path : "<input>", pattern);
                         cc__dl_module_free(owner);
@@ -815,208 +1140,6 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
     return 0;
 }
 
-static int cc__collect_comptime_type_ufcs_registrations(CCSymbolTable* symbols,
-                                                        const char* input_path,
-                                                        const char* src,
-                                                        size_t n,
-                                                        const char* compile_src,
-                                                        size_t compile_n,
-                                                        int compile_src_is_include_expanded,
-                                                        int headers_only) {
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, line_start = 1;
-    char logical_file[1024] = {0};
-    if (!symbols || !src) return 0;
-    for (size_t i = 0; i < n; ++i) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        if (line_start && c == '#') {
-            size_t p = i + 1;
-            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
-            while (p < n && isdigit((unsigned char)src[p])) p++;
-            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
-            if (p < n && src[p] == '"') {
-                size_t q = p + 1;
-                size_t out = 0;
-                while (q < n && src[q] && src[q] != '"' && out + 1 < sizeof(logical_file)) {
-                    logical_file[out++] = src[q++];
-                }
-                logical_file[out] = '\0';
-            }
-            while (i < n && src[i] != '\n') i++;
-            line_start = 1;
-            continue;
-        }
-        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-        if (c == '"') { in_str = 1; continue; }
-        if (c == '\'') { in_chr = 1; continue; }
-        line_start = (c == '\n');
-        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) continue;
-        if (headers_only && logical_file[0] && input_path && strcmp(logical_file, input_path) == 0) continue;
-        {
-            size_t kw_end = i + 1 + strlen("comptime");
-            size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
-            size_t body_r;
-            if (body_l >= n || src[body_l] != '{') continue;
-            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) continue;
-            for (size_t j = body_l + 1; j < body_r; ++j) {
-                size_t lpar = 0, rpar = 0, p = 0, obj_l = 0, obj_r = 0, expr_s = 0, expr_e = 0;
-                char pattern[128];
-                char handler[128];
-                int handler_is_ident = 0;
-                if (!cc__match_keyword_codegen(src, body_r, j, "cc_type_register")) continue;
-                lpar = cc__skip_ws_codegen(src, body_r, j + strlen("cc_type_register"));
-                if (lpar >= body_r || src[lpar] != '(') continue;
-                if (!cc__find_matching_paren_codegen(src, body_r, lpar, &rpar)) continue;
-                p = cc__skip_ws_codegen(src, body_r, lpar + 1);
-                if (!cc__parse_string_literal_codegen(src, body_r, &p, pattern, sizeof(pattern))) {
-                    fprintf(stderr, "%s: error: unsupported cc_type_register type key form\n",
-                            input_path ? input_path : "<input>");
-                    return -1;
-                }
-                p = cc__skip_ws_codegen(src, body_r, p);
-                if (p >= body_r || src[p] != ',') {
-                    fprintf(stderr, "%s: error: malformed cc_type_register(...) for '%s'\n",
-                            input_path ? input_path : "<input>", pattern);
-                    return -1;
-                }
-                p = cc__skip_ws_codegen(src, body_r, p + 1);
-                if (p < body_r && src[p] == '(') {
-                    size_t cast_r = 0;
-                    if (!cc__find_matching_paren_codegen(src, body_r, p, &cast_r)) return -1;
-                    p = cc__skip_ws_codegen(src, body_r, cast_r + 1);
-                }
-                if (p >= body_r || src[p] != '{') {
-                    fprintf(stderr, "%s: error: cc_type_register(\"%s\", ...) expects a hooks object literal\n",
-                            input_path ? input_path : "<input>", pattern);
-                    return -1;
-                }
-                obj_l = p;
-                if (!cc__find_matching_brace_codegen(src, body_r, obj_l, &obj_r)) return -1;
-                p = obj_l + 1;
-                while (p < obj_r) {
-                    p = cc__skip_ws_codegen(src, obj_r, p);
-                    if (p >= obj_r) break;
-                    if (src[p] == ',') { p++; continue; }
-                    if (src[p] != '.') { p++; continue; }
-                    p++;
-                    if (!cc__match_keyword_codegen(src, obj_r, p, "ufcs")) {
-                        p++;
-                        continue;
-                    }
-                    p += strlen("ufcs");
-                    p = cc__skip_ws_codegen(src, obj_r, p);
-                    if (p >= obj_r || src[p] != '=') {
-                        fprintf(stderr, "%s: error: malformed .ufcs field for '%s'\n",
-                                input_path ? input_path : "<input>", pattern);
-                        return -1;
-                    }
-                    p = cc__skip_ws_codegen(src, obj_r, p + 1);
-                    expr_s = p;
-                    {
-                        int depth = 0, ls = 0, lc = 0, st = 0, ch = 0;
-                        for (; p < obj_r; ++p) {
-                            char d = src[p];
-                            char d2 = (p + 1 < obj_r) ? src[p + 1] : 0;
-                            if (lc) { if (d == '\n') lc = 0; continue; }
-                            if (ls) { if (d == '*' && d2 == '/') { ls = 0; p++; } continue; }
-                            if (st) { if (d == '\\' && d2) { p++; continue; } if (d == '"') st = 0; continue; }
-                            if (ch) { if (d == '\\' && d2) { p++; continue; } if (d == '\'') ch = 0; continue; }
-                            if (d == '/' && d2 == '/') { lc = 1; p++; continue; }
-                            if (d == '/' && d2 == '*') { ls = 1; p++; continue; }
-                            if (d == '"') { st = 1; continue; }
-                            if (d == '\'') { ch = 1; continue; }
-                            if (d == '(' || d == '{' || d == '[') { depth++; continue; }
-                            if (d == ')' || d == '}' || d == ']') {
-                                if (depth == 0 && d == '}') break;
-                                if (depth > 0) depth--;
-                                continue;
-                            }
-                            if (d == ',' && depth == 0) break;
-                        }
-                    }
-                    expr_e = p;
-                    break;
-                }
-                if (expr_s == 0 || expr_e <= expr_s) {
-                    j = rpar;
-                    continue;
-                }
-                cc__trim_range_codegen(src, &expr_s, &expr_e);
-                p = expr_s;
-                if (cc__parse_ident_codegen(src, expr_e, &p, handler, sizeof(handler)) && p == expr_e) {
-                    handler_is_ident = 1;
-                }
-                if (handler_is_ident) {
-                    void* owner = NULL;
-                    const void* fn_ptr = NULL;
-                    const char* handler_src = compile_src ? compile_src : src;
-                    size_t handler_src_len = compile_src ? compile_n : n;
-                    const char* handler_input_path = input_path;
-                    int handler_src_is_include_expanded = compile_src_is_include_expanded;
-                    char* logical_src = NULL;
-                    if (logical_file[0] && input_path && strcmp(logical_file, input_path) != 0) {
-                        size_t logical_len = 0;
-                        cc__read_entire_file(logical_file, &logical_src, &logical_len);
-                        if (logical_src && logical_len > 0) {
-                            handler_src = logical_src;
-                            handler_src_len = logical_len;
-                            handler_input_path = logical_file;
-                            handler_src_is_include_expanded = 0;
-                        }
-                    }
-                    if (cc__compile_named_ufcs_handler(handler_input_path,
-                                                       handler_src,
-                                                       handler_src_len,
-                                                       handler,
-                                                       handler_src_is_include_expanded,
-                                                       &owner,
-                                                       &fn_ptr) != 0) {
-                        free(logical_src);
-                        fprintf(stderr, "%s: error: unsupported comptime UFCS handler '%s'; expected a plain named function or non-capturing lambda compilable in the comptime subset\n",
-                                input_path ? input_path : "<input>", handler);
-                        return -1;
-                    }
-                    free(logical_src);
-                    if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
-                        fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
-                                input_path ? input_path : "<input>", pattern);
-                        cc__dl_module_free(owner);
-                        return -1;
-                    }
-                } else {
-                    void* owner = NULL;
-                    const void* fn_ptr = NULL;
-                    if (cc__compile_lambda_ufcs_handler(input_path,
-                                                        src,
-                                                        n,
-                                                        expr_s,
-                                                        expr_e,
-                                                        compile_src_is_include_expanded,
-                                                        &owner,
-                                                        &fn_ptr) != 0) {
-                        fprintf(stderr, "%s: error: unsupported comptime UFCS lambda; expected a non-capturing lambda compilable in the comptime subset\n",
-                                input_path ? input_path : "<input>");
-                        return -1;
-                    }
-                    if (cc_symbols_add_ufcs_callable(symbols, pattern, fn_ptr, owner, cc__dl_module_free) != 0) {
-                        fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
-                                input_path ? input_path : "<input>", pattern);
-                        cc__dl_module_free(owner);
-                        return -1;
-                    }
-                }
-                j = rpar;
-            }
-            i = body_r;
-        }
-    }
-    return 0;
-}
 
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
     char* out = NULL;
@@ -1053,72 +1176,82 @@ static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n
     return out;
 }
 
+static void cc__register_ufcs_declared_vars_for_type(CCTypeRegistry* reg,
+                                                     const char* type_name,
+                                                     const char* src,
+                                                     size_t n) {
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    size_t type_len = type_name ? strlen(type_name) : 0;
+    if (!reg || !type_name || !type_len || !src) return;
+    for (size_t i = 0; i < n; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (!cc__match_keyword_codegen(src, n, i, type_name)) continue;
+        {
+            size_t p = cc__skip_ws_codegen(src, n, i + type_len);
+            while (p < n && src[p] == '*') p++;
+            p = cc__skip_ws_codegen(src, n, p);
+            if (p < n && (isalpha((unsigned char)src[p]) || src[p] == '_')) {
+                char var_name[128];
+                const char* final_type_name = type_name;
+                size_t v = p;
+                size_t vn = 0;
+                while (v < n && (isalnum((unsigned char)src[v]) || src[v] == '_')) {
+                    if (vn + 1 < sizeof(var_name)) var_name[vn] = src[v];
+                    vn++;
+                    v++;
+                }
+                var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
+                v = cc__skip_ws_codegen(src, n, v);
+                if (v < n && src[v] == '(') continue;
+                if ((strcmp(type_name, "CCChanTx") == 0 || strcmp(type_name, "CCChanRx") == 0) &&
+                    v < n && src[v] == '=') {
+                    size_t rhs = cc__skip_ws_codegen(src, n, v + 1);
+                    if (rhs < n && (isalpha((unsigned char)src[rhs]) || src[rhs] == '_')) {
+                        char rhs_name[128];
+                        size_t rn = 0;
+                        size_t r = rhs;
+                        while (r < n && (isalnum((unsigned char)src[r]) || src[r] == '_')) {
+                            if (rn + 1 < sizeof(rhs_name)) rhs_name[rn] = src[r];
+                            rn++;
+                            r++;
+                        }
+                        rhs_name[rn < sizeof(rhs_name) ? rn : sizeof(rhs_name) - 1] = '\0';
+                        if (rhs_name[0]) {
+                            const char* rhs_type_name = cc_type_registry_lookup_var(reg, rhs_name);
+                            if (rhs_type_name &&
+                                ((strcmp(type_name, "CCChanTx") == 0 && strncmp(rhs_type_name, "CCChanTx_", 9) == 0) ||
+                                 (strcmp(type_name, "CCChanRx") == 0 && strncmp(rhs_type_name, "CCChanRx_", 9) == 0))) {
+                                final_type_name = rhs_type_name;
+                            }
+                        }
+                    }
+                }
+                cc_type_registry_add_var(reg, var_name, final_type_name);
+            }
+        }
+        i += type_len ? (type_len - 1) : 0;
+    }
+}
+
 static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     if (!symbols || !reg || !src) return;
     cc__collect_ufcs_field_and_var_types(src, n);
-    for (size_t ui = 0; ui < cc_symbols_ufcs_count(symbols); ++ui) {
-        int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-        const char* type_name = cc_symbols_ufcs_pattern(symbols, ui);
-        size_t type_len = type_name ? strlen(type_name) : 0;
-        if (!type_len) continue;
-        for (size_t i = 0; i < n; ++i) {
-            char c = src[i];
-            char c2 = (i + 1 < n) ? src[i + 1] : 0;
-            if (in_lc) { if (c == '\n') in_lc = 0; continue; }
-            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
-            if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
-            if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
-            if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
-            if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
-            if (c == '"') { in_str = 1; continue; }
-            if (c == '\'') { in_chr = 1; continue; }
-            if (!cc__match_keyword_codegen(src, n, i, type_name)) continue;
-            {
-                size_t p = cc__skip_ws_codegen(src, n, i + type_len);
-                while (p < n && src[p] == '*') p++;
-                p = cc__skip_ws_codegen(src, n, p);
-                if (p < n && (isalpha((unsigned char)src[p]) || src[p] == '_')) {
-                    char var_name[128];
-                    const char* final_type_name = type_name;
-                    size_t v = p;
-                    size_t vn = 0;
-                    while (v < n && (isalnum((unsigned char)src[v]) || src[v] == '_')) {
-                        if (vn + 1 < sizeof(var_name)) var_name[vn] = src[v];
-                        vn++;
-                        v++;
-                    }
-                    var_name[vn < sizeof(var_name) ? vn : sizeof(var_name) - 1] = '\0';
-                    v = cc__skip_ws_codegen(src, n, v);
-                    if (v < n && src[v] == '(') continue; /* function decl, not variable */
-                    if ((strcmp(type_name, "CCChanTx") == 0 || strcmp(type_name, "CCChanRx") == 0) &&
-                        v < n && src[v] == '=') {
-                        size_t rhs = cc__skip_ws_codegen(src, n, v + 1);
-                        if (rhs < n && (isalpha((unsigned char)src[rhs]) || src[rhs] == '_')) {
-                            char rhs_name[128];
-                            size_t rn = 0;
-                            size_t r = rhs;
-                            while (r < n && (isalnum((unsigned char)src[r]) || src[r] == '_')) {
-                                if (rn + 1 < sizeof(rhs_name)) rhs_name[rn] = src[r];
-                                rn++;
-                                r++;
-                            }
-                            rhs_name[rn < sizeof(rhs_name) ? rn : sizeof(rhs_name) - 1] = '\0';
-                            if (rhs_name[0]) {
-                                const char* rhs_type_name = cc_type_registry_lookup_var(reg, rhs_name);
-                                if (rhs_type_name &&
-                                    ((strcmp(type_name, "CCChanTx") == 0 && strncmp(rhs_type_name, "CCChanTx_", 9) == 0) ||
-                                     (strcmp(type_name, "CCChanRx") == 0 && strncmp(rhs_type_name, "CCChanRx_", 9) == 0))) {
-                                    final_type_name = rhs_type_name;
-                                }
-                            }
-                        }
-                    }
-                    cc_type_registry_add_var(reg, var_name, final_type_name);
-                }
-            }
-            i += type_len ? (type_len - 1) : 0;
-        }
+    for (size_t ti = 0; ti < cc_symbols_type_count(symbols); ++ti) {
+        const char* type_name = cc_symbols_type_name(symbols, ti);
+        const void* fn_ptr = NULL;
+        if (!type_name) continue;
+        if (cc_symbols_lookup_type_ufcs_callable(symbols, type_name, &fn_ptr) != 0 || !fn_ptr) continue;
+        cc__register_ufcs_declared_vars_for_type(reg, type_name, src, n);
     }
 }
 
@@ -1618,17 +1751,21 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        context matters; the comptime discovery input itself should come from one
        authoritative source. */
     if (reg_src && reg_src_len && ctx && ctx->symbols) {
-        if (cc_symbols_collect_type_registrations(ctx->symbols, ctx->input_path, reg_src, reg_src_len) != 0) {
-            fclose(out);
-            free(src_regs);
-            free(src_all);
-            return EINVAL;
-        }
-        if (cc__collect_comptime_type_ufcs_registrations(ctx->symbols, ctx->input_path,
-                                                         reg_src, reg_src_len,
-                                                         src_all, src_len,
-                                                         0,
-                                                         0) != 0) {
+        CCTypeUfcsCompileCtx type_ufcs_ctx = {
+            .registration_src = reg_src,
+            .registration_n = reg_src_len,
+            .compile_src = src_all,
+            .compile_n = src_len,
+            .compile_src_is_include_expanded = 0,
+        };
+        if (cc_symbols_collect_type_registrations_ex(ctx->symbols,
+                                                     ctx->input_path,
+                                                     reg_src,
+                                                     reg_src_len,
+                                                     NULL,
+                                                     NULL,
+                                                     cc__compile_type_ufcs_registration,
+                                                     &type_ufcs_ctx) != 0) {
             fclose(out);
             free(src_regs);
             free(src_all);
@@ -1645,11 +1782,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
         if (getenv("CC_DEBUG_COMPTIME_UFCS")) {
-            fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: collected %zu registration(s)\n",
-                    cc_symbols_ufcs_count(ctx->symbols));
-            for (size_t ui = 0; ui < cc_symbols_ufcs_count(ctx->symbols); ++ui) {
-                const char* pat = cc_symbols_ufcs_pattern(ctx->symbols, ui);
-                fprintf(stderr, "  pattern[%zu] = %s\n", ui, pat ? pat : "<null>");
+            fprintf(stderr, "CC_DEBUG_COMPTIME_UFCS: collected %zu type-pattern registration(s)\n",
+                    cc_symbols_type_count(ctx->symbols));
+            for (size_t ti = 0; ti < cc_symbols_type_count(ctx->symbols); ++ti) {
+                const char* pat = cc_symbols_type_name(ctx->symbols, ti);
+                const void* fn_ptr = NULL;
+                if (!pat) continue;
+                if (cc_symbols_lookup_type_ufcs_callable(ctx->symbols, pat, &fn_ptr) != 0 || !fn_ptr) continue;
+                fprintf(stderr, "  pattern[%zu] = %s\n", ti, pat);
             }
         }
         char* blanked = cc__blank_comptime_blocks_preserve_layout(src_ufcs, src_ufcs_len);
@@ -1680,7 +1820,22 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     if (src_ufcs && src_ufcs_len) {
-        char* rewritten = cc_rewrite_nursery_create_destroy_proto_ex(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+        char* rewritten = cc_rewrite_nursery_create_destroy_proto(src_ufcs, src_ufcs_len, ctx->input_path);
+        if (rewritten == (char*)-1) {
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            return EINVAL;
+        }
+        if (rewritten) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rewritten;
+            src_ufcs_len = strlen(rewritten);
+        }
+    }
+
+    if (src_ufcs && src_ufcs_len && ctx->symbols) {
+        char* rewritten = cc_rewrite_registered_type_create_destroy(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (rewritten == (char*)-1) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);

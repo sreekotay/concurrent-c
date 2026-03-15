@@ -9,6 +9,20 @@
 
 typedef struct CCSymbolTable CCSymbolTable;
 typedef void (*CCOwnedResourceFreeFn)(void*);
+typedef int (*CCTypeRegistrationCreateCallback)(CCSymbolTable* t,
+                                                const char* registration_input_path,
+                                                const char* logical_file,
+                                                const char* type_name,
+                                                const char* expr_src,
+                                                size_t expr_len,
+                                                void* user_ctx);
+typedef int (*CCTypeRegistrationUfcsCallback)(CCSymbolTable* t,
+                                              const char* registration_input_path,
+                                              const char* logical_file,
+                                              const char* type_name,
+                                              const char* expr_src,
+                                              size_t expr_len,
+                                              void* user_ctx);
 
 // Simple name/value binding used to preload consts from the driver.
 typedef struct {
@@ -32,24 +46,20 @@ int cc_symbols_lookup_const(CCSymbolTable* t, const char* name, long long* out_v
 int cc_symbols_set_fn_attrs(CCSymbolTable* t, const char* name, unsigned int attrs);
 int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int* out_attrs);
 
-/* Minimal compile-time UFCS registry (exact-match or simple prefix* patterns).
-   Callable entries back real comptime execution for named handlers and
-   non-capturing lambdas through the active comptime backend. Prefix entries
-   remain as a compatibility fallback for older lowering paths. */
-int cc_symbols_add_ufcs_prefix(CCSymbolTable* t, const char* pattern, const char* prefix);
-int cc_symbols_lookup_ufcs_prefix(CCSymbolTable* t, const char* pattern, const char** out_prefix);
-int cc_symbols_add_ufcs_callable(CCSymbolTable* t,
-                                 const char* pattern,
-                                 const void* fn_ptr,
-                                 void* owner,
-                                 CCOwnedResourceFreeFn owner_free);
-int cc_symbols_lookup_ufcs_callable(CCSymbolTable* t, const char* pattern, const void** out_fn_ptr);
-size_t cc_symbols_ufcs_count(CCSymbolTable* t);
-const char* cc_symbols_ufcs_pattern(CCSymbolTable* t, size_t idx);
-
- /* Exact-type hooks for declaration lifecycle and declarative UFCS lowering. */
+/* Type hooks for declaration lifecycle and declarative UFCS lowering.
+   Legacy `cc_ufcs_register(...)` compatibility is represented here as
+   type-pattern UFCS callables too, so this remains the one authoritative UFCS
+   registry. */
  int cc_symbols_add_type_create_call(CCSymbolTable* t, const char* type_name, int arity, const char* callee);
  int cc_symbols_lookup_type_create_call(CCSymbolTable* t, const char* type_name, int arity, const char** out_callee);
+ int cc_symbols_set_type_create_callable(CCSymbolTable* t,
+                                         const char* type_name,
+                                         const void* fn_ptr,
+                                         void* owner,
+                                         CCOwnedResourceFreeFn owner_free);
+ int cc_symbols_lookup_type_create_callable(CCSymbolTable* t,
+                                            const char* type_name,
+                                            const void** out_fn_ptr);
  int cc_symbols_set_type_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee);
  int cc_symbols_lookup_type_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
  int cc_symbols_add_type_ufcs_value(CCSymbolTable* t, const char* type_name, const char* method, const char* callee);
@@ -57,10 +67,33 @@ const char* cc_symbols_ufcs_pattern(CCSymbolTable* t, size_t idx);
                                       const char* type_name,
                                       const char* method,
                                       const char** out_callee);
+ int cc_symbols_set_type_ufcs_callable(CCSymbolTable* t,
+                                      const char* type_name,
+                                      const void* fn_ptr,
+                                      void* owner,
+                                      CCOwnedResourceFreeFn owner_free);
+ int cc_symbols_add_legacy_type_ufcs_callable(CCSymbolTable* t,
+                                             const char* type_name,
+                                             const void* fn_ptr,
+                                             void* owner,
+                                             CCOwnedResourceFreeFn owner_free);
+ int cc_symbols_lookup_type_ufcs_callable(CCSymbolTable* t,
+                                         const char* type_name,
+                                         const void** out_fn_ptr);
+ size_t cc_symbols_type_count(CCSymbolTable* t);
+ const char* cc_symbols_type_name(CCSymbolTable* t, size_t idx);
  int cc_symbols_collect_type_registrations(CCSymbolTable* t,
                                            const char* input_path,
                                            const char* src,
                                            size_t n);
+ int cc_symbols_collect_type_registrations_ex(CCSymbolTable* t,
+                                             const char* input_path,
+                                             const char* src,
+                                             size_t n,
+                                             CCTypeRegistrationCreateCallback create_callback,
+                                             void* create_user_ctx,
+                                             CCTypeRegistrationUfcsCallback ufcs_callback,
+                                             void* ufcs_user_ctx);
 
 #endif // CC_COMPTIME_SYMBOLS_H
 

@@ -1,0 +1,62 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    const char* path = "/tmp/cc_ufcs_file_smoke.txt";
+    const char* msg = "ufcs file smoke\n";
+    size_t msg_len = strlen(msg);
+    CCSlice data = cc_slice_from_buffer((void*)msg, msg_len);
+    CCFile f = {0};
+    CCFile reader = {0};
+    CCResult_size_t_CCIoError written;
+    CCResult_CCSlice_CCIoError read_back;
+    CCArena arena;
+    CCSlice out;
+
+    if (f.open(path, "w+") != 0) return 1;
+
+    written = f.write(data);
+    if (cc_is_err(written)) {
+        cc_file_close(&f);
+        return 2;
+    }
+    if (cc_unwrap_as(written, size_t) != msg_len) {
+        cc_file_close(&f);
+        return 3;
+    }
+
+    if (cc_is_err(cc_file_sync(&f))) {
+        cc_file_close(&f);
+        return 4;
+    }
+    cc_file_close(&f);
+
+    if (reader.open(path, "rb") != 0) {
+        return 5;
+    }
+
+    arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) {
+        cc_file_close(&reader);
+        return 6;
+    }
+
+    read_back = cc_file_read_all(&reader, &arena);
+    if (cc_is_err(read_back)) {
+        cc_arena_free(&arena);
+        cc_file_close(&reader);
+        return 7;
+    }
+    out = cc_unwrap_as(read_back, CCSlice);
+    if (out.len != msg_len || memcmp(out.ptr, msg, msg_len) != 0) {
+        cc_arena_free(&arena);
+        cc_file_close(&reader);
+        return 8;
+    }
+
+    cc_file_close(&reader);
+    cc_arena_free(&arena);
+    remove(path);
+    return 0;
+}

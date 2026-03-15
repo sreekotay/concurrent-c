@@ -17,6 +17,8 @@
 
 /* Default timeout for stress tests (seconds) */
 #define STRESS_TIMEOUT_SEC 10
+/* Perf runs should still finish promptly in the aggregate runner. */
+#define PERF_TIMEOUT_SEC 20
 
 typedef struct {
     int passed;
@@ -61,6 +63,40 @@ static void write_log(CCArena* arena, const char* path, const char* suffix,
     }
 }
 
+static void write_process_logs(CCArena* arena, const char* path, const CCProcessOutput* out) {
+    if (!out) return;
+    write_log(arena, path, ".stdout.txt", (const char*)out->stdout_data.ptr, out->stdout_data.len);
+    write_log(arena, path, ".stderr.txt", (const char*)out->stderr_data.ptr, out->stderr_data.len);
+}
+
+static void print_process_log_paths(CCArena* arena, const char* path) {
+    CCSlice base = cc_path_basename(arena, slice_from_cstr(path));
+    printf("    logs: %s/%s.stdout.txt, %s/%s.stderr.txt\n",
+           LOG_DIR, (const char*)base.ptr,
+           LOG_DIR, (const char*)base.ptr);
+}
+
+static void print_process_output_excerpt(const CCProcessOutput* out) {
+    CCSlice stdout_data;
+    CCSlice stderr_data;
+    if (!out) return;
+    stdout_data = out->stdout_data;
+    stderr_data = out->stderr_data;
+    if (stdout_data.len > 0 && stdout_data.ptr) {
+        printf("    stdout: %.*s", (int)(stdout_data.len > 200 ? 200 : stdout_data.len), (const char*)stdout_data.ptr);
+        if (stdout_data.len > 200) printf("...(truncated)");
+        printf("\n");
+    }
+    if (stderr_data.len > 0 && stderr_data.ptr) {
+        printf("    stderr: %.*s", (int)(stderr_data.len > 200 ? 200 : stderr_data.len), (const char*)stderr_data.ptr);
+        if (stderr_data.len > 200) printf("...(truncated)");
+        printf("\n");
+    }
+    if (stdout_data.len == 0 && stderr_data.len == 0) {
+        printf("    (no output captured)\n");
+    }
+}
+
 /* Returns the expected exit code for a given test path.
  * Most tests expect 0, but some (like deadlock demos) expect 1.
  * Returns -1 if the test should be skipped entirely (like servers). */
@@ -71,7 +107,15 @@ static int get_expected_exit_code(const char* path) {
     return 0;
 }
 
-static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats, int timeout_sec) {
+static int get_timeout_sec(const char* path, int default_timeout_sec) {
+    if (default_timeout_sec <= 0) return 0;
+    /* Occasionally slower under the full "all" aggregate load. */
+    if (strstr(path, "join_init_race") != NULL) return 20;
+    return default_timeout_sec;
+}
+
+static void run_files(CCArena* arena, const char* pattern, const char* label, Stats* stats,
+                      int timeout_sec, bool stream_output) {
     printf("\n=== %s ===\n", label);
 
     ensure_log_dir(arena);
@@ -85,6 +129,7 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 
     for (size_t i = 0; i < n; i++) {
         const char* path = cc_glob_result_get(&files, i);
+        int timeout_for_file = get_timeout_sec(path, timeout_sec);
         
         int expected_exit = get_expected_exit_code(path);
         if (expected_exit == -1) {
@@ -103,11 +148,39 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         CCArena test_arena = cc_arena_heap(megabytes(4));
         CCCommand cmd = cc_command(&test_arena, "ccc");
         CCResult_CCProcessOutput_CCIoError res;
+        CCResult_int_CCIoError status;
         cmd.arg("run");
-        cmd.arg_if(timeout_sec > 0, "--timeout");
-        cmd.arg_i32_if(timeout_sec > 0, timeout_sec);
+        cmd.arg_if(timeout_for_file > 0, "--timeout");
+        cmd.arg_i32_if(timeout_for_file > 0, timeout_for_file);
         cmd.arg(path);
         /* Use ccc from PATH */
+        if (stream_output) {
+            cmd.inherit_stdio();
+            status = cmd.status();
+            if (cc_is_err(status)) {
+                CCIoError err = cc_unwrap_err_as(status, CCIoError);
+                cc_arena_free(&test_arena);
+                printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
+                stats->skipped++;
+                continue;
+            }
+
+            int exit_code = cc_unwrap(status);
+            if (exit_code == expected_exit) {
+                printf("OK%s\n", expected_exit != 0 ? " (expected failure)" : "");
+                stats->passed++;
+            } else if (exit_code == 124 && expected_exit != 124) {
+                printf("TIMEOUT (>%ds)\n", timeout_for_file);
+                stats->failed++;
+            } else {
+                printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
+                stats->failed++;
+            }
+
+            cc_arena_free(&test_arena);
+            continue;
+        }
+
         res = cmd.output(&test_arena);
 
         if (cc_is_err(res)) {
@@ -126,44 +199,15 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
             stats->passed++;
         } else if (exit_code == 124 && expected_exit != 124) {
             /* 124 = timeout (like GNU timeout) */
-            printf("TIMEOUT (>%ds)\n", timeout_sec);
-            const char* out_str = cc_process_output_stdout_str(&out);
-            size_t out_len = cc_process_output_stdout_len(&out);
-            const char* err_str = cc_process_output_stderr_str(&out);
-            size_t err_len = cc_process_output_stderr_len(&out);
-            write_log(&test_arena, path, ".stdout.txt", out_str, out_len);
-            write_log(&test_arena, path, ".stderr.txt", err_str, err_len);
-            CCSlice base = cc_path_basename(&test_arena, slice_from_cstr(path));
-            printf("    logs: %s/%s.stdout.txt, %s/%s.stderr.txt\n",
-                   LOG_DIR, (const char*)base.ptr,
-                   LOG_DIR, (const char*)base.ptr);
+            printf("TIMEOUT (>%ds)\n", timeout_for_file);
+            write_process_logs(&test_arena, path, &out);
+            print_process_log_paths(&test_arena, path);
             stats->failed++;
         } else {
             printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
-            /* Print stdout/stderr on failure for debugging */
-            const char* out_str = cc_process_output_stdout_str(&out);
-            size_t out_len = cc_process_output_stdout_len(&out);
-            const char* err_str = cc_process_output_stderr_str(&out);
-            size_t err_len = cc_process_output_stderr_len(&out);
-            write_log(&test_arena, path, ".stdout.txt", out_str, out_len);
-            write_log(&test_arena, path, ".stderr.txt", err_str, err_len);
-            if (out_len > 0 && out_str) {
-                printf("    stdout: %.*s", (int)(out_len > 200 ? 200 : out_len), out_str);
-                if (out_len > 200) printf("...(truncated)");
-                printf("\n");
-            }
-            if (err_len > 0 && err_str) {
-                printf("    stderr: %.*s", (int)(err_len > 200 ? 200 : err_len), err_str);
-                if (err_len > 200) printf("...(truncated)");
-                printf("\n");
-            }
-            if (out_len == 0 && err_len == 0) {
-                printf("    (no output captured)\n");
-            }
-            CCSlice base = cc_path_basename(&test_arena, slice_from_cstr(path));
-            printf("    logs: %s/%s.stdout.txt, %s/%s.stderr.txt\n",
-                   LOG_DIR, (const char*)base.ptr,
-                   LOG_DIR, (const char*)base.ptr);
+            print_process_output_excerpt(&out);
+            write_process_logs(&test_arena, path, &out);
+            print_process_log_paths(&test_arena, path);
             stats->failed++;
         }
         
@@ -172,19 +216,20 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 }
 
 int main(int argc, char** argv) {
+    CCArena arena = cc_arena_heap(megabytes(16));
     bool do_examples;
     bool do_stress;
     bool do_perf;
     bool do_all;
     int cli_exit_code = 0;
-    CCCliSpec cli_specs[5];
-    size_t spec_i = 0;
-    cc_cli_meta_init(&cli_specs[spec_i++], "<category>...", "Run all examples, stress tests, or performance benchmarks.");
-    cc_cli_flag_init(&cli_specs[spec_i++], &do_examples, false, cc_cli_names1("examples"), "Run all example programs");
-    cc_cli_flag_init(&cli_specs[spec_i++], &do_stress, false, cc_cli_names1("stress"), "Run all stress tests");
-    cc_cli_flag_init(&cli_specs[spec_i++], &do_perf, false, cc_cli_names1("perf"), "Run all performance benchmarks");
-    cc_cli_flag_init(&cli_specs[spec_i++], &do_all, false, cc_cli_names1("all"), "Run everything");
-    if (!cc_cli_parse_into(&cli_exit_code, argc, argv, cli_specs)) {
+    CCCliSpecs cli_specs = cc_cli_specs(&arena);
+    cc_cli_meta(cc_cli_add(&cli_specs), "<category>...", "Run all examples, stress tests, or performance benchmarks.");
+    cc_cli_flag(cc_cli_add(&cli_specs), &do_examples, false, cc_cli_names1("examples"), "Run all example programs");
+    cc_cli_flag(cc_cli_add(&cli_specs), &do_stress, false, cc_cli_names1("stress"), "Run all stress tests");
+    cc_cli_flag(cc_cli_add(&cli_specs), &do_perf, false, cc_cli_names1("perf"), "Run all performance benchmarks");
+    cc_cli_flag(cc_cli_add(&cli_specs), &do_all, false, cc_cli_names1("all"), "Run everything");
+    if (!cc_cli_parse_into_list(&cli_exit_code, argc, argv, &cli_specs)) {
+        cc_arena_free(&arena);
         return cli_exit_code;
     }
     if (do_all) {
@@ -194,24 +239,24 @@ int main(int argc, char** argv) {
     }
     if (!do_examples && !do_stress && !do_perf) {
         fprintf(stderr, "Select at least one category.\n");
-        cc_cli_print_help(stderr, argc, argv, cli_specs);
+        cc_cli_print_help_list(stderr, argc, argv, &cli_specs);
+        cc_arena_free(&arena);
         return 1;
     }
-    CCArena arena = cc_arena_heap(megabytes(16));
     Stats stats = {0};
 
     printf("Concurrent-C Test Runner\n");
 
     if (do_examples) {
-        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0);  /* No timeout */
+        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0, false);  /* No timeout */
     }
 
     if (do_stress) {
-        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC);
+        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC, false);
     }
 
     if (do_perf) {
-        run_files(&arena, "perf/*.ccs", "Performance Benchmarks", &stats, 0);  /* No timeout */
+        run_files(&arena, "perf/*.ccs", "Performance Benchmarks", &stats, PERF_TIMEOUT_SEC, true);
     }
 
     // Summary

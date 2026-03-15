@@ -15,7 +15,9 @@ typedef struct {
 #endif
 
 typedef struct {
-    const char* callee;
+    const char* callee1;
+    const char* callee2;
+    const void* callable;
 } CCTypeCreateHook;
 
 typedef struct {
@@ -23,21 +25,35 @@ typedef struct {
 } CCTypeDestroyHook;
 
 #ifdef CC_PARSER_MODE
+typedef CCSlice (*CCTypeCreateHandler)();
 typedef CCSlice (*CCTypeUfcsHandler)();
 #else
-typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCArena* arena);
+typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
+typedef CCSlice (*CCTypeUfcsHandler)(CCSlice recv_type, CCSlice method, CCSlice mode, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 #endif
 
 typedef struct {
-    CCTypeCreateHook create1;
-    CCTypeCreateHook create2;
+    CCTypeCreateHook create;
     CCTypeDestroyHook destroy;
     CCTypeUfcsHandler ufcs;
 } CCTypeHooks;
 
 static inline CCTypeCreateHook cc_type_create_call(const char* callee) {
     CCTypeCreateHook hook = {0};
-    hook.callee = callee;
+    hook.callee1 = callee;
+    return hook;
+}
+
+static inline CCTypeCreateHook cc_type_create_overloads(const char* callee1, const char* callee2) {
+    CCTypeCreateHook hook = {0};
+    hook.callee1 = callee1;
+    hook.callee2 = callee2;
+    return hook;
+}
+
+static inline CCTypeCreateHook cc_type_create_hook(CCTypeCreateHandler callable) {
+    CCTypeCreateHook hook = {0};
+    hook.callable = (const void*)callable;
     return hook;
 }
 

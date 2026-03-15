@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_atomic.cch>
 
@@ -415,6 +416,43 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     uint64_t id = cc_slice_make_id(arena->provenance, false, false, false);
     // len/alen expressed in element count, per slice ABI convention.
     return cc_slice_from_parts(ptr, count, id, count);
+}
+
+#ifndef CC_CCSLICEARRAY_DEFINED
+#define CC_CCSLICEARRAY_DEFINED 1
+typedef struct {
+    CCSlice *items;
+    size_t len;
+} CCSliceArray;
+#endif
+
+static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
+                                       CCSlice method,
+                                       CCSlice mode,
+                                       CCSliceArray argv,
+                                       CCSliceArray arg_types,
+                                       CCArena *arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    (void)arena;
+    if (method.len == sizeof("free") - 1 && memcmp(method.ptr, "free", sizeof("free") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_free", sizeof("cc_arena_free") - 1);
+    }
+    if (method.len == sizeof("detach") - 1 && memcmp(method.ptr, "detach", sizeof("detach") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_detach", sizeof("cc_arena_detach") - 1);
+    }
+    if (method.len == sizeof("reset") - 1 && memcmp(method.ptr, "reset", sizeof("reset") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_reset", sizeof("cc_arena_reset") - 1);
+    }
+    if (method.len == sizeof("remaining") - 1 && memcmp(method.ptr, "remaining", sizeof("remaining") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_remaining", sizeof("cc_arena_remaining") - 1);
+    }
+    if (method.len == sizeof("checkpoint") - 1 && memcmp(method.ptr, "checkpoint", sizeof("checkpoint") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_checkpoint", sizeof("cc_arena_checkpoint") - 1);
+    }
+    return cc_slice_empty();
 }
 /* Non-atomic versions for per-fiber/per-thread exclusive arenas.
    Use when no other thread will touch the arena concurrently. */
