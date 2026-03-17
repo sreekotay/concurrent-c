@@ -538,7 +538,7 @@ int cc__rewrite_all_closure_calls_with_nodes(const CCASTRoot* root,
     int call_cap = 0;
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != 5) continue; /* CALL */
-        int is_ufcs = (n[i].aux2 & 2) != 0;
+        int is_ufcs = (n[i].aux2 & 4) != 0;
         if (is_ufcs) continue;
         if (!n[i].aux_s1) continue;
         if (!cc__node_file_matches_this_tu(root, ctx, n[i].file)) continue;

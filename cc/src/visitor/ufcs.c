@@ -225,6 +225,7 @@ typedef struct {
     const char* typed_chan_type;
     int recv_is_simple;
     int recv_is_addressable;
+    int recv_is_ptr;
 } CCUFCSDispatchCtx;
 
 static const void* cc__lookup_builtin_ufcs_callable(const char* recv_type_name) {
@@ -245,7 +246,36 @@ static const void* cc__lookup_builtin_ufcs_callable(const char* recv_type_name) 
 }
 
 static int cc__recv_pass_direct(const CCUFCSDispatchCtx* ctx, bool recv_is_ptr) {
-    return recv_is_ptr || !ctx || !ctx->recv_is_addressable;
+    return recv_is_ptr || !ctx || ctx->recv_is_ptr || !ctx->recv_is_addressable;
+}
+
+static int cc__type_name_has_ptr(const char* type_name) {
+    return type_name && strchr(type_name, '*') != NULL;
+}
+
+static int cc__same_nominal_type(const char* a, const char* b) {
+    char abuf[256];
+    char bbuf[256];
+    size_t alen = 0, blen = 0;
+    const char* ap = a;
+    const char* bp = b;
+    if (!a || !b) return 0;
+    if (strncmp(ap, "struct ", 7) == 0) ap += 7;
+    else if (strncmp(ap, "union ", 6) == 0) ap += 6;
+    if (strncmp(bp, "struct ", 7) == 0) bp += 7;
+    else if (strncmp(bp, "union ", 6) == 0) bp += 6;
+    while (*ap && isspace((unsigned char)*ap)) ap++;
+    while (*bp && isspace((unsigned char)*bp)) bp++;
+    while (ap[alen] && ap[alen] != '*') alen++;
+    while (bp[blen] && bp[blen] != '*') blen++;
+    while (alen > 0 && isspace((unsigned char)ap[alen - 1])) alen--;
+    while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
+    if (alen == 0 || blen == 0 || alen >= sizeof(abuf) || blen >= sizeof(bbuf)) return 0;
+    memcpy(abuf, ap, alen);
+    abuf[alen] = '\0';
+    memcpy(bbuf, bp, blen);
+    bbuf[blen] = '\0';
+    return strcmp(abuf, bbuf) == 0;
 }
 
 static void cc__trim_slice_bounds(const char* src, size_t* start, size_t* end) {
@@ -456,6 +486,7 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->recv_is_simple = is_ident_only(recv) || is_addr_of_ident(recv);
     ctx->recv_is_addressable = ctx->recv_is_simple || cc__is_addressable_lvalue_expr(recv);
+    ctx->recv_is_ptr = 0;
     ctx->recv_type_name = g_ufcs_recv_type;
     if (reg) {
         reg_type_name = cc_type_registry_resolve_receiver_expr(reg, recv, &reg_recv_is_ptr);
@@ -468,8 +499,19 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
              reg_type_name && reg_type_name[0])) {
             ctx->recv_type_name = reg_type_name;
         }
+        if (reg_type_name && reg_type_name[0]) {
+            if (reg_recv_is_ptr &&
+                ctx->recv_type_name && ctx->recv_type_name[0] &&
+                (strncmp(reg_type_name, "struct ", 7) == 0 ||
+                 strncmp(reg_type_name, "union ", 6) == 0) &&
+                !cc__type_name_has_ptr(ctx->recv_type_name) &&
+                cc__same_nominal_type(reg_type_name, ctx->recv_type_name)) {
+                ctx->recv_is_ptr = 0;
+            } else {
+                ctx->recv_is_ptr = reg_recv_is_ptr;
+            }
+        }
     }
-    if (reg_recv_is_ptr) g_ufcs_recv_type_is_ptr = 1;
     if (ctx->recv_type_name &&
         (strncmp(ctx->recv_type_name, "CCChanTx_", 9) == 0 ||
          strncmp(ctx->recv_type_name, "CCChanRx_", 9) == 0)) {
@@ -520,11 +562,18 @@ static int cc__emit_type_driven_dispatch(char* out,
             const char* raw_fn = (strcmp(method, "recv") == 0)
                 ? (g_ufcs_await_context ? "cc_channel_raw_recv_task" : "cc_channel_raw_recv")
                 : "cc_channel_raw_try_recv";
-            int chan_recv_is_ptr = recv_is_ptr || g_ufcs_recv_type_is_ptr ||
+            int chan_recv_is_ptr = recv_is_ptr || (ctx && ctx->recv_is_ptr) || g_ufcs_recv_type_is_ptr ||
                                    strcmp(ctx->recv_type_name, "CCChan*") == 0;
+            if (g_ufcs_await_context) {
+                return chan_recv_is_ptr
+                    ? snprintf(out, cap, "%s(%s, %s, sizeof(*%s))", raw_fn, recv, args_rewritten, args_rewritten)
+                    : snprintf(out, cap, "%s(&%s, %s, sizeof(*%s))", raw_fn, recv, args_rewritten, args_rewritten);
+            }
             return chan_recv_is_ptr
-                ? snprintf(out, cap, "%s(%s, %s, sizeof(*%s))", raw_fn, recv, args_rewritten, args_rewritten)
-                : snprintf(out, cap, "%s(&%s, %s, sizeof(*%s))", raw_fn, recv, args_rewritten, args_rewritten);
+                ? snprintf(out, cap, "cc_chan_result_from_errno(%s(%s, %s, sizeof(*%s)))",
+                           raw_fn, recv, args_rewritten, args_rewritten)
+                : snprintf(out, cap, "cc_chan_result_from_errno(%s(&%s, %s, sizeof(*%s)))",
+                           raw_fn, recv, args_rewritten, args_rewritten);
         }
         if (has_args) {
             if (channel_recv_by_value || cc__recv_pass_direct(ctx, recv_is_ptr))

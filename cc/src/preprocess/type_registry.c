@@ -157,6 +157,16 @@ static int ensure_field_capacity(CCTypeRegistry* reg, size_t needed) {
     return 0;
 }
 
+static int cc__is_parser_placeholder_type(const char* type_name) {
+    return type_name &&
+           (strcmp(type_name, "__CCVecGeneric") == 0 ||
+            strcmp(type_name, "__CCVecGeneric*") == 0 ||
+            strcmp(type_name, "__CCMapGeneric") == 0 ||
+            strcmp(type_name, "__CCMapGeneric*") == 0 ||
+            strcmp(type_name, "__CCResultGeneric") == 0 ||
+            strcmp(type_name, "__CCResultGeneric*") == 0);
+}
+
 int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const char* type_name) {
     if (!reg || !var_name || !type_name) return -1;
 
@@ -167,6 +177,15 @@ int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const ch
                   strcmp(type_name, "CCChanTx") == 0) ||
                  (strncmp(reg->vars[i].type_name, "CCChanRx_", 9) == 0 &&
                   strcmp(type_name, "CCChanRx") == 0))) {
+                return 0;
+            }
+            /* This registry is intentionally scope-less, so "last writer wins"
+               is unsafe once lowering passes introduce alternate concrete views
+               (e.g. CCString later appearing as CCSlice). Allow upgrading
+               parser placeholders to concrete types, but otherwise keep the
+               first concrete declaration we saw for a name. */
+            if (!cc__is_parser_placeholder_type(reg->vars[i].type_name) &&
+                strcmp(reg->vars[i].type_name, type_name) != 0) {
                 return 0;
             }
             free(reg->vars[i].type_name);
@@ -303,7 +322,6 @@ const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
             p++;
         } else if (*p == '-' && p[1] == '>') {
             is_arrow = 1;
-            recv_is_ptr = 1;
             p += 2;
         } else {
             break;

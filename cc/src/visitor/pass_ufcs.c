@@ -132,7 +132,8 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
 
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != 5) continue;         /* CALL */
-        if (!n[i].aux_s1) continue;           /* only UFCS calls */
+        if ((n[i].aux2 & 4) == 0) continue;   /* only real UFCS calls */
+        if (!n[i].aux_s1) continue;
         if (!cc_pass_same_file(ctx->input_path, n[i].file) &&
             !(root->lowered_path && cc_pass_same_file(root->lowered_path, n[i].file)))
             continue;
@@ -147,7 +148,7 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         }
         int occ = (n[i].aux2 >> 8) & 0x00ffffff;
         if (occ <= 0) occ = 1;
-        /* bit1 of aux2 = receiver's resolved type is a pointer (from TCC) */
+        /* bit1 of aux2 = parser fallback says pass receiver directly */
         int recv_type_is_ptr = (n[i].aux2 & 2) ? 1 : 0;
         /* Check if this node is under an AWAIT ancestor */
         int under_await = 0;
@@ -247,6 +248,17 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         if (!expr) { free(out_buf); continue; }
         memcpy(expr, cur + sp.start, expr_len);
         expr[expr_len] = '\0';
+        {
+            const char* p = expr;
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+            if ((strncmp(p, "@defer", 6) == 0 &&
+                 (p[6] == '\0' || p[6] == ' ' || p[6] == '\t' || p[6] == '\n' || p[6] == '\r' || p[6] == '(')) ||
+                strstr(p, "@defer") != NULL) {
+                free(expr);
+                free(out_buf);
+                continue;
+            }
+        }
         /* Use full rewrite with await context, type info, and receiver type. */
         {
             int rewrite_rc = cc_ufcs_rewrite_line_full(expr, out_buf, out_cap, nodes[i].is_under_await,
@@ -393,10 +405,23 @@ static int cc__span_from_anchor_and_end(const char* s,
                                        size_t sep_pos,
                                        size_t end_pos_excl,
                                        struct CC__UFCSSpan* out_span) {
+    size_t actual_sep_pos = sep_pos;
     if (!s || !out_span) return 0;
     if (sep_pos < range_start) return 0;
     if (end_pos_excl <= sep_pos) return 0;
-    out_span->start = cc__scan_receiver_start_left(s, range_start, sep_pos);
+    if (!(s[actual_sep_pos] == '.' ||
+          (actual_sep_pos + 1 < end_pos_excl && s[actual_sep_pos] == '-' && s[actual_sep_pos + 1] == '>'))) {
+        size_t p = actual_sep_pos;
+        while (p > range_start && isspace((unsigned char)s[p - 1])) p--;
+        while (p > range_start && cc__is_ident_char_char(s[p - 1])) p--;
+        while (p > range_start && isspace((unsigned char)s[p - 1])) p--;
+        if (p > range_start && s[p - 1] == '.') {
+            actual_sep_pos = p - 1;
+        } else if (p > range_start + 1 && s[p - 2] == '-' && s[p - 1] == '>') {
+            actual_sep_pos = p - 2;
+        }
+    }
+    out_span->start = cc__scan_receiver_start_left(s, range_start, actual_sep_pos);
     out_span->end = end_pos_excl;
     return out_span->start < out_span->end;
 }
