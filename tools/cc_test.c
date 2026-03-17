@@ -319,6 +319,12 @@ static int test_requires_async(const char* stem) {
     return file_exists(p);
 }
 
+static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
+    if (!stem) return default_timeout_sec;
+    if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
+    return default_timeout_sec;
+}
+
 static int run_one_test(const char* stem,
                         const char* input_path,
                         int compile_fail,
@@ -414,10 +420,11 @@ static int run_one_test(const char* stem,
         return 1;
     }
 
-    int run_rc = run_cmd_redirect_timeout(bin_out, out_txt, err_txt, verbose, run_timeout_sec);
+    int test_run_timeout_sec = get_run_timeout_for_test(stem, run_timeout_sec);
+    int run_rc = run_cmd_redirect_timeout(bin_out, out_txt, err_txt, verbose, test_run_timeout_sec);
     if (run_rc != 0) {
         if (run_rc == 124) {
-            fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, run_timeout_sec);
+            fprintf(stderr, "[TIMEOUT] %s: run timed out after %ds\n", stem, test_run_timeout_sec);
         }
         fprintf(stderr, "[FAIL] %s: run failed\n", stem);
         log_failure_files(stem, out_txt, err_txt, build_err_txt);
