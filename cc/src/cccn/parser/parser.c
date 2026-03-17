@@ -132,9 +132,9 @@ static CCNNode* convert_tcc_node(const CCNodeView* n, const char* file) {
         }
         
         case CC_AST_NODE_CALL: {
-            /* aux2 & 2 means UFCS (method call), otherwise regular function call.
+            /* aux2 & 4 means UFCS (method call), otherwise regular function call.
              * aux_s1 contains the function/method name for both cases. */
-            int is_ufcs = (n->aux2 & 2) != 0;
+            int is_ufcs = (n->aux2 & 4) != 0;
             if (is_ufcs) {
                 node = ccn_node_new(CCN_EXPR_METHOD);
                 if (node) {

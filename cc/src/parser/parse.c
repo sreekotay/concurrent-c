@@ -90,6 +90,152 @@ static char* cc__blank_comptime_blocks_preserve_layout_parse(const char* src, si
     return out;
 }
 
+static int cc__is_ident_start_parse(char c) {
+    return isalpha((unsigned char)c) || c == '_';
+}
+
+static int cc__is_ident_char_parse(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static size_t cc__skip_ws_and_comments_parse(const char* src, size_t n, size_t i) {
+    while (i < n) {
+        if (isspace((unsigned char)src[i])) {
+            i++;
+            continue;
+        }
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            i += 2;
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) i++;
+            if (i + 1 < n) i += 2;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+static int cc__find_matching_paren_parse(const char* src, size_t len, size_t lpar, size_t* out_rpar) {
+    int depth = 0, in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    for (size_t i = lpar; i < len; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '(') depth++;
+        else if (c == ')') {
+            depth--;
+            if (depth == 0) {
+                *out_rpar = i;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static char* cc__rewrite_result_helper_calls_for_parser_parse(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+
+    if (!src || n == 0) return NULL;
+    while (i < n) {
+        i = cc__skip_ws_and_comments_parse(src, n, i);
+        if (i >= n) break;
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) {
+                    i += 2;
+                    continue;
+                }
+                if (src[i] == q) {
+                    i++;
+                    break;
+                }
+                i++;
+            }
+            continue;
+        }
+        if (!cc__is_ident_start_parse(src[i])) {
+            i++;
+            continue;
+        }
+
+        size_t ident_start = i;
+        while (i < n && cc__is_ident_char_parse(src[i])) i++;
+        size_t ident_end = i;
+        size_t ident_len = ident_end - ident_start;
+        const char* parser_method = NULL;
+        size_t suffix_len = 0;
+        size_t j;
+        size_t paren_end = 0;
+
+        if (ident_len <= 9 || memcmp(src + ident_start, "CCResult_", 9) != 0) continue;
+
+        j = cc__skip_ws_and_comments_parse(src, n, ident_end);
+        if (j >= n || src[j] != '(') continue;
+
+        if (ident_len > 10 && memcmp(src + ident_end - 10, "_unwrap_or", 10) == 0) {
+            parser_method = "unwrap_or";
+            suffix_len = 10;
+        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_is_err", 7) == 0) {
+            parser_method = "is_err";
+            suffix_len = 7;
+        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_is_ok", 6) == 0) {
+            parser_method = "is_ok";
+            suffix_len = 6;
+        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_unwrap", 7) == 0) {
+            parser_method = "unwrap";
+            suffix_len = 7;
+        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_error", 6) == 0) {
+            parser_method = "error";
+            suffix_len = 6;
+        } else {
+            continue;
+        }
+
+        if (!cc__find_matching_paren_parse(src, n, j, &paren_end)) continue;
+
+        {
+            size_t p = cc__skip_ws_and_comments_parse(src, n, j + 1);
+            if (p < paren_end && cc__is_ident_start_parse(src[p])) {
+                size_t first_tok_end = p + 1;
+                while (first_tok_end < paren_end && cc__is_ident_char_parse(src[first_tok_end])) first_tok_end++;
+                p = cc__skip_ws_and_comments_parse(src, n, first_tok_end);
+                if (p < paren_end && (cc__is_ident_start_parse(src[p]) || src[p] == '*')) {
+                    i = paren_end + 1;
+                    continue;
+                }
+            }
+        }
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "__cc_parser_result_");
+        cc_sb_append_cstr(&out, &out_len, &out_cap, parser_method);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
+        cc_sb_append(&out, &out_len, &out_cap, src + ident_start, ident_len - suffix_len);
+        last_emit = ident_end;
+    }
+
+    if (last_emit == 0) return NULL;
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 typedef struct {
     const char* registration_src;
     size_t registration_len;
@@ -240,6 +386,13 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
             free(pp_buf);
             pp_buf = st;
             (void)st_len;
+        }
+    }
+    {
+        char* parser_helpers = cc__rewrite_result_helper_calls_for_parser_parse(pp_buf, strlen(pp_buf));
+        if (parser_helpers) {
+            free(pp_buf);
+            pp_buf = parser_helpers;
         }
     }
 

@@ -71,41 +71,19 @@ char* cc__rewrite_link_directives(const char* src, size_t n);
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);
 
-// Rewrite synthetic stdio receivers:
-//   cc_std_out.write(x) / cc_std_err.write(x)
-// These are not ordinary typed UFCS receivers, so they still lower through a
-// small dedicated text pass in final codegen.
-char* cc_rewrite_synthetic_std_io_receivers(const char* src, size_t n);
-
-// Rewrite CCFile UFCS for parser/generated-code survival:
-//   file.read(...) / file.write(...) / file.sync() / file.close()
-// Final source should still prefer the AST-aware UFCS pass; this helper is for
-// places where generated code introduces raw file UFCS after the main AST pass.
-char* cc_rewrite_file_ufcs_survival(const char* src, size_t n);
-
-// Rewrite CCResult_* UFCS for generated-code survival:
-//   r.value() / r.error() / r.is_ok() / ...
-// This is currently needed for generated closure bodies that bypass the main
-// AST-aware UFCS sweep.
-char* cc_rewrite_result_ufcs_survival(const char* src, size_t n);
-
-// Rewrite concrete generic/container UFCS that survives into later parsing:
-//   v.get(i) / v.pop() / m.get(k) / c.items.get(i) -> Vec_T_get(...) / Map_K_V_get(...)
-// Used as a parser/codegen survival pass when concrete family receiver types are
-// already visible in source text.
-char* cc_rewrite_generic_family_ufcs_survival(const char* src, size_t n);
-
 // Rewrite parser-style generic family types in final lowered source to concrete
 // family calls:
 //   __CC_VEC(int) v; v.get(1) -> Vec_int_get(&v, 1)
 //   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
 char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
 
-// Rewrite raw CCChan UFCS for parser/codegen survival:
-//   ch.recv(&v) -> cc_chan_result_from_errno(cc_channel_raw_recv(ch, &v, sizeof(*&v)))
-// Typed channel handles intentionally stay untouched here so the AST-aware/type-owned
-// UFCS path remains authoritative.
-char* cc_rewrite_channel_ufcs_survival(const char* src, size_t n);
+// Parser-only variant: keep the concrete rewrite family-focused in normal
+// lowering, but allow the stub-AST parser to normalize a narrow set of
+// additional raw UFCS calls it otherwise cannot type-check.
+char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
+
+// Rewrite raw CCChan UFCS in final lowered C when concrete receiver types are
+// still visible in source text.
 char* cc_rewrite_channel_ufcs_concrete(const char* src, size_t n);
 
 // Prototype rewrite for builtin nursery/arena declarations:

@@ -274,8 +274,9 @@ static inline CCSlice cc_file_lower_c(CCSlice recv_type,
 CCRes(size_t, CCIoError) cc_std_out_write(CCSlice data);
 CCRes(size_t, CCIoError) cc_std_err_write(CCSlice data);
 #ifdef CC_PARSER_MODE
-/* Synthetic UFCS receivers used only so raw `cc_std_out.write(...)` /
-   `cc_std_err.write(...)` survive parser-mode before AST UFCS lowering. */
+/* Synthetic singleton receiver names so raw `cc_std_out.write(...)` /
+   `cc_std_err.write(...)` parse in parser mode; normal UFCS lowering handles
+   the real call selection later. */
 extern int cc_std_out;
 extern int cc_std_err;
 #endif

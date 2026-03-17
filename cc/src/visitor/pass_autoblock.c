@@ -233,7 +233,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
     for (int i = 0; i < root->node_count; i++) {
         if (n[i].kind != 5) continue; /* CALL */
-        int is_ufcs = (n[i].aux2 & 2) != 0;
+        int is_ufcs = (n[i].aux2 & 4) != 0;
         if (is_ufcs) continue;
         if (!n[i].aux_s1) continue; /* callee name */
         if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
