@@ -2471,6 +2471,9 @@ char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n) {
     return cc__rewrite_generic_family_ufcs_impl(src, n, 0);
 }
 
+/* Parser-survival companion to the family-only concrete rewrite. Keep normal
+   lowering on the generic-family path; use this only where TCC's stub parse
+   still needs concrete CCFile/CCCommand-style calls normalized up front. */
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     return cc__rewrite_generic_family_ufcs_impl(src, n, 1);
 }
