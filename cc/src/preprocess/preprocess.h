@@ -77,9 +77,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
 //   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
 char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
 
-// Parser-only variant: keep the concrete rewrite family-focused in normal
-// lowering, but allow the stub-AST parser to normalize a narrow set of
-// additional raw UFCS calls it otherwise cannot type-check.
+// Parser-only variant: normal lowering should stay family-focused and let the
+// later typed/AST UFCS pipeline remain authoritative. Use this only when the
+// stub-AST parser needs a narrow parser-survival rewrite for concrete UFCS
+// forms (for example CCCommand/CCFile methods that would otherwise collide
+// with parser-mode declarations or system headers).
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
 
 // Rewrite raw CCChan UFCS in final lowered C when concrete receiver types are
