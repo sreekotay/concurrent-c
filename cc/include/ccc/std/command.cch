@@ -74,20 +74,6 @@ CCProcessOutput !> (CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena)
 CCProcessOutput !> (CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
 int !> (CCIoError) cc_command_status(CCCommand *cmd);
 
-#ifdef CC_PARSER_MODE
-/* Parser-mode UFCS stubs for raw `cmd.method(...)` syntax before lowering. */
-static size_t argc();
-static const char *get();
-static const char *program();
-static const char **argv();
-static CCProcessConfig process_config();
-static CCResult_CCProcess_CCIoError spawn();
-static CCResult_CCProcessOutput_CCIoError run();
-static CCResult_CCProcessOutput_CCIoError output();
-static CCResult_CCProcessOutput_CCIoError output_with_input();
-static CCResult_int_CCIoError status();
-#endif
-
 static inline char[:] cc_command_lower_c(char[:] recv_type, 
                                          char[:] method, 
                                          char[:] mode, 

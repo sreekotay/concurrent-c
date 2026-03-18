@@ -80,8 +80,8 @@ char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
 // Parser-only variant: normal lowering should stay family-focused and let the
 // later typed/AST UFCS pipeline remain authoritative. Use this only when the
 // stub-AST parser needs a narrow parser-survival rewrite for concrete UFCS
-// forms (for example CCCommand/CCFile methods that would otherwise collide
-// with parser-mode declarations or system headers).
+// forms (for example concrete CCCommand/CCFile methods that still need to be
+// normalized before TCC sees them).
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
 
 // Rewrite raw CCChan UFCS in final lowered C when concrete receiver types are
