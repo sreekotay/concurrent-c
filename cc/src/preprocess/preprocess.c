@@ -246,12 +246,260 @@ static int cc__pp_find_top_level_comma(const char* src, size_t start, size_t end
     return 0;
 }
 
+static int cc__pp_find_top_level_equal(const char* src, size_t start, size_t end, size_t* out_pos) {
+    int par = 0, brk = 0, br = 0;
+    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    for (size_t i = start; i < end; i++) {
+        char c = src[i];
+        char c2 = (i + 1 < end) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < end) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '(') par++;
+        else if (c == ')') { if (par) par--; }
+        else if (c == '[') brk++;
+        else if (c == ']') { if (brk) brk--; }
+        else if (c == '{') br++;
+        else if (c == '}') { if (br) br--; }
+        else if (c == '=' && par == 0 && brk == 0 && br == 0) {
+            if (out_pos) *out_pos = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int cc__pp_builtin_destroy_info(const char* declared_type,
+                                       const char** out_callee,
+                                       int* out_pass_address) {
+    int saw_nursery = 0;
+    int saw_arena = 0;
+    int saw_star = 0;
+    size_t i = 0;
+    if (out_callee) *out_callee = NULL;
+    if (out_pass_address) *out_pass_address = 0;
+    if (!declared_type) return 0;
+    while (declared_type[i]) {
+        if (declared_type[i] == '*') {
+            saw_star = 1;
+            i++;
+            continue;
+        }
+        if (isalpha((unsigned char)declared_type[i]) || declared_type[i] == '_') {
+            size_t start = i;
+            while (declared_type[i] &&
+                   (isalnum((unsigned char)declared_type[i]) || declared_type[i] == '_')) {
+                i++;
+            }
+            size_t len = i - start;
+            if (len == sizeof("CCArena") - 1 &&
+                memcmp(declared_type + start, "CCArena", len) == 0) {
+                saw_arena = 1;
+            } else if (len == sizeof("CCNursery") - 1 &&
+                       memcmp(declared_type + start, "CCNursery", len) == 0) {
+                saw_nursery = 1;
+            }
+            continue;
+        }
+        i++;
+    }
+    if (saw_arena && !saw_nursery && !saw_star) {
+        if (out_callee) *out_callee = "cc_arena_destroy";
+        if (out_pass_address) *out_pass_address = 1;
+        return 1;
+    }
+    if (saw_nursery && saw_star && !saw_arena) {
+        if (out_callee) *out_callee = "cc_nursery_free";
+        if (out_pass_address) *out_pass_address = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t n, const char* input_path) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    CCScannerState scanner;
+    cc_scanner_init(&scanner);
+    if (!src || n == 0) return NULL;
+
+    for (size_t i = 0; i < n; ) {
+        size_t token_len = 0;
+        int is_destroy = 0;
+        size_t stmt_s = 0, eq = 0, p = 0, name_s = 0, name_e = 0;
+        size_t rhs_s = 0, rhs_e = 0, semi = 0;
+        size_t destroy_body_s = 0, destroy_body_e = 0;
+        char declared_type[256];
+        const char* destroy_callee = NULL;
+        int pass_address = 0;
+
+        if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
+        if (src[i] != '@') {
+            i++;
+            continue;
+        }
+        if (i + 8 <= n && memcmp(src + i, "@destroy", 8) == 0 &&
+            (i + 8 >= n || !cc__pp_is_ident_char(src[i + 8]))) {
+            token_len = 8;
+            is_destroy = 1;
+        } else if (i + 7 <= n && memcmp(src + i, "@detach", 7) == 0 &&
+                   (i + 7 >= n || !cc__pp_is_ident_char(src[i + 7]))) {
+            token_len = 7;
+            is_destroy = 0;
+        } else {
+            i++;
+            continue;
+        }
+
+        stmt_s = i;
+        while (stmt_s > 0 &&
+               src[stmt_s - 1] != ';' &&
+               src[stmt_s - 1] != '{' &&
+               src[stmt_s - 1] != '}') {
+            stmt_s--;
+        }
+        stmt_s = cc_skip_ws_and_comments(src, n, stmt_s);
+        if (!cc__pp_find_top_level_equal(src, stmt_s, i, &eq)) {
+            i++;
+            continue;
+        }
+
+        p = eq;
+        while (p > stmt_s && isspace((unsigned char)src[p - 1])) p--;
+        name_e = p;
+        while (p > stmt_s && cc__pp_is_ident_char(src[p - 1])) p--;
+        name_s = p;
+        if (name_s >= name_e || !(isalpha((unsigned char)src[name_s]) || src[name_s] == '_')) {
+            i++;
+            continue;
+        }
+
+        {
+            size_t declared_type_len = name_s - stmt_s;
+            while (declared_type_len > 0 &&
+                   (src[stmt_s + declared_type_len - 1] == ' ' ||
+                    src[stmt_s + declared_type_len - 1] == '\t')) {
+                declared_type_len--;
+            }
+            if (declared_type_len == 0) {
+                i++;
+                continue;
+            }
+            if (declared_type_len >= sizeof(declared_type)) {
+                declared_type_len = sizeof(declared_type) - 1;
+            }
+            memcpy(declared_type, src + stmt_s, declared_type_len);
+            declared_type[declared_type_len] = '\0';
+        }
+
+        if (!cc__pp_builtin_destroy_info(declared_type, &destroy_callee, &pass_address)) {
+            i++;
+            continue;
+        }
+
+        rhs_s = cc_skip_ws_and_comments(src, n, eq + 1);
+        rhs_e = i;
+        while (rhs_e > rhs_s && isspace((unsigned char)src[rhs_e - 1])) rhs_e--;
+        if (rhs_s >= rhs_e) {
+            i++;
+            continue;
+        }
+        if (rhs_e >= rhs_s + 7 && memcmp(src + rhs_s, "@create(", 8) == 0) {
+            i++;
+            continue;
+        }
+
+        if (is_destroy) {
+            size_t after_destroy = cc_skip_ws_and_comments(src, n, i + token_len);
+            if (after_destroy < n && src[after_destroy] == '{') {
+                destroy_body_s = after_destroy;
+                if (!cc_find_matching_brace(src, n, destroy_body_s, &destroy_body_e)) {
+                    int line = 1, col = 1;
+                    cc__pp_offset_to_line_col(src, destroy_body_s, &line, &col);
+                    cc_pp_error_cat(input_path, line, col, "syntax",
+                                    "malformed '@destroy { ... }' block");
+                    free(out);
+                    return (char*)-1;
+                }
+                semi = cc_skip_ws_and_comments(src, n, destroy_body_e + 1);
+            } else {
+                semi = after_destroy;
+            }
+            if (semi >= n || src[semi] != ';') {
+                int line = 1, col = 1;
+                cc__pp_offset_to_line_col(src, semi < n ? semi : n, &line, &col);
+                cc_pp_error_cat(input_path, line, col, "syntax",
+                                "expected ';' after '@destroy' declaration");
+                free(out);
+                return (char*)-1;
+            }
+        } else {
+            size_t after_detach = cc_skip_ws_and_comments(src, n, i + token_len);
+            if (after_detach < n && src[after_detach] == '{') {
+                int line = 1, col = 1;
+                cc__pp_offset_to_line_col(src, after_detach, &line, &col);
+                cc_pp_error_cat(input_path, line, col, "syntax",
+                                "'@detach' does not take a cleanup body; use '@destroy { ... }' for custom teardown");
+                free(out);
+                return (char*)-1;
+            }
+            semi = after_detach;
+            if (semi >= n || src[semi] != ';') {
+                int line = 1, col = 1;
+                cc__pp_offset_to_line_col(src, semi < n ? semi : n, &line, &col);
+                cc_pp_error_cat(input_path, line, col, "syntax",
+                                "expected ';' after '@detach' declaration");
+                free(out);
+                return (char*)-1;
+            }
+        }
+
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n");
+        if (is_destroy && destroy_callee) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
+            if (destroy_body_s && destroy_body_e > destroy_body_s) {
+                cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+            if (pass_address) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "); };\n");
+        }
+
+        last_emit = semi + 1;
+        i = semi + 1;
+        changed = 1;
+    }
+
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) {
+        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    }
+    return out;
+}
+
 /* Prototype rewrite for explicit lifecycle handles:
    CCNursery* n = @create(parent, closure) @destroy;
    CCNursery* n = @create(parent, closure) @destroy { custom_cleanup(); };
    CCNursery* n = @create(parent, closure) @detach;
    CCArena a = @create(size) @destroy;
    CCArena a = @create(buffer, size) @destroy;
+   CCArena a = make_arena() @destroy;
 
    Low-risk constraints for v0:
    - prototype supports `CCNursery*` and `CCArena`
@@ -513,25 +761,49 @@ char* cc_rewrite_nursery_create_destroy_proto_ex(const char* src, size_t n, cons
         changed = 1;
     }
 
-    if (!changed) {
-        free(out);
-        return NULL;
-    }
-    if (last_emit < n) {
-        cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    }
     {
-        char* nested = cc_rewrite_nursery_create_destroy_proto_ex(out, out_len, input_path, symbols);
-        if (nested == (char*)-1) {
+        const char* base_src = src;
+        size_t base_len = n;
+        char* current = NULL;
+        int current_owned = 0;
+        char* nested = NULL;
+        char* owned_decls = NULL;
+
+        if (changed) {
+            if (last_emit < n) {
+                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+            }
+            current = out;
+            current_owned = 1;
+            base_src = current;
+            base_len = out_len;
+            nested = cc_rewrite_nursery_create_destroy_proto_ex(base_src, base_len, input_path, symbols);
+            if (nested == (char*)-1) {
+                free(current);
+                return (char*)-1;
+            }
+            if (nested) {
+                free(current);
+                current = nested;
+                base_src = current;
+                base_len = strlen(current);
+            }
+        } else if (out) {
             free(out);
+        }
+
+        owned_decls = cc__rewrite_builtin_owned_decl_annotations(base_src, base_len, input_path);
+        if (owned_decls == (char*)-1) {
+            if (current_owned && current) free(current);
             return (char*)-1;
         }
-        if (nested) {
-            free(out);
-            return nested;
+        if (owned_decls) {
+            if (current_owned && current) free(current);
+            return owned_decls;
         }
+        if (current_owned && current) return current;
+        return NULL;
     }
-    return out;
 }
 
 char* cc_rewrite_nursery_create_destroy_proto(const char* src, size_t n, const char* input_path) {
