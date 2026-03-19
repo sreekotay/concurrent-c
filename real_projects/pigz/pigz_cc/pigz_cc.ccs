@@ -472,10 +472,8 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
     _Atomic size_t* p_total_in = &total_in;
     _Atomic size_t* p_total_out = &total_out;
 
-    /* Explicit nursery handles:
-     * writer declared first, decompressor second, reader third so reader destroy
-     * closes `compressed_tx` first and decompressor destroy closes
-     * `decompressed_tx` before writer drains and exits. */
+    /* Keep the writer outside the producer scopes so producer-owned close_on()
+     * can close channels as soon as the upstream task exits. */
     CCClosure0 decomp_writer_task = () => [out_ptr, decompressed_rx, decompressed_ch, p_total_out] {
         DecompChunk chunk;
         while (true) {
@@ -588,14 +586,14 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             inflateEnd(&strm);
         }
     };
-    CCNursery* decompressor = @create(writer, decomp_inflate_task) @destroy {
-        cc_channel_close(decompressed_tx);
-    };
+    CCNursery* decompressor = @create(writer) @destroy;
     if (!decompressor) {
         cc_channel_close(decompressed_tx);
         fprintf(stderr, "Failed to create decompressor nursery\n");
         return 1;
     }
+    (void)decompressor->close_on(decompressed_tx);
+    decompressor->spawn(decomp_inflate_task);
 
     CCClosure0 decomp_reader_task = () => [in_ptr, compressed_tx, compressed_ch, p_total_in] {
         while (!cc_atomic_load(&g_pipeline_error)) {
@@ -643,14 +641,14 @@ int decompress_file(const char* in_path, const char* out_path, int num_workers) 
             }
         }
     };
-    CCNursery* reader = @create(decompressor, decomp_reader_task) @destroy {
-        cc_channel_close(compressed_tx);
-    };
+    CCNursery* reader = @create(decompressor) @destroy;
     if (!reader) {
         cc_channel_close(compressed_tx);
         fprintf(stderr, "Failed to create decompression reader nursery\n");
         return 1;
     }
+    (void)reader->close_on(compressed_tx);
+    reader->spawn(decomp_reader_task);
 
     if (g.list) {
         size_t in_total = cc_atomic_load(p_total_in);
@@ -1029,9 +1027,8 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         }
     };
 
-    /* Explicit nursery handles:
-     * writer declared first, reader second, so reader destroy closes the
-     * results channel before writer drains and exits. */
+    /* Keep the writer outside the producer scope so results_tx closes when the
+     * reader task exits, not later during nursery teardown. */
     CCNursery* writer = @create(NULL, writer_task) @destroy;
     if (!writer) {
         fprintf(stderr, "Failed to create writer nursery\n");
@@ -1185,14 +1182,14 @@ int compress_file(const char* in_path, const char* out_path, int num_workers, in
         }
     };
 
-    CCNursery* reader = @create(writer, reader_task) @destroy {
-        cc_channel_close(results_tx);
-    };
+    CCNursery* reader = @create(writer) @destroy;
     if (!reader) {
         cc_channel_close(results_tx);
         fprintf(stderr, "Failed to create reader nursery\n");
         return 1;
     }
+    (void)reader->close_on(results_tx);
+    reader->spawn(reader_task);
 
     if (!sync_file_or_fail(&out_file, "failed to sync compressed output")) {
         return 1;

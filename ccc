@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+SELF_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+exec "$SELF_DIR/cc/bin/ccc" "$@"

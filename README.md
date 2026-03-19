@@ -132,7 +132,7 @@ PREFIX=/opt/ccc sh ./cc-install.sh
 CC_REPO_DIR="$HOME/Documents/code/ccc" sh ./cc-install.sh
 ```
 
-The script initializes the required `third_party/tcc` and `third_party/liblfds` submodules, applies the TCC patch, builds TinyCC, builds `ccc`, and runs `make install`.
+The script initializes the required `third_party/tcc` and `third_party/liblfds` submodules, applies the TCC patch, builds TinyCC, builds `ccc`, runs `make install`, and creates a repo-local `./ccc` launcher for that checkout.
 
 **Homebrew tap:** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
 ```bash
