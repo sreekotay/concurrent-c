@@ -60,6 +60,8 @@ int cc_symbols_lookup_fn_attrs(CCSymbolTable* t, const char* name, unsigned int*
  int cc_symbols_lookup_type_create_callable(CCSymbolTable* t,
                                             const char* type_name,
                                             const void** out_fn_ptr);
+ int cc_symbols_set_type_pre_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee);
+ int cc_symbols_lookup_type_pre_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
  int cc_symbols_set_type_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee);
  int cc_symbols_lookup_type_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee);
  int cc_symbols_add_type_ufcs_value(CCSymbolTable* t, const char* type_name, const char* method, const char* callee);

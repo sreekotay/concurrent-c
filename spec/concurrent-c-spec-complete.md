@@ -5097,6 +5097,7 @@ typedef struct {
 } CCTypeCreateHook;
 
 typedef struct {
+    const char* pre_callee;
     const char* callee;
 } CCTypeDestroyHook;
 
@@ -5115,6 +5116,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
 - Handlers may be named functions or non-capturing lambdas.
 - `.create` is the type-owned construction hook. The compiler selects the overload from the declared type plus the `@create(...)` argument list.
+- `.destroy` may register a pre-destroy hook, a destroy hook, or both. `pre_callee` runs before `callee`.
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
@@ -5136,6 +5138,10 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - `cc_type_create_call("callee")` registers the one-argument form.
 - `cc_type_create_overloads("callee1", "callee2")` registers one- and two-argument forms on the same `.create` hook.
 - `cc_type_create_hook(handler)` registers a callable create hook; it receives `type_name`, `argv`, `arg_types`, and `arena`, and must return the lowered callee name as a slice.
+- `cc_type_destroy_call("callee")` registers the destroy phase only.
+- `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only.
+- `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
+- For `name = @create(...) @destroy { body };`, lowering order is: call-site `body`, then registered `pre_callee`, then registered `callee`.
 - `arg_types` for `.create` is inferred from the early `@create(...)` lowering path. Literal and simple direct expressions are the intended fast path; more complex local expressions may currently be left unknown by an implementation.
 
 **Preferred registration style:**
@@ -7519,7 +7525,7 @@ The following patterns emerged but remain deferred:
 **Typed lifecycle declarations:** A future lifecycle design may introduce declaration-oriented ownership syntax on top of the same cleanup substrate as `@defer`. The intended semantics are:
 
 - `@create` means typed birth: construct or acquire a value using the declared type as the lifecycle key.
-- `@destroy` means auto-register cleanup on the same machinery as `@defer`.
+- `@destroy` means auto-register cleanup on the same machinery as `@defer`. For types with destroy hooks, the call-site `@destroy { ... }` body runs first, then the type's `pre_destroy`, then the type's `destroy`.
 - `@detach` means do not auto-register cleanup; lifecycle becomes manual from that point onward.
 
 This note is semantic direction only. Exact syntax, registration API, and diagnostics remain deferred.

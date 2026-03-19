@@ -2,15 +2,24 @@
 #include <ccc/cc_ufcs.cch>
 
 static int g_destroyed = 0;
+static int g_pre_destroyed = 0;
+static int g_body_before_pre = 0;
 
 static size_t arena_avail(CCArena* arena) {
     return cc_arena_remaining(arena);
 }
 
+static void mark_arena_pre_destroy(CCArena* arena) {
+    if (arena) {
+        g_pre_destroyed += 1;
+        if (g_destroyed == 1) g_body_before_pre = 1;
+    }
+}
+
 @comptime {
     (void)cc_type_register("CCArena", (CCTypeHooks){
         .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_init"),
-        .destroy = cc_type_destroy_call("cc_arena_destroy"),
+        .destroy = cc_type_destroy_hooks("mark_arena_pre_destroy", "cc_arena_destroy"),
         .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
             (void)recv_type;
             (void)mode;
@@ -36,6 +45,8 @@ int main(void) {
     }
 
     if (g_destroyed != 1) return 4;
+    if (g_pre_destroyed != 1) return 7;
+    if (g_body_before_pre != 1) return 8;
 
     {
         char backing[64];

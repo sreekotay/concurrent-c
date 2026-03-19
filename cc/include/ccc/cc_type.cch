@@ -21,6 +21,7 @@ typedef struct {
 } CCTypeCreateHook;
 
 typedef struct {
+    const char* pre_callee;
     const char* callee;
 } CCTypeDestroyHook;
 
@@ -59,6 +60,19 @@ static inline CCTypeCreateHook cc_type_create_hook(CCTypeCreateHandler callable)
 
 static inline CCTypeDestroyHook cc_type_destroy_call(const char* callee) {
     CCTypeDestroyHook hook = {0};
+    hook.callee = callee;
+    return hook;
+}
+
+static inline CCTypeDestroyHook cc_type_pre_destroy_call(const char* callee) {
+    CCTypeDestroyHook hook = {0};
+    hook.pre_callee = callee;
+    return hook;
+}
+
+static inline CCTypeDestroyHook cc_type_destroy_hooks(const char* pre_callee, const char* callee) {
+    CCTypeDestroyHook hook = {0};
+    hook.pre_callee = pre_callee;
     hook.callee = callee;
     return hook;
 }

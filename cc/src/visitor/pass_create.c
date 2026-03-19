@@ -252,6 +252,7 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
         char declared_type[256];
         const char* registered_create_callee = NULL;
         const void* registered_create_callable = NULL;
+        const char* registered_pre_destroy_callee = NULL;
         const char* registered_destroy_callee = NULL;
         size_t args_s = 0, args_e = 0, comma = 0;
         int has_second_arg = 0;
@@ -345,6 +346,9 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             free(out);
             return (char*)-1;
         }
+        if (ownership == CC_CREATE_OWN_DESTROY) {
+            (void)cc_symbols_lookup_type_pre_destroy_call(symbols, declared_type, &registered_pre_destroy_callee);
+        }
         if (ownership == CC_CREATE_OWN_DESTROY && !registered_destroy_callee) {
             (void)cc_symbols_lookup_type_destroy_call(symbols, declared_type, &registered_destroy_callee);
         }
@@ -437,21 +441,36 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
         }
         cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
-        if (ownership == CC_CREATE_OWN_DESTROY && registered_destroy_callee) {
+        if (ownership == CC_CREATE_OWN_DESTROY &&
+            (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee)) {
             cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
             if (destroy_body_s && destroy_body_e > destroy_body_s) {
                 cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
             }
-            cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-            if (strchr(declared_type, '*')) {
-                cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-            } else {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
-                cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+            if (registered_pre_destroy_callee) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, registered_pre_destroy_callee);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                if (strchr(declared_type, '*')) {
+                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                }
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
             }
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "); };\n");
+            if (registered_destroy_callee) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                if (strchr(declared_type, '*')) {
+                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                }
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+            }
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "};\n");
         }
         last_emit = semi + 1;
         i = semi + 1;
