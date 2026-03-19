@@ -24,16 +24,20 @@ int main(void) {
      * The copy is immutable within the closure.
      * Original variable is unaffected by closure execution.
      */
-    @nursery {
+    {
+        CCNursery* __cc_nursery100 = @create(NULL) @destroy;
+        if (!__cc_nursery100) abort();
+
         /* Implicit value capture of 'snapshot' */
-        spawn(() => {
+        __cc_nursery100->spawn(() => {
             printf("task A sees snapshot = %d\n", snapshot);
             /* snapshot++; would be ERROR: cannot modify value-captured variable */
         });
 
-        spawn(() => {
+        __cc_nursery100->spawn(() => {
             printf("task B sees snapshot = %d\n", snapshot);
         });
+    
     }
     
     printf("after: snapshot still = %d (unchanged by tasks)\n\n", snapshot);
@@ -46,10 +50,14 @@ int main(void) {
     counter = 100;
     printf("before: counter = %d\n", counter);
     
-    @nursery {
-        spawn(() => [&counter] {
+    {
+        CCNursery* __cc_nursery101 = @create(NULL) @destroy;
+        if (!__cc_nursery101) abort();
+
+        __cc_nursery101->spawn(() => [&counter] {
             printf("task C reads counter = %d (via reference)\n", counter);
         });
+    
     }
     
     printf("after: counter = %d\n\n", counter);

@@ -9,8 +9,12 @@ int g = 0;
 @async int f(int flag) {
     g = 0;
     if (flag)
-        @nursery {
-            spawn(() => { g = 9; });
+        {
+            CCNursery* __cc_nursery3 = @create(NULL) @destroy;
+            if (!__cc_nursery3) abort();
+
+            __cc_nursery3->spawn(() => { g = 9; });
+        
         }
     int x = await noop(g);
     return x;

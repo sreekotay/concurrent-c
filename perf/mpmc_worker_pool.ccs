@@ -65,30 +65,33 @@ int main(int argc, char** argv) {
     WorkItem[~buffer_size <] work_rx;
     cc_channel_pair(&work_tx, &work_rx);
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery162 = @create(NULL) @destroy;
+        if (!__cc_nursery162) abort();
+
         /* Spawn workers - unroll since capture from loop var not supported */
-        int w0 = 0; spawn(() => [w0] {
+        int w0 = 0; __cc_nursery162->spawn(() => [w0] {
             WorkItem item;
             while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w0], 1);
             }
         });
-        int w1 = 1; spawn(() => [w1] {
+        int w1 = 1; __cc_nursery162->spawn(() => [w1] {
             WorkItem item;
             while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w1], 1);
             }
         });
-        int w2 = 2; spawn(() => [w2] {
+        int w2 = 2; __cc_nursery162->spawn(() => [w2] {
             WorkItem item;
             while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
                 cc_atomic_fetch_add(&worker_counts[w2], 1);
             }
         });
-        int w3 = 3; spawn(() => [w3] {
+        int w3 = 3; __cc_nursery162->spawn(() => [w3] {
             WorkItem item;
             while (cc_io_avail(chan_recv(work_rx, &item))) {
                 do_work(&item);
@@ -97,7 +100,7 @@ int main(int argc, char** argv) {
         });
         
         /* Producer: send all items then close */
-        spawn(() => {
+        __cc_nursery162->spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 WorkItem item = { .id = i };
                 for (int j = 0; j < 64; j++) item.data[j] = i + j;
@@ -105,6 +108,7 @@ int main(int argc, char** argv) {
             }
             chan_close(work_tx);
         });
+    
     }
     
     chan_free(work_rx);

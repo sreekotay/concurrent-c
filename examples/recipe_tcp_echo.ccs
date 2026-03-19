@@ -24,7 +24,10 @@
 /* Handle a single client connection.
  * Echoes back everything received until client closes. */
 void handle_client(CCSocket client) {
-    @arena(a, kilobytes(4)) {
+    {
+        CCArena __cc_arena14 = @create(kilobytes(4)) @destroy;
+        if (!__cc_arena14.base) abort();
+        CCArena* a = &__cc_arena14;
         CCNetError err = CC_NET_OK;
 
         /* Get peer address for logging */
@@ -58,6 +61,7 @@ void handle_client(CCSocket client) {
             }
             (void)written;
         }
+    
     }
 
     cc_socket_close(&client);

@@ -47,12 +47,16 @@ int main(void) {
     /* cc_block_on inside spawn blocks the spawn's thread,
        and with no receiver, the send will deadlock */
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery120 = @create(NULL) @destroy;
+        if (!__cc_nursery120) abort();
+
         /* Producer spawn - blocks on cc_block_on waiting for send (no receiver exists) */
-        spawn(() => {
+        __cc_nursery120->spawn(() => {
             int r = cc_block_on(int, producer(tx));  /* Blocks this thread! */
             (void)r;
         });
+    
     }
     
     /* Never reached - deadlock above */

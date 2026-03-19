@@ -89,21 +89,25 @@ int main(void) {
         cc_channel_pair(&tx_h, &rx_h);
         int[~10 >] tx = tx_h; int[~10 <] rx = rx_h;
 
-        @nursery {
+        {
+            CCNursery* __cc_nursery113 = @create(NULL) @destroy;
+            if (!__cc_nursery113) abort();
+
             // 1. Start the storm
             for (int i = 0; i < num_fibers; i++) {
                 CCChanTx t = tx;
                 CCChanRx r = rx;
                 int sid = i;
                 int rid = i;
-                spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); });
-                spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); });
+                __cc_nursery113->spawn(() => [t, sid, trace, trace_every] { sender(t, sid, trace, trace_every); });
+                __cc_nursery113->spawn(() => [r, rid, trace, trace_every] { receiver(r, rid, trace, trace_every); });
             }
 
             // 2. Close from parent context immediately.
             //    The parent thread isn't a fiber worker, so it won't be starved.
             tx.close();
             tx.close();
+        
         }
 
         // 5. Verification: All fibers that attempted an op must have finished it

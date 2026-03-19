@@ -22,14 +22,18 @@ int main(void) {
             fprintf(stderr, "iter %d/%d\n", rep, REPEATS);
         }
 
-        @nursery {
+        {
+            CCNursery* __cc_nursery81 = @create(NULL) @destroy;
+            if (!__cc_nursery81) abort();
+
             for (int i = 0; i < TASKS_PER_ROUND; i++) {
                 int k = i;
-                spawn(() => [k] {
+                __cc_nursery81->spawn(() => [k] {
                     if ((k % 4) == 0) cc_sleep_ms(1);
                     cc_atomic_fetch_add(&g_done, 1);
                 });
             }
+        
         }
 
         /* Give workers a chance to leave ACTIVE and enter idle/sleep states. */

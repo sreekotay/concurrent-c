@@ -56,13 +56,17 @@ int test_concurrent_alloc(void) {
     cc_atomic_store(&g_failed_allocs, 0);
     cc_atomic_store(&g_bytes_written, 0);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery107 = @create(NULL) @destroy;
+        if (!__cc_nursery107) abort();
+
         for (int w = 0; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            spawn(() => {
+            __cc_nursery107->spawn(() => {
                 arena_worker(worker_id);
             });
         }
+    
     }
 
     int success = cc_atomic_load(&g_successful_allocs);
@@ -92,11 +96,14 @@ int test_reset_during_use(void) {
     cc_atomic_store(&g_successful_allocs, 0);
     cc_atomic_store(&g_failed_allocs, 0);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery108 = @create(NULL) @destroy;
+        if (!__cc_nursery108) abort();
+
         /* Some workers allocate */
         for (int w = 0; w < NUM_WORKERS / 2; w++) {
             int worker_id = w;
-            spawn(() => {
+            __cc_nursery108->spawn(() => {
                 for (int i = 0; i < 50; i++) {
                     void* ptr = cc_arena_alloc(&g_arena, 64, 8);
                     if (ptr) {
@@ -107,7 +114,7 @@ int test_reset_during_use(void) {
         }
 
         /* One worker periodically resets (simulates request boundary) */
-        spawn(() => {
+        __cc_nursery108->spawn(() => {
             for (int i = 0; i < 5; i++) {
                 cc_sleep_ms(1);
                 cc_arena_reset(&g_arena);
@@ -117,7 +124,7 @@ int test_reset_during_use(void) {
         /* More workers allocate */
         for (int w = NUM_WORKERS / 2; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            spawn(() => {
+            __cc_nursery108->spawn(() => {
                 for (int i = 0; i < 50; i++) {
                     void* ptr = cc_arena_alloc(&g_arena, 64, 8);
                     if (ptr) {
@@ -126,6 +133,7 @@ int test_reset_during_use(void) {
                 }
             });
         }
+    
     }
 
     int success = cc_atomic_load(&g_successful_allocs);

@@ -83,8 +83,11 @@ void test_defer_spawn_immediate(void) {
     cc_atomic_store(&g_cleanup_count, 0);
     cc_atomic_store(&g_worker_count, 0);
     
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery55 = @create(NULL) @destroy;
+        if (!__cc_nursery55) abort();
+
+        __cc_nursery55->spawn(() => {
             Resource r;
             resource_init(&r, 300);
             @defer resource_cleanup(&r);  // This now works!
@@ -93,6 +96,7 @@ void test_defer_spawn_immediate(void) {
             cc_atomic_fetch_add(&g_worker_count, 1);
             // @defer runs here when closure exits
         });
+    
     }
     
     printf("All workers done. Cleanup count: %d, Worker count: %d\n",
@@ -112,10 +116,13 @@ void test_defer_spawn_multiple_workers(void) {
     cc_atomic_store(&g_cleanup_count, 0);
     cc_atomic_store(&g_worker_count, 0);
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery56 = @create(NULL) @destroy;
+        if (!__cc_nursery56) abort();
+
         for (int idx = 0; idx < 3; idx++) {
             int worker_id = idx;  // capture-friendly local
-            spawn(() => [worker_id] {
+            __cc_nursery56->spawn(() => [worker_id] {
                 Resource r;
                 resource_init(&r, 400 + worker_id);
                 @defer resource_cleanup(&r);  // This now works!
@@ -125,6 +132,7 @@ void test_defer_spawn_multiple_workers(void) {
                 // @defer runs here when closure exits
             });
         }
+    
     }
     
     int expected_cleanup = 3;

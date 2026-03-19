@@ -4,11 +4,15 @@
 
 /* Test capturing function parameters (not just local variables) */
 void test_param_capture(int level, const char* name) {
-    @nursery {
+    {
+        CCNursery* __cc_nursery43 = @create(NULL) @destroy;
+        if (!__cc_nursery43) abort();
+
         /* Capture function parameters directly */
-        spawn(() => [level, name] {
+        __cc_nursery43->spawn(() => [level, name] {
             printf("param capture: level=%d, name=%s\n", level, name);
         });
+    
     }
 }
 
@@ -16,11 +20,15 @@ int main(void) {
     int x = 10;
     int y = 20;
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery44 = @create(NULL) @destroy;
+        if (!__cc_nursery44) abort();
+
         /* x by value (copied), y by reference (shared, read-only) */
-        spawn(() => [x, &y] {
+        __cc_nursery44->spawn(() => [x, &y] {
             printf("value x=%d, ref y=%d\n", x, y);
         });
+    
     }
     
     /* Test function parameter capture */

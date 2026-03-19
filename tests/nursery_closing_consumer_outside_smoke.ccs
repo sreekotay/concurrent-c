@@ -20,8 +20,13 @@ int main(void) {
     g_err = 0;
 
     // Spawn producer(s) inside nursery; channel is closed on nursery exit.
-    @closing(ch_tx) {
-        spawn(() => { producer(ch_tx); });
+    {
+        CCNursery* __cc_nursery64 = @create(NULL) @destroy;
+        if (!__cc_nursery64) abort();
+        (void)__cc_nursery64->close_on(ch_tx);
+
+        __cc_nursery64->spawn(() => { producer(ch_tx); });
+    
     }
 
     if (g_err != 0) return 10;

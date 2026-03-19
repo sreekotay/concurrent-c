@@ -96,8 +96,11 @@ int main(void) {
     // Step 4 test: nursery spawn with result type used inside closure
     // (pigz_cc.ccs declares result vars inside spawn, doesn't capture them)
     int spawn_ok = 0;
-    @nursery {
-        spawn(@unsafe () => [&spawn_ok] {
+    {
+        CCNursery* __cc_nursery79 = @create(NULL) @destroy;
+        if (!__cc_nursery79) abort();
+
+        __cc_nursery79->spawn(@unsafe () => [&spawn_ok] {
             // Result type declared and used inside the spawn closure
             MyData*!>(MyError) res_in_spawn = create_data_ptr(1);
             if (cc_is_ok(res_in_spawn)) {
@@ -105,6 +108,7 @@ int main(void) {
                 if (p->x == 100 && p->y == 200) spawn_ok = 1;
             }
         });
+    
     }
     printf("spawn: %s\n", spawn_ok ? "ok" : "FAIL");
     
@@ -118,14 +122,18 @@ int main(void) {
     
     // Step 5b test: Same thing INSIDE spawn
     int spawn_stdlib = 0;
-    @nursery {
-        spawn(@unsafe () => [&spawn_stdlib] {
+    {
+        CCNursery* __cc_nursery80 = @create(NULL) @destroy;
+        if (!__cc_nursery80) abort();
+
+        __cc_nursery80->spawn(@unsafe () => [&spawn_stdlib] {
             // Try sigil syntax instead of CCRes macro
             size_t !> (CCIoError) res_stdlib = create_size_result_typed();
             if (cc_is_ok(res_stdlib)) {
                 spawn_stdlib = 1;
             }
         });
+    
     }
     printf("spawn_stdlib: %s\n", spawn_stdlib ? "ok" : "FAIL");
     

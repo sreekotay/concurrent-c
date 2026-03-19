@@ -19,20 +19,28 @@ int main(void) {
 
     printf("inbox_cross_worker_storm: outer=%d inner=%d\n", OUTER_TASKS, INNER_TASKS);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery125 = @create(NULL) @destroy;
+        if (!__cc_nursery125) abort();
+
         for (int i = 0; i < OUTER_TASKS; i++) {
-            spawn(() => {
+            __cc_nursery125->spawn(() => {
                 /* Busy loop to keep this worker occupied briefly. */
                 for (volatile int spin = 0; spin < 2000; spin++) {}
-                @nursery {
+                {
+                    CCNursery* __cc_nursery126 = @create(NULL) @destroy;
+                    if (!__cc_nursery126) abort();
+
                     for (int j = 0; j < INNER_TASKS; j++) {
-                        spawn(() => {
+                        __cc_nursery126->spawn(() => {
                             cc_atomic_fetch_add(&g_total, 1);
                         });
                     }
+                
                 }
             });
         }
+    
     }
 
     int expected = OUTER_TASKS * INNER_TASKS;

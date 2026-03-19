@@ -23,14 +23,17 @@ int main(void) {
     CCTask[~chan_cap <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    @nursery {
-        spawn(() => [tx] {
+    {
+        CCNursery* __cc_nursery91 = @create(NULL) @destroy;
+        if (!__cc_nursery91) abort();
+
+        __cc_nursery91->spawn(() => [tx] {
             CCTask task = cc_fiber_spawn_task(compute, (void*)41);
             (void)chan_send(tx, task);
             chan_close(tx);
         });
 
-        spawn(() => [rx, ch] {
+        __cc_nursery91->spawn(() => [rx, ch] {
             bool write_failed = false;
             (void)ch;
             CCTask task;
@@ -41,6 +44,7 @@ int main(void) {
                 }
             }
         });
+    
     }
 
     cc_chan_free(ch);

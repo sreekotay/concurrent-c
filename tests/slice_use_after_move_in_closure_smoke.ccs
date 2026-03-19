@@ -8,11 +8,15 @@ int main(void) {
     CCSlice s = cc_slice_from_buffer(buf, 2);
     CCSlice t = cc_move(s);
     (void)t;
-    @nursery {
-        spawn (() => {
+    {
+        CCNursery* __cc_nursery84 = @create(NULL) @destroy;
+        if (!__cc_nursery84) abort();
+
+        __cc_nursery84->spawn (() => {
             // illegal: s was moved before closure creation
             if (s.len == 2) g = 1;
         });
+    
     }
     return g;
 }

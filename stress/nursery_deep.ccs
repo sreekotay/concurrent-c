@@ -15,17 +15,21 @@ cc_atomic_int g_completed[MAX_DEPTH];
 void nested_spawn(int depth) {
     if (depth >= MAX_DEPTH) return;
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery139 = @create(NULL) @destroy;
+        if (!__cc_nursery139) abort();
+
         /* Capture depth in a local for the closure */
         int my_depth = depth;
 
         /* Task at this depth */
-        spawn(() => {
+        __cc_nursery139->spawn(() => {
             cc_atomic_store(&g_completed[my_depth], 1);
         });
 
         /* Recurse deeper (not in closure, direct call) */
         nested_spawn(depth + 1);
+    
     }
 }
 

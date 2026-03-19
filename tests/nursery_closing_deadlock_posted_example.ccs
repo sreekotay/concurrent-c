@@ -34,4 +34,3 @@ int main(void) {
     printf("sum = %d\n", (int)received_sum);
     return 0;
 }
-

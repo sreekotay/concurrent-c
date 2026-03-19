@@ -8,11 +8,15 @@ static void maybe_write_i32(int* p) {
 int main(void) {
     int x = 7;
 
-    @nursery {
-        spawn(() => [&x] {
+    {
+        CCNursery* __cc_nursery50 = @create(NULL) @destroy;
+        if (!__cc_nursery50) abort();
+
+        __cc_nursery50->spawn(() => [&x] {
             /* ERROR: callee takes int* (not const) */
             maybe_write_i32(&x);
         });
+    
     }
 
     return 0;

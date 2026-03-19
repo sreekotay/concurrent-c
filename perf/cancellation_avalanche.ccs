@@ -221,7 +221,10 @@ void deadline_leaf(int id, CCChanRx rx) {
 }
 
 void nested_scope(int depth, int base_id, int mode, CCChanRx recv_rx, CCChanRx recv_rx_alt, CCChanTx send_tx, CCChanRx deadline_rx) {
-    @nursery {
+    {
+        CCNursery* __cc_nursery153 = @create(NULL) @destroy;
+        if (!__cc_nursery153) abort();
+
         for (int i = 0; i < g_width; i++) {
             int leaf_id = base_id + i;
             CCChanRx rr = recv_rx;
@@ -232,22 +235,23 @@ void nested_scope(int depth, int base_id, int mode, CCChanRx recv_rx, CCChanRx r
                 int kind = leaf_kind_for_mode(mode, leaf_id);
                 if (kind == WAIT_RECV) {
                     CCChanRx leaf_rx = (mode == WAIT_RECV_SHARDED && (leaf_id & 1)) ? rr_alt : rr;
-                    spawn(() => [leaf_id, leaf_rx] { recv_leaf(leaf_id, leaf_rx); });
+                    __cc_nursery153->spawn(() => [leaf_id, leaf_rx] { recv_leaf(leaf_id, leaf_rx); });
                 } else if (kind == WAIT_SEND) {
-                    spawn(() => [leaf_id, st] { send_leaf(leaf_id, st); });
+                    __cc_nursery153->spawn(() => [leaf_id, st] { send_leaf(leaf_id, st); });
                 } else {
                     CCChanRx deadline_wait_rx = (mode == WAIT_RECV_DEADLINE_SHARED) ? rr : dr;
-                    spawn(() => [leaf_id, deadline_wait_rx] { deadline_leaf(leaf_id, deadline_wait_rx); });
+                    __cc_nursery153->spawn(() => [leaf_id, deadline_wait_rx] { deadline_leaf(leaf_id, deadline_wait_rx); });
                 }
             } else {
                 int child_depth = depth - 1;
                 int child_base = base_id + i * 100;
                 int child_mode = mode;
-                spawn(() => [child_depth, child_base, child_mode, rr, rr_alt, st, dr] {
+                __cc_nursery153->spawn(() => [child_depth, child_base, child_mode, rr, rr_alt, st, dr] {
                     nested_scope(child_depth, child_base, child_mode, rr, rr_alt, st, dr);
                 });
             }
         }
+    
     }
 }
 
@@ -313,14 +317,17 @@ int main(void) {
         double deadline_close_ms = 0.0;
         double post_close_join_ms = 0.0;
 
-        @nursery {
+        {
+            CCNursery* __cc_nursery154 = @create(NULL) @destroy;
+            if (!__cc_nursery154) abort();
+
             CCChanRx rr = recv_rx;
             CCChanRx rr2 = recv_rx2;
             CCChanTx st = send_tx;
             CCChanRx dr = deadline_rx;
             int root_base = iter * 10000;
             int root_mode = mode;
-            spawn(() => [rr, rr2, st, dr, root_base, root_mode] {
+            __cc_nursery154->spawn(() => [rr, rr2, st, dr, root_base, root_mode] {
                 nested_scope(g_depth, root_base, root_mode, rr, rr2, st, dr);
             });
             cc_sleep_ms(g_cancel_delay_ms);
@@ -336,6 +343,7 @@ int main(void) {
             deadline_tx.close();
             deadline_close_ms = now_ms() - t;
             post_close_join_ms = now_ms() - teardown_start - recv_close_ms - send_close_ms - deadline_close_ms;
+        
         }
 
         double teardown_ms = now_ms() - teardown_start;

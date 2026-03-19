@@ -8,8 +8,12 @@ int g = 0;
 
 @async int run_with_nursery(void) {
     g = 0;
-    @nursery {
-        spawn(() => { g = 7; });
+    {
+        CCNursery* __cc_nursery4 = @create(NULL) @destroy;
+        if (!__cc_nursery4) abort();
+
+        __cc_nursery4->spawn(() => { g = 7; });
+    
     }
     int dummy = await noop(g);
     (void)dummy;

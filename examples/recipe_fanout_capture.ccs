@@ -26,7 +26,10 @@ int compute(int x) {
 int main(void) {
     printf("=== Fan-Out: spawn %d tasks ===\n", NUM_TASKS);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery102 = @create(NULL) @destroy;
+        if (!__cc_nursery102) abort();
+
         for (int i = 0; i < NUM_TASKS; i++) {
             /*
              * Copy loop variable to a local before capture.
@@ -34,12 +37,13 @@ int main(void) {
              * This ensures each task sees its own value, not the final i.
              */
             int task_id = i;
-            spawn(() => {
+            __cc_nursery102->spawn(() => {
                 int result = compute(task_id);
                 printf("task %d: compute(%d) = %d\n", task_id, task_id, result);
                 results[task_id] = result;  /* safe: each task owns its slot */
             });
         }
+    
     }
     /* All tasks complete here. */
 

@@ -18,9 +18,11 @@ int main() {
     CCTask[~4 ordered <] rx;
     cc_channel_pair(&tx, &rx);
     
-    // Use spawn into to spawn task and send CCTask to channel
-    @closing(tx) {
-        spawn into(tx) () => double_value((void*)21);
+    // Manual explicit form: spawn a task handle, send it, then close the channel.
+    {
+        CCTask task = __spawn_into_call((void*(*)(void*))double_value, (void*)21);
+        (void)chan_send(tx, task);
+        tx.close();
     }
     
     // Receive and verify

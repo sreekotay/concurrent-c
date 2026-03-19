@@ -20,13 +20,17 @@ int main(void) {
     printf("Testing @defer inside spawn closure\n");
     cc_atomic_store(&g_cleanup_count, 0);
     
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery57 = @create(NULL) @destroy;
+        if (!__cc_nursery57) abort();
+
+        __cc_nursery57->spawn(() => {
             printf("Worker starting\n");
             @defer cleanup_fn();  // <-- THIS IS THE PROBLEM
             printf("Worker doing work\n");
             // cleanup_fn should run here when closure exits
         });
+    
     }
     
     printf("Nursery complete. Cleanup count: %d\n", cc_atomic_load(&g_cleanup_count));

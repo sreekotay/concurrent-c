@@ -22,8 +22,12 @@ int main(void) {
     double start = time_now_ms();
 
     for (int i = 0; i < ITERATIONS; i++) {
-        @nursery {
-                spawn(() => { global_counter++; });
+        {
+            CCNursery* __cc_nursery177 = @create(NULL) @destroy;
+            if (!__cc_nursery177) abort();
+
+                __cc_nursery177->spawn(() => { global_counter++; });
+        
         }
     }
 

@@ -5,11 +5,15 @@
 int main(void) {
     int counter = 0;
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery54 = @create(NULL) @destroy;
+        if (!__cc_nursery54) abort();
+
         /* @unsafe bypasses mutation check - you own this race */
-        spawn(@unsafe () => [&counter] {
+        __cc_nursery54->spawn(@unsafe () => [&counter] {
             counter++;
         });
+    
     }
     
     /* Note: this is racy! Only use @unsafe when you know what you're doing. */

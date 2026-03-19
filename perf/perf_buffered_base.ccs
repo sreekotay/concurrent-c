@@ -50,14 +50,18 @@ static double run_once(void) {
     cc_channel_pair(&tx_h, &rx_h);
 
     double start = time_now_ms();
-    @closing(tx_h) {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery164 = @create(NULL) @destroy;
+        if (!__cc_nursery164) abort();
+        (void)__cc_nursery164->close_on(tx_h);
+
+        __cc_nursery164->spawn(() => {
             for (int i = 0; i < g_iterations; i++) {
                 tx_h.send(i);
             }
         });
 
-        spawn(() => {
+        __cc_nursery164->spawn(() => {
             int v = 0;
             int64_t checksum = 0;
             for (int i = 0; i < g_iterations; i++) {
@@ -69,6 +73,7 @@ static double run_once(void) {
                 fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
             }
         });
+    
     }
     return time_now_ms() - start;
 }

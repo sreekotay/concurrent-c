@@ -10,17 +10,25 @@ cc_atomic_int g = 0;
 int main(void) {
     printf("nested_minimal: single iteration\n");
     
-    @nursery {
-        spawn (() => [] {
+    {
+        CCNursery* __cc_nursery133 = @create(NULL) @destroy;
+        if (!__cc_nursery133) abort();
+
+        __cc_nursery133->spawn (() => [] {
             printf("  fiber1: starting\n");
-            @nursery {
-                spawn (() => [] {
+            {
+                CCNursery* __cc_nursery134 = @create(NULL) @destroy;
+                if (!__cc_nursery134) abort();
+
+                __cc_nursery134->spawn (() => [] {
                     printf("  fiber2: running\n");
                     cc_atomic_store(&g, 42);
                 });
+            
             }
             printf("  fiber1: done\n");
         });
+    
     }
     
     int val = cc_atomic_load(&g);

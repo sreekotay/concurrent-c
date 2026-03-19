@@ -10,10 +10,14 @@
 int main(void) {
     printf("Starting...\n");
     
-    @nursery {
-        spawn(() => printf("Hello from task A!\n"));
-        spawn(() => printf("Hello from task B!\n"));
-        spawn(() => printf("Hello from task C!\n"));
+    {
+        CCNursery* __cc_nursery97 = @create(NULL) @destroy;
+        if (!__cc_nursery97) abort();
+
+        __cc_nursery97->spawn(() => printf("Hello from task A!\n"));
+        __cc_nursery97->spawn(() => printf("Hello from task B!\n"));
+        __cc_nursery97->spawn(() => printf("Hello from task C!\n"));
+    
     }
     /* All tasks complete before we reach here. */
     

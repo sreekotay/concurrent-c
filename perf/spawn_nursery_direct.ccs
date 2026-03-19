@@ -26,12 +26,16 @@ int main(void) {
     double start = time_now_ms();
 
     for (int batch = 0; batch < ITERATIONS / 1000; batch++) {
-        @nursery {
+        {
+            CCNursery* __cc_nursery175 = @create(NULL) @destroy;
+            if (!__cc_nursery175) abort();
+
             for (int i = 0; i < 1000; i++) {
-                spawn(() => {
+                __cc_nursery175->spawn(() => {
                     increment_global();
                 });
             }
+        
         }
     }
 

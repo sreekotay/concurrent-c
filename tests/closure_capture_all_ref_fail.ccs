@@ -4,11 +4,15 @@
 int main(void) {
     int x = 0;
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery31 = @create(NULL) @destroy;
+        if (!__cc_nursery31) abort();
+
         /* ERROR: capture-all [&] is not allowed */
-        spawn(() => [&] {
+        __cc_nursery31->spawn(() => [&] {
             x++;
         });
+    
     }
     
     return 0;

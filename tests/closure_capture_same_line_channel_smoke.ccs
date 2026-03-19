@@ -8,15 +8,19 @@ int main(void) {
     int[~1 >] tx; int[~1 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    @nursery {
-        spawn(() => [rx] {
+    {
+        CCNursery* __cc_nursery35 = @create(NULL) @destroy;
+        if (!__cc_nursery35) abort();
+
+        __cc_nursery35->spawn(() => [rx] {
             int v = -1;
             assert(cc_io_avail(chan_recv(rx, &v)));
             g_value = v;
         });
-        spawn(() => [tx] {
+        __cc_nursery35->spawn(() => [tx] {
             (void)chan_send(tx, 42);
         });
+    
     }
 
     assert(g_value == 42);

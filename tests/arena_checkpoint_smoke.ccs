@@ -5,7 +5,10 @@
 int main(void) {
     char buffer[1024];
 
-    @arena_init(buffer, sizeof(buffer)) {
+    {
+        CCArena __cc_arena1 = @create(buffer, sizeof(buffer)) @destroy;
+        if (!__cc_arena1.base) abort();
+        CCArena* arena = &__cc_arena1;
         int* a1 = cc_arena_alloc_T(int, arena);
         assert(a1 != NULL);
         *a1 = 11;
@@ -26,6 +29,7 @@ int main(void) {
 
         // Allocation before checkpoint should remain valid
         assert(*a1 == 11);
+    
     }
 
     printf("arena_checkpoint_smoke: OK\n");

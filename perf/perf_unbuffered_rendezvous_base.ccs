@@ -43,10 +43,14 @@ static double run_once(void) {
     CCChanRx rx = rx_h;
 
     double start = time_now_ms();
-    @closing(tx_h) {
+    {
+        CCNursery* __cc_nursery172 = @create(NULL) @destroy;
+        if (!__cc_nursery172) abort();
+        (void)__cc_nursery172->close_on(tx_h);
+
         for (int p = 0; p < PRODUCERS; p++) {
             (void)p;
-            spawn(() => [tx] {
+            __cc_nursery172->spawn(() => [tx] {
                 for (int i = 0; i < ITERS_PER_PRODUCER; i++) {
                     tx.send(i);
                 }
@@ -55,7 +59,7 @@ static double run_once(void) {
 
         for (int c = 0; c < CONSUMERS; c++) {
             (void)c;
-            spawn(() => [rx] {
+            __cc_nursery172->spawn(() => [rx] {
                 int v = 0;
                 int64_t checksum = 0;
                 for (int i = 0; i < MSGS_PER_CONSUMER; i++) {
@@ -67,6 +71,7 @@ static double run_once(void) {
                 }
             });
         }
+    
     }
     return time_now_ms() - start;
 }

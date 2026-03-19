@@ -66,9 +66,12 @@ void run_test_large_buffer(void) {
     Item[~16 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery157 = @create(NULL) @destroy;
+        if (!__cc_nursery157) abort();
+
         /* Producer sends all items then closes */
-        spawn(() => {
+        __cc_nursery157->spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = {i};
                 chan_send(tx, item);
@@ -79,7 +82,7 @@ void run_test_large_buffer(void) {
         /* Workers receive until channel closed */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int wid = w;
-            spawn(() => {
+            __cc_nursery157->spawn(() => {
                 Item item;
                 while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);
@@ -89,6 +92,7 @@ void run_test_large_buffer(void) {
                 }
             });
         }
+    
     }
     
     cc_chan_free(ch);
@@ -105,8 +109,11 @@ void run_test_small_buffer(void) {
     Item[~1 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
     
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery158 = @create(NULL) @destroy;
+        if (!__cc_nursery158) abort();
+
+        __cc_nursery158->spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = {i};
                 chan_send(tx, item);
@@ -116,7 +123,7 @@ void run_test_small_buffer(void) {
         
         for (int w = 0; w < NUM_WORKERS; w++) {
             int wid = w;
-            spawn(() => {
+            __cc_nursery158->spawn(() => {
                 Item item;
                 while (cc_io_avail(chan_recv(rx, &item))) {
                     cc_atomic_fetch_add(&g_worker_counts[wid], 1);
@@ -125,6 +132,7 @@ void run_test_small_buffer(void) {
                 }
             });
         }
+    
     }
     
     cc_chan_free(ch);

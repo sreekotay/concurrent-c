@@ -30,10 +30,13 @@ int main(void) {
     tx.send(1);
     printf("Channel is full. Next send will block.\n");
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery138 = @create(NULL) @destroy;
+        if (!__cc_nursery138) abort();
+
         // 2. Spawn a fiber that will block on send
         CCChanTx t = tx;
-        spawn(() => [t] {
+        __cc_nursery138->spawn(() => [t] {
             printf("[Fiber] Attempting to send to full channel (will block)...\n");
             int rc = cc_chan_send(t.raw, (int[]){2}, sizeof(int));
             printf("[Fiber] Send returned with code: %d (expected EPIPE=32 or ECANCELED=89)\n", rc);
@@ -46,6 +49,7 @@ int main(void) {
         printf("[Main] Closing channel to unblock fiber...\n");
         t.close();
         printf("[Main] Channel closed. Nursery will exit when fiber completes.\n");
+    
     }
 
     printf("\nRESULT: PASS - The nursery successfully joined the blocked fiber!\n");

@@ -49,11 +49,15 @@ int main(void) {
     CCChanTx tx2 = tx2_h;
     CCChanRx rx2 = rx2_h;
 
-    @nursery {
-        spawn(() => [tx1] { sender(tx1, N); });
-        spawn(() => [rx1] { receiver(rx1, N); });
-        spawn(() => [tx2] { sender(tx2, N); });
-        spawn(() => [rx2] { receiver(rx2, N); });
+    {
+        CCNursery* __cc_nursery17 = @create(NULL) @destroy;
+        if (!__cc_nursery17) abort();
+
+        __cc_nursery17->spawn(() => [tx1] { sender(tx1, N); });
+        __cc_nursery17->spawn(() => [rx1] { receiver(rx1, N); });
+        __cc_nursery17->spawn(() => [tx2] { sender(tx2, N); });
+        __cc_nursery17->spawn(() => [rx2] { receiver(rx2, N); });
+    
     }
 
     return cc_atomic_load(&g_errors) == 0 ? 0 : 1;

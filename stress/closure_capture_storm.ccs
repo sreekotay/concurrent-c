@@ -15,19 +15,23 @@ cc_atomic_int g_sum = 0;
 int main(void) {
     printf("closure_capture_storm: %d closures with captures\n", NUM_CLOSURES);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery116 = @create(NULL) @destroy;
+        if (!__cc_nursery116) abort();
+
         for (int i = 0; i < NUM_CLOSURES; i++) {
             /* Each closure captures different values */
             int a = i;
             int b = i * 2;
             int c = i * 3;
 
-            spawn(() => {
+            __cc_nursery116->spawn(() => {
                 /* Use captured values */
                 int local_sum = a + b + c;  /* = i + 2i + 3i = 6i */
                 cc_atomic_fetch_add(&g_sum, local_sum);
             });
         }
+    
     }
 
     /* Expected: sum of 6*i for i=0..NUM_CLOSURES-1 */

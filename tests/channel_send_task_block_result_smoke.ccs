@@ -16,9 +16,16 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     int ok = 1;
 
-    @nursery {
-        @closing(tx) {
-            spawn(() => [tx] {
+    {
+        CCNursery* __cc_nursery21 = @create(NULL) @destroy;
+        if (!__cc_nursery21) abort();
+
+        {
+            CCNursery* __cc_nursery22 = @create(NULL) @destroy;
+            if (!__cc_nursery22) abort();
+            (void)__cc_nursery22->close_on(tx);
+
+            __cc_nursery22->spawn(() => [tx] {
                 cc_channel_send_task(tx, () => {
                     int !>(CCIoError) res = compute_result(2);
                     res;
@@ -28,6 +35,7 @@ int main(void) {
                     res;
                 });
             });
+        
         }
 
         int !>(CCIoError) result;
@@ -40,6 +48,7 @@ int main(void) {
         if (cc_io_avail(rx.recv(&result))) {
             ok = 0;
         }
+    
     }
 
     cc_chan_free(ch);

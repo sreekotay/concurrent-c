@@ -65,8 +65,11 @@ static double bench_loop_local_once(void) {
 
 static double bench_loop_two_fiber_once(void) {
     double start = time_now_ms();
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery165 = @create(NULL) @destroy;
+        if (!__cc_nursery165) abort();
+
+        __cc_nursery165->spawn(() => {
             volatile int64_t local = 0;
             for (int i = 0; i < g_iterations; i++) {
                 local += i;
@@ -75,7 +78,7 @@ static double bench_loop_two_fiber_once(void) {
                 fprintf(stderr, "impossible local=%lld\n", (long long)local);
             }
         });
-        spawn(() => {
+        __cc_nursery165->spawn(() => {
             volatile int64_t local = 0;
             for (int i = 0; i < g_iterations; i++) {
                 local += i;
@@ -84,6 +87,7 @@ static double bench_loop_two_fiber_once(void) {
                 fprintf(stderr, "impossible local=%lld\n", (long long)local);
             }
         });
+    
     }
     double elapsed = time_now_ms() - start;
     return (g_iterations * 2.0) / (elapsed / 1000.0);
@@ -116,14 +120,18 @@ static double bench_chan_two_fiber_once(void) {
     cc_channel_pair(&tx_h, &rx_h);
 
     double start = time_now_ms();
-    @closing(tx_h) {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery166 = @create(NULL) @destroy;
+        if (!__cc_nursery166) abort();
+        (void)__cc_nursery166->close_on(tx_h);
+
+        __cc_nursery166->spawn(() => {
             for (int i = 0; i < g_iterations; i++) {
                 tx_h.send(i);
             }
         });
 
-        spawn(() => {
+        __cc_nursery166->spawn(() => {
             int v = 0;
             int64_t checksum = 0;
             for (int i = 0; i < g_iterations; i++) {
@@ -134,6 +142,7 @@ static double bench_chan_two_fiber_once(void) {
                 fprintf(stderr, "impossible checksum=%lld\n", (long long)checksum);
             }
         });
+    
     }
     double elapsed = time_now_ms() - start;
     return (g_iterations * 2.0) / (elapsed / 1000.0);

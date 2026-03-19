@@ -6,12 +6,16 @@ int main(void) {
     int x = 42;
     int result = 0;
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery42 = @create(NULL) @destroy;
+        if (!__cc_nursery42) abort();
+
         /* Explicit value capture: x is copied into closure */
-        spawn(() => [x] {
+        __cc_nursery42->spawn(() => [x] {
             printf("captured x=%d\n", x);
             /* x is a copy, original is unaffected */
         });
+    
     }
     
     /* Original x unchanged */

@@ -27,10 +27,13 @@ int main(void) {
     CCChan* jobs_ch = cc_channel_pair(&jobs_tx, &jobs_rx);
     CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery105 = @create(NULL) @destroy;
+        if (!__cc_nursery105) abort();
+
         /* Workers: pull jobs, send completion to done channel. */
         for (int w = 0; w < NUM_WORKERS; w++) {
-            spawn(() => {
+            __cc_nursery105->spawn(() => {
                 int job;
                 while (cc_io_avail(chan_recv(jobs_rx, &job))) {
                     printf("worker: processed job %d\n", job);
@@ -40,15 +43,21 @@ int main(void) {
         }
 
         /* Feeder: sends all jobs, then inner nursery closes jobs channel. */
-        @closing(jobs_tx) {
-            spawn(() => {
+        {
+            CCNursery* __cc_nursery106 = @create(NULL) @destroy;
+            if (!__cc_nursery106) abort();
+            (void)__cc_nursery106->close_on(jobs_tx);
+
+            __cc_nursery106->spawn(() => {
                 for (int j = 1; j <= NUM_JOBS; j++) {
                     (void)chan_send(jobs_tx, j);
                 }
                 printf("feeder: sent %d jobs\n", NUM_JOBS);
             });
+        
         }
         /* jobs closed -> workers drain and exit. */
+    
     }
 
     /* Count completed jobs by draining done channel. */

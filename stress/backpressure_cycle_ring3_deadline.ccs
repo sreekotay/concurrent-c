@@ -45,10 +45,14 @@ int main(void) {
         if (cc_chan_send(tx2.raw, &seed2, sizeof(seed2)) != 0) return 3;
         if (cc_chan_send(tx3.raw, &seed3, sizeof(seed3)) != 0) return 4;
 
-        @nursery {
-            spawn(() => [tx2, rx1] { backpressure_actor(tx2, rx1, 101); });
-            spawn(() => [tx3, rx2] { backpressure_actor(tx3, rx2, 202); });
-            spawn(() => [tx1, rx3] { backpressure_actor(tx1, rx3, 303); });
+        {
+            CCNursery* __cc_nursery109 = @create(NULL) @destroy;
+            if (!__cc_nursery109) abort();
+
+            __cc_nursery109->spawn(() => [tx2, rx1] { backpressure_actor(tx2, rx1, 101); });
+            __cc_nursery109->spawn(() => [tx3, rx2] { backpressure_actor(tx3, rx2, 202); });
+            __cc_nursery109->spawn(() => [tx1, rx3] { backpressure_actor(tx1, rx3, 303); });
+        
         }
 
         cc_chan_free(ch1);

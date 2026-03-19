@@ -9,9 +9,12 @@ int main() {
     printf("START. Spawning %d fibers...\n", count);
     fflush(stdout);
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery161 = @create(NULL) @destroy;
+        if (!__cc_nursery161) abort();
+
         for (int i = 0; i < count; i++) {
-            spawn(() => {
+            __cc_nursery161->spawn(() => {
                 cc_sleep_ms(1000);
                 atomic_fetch_add(&g_completed, 1);
             });
@@ -23,6 +26,7 @@ int main() {
         
         printf("All %d fibers spawned. Waiting for completion...\n", count);
         fflush(stdout);
+    
     }
     
     struct rusage ru;

@@ -9,11 +9,15 @@ static void read_only_i32(const int* p) {
 int main(void) {
     int x = 7;
 
-    @nursery {
-        spawn(() => [&x] {
+    {
+        CCNursery* __cc_nursery49 = @create(NULL) @destroy;
+        if (!__cc_nursery49) abort();
+
+        __cc_nursery49->spawn(() => [&x] {
             /* Allowed: callee takes const int* */
             read_only_i32(&x);
         });
+    
     }
 
     return 0;

@@ -912,7 +912,6 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
     CCProcessConfig run_cfg;
     CCResult_CCProcess_CCIoError spawn_res;
     CCProcess proc;
-    CCProcessOutput output = {0};
 
     if (!arena || !config || !config->program || !config->args) {
         return cc_err_CCResult_CCProcessOutput_CCIoError(cc_io_from_errno(EINVAL));
@@ -929,6 +928,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
     proc = cc_unwrap(spawn_res);
 
 #ifdef _WIN32
+    CCProcessOutput output = {0};
     if (run_cfg.pipe_stdin) {
         while (input.len > 0) {
             CCResult_size_t_CCIoError write_res = cc_process_write(&proc, input);

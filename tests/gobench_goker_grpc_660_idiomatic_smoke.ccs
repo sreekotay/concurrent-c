@@ -21,8 +21,11 @@ int main(void) {
     int v = 0;
     int first_err = 0;
 
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery58 = @create(NULL) @destroy;
+        if (!__cc_nursery58) abort();
+
+        __cc_nursery58->spawn(() => {
             if (cc_io_avail(chan_send(done_tx, 1))) {
                 (void)chan_send(progress_tx, 2);
             }
@@ -40,6 +43,7 @@ int main(void) {
         if (v != 1) return 12;
         if (!cc_io_avail(chan_recv(progress_rx, &v))) return 13;
         if (v != 2) return 14;
+    
     }
 
     cc_chan_free(done_ch);

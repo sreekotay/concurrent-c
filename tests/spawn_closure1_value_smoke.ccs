@@ -8,8 +8,12 @@ int main(void) {
 
     CCClosure1 c = x => { int* p = (int*)x; if (p) *gp = *p; };
 
-    @nursery {
-        spawn (c, &v);
+    {
+        CCNursery* __cc_nursery85 = @create(NULL) @destroy;
+        if (!__cc_nursery85) abort();
+
+        (void)cc_nursery_spawn_closure1(__cc_nursery85, c, (intptr_t)&v);
+    
     }
     return (g == 5) ? 0 : 1;
 }

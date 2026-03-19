@@ -27,9 +27,12 @@ int main(void) {
     CCChan* work_ch = cc_channel_pair(&work_tx, &work_rx);
     CCChan* done_ch = cc_channel_pair(&done_tx, &done_rx);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery121 = @create(NULL) @destroy;
+        if (!__cc_nursery121) abort();
+
         /* Collector: must run in parallel with workers for unbuffered channels */
-        spawn(() => {
+        __cc_nursery121->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(done_rx, &v))) {
                 cc_atomic_fetch_add(&g_sum, (int64_t)v);
@@ -38,9 +41,13 @@ int main(void) {
         });
 
         /* Workers: receive, process, send result */
-        @closing(done_tx) {
+        {
+            CCNursery* __cc_nursery123 = @create(NULL) @destroy;
+            if (!__cc_nursery123) abort();
+            (void)__cc_nursery123->close_on(done_tx);
+
             for (int w = 0; w < NUM_WORKERS; w++) {
-                spawn(() => {
+                __cc_nursery123->spawn(() => {
                     int v;
                     while (cc_io_avail(chan_recv(work_rx, &v))) {
                         /* "Process" by squaring */
@@ -51,14 +58,21 @@ int main(void) {
             }
 
             /* Producer: fan out work items */
-            @closing(work_tx) {
-                spawn(() => {
+            {
+                CCNursery* __cc_nursery122 = @create(NULL) @destroy;
+                if (!__cc_nursery122) abort();
+                (void)__cc_nursery122->close_on(work_tx);
+
+                __cc_nursery122->spawn(() => {
                     for (int i = 0; i < NUM_ITEMS; i++) {
                         (void)chan_send(work_tx, i);
                     }
                 });
+            
             }
+        
         }
+    
     }
 
     cc_chan_free(work_ch);
