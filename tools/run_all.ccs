@@ -147,14 +147,15 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 
         /* Use a fresh temp arena for each test to avoid accumulation */
         CCArena test_arena = cc_arena_heap(megabytes(4));
-        CCCommand cmd = cc_command(&test_arena, "ccc");
+        /* The aggregate runner already assumes repo-root-relative paths,
+         * so invoke the repo-local launcher explicitly instead of relying on PATH. */
+        CCCommand cmd = cc_command(&test_arena, "./ccc");
         CCResult_CCProcessOutput_CCIoError res;
         CCResult_int_CCIoError status;
         cmd.arg("run");
         cmd.arg_if(timeout_for_file > 0, "--timeout");
         cmd.arg_i32_if(timeout_for_file > 0, timeout_for_file);
         cmd.arg(path);
-        /* Use ccc from PATH */
         if (stream_output) {
             cmd.inherit_stdio();
             status = cmd.status();

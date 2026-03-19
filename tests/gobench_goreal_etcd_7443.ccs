@@ -10,10 +10,14 @@
 static pthread_mutex_t* g_mu = NULL;
 static CCChan* g_notify_ch = NULL;
 static CCChan* g_progress_ch = NULL;
+static CCChan* g_ready_ch = NULL;
 
 static void* waiter_thread(void* arg) {
     (void)arg;
     pthread_mutex_lock(g_mu);
+    /* Tell main that the lock is held before the sender starts. */
+    int ready = 1;
+    cc_chan_send(g_ready_ch, &ready, sizeof(ready));
     int v = 0;
     (void)cc_chan_recv(g_notify_ch, &v, sizeof(v)); /* blocks while holding lock */
     pthread_mutex_unlock(g_mu);
@@ -39,15 +43,20 @@ int main(void) {
 
     CCChan* notify_ch = cc_chan_create(0);
     CCChan* progress_ch = cc_chan_create(2);
-    if (!notify_ch || !progress_ch) return 2;
+    CCChan* ready_ch = cc_chan_create(1);
+    if (!notify_ch || !progress_ch || !ready_ch) return 2;
     if (cc_chan_init_elem(notify_ch, sizeof(int)) != 0) return 3;
     if (cc_chan_init_elem(progress_ch, sizeof(int)) != 0) return 4;
+    if (cc_chan_init_elem(ready_ch, sizeof(int)) != 0) return 5;
 
     pthread_t t1, t2;
     g_mu = &mu;
     g_notify_ch = notify_ch;
     g_progress_ch = progress_ch;
+    g_ready_ch = ready_ch;
     pthread_create(&t1, NULL, waiter_thread, NULL);
+    int ready = 0;
+    (void)cc_chan_recv(ready_ch, &ready, sizeof(ready));
     pthread_create(&t2, NULL, sender_thread, NULL);
 
     int v = 0;
@@ -69,6 +78,7 @@ int main(void) {
 
     cc_chan_free(notify_ch);
     cc_chan_free(progress_ch);
+    cc_chan_free(ready_ch);
     pthread_mutex_destroy(&mu);
     printf("gobench goreal etcd7443: PASS\n");
     return 0;
