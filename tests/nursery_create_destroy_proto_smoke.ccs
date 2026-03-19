@@ -8,7 +8,7 @@ int main(void) {
         CCNursery* n = @create(NULL, () => {
             g_task_ran = 1;
         }) @destroy {
-            (void)cc_nursery_wait(n);
+            (void)n->wait();
             if (g_task_ran == 1) {
                 g_destroy_ran = 1;
             }

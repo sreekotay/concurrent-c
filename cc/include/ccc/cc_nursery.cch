@@ -111,12 +111,12 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
 @comptime {
     (void)cc_type_register("CCNursery*", (CCTypeHooks){
         .create = cc_type_create_overloads("cc_nursery_create_child", "cc_nursery_spawn_child_closure0"),
-        .destroy = cc_type_destroy_call("cc_nursery_destroy"),
+        .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
         .ufcs = cc_nursery_lower_c,
     });
     (void)cc_type_register("CCNursery", (CCTypeHooks){
         .create = cc_type_create_overloads("cc_nursery_create_child", "cc_nursery_spawn_child_closure0"),
-        .destroy = cc_type_destroy_call("cc_nursery_destroy"),
+        .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
         .ufcs = cc_nursery_lower_c,
     });
 }

@@ -27,6 +27,7 @@ typedef struct {
     const void* create_callable;
     void* create_owner;
     CCOwnedResourceFreeFn create_owner_free;
+    char* pre_destroy_call;
     char* destroy_call;
     const void* ufcs_callable;
     int ufcs_callable_is_legacy_compat;
@@ -163,6 +164,7 @@ void cc_symbols_free(CCSymbolTable* t) {
         if (t->types[i].create_owner && t->types[i].create_owner_free) {
             t->types[i].create_owner_free(t->types[i].create_owner);
         }
+        free(t->types[i].pre_destroy_call);
         free(t->types[i].destroy_call);
         if (t->types[i].ufcs_owner && t->types[i].ufcs_owner_free) {
             t->types[i].ufcs_owner_free(t->types[i].ufcs_owner);
@@ -327,6 +329,29 @@ int cc_symbols_set_type_destroy_call(CCSymbolTable* t, const char* type_name, co
     if (!copy) return ENOMEM;
     free(entry->destroy_call);
     entry->destroy_call = copy;
+    return 0;
+}
+
+int cc_symbols_set_type_pre_destroy_call(CCSymbolTable* t, const char* type_name, const char* callee) {
+    CCTypeEntry* entry = NULL;
+    char* copy = NULL;
+    int err;
+    if (!t || !type_name || !callee) return EINVAL;
+    err = cc__ensure_type_entry(t, type_name, &entry);
+    if (err != 0) return err;
+    copy = strdup(callee);
+    if (!copy) return ENOMEM;
+    free(entry->pre_destroy_call);
+    entry->pre_destroy_call = copy;
+    return 0;
+}
+
+int cc_symbols_lookup_type_pre_destroy_call(CCSymbolTable* t, const char* type_name, const char** out_callee) {
+    CCTypeEntry* entry = NULL;
+    if (!t || !type_name || !out_callee) return EINVAL;
+    entry = cc__find_type_entry(t, type_name);
+    if (!entry || !entry->pre_destroy_call) return ENOENT;
+    *out_callee = entry->pre_destroy_call;
     return 0;
 }
 
@@ -738,10 +763,23 @@ static int cc__parse_type_hooks_object(CCSymbolTable* t,
             continue;
         }
         if (cc__match_kw_reg(src, obj_r, p, "destroy")) {
+            char destroy_pre_callee[256];
             p += strlen("destroy");
             p = cc__skip_ws_reg(src, obj_r, p);
             if (p >= obj_r || src[p] != '=') return -1;
             p++;
+            if (cc__parse_helper_call_2(src, obj_r, &p, "cc_type_destroy_hooks",
+                                        destroy_pre_callee, sizeof(destroy_pre_callee),
+                                        destroy_callee, sizeof(destroy_callee))) {
+                if (cc_symbols_set_type_pre_destroy_call(t, type_name, destroy_pre_callee) != 0) return -1;
+                if (cc_symbols_set_type_destroy_call(t, type_name, destroy_callee) != 0) return -1;
+                continue;
+            }
+            if (cc__parse_helper_call_1(src, obj_r, &p, "cc_type_pre_destroy_call",
+                                        destroy_pre_callee, sizeof(destroy_pre_callee))) {
+                if (cc_symbols_set_type_pre_destroy_call(t, type_name, destroy_pre_callee) != 0) return -1;
+                continue;
+            }
             if (!cc__parse_helper_call_1(src, obj_r, &p, "cc_type_destroy_call", destroy_callee, sizeof(destroy_callee))) return -1;
             if (cc_symbols_set_type_destroy_call(t, type_name, destroy_callee) != 0) return -1;
             continue;

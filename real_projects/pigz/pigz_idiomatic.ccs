@@ -132,8 +132,8 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    /* Prototype explicit nursery handles:
-     * consumer declared first, producer second, so producer destroy runs first. */
+    /* Keep the consumer outside the producer scope so results_tx closes when the
+     * producer task exits, not later during nursery teardown. */
     CCNursery* consumer = @create(NULL, () => [out_ptr, results_rx] {
         CompressedResult* !>(CCIoError) r;
         long expect_seq = 0;
@@ -157,7 +157,15 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         return 1;
     }
 
-    CCNursery* producer = @create(consumer, () => [in_ptr, results_tx] {
+    CCNursery* producer = @create(consumer) @destroy {
+        results_tx.close();
+    };
+    if (!producer) {
+        results_tx.close();
+        fprintf(stderr, "Failed to create producer nursery\n");
+        return 1;
+    }
+    producer->spawn(() => [in_ptr, results_tx] {
         long seq = 0;
         while (true) {
             CCArena blk_arena = @create(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
@@ -187,14 +195,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             
             if (is_last) break;
         }
-    }) @destroy {
-        results_tx.close();
-    };
-    if (!producer) {
-        results_tx.close();
-        fprintf(stderr, "Failed to create producer nursery\n");
-        return 1;
-    }
+    });
 
     (void)out_file.sync();
     return 0;

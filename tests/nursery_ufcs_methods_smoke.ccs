@@ -9,16 +9,16 @@ int main(void) {
     if (n->spawn(() => {
         g_runs += 1;
     }) != 0) {
-        cc_nursery_free(n);
+        n->free();
         return 2;
     }
 
     if (n->wait() != 0) {
-        cc_nursery_free(n);
+        n->free();
         return 3;
     }
 
-    cc_nursery_free(n);
+    n->free();
     if (g_runs != 1) return 4;
     return 0;
 }
