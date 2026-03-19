@@ -7,6 +7,7 @@ All dependencies are Git submodules for easy version tracking and updates.
 | Directory | Library | License | Purpose | Build |
 |-----------|---------|---------|---------|-------|
 | `tcc/` | TinyCC | LGPL 2.1 | C parser/compiler foundation | (auto) |
+| `liblfds/` | liblfds 7.1.1 | Unlicense | Lock-free channel queue backend | (auto) |
 | `bearssl/` | BearSSL | MIT | TLS support (`<std/tls.cch>`) | `make bearssl` |
 | `curl/` | libcurl | MIT | HTTP client (`<std/http.cch>`) | `make curl` |
 

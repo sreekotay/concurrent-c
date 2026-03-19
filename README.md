@@ -122,7 +122,7 @@ git clone --recurse-submodules https://github.com/sreekotay/concurrent-c.git
 cd concurrent-c
 ./install.sh
 ```
-If you cloned without `--recurse-submodules`, `install.sh` will init the `third_party/tcc` submodule and then run `brew install --formula Formula/ccc.rb`.
+If you cloned without `--recurse-submodules`, `install.sh` will init the required `third_party/tcc` and `third_party/liblfds` submodules and then run `brew install --formula Formula/ccc.rb`.
 
 **From anywhere (tap):** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
 ```bash
@@ -303,7 +303,7 @@ Override:
 
 ### Updating TCC (patch workflow)
 
-We keep CC’s TCC modifications as an **uncommitted diff** on top of a pinned upstream commit, and store that diff as a patch file:
+We keep CC’s TCC modifications as a patch applied on top of a pinned upstream commit:
 
 - Patch file: `third_party/tcc-patches/0001-cc-ext-hooks.patch`
 - Apply patches (idempotent): `make tcc-patch-apply`

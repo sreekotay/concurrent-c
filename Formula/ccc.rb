@@ -20,8 +20,8 @@ class Ccc < Formula
   depends_on "make" => :build
 
   def install
-    # TCC (Tiny C Compiler) is required; it's a submodule with local patches.
-    system "git", "submodule", "update", "--init", "third_party/tcc"
+    # TCC and liblfds are required submodules for the compiler and runtime.
+    system "git", "submodule", "update", "--init", "third_party/tcc", "third_party/liblfds"
     system "./scripts/apply_tcc_patches.sh"
     system "make", "-C", "third_party/tcc", "-j#{ENV.make_jobs}"
 
