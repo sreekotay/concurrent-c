@@ -7,15 +7,18 @@ set -e
 usage() {
   cat <<'EOF'
 Usage:
-  cc-install.sh [--add-to-path] [--no-add-to-path]
+  cc-install.sh [--add-to-path] [--no-add-to-path] [--no-editor-tools]
 
 Options:
   --add-to-path     Add PREFIX/bin to your shell startup file without prompting.
   --no-add-to-path  Never modify shell startup files.
+  --no-editor-tools Skip VS Code / Cursor syntax and debugger setup.
   -h, --help        Show this help.
 
 Default behavior:
   If running interactively in a terminal, prompt to add PREFIX/bin to PATH.
+  Install Concurrent-C syntax support for VS Code and Cursor.
+  Attempt to install the CodeLLDB debugger extension when the editor CLI is available.
   If running non-interactively, do not modify shell config.
 EOF
 }
@@ -91,6 +94,51 @@ maybe_add_to_path() {
   esac
 }
 
+install_editor_syntax_to() {
+  dest_root="$1"
+  editor_name="$2"
+  src_dir="$ROOT_DIR/vscode/ccs-syntax"
+  dest_dir="${dest_root}/concurrent-c-syntax"
+
+  if [ ! -d "$src_dir" ]; then
+    echo "Skipping ${editor_name} syntax install: ${src_dir} not found."
+    return 0
+  fi
+
+  mkdir -p "$dest_root"
+  rm -rf "$dest_dir"
+  cp -R "$src_dir" "$dest_dir"
+
+  echo "Installed Concurrent-C syntax for ${editor_name}: ${dest_dir}"
+}
+
+maybe_install_lldb_extension() {
+  editor_cmd="$1"
+  editor_name="$2"
+
+  if ! command -v "$editor_cmd" >/dev/null 2>&1; then
+    echo "Skipping ${editor_name} debugger extension: '${editor_cmd}' CLI not found."
+    return 0
+  fi
+
+  if "$editor_cmd" --install-extension vadimcn.vscode-lldb >/dev/null 2>&1; then
+    echo "Installed CodeLLDB for ${editor_name}."
+  else
+    echo "Warning: failed to install CodeLLDB for ${editor_name} via '${editor_cmd}'." >&2
+  fi
+}
+
+install_editor_tools() {
+  if [ "$INSTALL_EDITOR_TOOLS" != "1" ]; then
+    return 0
+  fi
+
+  install_editor_syntax_to "$HOME/.vscode/extensions" "VS Code"
+  install_editor_syntax_to "$HOME/.cursor/extensions" "Cursor"
+  maybe_install_lldb_extension code "VS Code"
+  maybe_install_lldb_extension cursor "Cursor"
+}
+
 install_local_ccc_wrapper() {
   cat > "$ROOT_DIR/ccc" <<'EOF'
 #!/bin/sh
@@ -113,6 +161,15 @@ print_path_hint() {
       echo "Add $PREFIX/bin to PATH if you want bare 'ccc' to work."
       ;;
   esac
+}
+
+print_editor_tool_hints() {
+  if [ "$INSTALL_EDITOR_TOOLS" != "1" ]; then
+    return 0
+  fi
+
+  echo "Workspace debug configs: $ROOT_DIR/.vscode/tasks.json and $ROOT_DIR/.vscode/launch.json"
+  echo "Reload VS Code / Cursor after install so the syntax extension is picked up."
 }
 
 check_prefix_writable() {
@@ -148,6 +205,7 @@ PREFIX="${PREFIX:-/usr/local}"
 CC_REPO_URL="${CC_REPO_URL:-https://github.com/sreekotay/concurrent-c.git}"
 CC_REPO_DIR="${CC_REPO_DIR:-$PWD/concurrent-c}"
 ADD_TO_PATH_MODE="ask"
+INSTALL_EDITOR_TOOLS="1"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -156,6 +214,9 @@ while [ $# -gt 0 ]; do
       ;;
     --no-add-to-path)
       ADD_TO_PATH_MODE="never"
+      ;;
+    --no-editor-tools)
+      INSTALL_EDITOR_TOOLS="0"
       ;;
     -h|--help)
       usage
@@ -219,8 +280,10 @@ install_local_ccc_wrapper
 
 echo "Installing Concurrent-C to $PREFIX..."
 make install BUILD="$BUILD" PREFIX="$PREFIX"
+install_editor_tools
 maybe_add_to_path
 
 echo "Install complete."
 echo "Checkout: $ROOT_DIR"
 print_path_hint
+print_editor_tool_hints
