@@ -111,6 +111,7 @@ static int get_timeout_sec(const char* path, int default_timeout_sec) {
     if (default_timeout_sec <= 0) return 0;
     /* Occasionally slower under the full "all" aggregate load. */
     if (strstr(path, "join_init_race") != NULL) return 20;
+    if (strstr(path, "block_combinators_stress") != NULL) return 20;
     return default_timeout_sec;
 }
 

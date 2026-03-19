@@ -92,7 +92,7 @@ int main(void) {
 
         // 5. Cancel the nursery - signals all fibers to stop
         printf("Cancelling nursery...=========================================\n");
-        nursery_cancel();
+        __cc_nursery148->cancel();
     
     }
 
