@@ -114,17 +114,27 @@ The compiler auto-detects its include/runtime paths from the binary location. Yo
 CC_HOME=/opt/ccc ccc run myfile.ccs
 ```
 
-#### Install with Homebrew
+#### Install with `install.sh`
 
-**From a clone (recommended):** clone the repo, then run the install script at repo root:
+`install.sh` works in two modes:
+- If you run it from the repo root, it uses the current checkout.
+- If you run it anywhere else, it clones into `$PWD/concurrent-c` first and installs from there.
+
+Examples:
 ```bash
-git clone --recurse-submodules https://github.com/sreekotay/concurrent-c.git
-cd concurrent-c
+# From an existing checkout
 ./install.sh
-```
-If you cloned without `--recurse-submodules`, `install.sh` will init the required `third_party/tcc` and `third_party/liblfds` submodules and then run `brew install --formula Formula/ccc.rb`.
 
-**From anywhere (tap):** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
+# From any other directory (using a copied/downloaded script)
+PREFIX=/opt/ccc sh ./install.sh
+
+# Override clone destination
+CC_REPO_DIR="$HOME/Documents/code/ccc" sh ./install.sh
+```
+
+The script initializes the required `third_party/tcc` and `third_party/liblfds` submodules, applies the TCC patch, builds TinyCC, builds `ccc`, and runs `make install`.
+
+**Homebrew tap:** a *tap* is a Homebrew source of formulas. Adding this repo as a tap lets anyone install the head version without cloning:
 ```bash
 brew tap sreekotay/concurrent-c https://github.com/sreekotay/concurrent-c.git
 brew install sreekotay/concurrent-c/ccc
