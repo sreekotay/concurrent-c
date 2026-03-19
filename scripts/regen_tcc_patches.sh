@@ -17,18 +17,35 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PATCH_DIR="$ROOT_DIR/third_party/tcc-patches"
 TCC_DIR="$ROOT_DIR/third_party/tcc"
 OUT_PATCH="$PATCH_DIR/0001-cc-ext-hooks.patch"
+BASE_REF="${TCC_PATCH_BASE_REF:-}"
 
 cd "$TCC_DIR"
 
-# Check if there are any changes from upstream
-if git diff --quiet --no-ext-diff origin/mob; then
-  echo "[regen] third_party/tcc has no changes from origin/mob; nothing to regenerate." >&2
+# Prefer the fork's upstream mirror, but keep working in older local checkouts
+# where the fork remote may still be named `fork`.
+if [ -z "$BASE_REF" ]; then
+  for candidate in origin/upstream-mob fork/upstream-mob upstream/mob origin/mob; do
+    if git rev-parse --verify "$candidate" >/dev/null 2>&1; then
+      BASE_REF="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$BASE_REF" ]; then
+  echo "[regen] No upstream base ref found. Set TCC_PATCH_BASE_REF or fetch origin/fork/upstream." >&2
+  exit 1
+fi
+
+# Check if there are any changes from the upstream mirror.
+if git diff --quiet --no-ext-diff "$BASE_REF"; then
+  echo "[regen] third_party/tcc has no changes from $BASE_REF; nothing to regenerate." >&2
   exit 1
 fi
 
 tmp="$OUT_PATCH.tmp"
-# Capture all changes from upstream to current working tree
-git diff origin/mob --binary --no-color > "$tmp"
+# Capture all changes from the upstream mirror to current working tree.
+git diff "$BASE_REF" --binary --no-color > "$tmp"
 
 if [ ! -s "$tmp" ]; then
   echo "[regen] Generated patch is empty; refusing to overwrite $OUT_PATCH" >&2
