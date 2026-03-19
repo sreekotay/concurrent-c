@@ -24,14 +24,11 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     @defer cc_chan_free(ch);
     
-    {
-        CCNursery* __cc_nursery20 = @create(NULL) @destroy;
-        if (!__cc_nursery20) abort();
-
+    @nursery {
         /* Workers */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            __cc_nursery20->spawn(() => [worker_id] {
+            spawn(() => [worker_id] {
                 Item item;
                 int count = 0;
                 while (cc_io_avail(chan_recv(rx, &item))) {
@@ -51,7 +48,7 @@ int main(void) {
         }
         
         /* Producer - then close channel */
-        __cc_nursery20->spawn(() => {
+        spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = { .seq = i, .value = i * 10 };
                 (void)chan_send(tx, item);
@@ -59,7 +56,6 @@ int main(void) {
             }
             chan_close(tx);  /* Explicitly close */
         });
-    
     }
     
     int sent = cc_atomic_load(&g_sent);

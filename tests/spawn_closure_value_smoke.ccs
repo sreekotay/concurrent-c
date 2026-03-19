@@ -1,3 +1,4 @@
+#include <ccc/cc_nursery.cch>
 // Smoke: spawn should accept a CCClosure0 value (not just a literal).
 #include <ccc/cc_closure.cch>
 
