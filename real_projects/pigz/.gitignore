@@ -5,7 +5,6 @@ out/
 *.bin
 *.bin.gz
 *_decomp.bin
-bench_*
 gunzip_err.txt
 *.gz
 
@@ -16,5 +15,3 @@ testdata/text_*mb.bin
 testdata/enwik8
 testdata/enwik8.zip
 
-# Third-party
-zopfli/
