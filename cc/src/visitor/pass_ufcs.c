@@ -33,6 +33,10 @@ static int cc__find_ufcs_span_in_range(const char* s,
                                        struct CC__UFCSSpan* out_span);
 static size_t cc__ufcs_extend_chain_end(const char* s, size_t len, size_t end);
 static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t out_cap);
+static int cc__rewrite_ufcs_text_fallback(const char* in_src,
+                                          size_t in_len,
+                                          char** out_src,
+                                          size_t* out_len);
 
 static void cc__trim_span(const char** start, const char** end) {
     if (!start || !end || !*start || !*end) return;
@@ -88,6 +92,87 @@ static void cc__ufcs_extract_receiver_expr(const char* expr, char* out, size_t o
     }
 }
 
+static int cc__rewrite_ufcs_text_fallback(const char* in_src,
+                                          size_t in_len,
+                                          char** out_src,
+                                          size_t* out_len) {
+    if (!in_src || !out_src || !out_len) return 0;
+    *out_src = NULL;
+    *out_len = 0;
+
+    size_t out_cap = in_len + 1;
+    char* out = (char*)malloc(out_cap);
+    if (!out) return -1;
+    size_t out_n = 0;
+    int changed = 0;
+
+    for (size_t line_start = 0; line_start < in_len; ) {
+        size_t line_end = line_start;
+        while (line_end < in_len && in_src[line_end] != '\n') line_end++;
+        size_t line_len = line_end - line_start;
+        int has_nl = (line_end < in_len && in_src[line_end] == '\n') ? 1 : 0;
+
+        char* line = (char*)malloc(line_len + 1);
+        if (!line) {
+            free(out);
+            return -1;
+        }
+        memcpy(line, in_src + line_start, line_len);
+        line[line_len] = '\0';
+
+        const char* emit = line;
+        char* rewritten = NULL;
+        const char* trim = line;
+        while (*trim == ' ' || *trim == '\t' || *trim == '\r') trim++;
+        if (*trim != '#') {
+            size_t rew_cap = line_len * 2 + 256;
+            rewritten = (char*)malloc(rew_cap);
+            if (!rewritten) {
+                free(line);
+                free(out);
+                return -1;
+            }
+            int rc = cc_ufcs_rewrite_line(line, rewritten, rew_cap);
+            if (rc == CC_UFCS_REWRITE_OK && strcmp(rewritten, line) != 0) {
+                emit = rewritten;
+                changed = 1;
+            }
+        }
+
+        size_t emit_len = strlen(emit);
+        if (out_n + emit_len + (size_t)has_nl + 1 > out_cap) {
+            size_t new_cap = (out_cap * 2 > out_n + emit_len + (size_t)has_nl + 1)
+                           ? out_cap * 2
+                           : out_n + emit_len + (size_t)has_nl + 1;
+            char* next = (char*)realloc(out, new_cap);
+            if (!next) {
+                free(rewritten);
+                free(line);
+                free(out);
+                return -1;
+            }
+            out = next;
+            out_cap = new_cap;
+        }
+        memcpy(out + out_n, emit, emit_len);
+        out_n += emit_len;
+        if (has_nl) out[out_n++] = '\n';
+
+        free(rewritten);
+        free(line);
+        line_start = line_end + (size_t)has_nl;
+    }
+
+    out[out_n] = '\0';
+    if (!changed) {
+        free(out);
+        return 0;
+    }
+    *out_src = out;
+    *out_len = out_n;
+    return 1;
+}
+
 int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
                                      const CCVisitorCtx* ctx,
                                      const char* in_src,
@@ -134,9 +219,9 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         if (n[i].kind != 5) continue;         /* CALL */
         if ((n[i].aux2 & 4) == 0) continue;   /* only real UFCS calls */
         if (!n[i].aux_s1) continue;
-        if (!cc_pass_same_file(ctx->input_path, n[i].file) &&
-            !(root->lowered_path && cc_pass_same_file(root->lowered_path, n[i].file)))
-            continue;
+        /* Macro-expanded UFCS calls can inherit the header file in TCC's stub AST
+           even when line/col still point at user source text. Keep the node and
+           let the later span finder prove whether it exists in the current source. */
         int ls = n[i].line_start;
         int le = n[i].line_end;
         if (ls <= 0) continue;
@@ -575,6 +660,24 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
     char* rewritten = NULL;
     size_t rewritten_len = 0;
     int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
+    if (r >= 0) {
+        const char* base_src = (r > 0 && rewritten) ? rewritten : eb->src;
+        size_t base_len = (r > 0 && rewritten) ? rewritten_len : eb->src_len;
+        char* fallback = NULL;
+        size_t fallback_len = 0;
+        int fr = cc__rewrite_ufcs_text_fallback(base_src, base_len, &fallback, &fallback_len);
+        if (fr < 0) {
+            cc_ufcs_set_symbols(NULL);
+            free(rewritten);
+            return -1;
+        }
+        if (fr > 0) {
+            free(rewritten);
+            rewritten = fallback;
+            rewritten_len = fallback_len;
+            r = 1;
+        }
+    }
     cc_ufcs_set_symbols(NULL);
     if (r < 0) return -1;
     if (r == 0 || !rewritten) return 0;

@@ -1277,9 +1277,10 @@ static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const 
     cc__collect_ufcs_field_and_var_types(src, n);
     for (size_t ti = 0; ti < cc_symbols_type_count(symbols); ++ti) {
         const char* type_name = cc_symbols_type_name(symbols, ti);
-        const void* fn_ptr = NULL;
         if (!type_name) continue;
-        if (cc_symbols_lookup_type_ufcs_callable(symbols, type_name, &fn_ptr) != 0 || !fn_ptr) continue;
+        /* Text fallback UFCS needs declared-variable types even for simple
+           value-lowered hooks like `CCNursery* -> wait/free/cancel`, not just
+           callable registrations. */
         cc__register_ufcs_declared_vars_for_type(reg, type_name, src, n);
     }
 }

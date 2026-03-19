@@ -5134,15 +5134,15 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 **Create hook contract (normative):**
 - `.create` is selected from the declared type that appears on the left-hand side of `name = @create(...)`.
 - The compiler implicitly selects the registered creation overload from the `@create(...)` argument count.
-- Current language-defined `@create(...)` forms use one or two explicit arguments.
+- Language-defined `@create(...)` forms use one or two explicit arguments.
 - `cc_type_create_call("callee")` registers the one-argument form.
 - `cc_type_create_overloads("callee1", "callee2")` registers one- and two-argument forms on the same `.create` hook.
 - `cc_type_create_hook(handler)` registers a callable create hook; it receives `type_name`, `argv`, `arg_types`, and `arena`, and must return the lowered callee name as a slice.
 - `cc_type_destroy_call("callee")` registers the destroy phase only.
-- `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only.
+- `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only; it runs before any call-site `@destroy { ... }` body.
 - `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
-- For `name = @create(...) @destroy { body };`, lowering order is: call-site `body`, then registered `pre_callee`, then registered `callee`.
-- `arg_types` for `.create` is inferred from the early `@create(...)` lowering path. Literal and simple direct expressions are the intended fast path; more complex local expressions may currently be left unknown by an implementation.
+- For `name = @create(...) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`.
+- `arg_types` for `.create` is inferred from the `@create(...)` argument list. Implementations may leave complex local expressions unknown.
 
 **Preferred registration style:**
 
@@ -5170,9 +5170,9 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 }
 ```
 
-**Design note:** The UFCS registration substrate is shared with typed lifecycle hooks (`create`, `destroy`). UFCS is stage one of that model; the same type-owned registration machinery is intended to support typed birth and cleanup.
+UFCS registration and typed lifecycle hooks (`create`, `destroy`) use the same type-owned registration machinery.
 
-**Legacy compatibility:** `cc_ufcs_register(...)` is a legacy compatibility helper for direct UFCS-only registration. New code should prefer `cc_type_register(...)` so UFCS and lifecycle hooks share one registration model.
+`cc_ufcs_register(...)` is the direct UFCS-only helper. `cc_type_register(...)` is the general registration form and may define UFCS together with lifecycle hooks.
 
 This same contract applies to standard-library families such as channels, files, strings, arenas, vectors, maps, optionals, and results. Family-specific naming and lowering remain library policy rather than compiler policy; shared erased-core machinery is permitted so long as the family contract is preserved.
 
@@ -5968,7 +5968,7 @@ Concurrent-C supports two kinds of generic parameters:
 - **Type parameters:** `T`, `K`, `V`, etc.
 - **Comptime value parameters:** compile-time integers/bools/etc used for sizes/layout.
 
-**Generic function (target source model):**
+**Generic function example:**
 
 ```c
 void swap<T>(T* a, T* b) {
@@ -5978,7 +5978,7 @@ void swap<T>(T* a, T* b) {
 }
 ```
 
-**Generic type (struct/enum, target source model):**
+**Generic type example (struct/enum):**
 
 ```c
 enum Option<T> { None, Some(T) }
@@ -6006,7 +6006,7 @@ generic_param  := ident
 - A type parameter is an identifier with no prefix: `T`.
 - A value parameter is introduced with `comptime <type> <name>`: `comptime int N`.
 
-**Status note:** The current implementation robustly supports built-in monomorphized families (`Vec<T>`, `Map<K,V>`, `T?`, `T!>(E)`, channels) via lowering and mangling. Full user-defined generic declarations as shown above remain a future direction.
+Built-in generic families such as `Vec<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channels follow the monomorphization model in this chapter.
 
 **Rule:** A `comptime` value parameter is always a compile-time constant and may be used in:
 - array lengths `T[N]`
@@ -6017,7 +6017,7 @@ generic_param  := ident
 
 ### 10.2 Instantiation & Monomorphization (Normative)
 
-Built-in generic families are implemented today via compile-time monomorphization, and future user-defined generics are intended to follow the same model.
+Generic instantiation uses compile-time monomorphization.
 
 **Rule (instantiation):** A generic declaration produces no code by itself. Code is generated only when the program forms an instantiation by calling the function or naming the type with concrete arguments.
 
@@ -6046,8 +6046,6 @@ Built-in generic families are implemented today via compile-time monomorphizatio
 ```c
 swap(&a, &b);     // infers T from a/b pointer types
 ```
-
-**Status note:** In the current implementation, inference is primarily exercised through built-in generic families and their constructors/helpers. The general rule above is the target rule for future user-defined generics.
 
 **Rule (explicit instantiation):** The caller may specify generic arguments explicitly:
 
@@ -6085,8 +6083,6 @@ void copy<T>(T[:] dst, T[:] src) {
 
 **Rule:** Only the taken branch is type-checked; untaken branches are discarded.
 
-**Status note:** This section describes the intended generic specialization model. Built-in monomorphized families may use equivalent implementation techniques internally before full user-defined generics land.
-
 ---
 
 ### 10.5 Ownership and Moves in Generic Code
@@ -6120,7 +6116,7 @@ Intentionally omitted in v1.0:
 - Specialization by overload sets (only `@comptime if` specialization is supported)
 - Runtime reflection over type `T`
 
-**Rule:** Built-in generic families (`Task<T>`, `Mutex<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channels parameterized by element type) already follow the monomorphization model described above, even where their current implementation uses lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
+**Rule:** Built-in generic families (`Task<T>`, `Mutex<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
 
 ---
 
@@ -7521,14 +7517,6 @@ The following patterns emerged but remain deferred:
 **MuxConn abstraction:** HTTP/2 and gRPC multiplex many independent streams over one TCP/TLS connection. A future `MuxConn` may wrap a Duplex, accept per-stream Duplex + stream_arena, and integrate with `server_loop`. Today, `Duplex` assumes 1:1 connection-to-stream; protocol layers (HTTP/2, gRPC) implement multiplexing above it.
 
 **Errdefer / conditional defer:** Go idiom for "defer cleanup only on error path". Useful for partial upgrades (WebSocket handshake cleanup). Deferred pending further language design.
-
-**Typed lifecycle declarations:** A future lifecycle design may introduce declaration-oriented ownership syntax on top of the same cleanup substrate as `@defer`. The intended semantics are:
-
-- `@create` means typed birth: construct or acquire a value using the declared type as the lifecycle key.
-- `@destroy` means auto-register cleanup on the same machinery as `@defer`. For types with destroy hooks, the call-site `@destroy { ... }` body runs first, then the type's `pre_destroy`, then the type's `destroy`.
-- `@detach` means do not auto-register cleanup; lifecycle becomes manual from that point onward.
-
-This note is semantic direction only. Exact syntax, registration API, and diagnostics remain deferred.
 
 ---
 

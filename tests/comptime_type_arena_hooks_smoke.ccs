@@ -3,7 +3,7 @@
 
 static int g_destroyed = 0;
 static int g_pre_destroyed = 0;
-static int g_body_before_pre = 0;
+static int g_pre_before_body = 0;
 
 static size_t arena_avail(CCArena* arena) {
     return cc_arena_remaining(arena);
@@ -12,7 +12,7 @@ static size_t arena_avail(CCArena* arena) {
 static void mark_arena_pre_destroy(CCArena* arena) {
     if (arena) {
         g_pre_destroyed += 1;
-        if (g_destroyed == 1) g_body_before_pre = 1;
+        if (g_destroyed == 0) g_pre_before_body = 1;
     }
 }
 
@@ -46,7 +46,7 @@ int main(void) {
 
     if (g_destroyed != 1) return 4;
     if (g_pre_destroyed != 1) return 7;
-    if (g_body_before_pre != 1) return 8;
+    if (g_pre_before_body != 1) return 8;
 
     {
         char backing[64];
