@@ -116,8 +116,8 @@ This approach:
 
 **CRITICAL**: The `cccn` refactor does NOT add new TCC patches. We reuse the existing minimal hooks.
 
-TCC modifications are kept in `third_party/tcc/` as a submodule with local commits.
-Patches are exported to `third_party/tcc-patches/` for documentation/backup.
+TCC stays pinned to a fetchable upstream commit in `third_party/tcc/`.
+CC-specific hook changes live in `third_party/tcc-patches/` and are applied during the TCC build workflow.
 
 ### Existing TCC Hooks (reused by cccn)
 

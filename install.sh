@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install ccc via Homebrew from this repo.
-# Run from repo root (after cloning with submodules, or we will init tcc).
+# Run from repo root (after cloning with submodules, or we will init required ones).
 set -e
 
 cd "$(dirname "$0")"
@@ -10,9 +10,10 @@ if [ ! -f Formula/ccc.rb ]; then
   exit 1
 fi
 
-if [ ! -d third_party/tcc/.git ] || [ ! -f third_party/tcc/libtcc.c ]; then
-  echo "Initializing third_party/tcc submodule..."
-  git submodule update --init third_party/tcc
+if [ ! -d third_party/tcc/.git ] || [ ! -f third_party/tcc/libtcc.c ] || \
+   [ ! -d third_party/liblfds/.git ] || [ ! -f third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h ]; then
+  echo "Initializing required submodules..."
+  git submodule update --init third_party/tcc third_party/liblfds
 fi
 
 brew install --formula Formula/ccc.rb

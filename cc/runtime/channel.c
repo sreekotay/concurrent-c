@@ -14,6 +14,11 @@
 #include <ccc/cc_channel.cch>
 
 /* liblfds lock-free data structures */
+#if defined(__APPLE__) && defined(__MACH__)
+#define LFDS711_PAL_OPERATING_SYSTEM
+#define LFDS711_PAL_OS_STRING "Darwin"
+#define LFDS711_PAL_ASSERT(expression) do { if (!(expression)) LFDS711_MISC_DELIBERATELY_CRASH; } while (0)
+#endif
 #include "../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h"
 
 /* Include liblfds source files for bounded MPMC queue */
