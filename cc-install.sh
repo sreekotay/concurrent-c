@@ -4,11 +4,40 @@
 # - Otherwise, clone into $PWD/concurrent-c (or $CC_REPO_DIR) first.
 set -e
 
+die() {
+  echo "Error: $1" >&2
+  exit 1
+}
+
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Error: required command not found: $1" >&2
-    exit 1
+    die "required command not found: $1"
   fi
+}
+
+check_prefix_writable() {
+  target="$1"
+
+  if [ -d "$target" ]; then
+    test -w "$target" && return 0
+  else
+    parent="$(dirname "$target")"
+    while [ ! -d "$parent" ] && [ "$parent" != "/" ]; do
+      parent="$(dirname "$parent")"
+    done
+    test -w "$parent" && return 0
+  fi
+
+  cat >&2 <<EOF
+Error: install prefix is not writable: $target
+
+Try one of:
+  PREFIX="\$HOME/.local" ./cc-install.sh
+  PREFIX="/opt/ccc" ./cc-install.sh
+
+Or rerun with elevated privileges if you really want a system-wide install.
+EOF
+  exit 1
 }
 
 need_cmd git
@@ -27,8 +56,7 @@ else
   if [ -d "$ROOT_DIR/.git" ]; then
     echo "Using existing concurrent-c checkout in $ROOT_DIR"
   elif [ -e "$ROOT_DIR" ]; then
-    echo "Error: target exists and is not a concurrent-c checkout: $ROOT_DIR" >&2
-    exit 1
+    die "target exists and is not a concurrent-c checkout: $ROOT_DIR"
   else
     echo "Cloning concurrent-c into $ROOT_DIR..."
     git clone "$CC_REPO_URL" "$ROOT_DIR"
@@ -36,6 +64,8 @@ else
 fi
 
 cd "$ROOT_DIR"
+
+check_prefix_writable "$PREFIX"
 
 echo "Initializing required submodules..."
 git submodule sync -- third_party/tcc third_party/liblfds >/dev/null 2>&1 || true

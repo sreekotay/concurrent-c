@@ -21,6 +21,9 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <spawn.h>
+#if defined(__APPLE__)
+#include <AvailabilityMacros.h>
+#endif
 extern char **environ;  /* For posix_spawn with inherited environment */
 #endif
 
@@ -271,7 +274,13 @@ CCResult_CCProcess_CCIoError cc_process_spawn(const CCProcessConfig* config) {
     if (config->cwd) {
         /* posix_spawn doesn't support chdir directly, so we use chdir file action
          * Note: posix_spawn_file_actions_addchdir_np is non-portable (macOS/glibc 2.29+) */
-#if defined(__APPLE__) || (defined(__GLIBC__) && __GLIBC__ >= 2 && __GLIBC_MINOR__ >= 29)
+#if defined(__APPLE__)
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+        posix_spawn_file_actions_addchdir(&file_actions, config->cwd);
+#else
+        posix_spawn_file_actions_addchdir_np(&file_actions, config->cwd);
+#endif
+#elif defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 29))
         posix_spawn_file_actions_addchdir_np(&file_actions, config->cwd);
 #else
         /* Fallback: can't change directory with posix_spawn on older systems.
