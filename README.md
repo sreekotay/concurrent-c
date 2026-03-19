@@ -313,7 +313,7 @@ Override:
 
 ### Updating TCC (patch workflow)
 
-We keep CC’s TCC modifications as a patch applied on top of a pinned upstream commit:
+We keep CC’s TCC modifications in a fetchable forked `third_party/tcc` history and snapshot that delta as a patch against a mirrored upstream base:
 
 - Patch file: `third_party/tcc-patches/0001-cc-ext-hooks.patch`
 - Apply patches (idempotent): `make tcc-patch-apply`

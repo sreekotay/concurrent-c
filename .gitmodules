@@ -1,6 +1,6 @@
 [submodule "third_party/tcc"]
 	path = third_party/tcc
-	url = https://github.com/TinyCC/tinycc.git
+	url = https://github.com/sreekotay/tinycc.git
 	branch = mob
 [submodule "third_party/liblfds"]
 	path = third_party/liblfds

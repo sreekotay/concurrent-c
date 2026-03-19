@@ -41,13 +41,15 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 |------|---------|
 | `Makefile` | Adds `-DCONFIG_CC_EXT` when `CONFIG_cc_ext=yes` |
 | `tcc.h` | AST node types, TCCState extensions, new tokens |
-| `tcc.c` | CC output type flag |
+| `cc_ast_record.h` | AST recording helpers and node metadata capture |
 | `libtcc.c` | `cc_tcc_parse_to_ast()` API, include path setup |
 | `tccgen.c` | Statement/expression parsing extensions, better error messages |
 | `tccpp.c` | `=>` arrow token lexing |
 
 ## Upstream Compatibility
 
-- Base: TCC `origin/mob` branch
+- Submodule source: `https://github.com/sreekotay/tinycc.git`
+- Pinned CC branch: `mob`
+- Upstream baseline for patch regen: `origin/upstream-mob`
 - Extensions are isolated behind `CONFIG_CC_EXT`
 - Goal: keep changes minimal and easy to rebase
