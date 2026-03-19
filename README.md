@@ -114,22 +114,22 @@ The compiler auto-detects its include/runtime paths from the binary location. Yo
 CC_HOME=/opt/ccc ccc run myfile.ccs
 ```
 
-#### Install with `install.sh`
+#### Install with `cc-install.sh`
 
-`install.sh` works in two modes:
+`cc-install.sh` works in two modes:
 - If you run it from the repo root, it uses the current checkout.
 - If you run it anywhere else, it clones into `$PWD/concurrent-c` first and installs from there.
 
 Examples:
 ```bash
 # From an existing checkout
-./install.sh
+./cc-install.sh
 
 # From any other directory (using a copied/downloaded script)
-PREFIX=/opt/ccc sh ./install.sh
+PREFIX=/opt/ccc sh ./cc-install.sh
 
 # Override clone destination
-CC_REPO_DIR="$HOME/Documents/code/ccc" sh ./install.sh
+CC_REPO_DIR="$HOME/Documents/code/ccc" sh ./cc-install.sh
 ```
 
 The script initializes the required `third_party/tcc` and `third_party/liblfds` submodules, applies the TCC patch, builds TinyCC, builds `ccc`, and runs `make install`.
