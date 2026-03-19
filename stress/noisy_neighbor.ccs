@@ -78,7 +78,7 @@ int main(void) {
         cc_sleep_ms(TEST_DURATION_SEC * 1000);
 
         printf("\nStopping test...\n");
-        nursery_cancel();
+        __cc_nursery137->cancel();
     
     }
 
