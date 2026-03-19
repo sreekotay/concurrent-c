@@ -24,9 +24,12 @@ int main(void) {
     CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
     CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery117 = @create(NULL) @destroy;
+        if (!__cc_nursery117) abort();
+
         // Fiber 1: waits on rx1, sends to tx3
-        spawn(() => [rx1, tx3] {
+        __cc_nursery117->spawn(() => [rx1, tx3] {
             printf("Fiber 1: Waiting for Fiber 2...\n");
             int v;
             (void)chan_recv(rx1, &v);
@@ -35,7 +38,7 @@ int main(void) {
         });
 
         // Fiber 2: waits on rx2, sends to tx1
-        spawn(() => [rx2, tx1] {
+        __cc_nursery117->spawn(() => [rx2, tx1] {
             printf("Fiber 2: Waiting for Fiber 3...\n");
             int v;
             (void)chan_recv(rx2, &v);
@@ -44,13 +47,14 @@ int main(void) {
         });
 
         // Fiber 3: waits on rx3, sends to tx2
-        spawn(() => [rx3, tx2] {
+        __cc_nursery117->spawn(() => [rx3, tx2] {
             printf("Fiber 3: Waiting for Fiber 1...\n");
             int v;
             (void)chan_recv(rx3, &v);
             printf("Fiber 3: Sending to Fiber 2...\n");
             (void)chan_send(tx2, 1);
         });
+    
     }
 
     cc_chan_free(ch1);

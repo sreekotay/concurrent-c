@@ -32,12 +32,16 @@ int main(void) {
     int completed = 0;
     
     for (int iter = 0; iter < ITERATIONS / BATCH_SIZE; iter++) {
-        @nursery {
+        {
+            CCNursery* __cc_nursery124 = @create(NULL) @destroy;
+            if (!__cc_nursery124) abort();
+
             for (int i = 0; i < BATCH_SIZE; i++) {
-                spawn(() => {
+                __cc_nursery124->spawn(() => {
                     /* Trivial work - complete as fast as possible */
                 });
             }
+        
         }
         completed += BATCH_SIZE;
         

@@ -17,13 +17,17 @@ cc_atomic_int g_completed_levels = 0;
 void torture_nesting(int depth) {
     if (depth >= TORTURE_DEPTH) return;
 
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery140 = @create(NULL) @destroy;
+        if (!__cc_nursery140) abort();
+
+        __cc_nursery140->spawn(() => {
             cc_atomic_fetch_add(&g_completed_levels, 1);
         });
 
         // Recurse! Each level is a new nursery scope.
         torture_nesting(depth + 1);
+    
     }
 }
 

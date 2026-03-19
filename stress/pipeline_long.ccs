@@ -34,9 +34,12 @@ int main(void) {
     g_ch3 = cc_channel_pair(&g_tx3, &g_rx3);
     g_ch4 = cc_channel_pair(&g_tx4, &g_rx4);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery144 = @create(NULL) @destroy;
+        if (!__cc_nursery144) abort();
+
         /* Producer */
-        spawn(() => {
+        __cc_nursery144->spawn(() => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 (void)chan_send(g_tx0, i);
             }
@@ -44,7 +47,7 @@ int main(void) {
         });
 
         /* Stage 1 */
-        spawn(() => {
+        __cc_nursery144->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx0, &v))) {
                 (void)chan_send(g_tx1, v + 1);
@@ -53,7 +56,7 @@ int main(void) {
         });
 
         /* Stage 2 */
-        spawn(() => {
+        __cc_nursery144->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx1, &v))) {
                 (void)chan_send(g_tx2, v + 1);
@@ -62,7 +65,7 @@ int main(void) {
         });
 
         /* Stage 3 */
-        spawn(() => {
+        __cc_nursery144->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx2, &v))) {
                 (void)chan_send(g_tx3, v + 1);
@@ -71,7 +74,7 @@ int main(void) {
         });
 
         /* Stage 4 */
-        spawn(() => {
+        __cc_nursery144->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx3, &v))) {
                 (void)chan_send(g_tx4, v + 1);
@@ -80,13 +83,14 @@ int main(void) {
         });
 
         /* Consumer */
-        spawn(() => {
+        __cc_nursery144->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(g_rx4, &v))) {
                 cc_atomic_fetch_add(&g_output_count, 1);
                 cc_atomic_fetch_add(&g_output_sum, v);
             }
         });
+    
     }
 
     cc_chan_free(g_ch0);

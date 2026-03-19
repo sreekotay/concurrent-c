@@ -26,25 +26,29 @@ int main(void) {
         int[~ <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
-        @nursery {
+        {
+            CCNursery* __cc_nursery9 = @create(NULL) @destroy;
+            if (!__cc_nursery9) abort();
+
             for (int i = 0; i < WAITERS; i++) {
-                spawn(() => [rx] {
+                __cc_nursery9->spawn(() => [rx] {
                     int out = 0;
                     int rc = cc_chan_recv(rx.raw, &out, sizeof(int));
                     if (rc == EPIPE) cc_atomic_fetch_add(&g_closed, 1);
                     else cc_atomic_fetch_add(&g_errors, 1);
                 });
             }
-            spawn(() => [tx] {
+            __cc_nursery9->spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
                 tx.close();
                 tx.close();
             });
-            spawn(() => [tx] {
+            __cc_nursery9->spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
             });
+        
         }
 
         tx.close();

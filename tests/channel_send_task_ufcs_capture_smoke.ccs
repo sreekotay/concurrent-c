@@ -7,8 +7,15 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     int ok = 1;
 
-    @nursery {
-        @closing(tx) {
+    {
+        CCNursery* __cc_nursery23 = @create(NULL) @destroy;
+        if (!__cc_nursery23) abort();
+
+        {
+            CCNursery* __cc_nursery24 = @create(NULL) @destroy;
+            if (!__cc_nursery24) abort();
+            (void)__cc_nursery24->close_on(tx);
+
             CCNursery* producer = @create(NULL, () => [tx] {
                 int value = 2;
                 tx.send_task(() => [value] {
@@ -20,7 +27,9 @@ int main(void) {
             if (!producer) {
                 ok = 0;
             }
+        
         }
+    
     }
 
     cc_chan_free(ch);

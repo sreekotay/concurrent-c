@@ -42,13 +42,17 @@ void racer_work(int racer_id) {
 int main(void) {
     printf("deadline_race: %d racers with varying deadlines\n", NUM_RACERS);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery119 = @create(NULL) @destroy;
+        if (!__cc_nursery119) abort();
+
         for (int i = 0; i < NUM_RACERS; i++) {
             int racer_id = i;
-            spawn(() => {
+            __cc_nursery119->spawn(() => {
                 racer_work(racer_id);
             });
         }
+    
     }
 
     int completed = cc_atomic_load(&g_completed);

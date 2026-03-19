@@ -15,12 +15,16 @@ cc_atomic_int g_counter = 0;
 int main(void) {
     printf("spawn_storm: spawning %d tasks\n", NUM_TASKS);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery147 = @create(NULL) @destroy;
+        if (!__cc_nursery147) abort();
+
         for (int i = 0; i < NUM_TASKS; i++) {
-            spawn(() => {
+            __cc_nursery147->spawn(() => {
                 cc_atomic_fetch_add(&g_counter, 1);
             });
         }
+    
     }
 
     int final = cc_atomic_load(&g_counter);

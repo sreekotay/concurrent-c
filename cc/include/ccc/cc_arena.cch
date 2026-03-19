@@ -426,6 +426,8 @@ typedef struct {
 } CCSliceArray;
 #endif
 
+#include <ccc/cc_type.cch>
+
 static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
                                        CCSlice method,
                                        CCSlice mode,
@@ -454,6 +456,16 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
     }
     return cc_slice_empty();
 }
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCArena", (CCTypeHooks){
+        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_init"),
+        .destroy = cc_type_destroy_call("cc_arena_destroy"),
+        .ufcs = cc_arena_lower_c,
+    });
+}
+#endif
 /* Non-atomic versions for per-fiber/per-thread exclusive arenas.
    Use when no other thread will touch the arena concurrently. */
 #define cc_arena_alloc_T_count_local(T, arena, count) \

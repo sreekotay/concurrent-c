@@ -28,7 +28,10 @@ const char* g_urls[] = {
 static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
     /* Each task gets its own arena backed by stack memory */
     char buf[32 * 1024];
-    @arena_init(buf, sizeof(buf)) {
+    {
+        CCArena __cc_arena13 = @create(buf, sizeof(buf)) @destroy;
+        if (!__cc_arena13.base) abort();
+        CCArena* arena = &__cc_arena13;
         CCHttpErrorInfo err = {0};
         CCHttpResponse resp = cc_http_get(arena, g_urls[idx], strlen(g_urls[idx]), &err);
 
@@ -41,6 +44,7 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
             status_p[idx] = -1;
             printf("[%d] %s -> ERROR %d\n", idx, g_urls[idx], err.code);
         }
+    
     }
 }
 
@@ -53,13 +57,17 @@ int main(void) {
     int* status_p = status;
     size_t* body_len_p = body_len;
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery103 = @create(NULL) @destroy;
+        if (!__cc_nursery103) abort();
+
         for (int i = 0; i < NUM_URLS; i++) {
             int idx = i;  /* capture copy */
-            spawn(() => {
+            __cc_nursery103->spawn(() => {
                 fetch_one(idx, status_p, body_len_p);
             });
         }
+    
     }
 
     /* All requests complete - summarize */

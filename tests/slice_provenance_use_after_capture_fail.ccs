@@ -5,10 +5,14 @@ int main(void) {
     int* p = (int*)malloc(sizeof(int) * 2);
     p[0] = 3; p[1] = 4;
     CCSlice s = cc_slice_from_parts(p, 2, cc_slice_make_id(3, true, false, false), 2);
-    @nursery {
-        spawn (() => {
+    {
+        CCNursery* __cc_nursery83 = @create(NULL) @destroy;
+        if (!__cc_nursery83) abort();
+
+        __cc_nursery83->spawn (() => {
             (void)s.len;
         });
+    
     }
     // ERROR: moved into closure capture above
     return (int)s.len;

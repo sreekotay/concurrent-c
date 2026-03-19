@@ -25,9 +25,12 @@ int main(void) {
     int[~ <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery142 = @create(NULL) @destroy;
+        if (!__cc_nursery142) abort();
+
         /* Receiver */
-        spawn(() => {
+        __cc_nursery142->spawn(() => {
             int v = 0;
             while (cc_io_avail(chan_recv(rx, &v))) {
                 cc_atomic_fetch_add(&g_received, 1);
@@ -35,16 +38,22 @@ int main(void) {
         });
 
         /* Senders */
-        @closing(tx) {
+        {
+            CCNursery* __cc_nursery143 = @create(NULL) @destroy;
+            if (!__cc_nursery143) abort();
+            (void)__cc_nursery143->close_on(tx);
+
             for (int s = 0; s < SENDERS; s++) {
                 int n = MSGS_PER_SENDER;
-                spawn(() => [n] {
+                __cc_nursery143->spawn(() => [n] {
                     for (int i = 0; i < n; i++) {
                         (void)chan_send(tx, i);
                     }
                 });
             }
+        
         }
+    
     }
 
     cc_chan_free(ch);

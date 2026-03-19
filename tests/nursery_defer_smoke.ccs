@@ -1,3 +1,4 @@
+#include <ccc/cc_nursery.cch>
 // Smoke test: ensure patched TCC parser can consume @nursery and @defer constructs.
 
 void worker(int n) {
@@ -6,8 +7,12 @@ void worker(int n) {
 
 void main() {
     @defer cleanup: { int x = 0; (void)x; };
-    @nursery {
-        spawn (worker(1));
+    {
+        CCNursery* __cc_nursery71 = @create(NULL) @destroy;
+        if (!__cc_nursery71) abort();
+
+        __cc_nursery71->spawn(() => { worker(1); });
+    
     }
 }
 

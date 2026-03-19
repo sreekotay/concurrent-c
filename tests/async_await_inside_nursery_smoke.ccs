@@ -8,10 +8,14 @@ int g = 0;
 
 @async int f(void) {
     g = 0;
-    @nursery {
+    {
+        CCNursery* __cc_nursery1 = @create(NULL) @destroy;
+        if (!__cc_nursery1) abort();
+
         int x = await noop(7);
         g = x;
-        spawn(() => { g = g + 1; });
+        __cc_nursery1->spawn(() => { g = g + 1; });
+    
     }
     return g;
 }

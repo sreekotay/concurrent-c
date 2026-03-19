@@ -1,0 +1,24 @@
+#include <ccc/std/prelude.cch>
+
+static int g_runs = 0;
+
+int main(void) {
+    CCNursery* n = @create(NULL) @detach;
+    if (!n) return 1;
+
+    if (n->spawn(() => {
+        g_runs += 1;
+    }) != 0) {
+        cc_nursery_free(n);
+        return 2;
+    }
+
+    if (n->wait() != 0) {
+        cc_nursery_free(n);
+        return 3;
+    }
+
+    cc_nursery_free(n);
+    if (g_runs != 1) return 4;
+    return 0;
+}

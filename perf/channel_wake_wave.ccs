@@ -109,9 +109,19 @@ int main(void) {
         int[~1 >] tx2; int[~1 <] rx2; CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
         int[~1 >] tx3; int[~1 <] rx3; CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
-        @closing(tx0, tx1, tx2, tx3) {
-            @nursery {
-                spawn(() => [rx0] {
+        {
+            CCNursery* __cc_nursery160 = @create(NULL) @destroy;
+            if (!__cc_nursery160) abort();
+            (void)__cc_nursery160->close_on(tx0);
+            (void)__cc_nursery160->close_on(tx1);
+            (void)__cc_nursery160->close_on(tx2);
+            (void)__cc_nursery160->close_on(tx3);
+
+            {
+                CCNursery* __cc_nursery159 = @create(NULL) @destroy;
+                if (!__cc_nursery159) abort();
+
+                __cc_nursery159->spawn(() => [rx0] {
                     int v = -1;
                     cc__fiber_set_worker_affinity(0);
                     g_start_worker[0] = cc__sched_current_worker_id();
@@ -122,7 +132,7 @@ int main(void) {
                     g_latency_ns[0] = now_ns() - cc_atomic_load(&g_send_start_ns);
                     cc_atomic_fetch_add(&g_done, 1);
                 });
-                spawn(() => [rx1] {
+                __cc_nursery159->spawn(() => [rx1] {
                     int v = -1;
                     cc__fiber_set_worker_affinity(1);
                     g_start_worker[1] = cc__sched_current_worker_id();
@@ -133,7 +143,7 @@ int main(void) {
                     g_latency_ns[1] = now_ns() - cc_atomic_load(&g_send_start_ns);
                     cc_atomic_fetch_add(&g_done, 1);
                 });
-                spawn(() => [rx2] {
+                __cc_nursery159->spawn(() => [rx2] {
                     int v = -1;
                     cc__fiber_set_worker_affinity(2);
                     g_start_worker[2] = cc__sched_current_worker_id();
@@ -144,7 +154,7 @@ int main(void) {
                     g_latency_ns[2] = now_ns() - cc_atomic_load(&g_send_start_ns);
                     cc_atomic_fetch_add(&g_done, 1);
                 });
-                spawn(() => [rx3] {
+                __cc_nursery159->spawn(() => [rx3] {
                     int v = -1;
                     cc__fiber_set_worker_affinity(3);
                     g_start_worker[3] = cc__sched_current_worker_id();
@@ -172,7 +182,9 @@ int main(void) {
                 while (cc_atomic_load(&g_done) < NUM_WORKERS) {
                     cc_yield();
                 }
+            
             }
+        
         }
 
         cc_chan_free(ch0);

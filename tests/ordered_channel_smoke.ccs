@@ -28,11 +28,16 @@ static int test_legacy_ordered_recv(void) {
     intptr_t values[] = {10, 200, 30, 400, 50};
     int n = sizeof(values) / sizeof(values[0]);
 
-    @closing(tx) {
+    {
+        CCNursery* __cc_nursery73 = @create(NULL) @destroy;
+        if (!__cc_nursery73) abort();
+        (void)__cc_nursery73->close_on(tx);
+
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             cc_channel_send_task(tx, () => [v] compute(v));
         }
+    
     }
 
     void* result;
@@ -65,11 +70,16 @@ static int test_typed_ordered_stmt_form(void) {
     intptr_t values[] = {1, 2, 3, 4, 5};
     int n = sizeof(values) / sizeof(values[0]);
 
-    @closing(tx) {
+    {
+        CCNursery* __cc_nursery74 = @create(NULL) @destroy;
+        if (!__cc_nursery74) abort();
+        (void)__cc_nursery74->close_on(tx);
+
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             cc_channel_send_task(tx, () => [v] compute(v));
         }
+    
     }
 
     intptr_t result;
@@ -100,11 +110,16 @@ static int test_typed_ordered_expr_form(void) {
     intptr_t values[] = {7, 14, 21, 28};
     int n = sizeof(values) / sizeof(values[0]);
 
-    @closing(tx) {
+    {
+        CCNursery* __cc_nursery75 = @create(NULL) @destroy;
+        if (!__cc_nursery75) abort();
+        (void)__cc_nursery75->close_on(tx);
+
         for (int i = 0; i < n; i++) {
             intptr_t v = values[i];
             cc_channel_send_task(tx, () => [v] compute(v));
         }
+    
     }
 
     intptr_t result;
@@ -137,11 +152,16 @@ static int test_ordered_result_payload(void) {
     int expected_is_err[] = {0, 1, 0};
     int n = sizeof(values) / sizeof(values[0]);
 
-    @closing(result_tx) {
+    {
+        CCNursery* __cc_nursery76 = @create(NULL) @destroy;
+        if (!__cc_nursery76) abort();
+        (void)__cc_nursery76->close_on(result_tx);
+
         for (int i = 0; i < n; i++) {
             int v = values[i];
             cc_channel_send_task(result_tx, () => [v] compute_result(v));
         }
+    
     }
 
     int !>(CCIoError) result;

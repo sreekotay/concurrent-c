@@ -9,8 +9,12 @@ int main(void) {
 
     CCClosure2 c = (x, y) => { int* px = (int*)x; int* py = (int*)y; if (px && py) *gp = *px + *py; };
 
-    @nursery {
-        spawn (c, &a, &b);
+    {
+        CCNursery* __cc_nursery87 = @create(NULL) @destroy;
+        if (!__cc_nursery87) abort();
+
+        (void)cc_nursery_spawn_closure2(__cc_nursery87, c, (intptr_t)&a, (intptr_t)&b);
+    
     }
     return (g == 13) ? 0 : 1;
 }

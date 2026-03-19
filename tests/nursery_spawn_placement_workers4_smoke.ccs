@@ -49,10 +49,13 @@ int main(void) {
         }
         cc_atomic_store(&g_ready, 0);
 
-        @nursery {
+        {
+            CCNursery* __cc_nursery72 = @create(NULL) @destroy;
+            if (!__cc_nursery72) abort();
+
             for (int i = 0; i < NUM_SIBLINGS; i++) {
                 int idx = i;
-                spawn(() => [idx] {
+                __cc_nursery72->spawn(() => [idx] {
                     int wid = -1;
                     for (int spin = 0; spin < 10000 && wid < 0; spin++) {
                         wid = cc__sched_current_worker_id();
@@ -67,6 +70,7 @@ int main(void) {
                     }
                 });
             }
+        
         }
 
         int unique = count_unique_workers(g_worker_ids, NUM_SIBLINGS);

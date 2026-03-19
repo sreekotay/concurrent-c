@@ -6,7 +6,10 @@ int main(void) {
     // User-provided stack buffer
     char buffer[1024];
     
-    @arena_init(buffer, sizeof(buffer)) {
+    {
+        CCArena __cc_arena4 = @create(buffer, sizeof(buffer)) @destroy;
+        if (!__cc_arena4.base) abort();
+        CCArena* arena = &__cc_arena4;
         // Allocate from the arena using type-safe macro
         int* x = cc_arena_alloc_T(int, arena);
         assert(x != NULL);
@@ -19,6 +22,7 @@ int main(void) {
         
         printf("arena_user_buffer_smoke: allocated at offset %ld\n", 
                (long)((char*)x - buffer));
+    
     }
     
     printf("arena_user_buffer_smoke: OK\n");

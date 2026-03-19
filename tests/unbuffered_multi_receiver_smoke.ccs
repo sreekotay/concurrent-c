@@ -14,21 +14,26 @@ int main(void) {
     int[~ <] rx;
     cc_channel_pair(&tx, &rx);
 
-    @closing(tx) {
+    {
+        CCNursery* __cc_nursery94 = @create(NULL) @destroy;
+        if (!__cc_nursery94) abort();
+        (void)__cc_nursery94->close_on(tx);
+
         /* 1 sender, sends 20 messages */
-        spawn(() => [tx] {
+        __cc_nursery94->spawn(() => [tx] {
             for (int i = 0; i < 20; i++) tx.send(i);
         });
         
         /* 2 receivers, each receives 10 messages */
-        spawn(() => [rx] {
+        __cc_nursery94->spawn(() => [rx] {
             int v;
             for (int i = 0; i < 10; i++) rx.recv(&v);
         });
-        spawn(() => [rx] {
+        __cc_nursery94->spawn(() => [rx] {
             int v;
             for (int i = 0; i < 10; i++) rx.recv(&v);
         });
+    
     }
 
     printf("unbuffered_multi_receiver_smoke: PASS\n");

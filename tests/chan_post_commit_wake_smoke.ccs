@@ -23,16 +23,20 @@ int main(void) {
         int[~ <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
-        @nursery {
-            spawn(() => [rx] {
+        {
+            CCNursery* __cc_nursery14 = @create(NULL) @destroy;
+            if (!__cc_nursery14) abort();
+
+            __cc_nursery14->spawn(() => [rx] {
                 int v = -1;
                 rx.recv(&v);
                 if (v != 11) cc_atomic_fetch_add(&g_errors, 1);
             });
-            spawn(() => [tx] {
+            __cc_nursery14->spawn(() => [tx] {
                 cc_sleep_ms(1); /* Ensure recv likely commits parked state. */
                 tx.send(11);
             });
+        
         }
 
         tx.close();

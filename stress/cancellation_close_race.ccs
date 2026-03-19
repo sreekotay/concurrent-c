@@ -68,19 +68,23 @@ int test_close_while_recv(void) {
         /* Note: We need TWO spawns - one to recv, one to close.
            The closing(tx) clause runs AFTER children, which would deadlock.
            Instead, have a sibling spawn close the channel. */
-        @nursery {
-            spawn(() => {
+        {
+            CCNursery* __cc_nursery110 = @create(NULL) @destroy;
+            if (!__cc_nursery110) abort();
+
+            __cc_nursery110->spawn(() => {
                 int val;
                 if (!cc_io_avail(chan_recv(rx, &val))) {
                     cc_atomic_fetch_add(&g_close_errors, 1);
                 }
             });
             
-            spawn(() => {
+            __cc_nursery110->spawn(() => {
                 /* Small delay to ensure recv is waiting */
                 for (int i = 0; i < 1000; i++) { }
                 chan_close(tx);
             });
+        
         }
         
         cc_chan_free(ch);
@@ -100,11 +104,15 @@ int test_concurrent_close(void) {
         int[~4 <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx);
         
-        @nursery {
-            spawn(() => { chan_close(tx); });
-            spawn(() => { chan_close(tx); });
-            spawn(() => { chan_close(tx); });
-            spawn(() => { chan_close(tx); });
+        {
+            CCNursery* __cc_nursery111 = @create(NULL) @destroy;
+            if (!__cc_nursery111) abort();
+
+            __cc_nursery111->spawn(() => { chan_close(tx); });
+            __cc_nursery111->spawn(() => { chan_close(tx); });
+            __cc_nursery111->spawn(() => { chan_close(tx); });
+            __cc_nursery111->spawn(() => { chan_close(tx); });
+        
         }
         
         cc_chan_free(ch);

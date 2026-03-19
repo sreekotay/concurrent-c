@@ -14,10 +14,14 @@ int main(void) {
     
     for (int i = 0; i < ITERATIONS; i++) {
         int x = i;
-        @nursery {
-            spawn (() => [x] {
+        {
+            CCNursery* __cc_nursery130 = @create(NULL) @destroy;
+            if (!__cc_nursery130) abort();
+
+            __cc_nursery130->spawn (() => [x] {
                 cc_atomic_store(&g, x);
             });
+        
         }
         
         if ((i + 1) % 100 == 0) {

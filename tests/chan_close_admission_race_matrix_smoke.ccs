@@ -28,17 +28,21 @@ static void run_case_buffered(void) {
         int[~1 <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
-        @nursery {
-            spawn(() => [tx] {
+        {
+            CCNursery* __cc_nursery7 = @create(NULL) @destroy;
+            if (!__cc_nursery7) abort();
+
+            __cc_nursery7->spawn(() => [tx] {
                 int v = 1;
                 CCDeadline d = cc_deadline_after_ms(40);
                 int rc = cc_chan_deadline_send(tx.raw, &v, sizeof(int), &d);
                 if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) cc_atomic_fetch_add(&g_errors, 1);
             });
-            spawn(() => [tx] {
+            __cc_nursery7->spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
             });
+        
         }
 
         /* After close: drain-at-most-one admitted item, then closed/non-success. */
@@ -82,17 +86,21 @@ static void run_case_unbuffered(void) {
         int[~ <] rx;
         CCChan* ch = cc_channel_pair(&tx, &rx);
 
-        @nursery {
-            spawn(() => [tx] {
+        {
+            CCNursery* __cc_nursery8 = @create(NULL) @destroy;
+            if (!__cc_nursery8) abort();
+
+            __cc_nursery8->spawn(() => [tx] {
                 int v = 3;
                 CCDeadline d = cc_deadline_after_ms(40);
                 int rc = cc_chan_deadline_send(tx.raw, &v, sizeof(int), &d);
                 if (!(rc == 0 || rc == EPIPE || rc == ETIMEDOUT)) cc_atomic_fetch_add(&g_errors, 1);
             });
-            spawn(() => [tx] {
+            __cc_nursery8->spawn(() => [tx] {
                 cc_sleep_ms(1);
                 tx.close();
             });
+        
         }
 
         {

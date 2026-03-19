@@ -42,11 +42,15 @@ int main(void) {
     CCChanTx tx2 = tx2_h;
     CCChanRx rx2 = rx2_h;
 
-    @nursery {
-        spawn(() => [tx1] { producer(tx1, ITERS); });
-        spawn(() => [rx1] { consumer(rx1, ITERS); });
-        spawn(() => [tx2] { producer(tx2, ITERS); });
-        spawn(() => [rx2] { consumer(rx2, ITERS); });
+    {
+        CCNursery* __cc_nursery18 = @create(NULL) @destroy;
+        if (!__cc_nursery18) abort();
+
+        __cc_nursery18->spawn(() => [tx1] { producer(tx1, ITERS); });
+        __cc_nursery18->spawn(() => [rx1] { consumer(rx1, ITERS); });
+        __cc_nursery18->spawn(() => [tx2] { producer(tx2, ITERS); });
+        __cc_nursery18->spawn(() => [rx2] { consumer(rx2, ITERS); });
+    
     }
 
     return cc_atomic_load(&g_errors) == 0 ? 0 : 1;

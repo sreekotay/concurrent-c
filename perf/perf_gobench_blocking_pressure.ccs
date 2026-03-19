@@ -77,9 +77,12 @@ int main(void) {
     print_sched_stats("start");
 
     double start = time_now_ms();
-    @nursery {
+    {
+        CCNursery* __cc_nursery169 = @create(NULL) @destroy;
+        if (!__cc_nursery169) abort();
+
         for (int i = 0; i < tasks; i++) {
-            spawn(() => {
+            __cc_nursery169->spawn(() => {
                 int v = 0;
                 int err = cc_chan_recv(work, &v, sizeof(v));
                 if (err == 0) {
@@ -88,7 +91,7 @@ int main(void) {
             });
         }
         for (int i = 0; i < blocking_tasks; i++) {
-            spawn(() => [blocking_sleep_us] {
+            __cc_nursery169->spawn(() => [blocking_sleep_us] {
                 blocking_sleep(blocking_sleep_us);
                 int v = 1;
                 cc_chan_send(block_done, &v, sizeof(v));
@@ -119,6 +122,7 @@ int main(void) {
         }
         printf("  released=%d/%d blocking_done=%d/%d\n",
                ok, releases, bdone, blocking_tasks);
+    
     }
     double elapsed = time_now_ms() - start;
 

@@ -11,16 +11,24 @@
 void test_nursery_then_arena(void) {
     printf("test_nursery_then_arena:\n");
     
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery60 = @create(NULL) @destroy;
+        if (!__cc_nursery60) abort();
+
+        __cc_nursery60->spawn(() => {
             printf("  spawned task\n");
         });
+    
     }
     
-    @arena(a, kilobytes(4)) {
+    {
+        CCArena __cc_arena7 = @create(kilobytes(4)) @destroy;
+        if (!__cc_arena7.base) abort();
+        CCArena* a = &__cc_arena7;
         int* p = cc_arena_alloc_T(int, a);
         *p = 42;
         printf("  arena allocated: %d\n", *p);
+    
     }
     
     printf("  done\n");
@@ -29,16 +37,24 @@ void test_nursery_then_arena(void) {
 void test_arena_then_nursery(void) {
     printf("test_arena_then_nursery:\n");
     
-    @arena(a, kilobytes(4)) {
+    {
+        CCArena __cc_arena8 = @create(kilobytes(4)) @destroy;
+        if (!__cc_arena8.base) abort();
+        CCArena* a = &__cc_arena8;
         int* p = cc_arena_alloc_T(int, a);
         *p = 123;
         printf("  arena allocated: %d\n", *p);
+    
     }
     
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery61 = @create(NULL) @destroy;
+        if (!__cc_nursery61) abort();
+
+        __cc_nursery61->spawn(() => {
             printf("  spawned task\n");
         });
+    
     }
     
     printf("  done\n");
@@ -47,26 +63,42 @@ void test_arena_then_nursery(void) {
 void test_interleaved(void) {
     printf("test_interleaved:\n");
     
-    @arena(a1, kilobytes(4)) {
+    {
+        CCArena __cc_arena9 = @create(kilobytes(4)) @destroy;
+        if (!__cc_arena9.base) abort();
+        CCArena* a1 = &__cc_arena9;
         printf("  arena a1 active\n");
         
-        @nursery {
-            spawn(() => {
+        {
+            CCNursery* __cc_nursery62 = @create(NULL) @destroy;
+            if (!__cc_nursery62) abort();
+
+            __cc_nursery62->spawn(() => {
                 printf("  spawned inside arena\n");
             });
+        
         }
         
         printf("  nursery inside arena done\n");
+    
     }
     
-    @nursery {
-        @arena(a2, kilobytes(4)) {
+    {
+        CCNursery* __cc_nursery63 = @create(NULL) @destroy;
+        if (!__cc_nursery63) abort();
+
+        {
+            CCArena __cc_arena10 = @create(kilobytes(4)) @destroy;
+            if (!__cc_arena10.base) abort();
+            CCArena* a2 = &__cc_arena10;
             printf("  arena inside nursery\n");
+        
         }
         
-        spawn(() => {
+        __cc_nursery63->spawn(() => {
             printf("  spawned after arena\n");
         });
+    
     }
     
     printf("  done\n");

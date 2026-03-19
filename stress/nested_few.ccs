@@ -13,14 +13,22 @@ int main(void) {
     
     for (int i = 0; i < ITERATIONS; i++) {
         int x = i;
-        @nursery {
-            spawn (() => [x] {
-                @nursery {
-                    spawn (() => [x] {
+        {
+            CCNursery* __cc_nursery131 = @create(NULL) @destroy;
+            if (!__cc_nursery131) abort();
+
+            __cc_nursery131->spawn (() => [x] {
+                {
+                    CCNursery* __cc_nursery132 = @create(NULL) @destroy;
+                    if (!__cc_nursery132) abort();
+
+                    __cc_nursery132->spawn (() => [x] {
                         cc_atomic_store(&g, x);
                     });
+                
                 }
             });
+        
         }
     }
     

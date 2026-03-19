@@ -56,9 +56,12 @@ int main(void) {
     printf("=================================================================\n\n");
 
     double start = time_now_ms();
-    @nursery {
+    {
+        CCNursery* __cc_nursery152 = @create(NULL) @destroy;
+        if (!__cc_nursery152) abort();
+
         for (int i = 0; i < NUM_FIBERS; i++) {
-            spawn(() => { 
+            __cc_nursery152->spawn(() => { 
                 CCArena local_arena;
                 void* local_buf = malloc(FIBER_ARENA_SIZE);
                 cc_arena_init(&local_arena, local_buf, FIBER_ARENA_SIZE);
@@ -66,6 +69,7 @@ int main(void) {
                 free(local_buf);
             });
         }
+    
     }
     double duration = time_now_ms() - start;
 

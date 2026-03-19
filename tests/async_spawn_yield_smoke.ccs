@@ -8,27 +8,31 @@
 int g_results[4] = {0};
 
 int main(void) {
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery5 = @create(NULL) @destroy;
+        if (!__cc_nursery5) abort();
+
+        __cc_nursery5->spawn(() => {
             int sum = 0;
             for (int i = 0; i < 100; i++) sum += i;
             g_results[0] = sum;
         });
-        spawn(() => {
+        __cc_nursery5->spawn(() => {
             int sum = 0;
             for (int i = 0; i < 200; i++) sum += i;
             g_results[1] = sum;
         });
-        spawn(() => {
+        __cc_nursery5->spawn(() => {
             int sum = 0;
             for (int i = 0; i < 300; i++) sum += i;
             g_results[2] = sum;
         });
-        spawn(() => {
+        __cc_nursery5->spawn(() => {
             int sum = 0;
             for (int i = 0; i < 400; i++) sum += i;
             g_results[3] = sum;
         });
+    
     }
     
     /* 0+1+...+99 = 4950, 0+1+...+199 = 19900, etc */

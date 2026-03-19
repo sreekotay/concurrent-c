@@ -39,9 +39,14 @@ int main(void) {
     g_got = 0;
 
     // Spec: closing(ch) must close after all children exit (i.e., after joining).
-    @closing(ch_tx) {
-        spawn(() => { producer(ch_tx); });
-        spawn(() => { consumer(ch_rx); });
+    {
+        CCNursery* __cc_nursery68 = @create(NULL) @destroy;
+        if (!__cc_nursery68) abort();
+        (void)__cc_nursery68->close_on(ch_tx);
+
+        __cc_nursery68->spawn(() => { producer(ch_tx); });
+        __cc_nursery68->spawn(() => { consumer(ch_rx); });
+    
     }
 
     // If closing happened before join, producer/consumer likely saw EPIPE.

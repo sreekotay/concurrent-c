@@ -28,10 +28,14 @@ void do_work() {
 void imbalanced_producer() {
     // This function runs in a fiber on ONE worker.
     // We use a nursery here to spawn all sub-tasks.
-    @nursery {
+    {
+        CCNursery* __cc_nursery179 = @create(NULL) @destroy;
+        if (!__cc_nursery179) abort();
+
         for (int i = 0; i < NUM_TASKS; i++) {
-            spawn(() => { do_work(); });
+            __cc_nursery179->spawn(() => { do_work(); });
         }
+    
     }
 }
 
@@ -45,10 +49,14 @@ int main(void) {
     // 1. Balanced Spawn: Distribute from main
     cc_atomic_store(&g_completed, 0);
     double start = time_now_ms();
-    @nursery {
+    {
+        CCNursery* __cc_nursery180 = @create(NULL) @destroy;
+        if (!__cc_nursery180) abort();
+
         for (int i = 0; i < NUM_TASKS; i++) {
-            spawn(() => { do_work(); });
+            __cc_nursery180->spawn(() => { do_work(); });
         }
+    
     }
     double balanced_ms = time_now_ms() - start;
     printf("Balanced Spawn (from main):   %8.2f ms\n", balanced_ms);
@@ -56,8 +64,12 @@ int main(void) {
     // 2. Imbalanced Spawn: All tasks spawned from inside ONE fiber
     cc_atomic_store(&g_completed, 0);
     start = time_now_ms();
-    @nursery {
-        spawn(() => { imbalanced_producer(); });
+    {
+        CCNursery* __cc_nursery181 = @create(NULL) @destroy;
+        if (!__cc_nursery181) abort();
+
+        __cc_nursery181->spawn(() => { imbalanced_producer(); });
+    
     }
     double imbalanced_ms = time_now_ms() - start;
     printf("Imbalanced Spawn (from fiber): %8.2f ms\n", imbalanced_ms);

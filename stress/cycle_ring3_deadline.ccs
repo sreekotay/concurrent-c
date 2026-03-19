@@ -38,10 +38,14 @@ int main(void) {
         CCChan* ch2 = cc_channel_pair(&tx2, &rx2);
         CCChan* ch3 = cc_channel_pair(&tx3, &rx3);
 
-        @nursery {
-            spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });
-            spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); });
-            spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); });
+        {
+            CCNursery* __cc_nursery118 = @create(NULL) @destroy;
+            if (!__cc_nursery118) abort();
+
+            __cc_nursery118->spawn(() => [tx2, rx1] { cycle_actor(tx2, rx1, 1); });
+            __cc_nursery118->spawn(() => [tx3, rx2] { cycle_actor(tx3, rx2, 2); });
+            __cc_nursery118->spawn(() => [tx1, rx3] { cycle_actor(tx1, rx3, 3); });
+        
         }
 
         cc_chan_free(ch1);

@@ -56,9 +56,12 @@ int main(void) {
     printf("Workers: 16 | CPU Hogs: %d\n", NUM_HOGS);
     printf("=================================================================\n\n");
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery137 = @create(NULL) @destroy;
+        if (!__cc_nursery137) abort();
+
         // 1. Start the heartbeat
-        spawn(() => { heartbeat_fiber(); });
+        __cc_nursery137->spawn(() => { heartbeat_fiber(); });
 
         // 2. Wait for healthy start
         cc_sleep_ms(500);
@@ -68,7 +71,7 @@ int main(void) {
         printf("\n!!! Unleashing CPU Hogs !!!\n");
         for (int i = 0; i < NUM_HOGS; i++) {
             int id = i;
-            spawn(() => [id] { hog_fiber(id); });
+            __cc_nursery137->spawn(() => [id] { hog_fiber(id); });
         }
 
         // 4. Monitor for duration
@@ -76,6 +79,7 @@ int main(void) {
 
         printf("\nStopping test...\n");
         nursery_cancel();
+    
     }
 
     int final_beats = atomic_load(&g_heartbeats);

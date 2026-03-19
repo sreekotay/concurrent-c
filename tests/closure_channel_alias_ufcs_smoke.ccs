@@ -13,15 +13,20 @@ int main(void) {
 
     assert(ch != NULL);
 
-    @closing(tx_h) {
-        spawn(() => [tx] {
+    {
+        CCNursery* __cc_nursery38 = @create(NULL) @destroy;
+        if (!__cc_nursery38) abort();
+        (void)__cc_nursery38->close_on(tx_h);
+
+        __cc_nursery38->spawn(() => [tx] {
             tx.send(1);
         });
-        spawn(() => [rx, got_ptr] {
+        __cc_nursery38->spawn(() => [rx, got_ptr] {
             int v = 0;
             rx.recv(&v);
             *got_ptr = v;
         });
+    
     }
 
     assert(got == 1);

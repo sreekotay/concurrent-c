@@ -6,11 +6,15 @@ int g = 0;
 int main(void) {
     int buf[4] = {1, 2, 3, 4};
     CCSlice s = cc_slice_from_buffer(buf, 4);
-    @nursery {
-        spawn (() => {
+    {
+        CCNursery* __cc_nursery32 = @create(NULL) @destroy;
+        if (!__cc_nursery32) abort();
+
+        __cc_nursery32->spawn (() => {
             int *p = (int*)s.ptr;
             if (p && s.len == 4 && p[0] == 1) g = 1;
         });
+    
     }
     return (g == 1) ? 0 : 1;
 }

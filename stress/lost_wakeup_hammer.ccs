@@ -62,19 +62,22 @@ int main(void) {
     int[~ >] tx1 = tx1_h; int[~ >] tx2 = tx2_h;
     int[~ <] rx1 = rx1_h; int[~ <] rx2 = rx2_h;
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery129 = @create(NULL) @destroy;
+        if (!__cc_nursery129) abort();
+
         // 1. Start Selectors
         for (int i = 0; i < NUM_FIBERS; i++) {
             CCChanRx r1 = rx1;
             CCChanRx r2 = rx2;
-            spawn(() => [r1, r2] { selector_fiber(r1, r2); });
+            __cc_nursery129->spawn(() => [r1, r2] { selector_fiber(r1, r2); });
         }
 
         // 2. Start Senders
         for (int i = 0; i < NUM_FIBERS; i++) {
             CCChanTx t1 = tx1;
             CCChanTx t2 = tx2;
-            spawn(() => [t1, t2] { sender_fiber(t1, t2); });
+            __cc_nursery129->spawn(() => [t1, t2] { sender_fiber(t1, t2); });
         }
         
         // 3. Monitor progress with a timeout
@@ -99,6 +102,7 @@ int main(void) {
                 stalled_iters = 0;
             }
         }
+    
     }
 
     printf("\n\nRESULT: PASS - All %d operations completed without a hang.\n", TOTAL_OPS);

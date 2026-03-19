@@ -23,13 +23,17 @@ static double time_now_ms(void) {
 void recursive_nursery(int depth) {
     if (depth >= TORTURE_DEPTH) return;
 
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery141 = @create(NULL) @destroy;
+        if (!__cc_nursery141) abort();
+
+        __cc_nursery141->spawn(() => {
             cc_atomic_fetch_add(&g_count, 1);
         });
         
         // Recurse deeper
         recursive_nursery(depth + 1);
+    
     }
 }
 

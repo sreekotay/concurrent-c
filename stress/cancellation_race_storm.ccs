@@ -54,20 +54,24 @@ int main(void) {
             return 1;
         }
 
-        @nursery {
+        {
+            CCNursery* __cc_nursery112 = @create(NULL) @destroy;
+            if (!__cc_nursery112) abort();
+
             // 1. Start spawners that hammer the target nursery
             for (int s = 0; s < NUM_SPAWNERS; s++) {
-                spawn(() => [n] { spawner_fiber(n); });
+                __cc_nursery112->spawn(() => [n] { spawner_fiber(n); });
             }
 
             // 2. Wait just a tiny bit to get the storm going
             cc_sleep_ms(1);
 
             // 3. Trigger cancellation on the target nursery
-            spawn(() => [n] { 
+            __cc_nursery112->spawn(() => [n] { 
                 cc_sleep_ms(2);
                 cc_nursery_cancel(n); 
             });
+        
         }
 
         // 4. Wait for the target nursery to finish and clean up

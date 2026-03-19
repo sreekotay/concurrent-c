@@ -7,15 +7,25 @@ int main(void) {
     int[~1 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    @nursery {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery25 = @create(NULL) @destroy;
+        if (!__cc_nursery25) abort();
+
+        __cc_nursery25->spawn(() => {
             int v = 0;
             if (cc_io_avail(chan_recv(rx, &v))) g_value = v;
         });
 
-        @closing(tx) spawn(() => {
+        {
+            CCNursery* __cc_nursery26 = @create(NULL) @destroy;
+            if (!__cc_nursery26) abort();
+            (void)__cc_nursery26->close_on(tx);
+
+            __cc_nursery26->spawn(() => {
             (void)chan_send(tx, 42);
         });
+        }
+    
     }
 
     cc_chan_free(ch);

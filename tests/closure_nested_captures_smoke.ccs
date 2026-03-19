@@ -5,19 +5,27 @@
 int main(void) {
     int outer = 100;
     
-    @nursery {
-        spawn(() => [outer] {
+    {
+        CCNursery* __cc_nursery47 = @create(NULL) @destroy;
+        if (!__cc_nursery47) abort();
+
+        __cc_nursery47->spawn(() => [outer] {
             int middle = 50;
             
             // Inner nursery with nested closure
-            @nursery {
-                spawn(() => [outer, middle] {
+            {
+                CCNursery* __cc_nursery48 = @create(NULL) @destroy;
+                if (!__cc_nursery48) abort();
+
+                __cc_nursery48->spawn(() => [outer, middle] {
                     int inner = 25;
                     printf("outer=%d middle=%d inner=%d\n", outer, middle, inner);
                     printf("sum=%d\n", outer + middle + inner);
                 });
+            
             }
         });
+    
     }
     
     return 0;

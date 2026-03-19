@@ -27,13 +27,16 @@ int main(void) {
 
         int selected = 0;
         int got = 0;
-        @nursery {
-            spawn(() => {
+        {
+            CCNursery* __cc_nursery16 = @create(NULL) @destroy;
+            if (!__cc_nursery16) abort();
+
+            __cc_nursery16->spawn(() => {
                 int v = 1;
                 CCDeadline d = cc_deadline_after_ms(10);
                 (void)cc_chan_deadline_send(tx_data.raw, &v, sizeof(int), &d);
             });
-            spawn(() => {
+            __cc_nursery16->spawn(() => {
                 tx_close.close();
             });
 
@@ -47,6 +50,7 @@ int main(void) {
                     }
                 }
             }
+        
         }
 
         if (selected == 1) {

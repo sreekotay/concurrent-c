@@ -60,7 +60,11 @@ static void* noop_task(void* arg) {
 static double bench_empty_nursery_once(void) {
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
-        @nursery {
+        {
+            CCNursery* __cc_nursery170 = @create(NULL) @destroy;
+            if (!__cc_nursery170) abort();
+
+        
         }
     }
     return time_now_ms() - start;
@@ -69,12 +73,16 @@ static double bench_empty_nursery_once(void) {
 static double bench_nursery_spawn_once(void) {
     double start = time_now_ms();
     for (int batch = 0; batch < total_batches(); batch++) {
-        @nursery {
+        {
+            CCNursery* __cc_nursery171 = @create(NULL) @destroy;
+            if (!__cc_nursery171) abort();
+
             for (int i = 0; i < g_batch_size; i++) {
-                spawn(() => {
+                __cc_nursery171->spawn(() => {
                     (void)noop_task(NULL);
                 });
             }
+        
         }
     }
     return time_now_ms() - start;

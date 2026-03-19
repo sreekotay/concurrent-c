@@ -26,4 +26,3 @@ int main(void) {
     chan_free(ch_tx);
     return (received_sum == 6) ? 0 : 1;
 }
-

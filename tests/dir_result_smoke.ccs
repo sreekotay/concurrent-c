@@ -3,7 +3,10 @@
 #include <stdio.h>
 
 int main(void) {
-    @arena(a, kilobytes(64)) {
+    {
+        CCArena __cc_arena6 = @create(kilobytes(64)) @destroy;
+        if (!__cc_arena6.base) abort();
+        CCArena* a = &__cc_arena6;
         // Test 1: open directory (pointer result, use cc_unwrap_as)
         CCDirIter*!>(CCIoError) iter_res = cc_dir_open(a, ".");
         if (cc_is_err(iter_res)) {
@@ -35,6 +38,7 @@ int main(void) {
         
         cc_dir_close(iter);
         printf("Dir test passed, found %d entries\n", count);
+    
     }
     return 0;
 }

@@ -23,12 +23,16 @@ int main(void) {
     cc_atomic_int* counter_ptr = &counter;
 
     for (int batch = 0; batch < ITERATIONS / 1000; batch++) {
-        @nursery {
+        {
+            CCNursery* __cc_nursery173 = @create(NULL) @destroy;
+            if (!__cc_nursery173) abort();
+
             for (int i = 0; i < 1000; i++) {
-                spawn(() => [counter_ptr] {
+                __cc_nursery173->spawn(() => [counter_ptr] {
                     cc_atomic_fetch_add(counter_ptr, 1);
                 });
             }
+        
         }
     }
 

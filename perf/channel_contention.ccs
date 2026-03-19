@@ -145,14 +145,18 @@ static double run_single_pair(int trial) {
     trace_worker_state_reset();
     trace_trial_marker("baseline", trial, "begin", -1.0);
     double start = time_now_ms();
-    @closing(tx) {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery155 = @create(NULL) @destroy;
+        if (!__cc_nursery155) abort();
+        (void)__cc_nursery155->close_on(tx);
+
+        __cc_nursery155->spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
                 trace_worker_sample(0, i);
                 tx.send(i ^ (i >> 16));
             }
         });
-        spawn(() => {
+        __cc_nursery155->spawn(() => {
             int v;
             long long local_sum = 0;
             for (int i = 0; i < ITERATIONS; i++) {
@@ -162,6 +166,7 @@ static double run_single_pair(int trial) {
             }
             sum += local_sum;
         });
+    
     }
     g_sink += sum;
     double elapsed = time_now_ms() - start;
@@ -183,14 +188,19 @@ static double run_two_pairs(int trial) {
     trace_worker_state_reset();
     trace_trial_marker("contention", trial, "begin", -1.0);
     double start = time_now_ms();
-    @closing(tx1, tx2) {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery156 = @create(NULL) @destroy;
+        if (!__cc_nursery156) abort();
+        (void)__cc_nursery156->close_on(tx1);
+        (void)__cc_nursery156->close_on(tx2);
+
+        __cc_nursery156->spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
                 trace_worker_sample(0, i);
                 tx1.send(i ^ (i >> 16));
             }
         });
-        spawn(() => {
+        __cc_nursery156->spawn(() => {
             int v;
             long long local_sum = 0;
             for (int i = 0; i < ITERATIONS; i++) {
@@ -200,13 +210,13 @@ static double run_two_pairs(int trial) {
             }
             sum1 += local_sum;
         });
-        spawn(() => {
+        __cc_nursery156->spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
                 trace_worker_sample(2, i);
                 tx2.send(i ^ (i >> 16));
             }
         });
-        spawn(() => {
+        __cc_nursery156->spawn(() => {
             int v;
             long long local_sum = 0;
             for (int i = 0; i < ITERATIONS; i++) {
@@ -216,6 +226,7 @@ static double run_two_pairs(int trial) {
             }
             sum2 += local_sum;
         });
+    
     }
     g_sink += sum1 + sum2;
     double elapsed = time_now_ms() - start;

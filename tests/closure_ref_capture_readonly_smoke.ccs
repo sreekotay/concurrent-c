@@ -6,13 +6,17 @@ int main(void) {
     int x = 42;
     int result = 0;
     
-    @nursery {
+    {
+        CCNursery* __cc_nursery52 = @create(NULL) @destroy;
+        if (!__cc_nursery52) abort();
+
         /* Reference capture: closure shares x with outer scope.
            Read-only access is allowed. */
-        spawn(() => [&x] {
+        __cc_nursery52->spawn(() => [&x] {
             printf("ref captured x=%d\n", x);
             /* Reading x is fine */
         });
+    
     }
     
     result = (x == 42) ? 0 : 1;

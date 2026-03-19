@@ -44,9 +44,15 @@ int main(void) {
     g_err = 0;
     g_sum = 0;
 
-    @closing(ch1_tx, ch2_tx) {
-        spawn(() => { producer(ch1_tx, ch2_tx); });
-        spawn(() => { consumer(ch1_rx, ch2_rx); });
+    {
+        CCNursery* __cc_nursery69 = @create(NULL) @destroy;
+        if (!__cc_nursery69) abort();
+        (void)__cc_nursery69->close_on(ch1_tx);
+        (void)__cc_nursery69->close_on(ch2_tx);
+
+        __cc_nursery69->spawn(() => { producer(ch1_tx, ch2_tx); });
+        __cc_nursery69->spawn(() => { consumer(ch1_rx, ch2_rx); });
+    
     }
 
     if (g_err != 0) return 10;

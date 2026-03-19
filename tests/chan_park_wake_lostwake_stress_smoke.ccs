@@ -35,18 +35,22 @@ int main(void) {
             int[~ >] tx;
             int[~ <] rx;
             CCChan* ch = cc_channel_pair(&tx, &rx);
-            @nursery {
-                spawn(() => [rx] {
+            {
+                CCNursery* __cc_nursery11 = @create(NULL) @destroy;
+                if (!__cc_nursery11) abort();
+
+                __cc_nursery11->spawn(() => [rx] {
                     int v = -1;
                     int rc = cc_chan_recv(rx.raw, &v, sizeof(int));
                     if (rc == 0 && v == 7) cc_atomic_fetch_add(&g_data, 1);
                     else cc_atomic_fetch_add(&g_errors, 1);
                 });
-                spawn(() => [tx] {
+                __cc_nursery11->spawn(() => [tx] {
                     int v = 7;
                     int rc = cc_chan_send(tx.raw, &v, sizeof(int));
                     if (rc != 0) cc_atomic_fetch_add(&g_errors, 1);
                 });
+            
             }
             tx.close();
             cc_chan_free(ch);
@@ -57,19 +61,23 @@ int main(void) {
             int[~ >] tx;
             int[~ <] rx;
             CCChan* ch = cc_channel_pair(&tx, &rx);
-            @nursery {
-                spawn(() => [rx] {
+            {
+                CCNursery* __cc_nursery12 = @create(NULL) @destroy;
+                if (!__cc_nursery12) abort();
+
+                __cc_nursery12->spawn(() => [rx] {
                     int v = -1;
                     int rc = cc_chan_recv(rx.raw, &v, sizeof(int));
                     if (rc == 0 && v == 11) cc_atomic_fetch_add(&g_data, 1);
                     else cc_atomic_fetch_add(&g_errors, 1);
                 });
-                spawn(() => [tx] {
+                __cc_nursery12->spawn(() => [tx] {
                     cc_sleep_ms(1);
                     int v = 11;
                     int rc = cc_chan_send(tx.raw, &v, sizeof(int));
                     if (rc != 0) cc_atomic_fetch_add(&g_errors, 1);
                 });
+            
             }
             tx.close();
             cc_chan_free(ch);
@@ -80,24 +88,28 @@ int main(void) {
             int[~ >] tx;
             int[~ <] rx;
             CCChan* ch = cc_channel_pair(&tx, &rx);
-            @nursery {
-                spawn(() => [rx] {
+            {
+                CCNursery* __cc_nursery13 = @create(NULL) @destroy;
+                if (!__cc_nursery13) abort();
+
+                __cc_nursery13->spawn(() => [rx] {
                     int v = -1;
                     int rc = cc_chan_recv(rx.raw, &v, sizeof(int));
                     if (rc == 0) cc_atomic_fetch_add(&g_data, 1);
                     else if (rc == EPIPE) cc_atomic_fetch_add(&g_closed, 1);
                     else cc_atomic_fetch_add(&g_errors, 1);
                 });
-                spawn(() => [tx] {
+                __cc_nursery13->spawn(() => [tx] {
                     cc_sleep_ms(1);
                     int v = 23;
                     int rc = cc_chan_send(tx.raw, &v, sizeof(int));
                     if (!(rc == 0 || rc == EPIPE)) cc_atomic_fetch_add(&g_errors, 1);
                 });
-                spawn(() => [tx] {
+                __cc_nursery13->spawn(() => [tx] {
                     cc_sleep_ms(1);
                     tx.close();
                 });
+            
             }
             tx.close();
             cc_chan_free(ch);

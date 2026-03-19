@@ -10,6 +10,8 @@
 #include <ccc/cc_sched.cch>
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_chan_handle.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_ufcs.cch>
 
 typedef struct CCChan CCChan;
 
@@ -70,6 +72,55 @@ int cc_nursery_wait(CCNursery* n);
 
 // Destroy nursery and free task handles (tasks must be finished).
 void cc_nursery_free(CCNursery* n);
+
+static inline void cc_nursery_destroy(CCNursery* n) {
+    if (!n) return;
+    (void)cc_nursery_wait(n);
+    cc_nursery_free(n);
+}
+
+static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
+                                         CCSlice method,
+                                         CCSlice mode,
+                                         CCSliceArray argv,
+                                         CCSliceArray arg_types,
+                                         CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    if (cc_ufcs_slice_eq_cstr(method, "spawn")) {
+        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_spawn_closure0");
+    }
+    if (cc_ufcs_slice_eq_cstr(method, "wait")) {
+        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_wait");
+    }
+    if (cc_ufcs_slice_eq_cstr(method, "cancel")) {
+        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_cancel");
+    }
+    if (cc_ufcs_slice_eq_cstr(method, "destroy")) {
+        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_destroy");
+    }
+    if (cc_ufcs_slice_eq_cstr(method, "close_on")) {
+        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_add_closing_tx");
+    }
+    return cc_ufcs_concat2(arena, cc_slice_from_buffer((void*)"cc_nursery_", sizeof("cc_nursery_") - 1), method);
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCNursery*", (CCTypeHooks){
+        .create = cc_type_create_overloads("cc_nursery_create_child", "cc_nursery_spawn_child_closure0"),
+        .destroy = cc_type_destroy_call("cc_nursery_destroy"),
+        .ufcs = cc_nursery_lower_c,
+    });
+    (void)cc_type_register("CCNursery", (CCTypeHooks){
+        .create = cc_type_create_overloads("cc_nursery_create_child", "cc_nursery_spawn_child_closure0"),
+        .destroy = cc_type_destroy_call("cc_nursery_destroy"),
+        .ufcs = cc_nursery_lower_c,
+    });
+}
+#endif
 
 #endif // CC_NURSERY_H
 

@@ -39,9 +39,12 @@ int main(void) {
     for (int sample = 1; sample <= NUM_SAMPLES; sample++) {
         cc_atomic_store(&g_count, 0);
         
-        @nursery {
+        {
+            CCNursery* __cc_nursery178 = @create(NULL) @destroy;
+            if (!__cc_nursery178) abort();
+
             for (int i = 0; i < NUM_WAITERS; i++) {
-                spawn(() => [rx] { waiter(rx); });
+                __cc_nursery178->spawn(() => [rx] { waiter(rx); });
             }
             
             // Give them time to all block
@@ -62,6 +65,7 @@ int main(void) {
             for (int i = 1; i < NUM_WAITERS; i++) {
                 (void)chan_send(tx, i);
             }
+        
         }
     }
 

@@ -9,31 +9,43 @@
 #include <stdio.h>
 
 void test_apostrophe_in_comment(int level) {
-    @nursery {
-        spawn(() => [level] {  /* Test comment with apostrophe - it's fine */
+    {
+        CCNursery* __cc_nursery39 = @create(NULL) @destroy;
+        if (!__cc_nursery39) abort();
+
+        __cc_nursery39->spawn(() => [level] {  /* Test comment with apostrophe - it's fine */
             printf("level=%d\n", level);
         });
+    
     }
 }
 
 void test_multiple_comments(int x) {
-    @nursery {
-        spawn(() => [x] {
+    {
+        CCNursery* __cc_nursery40 = @create(NULL) @destroy;
+        if (!__cc_nursery40) abort();
+
+        __cc_nursery40->spawn(() => [x] {
             /* It's a test */
             int y = x;
             /* Don't forget this */
             printf("y=%d\n", y);
             /* That's all folks */
         });
+    
     }
 }
 
 void test_line_comment_apostrophe(int val) {
-    @nursery {
-        spawn(() => [val] {
+    {
+        CCNursery* __cc_nursery41 = @create(NULL) @destroy;
+        if (!__cc_nursery41) abort();
+
+        __cc_nursery41->spawn(() => [val] {
             // This comment's apostrophe shouldn't break parsing
             printf("val=%d\n", val);
         });
+    
     }
 }
 

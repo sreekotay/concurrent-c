@@ -22,9 +22,12 @@ int main(void) {
     int[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    @nursery {
+    {
+        CCNursery* __cc_nursery98 = @create(NULL) @destroy;
+        if (!__cc_nursery98) abort();
+
         /* Consumer: lives in outer nursery, drains until close. */
-        spawn(() => {
+        __cc_nursery98->spawn(() => {
             int v;
             while (cc_io_avail(chan_recv(rx, &v))) {
                 printf("recv: %d\n", v);
@@ -34,16 +37,22 @@ int main(void) {
         });
 
         /* Producers: live in inner nursery with closing(ch). */
-        @closing(tx) {
-            spawn(() => {
+        {
+            CCNursery* __cc_nursery99 = @create(NULL) @destroy;
+            if (!__cc_nursery99) abort();
+            (void)__cc_nursery99->close_on(tx);
+
+            __cc_nursery99->spawn(() => {
                 for (int i = 1; i <= 3; i++) {
                     (void)chan_send(tx, i);
                     printf("send: %d\n", i);
                 }
             });
+        
         }
         /* Inner nursery done -> producers finished -> ch closed. */
         /* Consumer sees close, drains remaining, exits. */
+    
     }
     /* Outer nursery done -> consumer finished -> all clean. */
 

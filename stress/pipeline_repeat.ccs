@@ -31,33 +31,37 @@ int main(void) {
         cc_atomic_store(&g_out_count, 0);
         cc_atomic_store(&g_out_sum, 0);
 
-        @nursery {
-            spawn(() => {
+        {
+            CCNursery* __cc_nursery145 = @create(NULL) @destroy;
+            if (!__cc_nursery145) abort();
+
+            __cc_nursery145->spawn(() => {
                 for (int i = 0; i < NUM_ITEMS; i++) chan_send(g_tx0, i);
                 chan_close(g_tx0);
             });
-            spawn(() => {
+            __cc_nursery145->spawn(() => {
                 int v; while (cc_io_avail(chan_recv(g_rx0, &v))) chan_send(g_tx1, v+1);
                 chan_close(g_tx1);
             });
-            spawn(() => {
+            __cc_nursery145->spawn(() => {
                 int v; while (cc_io_avail(chan_recv(g_rx1, &v))) chan_send(g_tx2, v+1);
                 chan_close(g_tx2);
             });
-            spawn(() => {
+            __cc_nursery145->spawn(() => {
                 int v; while (cc_io_avail(chan_recv(g_rx2, &v))) chan_send(g_tx3, v+1);
                 chan_close(g_tx3);
             });
-            spawn(() => {
+            __cc_nursery145->spawn(() => {
                 int v; while (cc_io_avail(chan_recv(g_rx3, &v))) chan_send(g_tx4, v+1);
                 chan_close(g_tx4);
             });
-            spawn(() => {
+            __cc_nursery145->spawn(() => {
                 int v; while (cc_io_avail(chan_recv(g_rx4, &v))) {
                     cc_atomic_fetch_add(&g_out_count, 1);
                     cc_atomic_fetch_add(&g_out_sum, v);
                 }
             });
+        
         }
 
         int expected = (NUM_ITEMS*(NUM_ITEMS-1))/2 + 4*NUM_ITEMS;

@@ -18,11 +18,15 @@ int main(void) {
         int x = i;
         int y = i * 2;
         
-        @nursery {
-            spawn(() => [x, y] {
+        {
+            CCNursery* __cc_nursery93 = @create(NULL) @destroy;
+            if (!__cc_nursery93) abort();
+
+            __cc_nursery93->spawn(() => [x, y] {
                 /* Read captured values - this should synchronize properly */
                 cc_atomic_fetch_add(&sum, x + y);
             });
+        
         }
     }
     

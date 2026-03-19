@@ -22,21 +22,26 @@ static void bench_buffered(void) {
     
     double start = time_now_ms();
 
-    @closing(tx) {
+    {
+        CCNursery* __cc_nursery167 = @create(NULL) @destroy;
+        if (!__cc_nursery167) abort();
+        (void)__cc_nursery167->close_on(tx);
+
         /* Producer */
-        spawn(() => {
+        __cc_nursery167->spawn(() => {
             for (int i = 0; i < ITERATIONS; i++) {
                 tx.send(i);
             }
         });
         
         /* Consumer */
-        spawn(() => {
+        __cc_nursery167->spawn(() => {
             int v;
             for (int i = 0; i < ITERATIONS; i++) {
                 rx.recv(&v);
             }
         });
+    
     }
     double elapsed = time_now_ms() - start;
     double ops_per_sec = (ITERATIONS * 2.0) / (elapsed / 1000.0);  /* send + recv */
@@ -54,19 +59,24 @@ static void bench_unbuffered(void) {
     int iterations = ITERATIONS / 10;  /* Unbuffered is slower */
     double start = time_now_ms();
     
-    @closing(tx) {
-        spawn(() => [iterations] {
+    {
+        CCNursery* __cc_nursery168 = @create(NULL) @destroy;
+        if (!__cc_nursery168) abort();
+        (void)__cc_nursery168->close_on(tx);
+
+        __cc_nursery168->spawn(() => [iterations] {
             for (int i = 0; i < iterations; i++) {
                 tx.send(i);
             }
         });
         
-        spawn(() => [iterations] {
+        __cc_nursery168->spawn(() => [iterations] {
             int v;
             for (int i = 0; i < iterations; i++) {
                 rx.recv(&v);
             }
         });
+    
     }
     
     double elapsed = time_now_ms() - start;

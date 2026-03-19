@@ -41,27 +41,32 @@ int test_consumer_outside(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     
     /* Producers inside nursery - channel closed when they all finish */
-    @closing(tx) {
-        spawn(() => {
+    {
+        CCNursery* __cc_nursery146 = @create(NULL) @destroy;
+        if (!__cc_nursery146) abort();
+        (void)__cc_nursery146->close_on(tx);
+
+        __cc_nursery146->spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 0 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        spawn(() => {
+        __cc_nursery146->spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 1 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        spawn(() => {
+        __cc_nursery146->spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 2 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
-        spawn(() => {
+        __cc_nursery146->spawn(() => {
             for (int i = 0; i < ITEMS_PER_PRODUCER; i++) {
                 if (cc_io_avail(chan_send(tx, 3 * 1000 + i))) cc_atomic_fetch_add(&g_sent, 1);
             }
         });
+    
     }
     
     /* Consumer OUTSIDE nursery - drains until closed */

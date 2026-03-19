@@ -16,9 +16,14 @@ int main(void) {
     
     int pass = 0;
     
-    @closing(ping_tx, pong_tx) {
+    {
+        CCNursery* __cc_nursery96 = @create(NULL) @destroy;
+        if (!__cc_nursery96) abort();
+        (void)__cc_nursery96->close_on(ping_tx);
+        (void)__cc_nursery96->close_on(pong_tx);
+
         /* Ping side: send, wait for pong */
-        spawn(() => [ping_tx, pong_rx] {
+        __cc_nursery96->spawn(() => [ping_tx, pong_rx] {
             for (int i = 0; i < 50; i++) {
                 ping_tx.send(i);
                 int v;
@@ -27,7 +32,7 @@ int main(void) {
         });
         
         /* Pong side: wait for ping, reply */
-        spawn(@unsafe () => [ping_rx, pong_tx, &pass] {
+        __cc_nursery96->spawn(@unsafe () => [ping_rx, pong_tx, &pass] {
             int v;
             for (int i = 0; i < 50; i++) {
                 ping_rx.recv(&v);
@@ -35,6 +40,7 @@ int main(void) {
             }
             pass = 1;
         });
+    
     }
     
     if (pass) {
