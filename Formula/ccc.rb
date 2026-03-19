@@ -23,7 +23,10 @@ class Ccc < Formula
     # TCC and liblfds are required submodules for the compiler and runtime.
     system "git", "submodule", "update", "--init", "third_party/tcc", "third_party/liblfds"
     system "./scripts/apply_tcc_patches.sh"
-    system "make", "-C", "third_party/tcc", "-j#{ENV.make_jobs}"
+    cd "third_party/tcc" do
+      system "./configure", "--config-cc_ext"
+      system "make", "-j#{ENV.make_jobs}"
+    end
 
     # Build the compiler (release).
     system "make", "cc", "BUILD=release"
