@@ -444,10 +444,6 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
         if (ownership == CC_CREATE_OWN_DESTROY &&
             (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee)) {
             cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
-            if (destroy_body_s && destroy_body_e > destroy_body_s) {
-                cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
-            }
             if (registered_pre_destroy_callee) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, registered_pre_destroy_callee);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
@@ -458,6 +454,10 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
                     cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
                 }
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+            }
+            if (destroy_body_s && destroy_body_e > destroy_body_s) {
+                cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
             }
             if (registered_destroy_callee) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
