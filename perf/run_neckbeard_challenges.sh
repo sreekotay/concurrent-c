@@ -96,21 +96,20 @@ echo ""
 # 3. Channel Isolation
 echo "[3/5] Channel Isolation Challenge..."
 if [ "$SKIP_CC" -eq 0 ]; then
-    if "$SCRIPT_DIR/compare_contention.sh" > cc_contention_out.txt 2>&1; then
-        CC_INTF=$(extract "DATA_CC_INTERFERENCE" cc_contention_out.txt)
-        PTHREAD_INTF=$(extract "DATA_PTHREAD_INTERFERENCE" cc_contention_out.txt)
-        GO_INTF=$(extract "DATA_GO_INTERFERENCE" cc_contention_out.txt)
+    if "$SCRIPT_DIR/compare_contention_stability.sh" 5 > cc_contention_out.txt 2>&1; then
+        :
     else
-        echo "  [WARN] compare_contention.sh failed (exit $?). Check cc_contention_out.txt for details."
+        echo "  [WARN] compare_contention_stability.sh failed (exit $?). Check cc_contention_out.txt for details."
     fi
 fi
 
-echo "-----------------------------------------------------------------"
-printf "%-20s %-15s\n" "Implementation" "Interference"
-printf "%-20s %-15s\n" "Pthread" "$(val_or_na "${PTHREAD_INTF:+${PTHREAD_INTF}%}")"
-printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "${CC_INTF:+${CC_INTF}%}")"
-printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_INTF")"
-echo "-----------------------------------------------------------------"
+if [ -f cc_contention_out.txt ]; then
+    sed -n '/^min \/ mean \/ max/,$p' cc_contention_out.txt
+else
+    echo "-----------------------------------------------------------------"
+    echo "Channel isolation stability output unavailable."
+    echo "-----------------------------------------------------------------"
+fi
 echo ""
 
 # 4. Noisy Neighbor

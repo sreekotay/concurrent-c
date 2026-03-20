@@ -45,26 +45,38 @@ else
 fi
 
 # 5. Extract results
+PTHREAD_BASE=$(grep "^  Best baseline:" pthread_out.txt | awk '{print $3}')
+PTHREAD_CONT=$(grep "^  Best contention:" pthread_out.txt | awk '{print $3}')
 PTHREAD_INTF=$(grep "^Interference:" pthread_out.txt | awk '{print $2}' | tr -d '%')
+CC_BASE=$(grep "^  Best baseline:" cc_out.txt | awk '{print $3}')
+CC_CONT=$(grep "^  Best contention:" cc_out.txt | awk '{print $3}')
 CC_INTF=$(grep "^Interference:" cc_out.txt | awk '{print $2}' | tr -d '%')
 if [ -f go_out.txt ]; then
+    GO_BASE=$(grep "^  Best baseline:" go_out.txt | awk '{print $3}')
+    GO_CONT=$(grep "^  Best contention:" go_out.txt | awk '{print $3}')
     GO_INTF=$(grep "^Interference:" go_out.txt | awk '{print $2}')
 fi
 
+echo "DATA_PTHREAD_BASELINE_MS: $PTHREAD_BASE"
+echo "DATA_PTHREAD_CONTENTION_MS: $PTHREAD_CONT"
 echo "DATA_PTHREAD_INTERFERENCE: $PTHREAD_INTF"
+echo "DATA_CC_BASELINE_MS: $CC_BASE"
+echo "DATA_CC_CONTENTION_MS: $CC_CONT"
 echo "DATA_CC_INTERFERENCE: $CC_INTF"
 if [ -n "$GO_INTF" ]; then
+    echo "DATA_GO_BASELINE_MS: $GO_BASE"
+    echo "DATA_GO_CONTENTION_MS: $GO_CONT"
     echo "DATA_GO_INTERFERENCE: $GO_INTF"
 fi
 
 echo "================================================================="
 echo "FINAL VERDICT"
 echo "================================================================="
-printf "%-20s %-15s\n" "Implementation" "Interference"
-printf "%-20s %-15s\n" "Pthread (Baseline)" "${PTHREAD_INTF}%"
-printf "%-20s %-15s\n" "Concurrent-C" "${CC_INTF}%"
+printf "%-20s %-14s %-16s %-15s\n" "Implementation" "Baseline (ms)" "Contention (ms)" "Interference"
+printf "%-20s %-14s %-16s %-15s\n" "Pthread (Baseline)" "$PTHREAD_BASE" "$PTHREAD_CONT" "${PTHREAD_INTF}%"
+printf "%-20s %-14s %-16s %-15s\n" "Concurrent-C" "$CC_BASE" "$CC_CONT" "${CC_INTF}%"
 if [ -n "$GO_INTF" ]; then
-    printf "%-20s %-15s\n" "Go" "${GO_INTF}"
+    printf "%-20s %-14s %-16s %-15s\n" "Go" "$GO_BASE" "$GO_CONT" "${GO_INTF}"
 fi
 echo "-----------------------------------------------------------------"
 
