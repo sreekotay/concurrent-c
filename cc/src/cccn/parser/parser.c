@@ -22,7 +22,7 @@
  *   CC_AST_NODE_PARAM = 16 - parameter
  *   CC_AST_NODE_BLOCK = 2  - compound statement
  *   CC_AST_NODE_STMT = 3   - statement (spawn, defer, nursery marker)
- *   CC_AST_NODE_ARENA = 4  - @arena block
+ *   CC_AST_NODE_ARENA = 4  - legacy @arena block
  *   CC_AST_NODE_CALL = 5   - function/method call
  *   CC_AST_NODE_AWAIT = 6  - await expression
  *   CC_AST_NODE_CLOSURE = 9 - closure literal

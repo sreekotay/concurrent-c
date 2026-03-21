@@ -72,7 +72,6 @@ void cc_edit_buffer_dump(const CCEditBuffer* eb);
  *   int cc__collect_closure_edits(const CCASTRoot* ast, CCEditBuffer* eb);
  *   int cc__collect_spawn_edits(const CCASTRoot* ast, CCEditBuffer* eb);
  *   int cc__collect_nursery_edits(const CCASTRoot* ast, CCEditBuffer* eb);
- *   int cc__collect_arena_edits(const CCASTRoot* ast, CCEditBuffer* eb);
  *   int cc__collect_ufcs_edits(const CCASTRoot* ast, CCEditBuffer* eb);
  *   etc.
  *

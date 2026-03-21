@@ -94,7 +94,7 @@ typedef enum {
     
     /* CC-specific statements */
     CCN_STMT_NURSERY,     /* @nursery { ... } */
-    CCN_STMT_ARENA,       /* @arena { ... } */
+    CCN_STMT_ARENA,       /* legacy @arena { ... } */
     CCN_STMT_DEFER,       /* @defer stmt; */
     CCN_STMT_SPAWN,       /* spawn(closure); */
     CCN_STMT_MATCH,       /* @match { case ... } */

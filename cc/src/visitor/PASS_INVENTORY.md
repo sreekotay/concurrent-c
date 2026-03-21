@@ -88,7 +88,6 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
 | # | Pass File | Lines | Transform |
 |---|-----------|-------|-----------|
 | 12 | pass_nursery_spawn_ast.c | 1,071 | spawn/nursery lowering |
-| 13 | pass_arena_ast.c | 505 | @arena prologue/epilogue |
 
 ### Phase 7: Defer (text)
 
@@ -118,14 +117,14 @@ collected from all passes, then applied once (instead of 4 sequential rewrites).
    - Edits collected once, applied once (vs 4 sequential rewrites)
    - Done: 2026-02-01
 
-2. **Merge closure_literals + spawn/nursery/arena** — share one reparse
+2. **Merge closure_literals + spawn/nursery** — share one reparse
    - BLOCKED: closure_literals uses coarse-grained whole-file edit
    - Would require refactoring to fine-grained edits
    - Could save: 1 reparse (3→2)
 
-3. **Merge Phase 6** — spawn/nursery + arena
-   - Already batched, but could be single pass
-   - Saves: 0 reparses
+3. **Refactor Phase 6** — spawn/nursery lowering is now the only remaining pass there
+   - Arena block lowering was retired with the surface syntax
+   - Savings are now from simplification rather than fewer reparses
 
 ### Medium Value (reduces complexity)
 
@@ -179,7 +178,7 @@ surface syntax tokens before TCC sees them. As a result:
 |-----------|---------|--------|
 | `spawn into` validation | Already AST-based via stub-AST `spawn_into` node | ✅ |
 | Nursery nesting checks | Already AST-based via `@nursery` node matching | ✅ |
-| Arena/await interaction check | Already AST-based in pass_arena_ast.c | ✅ |
+| Arena/await interaction check | Retired with `@arena` block syntax removal | ✅ |
 | Result type collection | Only in text form (no AST nodes for `T!>E`) | BLOCKED |
 | Try expr rewriting (P15) | Only in text form (no AST nodes for `try expr`) | BLOCKED |
 | Closure literal lowering (P11) | Partially AST-based; whole-file edit blocks batching | MEDIUM |

@@ -1,4 +1,4 @@
-// Test: @arena_init with user-provided buffer
+// Test: owned arena with user-provided buffer
 #include <ccc/std/prelude.cch>
 #include <assert.h>
 

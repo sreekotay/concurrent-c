@@ -54,15 +54,13 @@ After Phase 2, source is parsed with TCC to get stub-AST.
 
 *Generates additional prototypes and definitions.*
 
-### Phase 6: Structured Concurrency (batched, reparse required)
+### Phase 6: Structured Concurrency (reparse required)
 
 | # | Pass | Transform |
 |---|------|-----------|
-| 13 | spawn | `spawn(...)` → `cc_nursery_spawn*()` |
-| 14 | nursery | `@nursery {...}` → CCNursery create/wait/free |
-| 15 | arena | `@arena(...) {...}` → CCArena prologue/epilogue |
+| 13 | spawn/nursery AST lowering | `spawn(...)` / `@create(...)/wait/free` helpers → runtime calls |
 
-*These three share an EditBuffer - spawn must be inside nursery.*
+*Retired block forms such as `spawn(...)`, `@nursery { ... }`, and `@arena { ... }` now fail in the parser before this phase runs.*
 
 ### Phase 7: Defer (text)
 
@@ -82,7 +80,6 @@ After Phase 2, source is parsed with TCC to get stub-AST.
 
 ```
 with_deadline (4) ──produces @defer──▶ defer (16)
-spawn (13) ──must be inside──▶ nursery (14)
 ```
 
 ## Future Improvements
@@ -97,7 +94,7 @@ spawn (13) ──must be inside──▶ nursery (14)
 2. **Merge related passes** - UFCS passes (1-3, 6), channel passes (10-11)
    - These share common logic but have ordering dependencies
    
-3. **Reduce reparses** - Currently ~5 TCC parses; could potentially reduce to 2-3
+3. **Reduce reparses** - Currently several TCC parses; could potentially reduce further
    - Requires careful dependency analysis between phases
 
 4. **Extract channel code** - ✓ DONE

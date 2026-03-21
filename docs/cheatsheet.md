@@ -23,19 +23,24 @@ ccc build -g file.ccs               # debug build
 #include <ccc/cc_runtime.cch>
 
 // Basic nursery - waits for all spawned tasks
-@nursery {
-    spawn(() => do_work());
-    spawn(() => do_other_work());
+{
+    CCNursery* n = @create(NULL) @destroy;
+    if (!n) return 1;
+    n->spawn(() => do_work());
+    n->spawn(() => do_other_work());
 }
 // Both tasks complete before this line
 
 // Nested nurseries
-@nursery {
-    spawn(() => {
-        @nursery {
-            spawn(subtask1());
-            spawn(subtask2());
-        }
+{
+    CCNursery* outer = @create(NULL) @destroy;
+    if (!outer) return 1;
+    outer->spawn(() => {
+        CCNursery* inner = @create(NULL) @destroy;
+        if (!inner) return 1;
+        inner->spawn(subtask1());
+        inner->spawn(subtask2());
+        return 0;
     });
 }
 ```
@@ -63,16 +68,18 @@ if (chan_recv(rx, &val) != 0) {
     // channel closed
 }
 
-// Iterate until closed (in closing() scope)
-@nursery {
-    spawn([tx]() => {
+// Iterate until closed
+{
+    CCNursery* producer = @create(NULL) @destroy {
+        chan_close(tx);
+    };
+    if (!producer) return 1;
+    producer->spawn([tx]() => {
         for (int i = 0; i < 10; i++) chan_send(tx, i);
     });
-    closing(tx) {
-        int v;
-        while (chan_recv(rx, &v) == 0) {
-            printf("%d\n", v);
-        }
+    int v;
+    while (chan_recv(rx, &v) == 0) {
+        printf("%d\n", v);
     }
 }
 ```
@@ -103,18 +110,22 @@ cc_sleep_ms(100);
 
 ```c
 // Heap-backed arena (recommended)
-@arena(a, kilobytes(4)) {
-    void* buf = cc_arena_alloc(a, 1024, 8);
-    char* str = cc_arena_strdup(a, "hello");
+{
+    CCArena arena = @create(kilobytes(4)) @destroy;
+    if (!arena.base) return 1;
+    void* buf = cc_arena_alloc(&arena, 1024, 8);
+    char* str = cc_arena_strdup(&arena, "hello");
     // auto-freed at scope exit
 }
 
 // Reset arena (reuse memory)
-@arena(a, kilobytes(4)) {
+{
+    CCArena arena = @create(kilobytes(4)) @destroy;
+    if (!arena.base) return 1;
     for (int i = 0; i < 100; i++) {
-        void* tmp = cc_arena_alloc(a, 64, 8);
+        void* tmp = cc_arena_alloc(&arena, 64, 8);
         process(tmp);
-        cc_arena_reset(a);  // reuse for next iteration
+        cc_arena_reset(&arena);  // reuse for next iteration
     }
 }
 ```
@@ -184,18 +195,21 @@ int!>(MyError) caller(void) {
 ## Closures
 
 ```c
+CCNursery* n = @create(NULL) @destroy;
+if (!n) return 1;
+
 // Lambda syntax
-spawn(() => printf("hello\n"));
+n->spawn(() => printf("hello\n"));
 
 // With captures (value by default)
 int x = 42;
-spawn([x]() => printf("x = %d\n", x));
+n->spawn([x]() => printf("x = %d\n", x));
 
 // Reference capture
-spawn([&x]() => { x++; });
+n->spawn([&x]() => { x++; });
 
 // Explicit copy capture
-spawn([=x]() => printf("x = %d\n", x));
+n->spawn([=x]() => printf("x = %d\n", x));
 ```
 
 ---
@@ -204,14 +218,15 @@ spawn([=x]() => printf("x = %d\n", x));
 
 ### Worker Pool
 ```c
-@nursery {
+{
     int[~100 >] jobs_tx;
     int[~100 <] jobs_rx;
     channel_pair(&jobs_tx, &jobs_rx);
 
-    // Spawn workers
+    CCNursery* workers = @create(NULL) @destroy;
+    if (!workers) return 1;
     for (int i = 0; i < 4; i++) {
-        spawn([jobs_rx]() => {
+        workers->spawn([jobs_rx]() => {
             int job;
             while (chan_recv(jobs_rx, &job) == 0) {
                 process(job);
@@ -219,61 +234,64 @@ spawn([=x]() => printf("x = %d\n", x));
         });
     }
 
-    // Send jobs then close
-    closing(jobs_tx) {
+    CCNursery* feeder = @create(workers) @destroy {
+        chan_close(jobs_tx);
+    };
+    if (!feeder) return 1;
+    feeder->spawn([jobs_tx]() => {
         for (int j = 0; j < 100; j++) {
             chan_send(jobs_tx, j);
         }
-    }
+    });
 }
 ```
 
 ### Fan-out / Fan-in
 ```c
-@nursery {
+{
     int[~16 >] results_tx;
     int[~16 <] results_rx;
     channel_pair(&results_tx, &results_rx);
 
-    // Fan-out: spawn N workers
+    CCNursery* workers = @create(NULL) @destroy {
+        chan_close(results_tx);
+    };
+    if (!workers) return 1;
     for (int i = 0; i < 16; i++) {
-        spawn([i, results_tx]() => {
+        workers->spawn([i, results_tx]() => {
             int result = compute(i);
             chan_send(results_tx, result);
         });
     }
 
-    // Fan-in: collect results
-    closing(results_tx) {
-        int sum = 0, r;
-        while (chan_recv(results_rx, &r) == 0) {
-            sum += r;
-        }
-        printf("total: %d\n", sum);
+    int sum = 0, r;
+    while (chan_recv(results_rx, &r) == 0) {
+        sum += r;
     }
+    printf("total: %d\n", sum);
 }
 ```
 
 ### Producer/Consumer Pipeline
 ```c
-@nursery {
+{
     int[~10 >] tx;
     int[~10 <] rx;
     channel_pair(&tx, &rx);
 
-    // Producer
-    spawn([tx]() => {
+    CCNursery* producer = @create(NULL) @destroy {
+        chan_close(tx);
+    };
+    if (!producer) return 1;
+    producer->spawn([tx]() => {
         for (int i = 0; i < 100; i++) {
             chan_send(tx, i);
         }
     });
 
-    // Consumer
-    closing(tx) {
-        int v;
-        while (chan_recv(rx, &v) == 0) {
-            printf("got %d\n", v);
-        }
+    int v;
+    while (chan_recv(rx, &v) == 0) {
+        printf("got %d\n", v);
     }
 }
 ```
@@ -318,7 +336,7 @@ ccc build --build-file path/build.cc
 ## Includes
 
 ```c
-#include <ccc/cc_runtime.cch>     // Core runtime (nursery, spawn, channels)
+#include <ccc/cc_runtime.cch>     // Core runtime (owned nurseries, channels)
 #include <ccc/std/prelude.cch>    // Convenience (kilobytes, heap arena, etc.)
 #include <ccc/cc_atomic.cch>      // Portable atomics
 ```

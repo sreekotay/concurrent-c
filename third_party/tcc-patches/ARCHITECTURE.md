@@ -29,7 +29,7 @@ The fork also publishes `upstream-mob`, which mirrors TinyCC upstream and is use
 | `tcc.h` | CC-specific fields in `TCCState`, AST node types, new tokens |
 | `cc_ast_record.h` | AST recording helpers and node metadata capture |
 | `libtcc.c` | `cc_tcc_parse_to_ast()` API, include path setup |
-| `tccgen.c` | Statement/expression parsing extensions (closures, @arena, etc.) |
+| `tccgen.c` | Statement/expression parsing extensions (closures, `@defer`, retired-syntax rejection hooks, etc.) |
 | `tccpp.c` | `=>` arrow token lexing |
 
 ## Workflow

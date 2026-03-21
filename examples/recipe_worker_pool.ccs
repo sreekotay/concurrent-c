@@ -3,7 +3,7 @@
  *
  * Demonstrates:
  *   - N workers consuming from shared job queue
- *   - closing() signals "no more jobs" when feeder done
+ *   - feeder-owned channel close signals "no more jobs" when submission ends
  *   - Workers report results via separate channel (no shared counter)
  *   - Channel handles captured in closures
  *   - Macro in channel capacity

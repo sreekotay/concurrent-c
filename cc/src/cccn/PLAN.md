@@ -127,7 +127,7 @@ CC-specific hook changes live in `third_party/tcc-patches/` and are applied duri
    - Each node has: kind, parent, span, aux1/aux2, aux_s1/aux_s2
 
 2. **External Parser Hooks** (`TCCExtParser`)
-   - `try_cc_at_stmt()` — `@nursery`, `@arena`, `@defer`
+   - `try_cc_at_stmt()` — active `@defer` plus retirement errors for `@nursery` / `@arena`
    - `try_cc_spawn()` — `spawn()` statements
    - `try_cc_closure()` — `() => {}` syntax
 

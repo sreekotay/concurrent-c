@@ -2,12 +2,12 @@
  * Recipe: Channel Pipeline (Producer/Consumer)
  *
  * Demonstrates:
- *   - Nested nurseries for structured channel lifetime
- *   - closing(ch) on inner nursery closes channel when producers done
+ *   - Nested owned nurseries for structured channel lifetime
+ *   - `close_on(tx)` on the inner nursery closes the producer side when done
  *   - Consumer in outer nursery drains until close, then exits
  *   - Channel handles captured in closures
  *
- * Key insight: Nest producers inside closing() so channel closes
+ * Key insight: Nest producers inside the close-owning nursery so the channel closes
  * exactly when producers finish, while consumer keeps running.
  */
 #include <ccc/cc_nursery.cch>
@@ -36,7 +36,7 @@ int main(void) {
             printf("consumer: channel closed\n");
         });
 
-        /* Producers: live in inner nursery with closing(ch). */
+        /* Producers: live in the inner close-owning nursery. */
         {
             CCNursery* __cc_nursery99 = @create(NULL) @destroy;
             if (!__cc_nursery99) abort();

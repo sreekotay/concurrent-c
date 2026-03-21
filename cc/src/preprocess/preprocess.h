@@ -5,7 +5,7 @@
 
 typedef struct CCSymbolTable CCSymbolTable;
 
-// Preprocess a CC source file, rewriting CC syntax (e.g., @arena, UFCS) into
+// Preprocess a CC source file, rewriting CC syntax (e.g., UFCS) into
 // plain C that TCC can parse. Writes to a temporary file path (returned via
 // out_path), nul-terminated. Returns 0 on success; caller must unlink the
 // temp file when done.
@@ -88,7 +88,7 @@ char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
 // still visible in source text.
 char* cc_rewrite_channel_ufcs_concrete(const char* src, size_t n);
 
-// Prototype rewrite for builtin nursery/arena declarations:
+// Prototype rewrite for builtin nursery declarations:
 //   CCNursery* n = @create(parent, closure) @destroy;
 //   CCNursery* n = @create(parent, closure) @destroy { ... };
 // Returns newly allocated string on change, NULL on no-op, (char*)-1 on error.

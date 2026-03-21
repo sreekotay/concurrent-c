@@ -27,10 +27,10 @@ The compiler binary is at `cc/bin/ccc`.
 #include <stdio.h>
 
 int main(void) {
-    @nursery {
-        spawn(() => printf("Hello from task A!\n"));
-        spawn(() => printf("Hello from task B!\n"));
-    }
+    CCNursery* n = @create(NULL) @destroy;
+    if (!n) return 1;
+    n->spawn(() => printf("Hello from task A!\n"));
+    n->spawn(() => printf("Hello from task B!\n"));
     printf("Done.\n");
     return 0;
 }

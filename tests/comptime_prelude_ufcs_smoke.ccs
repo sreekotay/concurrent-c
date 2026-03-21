@@ -59,7 +59,10 @@ static CCSlice named_toy_ufcs_rewrite(CCSlice recv_type, CCSlice method, CCSlice
 }
 
 int main(void) {
-    @arena {
+    {
+        CCArena arena_storage = @create(kilobytes(4)) @destroy;
+        if (!arena_storage.base) abort();
+        CCArena* arena = &arena_storage;
         NamedToy named = { 1 };
         LambdaToy lambda = { 2 };
         CCString s = cc_string_new(arena);

@@ -751,7 +751,7 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
             break;
             
         case CCN_STMT_ARENA:
-            /* Lower @arena { body } to:
+            /* Lower legacy @arena { body } nodes to:
              *   { CCArena arena; cc_arena_init(&arena);
              *     body;
              *     cc_arena_release(&arena); }

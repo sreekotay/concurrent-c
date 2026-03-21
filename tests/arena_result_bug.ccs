@@ -1,7 +1,7 @@
-// Regression test for @arena + T!>(E) variable name collision bug (fixed)
+// Regression test for owned-arena + T!>(E) variable name collision bug (fixed)
 //
 // Previously, when a variable name (e.g. 'res') was used in BOTH:
-//   1. A function with @arena block (as a local pointer variable)
+//   1. A function with an owned arena scope (as a local pointer variable)
 //   2. Another function with T!>(E) syntax (as a Result variable)
 // The preprocessor incorrectly rewrote "T* res" as "Tcc_unwrap(res)"
 // because it thought the * was dereferencing a Result variable.
@@ -13,7 +13,7 @@
 
 typedef struct { int x; } MyStruct;
 
-// Function 1: Has @arena with local variable named 'res'
+// Function 1: Has owned arena scope with local variable named 'res'
 MyStruct* !>(CCIoError) func_with_arena(void) {
     {
         CCArena __cc_arena3 = @create(4096) @destroy;

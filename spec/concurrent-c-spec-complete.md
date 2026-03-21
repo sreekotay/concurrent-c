@@ -46,7 +46,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | Keyword | Context | Purpose |
 |---------|---------|---------|
 | `async` | After `@` (in `@async fn`) | Mark function as asynchronous |
-| `arena` | After `@` (in `@arena(a)`) | Define arena allocation scope |
+| `arena` | After `@` (in retired `@arena(...)`) | Retired arena-scope keyword; use `@create(...) @destroy` |
 | `lock` | After `@` (in `@lock (m) as var`) | Acquire mutex guard |
 | `noblock` | After `@` (in `@noblock fn`) | Mark function as provably non-blocking |
 | `closing` | In `@closing(ch)` | Auto-close channels when producer scope completes |
@@ -60,7 +60,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@scoped type T` | Type tied to lexical scope (cannot escape) | `@scoped type Guard<T>;` |
 | `@nursery { }` | Structured concurrency scope; spawn tasks here | `@nursery { spawn (t1()); spawn (t2()); }` |
 | `@closing(ch) spawn/{ }` | Mark producer scope as owning channel close | `@closing(tx) spawn(producer);` |
-| `@arena(a) { }` | Arena memory allocation scope | `@arena(a) { Vec<int> v = ...; }` |
+| `@create(...) @destroy` | Resource lifetime declaration with deterministic cleanup | `CCArena a = @create(kilobytes(4)) @destroy;` |
 | `@lock (m) as g { }` | Acquire mutex, bind guard to variable | `@lock (m) as guard { guard.data++; }` |
 | `@match { case T x = ... }` | Multiplex on channel events | `@match { case int x = await ch: ... }` |
 | `@defer stmt;` | Schedule statement to run on scope exit | `@defer file.close();` |
@@ -522,7 +522,7 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@scoped` | Type tied to lexical scope | `@scoped type Guard<T>;` |
 | | `@nursery` | Structured concurrency block | `@nursery { spawn (task()); }` |
 | | `@closing(ch)` | Producer-scope channel ownership | `@closing(tx) spawn(task);` |
-| | `@arena(a)` | Arena allocation scope | `@arena(a) { Vec<int> v = ...; }` |
+| | `@create(...) @destroy` | Deterministic resource lifetime | `CCArena a = @create(kilobytes(4)) @destroy;` |
 | | `@lock (m) as var` | Mutex guard acquisition | `@lock (m) as g { g.value++; }` |
 | | `@match` | Channel event dispatch | `@match { case T x = await ch: ... }` |
 | | `@defer` | Deferred cleanup statement | `@defer cleanup();` |
@@ -638,7 +638,7 @@ All attributes use the `@` prefix and follow consistent spacing:
 | `@noblock` | `@noblock fn() { }` | Marks synchronous non-blocking function |
 | `@scoped` | `@scoped type Guard<T>;` | On type declarations |
 | `@nursery` | `@nursery { ... }` | No parameters, always a block |
-| `@arena` | `@arena(a) { ... }` | No space before parentheses |
+| `@arena` | retired | Use `CCArena a = @create(...) @destroy` instead |
 | `@lock` | `@lock (m) as g { ... }` | Space before parentheses (statement form) |
 | `@for await` | `@for await (T x : ch) { }` | Unified statement, no confusion with `for` + `await` |
 | `@defer` | `@defer cleanup();` | Single statement after |
@@ -1528,7 +1528,7 @@ cc_arena_free(&a);  // frees if heap-backed, no-op otherwise
 
 Arenas created with `cc_arena_heap` are **growable by default** (`block_max = 0`, meaning unbounded). When allocation exhausts the current block, a new block is allocated (1.5x the previous capacity, minimum 4096 bytes) and the full block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
 
-- `block_max = 0`: Unbounded growth (default for `cc_arena_heap` / `@arena`).
+- `block_max = 0`: Unbounded growth (default for `cc_arena_heap` / heap-created arenas).
 - `block_max = 1`: Fixed, no growth allowed (default for `cc_arena_init` / stack-backed arenas).
 - `block_max = N` (N > 1): At most N blocks total. Growth beyond the budget returns NULL.
 

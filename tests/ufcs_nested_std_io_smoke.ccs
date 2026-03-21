@@ -4,7 +4,10 @@
 #include <ccc/std/prelude.cch>
 
 int main(void) {
-    @arena {
+    {
+        CCArena arena_storage = @create(kilobytes(4)) @destroy;
+        if (!arena_storage.base) abort();
+        CCArena* arena = &arena_storage;
         // First string - simple case
         CCString s1 = cc_string_new(arena);
         s1.append("first:");

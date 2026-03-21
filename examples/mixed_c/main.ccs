@@ -3,7 +3,10 @@
 #include "helper.h"
 
 int main(void) {
-    @arena {
+    CCArena arena_storage = @create(kilobytes(4)) @destroy;
+    if (!arena_storage.base) return 1;
+    CCArena* arena = &arena_storage;
+    {
         CCString s = cc_string_new(arena);
         int v = helper_add(2, 5);
         s.append("mixed_c helper_add(2,5)=");

@@ -16,7 +16,7 @@ Goal: Reduce TCC patch from ~1300 lines to ~150 lines by externalizing CC logic.
 ```c
 // Declared in tcc.h, implemented in cc/src/parser/cc_ext_parser.c
 
-// Statement hook - handles @arena, @defer, @nursery, spawn
+// Statement hook - handles lifecycle blocks like @create/@destroy and @defer
 // Returns 1 if consumed, 0 to continue normal parsing
 int cc_ext_try_stmt(void);
 

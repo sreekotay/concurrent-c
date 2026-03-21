@@ -73,8 +73,8 @@ static inline void destroy_input_arena(CCArena* arena) {
  * Returns a CompressedResult*!>(CCIoError) to demonstrate idiomatic error propagation.
  * (matches pigz.c:2310-2350)
  * 
- * Uses @arena block with arena.detach() for clean ownership transfer:
- * - On error: @arena cleanup frees the memory
+ * Uses owned arena scope with arena.detach() for clean ownership transfer:
+ * - On error: scope cleanup frees the memory
  * - On success: arena_detach() transfers ownership, cleanup is no-op
  */
 CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCSlice dict, int level, int strategy) {
@@ -82,7 +82,10 @@ CompressedResultPtr !>(CCIoError) compress_block(z_stream* strm, Block* blk, CCS
     // Deflate worst case is ~0.03% expansion + 11 bytes; we allow 12.5% + 8KB for safety
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
-    @arena(res_arena, arena_size) {
+    {
+        CCArena res_arena_storage = @create(arena_size) @destroy;
+        if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+        CCArena* res_arena = &res_arena_storage;
         CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         
@@ -372,7 +375,10 @@ CompressedResultPtr !>(CCIoError) compress_owned_block(Block* blk) {
 // decompress_block - currently unused, single-threaded decompression in decompress_file
 DecompressedResultPtr !>(CCIoError) decompress_block(CCSlice member, long seq) {
     size_t est_size = 256 * 1024;
-    @arena(res_arena, est_size + 8192) {
+    {
+        CCArena res_arena_storage = @create(est_size + 8192) @destroy;
+        if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+        CCArena* res_arena = &res_arena_storage;
         DecompressedResult* res = cc_arena_alloc_T(DecompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         res->seq = seq;
@@ -1230,7 +1236,10 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
             return 0;
         }
 
-        @arena(dir_arena, megabytes(1)) {
+        {
+            CCArena dir_arena_storage = @create(megabytes(1)) @destroy;
+            if (!dir_arena_storage.base) return 1;
+            CCArena* dir_arena = &dir_arena_storage;
             CCDirIter* !>(CCIoError) iter_res = cc_dir_open(dir_arena, path);
             if (cc_is_ok(iter_res)) {
                 CCDirIter* iter = cc_unwrap_as(iter_res, CCDirIter*);
