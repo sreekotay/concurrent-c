@@ -1,6 +1,7 @@
 /* Test: verify channel recv delivers each item exactly once */
 #include <ccc/std/prelude.cch>
 #include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -24,11 +25,14 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
     @defer cc_chan_free(ch);
     
-    @nursery {
+    CCNursery* n = @create(NULL) @detach;
+    if (!n) abort();
+
+    {
         /* Workers */
         for (int w = 0; w < NUM_WORKERS; w++) {
             int worker_id = w;
-            spawn(() => [worker_id] {
+            (void)cc_nursery_spawn_closure0(n, () => [worker_id] {
                 Item item;
                 int count = 0;
                 while (cc_io_avail(chan_recv(rx, &item))) {
@@ -48,7 +52,7 @@ int main(void) {
         }
         
         /* Producer - then close channel */
-        spawn(() => {
+        (void)cc_nursery_spawn_closure0(n, () => {
             for (int i = 0; i < NUM_ITEMS; i++) {
                 Item item = { .seq = i, .value = i * 10 };
                 (void)chan_send(tx, item);
@@ -57,6 +61,8 @@ int main(void) {
             chan_close(tx);  /* Explicitly close */
         });
     }
+    (void)cc_nursery_wait(n);
+    cc_nursery_free(n);
     
     int sent = cc_atomic_load(&g_sent);
     int recv = cc_atomic_load(&g_recv);

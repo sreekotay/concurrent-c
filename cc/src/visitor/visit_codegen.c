@@ -17,7 +17,6 @@
 #include "visitor/pass_closure_calls.h"
 #include "visitor/pass_autoblock.h"
 #include "visitor/pass_arena_ast.h"
-#include "visitor/pass_nursery_spawn_ast.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_channel_syntax.h"
@@ -1513,153 +1512,6 @@ static int cc__is_parser_placeholder_type_codegen(const char* type_name) {
             strcmp(type_name, "__CCResultGeneric*") == 0);
 }
 
-/* Rewrite @closing(ch) spawn(...) or @closing(ch) { ... } syntax.
-   Transforms into explicit nested `@nursery closing(...)` form. */
-static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
-    if (!src || n == 0) return NULL;
-    char* out = NULL;
-    size_t out_len = 0, out_cap = 0;
-    
-    size_t i = 0;
-    size_t last_emit = 0;
-    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
-    
-    while (i < n) {
-        char c = src[i];
-        char c2 = (i + 1 < n) ? src[i + 1] : 0;
-        
-        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
-        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
-        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
-        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
-        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
-        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
-        if (c == '"') { in_str = 1; i++; continue; }
-        if (c == '\'') { in_chr = 1; i++; continue; }
-        
-        /* Look for @closing( */
-        if (c == '@' && i + 8 < n && memcmp(src + i, "@closing", 8) == 0) {
-            size_t start = i;
-            size_t j = i + 8;
-            
-            /* Skip whitespace */
-            while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-            
-            if (j < n && src[j] == '(') {
-                /* Found @closing( - parse the channel list */
-                size_t paren_start = j;
-                j++; /* skip '(' */
-                int paren_depth = 1;
-                while (j < n && paren_depth > 0) {
-                    if (src[j] == '(') paren_depth++;
-                    else if (src[j] == ')') paren_depth--;
-                    j++;
-                }
-                if (paren_depth != 0) { i++; continue; }
-                
-                size_t paren_end = j - 1;
-                size_t chans_start = paren_start + 1;
-                size_t chans_end = paren_end;
-                
-                /* Skip whitespace after ) */
-                while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n')) j++;
-                
-                if (j >= n) { i++; continue; }
-                
-                size_t body_start = j;
-                size_t body_end;
-                int is_block = 0;
-                
-                if (src[j] == '{') {
-                    is_block = 1;
-                    int brace_depth = 1;
-                    j++;
-                    while (j < n && brace_depth > 0) {
-                        if (src[j] == '{') brace_depth++;
-                        else if (src[j] == '}') brace_depth--;
-                        else if (src[j] == '"') {
-                            j++;
-                            while (j < n && src[j] != '"') {
-                                if (src[j] == '\\' && j + 1 < n) j++;
-                                j++;
-                            }
-                        } else if (src[j] == '\'') {
-                            j++;
-                            while (j < n && src[j] != '\'') {
-                                if (src[j] == '\\' && j + 1 < n) j++;
-                                j++;
-                            }
-                        }
-                        j++;
-                    }
-                    body_end = j;
-                } else if (j + 5 < n && memcmp(src + j, "spawn", 5) == 0) {
-                    is_block = 0;
-                    int paren_d = 0, brace_d = 0;
-                    while (j < n) {
-                        if (src[j] == '(') paren_d++;
-                        else if (src[j] == ')') paren_d--;
-                        else if (src[j] == '{') brace_d++;
-                        else if (src[j] == '}') { brace_d--; if (brace_d < 0) break; }
-                        else if (src[j] == ';' && paren_d == 0 && brace_d == 0) { j++; break; }
-                        else if (src[j] == '"') {
-                            j++;
-                            while (j < n && src[j] != '"') {
-                                if (src[j] == '\\' && j + 1 < n) j++;
-                                j++;
-                            }
-                        }
-                        j++;
-                    }
-                    body_end = j;
-                } else {
-                    i++;
-                    continue;
-                }
-                
-                cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, start - last_emit);
-                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "@nursery closing(");
-                cc__cg_sb_append(&out, &out_len, &out_cap, src + chans_start, chans_end - chans_start);
-                cc__cg_sb_append_cstr(&out, &out_len, &out_cap, ") ");
-                
-                if (is_block) {
-                    /* Re-run rewrite recursively to handle nested @closing(...) */
-                    size_t blen = body_end - body_start;
-                    char* inner = cc__rewrite_closing_annotation(src + body_start, blen);
-                    if (inner) {
-                        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, inner);
-                        free(inner);
-                    } else {
-                        cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, blen);
-                    }
-                } else {
-                    /* Single-spawn form with recursive rewrite support. */
-                    size_t blen = body_end - body_start;
-                    char* inner = cc__rewrite_closing_annotation(src + body_start, blen);
-                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "{\n");
-                    if (inner) {
-                        cc__cg_sb_append_cstr(&out, &out_len, &out_cap, inner);
-                        free(inner);
-                    } else {
-                        cc__cg_sb_append(&out, &out_len, &out_cap, src + body_start, blen);
-                    }
-                    cc__cg_sb_append_cstr(&out, &out_len, &out_cap, "\n}");
-                }
-                
-                last_emit = body_end;
-                i = body_end;
-                continue;
-            }
-        }
-        
-        i++;
-    }
-    
-    if (last_emit == 0) return NULL;
-    if (last_emit < n) cc__cg_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
-    return out;
-}
-
 /* Rewrite `if @try (T x = expr) { ... } else { ... }` into expanded form:
    { __typeof__(expr) __cc_try_bind = (expr);
      if (__cc_try_bind.ok) { T x = __cc_try_bind.u.value; ... }
@@ -1993,16 +1845,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
-    /* Rewrite @closing(ch) spawn/{ } -> spawned sub-nursery for flat channel closing */
-    if (src_ufcs && src_ufcs_len) {
-        char* rewritten = cc__rewrite_closing_annotation(src_ufcs, src_ufcs_len);
-        if (rewritten) {
-            if (src_ufcs != src_all) free(src_ufcs);
-            src_ufcs = rewritten;
-            src_ufcs_len = strlen(rewritten);
-        }
-    }
-
     /* Rewrite `if @try (T x = expr) { ... }` into expanded form */
     if (src_ufcs && src_ufcs_len) {
         char* rewritten = cc__rewrite_if_try_syntax(src_ufcs, src_ufcs_len);
@@ -2153,6 +1995,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
+    /* Internal reparses need parser-safe container receiver types too. When
+       src_ufcs still carries raw `Vec<T>` / `Map<K,V>` syntax, direct field UFCS
+       like `c.items.push(...)` can survive the initial parse but fail later
+       during these in-memory reparses. Canonicalize containers here so the
+       subsequent reparses see the same receiver shapes as the main parser. */
+    if (src_ufcs && ctx && ctx->input_path) {
+        char* rew = cc_rewrite_generic_containers(src_ufcs, src_ufcs_len, ctx->input_path);
+        if (rew) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rew;
+            src_ufcs_len = strlen(src_ufcs);
+        }
+    }
+
     /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
        (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
@@ -2206,19 +2062,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
 
-        /* 2+3+4) Batch spawn + nursery + arena using EditBuffer so we don't have stale AST offsets.
-           All passes use root4; without batching, each pass changes src_ufcs but subsequent
-           passes still reference root4's offsets (which would be wrong).
-           ELIMINATED ONE REPARSE by using cc__collect_spawn_edits instead of whole-file rewrite. */
+        /* Batch arena edits using EditBuffer so we don't have stale AST offsets. */
         {
             CCEditBuffer eb;
             cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
 
-            int n_spawn = cc__collect_spawn_edits(root4, ctx, &eb);
-            int n_nursery = cc__collect_nursery_edits(root4, ctx, &eb);
             int n_arena = cc__collect_arena_edits(root4, ctx, &eb);
 
-            if (n_spawn < 0 || n_nursery < 0 || n_arena < 0) {
+            if (n_arena < 0) {
                 cc_tcc_bridge_free_ast(root4);
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);

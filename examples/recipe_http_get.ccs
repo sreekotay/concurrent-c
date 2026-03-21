@@ -2,7 +2,7 @@
  * Recipe: Async HTTP Requests
  *
  * Demonstrates:
- *   - Parallel HTTP requests with @nursery
+ *   - Parallel HTTP requests with explicit nursery handles
  *   - cc_http_get for simple requests
  *   - Arena-based response memory
  *   - @link("curl") for automatic library linking
@@ -51,7 +51,7 @@ static void fetch_one(int idx, int* status_p, size_t* body_len_p) {
 int main(void) {
     printf("Fetching %d URLs in parallel...\n\n", NUM_URLS);
 
-    /* Results storage (stack is fine: @nursery waits for all tasks before returning) */
+    /* Results storage stays valid until the nursery scope waits on all tasks. */
     int status[NUM_URLS] = {0};
     size_t body_len[NUM_URLS] = {0};
     int* status_p = status;

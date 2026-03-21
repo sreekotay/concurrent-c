@@ -1,12 +1,15 @@
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_nursery.cch>
+#include <stdlib.h>
 
 int g = 0;
 
 int main(void) {
-    int buf[4] = {1, 2, 3, 4};
-    CCSlice s = cc_slice_from_buffer(buf, 4); /* stack-backed */
+    int* buf = malloc(sizeof(int) * 4);
+    if (!buf) return 2;
+    buf[0] = 1; buf[1] = 2; buf[2] = 3; buf[3] = 4;
+    CCSlice s = cc_slice_from_parts(buf, 4, CC_SLICE_ID_UNTRACKED, 4);
 
     CCClosure0 c = () => {
         int* p = (int*)s.ptr;
@@ -14,8 +17,13 @@ int main(void) {
         return NULL;
     };
 
-    @nursery {
-        spawn (c);
+    CCNursery* n = @create(NULL, c) @detach;
+    if (!n) {
+        free(buf);
+        return 3;
     }
+    (void)cc_nursery_wait(n);
+    cc_nursery_free(n);
+    free(buf);
     return (g == 1) ? 0 : 1;
 }

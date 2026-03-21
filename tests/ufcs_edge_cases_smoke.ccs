@@ -4,7 +4,7 @@
    Key cases:
    1. cc_std_out.write("literal") - preprocessed to cc_std_out_write(cc_slice_from_buffer(...))
    2. cc_std_out.write(s) - preprocessed to cc_std_out_write_string(&s)
-   3. vp->push(x) - pointer receiver UFCS, preprocessed to Vec_T_push(vp, x)
+   3. c.items.push(x) / pc.items->push(x) - field receivers respect value vs pointer lowering
    
    Note: Nested UFCS (cc_std_out.write(s.as_slice())) is tested separately in ufcs_nested_multiline.ccs
 */
@@ -24,18 +24,22 @@ int main(void) {
         s.append("case2:");
         cc_std_out.write(s);
         
-        // Case 3: Pointer receiver UFCS on Vec
+        // Case 3: Field receivers respect value vs pointer type
         Container c;
         c.items = vec_new<int>(arena);
-        c.items.push(10);  // Direct access via field
-        
-        Vec<int>* vp = &c.items;
-        vp->push(20);      // Pointer receiver - must become Vec_int_push(vp, 20)
-        vp->push(30);
+        c.items.push(10);  // Value receiver - must become Vec_int_push(&c.items, 10)
+
+        typedef struct {
+            Vec<int>* items;
+        } PtrContainer;
+        PtrContainer pc;
+        pc.items = &c.items;
+        pc.items->push(20);  // Pointer receiver - must become Vec_int_push(pc.items, 20)
+        pc.items->push(30);
         
         // Verify Vec contents using UFCS .get() which returns optional
         int? v0 = c.items.get(0);
-        int? v1 = c.items.get(1);
+        int? v1 = pc.items->get(1);
         int? v2 = c.items.get(2);
         
         if (c.items.len() == 3 &&

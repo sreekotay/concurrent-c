@@ -44,21 +44,8 @@ int main(void) {
     CCTask[~CHAN_CAP <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
-    @nursery {
-        /* Producer: spawn OS tasks, send CCTask handles into channel */
-        spawn(() => [tx] {
-            for (int i = 1; i <= NUM_ITEMS; i++) {
-                Item* item = malloc(sizeof(Item));
-                item->id = i;
-                item->result = -1;
-                CCTask task = cc_thread_spawn(compute, item);
-                (void)chan_send(tx, task);
-            }
-            chan_close(tx);
-        });
-
-        /* Consumer: receive handles in order, await each, verify result */
-        spawn(() => [rx] {
+    {
+        CCNursery* consumer = @create(NULL, () => [rx] {
             CCTask task;
             int idx = 1;
             while (cc_io_avail(chan_recv(rx, &task))) {
@@ -85,7 +72,21 @@ int main(void) {
                 printf("FAIL: received %d items, expected %d\n", idx - 1, NUM_ITEMS);
                 atomic_store(&g_failed, 1);
             }
-        });
+        }) @destroy;
+        if (!consumer) abort();
+
+        CCNursery* producer = @create(consumer, () => [tx] {
+            for (int i = 1; i <= NUM_ITEMS; i++) {
+                Item* item = malloc(sizeof(Item));
+                item->id = i;
+                item->result = -1;
+                CCTask task = cc_thread_spawn(compute, item);
+                (void)chan_send(tx, task);
+            }
+        }) @destroy {
+            chan_close(tx);
+        };
+        if (!producer) abort();
     }
 
     cc_chan_free(ch);

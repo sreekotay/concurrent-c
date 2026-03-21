@@ -132,58 +132,69 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    @nursery {
-        // Consumer: read results in COMPLETION order (no ordering guarantee)
-        spawn(() => [out_ptr, res_rx] {
-            CompressedResult* r;
-            while (cc_chan_recv(res_rx.raw, &r, sizeof(r)) == 0) {
-                if (r) {
-                    cc_file_write(out_ptr, r->data);
-                    cc_arena_free(&r->arena);
-                }
+    CCNursery* consumer = @create(NULL, () => [out_ptr, res_rx] {
+        CompressedResult* r;
+        while (cc_chan_recv(res_rx.raw, &r, sizeof(r)) == 0) {
+            if (r) {
+                cc_file_write(out_ptr, r->data);
+                cc_arena_free(&r->arena);
             }
-        });
-
-        // Producer + compression: spawn a task per block, each task sends
-        // its result directly to res_tx when done.
-        @closing(res_tx) {
-            spawn(() => [in_ptr, res_tx] {
-                long seq = 0;
-                while (true) {
-                    CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
-                    CCSlice data;
-                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
-                    
-                    if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
-                        cc_arena_free(&blk_arena);
-                        break;
-                    }
-                    
-                    Block* blk = cc_arena_alloc_T(Block, &blk_arena);
-                    if (!blk) {
-                        cc_arena_free(&blk_arena);
-                        break;
-                    }
-                    
-                    blk->seq = seq++;
-                    blk->data = data;
-                    blk->is_last = (data.len < BLOCK_SIZE);
-                    blk->arena = blk_arena;
-                    bool is_last = blk->is_last;
-
-                    // Spawn compression fiber; it sends result to res_tx directly.
-                    spawn(() => [blk, res_tx] {
-                        CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
-                        cc_arena_free(&blk->arena);
-                        CompressedResult* r = cc_is_err(res) ? NULL
-                                                              : cc_unwrap_as(res, CompressedResult*);
-                        cc_chan_send(res_tx.raw, &r, sizeof(r));
-                    });
-
-                    if (is_last) break;
-                }
-            });
         }
+    }) @destroy;
+    if (!consumer) {
+        fprintf(stderr, "Failed to create consumer nursery\n");
+        return 1;
+    }
+
+    CCNursery* producer = @create(consumer, () => [in_ptr, res_tx] {
+        CCNursery* workers = @create(NULL) @detach;
+        if (!workers) {
+            return 0;
+        }
+
+        long seq = 0;
+        while (true) {
+            CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
+            CCSlice data;
+            bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
+            
+            if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
+                cc_arena_free(&blk_arena);
+                break;
+            }
+            
+            Block* blk = cc_arena_alloc_T(Block, &blk_arena);
+            if (!blk) {
+                cc_arena_free(&blk_arena);
+                break;
+            }
+            
+            blk->seq = seq++;
+            blk->data = data;
+            blk->is_last = (data.len < BLOCK_SIZE);
+            blk->arena = blk_arena;
+            bool is_last = blk->is_last;
+
+            // Spawn compression fiber; it sends result to res_tx directly.
+            workers->spawn(() => [blk, res_tx] {
+                CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
+                cc_arena_free(&blk->arena);
+                CompressedResult* r = cc_is_err(res) ? NULL
+                                                      : cc_unwrap_as(res, CompressedResult*);
+                cc_chan_send(res_tx.raw, &r, sizeof(r));
+            });
+
+            if (is_last) break;
+        }
+        (void)workers->wait();
+        workers->free();
+    }) @destroy {
+        chan_close(res_tx);
+    };
+    if (!producer) {
+        chan_close(res_tx);
+        fprintf(stderr, "Failed to create producer nursery\n");
+        return 1;
     }
 
     cc_file_sync(&out_file);

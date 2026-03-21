@@ -1845,6 +1845,54 @@ static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) 
     out[len] = '\0';
 }
 
+static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* type_name) {
+    const char* start;
+    const char* end;
+    const char* base_end;
+    int ptr_count = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name) return;
+    start = type_name;
+    end = type_name + strlen(type_name);
+    cc__trim_span_ws(&start, &end);
+    if (start >= end) return;
+    base_end = end;
+    while (base_end > start) {
+        char c = base_end[-1];
+        if (c == ' ' || c == '\t') {
+            base_end--;
+            continue;
+        }
+        if (c == '*') {
+            ptr_count++;
+            base_end--;
+            continue;
+        }
+        break;
+    }
+    while (base_end > start && (base_end[-1] == ' ' || base_end[-1] == '\t')) base_end--;
+    if ((size_t)(base_end - start) > 4 && memcmp(start, "Vec<", 4) == 0 && base_end[-1] == '>') {
+        size_t inner_len = (size_t)(base_end - (start + 4) - 1);
+        snprintf(out, out_sz, "__CC_VEC(%.*s)%.*s",
+                 (int)inner_len, start + 4, ptr_count, "********");
+        return;
+    }
+    if ((size_t)(base_end - start) > 4 && memcmp(start, "Map<", 4) == 0 && base_end[-1] == '>') {
+        size_t inner_len = (size_t)(base_end - (start + 4) - 1);
+        snprintf(out, out_sz, "__CC_MAP(%.*s)%.*s",
+                 (int)inner_len, start + 4, ptr_count, "********");
+        return;
+    }
+    {
+        size_t base_len = (size_t)(base_end - start);
+        if (base_len >= out_sz) base_len = out_sz - 1;
+        memcpy(out, start, base_len);
+        out[base_len] = '\0';
+        while (ptr_count-- > 0 && strlen(out) + 1 < out_sz) strcat(out, "*");
+    }
+}
+
 static int cc__type_is_parser_vec(const char* type_name) {
     return type_name && strncmp(type_name, "__CC_VEC", 8) == 0;
 }
@@ -1880,10 +1928,13 @@ static void cc__record_ufcs_var(CCUfcsVarInfo* vars,
                                 size_t var_cap,
                                 const char* name,
                                 const char* type_name) {
+    char normalized_type[256];
     if (!vars || !var_count || !name || !type_name || !name[0] || !type_name[0]) return;
+    cc__normalize_ufcs_type_name(normalized_type, sizeof(normalized_type), type_name);
+    if (!normalized_type[0]) return;
     for (size_t i = 0; i < *var_count; i++) {
         if (strcmp(vars[i].name, name) == 0) {
-            strncpy(vars[i].type, type_name, sizeof(vars[i].type) - 1);
+            strncpy(vars[i].type, normalized_type, sizeof(vars[i].type) - 1);
             vars[i].type[sizeof(vars[i].type) - 1] = '\0';
             return;
         }
@@ -1891,7 +1942,7 @@ static void cc__record_ufcs_var(CCUfcsVarInfo* vars,
     if (*var_count >= var_cap) return;
     strncpy(vars[*var_count].name, name, sizeof(vars[*var_count].name) - 1);
     vars[*var_count].name[sizeof(vars[*var_count].name) - 1] = '\0';
-    strncpy(vars[*var_count].type, type_name, sizeof(vars[*var_count].type) - 1);
+    strncpy(vars[*var_count].type, normalized_type, sizeof(vars[*var_count].type) - 1);
     vars[*var_count].type[sizeof(vars[*var_count].type) - 1] = '\0';
     (*var_count)++;
 }
@@ -1902,13 +1953,16 @@ static void cc__record_ufcs_field(CCUfcsFieldInfo* fields,
                                   const char* struct_name,
                                   const char* field_name,
                                   const char* field_type) {
+    char normalized_type[256];
     if (!fields || !field_count || !struct_name || !field_name || !field_type) return;
     if (*field_count >= field_cap) return;
+    cc__normalize_ufcs_type_name(normalized_type, sizeof(normalized_type), field_type);
+    if (!normalized_type[0]) return;
     strncpy(fields[*field_count].struct_name, struct_name, sizeof(fields[*field_count].struct_name) - 1);
     fields[*field_count].struct_name[sizeof(fields[*field_count].struct_name) - 1] = '\0';
     strncpy(fields[*field_count].field_name, field_name, sizeof(fields[*field_count].field_name) - 1);
     fields[*field_count].field_name[sizeof(fields[*field_count].field_name) - 1] = '\0';
-    strncpy(fields[*field_count].field_type, field_type, sizeof(fields[*field_count].field_type) - 1);
+    strncpy(fields[*field_count].field_type, normalized_type, sizeof(fields[*field_count].field_type) - 1);
     fields[*field_count].field_type[sizeof(fields[*field_count].field_type) - 1] = '\0';
     (*field_count)++;
 }
@@ -4778,7 +4832,7 @@ static char* cc__rewrite_inferred_result_ctors(const char* src, size_t n) {
    @nursery closing(ch) { for (w) spawn(worker); }
    
    This keeps @closing(...) semantically equivalent to explicit nursery ownership. */
-static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
+__attribute__((unused)) static char* cc__rewrite_closing_annotation(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
@@ -5846,7 +5900,6 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_family_ufcs_parser_safe(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_try_exprs(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_unwrap(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_closing_annotation(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_cc_concurrent(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_link_directives(chain->src, chain->len)) < 0) return -1;
     return 0;
@@ -6044,7 +6097,24 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 2: Rewrite T? -> CCOptional_T */
+    /* Pass 2: Rewrite slice types T[:] -> CCSlice */
+    buffers[buf_idx] = cc__rewrite_slice_types(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+
+    /* Pass 3: Rewrite Vec<T>/Map<K,V> into parser-safe container forms early,
+       so parser-survival UFCS can resolve field receiver types correctly. */
+    buffers[buf_idx] = cc_rewrite_generic_containers(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+    
+    /* Pass 4: Rewrite T? -> CCOptional_T */
     buffers[buf_idx] = cc__rewrite_optional_types(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6052,7 +6122,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 2b: Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v) */
+    /* Pass 4b: Rewrite cc_some_CCOptional_T(v) -> __CC_OPTIONAL_SOME(T, v) */
     buffers[buf_idx] = cc__rewrite_optional_constructors(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6060,7 +6130,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 3: Infer result constructor types from enclosing function:
+    /* Pass 5: Infer result constructor types from enclosing function:
        cc_ok(x) -> cc_ok_CCResult_T_E(x) when inside a function returning T!E
        This must run BEFORE type rewrite so we can still detect T!E syntax. */
     buffers[buf_idx] = cc__rewrite_inferred_result_ctors(cur, cur_len);
@@ -6070,7 +6140,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 3b: Rewrite cc_ok_CCResult_T_E(v) -> __cc_result_ok_impl(v) */
+    /* Pass 5b: Rewrite cc_ok_CCResult_T_E(v) -> __cc_result_ok_impl(v) */
     buffers[buf_idx] = cc__rewrite_result_constructors(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6078,7 +6148,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 3c: Rewrite T!>(E) -> CCResult_T_E */
+    /* Pass 5c: Rewrite T!>(E) -> CCResult_T_E */
     buffers[buf_idx] = cc__rewrite_result_types(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6095,15 +6165,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         cur_len = strlen(cur);
         buf_idx++;
     }
-    /* Pass 4: Rewrite slice types T[:] -> CCSlice */
-    buffers[buf_idx] = cc__rewrite_slice_types(cur, cur_len, input_path);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 5: Normalize if @try ( -> if (try  */
+    /* Pass 6: Normalize if @try ( -> if (try  */
     buffers[buf_idx] = cc__normalize_if_try_syntax(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6111,7 +6173,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 6: Rewrite if (try T x = expr) to expanded form */
+    /* Pass 7: Rewrite if (try T x = expr) to expanded form */
     buffers[buf_idx] = cc__rewrite_try_binding(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6119,7 +6181,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
 
-    /* Pass 6b: Prototype explicit nursery-handle create/destroy declarations. */
+    /* Pass 7b: Prototype explicit nursery-handle create/destroy declarations. */
     buffers[buf_idx] = cc_rewrite_nursery_create_destroy_proto(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6129,7 +6191,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
     
     /* Note: try expressions are handled natively by TCC (CC_AST_NODE_TRY) */
     
-    /* Pass 7: Rewrite @defer(err) -> @defer */
+    /* Pass 8: Rewrite @defer(err) -> @defer */
     buffers[buf_idx] = cc__rewrite_defer_syntax(cur, cur_len);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -6137,16 +6199,8 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
     
-    /* Pass 8: Rewrite *opt_var and *result_var to unwrap calls */
+    /* Pass 9: Rewrite *opt_var and *result_var to unwrap calls */
     buffers[buf_idx] = cc__rewrite_optional_unwrap(cur, cur_len);
-    if (buffers[buf_idx]) {
-        cur = buffers[buf_idx];
-        cur_len = strlen(cur);
-        buf_idx++;
-    }
-    
-    /* Pass 10: Rewrite Vec<T>/Map<K,V> -> Vec_T/Map_K_V */
-    buffers[buf_idx] = cc_rewrite_generic_containers(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);

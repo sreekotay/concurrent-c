@@ -137,54 +137,59 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCFile* in_ptr = &in_file;
     CCFile* out_ptr = &out_file;
 
-    @nursery {
-        // Consumer: ordered_recv awaits task and extracts result
-        spawn(() => [out_ptr, tasks_rx] {
-            void* result;
-            while (ordered_recv(tasks_rx, &result) == 1) {
-                CompressedResult* r = (CompressedResult*)result;
-                if (r) {
-                    cc_file_write(out_ptr, r->data);
-                    cc_arena_free(&r->arena);
-                }
+    CCNursery* consumer = @create(NULL, () => [out_ptr, tasks_rx] {
+        void* result;
+        while (ordered_recv(tasks_rx, &result) == 1) {
+            CompressedResult* r = (CompressedResult*)result;
+            if (r) {
+                cc_file_write(out_ptr, r->data);
+                cc_arena_free(&r->arena);
             }
-        });
-
-        // Producer: spawn OS thread task + send handle
-        @closing(tasks_tx) {
-            spawn(() => [in_ptr, tasks_tx] {
-                long seq = 0;
-                while (true) {
-                    CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
-                    CCSlice data;
-                    bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
-                    
-                    if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
-                        cc_arena_free(&blk_arena);
-                        break;
-                    }
-                    
-                    Block* blk = cc_arena_alloc_T(Block, &blk_arena);
-                    if (!blk) {
-                        cc_arena_free(&blk_arena);
-                        break;
-                    }
-                    
-                    blk->seq = seq++;
-                    blk->data = data;
-                    blk->is_last = (data.len < BLOCK_SIZE);
-                    blk->arena = blk_arena;
-                    
-                    bool is_last = blk->is_last;
-                    
-                    // KEY DIFFERENCE: cc_thread_spawn instead of cc_fiber_spawn_task
-                    CCTask task = cc_thread_spawn(compress_task_wrapper, blk);
-                    cc_chan_send(tasks_tx.raw, &task, sizeof(task));
-                    
-                    if (is_last) break;
-                }
-            });
         }
+    }) @destroy;
+    if (!consumer) {
+        fprintf(stderr, "Failed to create consumer nursery\n");
+        return 1;
+    }
+
+    CCNursery* producer = @create(consumer, () => [in_ptr, tasks_tx] {
+        long seq = 0;
+        while (true) {
+            CCArena blk_arena = cc_arena_heap(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD);
+            CCSlice data;
+            bool !>(CCIoError) read_res = cc_file_read(in_ptr, &blk_arena, BLOCK_SIZE, &data);
+            
+            if (cc_is_err(read_res) || !cc_io_avail(read_res)) {
+                cc_arena_free(&blk_arena);
+                break;
+            }
+            
+            Block* blk = cc_arena_alloc_T(Block, &blk_arena);
+            if (!blk) {
+                cc_arena_free(&blk_arena);
+                break;
+            }
+            
+            blk->seq = seq++;
+            blk->data = data;
+            blk->is_last = (data.len < BLOCK_SIZE);
+            blk->arena = blk_arena;
+            
+            bool is_last = blk->is_last;
+            
+            // KEY DIFFERENCE: cc_thread_spawn instead of cc_fiber_spawn_task
+            CCTask task = cc_thread_spawn(compress_task_wrapper, blk);
+            cc_chan_send(tasks_tx.raw, &task, sizeof(task));
+            
+            if (is_last) break;
+        }
+    }) @destroy {
+        chan_close(tasks_tx);
+    };
+    if (!producer) {
+        chan_close(tasks_tx);
+        fprintf(stderr, "Failed to create producer nursery\n");
+        return 1;
     }
 
     cc_file_sync(&out_file);

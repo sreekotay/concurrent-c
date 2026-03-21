@@ -12,7 +12,7 @@ int main(void) {
     Container c;
     c.items = vec_new<int>(&arena);
     
-    /* Field access UFCS: c.items.push(...) -> Vec_int_push(&c.items, ...) */
+    /* Value receiver on a struct field should lower with &field. */
     c.items.push(10);
     c.items.push(20);
     c.items.push(30);
@@ -28,11 +28,15 @@ int main(void) {
         return 1;
     }
     
-    /* Also test pointer receiver */
-    Vec<int>* vp = &c.items;
-    vp->push(40);
+    /* Pointer receiver on a pointer-valued field should pass the field directly. */
+    typedef struct {
+        Vec<int>* items;
+    } PtrContainer;
+    PtrContainer pc;
+    pc.items = &c.items;
+    pc.items->push(40);
     
-    if (Vec_int_len(vp) != 4) {
+    if (Vec_int_len(&c.items) != 4) {
         printf("FAIL: expected 4 elements after ptr push\n");
         return 1;
     }

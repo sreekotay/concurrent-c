@@ -76,21 +76,16 @@ Uses locks (mutex + condvar) via yarn.h for synchronization.
                     └───────────┘
 ```
 
-Uses channels and nested nurseries for clean structured concurrency:
+Uses channels and explicit ownership scopes for clean structured concurrency:
 
 ```c
-@nursery {
-    spawn(writer);               // Collects results
-    
-    @closing(results_tx) {
-        for (N workers)
-            spawn(compressor);   // Compress blocks
-        
-        @closing(blocks_tx) {
-            spawn(reader);       // Produce blocks
-        }
-    }
-}
+CCNursery* writer = @create(NULL, writer_task) @destroy;
+CCNursery* pipeline = @create(writer) @destroy {
+    results_tx.close();
+};
+
+pipeline->spawn(() => { compress_block(); });
+pipeline->spawn(() => { read_blocks(); });
 ```
 
 ## CC Patterns Demonstrated
@@ -103,20 +98,17 @@ Block[~4 <] blocks_rx;    // Receive handle
 CCChan* ch = channel_pair(&blocks_tx, &blocks_rx);
 ```
 
-### 2. Nested Nurseries with `closing()`
-Auto-close channels when producers finish:
+### 2. Nested Ownership with Explicit Close
+Close channels when producer-owned work finishes:
 ```c
-@closing(results_tx) {
-    // Workers here...
-    @closing(blocks_tx) {
-        // Reader here - when done, blocks_tx closes
-    }
-    // Workers drain blocks_rx, then exit
-}
-// Writer drains results_rx, then exits
+CCNursery* producer = @create(consumer) @destroy {
+    results_tx.close();
+};
+// Producer-owned work runs here.
+// Consumer drains results_rx after close and then exits.
 ```
 
-### 3. Parallel Workers via `spawn()`
+### 3. Parallel Workers via `n->spawn()`
 No thread management - structured lifetime:
 ```c
 for (int w = 0; w < num_workers; w++) {
