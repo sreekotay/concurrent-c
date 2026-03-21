@@ -152,15 +152,82 @@ static int cc__is_family_recv_type(const char* type_name) {
     return type_name &&
            (strncmp(type_name, "Vec_", 4) == 0 ||
             strncmp(type_name, "Map_", 4) == 0 ||
+            strncmp(type_name, "__CC_VEC(", 9) == 0 ||
+            strncmp(type_name, "__CC_MAP(", 9) == 0 ||
             strncmp(type_name, "CCResult_", 9) == 0 ||
             strncmp(type_name, "CCOptional_", 11) == 0);
+}
+
+static const char* cc__canonicalize_parser_family_macro(const char* type_name,
+                                                        char* scratch,
+                                                        size_t scratch_cap) {
+    const char* args = NULL;
+    const char* close = NULL;
+    const char* tail = NULL;
+    int is_map = 0;
+    char mangled_a[128];
+    char mangled_b[128];
+    if (!type_name || !scratch || scratch_cap == 0) return NULL;
+    if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
+        args = type_name + 9;
+        is_map = 0;
+    } else if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
+        args = type_name + 9;
+        is_map = 1;
+    } else {
+        return NULL;
+    }
+    close = strrchr(args, ')');
+    if (!close || close <= args) return NULL;
+    tail = close + 1;
+    while (*tail == ' ' || *tail == '\t') tail++;
+    if (!is_map) {
+        cc_result_spec_mangle_type(args, (size_t)(close - args), mangled_a, sizeof(mangled_a));
+        if (!mangled_a[0]) return NULL;
+        snprintf(scratch, scratch_cap, "Vec_%s", mangled_a);
+        return scratch;
+    }
+    {
+        const char* comma = NULL;
+        int par = 0, br = 0, brc = 0, ang = 0;
+        for (const char* p = args; p < close; ++p) {
+            if (*p == '(') par++;
+            else if (*p == ')' && par > 0) par--;
+            else if (*p == '[') br++;
+            else if (*p == ']' && br > 0) br--;
+            else if (*p == '{') brc++;
+            else if (*p == '}' && brc > 0) brc--;
+            else if (*p == '<') ang++;
+            else if (*p == '>' && ang > 0) ang--;
+            else if (*p == ',' && par == 0 && br == 0 && brc == 0 && ang == 0) {
+                comma = p;
+                break;
+            }
+        }
+        if (!comma) return NULL;
+        cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_a, sizeof(mangled_a));
+        cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_b, sizeof(mangled_b));
+        if (!mangled_a[0] || !mangled_b[0]) return NULL;
+        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_a, mangled_b);
+        return scratch;
+    }
 }
 
 static const char* cc__canonicalize_family_recv_type(const char* type_name,
                                                      char* scratch,
                                                      size_t scratch_cap) {
+    const char* normalized = NULL;
+    char tmp[256];
     if (!type_name || !scratch || scratch_cap == 0) return type_name;
-    if (!strstr(type_name, "_Bool")) return type_name;
+    normalized = cc__canonicalize_parser_family_macro(type_name, tmp, sizeof(tmp));
+    if (normalized) type_name = normalized;
+    if (!strstr(type_name, "_Bool")) {
+        if (normalized) {
+            snprintf(scratch, scratch_cap, "%s", type_name);
+            return scratch;
+        }
+        return type_name;
+    }
 
     size_t out = 0;
     for (size_t i = 0; type_name[i] && out + 1 < scratch_cap;) {

@@ -512,6 +512,39 @@ static int cc_try_cc_closure_single_param(int ident_tok, int start_line, int sta
     return 1;
 }
 
+static void cc_skip_retired_stmt_tail(void) {
+    int par = 0, br = 0, sq = 0;
+    while (tok && tok != TOK_EOF) {
+        if (tok == '(') par++;
+        else if (tok == ')' && par > 0) par--;
+        else if (tok == '{') br++;
+        else if (tok == '}' && br > 0) br--;
+        else if (tok == '[') sq++;
+        else if (tok == ']' && sq > 0) sq--;
+        else if (par == 0 && br == 0 && sq == 0) {
+            if (tok == ';') {
+                next();
+                break;
+            }
+            if (tok == '}') {
+                break;
+            }
+        }
+        next();
+    }
+}
+
+static void cc_skip_retired_block(void) {
+    if (tok != '{') return;
+    int depth = 1;
+    next();
+    while (tok && tok != TOK_EOF && depth > 0) {
+        if (tok == '{') depth++;
+        else if (tok == '}') depth--;
+        next();
+    }
+}
+
 /*
  * Parse spawn statement: spawn(expr, ...); or spawn into(channel)? () => expr;
  * Returns: 1 = handled, 0 = not handled
@@ -519,142 +552,14 @@ static int cc_try_cc_closure_single_param(int ident_tok, int start_line, int sta
 static int cc_try_thread_spawn(void) {
     if (tok < TOK_IDENT || strcmp(get_tok_str(tok, NULL), "spawn") != 0)
         return 0;
-    
-    cc_ast_record_start(CC_AST_NODE_STMT);
-    if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-        int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-        tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("spawn");
-    }
-    
+
     next(); /* consume 'spawn' */
-    
-    /* Check for 'spawn into(channel)' syntax */
     if (tok >= TOK_IDENT && strcmp(get_tok_str(tok, NULL), "into") == 0) {
-        /* Record as 'spawn_into' to distinguish from regular spawn */
-        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("spawn_into");
-        }
-        
-        next(); /* consume 'into' */
-        if (tok != '(') {
-            tcc_error("expected '(' after 'into'");
-            return 0;
-        }
-        next(); /* consume '(' */
-        
-        /* Parse channel name - store in aux_s2 */
-        if (tok < TOK_IDENT) {
-            tcc_error("expected channel name in spawn into()");
-            return 0;
-        }
-        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux_s2 = tcc_strdup(get_tok_str(tok, NULL));
-        }
-        next(); /* consume channel name */
-        
-        skip(')'); /* consume ')' after channel */
-        
-        /* Check for optional '?' for send error propagation */
-        if (tok == '?') {
-            if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-                int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-                tcc_state->cc_nodes[idx].aux2 |= 4;  /* bit 2: has error prop */
-            }
-            next(); /* consume '?' */
-        }
-        
-        /* Now expect closure: () => expr or () => [captures] expr */
-        /* Parse-only mode for the rest */
-        {
-            int saved_ncw = nocode_wanted;
-            ++nocode_wanted;
-            
-            /* Expect () */
-            if (tok != '(') {
-                tcc_error("expected '()' in spawn into closure");
-                return 0;
-            }
-            next();
-            skip(')');
-            
-            /* Expect => */
-            if (tok != TOK_CC_ARROW) {
-                tcc_error("expected '=>' in spawn into closure");
-                return 0;
-            }
-            next();
-            
-            /* Skip optional captures [x, y] after => */
-            if (tok == '[') {
-                int bracket_depth = 1;
-                next();
-                while (bracket_depth > 0 && tok != TOK_EOF) {
-                    if (tok == '[') bracket_depth++;
-                    else if (tok == ']') bracket_depth--;
-                    next();
-                }
-            }
-            
-            /* Parse the expression/body */
-            if (tok == '{') {
-                block(0);
-            } else {
-                expr_eq();
-                vpop();
-            }
-            
-            nocode_wanted = saved_ncw;
-        }
-        
-        /* Record end position at ';' before consuming it */
-        if (tcc_state && tok == ';' && file && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].line_end = file->line_num;
-            tcc_state->cc_nodes[idx].col_end = tok_col + 1;
-            tcc_state->cc_nodes[idx].aux2 |= (int)(1U << 31);
-        }
-        
-        skip(';');
-        cc_ast_record_end();
-        return 1;
+        tcc_error("async: `spawn into(...)` is retired; create/send `CCTask` handles explicitly");
+    } else {
+        tcc_error("async: `spawn(...)` statement is retired; use `n->spawn(...)` or explicit task APIs");
     }
-    
-    /* Regular spawn(expr, ...) */
-    if (tok != '(') {
-        tcc_error("expected '(' after spawn");
-        return 0;
-    }
-    next(); /* consume '(' */
-    
-    /* Parse-only: do not emit code for CC spawn statement */
-    {
-        int saved_ncw = nocode_wanted;
-        ++nocode_wanted;
-        /* Parse comma-separated argument list */
-        expr_eq();
-        vpop();
-        while (tok == ',') {
-            next(); /* consume ',' */
-            expr_eq();
-            vpop();
-        }
-        nocode_wanted = saved_ncw;
-    }
-    
-    skip(')');
-    
-    /* Record end position at ';' before consuming it */
-    if (tcc_state && tok == ';' && file && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-        int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-        tcc_state->cc_nodes[idx].line_end = file->line_num;
-        tcc_state->cc_nodes[idx].col_end = tok_col + 1;
-        tcc_state->cc_nodes[idx].aux2 |= (int)(1U << 31); /* pin end span */
-    }
-    
-    skip(';');
-    cc_ast_record_end();
+    cc_skip_retired_stmt_tail();
     return 1;
 }
 
@@ -692,16 +597,10 @@ static int cc_try_cc_at_stmt(void) {
     
     /* --- @closing(ch[, ...]) { ... } --- */
     if (strcmp(cc_at, "closing") == 0) {
-        cc_ast_record_start(CC_AST_NODE_STMT);
-        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            /* Internally this is equivalent to @nursery closing(...) */
-            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("nursery");
-        }
-        tcc_state->cc_at_nursery_wrap = 1;
+        tcc_error("async: `@closing(...)` is retired; use explicit ownership with `@create(...) @destroy { chan.close(); }`");
         next(); /* consume 'closing' */
         if (tok != '(')
-            tcc_error("expected '(' after @closing");
+            return 1;
         int depth = 1;
         next();
         while (tok && tok != TOK_EOF && depth > 0) {
@@ -709,9 +608,9 @@ static int cc_try_cc_at_stmt(void) {
             else if (tok == ')') depth--;
             next();
         }
-        if (tok != '{')
-            tcc_error("expected '{' after @closing(...)");
-        return 2; /* handled, parse block with nursery wrap */
+        if (tok == '{') cc_skip_retired_block();
+        else cc_skip_retired_stmt_tail();
+        return 1;
     }
 
     /* --- @defer stmt; --- */
@@ -761,19 +660,14 @@ static int cc_try_cc_at_stmt(void) {
     
     /* --- @nursery { ... } --- */
     if (strcmp(cc_at, "nursery") == 0) {
-        cc_ast_record_start(CC_AST_NODE_STMT);
-        if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux_s1 = tcc_strdup("nursery");
-        }
-        tcc_state->cc_at_nursery_wrap = 1;
+        tcc_error("async: `@nursery { ... }` is retired; use `CCNursery* n = @create(parent) @destroy` and `n->spawn(...)`");
         next(); /* consume 'nursery' */
         
         /* Optional 'closing(...)' clause */
         if (tok >= TOK_IDENT && strcmp(get_tok_str(tok, NULL), "closing") == 0) {
             next(); /* consume 'closing' */
             if (tok != '(')
-                tcc_error("expected '(' after @nursery closing");
+                return 1;
             int depth = 1;
             next();
             while (tok && tok != TOK_EOF && depth > 0) {
@@ -782,9 +676,9 @@ static int cc_try_cc_at_stmt(void) {
                 next();
             }
         }
-        if (tok != '{')
-            tcc_error("expected '{' after @nursery");
-        return 2; /* handled, fall through to block */
+        if (tok == '{') cc_skip_retired_block();
+        else cc_skip_retired_stmt_tail();
+        return 1;
     }
     
     /* --- @match { ... } --- */

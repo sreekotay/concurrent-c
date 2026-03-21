@@ -1,1 +1,1 @@
-error: channel: deadlock: `@closing(ch)` closes channels only after owned tasks exit
+error: async: `@closing(...)` is retired; use explicit ownership with `@create(...) @destroy { chan.close(); }`

@@ -9,7 +9,7 @@
  *
  * IMPORTANT: When sending values to a channel from cc_block_on(),
  * ensure the buffer is large enough to hold all values, OR use
- * concurrent producer/consumer via @nursery.
+ * concurrent producer/consumer via an explicit nursery handle.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>

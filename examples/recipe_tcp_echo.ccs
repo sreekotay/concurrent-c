@@ -3,7 +3,7 @@
  *
  * Demonstrates:
  *   - TCP socket primitives (listen, accept, read, write)
- *   - Connection handling with @nursery
+ *   - Connection handling with explicit nursery ownership
  *   - Arena-based memory management
  *   - Graceful cleanup
  *

@@ -47,26 +47,15 @@ int main(void) {
     CCTask[~CHAN_CAP >] tasks_tx;
     CCTask[~CHAN_CAP <] tasks_rx;
     CCChan* tasks_ch = cc_channel_pair(&tasks_tx, &tasks_rx);
+    if (!tasks_ch) {
+        return 1;
+    }
 
     printf("=== Ordered Parallel Processing ===\n");
     printf("Processing %d items with variable delays...\n\n", NUM_ITEMS);
 
-    @nursery {
-        /* Producer: spawn tasks, send handles in order, then close channel. */
-        spawn(() => [tasks_tx] {
-            for (int i = 1; i <= NUM_ITEMS; i++) {
-                Item* item = malloc(sizeof(Item));
-                item->id = i;
-                
-                CCTask task = cc_thread_spawn(process_item, item);
-                (void)chan_send(tasks_tx, task);
-                printf("[producer] spawned task for item %d\n", i);
-            }
-            chan_close(tasks_tx);  /* Signal no more tasks */
-        });
-
-        /* Consumer: await handles in FIFO order → ordered output! */
-        spawn(() => [tasks_rx] {
+    {
+        CCNursery* consumer = @create(NULL, () => [tasks_rx] {
             printf("\n[consumer] receiving results in order:\n");
             CCTask task;
             while (cc_io_avail(chan_recv(tasks_rx, &task))) {
@@ -74,9 +63,33 @@ int main(void) {
                 void* result = (void*)cc_block_on_intptr(task);
                 
                 Item* item = (Item*)result;
-                printf("[consumer] item %d: %d^2 = %d\n", 
+                printf("[consumer] item %d: %d^2 = %d\n",
                        item->id, item->id, item->result);
                 free(item);
+            }
+        }) @destroy;
+        if (!consumer) {
+            cc_chan_free(tasks_ch);
+            return 1;
+        }
+
+        CCNursery* producer = @create(consumer) @destroy {
+            chan_close(tasks_tx);
+        };
+        if (!producer) {
+            chan_close(tasks_tx);
+            cc_chan_free(tasks_ch);
+            return 1;
+        }
+
+        producer->spawn(() => [tasks_tx] {
+            for (int i = 1; i <= NUM_ITEMS; i++) {
+                Item* item = malloc(sizeof(Item));
+                item->id = i;
+                
+                CCTask task = cc_thread_spawn(process_item, item);
+                (void)chan_send(tasks_tx, task);
+                printf("[producer] spawned task for item %d\n", i);
             }
         });
     }

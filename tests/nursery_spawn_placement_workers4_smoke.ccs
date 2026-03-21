@@ -8,6 +8,7 @@
  */
 
 #include <ccc/std/prelude.cch>
+#include <ccc/cc_nursery.cch>
 #include <stdio.h>
 
 #define NUM_WORKERS 4
@@ -49,25 +50,27 @@ int main(void) {
         }
         cc_atomic_store(&g_ready, 0);
 
-        @nursery {
-            for (int i = 0; i < NUM_SIBLINGS; i++) {
-                int idx = i;
-                spawn(() => [idx] {
-                    int wid = -1;
-                    for (int spin = 0; spin < 10000 && wid < 0; spin++) {
-                        wid = cc__sched_current_worker_id();
-                        if (wid < 0) {
-                            cc_yield();
-                        }
-                    }
-                    cc_atomic_store(&g_worker_ids[idx], wid);
-                    cc_atomic_fetch_add(&g_ready, 1);
-                    while (cc_atomic_load(&g_ready) < NUM_SIBLINGS) {
+        CCNursery* n = @create(NULL) @detach;
+        if (!n) abort();
+        for (int i = 0; i < NUM_SIBLINGS; i++) {
+            int idx = i;
+            (void)cc_nursery_spawn_closure0(n, () => [idx] {
+                int wid = -1;
+                for (int spin = 0; spin < 10000 && wid < 0; spin++) {
+                    wid = cc__sched_current_worker_id();
+                    if (wid < 0) {
                         cc_yield();
                     }
-                });
-            }
+                }
+                cc_atomic_store(&g_worker_ids[idx], wid);
+                cc_atomic_fetch_add(&g_ready, 1);
+                while (cc_atomic_load(&g_ready) < NUM_SIBLINGS) {
+                    cc_yield();
+                }
+            });
         }
+        (void)cc_nursery_wait(n);
+        cc_nursery_free(n);
 
         int unique = count_unique_workers(g_worker_ids, NUM_SIBLINGS);
         if (unique < 0) {
