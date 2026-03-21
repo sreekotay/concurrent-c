@@ -247,15 +247,16 @@ Concurrent-C detects deadlocks at **compile time** (for guaranteed patterns) and
 #### Compile-time: 100% guaranteed deadlocks → ERROR
 
 ```c
-@closing(ch) {
-    spawn([rx]() => {
+CCNursery* producer = @create(NULL) @destroy {
+    chan_close(ch);
+};
+producer->spawn([rx]() => {
         while (chan_recv(rx, &v) == 0) { ... }  // ❌ ERROR: deadlock
-    });
-}
-// Consumer waits for close, but close happens AFTER children exit
+});
+// Consumer waits for close, but close happens AFTER owned tasks exit
 ```
 
-Fix: Move consumer **outside** the nursery.
+Fix: Move consumer **outside** the owning nursery scope.
 
 #### Runtime: Real deadlock detection
 

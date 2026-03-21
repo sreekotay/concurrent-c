@@ -15,7 +15,7 @@ The primary integration point. CC provides an external parser that handles CC-sp
 struct TCCExtParser {
     int (*try_cc_decl)(void);      // Try parsing CC declaration (unused currently)
     int (*try_cc_stmt)(void);      // Try parsing CC statement (unused currently)
-    int (*try_cc_at_stmt)(void);   // Parse @defer, @nursery, @arena statements
+    int (*try_cc_at_stmt)(void);   // Parse active @-statements and reject retired block forms
     int (*try_cc_unary)(void);     // Try parsing CC unary expression (unused)
     int (*try_cc_spawn)(void);     // Parse spawn(...) statement
     int (*try_cc_closure)(void);   // Parse closure: [captures](params) => body
@@ -48,7 +48,7 @@ enum {
     CC_AST_NODE_DECL = 1,       // Declaration
     CC_AST_NODE_BLOCK = 2,      // Block scope
     CC_AST_NODE_STMT = 3,       // Statement (@defer, @nursery, spawn)
-    CC_AST_NODE_ARENA = 4,      // @arena block
+    CC_AST_NODE_ARENA = 4,      // legacy @arena block node (retired surface syntax)
     CC_AST_NODE_CALL = 5,       // Function call (with UFCS metadata)
     CC_AST_NODE_AWAIT = 6,      // await expression
     CC_AST_NODE_SEND_TAKE = 7,  // Channel send/take

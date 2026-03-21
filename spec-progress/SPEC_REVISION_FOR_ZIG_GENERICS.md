@@ -297,7 +297,7 @@ async, arena, lock, noblock, closing
 
 ### @ Statements (11) - unchanged
 ```
-@async, @latency_sensitive, @scoped, @nursery, @arena, @lock, @match, @defer, @for await, @comptime, @nursery closing
+@async, @latency_sensitive, @scoped, @nursery, @lock, @match, @defer, @for await, @comptime, @nursery closing
 ```
 
 ### Type Constructors (4) - unchanged

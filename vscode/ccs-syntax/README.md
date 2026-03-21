@@ -5,13 +5,12 @@ Syntax highlighting for Concurrent-C source and headers:
 - `*.ccs` (Concurrent-C source)
 - `*.cch` (Concurrent-C headers)
 
-Concurrent-C is largely C + preprocessor, with a few extra surface-syntax constructs like:
+Concurrent-C is largely C + preprocessor, with a few extra active surface-syntax constructs like:
 
-- `@arena { ... }`
-- `@nursery { ... }`
+- `@create(...) @destroy` lifecycle declarations
 - `@defer label: { ... }`
 - `@async` function modifier
-- `spawn (call(...))`
+- UFCS-style task operations like `n->spawn(...)` / `n->wait()`
 - UFCS-style `value.method(...)` / `ptr->method(...)` calls
 - Core keywords like `await`, `try`, `catch`, `unsafe`, `comptime`
 - Type sugar like `T?`, `T!>(E)`, `T[:]`, `T[~N ...]`

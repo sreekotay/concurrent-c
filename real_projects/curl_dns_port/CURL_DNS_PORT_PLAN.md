@@ -10,7 +10,7 @@ The `asyn-thrdd.c` file in `curl` implements an asynchronous DNS resolver using 
 
 1.  **Surgical Interop:** It's a self-contained file (approx 500-800 lines). We can replace the thread-spawning logic with Concurrent-C fibers and a `@nursery` without rewriting the rest of `curl`.
 2.  **Build System Test:** `curl` uses a complex Autotools/CMake build system. Integrating `ccc` to compile this one file and link it into `libcurl.so` is the ultimate test of Concurrent-C's "brownfield" integration capabilities.
-3.  **Structural Safety:** DNS resolution is a common source of memory leaks and use-after-free bugs during cancellation. Using `@arena` for the lifetime of a DNS request and `@nursery` for the resolver fiber ensures deterministic cleanup.
+3.  **Structural Safety:** DNS resolution is a common source of memory leaks and use-after-free bugs during cancellation. Using an owned `CCArena` for the lifetime of a DNS request and structured task ownership for the resolver fiber ensures deterministic cleanup.
 4.  **Fiber Efficiency:** Moving from OS threads to fibers reduces the overhead of concurrent DNS lookups, especially when many transfers are initiated simultaneously.
 
 ## Implementation Strategy:

@@ -1,0 +1,1 @@
+error: async: `@arena(...) { ... }` is retired; use `CCArena a = @create(size) @destroy`

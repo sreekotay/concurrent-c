@@ -27,10 +27,10 @@ Create `hello.ccs`:
 int main(void) {
     printf("Starting...\n");
     
-    @nursery {
-        spawn(() => printf("Hello from task A!\n"));
-        spawn(() => printf("Hello from task B!\n"));
-    }
+    CCNursery* n = @create(NULL) @destroy;
+    if (!n) return 1;
+    n->spawn(() => printf("Hello from task A!\n"));
+    n->spawn(() => printf("Hello from task B!\n"));
     
     printf("Done.\n");
     return 0;
@@ -55,12 +55,14 @@ Done.
 
 ### Structured Concurrency
 
-All concurrent tasks are scoped to a `@nursery` block. The block waits for all spawned tasks to complete:
+All concurrent tasks are scoped to an owned `CCNursery*`. Its `@destroy` waits for all spawned tasks to complete:
 
 ```c
-@nursery {
-    spawn(task1());
-    spawn(task2());
+{
+    CCNursery* n = @create(NULL) @destroy;
+    if (!n) return 1;
+    n->spawn(task1());
+    n->spawn(task2());
 }
 // Both tasks complete before this line
 ```
@@ -74,22 +76,20 @@ int[~10 >] tx;  // sender, capacity 10
 int[~10 <] rx;  // receiver
 CCChan* ch = channel_pair(&tx, &rx);
 
-@nursery {
-    // Consumer drains until producer ownership scope closes tx.
-    spawn(() => {
-        int v = 0;
-        while (cc_io_avail(chan_recv(rx, &v))) {
-            printf("got %d\n", v);
+{
+    CCNursery* producer = @create(NULL) @destroy {
+        chan_close(tx);
+    };
+    if (!producer) return 1;
+    producer->spawn(() => {
+        for (int i = 0; i < 5; i++) {
+            (void)chan_send(tx, i);
         }
     });
 
-    // Preferred: annotate producer ownership with @closing(tx).
-    @closing(tx) {
-        spawn(() => {
-            for (int i = 0; i < 5; i++) {
-                (void)chan_send(tx, i);
-            }
-        });
+    int v = 0;
+    while (cc_io_avail(chan_recv(rx, &v))) {
+        printf("got %d\n", v);
     }
 }
 cc_chan_free(ch);
@@ -106,13 +106,15 @@ FILE* f = fopen("data.txt", "r");
 // fclose runs automatically
 ```
 
-### Scoped Memory with `@arena`
+### Scoped Memory with Owned Arenas
 
 Fast bump allocation with automatic cleanup:
 
 ```c
-@arena(a, kilobytes(4)) {
-    void* buf = cc_arena_alloc(a, 1024, 8);
+{
+    CCArena arena = @create(kilobytes(4)) @destroy;
+    if (!arena.base) return 1;
+    void* buf = cc_arena_alloc(&arena, 1024, 8);
     // ... use buf ...
 }
 // Arena freed automatically

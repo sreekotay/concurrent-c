@@ -1,0 +1,9 @@
+#include <ccc/std/prelude.cch>
+
+int main(void) {
+    char buf[128];
+    @arena_init(buf, sizeof(buf)) {
+        (void)arena;
+    }
+    return 0;
+}

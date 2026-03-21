@@ -45,7 +45,10 @@ cc_atomic_int g_blocks_done = 0;
 CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
-    @arena(res_arena, arena_size) {
+    {
+        CCArena res_arena_storage = @create(arena_size) @destroy;
+        if (!res_arena_storage.base) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
+        CCArena* res_arena = &res_arena_storage;
         CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
         if (!res) return cc_err(cc_io_error(CC_IO_OUT_OF_MEMORY));
         

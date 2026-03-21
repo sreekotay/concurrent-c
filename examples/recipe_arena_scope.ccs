@@ -2,7 +2,7 @@
  * Recipe: Scoped Memory (Arena)
  *
  * Demonstrates:
- *   - @arena block for automatic memory scope
+ *   - owned arena scope with automatic cleanup
  *   - Arena-backed CCString builder with UFCS
  *   - Request-scoped allocation: O(1) reset per iteration
  *
@@ -15,7 +15,10 @@
 int main(void) {
     /* Simulate processing 3 "requests" - arena resets each iteration. */
     for (int i = 1; i <= 3; i++) {
-        @arena {
+        {
+            CCArena arena_storage = @create(kilobytes(4)) @destroy;
+            if (!arena_storage.base) return 1;
+            CCArena* arena = &arena_storage;
             /* All allocations this iteration use this arena. */
             CCString s = cc_string_new(arena);
             

@@ -16,7 +16,6 @@
 #include "visitor/pass_ufcs.h"
 #include "visitor/pass_closure_calls.h"
 #include "visitor/pass_autoblock.h"
-#include "visitor/pass_arena_ast.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_channel_syntax.h"
@@ -1719,11 +1718,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
          phase 3: lower the post-comptime TU to host C
        Today phase 2 is still implemented as registration/handler collection,
        but keep the comments and call structure aligned with that broader model.
-       For final codegen we still read the original source and lower UFCS/@arena
+       For final codegen we still read the original source and lower UFCS plus
+       the remaining AST/text passes that operate on original spans
        here; the preprocessor's temp file exists only to make TCC parsing
        succeed. Note: text-based rewrites like `if @try` run on original source
        early in this function. */
-    /* Read original source once; we may rewrite UFCS spans before @arena lowering. */
+    /* Read original source once; later passes still rewrite against original spans. */
     char* src_all = NULL;
     char* src_regs = NULL;
     size_t src_len = 0;
@@ -2009,8 +2009,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
-    /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering
-       (@arena/@nursery/spawn). These rewrites run before marker stripping to keep spans stable. */
+    /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering.
+       These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
         CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (!root3) {
@@ -2050,46 +2050,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             if (defs) { free(closure_defs); closure_defs = defs; closure_defs_len = defs_len; }
         }
         cc_tcc_bridge_free_ast(root3);
-
-        /* Reparse after closure rewrite so spawn/nursery/arena spans are correct. */
-        CCASTRoot* root4 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
-        if (!root4) {
-            fclose(out);
-            if (src_ufcs != src_all) free(src_ufcs);
-            free(src_all);
-            free(closure_protos);
-            free(closure_defs);
-            return EINVAL;
-        }
-
-        /* Batch arena edits using EditBuffer so we don't have stale AST offsets. */
-        {
-            CCEditBuffer eb;
-            cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
-
-            int n_arena = cc__collect_arena_edits(root4, ctx, &eb);
-
-            if (n_arena < 0) {
-                cc_tcc_bridge_free_ast(root4);
-                fclose(out);
-                if (src_ufcs != src_all) free(src_ufcs);
-                free(src_all);
-                free(closure_protos);
-                free(closure_defs);
-                return EINVAL;
-            }
-
-            if (eb.count > 0) {
-                size_t new_len = 0;
-                char* applied = cc_edit_buffer_apply(&eb, &new_len);
-                if (applied) {
-                    if (src_ufcs != src_all) free(src_ufcs);
-                    src_ufcs = applied;
-                    src_ufcs_len = new_len;
-                }
-            }
-        }
-        cc_tcc_bridge_free_ast(root4);
     }
 
     /* Lower @defer (and hard-error on cancel) using a syntax-driven pass.
@@ -2114,7 +2074,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     /* AST-driven @async lowering (state machine).
-       IMPORTANT: run AFTER CC statement-level lowering so @nursery/@arena/spawn/closures are real C. */
+       IMPORTANT: run after statement-level lowering so closure rewrites are already reflected. */
     if (src_ufcs && ctx && ctx->symbols) {
         CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (getenv("CC_DEBUG_REPARSE")) {

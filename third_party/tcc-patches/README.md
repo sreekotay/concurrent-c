@@ -29,7 +29,7 @@ make tcc-patch-regen
 - AST stub recording system for CC visitor passes
 - External parser hooks (`ext_parser`) for CC syntax
 - UFCS (Uniform Function Call Syntax) support
-- Statement extensions: `@arena`, `@nursery`, `@defer`, `spawn`
+- Statement extensions: `@defer`, `spawn`, and parser-level rejection of retired `@arena` / `@nursery`
 - Expression extensions: `await`, closures (`=>` syntax)
 - New tokens: `TOK_CC_ARROW` for `=>`
 

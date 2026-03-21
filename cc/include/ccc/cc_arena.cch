@@ -182,7 +182,7 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
 
 
 // Allocate a growable arena with heap-backed storage of given initial size.
-// block_max = 0 means unbounded growth (default for @arena).
+// block_max = 0 means unbounded growth (the default for heap-created arenas).
 static inline CCArena cc_arena_heap(size_t bytes) {
     CCArena a = {0};
     void* buf = malloc(bytes);

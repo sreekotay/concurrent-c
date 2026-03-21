@@ -1,7 +1,7 @@
-/* Test: @nursery and @arena in the same function.
+/* Test: owned nursery and owned arena in the same function.
    
-   This tests the EditBuffer fix - previously nursery and arena used the same AST
-   but nursery would modify the source first, leaving arena with stale offsets.
+   This tests the EditBuffer fix - previously nursery and arena rewrites used the same AST
+   but nursery would modify the source first, leaving arena lowering with stale offsets.
    Now both collect edits into a shared EditBuffer and apply them together.
 */
 

@@ -15,7 +15,10 @@ typedef struct {
 } Container;
 
 int main(void) {
-    @arena {
+    {
+        CCArena arena_storage = @create(kilobytes(4)) @destroy;
+        if (!arena_storage.base) abort();
+        CCArena* arena = &arena_storage;
         // Case 1: String literal argument
         cc_std_out.write("case1:");
         

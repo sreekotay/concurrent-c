@@ -60,18 +60,6 @@ static int cc__is_async_owner(const CCASTRoot* root,
     return 0;
 }
 
-static int cc__is_inside_arena(const CCASTRoot* root,
-                              const CCVisitorCtx* ctx,
-                              const NodeView* n,
-                              int idx) {
-    if (!root || !ctx || !n) return 0;
-    for (int cur = idx; cur >= 0 && cur < root->node_count; cur = n[cur].parent) {
-        if (!cc_pass_node_in_tu(root, ctx, n[cur].file)) continue;
-        if (n[cur].kind == CC_AST_NODE_ARENA) return 1;
-    }
-    return 0;
-}
-
 
 static size_t cc__node_start_off(const char* src, size_t len, const NodeView* nd) {
     if (!nd || nd->line_start <= 0) return 0;
@@ -622,8 +610,8 @@ static int cc__parse_one_stmt_from_text(const char* src, size_t len, size_t ss, 
     if (i >= se) { memset(out, 0, sizeof(*out)); out->kind = ST_SEMI; out->text = strdup(""); if (out_end) *out_end = se; return 1; }
     /* CC extension block-like statements with braces but no trailing ';'.
        We treat these as a single semi-like statement so later lowering passes
-       (@nursery/@arena) can handle them, but we still need correct statement
-       boundary at the matching '}' so the next statement doesn't get glued. */
+       can handle them, but we still need correct statement boundary at the
+       matching '}' so the next statement doesn't get glued. */
     if (src[i] == '@') {
         size_t j = i + 1;
         j = cc__skip_ws_and_comments_bounded(src, len, j, se);
@@ -1305,6 +1293,10 @@ typedef struct {
     const char* const* map_names;
     const char* const* map_repls;
     int map_n;
+    char* const* local_names;
+    char* const* local_tys;
+    char* const* local_sufs;
+    int local_n;
     int* cur_state;
     int* next_state;
     int* task_idx;
@@ -1316,6 +1308,21 @@ typedef struct {
     int cont_state[64];
     int indent; /* spaces for statement indentation inside switch/case */
 } Emit;
+
+static const char* cc__emit_lookup_local_type(const Emit* e, const char* name) {
+    if (!e || !name) return NULL;
+    for (int i = 0; i < e->local_n; i++) {
+        if (e->local_names && e->local_names[i] && strcmp(e->local_names[i], name) == 0) {
+            return (e->local_tys && e->local_tys[i]) ? e->local_tys[i] : NULL;
+        }
+    }
+    return NULL;
+}
+
+static int cc__emit_rhs_is_brace_init(const char* rhs) {
+    rhs = cc__skip_ws(rhs);
+    return rhs && rhs[0] == '{';
+}
 
 static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n);
 
@@ -1679,6 +1686,53 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         }
     }
 
+    /* array declaration (e.g. `char buf[256];`) hoisted into frame:
+       skip the declaration so we don't emit invalid `char __f->buf[256];`. */
+    {
+        const char* q = p;
+        if (strncmp(q, "struct ", 7) == 0) q += 7;
+        else if (strncmp(q, "union ", 6) == 0) q += 6;
+        else if (strncmp(q, "enum ", 5) == 0) q += 5;
+        q = cc__skip_ws(q);
+
+        const char* type_start = q;
+        int n_type_tokens = 0;
+        while (cc__is_ident_start(*q)) {
+            while (cc__is_ident_char(*q)) q++;
+            n_type_tokens++;
+            q = cc__skip_ws(q);
+            if (!cc__is_ident_start(*q)) break;
+        }
+        if (n_type_tokens >= 2) {
+            q = type_start;
+            const char* var_start = NULL;
+            const char* var_end = NULL;
+            while (cc__is_ident_start(*q)) {
+                var_start = q;
+                while (cc__is_ident_char(*q)) q++;
+                var_end = q;
+                q = cc__skip_ws(q);
+                if (!cc__is_ident_start(*q)) break;
+            }
+            if (var_start && var_end) {
+                q = cc__skip_ws(q);
+                if (*q == '[') {
+                    size_t nn = (size_t)(var_end - var_start);
+                    if (nn > 0 && nn < 128) {
+                        char nm[128];
+                        memcpy(nm, var_start, nn);
+                        nm[nn] = 0;
+                        int is_frame = 0;
+                        for (int k = 0; k < e->map_n; k++) {
+                            if (e->map_names[k] && strcmp(e->map_names[k], nm) == 0) { is_frame = 1; break; }
+                        }
+                        if (is_frame) return 1;
+                    }
+                }
+            }
+        }
+    }
+
     /* struct/other type declaration (e.g. `BigStruct s;`, `MyType x = init;`) hoisted into frame:
        - With initializer: emit as assignment to frame slot
        - Without initializer: skip (variable is already declared in frame struct)
@@ -1745,8 +1799,15 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                             if (!init2) return 0;
                             char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
                             char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
+                            const char* ty2 = cc__emit_lookup_local_type(e, nm);
                             free(init2);
-                            if (lhs2 && rhs2) cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                            if (lhs2 && rhs2) {
+                                if (ty2 && ty2[0] && cc__emit_rhs_is_brace_init(rhs2)) {
+                                    cc__emit_line_fmt(e, "%s = (%s)%s;", lhs2, ty2, rhs2);
+                                } else {
+                                    cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                                }
+                            }
                             free(lhs2);
                             free(rhs2);
                             return 1;
@@ -2040,14 +2101,6 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
             fprintf(stderr, "  hint: mark the containing function with @async, e.g.: @async void my_fn(void) { ... }\n");
             return -1;
         }
-        if (cc__is_inside_arena(root, ctx, n, n[i].parent)) {
-            const char* f = n[i].file ? n[i].file : (ctx->input_path ? ctx->input_path : "<input>");
-            cc_pass_error_cat(f, n[i].line_start, n[i].col_start > 0 ? n[i].col_start : 1,
-                    CC_ERR_ASYNC, "'await' inside @arena blocks is not supported");
-            fprintf(stderr, "  note: arena-allocated memory cannot be preserved across await points\n");
-            fprintf(stderr, "  hint: move the await outside the @arena block, or use heap allocation instead\n");
-            return -1;
-        }
     }
 
     typedef struct {
@@ -2236,9 +2289,11 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         /* Collect locals names (+ best-effort type) using DECL_ITEM nodes in function subtree. */
         char* locals[256];
         char* local_tys[256]; /* only used for pointer-like locals; NULL => keep as intptr_t */
+        char* local_sufs[256]; /* array declarator suffix, e.g. "[256]" */
         int local_n = 0;
         memset(locals, 0, sizeof(locals));
         memset(local_tys, 0, sizeof(local_tys));
+        memset(local_sufs, 0, sizeof(local_sufs));
         for (int i = 0; i < root->node_count && local_n < 256; i++) {
             if (n[i].kind != CC_AST_NODE_DECL_ITEM) continue;
             if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
@@ -2334,6 +2389,33 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                                 }
                             }
                             local_tys[local_n - 1] = ty_text;
+                            {
+                                const char* after = hit + nn;
+                                after = cc__skip_ws(after);
+                                if (*after == '[') {
+                                    const char* suf_s = after;
+                                    int depth = 0;
+                                    int in_str = 0, in_chr = 0;
+                                    while (*after) {
+                                        char ch = *after;
+                                        char ch2 = after[1];
+                                        if (in_str) { if (ch == '\\' && ch2) { after += 2; continue; } if (ch == '"') in_str = 0; after++; continue; }
+                                        if (in_chr) { if (ch == '\\' && ch2) { after += 2; continue; } if (ch == '\'') in_chr = 0; after++; continue; }
+                                        if (ch == '"') { in_str = 1; after++; continue; }
+                                        if (ch == '\'') { in_chr = 1; after++; continue; }
+                                        if (ch == '[') depth++;
+                                        else if (ch == ']') {
+                                            if (depth > 0) depth--;
+                                            after++;
+                                            while (*after == ' ' || *after == '\t') after++;
+                                            if (*after != '[' && depth == 0) break;
+                                            continue;
+                                        }
+                                        after++;
+                                    }
+                                    local_sufs[local_n - 1] = cc__strndup_trim_ws(suf_s, (size_t)(after - suf_s));
+                                }
+                            }
                         }
                     }
                 }
@@ -2491,7 +2573,11 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         for (int k = 0; k < local_n; k++) {
             /* Use actual type if known, otherwise fall back to intptr_t for primitives. */
             if (local_tys[k] && local_tys[k][0]) {
-                cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s;\n", local_tys[k], locals[k]);
+                if (local_sufs[k] && local_sufs[k][0]) {
+                    cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s%s;\n", local_tys[k], locals[k], local_sufs[k]);
+                } else {
+                    cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  %s %s;\n", local_tys[k], locals[k]);
+                }
             } else {
                 cc__sb_append_fmt(&repl, &repl_len, &repl_cap, "  intptr_t %s;\n", locals[k]);
             }
@@ -2530,6 +2616,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         Emit em = {
             .out = &repl, .out_len = &repl_len, .out_cap = &repl_cap,
             .map_names = map_names, .map_repls = map_repls, .map_n = map_n,
+            .local_names = locals, .local_tys = local_tys, .local_sufs = local_sufs, .local_n = local_n,
             .cur_state = &cur_state, .next_state = &next_state, .task_idx = &task_idx,
             .task_cap = task_cap,
             .ret_is_void = fn->ret_is_void,
@@ -2612,7 +2699,7 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         cc__free_stmt_list(st, st_n);
         free(st);
 
-        for (int k = 0; k < local_n; k++) { free(locals[k]); free(local_tys[k]); }
+        for (int k = 0; k < local_n; k++) { free(locals[k]); free(local_tys[k]); free(local_sufs[k]); }
         for (int k = 0; k < aw_total; k++) free(aw_names[k]);
         for (int k = 0; k < param_n; k++) { free(param_names[k]); free(param_tys[k]); }
         for (int k = 0; k < map_n; k++) free((void*)map_repls[k]);

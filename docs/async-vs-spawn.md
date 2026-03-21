@@ -65,19 +65,19 @@ cc_block_all(100, tasks, results);
 
 ```c
 // Parallel computation across cores
-@nursery {
-    spawn(() => { compute_shard(data, 0, n/4); });
-    spawn(() => { compute_shard(data, n/4, n/2); });
-    spawn(() => { compute_shard(data, n/2, 3*n/4); });
-    spawn(() => { compute_shard(data, 3*n/4, n); });
-}
+CCNursery* workers = @create(NULL) @destroy;
+workers->spawn(() => { compute_shard(data, 0, n/4); });
+workers->spawn(() => { compute_shard(data, n/4, n/2); });
+workers->spawn(() => { compute_shard(data, n/2, 3*n/4); });
+workers->spawn(() => { compute_shard(data, 3*n/4, n); });
 ```
 
 ### ✅ Blocking FFI Calls
 
 ```c
 // Blocking C library that can't be made async
-spawn(() => {
+CCNursery* workers = @create(NULL) @destroy;
+workers->spawn(() => {
     sqlite3_exec(db, "SELECT ...", callback, NULL, NULL);
 });
 ```
@@ -86,12 +86,11 @@ spawn(() => {
 
 ```c
 // Long-running worker threads
-@nursery {
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        spawn([i]() => {
-            worker_loop(i);  // Runs until shutdown
-        });
-    }
+CCNursery* workers = @create(NULL) @destroy;
+for (int i = 0; i < NUM_WORKERS; i++) {
+    workers->spawn([i]() => {
+        worker_loop(i);  // Runs until shutdown
+    });
 }
 ```
 
@@ -101,8 +100,9 @@ spawn(() => {
 
 ```c
 // BAD: 1000 thread pool tasks for I/O
+CCNursery* workers = @create(NULL) @destroy;
 for (int i = 0; i < 1000; i++) {
-    spawn([ch, i]() => {
+    workers->spawn([ch, i]() => {
         ch.send(i);  // This should be @async!
     });
 }
@@ -118,7 +118,7 @@ cc_block_all(1000, tasks, results);
 
 ```c
 // BAD: Thread pool overhead for trivial computation
-spawn(() => { result = a + b; });
+workers->spawn(() => { result = a + b; });
 
 // GOOD: Just do it inline
 result = a + b;
@@ -128,7 +128,8 @@ result = a + b;
 
 ```c
 // BAD: Blocks the thread pool worker, deadlock risk!
-spawn(() => {
+CCNursery* workers = @create(NULL) @destroy;
+workers->spawn(() => {
     int x = cc_block_on(int, async_work());  // ⚠️ Deadlock hazard
 });
 
@@ -145,14 +146,11 @@ Sometimes you need both. The key is to use the right tool at each level:
 
 ```c
 // Outer: spawn for parallelism
-@nursery {
-    spawn(() => {
-        // Inner: @async for I/O
-        @closing(tx) {
-            @async produce(tx, shard_id);  // Channel-heavy work
-        }
-    });
-}
+CCNursery* workers = @create(NULL) @destroy;
+workers->spawn(() => {
+    // Inner: @async for I/O
+    @async produce(tx, shard_id);  // Channel-heavy work
+});
 ```
 
 ## Summary
