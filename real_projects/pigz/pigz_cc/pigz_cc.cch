@@ -129,7 +129,7 @@ struct {
     char *alias;            // name for zip header when input is stdin
     char *comment;          // comment for gzip or zip header
     time_t mtime;           // modification time for header
-} g;
+} g = {0};
 
 /* Global statistics */
 extern cc_atomic_i64 g_bytes_in;
