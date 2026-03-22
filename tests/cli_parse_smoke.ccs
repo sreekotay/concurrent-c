@@ -1,163 +1,135 @@
 #include <ccc/std/prelude.cch>
 #include <ccc/std/cli.cch>
 
-typedef struct {
-    int mode;
-    int flags;
-    int hits;
-} CliMutatorState;
+static const CCArgSpec CLI_SPECS[] = {
+    { .long_ = "help", .short_ = 'h', .kind = CC_ARG_FLAG, .desc = "show help" },
+    { .long_ = "verbose", .short_ = 'v', .kind = CC_ARG_FLAG, .desc = "verbose mode" },
+    { .long_ = "processes", .short_ = 'p', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "N", .allow_short_attached = true, .desc = "worker count" },
+    { .long_ = "blocksize", .short_ = 'b', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "KB", .allow_short_attached = true, .desc = "block size" },
+    { .long_ = "suffix", .short_ = 'S', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "SUFFIX", .desc = "suffix" },
+    { .long_ = "comment", .short_ = 'C', .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "TEXT", .desc = "comment" },
+    { .long_ = "fast", .kind = CC_ARG_ALIAS, .maps_to = cc_strs("level", "1"), .desc = "fast mode" },
+    { .long_ = "level", .short_ = '1', .short_aliases = cc_strs("0", "2", "3", "4", "5", "6", "7", "8", "9", "11"), .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "LEVEL", .desc = "compression level" },
+    { .long_ = "file", .kind = CC_ARG_POSITIONAL, .positional_many = true, .desc = "input files" },
+};
 
-static void cli_mark_custom(void* out) {
-    CliMutatorState* state = (CliMutatorState*)out;
-    if (!state) return;
-    state->mode = 42;
-    state->hits++;
+static bool parse_i64_value(CCSlice value, int64_t* out) {
+    CCResult_int64_t_CC_I64ParseError parsed = cc_slice_parse_i64(value, 10);
+    if (cc_is_err(parsed)) return false;
+    if (out) *out = cc_unwrap(parsed);
+    return true;
 }
 
 static int test_attached_and_equals_forms(void) {
     char* argv[] = { "prog", "-p4", "--suffix=.zz", "input.ccs" };
-    CCArena arena = cc_arena_heap(kilobytes(8));
-    int cli_exit = 0;
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    CCCliParse cli = cc_cli_parse_args(4, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
     int64_t workers = 0;
-    const char* suffix = NULL;
-    CCCliPositionals inputs = cc_cli_positionals(&arena);
-    CCCliSpecs specs = cc_cli_specs(&arena);
+    CCSlice suffix = cc_slice_empty();
+    CCSlice input = cc_slice_empty();
 
-    cc_cli_meta(cc_cli_add(&specs), "[options] [file]", "cli smoke");
-    cc_cli_i64(cc_cli_add(&specs), &workers, 3, cc_cli_names2("-p", "--processes"), "worker count");
-    cc_cli_string(cc_cli_add(&specs), &suffix, ".gz", cc_cli_names2("-S", "--suffix"), "suffix");
-    cc_cli_positional_many(cc_cli_add(&specs), &inputs, "file");
-
-    if (!cc_cli_parse_into_list(&cli_exit, 4, argv, &specs)) {
-        cc_arena_free(&arena);
+    if (!cli.ok) {
         return 1;
     }
-    if (cli_exit != 0) {
-        cc_arena_free(&arena);
+    if (!cli.args.find_last_value("processes", &suffix)
+        || !parse_i64_value(suffix, &workers)) {
         return 2;
     }
     if (workers != 4) {
-        cc_arena_free(&arena);
         return 3;
     }
-    if (!suffix || strcmp(suffix, ".zz") != 0) {
-        cc_arena_free(&arena);
+    if (!cli.args.find_last_value("suffix", &suffix)
+        || !cc_slice_eq_cstr(suffix, ".zz")) {
         return 4;
     }
-    if (cc_cli_positionals_len(&inputs) != 1) {
-        cc_arena_free(&arena);
+    if (cli.args.count("file") != 1) {
         return 5;
     }
-    if (!cc_slice_eq_cstr(cc_cli_positionals_get(&inputs, 0), "input.ccs")) {
-        cc_arena_free(&arena);
+    if (!cli.args.find_value_at("file", 0, &input)
+        || !cc_slice_eq_cstr(input, "input.ccs")) {
         return 6;
     }
-    cc_arena_free(&arena);
     return 0;
 }
 
 static int test_next_arg_and_double_dash(void) {
     char* argv[] = { "prog", "--processes", "7", "--", "-literal" };
-    CCArena arena = cc_arena_heap(kilobytes(8));
-    int cli_exit = 0;
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    CCCliParse cli = cc_cli_parse_args(5, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
     int64_t workers = 0;
-    CCCliPositionals inputs = cc_cli_positionals(&arena);
-    CCCliSpecs specs = cc_cli_specs(&arena);
-
-    cc_cli_meta(cc_cli_add(&specs), "[options] [file]", "cli smoke");
-    cc_cli_i64(cc_cli_add(&specs), &workers, 3, cc_cli_names2("-p", "--processes"), "worker count");
-    cc_cli_positional_many(cc_cli_add(&specs), &inputs, "file");
-
-    if (!cc_cli_parse_into_list(&cli_exit, 5, argv, &specs)) {
-        cc_arena_free(&arena);
+    CCSlice value = cc_slice_empty();
+    if (!cli.ok) {
         return 7;
     }
-    if (workers != 7) {
-        cc_arena_free(&arena);
+    if (!cli.args.find_last_value("processes", &value)
+        || !parse_i64_value(value, &workers)) {
         return 8;
     }
-    if (cc_cli_positionals_len(&inputs) != 1) {
-        cc_arena_free(&arena);
+    if (workers != 7) {
         return 9;
     }
-    if (!cc_slice_eq_cstr(cc_cli_positionals_get(&inputs, 0), "-literal")) {
-        cc_arena_free(&arena);
+    if (cli.args.count("file") != 1) {
         return 10;
     }
-    cc_arena_free(&arena);
-    return 0;
-}
-
-static int test_defaults(void) {
-    char* argv[] = { "prog" };
-    CCArena arena = cc_arena_heap(kilobytes(8));
-    int cli_exit = 0;
-    bool examples = false;
-    int64_t workers = 0;
-    const char* suffix = NULL;
-    CCCliSpecs specs = cc_cli_specs(&arena);
-
-    cc_cli_meta(cc_cli_add(&specs), "[options]", "cli smoke");
-    cc_cli_flag(cc_cli_add(&specs), &examples, false, cc_cli_names1("examples"), "examples");
-    cc_cli_i64(cc_cli_add(&specs), &workers, 9, cc_cli_names2("-p", "--processes"), "worker count");
-    cc_cli_string(cc_cli_add(&specs), &suffix, ".gz", cc_cli_names2("-S", "--suffix"), "suffix");
-
-    if (!cc_cli_parse_into_list(&cli_exit, 1, argv, &specs)) {
-        cc_arena_free(&arena);
+    if (!cli.args.find_value_at("file", 0, &value)
+        || !cc_slice_eq_cstr(value, "-literal")) {
         return 11;
     }
-    if (examples) {
-        cc_arena_free(&arena);
-        return 12;
-    }
-    if (workers != 9) {
-        cc_arena_free(&arena);
-        return 13;
-    }
-    if (!suffix || strcmp(suffix, ".gz") != 0) {
-        cc_arena_free(&arena);
-        return 14;
-    }
-    cc_arena_free(&arena);
     return 0;
 }
 
-static int test_mutators_and_custom_action(void) {
-    char* argv[] = { "prog", "--mode", "--loud", "--name", "--notime", "--custom" };
-    CCArena arena = cc_arena_heap(kilobytes(8));
-    int cli_exit = 0;
-    CliMutatorState state = {0};
-    CCCliSpecs specs = cc_cli_specs(&arena);
-
-    cc_cli_meta(cc_cli_add(&specs), "[options]", "cli smoke");
-    cc_cli_set_int(cc_cli_add(&specs), &state.mode, 7, cc_cli_names1("--mode"), "set mode");
-    cc_cli_inc_int(cc_cli_add(&specs), &state.hits, 3, cc_cli_names1("--loud"), "increment hits");
-    cc_cli_bit_set(cc_cli_add(&specs), &state.flags, 1, cc_cli_names1("--name"), "set bit");
-    cc_cli_bit_clear(cc_cli_add(&specs), &state.flags, 2, cc_cli_names1("--notime"), "clear bit");
-    cc_cli_action(cc_cli_add(&specs), &state, cc_cli_names1("--custom"), cli_mark_custom, "custom action");
-
-    state.flags = 3;
-    if (!cc_cli_parse_into_list(&cli_exit, 6, argv, &specs)) {
-        cc_arena_free(&arena);
+static int test_aliases_and_clusters(void) {
+    char* argv[] = { "prog", "-vh", "--fast", "-11" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    CCCliParse cli = cc_cli_parse_args(4, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
+    CCSlice value = cc_slice_empty();
+    if (!cli.ok) {
+        return 12;
+    }
+    if (!cli.args.has("help") || !cli.args.has("verbose")) {
+        return 13;
+    }
+    if (cli.args.count("level") != 2) {
+        return 14;
+    }
+    if (!cli.args.find_value_at("level", 0, &value)
+        || !cc_slice_eq_cstr(value, "1")) {
         return 15;
     }
-    if (cli_exit != 0) {
-        cc_arena_free(&arena);
+    if (!cli.args.find_value_at("level", 1, &value)
+        || !cc_slice_eq_cstr(value, "11")) {
         return 16;
     }
-    if (state.mode != 42) {
-        cc_arena_free(&arena);
+    return 0;
+}
+
+static int test_missing_and_space_only_values(void) {
+    char* argv_bad_suffix[] = { "prog", "-S.zz" };
+    char* argv_bad_comment[] = { "prog", "-Cnote" };
+    char* argv_missing[] = { "prog", "--suffix", "--help" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    if (cc_cli_parse_args(2, argv_bad_suffix, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena).ok) {
         return 17;
     }
-    if (state.hits != 4) {
-        cc_arena_free(&arena);
+    if (cc_cli_parse_args(2, argv_bad_comment, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena).ok) {
         return 18;
     }
-    if (state.flags != 1) {
-        cc_arena_free(&arena);
+    if (cc_cli_parse_args(3, argv_missing, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena).ok) {
         return 19;
     }
-    cc_arena_free(&arena);
+    return 0;
+}
+
+static int test_help_parse(void) {
+    char* argv[] = { "prog", "--help" };
+    CCArena arena = cc_arena_heap(kilobytes(8)) @destroy;
+    CCCliParse cli = cc_cli_parse_args(2, argv, CLI_SPECS, cc_arg_spec_count(CLI_SPECS), &arena);
+    if (!cli.ok) {
+        return 20;
+    }
+    if (!cli.args.has("help")) {
+        return 21;
+    }
     return 0;
 }
 
@@ -166,9 +138,11 @@ int main(void) {
     if (rc != 0) return rc;
     rc = test_next_arg_and_double_dash();
     if (rc != 0) return rc;
-    rc = test_defaults();
+    rc = test_aliases_and_clusters();
     if (rc != 0) return rc;
-    rc = test_mutators_and_custom_action();
+    rc = test_missing_and_space_only_values();
+    if (rc != 0) return rc;
+    rc = test_help_parse();
     if (rc != 0) return rc;
     return 0;
 }

@@ -218,22 +218,31 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
 }
 
 int main(int argc, char** argv) {
-    CCArena arena = cc_arena_heap(megabytes(16));
+    CCArena arena = cc_arena_heap(megabytes(16)) @destroy;
     bool do_examples;
     bool do_stress;
     bool do_perf;
     bool do_all;
-    int cli_exit_code = 0;
-    CCCliSpecs cli_specs = cc_cli_specs(&arena);
-    cc_cli_meta(cc_cli_add(&cli_specs), "<category>...", "Run all examples, stress tests, or performance benchmarks.");
-    cc_cli_flag(cc_cli_add(&cli_specs), &do_examples, false, cc_cli_names1("examples"), "Run all example programs");
-    cc_cli_flag(cc_cli_add(&cli_specs), &do_stress, false, cc_cli_names1("stress"), "Run all stress tests");
-    cc_cli_flag(cc_cli_add(&cli_specs), &do_perf, false, cc_cli_names1("perf"), "Run all performance benchmarks");
-    cc_cli_flag(cc_cli_add(&cli_specs), &do_all, false, cc_cli_names1("all"), "Run everything");
-    if (!cc_cli_parse_into_list(&cli_exit_code, argc, argv, &cli_specs)) {
-        cc_arena_free(&arena);
-        return cli_exit_code;
+    static const CCArgSpec RUN_ALL_ARGS[] = {
+        { .long_ = "help", .short_ = 'h', .kind = CC_ARG_FLAG, .desc = "Show this help" },
+        { .long_ = "examples", .kind = CC_ARG_FLAG, .desc = "Run all example programs" },
+        { .long_ = "stress", .kind = CC_ARG_FLAG, .desc = "Run all stress tests" },
+        { .long_ = "perf", .kind = CC_ARG_FLAG, .desc = "Run all performance benchmarks" },
+        { .long_ = "all", .kind = CC_ARG_FLAG, .desc = "Run everything" },
+    };
+    CCCliParse cli = cc_cli_parse_args(argc, argv, RUN_ALL_ARGS, cc_arg_spec_count(RUN_ALL_ARGS), &arena);
+    if (!cli.ok) {
+        cli.print(stderr);
+        return cli.exit_code;
     }
+    if (cli.args.has("help")) {
+        cli.print(stdout);
+        return 0;
+    }
+    do_examples = cli.args.has("examples");
+    do_stress = cli.args.has("stress");
+    do_perf = cli.args.has("perf");
+    do_all = cli.args.has("all");
     if (do_all) {
         do_examples = true;
         do_stress = true;
@@ -241,8 +250,7 @@ int main(int argc, char** argv) {
     }
     if (!do_examples && !do_stress && !do_perf) {
         fprintf(stderr, "Select at least one category.\n");
-        cc_cli_print_help_list(stderr, argc, argv, &cli_specs);
-        cc_arena_free(&arena);
+        cli.print(stderr);
         return 1;
     }
     Stats stats = {0};
@@ -268,6 +276,5 @@ int main(int argc, char** argv) {
     printf("  Skipped: %d\n", stats.skipped);
     printf("  Total:   %d\n", stats.passed + stats.failed + stats.skipped);
 
-    cc_arena_free(&arena);
     return stats.failed > 0 ? 1 : 0;
 }
