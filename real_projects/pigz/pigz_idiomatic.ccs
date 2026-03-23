@@ -51,60 +51,58 @@ cc_atomic_int g_blocks_done = 0;
 CompressedResult* !>(CCIoError) compress_block(Block* blk, int level) {
     size_t arena_size = blk->data.len + (blk->data.len >> 3) + 8192;
     
-    {
-        CCArena res_arena_storage = @create(arena_size) @destroy;
-        if (!res_arena_storage.base) return cc_err(CC_IO_OUT_OF_MEMORY);
-        CCArena* res_arena = &res_arena_storage;
-        CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
-        if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
-        
-        res->seq = blk->seq;
-        res->is_last = blk->is_last;
-        res->original_len = blk->data.len;
-        res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
+    CCArena res_arena_storage = @create(arena_size) @destroy;
+    if (!res_arena_storage.base) return cc_err(CC_IO_OUT_OF_MEMORY);
+    CCArena* res_arena = &res_arena_storage;
+    CompressedResult* res = cc_arena_alloc_T(CompressedResult, res_arena);
+    if (!res) return cc_err(CC_IO_OUT_OF_MEMORY);
+    
+    res->seq = blk->seq;
+    res->is_last = blk->is_last;
+    res->original_len = blk->data.len;
+    res->crc = crc32(0UL, (const Bytef*)blk->data.ptr, (uInt)blk->data.len);
 
-        size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
-        unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
-        if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
+    size_t max_out = blk->data.len + (blk->data.len >> 3) + 256;
+    unsigned char* out_buf = cc_arena_alloc_T_count(unsigned char, res_arena, max_out);
+    if (!out_buf) return cc_err(CC_IO_OUT_OF_MEMORY);
 
-        unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
-        memcpy(out_buf, header, 10);
-        size_t pos = 10;
+    unsigned char header[10] = {0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0x03};
+    memcpy(out_buf, header, 10);
+    size_t pos = 10;
 
-        z_stream strm = {0};
-        if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-            return cc_err(CC_IO_OTHER);
-        }
-        strm.next_in = (Bytef*)blk->data.ptr;
-        strm.avail_in = (uInt)blk->data.len;
-        strm.next_out = out_buf + pos;
-        strm.avail_out = (uInt)(max_out - pos - 8);
-        
-        int ret = deflate(&strm, Z_FINISH);
-        pos += strm.total_out;
-        deflateEnd(&strm);
-        
-        if (ret != Z_STREAM_END) return cc_err(CC_IO_OTHER);
-        
-        unsigned long crc = res->crc;
-        size_t in_len = blk->data.len;
-        out_buf[pos++] = crc & 0xff;
-        out_buf[pos++] = (crc >> 8) & 0xff;
-        out_buf[pos++] = (crc >> 16) & 0xff;
-        out_buf[pos++] = (crc >> 24) & 0xff;
-        out_buf[pos++] = in_len & 0xff;
-        out_buf[pos++] = (in_len >> 8) & 0xff;
-        out_buf[pos++] = (in_len >> 16) & 0xff;
-        out_buf[pos++] = (in_len >> 24) & 0xff;
-
-        res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
-        cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
-        cc_atomic_fetch_add(&g_bytes_out, pos);
-        cc_atomic_fetch_add(&g_blocks_done, 1);
-
-        res->arena = res_arena->detach();
-        return cc_ok(res);
+    z_stream strm = {0};
+    if (deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return cc_err(CC_IO_OTHER);
     }
+    strm.next_in = (Bytef*)blk->data.ptr;
+    strm.avail_in = (uInt)blk->data.len;
+    strm.next_out = out_buf + pos;
+    strm.avail_out = (uInt)(max_out - pos - 8);
+    
+    int ret = deflate(&strm, Z_FINISH);
+    pos += strm.total_out;
+    deflateEnd(&strm);
+    
+    if (ret != Z_STREAM_END) return cc_err(CC_IO_OTHER);
+    
+    unsigned long crc = res->crc;
+    size_t in_len = blk->data.len;
+    out_buf[pos++] = crc & 0xff;
+    out_buf[pos++] = (crc >> 8) & 0xff;
+    out_buf[pos++] = (crc >> 16) & 0xff;
+    out_buf[pos++] = (crc >> 24) & 0xff;
+    out_buf[pos++] = in_len & 0xff;
+    out_buf[pos++] = (in_len >> 8) & 0xff;
+    out_buf[pos++] = (in_len >> 16) & 0xff;
+    out_buf[pos++] = (in_len >> 24) & 0xff;
+
+    res->data = cc_slice_from_parts(out_buf, pos, CC_SLICE_ID_UNTRACKED, pos);
+    cc_atomic_fetch_add(&g_bytes_in, blk->data.len);
+    cc_atomic_fetch_add(&g_bytes_out, pos);
+    cc_atomic_fetch_add(&g_blocks_done, 1);
+
+    res->arena = res_arena->detach();
+    return cc_ok(res);
 }
 
 int compress_file(const char* in_path, const char* out_path, int level) {

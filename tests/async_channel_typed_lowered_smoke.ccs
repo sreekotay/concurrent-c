@@ -5,14 +5,14 @@
 
 @async int sender(CCChanTx tx) {
     int val = 42;
-    intptr_t rc = await CCChanTx_int_send(tx, val);
+    intptr_t rc = await tx.send(val);
     printf("typed sender: sent %d, rc=%ld\n", val, (long)rc);
     return (int)rc;
 }
 
 @async int receiver(CCChanRx rx) {
     int val = 0;
-    intptr_t rc = await CCChanRx_int_recv(rx, &val);
+    intptr_t rc = await rx.recv(&val);
     printf("typed receiver: received %d, rc=%ld\n", val, (long)rc);
     assert(rc == 0);
     return val;

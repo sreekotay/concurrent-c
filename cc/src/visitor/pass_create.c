@@ -443,23 +443,11 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
         cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
         if (ownership == CC_CREATE_OWN_DESTROY &&
             (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee)) {
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
-            if (registered_pre_destroy_callee) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, registered_pre_destroy_callee);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-                if (strchr(declared_type, '*')) {
-                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-                } else {
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
-                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-                }
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
-            }
-            if (destroy_body_s && destroy_body_e > destroy_body_s) {
-                cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
-            }
-            if (registered_destroy_callee) {
+            int has_pre_destroy = (registered_pre_destroy_callee != NULL);
+            int has_custom_body = (destroy_body_s && destroy_body_e > destroy_body_s);
+            int has_destroy_callee = (registered_destroy_callee != NULL);
+            if (!has_pre_destroy && !has_custom_body && has_destroy_callee) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                 if (strchr(declared_type, '*')) {
@@ -468,9 +456,37 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
                     cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
                 }
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
+                if (registered_pre_destroy_callee) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, registered_pre_destroy_callee);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                    if (strchr(declared_type, '*')) {
+                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                    } else {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                }
+                if (destroy_body_s && destroy_body_e > destroy_body_s) {
+                    cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+                }
+                if (registered_destroy_callee) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, registered_destroy_callee);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                    if (strchr(declared_type, '*')) {
+                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                    } else {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                        cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                }
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "};\n");
             }
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "};\n");
         }
         last_emit = semi + 1;
         i = semi + 1;

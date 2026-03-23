@@ -1566,7 +1566,8 @@ cc_arena_init(&c, buf, sizeof(buf));  // block_max = 1, no growth
 - Restoring a checkpoint releases all allocations performed after the checkpoint.
 - Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
 - Arena checkpoints do not alter arena ownership or lifetime rules.
- - Restoring a checkpoint does not bump arena provenance; uses-after-restore are programmer errors.
+- Taking a checkpoint starts a fresh arena provenance epoch for subsequent allocations.
+- Restoring a checkpoint restores the checkpoint's provenance epoch so post-checkpoint allocations become stale while prior allocations remain valid.
 
 ```c
 CCArena a = cc_arena_heap(megabytes(1));
@@ -5112,7 +5113,9 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 
 **Registration rules (normative):**
 - Registrations appear in ordinary `@comptime { ... }` code.
-- `type_name` is either an exact concrete type name such as `"CCArena"` or a trailing-wildcard family such as `"CCChanTx_*"` or `"CCChanRx_*"`.
+- The current implementation discovers registrations by scanning `@comptime` source text. `cc_type_register(...)` itself is a compile-time marker API and returns `0`.
+- `type_name` must be a string literal naming either an exact concrete type such as `"CCArena"` or a trailing-wildcard family such as `"CCChanTx_*"` or `"CCChanRx_*"`.
+- The second argument must be a hooks object literal, typically `(CCTypeHooks){ ... }`.
 - Registrations are library-owned. The compiler selects a UFCS lowering rule from the resolved receiver type, not from the method name alone.
 - Handlers may be named functions or non-capturing lambdas.
 - `.create` is the type-owned construction hook. The compiler selects the overload from the declared type plus the `@create(...)` argument list.
@@ -5120,6 +5123,7 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 - The `.ufcs` hook is responsible only for choosing the lowered callee family. It does not execute the call.
 - Returning the empty slice means "no custom rewrite; fall back to ordinary receiver-type UFCS".
 - `.create` may be registered either as fixed callee strings (`cc_type_create_call(...)`, `cc_type_create_overloads(...)`) or as a callable hook via `cc_type_create_hook(...)`.
+- Recognized hook fields are `.create`, `.destroy`, and `.ufcs`. The implementation also accepts legacy `.create1` and `.create2` spellings as compatibility aliases for one- and two-argument create registrations.
 
 **UFCS handler contract (normative):**
 - `recv_type` is the resolved receiver type name used for dispatch.
@@ -5134,13 +5138,15 @@ int cc_type_register(const char* type_name, CCTypeHooks hooks);
 **Create hook contract (normative):**
 - `.create` is selected from the declared type that appears on the left-hand side of `name = @create(...)`.
 - The compiler implicitly selects the registered creation overload from the `@create(...)` argument count.
-- Language-defined `@create(...)` forms use one or two explicit arguments.
+- The current implementation supports at most two explicit `@create(...)` arguments, including callable create hooks.
 - `cc_type_create_call("callee")` registers the one-argument form.
 - `cc_type_create_overloads("callee1", "callee2")` registers one- and two-argument forms on the same `.create` hook.
 - `cc_type_create_hook(handler)` registers a callable create hook; it receives `type_name`, `argv`, `arg_types`, and `arena`, and must return the lowered callee name as a slice.
 - `cc_type_destroy_call("callee")` registers the destroy phase only.
 - `cc_type_pre_destroy_call("callee")` registers the pre-destroy phase only; it runs before any call-site `@destroy { ... }` body.
 - `cc_type_destroy_hooks("pre", "destroy")` registers both destroy phases.
+- If a type registers a destroy callee, then `name = @create(...)` must be followed by explicit ownership syntax: either `@destroy` or `@detach`. Omitting both is a compile-time error.
+- `@detach` does not take a cleanup body.
 - For `name = @create(...) @destroy { body };`, lowering order is: registered `pre_callee`, then call-site `body`, then registered `callee`.
 - `arg_types` for `.create` is inferred from the `@create(...)` argument list. Implementations may leave complex local expressions unknown.
 
@@ -6823,7 +6829,7 @@ On alloc failure in current block:
 
 **Reset:** Walk `prev` chain to tail (original block), free all intermediate buffers and extent structs, restore root to original state, set offset = 0.
 
-**Checkpoint/Restore:** Checkpoint captures `{arena, offset, block_idx}`. Restore checks if `checkpoint.block_idx < arena->block_idx`; if so, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block.
+**Checkpoint/Restore:** Checkpoint captures `{arena, offset, block_idx, provenance}` and immediately starts a fresh arena provenance epoch for subsequent allocations. Restore checks if `checkpoint.block_idx < arena->block_idx`; if so, it unwinds the chain by freeing the current block and all extents newer than the checkpoint, restoring the root to the target block, then restores the checkpoint's provenance epoch.
 
 **Per-request pattern:**
 

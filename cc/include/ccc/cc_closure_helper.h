@@ -1,8 +1,8 @@
 /*
- * cc_closure_helper.h - Closure/spawn lowering helpers
+ * cc_closure_helper.h - Generated lowering helpers
  *
- * This header provides TSan synchronization macros and spawn thunks
- * used by codegen for closure captures and spawn patterns.
+ * This header provides generated-C helpers shared by closure lowering,
+ * spawn patterns, and other synthesized codegen utilities.
  */
 #ifndef CC_CLOSURE_HELPER_H
 #define CC_CLOSURE_HELPER_H
@@ -23,6 +23,48 @@
         return cc_closure0_make(__cc_closure_entry_##n, NULL, NULL); \
     } \
     static void* __cc_closure_entry_##n(void* __p)
+
+/* --- Generated lowering helpers --- */
+#define CC_CLOSURE_ENV_ALLOC(env_ty, var) \
+    env_ty* var = (env_ty*)malloc(sizeof(env_ty)); \
+    if (!(var)) abort()
+
+#define CC_CLOSURE_ENV_NURSERY_ALLOC(nursery, env_ty, var) \
+    env_ty* var = (env_ty*)cc_nursery_closure_env_alloc((nursery), sizeof(env_ty), _Alignof(env_ty)); \
+    if (!(var)) abort()
+
+#define CC_TASK_RESULT_PTR_OR_RETURN(type, var) \
+    type* var = (type*)cc_task_result_ptr(sizeof(type)); \
+    if (!(var)) return NULL
+
+#define CC_SEND_TASK_OR_JOIN(tx_expr, task_var) \
+    do { \
+        int __cc_send_err = cc_chan_send((tx_expr).raw, &(task_var), sizeof(task_var)); \
+        if (__cc_send_err != 0) { \
+            (void)cc_block_on_intptr(task_var); \
+        } \
+    } while (0)
+
+#define __cc_ret(id, value) \
+    do { \
+        __cc_retval_##id = (value); \
+        __cc_ret_set_##id = 1; \
+        goto __cc_cleanup_##id; \
+    } while (0)
+
+#define __cc_ret_ok(id, value) \
+    do { \
+        cc_ok_into(__cc_retval_##id, (value)); \
+        __cc_ret_set_##id = 1; \
+        goto __cc_cleanup_##id; \
+    } while (0)
+
+#define __cc_ret_err(id, err) \
+    do { \
+        cc_err_into(__cc_retval_##id, (err)); \
+        __cc_ret_set_##id = 1; \
+        goto __cc_cleanup_##id; \
+    } while (0)
 
 /* --- TSan synchronization for closure captures --- */
 #if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))

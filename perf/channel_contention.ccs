@@ -1,36 +1,35 @@
 /*
- * channel_contention.ccs - Channel isolation benchmark
+ * channel_contention.ccs - Shared-channel N x M contention benchmark
  *
- * Measures how much two independent producer/consumer pairs interfere
- * with each other.  Ideal result: ~0% or negative (pairs run on separate
- * workers, matching Go's goroutine-per-P behaviour).
- *
- * Each producer does a trivial XOR-hash per value; each consumer
- * accumulates a checksum.  Both results feed g_sink so the optimizer
- * cannot drop any of the channel work.
+ * Baseline is always 1 producer x 1 consumer on one shared channel.
+ * Contention runs N producers x M consumers on that same shared channel,
+ * with the total message count held constant so we can compare the extra
+ * overhead caused by shared contention rather than by more total work.
  */
 
 #include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
-#define ITERATIONS 1000000
-#define NUM_TRIALS 15
-#define CAP        1024
-#define TRACE_MAX_ROLES 4
-#define TRACE_MAX_WORKERS 64
+#define DEFAULT_MESSAGES   1000000
+#define DEFAULT_NUM_TRIALS 15
+#define DEFAULT_PRODUCERS  8
+#define DEFAULT_CONSUMERS  8
+#define CAP                1024
+#define TRACE_MAX_WORKERS  64
 
-/* Prevent dead-code elimination of consumer work. */
 static volatile long long g_sink = 0;
 
-/* Private runtime probe used only for diagnostics. */
 int cc__sched_current_worker_id(void);
 
-static int g_role_last_worker[TRACE_MAX_ROLES];
-static int g_role_switches[TRACE_MAX_ROLES];
-static int g_role_samples[TRACE_MAX_ROLES];
-static int g_role_worker_hits[TRACE_MAX_ROLES][TRACE_MAX_WORKERS];
+static int g_trace_role_capacity = 0;
+static int g_trace_consumer_base = 0;
+static int* g_role_last_worker = NULL;
+static int* g_role_switches = NULL;
+static int* g_role_samples = NULL;
+static int* g_role_worker_hits = NULL;
 
 static double time_now_ms(void) {
     struct timespec ts;
@@ -38,19 +37,65 @@ static double time_now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
 }
 
+static int env_int_or_default(const char* name, int fallback, int min_value) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    int parsed = atoi(v);
+    return parsed < min_value ? min_value : parsed;
+}
+
+static int bench_messages(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_CONTENTION_ITERATIONS", DEFAULT_MESSAGES, 1);
+    return value;
+}
+
+static int bench_trials(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_CONTENTION_TRIALS", DEFAULT_NUM_TRIALS, 1);
+    return value;
+}
+
+static int bench_producers(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_CONTENTION_PRODUCERS", DEFAULT_PRODUCERS, 1);
+    return value;
+}
+
+static int bench_consumers(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_CONTENTION_CONSUMERS", DEFAULT_CONSUMERS, 1);
+    return value;
+}
+
+static int work_share(int total, int idx, int workers) {
+    int base = total / workers;
+    int rem = total % workers;
+    return base + (idx < rem ? 1 : 0);
+}
+
+static void trace_worker_state_ensure(int roles) {
+    if (roles <= g_trace_role_capacity) return;
+    g_role_last_worker = (int*)realloc(g_role_last_worker, sizeof(int) * roles);
+    g_role_switches = (int*)realloc(g_role_switches, sizeof(int) * roles);
+    g_role_samples = (int*)realloc(g_role_samples, sizeof(int) * roles);
+    g_role_worker_hits = (int*)realloc(g_role_worker_hits, sizeof(int) * roles * TRACE_MAX_WORKERS);
+    if (!g_role_last_worker || !g_role_switches || !g_role_samples || !g_role_worker_hits) {
+        fprintf(stderr, "channel_contention: trace allocation failed\n");
+        abort();
+    }
+    g_trace_role_capacity = roles;
+}
+
 static int trace_contention_trials_enabled(void) {
     static int enabled = -1;
-    if (enabled < 0) {
-        enabled = getenv("CC_CONTENTION_TRACE") != NULL;
-    }
+    if (enabled < 0) enabled = getenv("CC_CONTENTION_TRACE") != NULL;
     return enabled;
 }
 
 static int trace_contention_workers_enabled(void) {
     static int enabled = -1;
-    if (enabled < 0) {
-        enabled = getenv("CC_CONTENTION_WORKERS") != NULL;
-    }
+    if (enabled < 0) enabled = getenv("CC_CONTENTION_WORKERS") != NULL;
     return enabled;
 }
 
@@ -64,25 +109,29 @@ static int trace_contention_worker_stride(void) {
     return stride;
 }
 
-static void trace_worker_state_reset(void) {
+static void trace_worker_state_reset(int producers, int consumers) {
     if (!trace_contention_workers_enabled()) return;
-    for (int role = 0; role < TRACE_MAX_ROLES; role++) {
+    int roles = producers + consumers;
+    trace_worker_state_ensure(roles);
+    g_trace_consumer_base = producers;
+    for (int role = 0; role < roles; role++) {
         g_role_last_worker[role] = -1;
         g_role_switches[role] = 0;
         g_role_samples[role] = 0;
         for (int w = 0; w < TRACE_MAX_WORKERS; w++) {
-            g_role_worker_hits[role][w] = 0;
+            g_role_worker_hits[role * TRACE_MAX_WORKERS + w] = 0;
         }
     }
 }
 
 static void trace_worker_sample(int role, int iter) {
     if (!trace_contention_workers_enabled()) return;
+    if (role < 0 || role >= g_trace_role_capacity) return;
     int stride = trace_contention_worker_stride();
-    if (iter != 0 && iter != ITERATIONS - 1 && (iter % stride) != 0) return;
+    if (iter != 0 && (iter % stride) != 0) return;
     int worker = cc__sched_current_worker_id();
     if (worker >= 0 && worker < TRACE_MAX_WORKERS) {
-        g_role_worker_hits[role][worker]++;
+        g_role_worker_hits[role * TRACE_MAX_WORKERS + worker]++;
     }
     if (g_role_last_worker[role] >= 0 && worker != g_role_last_worker[role]) {
         g_role_switches[role]++;
@@ -91,11 +140,9 @@ static void trace_worker_sample(int role, int iter) {
     g_role_samples[role]++;
 }
 
-static void trace_worker_summary(const char* phase, int trial, int roles) {
+static void trace_worker_summary(const char* phase, int trial, int producers, int consumers) {
     if (!trace_contention_workers_enabled()) return;
-    static const char* role_names[TRACE_MAX_ROLES] = {
-        "tx1", "rx1", "tx2", "rx2"
-    };
+    int roles = producers + consumers;
     int max_workers = (int)cc_sched_get_num_workers();
     if (max_workers <= 0 || max_workers > TRACE_MAX_WORKERS) {
         max_workers = TRACE_MAX_WORKERS;
@@ -105,18 +152,24 @@ static void trace_worker_summary(const char* phase, int trial, int roles) {
         int best_hits = -1;
         int active_workers = 0;
         for (int w = 0; w < max_workers; w++) {
-            int hits = g_role_worker_hits[role][w];
+            int hits = g_role_worker_hits[role * TRACE_MAX_WORKERS + w];
             if (hits > 0) active_workers++;
             if (hits > best_hits) {
                 best_hits = hits;
                 best_worker = w;
             }
         }
+        char role_name[16];
+        if (role < g_trace_consumer_base) {
+            snprintf(role_name, sizeof(role_name), "p%d", role + 1);
+        } else {
+            snprintf(role_name, sizeof(role_name), "c%d", role - g_trace_consumer_base + 1);
+        }
         fprintf(stderr,
                 "CC_TRACE_WORKERS phase=%s trial=%d role=%s samples=%d switches=%d active_workers=%d dominant=%d dominant_hits=%d last=%d\n",
                 phase,
                 trial,
-                role_names[role],
+                role_name,
                 g_role_samples[role],
                 g_role_switches[role],
                 active_workers,
@@ -136,143 +189,115 @@ static void trace_trial_marker(const char* phase, int trial, const char* event, 
     }
 }
 
-/* Run a single producer/consumer pair and return wall-clock ms. */
-static double run_single_pair(int trial) {
+static double run_shared_case(const char* phase, int trial, int producers, int consumers) {
+    int messages = bench_messages();
+    cc_atomic_int producers_left = 0;
+    cc_atomic_store(&producers_left, producers);
+    long long* sums = (long long*)calloc((size_t)consumers, sizeof(long long));
+    if (!sums) abort();
+
     int[~CAP >] tx;
     int[~CAP <] rx;
-    cc_channel_pair(&tx, &rx);
-    long long sum = 0;
-    trace_worker_state_reset();
-    trace_trial_marker("baseline", trial, "begin", -1.0);
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) abort();
+
+    trace_worker_state_reset(producers, consumers);
+    trace_trial_marker(phase, trial, "begin", -1.0);
     double start = time_now_ms();
     {
-        CCNursery* __cc_nursery155 = @create(NULL) @destroy;
-        if (!__cc_nursery155) abort();
-        (void)__cc_nursery155->close_on(tx);
+        CCNursery* nursery = @create(NULL) @destroy;
+        if (!nursery) abort();
 
-        __cc_nursery155->spawn(() => {
-            for (int i = 0; i < ITERATIONS; i++) {
-                trace_worker_sample(0, i);
-                tx.send(i ^ (i >> 16));
-            }
-        });
-        __cc_nursery155->spawn(() => {
-            int v;
-            long long local_sum = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
-                trace_worker_sample(1, i);
-                rx.recv(&v);
-                local_sum += v;
-            }
-            sum += local_sum;
-        });
-    
+        for (int p = 0; p < producers; p++) {
+            CCChanTx tx_h = tx;
+            cc_atomic_int* producers_left_ptr = &producers_left;
+            int producer_id = p;
+            int send_count = work_share(messages, p, producers);
+            nursery->spawn(() => [tx_h, producers_left_ptr, producer_id, send_count] {
+                for (int i = 0; i < send_count; i++) {
+                    trace_worker_sample(producer_id, i);
+                    tx_h.send((producer_id + 1) ^ (i << 1) ^ (i >> 16));
+                }
+                if (cc_atomic_fetch_sub(producers_left_ptr, 1) == 1) {
+                    tx_h.close();
+                }
+            });
+        }
+
+        for (int c = 0; c < consumers; c++) {
+            CCChanRx rx_h = rx;
+            long long* sum_slot = &sums[c];
+            int consumer_role = producers + c;
+            nursery->spawn(() => [rx_h, sum_slot, consumer_role] {
+                int v;
+                int recv_count = 0;
+                long long local_sum = 0;
+                while (cc_io_avail(chan_recv(rx_h, &v))) {
+                    trace_worker_sample(consumer_role, recv_count);
+                    local_sum += v;
+                    recv_count++;
+                }
+                *sum_slot += local_sum;
+            });
+        }
     }
-    g_sink += sum;
-    double elapsed = time_now_ms() - start;
-    trace_trial_marker("baseline", trial, "end", elapsed);
-    trace_worker_summary("baseline", trial, 2);
-    return elapsed;
-}
 
-/* Run two independent producer/consumer pairs concurrently and return wall-clock ms. */
-static double run_two_pairs(int trial) {
-    int[~CAP >] tx1;
-    int[~CAP <] rx1;
-    int[~CAP >] tx2;
-    int[~CAP <] rx2;
-    cc_channel_pair(&tx1, &rx1);
-    cc_channel_pair(&tx2, &rx2);
-    long long sum1 = 0;
-    long long sum2 = 0;
-    trace_worker_state_reset();
-    trace_trial_marker("contention", trial, "begin", -1.0);
-    double start = time_now_ms();
-    {
-        CCNursery* __cc_nursery156 = @create(NULL) @destroy;
-        if (!__cc_nursery156) abort();
-        (void)__cc_nursery156->close_on(tx1);
-        (void)__cc_nursery156->close_on(tx2);
-
-        __cc_nursery156->spawn(() => {
-            for (int i = 0; i < ITERATIONS; i++) {
-                trace_worker_sample(0, i);
-                tx1.send(i ^ (i >> 16));
-            }
-        });
-        __cc_nursery156->spawn(() => {
-            int v;
-            long long local_sum = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
-                trace_worker_sample(1, i);
-                rx1.recv(&v);
-                local_sum += v;
-            }
-            sum1 += local_sum;
-        });
-        __cc_nursery156->spawn(() => {
-            for (int i = 0; i < ITERATIONS; i++) {
-                trace_worker_sample(2, i);
-                tx2.send(i ^ (i >> 16));
-            }
-        });
-        __cc_nursery156->spawn(() => {
-            int v;
-            long long local_sum = 0;
-            for (int i = 0; i < ITERATIONS; i++) {
-                trace_worker_sample(3, i);
-                rx2.recv(&v);
-                local_sum += v;
-            }
-            sum2 += local_sum;
-        });
-    
+    long long total_sum = 0;
+    for (int c = 0; c < consumers; c++) {
+        total_sum += sums[c];
     }
-    g_sink += sum1 + sum2;
+    g_sink += total_sum;
+
     double elapsed = time_now_ms() - start;
-    trace_trial_marker("contention", trial, "end", elapsed);
-    trace_worker_summary("contention", trial, 4);
+    trace_trial_marker(phase, trial, "end", elapsed);
+    trace_worker_summary(phase, trial, producers, consumers);
+    cc_chan_free(ch);
+    free(sums);
     return elapsed;
 }
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    int messages = bench_messages();
+    int trials = bench_trials();
+    int producers = bench_producers();
+    int consumers = bench_consumers();
 
     printf("=================================================================\n");
-    printf("CHANNEL CONTENTION TEST: Cache-line interference\n");
-    printf("Iterations: %d | Trials: %d\n", ITERATIONS, NUM_TRIALS);
+    printf("SHARED CHANNEL CONTENTION TEST\n");
+    printf("Messages: %d | Trials: %d | Contention: %dx%d\n",
+           messages, trials, producers, consumers);
     printf("=================================================================\n\n");
 
-    double baseline_times[NUM_TRIALS];
-    double contention_times[NUM_TRIALS];
+    double* baseline_times = (double*)calloc((size_t)trials, sizeof(double));
+    double* contention_times = (double*)calloc((size_t)trials, sizeof(double));
+    if (!baseline_times || !contention_times) abort();
 
-    for (int trial = 1; trial <= NUM_TRIALS; trial++) {
-        baseline_times[trial - 1]   = run_single_pair(trial);
-        contention_times[trial - 1] = run_two_pairs(trial);
+    for (int trial = 1; trial <= trials; trial++) {
+        baseline_times[trial - 1] = run_shared_case("baseline", trial, 1, 1);
+        contention_times[trial - 1] = run_shared_case("contention", trial, producers, consumers);
         printf("  Trial %d:  baseline=%6.2f ms  contention=%6.2f ms\n",
                trial, baseline_times[trial - 1], contention_times[trial - 1]);
     }
 
-    /* Best (minimum) time is the cleanest signal: it represents what the
-     * scheduler can do when the OS isn't adding noise.  Comparing medians
-     * is misleading because a noisy baseline run makes interference look
-     * negative even when the scheduler is actually serialising the pairs. */
-    double best_baseline   = baseline_times[0];
+    double best_baseline = baseline_times[0];
     double best_contention = contention_times[0];
-    for (int i = 1; i < NUM_TRIALS; i++) {
-        if (baseline_times[i]   < best_baseline)   best_baseline   = baseline_times[i];
+    for (int i = 1; i < trials; i++) {
+        if (baseline_times[i] < best_baseline) best_baseline = baseline_times[i];
         if (contention_times[i] < best_contention) best_contention = contention_times[i];
     }
 
     double interference = (best_contention - best_baseline) / best_baseline * 100.0;
 
     printf("\n");
-    printf("  Best baseline:    %6.2f ms  (%8.0f ops/sec)\n",
-           best_baseline, (double)ITERATIONS * 1000.0 / best_baseline);
-    printf("  Best contention:  %6.2f ms  (%8.0f ops/sec per channel)\n",
-           best_contention, (double)ITERATIONS * 1000.0 / best_contention);
+    printf("  Best baseline:    %6.2f ms  (%8.0f msgs/sec)\n",
+           best_baseline, (double)messages * 1000.0 / best_baseline);
+    printf("  Best contention:  %6.2f ms  (%8.0f msgs/sec)\n",
+           best_contention, (double)messages * 1000.0 / best_contention);
     printf("\n");
-    printf("Interference: %.2f%%  (best-of-%d)\n", interference, NUM_TRIALS);
+    printf("Interference: %.2f%%  (best-of-%d)\n", interference, trials);
 
+    free(baseline_times);
+    free(contention_times);
     return 0;
 }

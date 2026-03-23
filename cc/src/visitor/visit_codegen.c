@@ -51,6 +51,30 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
 static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n);
 static int cc__is_parser_placeholder_type_codegen(const char* type_name);
 
+static void cc__emit_line_directive(FILE* out, int line, const char* path) {
+    char rel[1024];
+    const char* shown = (path && path[0]) ? cc_path_rel_to_repo(path, rel, sizeof(rel)) : "<input>";
+    fprintf(out, "#line %d \"%s\"\n", line > 0 ? line : 1, shown);
+}
+
+static void cc__maybe_format_lowered_output(const char* out_path) {
+    const char* format_flag = getenv("CC_FORMAT_LOWERED");
+    const char* formatter = getenv("CC_CLANG_FORMAT");
+    char cmd[4096];
+
+    if (!out_path || !out_path[0] || !format_flag || format_flag[0] == '\0' || strcmp(format_flag, "0") == 0) {
+        return;
+    }
+    if (!formatter || !formatter[0]) {
+        formatter = "clang-format";
+    }
+    if (access(out_path, F_OK) != 0) {
+        return;
+    }
+    snprintf(cmd, sizeof(cmd), "%s -i \"%s\" >/dev/null 2>&1", formatter, out_path);
+    (void)system(cmd);
+}
+
 /* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
                                             const char* input_path, CCSymbolTable* symbols) {
@@ -1971,7 +1995,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
         /* Rewrite cc_channel_send_task(ch, closure) BEFORE channel type rewrite.
            This wraps the closure body to store result in fiber-local storage. */
-        {
+        if (strstr(src_ufcs, "send_task") != NULL || strstr(src_ufcs, "cc_channel_send_task") != NULL) {
             size_t st_len = 0;
             char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
             if (st) {
@@ -2054,7 +2078,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* Lower @defer (and hard-error on cancel) using a syntax-driven pass.
        IMPORTANT: this must run BEFORE async lowering so `@defer` can be made suspend-safe. */
-    if (src_ufcs) {
+    if (src_ufcs && (strstr(src_ufcs, "@defer") != NULL || strstr(src_ufcs, "cancel") != NULL)) {
         char* rewritten = NULL;
         size_t rewritten_len = 0;
         int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
@@ -2075,7 +2099,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* AST-driven @async lowering (state machine).
        IMPORTANT: run after statement-level lowering so closure rewrites are already reflected. */
-    if (src_ufcs && ctx && ctx->symbols) {
+    if (src_ufcs && ctx && ctx->symbols &&
+        (strstr(src_ufcs, "@async") != NULL || strstr(src_ufcs, "await") != NULL)) {
         CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (getenv("CC_DEBUG_REPARSE")) {
             fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2 ? root2->node_count : -1);
@@ -2122,7 +2147,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* NOTE: slice move/provenance checking is now handled by the stub-AST checker pass
        (`cc/src/visitor/checker.c`) before visitor lowering. */
 
-    fprintf(out, "/* CC visitor: passthrough of lowered C (preprocess + TCC parse) */\n");
+    fprintf(out, "/* CC lowered C output */\n");
     fprintf(out, "#include <stdlib.h>\n");
     fprintf(out, "#include <stdint.h>\n");
     /* Include lowered headers (.h) - these are generated from .cch files
@@ -2146,9 +2171,19 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         if (reg) {
             size_t n_vec = cc_type_registry_vec_count(reg);
             size_t n_map = cc_type_registry_map_count(reg);
-            size_t n_chan = cc_type_registry_channel_count(reg);
-            
-            if (n_vec > 0 || n_map > 0 || n_chan > 0) {
+            int emit_container_decls = (n_map > 0);
+            if (!emit_container_decls) {
+                for (size_t i = 0; i < n_vec; i++) {
+                    const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
+                    if (!inst || !inst->mangled_name) continue;
+                    if (strcmp(inst->mangled_name, "Vec_char") != 0) {
+                        emit_container_decls = 1;
+                        break;
+                    }
+                }
+            }
+
+            if (emit_container_decls) {
                 fprintf(out, "/* --- CC generic container declarations --- */\n");
                 fprintf(out, "#include <ccc/std/vec.h>\n");
                 fprintf(out, "#include <ccc/std/map.h>\n");
@@ -2204,22 +2239,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     }
                 }
 
-                for (size_t i = 0; i < n_chan; i++) {
-                    const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
-                    if (inst && inst->type1 && inst->mangled_name) {
-                        fprintf(out, "typedef CCChanTx CCChanTx_%s;\n", inst->mangled_name);
-                        fprintf(out, "typedef CCChanRx CCChanRx_%s;\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanTx_%s_send(tx, value) CC_TYPED_CHAN_SEND((tx), (value))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanRx_%s_recv(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanTx_%s_try_send(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), (value))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanRx_%s_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanTx_%s_close(tx) CC_TYPED_CHAN_CLOSE((tx))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanRx_%s_close(rx) CC_TYPED_CHAN_CLOSE((rx))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanTx_%s_free(tx) CC_TYPED_CHAN_FREE((tx))\n", inst->mangled_name);
-                        fprintf(out, "#define CCChanRx_%s_free(rx) CC_TYPED_CHAN_FREE((rx))\n", inst->mangled_name);
-                    }
-                }
-                
                 fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
                 fprintf(out, "/* --- end container declarations --- */\n\n");
             }
@@ -2238,8 +2257,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* Preserve diagnostics mapping to the original input (repo-relative for readability). */
     {
-        char rel[1024];
-        fprintf(out, "#line 1 \"%s\"\n", cc_path_rel_to_repo(src_path, rel, sizeof(rel)));
+        cc__emit_line_directive(out, 1, src_path);
     }
 
     if (src_ufcs) {
@@ -2256,7 +2274,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = rp_len;
         }
         /* Rewrite cc_channel_send_task(ch, closure) */
-        {
+        if (strstr(src_ufcs, "send_task") != NULL || strstr(src_ufcs, "cc_channel_send_task") != NULL) {
             size_t st_len = 0;
             char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
             if (st) {
@@ -2473,7 +2491,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            forms. Normalize them again before the final UFCS reparse so
            expressions like `@defer arena.free();` don't reach strict UFCS
            dispatch with `@defer arena` as the apparent receiver. */
-        {
+        if (strstr(src_ufcs, "@defer") != NULL || strstr(src_ufcs, "cancel") != NULL) {
             char* rewritten = NULL;
             size_t rewritten_len = 0;
             int r = cc__rewrite_defer_syntax(ctx, src_ufcs, src_ufcs_len, &rewritten, &rewritten_len);
@@ -2590,13 +2608,15 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         free(closure_protos);
         if (closure_defs && closure_defs_len > 0) {
             /* Run @defer lowering on closure definitions too (handles @defer inside spawn closures) */
-            char* closure_defs_lowered = NULL;
-            size_t closure_defs_lowered_len = 0;
-            if (cc__rewrite_defer_syntax(ctx, closure_defs, closure_defs_len, 
-                                          &closure_defs_lowered, &closure_defs_lowered_len) > 0) {
-                free(closure_defs);
-                closure_defs = closure_defs_lowered;
-                closure_defs_len = closure_defs_lowered_len;
+            if (strstr(closure_defs, "@defer") != NULL || strstr(closure_defs, "cancel") != NULL) {
+                char* closure_defs_lowered = NULL;
+                size_t closure_defs_lowered_len = 0;
+                if (cc__rewrite_defer_syntax(ctx, closure_defs, closure_defs_len,
+                                             &closure_defs_lowered, &closure_defs_lowered_len) > 0) {
+                    free(closure_defs);
+                    closure_defs = closure_defs_lowered;
+                    closure_defs_len = closure_defs_lowered_len;
+                }
             }
 
             {
@@ -2615,7 +2635,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     closure_defs_len = strlen(rewritten);
                 }
             }
-            {
+            if (strstr(closure_defs, "send_task") != NULL || strstr(closure_defs, "cc_channel_send_task") != NULL) {
                 size_t rewritten_len = 0;
                 char* rewritten = cc__rewrite_chan_send_task_text(ctx, closure_defs, closure_defs_len, &rewritten_len);
                 if (rewritten) {
@@ -2626,7 +2646,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             
             /* Emit closure definitions at end-of-file so global names are in scope. */
-            fputs("\n#line 1 \"<cc-generated:closures>\"\n", out);
+            fputs("\n/* --- CC generated closures --- */\n", out);
             fwrite(closure_defs, 1, closure_defs_len, out);
         }
         free(closure_defs);
@@ -2647,6 +2667,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     }
 
     fclose(out);
+    cc__maybe_format_lowered_output(output_path);
     return 0;
 }
 

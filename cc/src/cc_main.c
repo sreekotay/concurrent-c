@@ -69,6 +69,45 @@ static int cc__ends_with(const char* s, const char* suf) {
     return memcmp(s + (n - m), suf, m) == 0;
 }
 
+static int cc__path_is_dir(const char* path) {
+    struct stat st;
+    if (!path || !path[0]) return 0;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int cc__looks_like_dev_repo_root(const char* path) {
+    char include_dir[PATH_MAX];
+    char runtime_src[PATH_MAX];
+    if (!path || !path[0]) return 0;
+    snprintf(include_dir, sizeof(include_dir), "%s/cc/include/ccc", path);
+    snprintf(runtime_src, sizeof(runtime_src), "%s/cc/runtime/concurrent_c.c", path);
+    return cc__path_is_dir(include_dir) && access(runtime_src, F_OK) == 0;
+}
+
+static int cc__search_up_for_dev_repo_root(const char* start_path, char* out, size_t out_sz) {
+    char cur[PATH_MAX];
+    if (!start_path || !start_path[0] || !out || out_sz == 0) return -1;
+    if (realpath(start_path, cur) == NULL) {
+        strncpy(cur, start_path, sizeof(cur));
+        cur[sizeof(cur) - 1] = '\0';
+    }
+    while (cur[0]) {
+        if (cc__looks_like_dev_repo_root(cur)) {
+            strncpy(out, cur, out_sz);
+            out[out_sz - 1] = '\0';
+            return 0;
+        }
+        char parent[PATH_MAX];
+        strncpy(parent, cur, sizeof(parent));
+        parent[sizeof(parent) - 1] = '\0';
+        cc__dirname_inplace(parent);
+        if (!parent[0] || strcmp(parent, cur) == 0) break;
+        strncpy(cur, parent, sizeof(cur));
+        cur[sizeof(cur) - 1] = '\0';
+    }
+    return -1;
+}
+
 // Detect if the compiler is TCC (doesn't support -MMD/-MF/-MT or section flags)
 static int cc__is_tcc(const char* cc_bin) {
     if (!cc_bin) return 0;
@@ -381,6 +420,17 @@ static void cc_init_paths(const char* argv0) {
             cc__dirname_inplace(tmp); // .../bin
             cc__dirname_inplace(tmp); // .../cc
             cc__dirname_inplace(tmp); // repo root
+        }
+
+        if (!cc__looks_like_dev_repo_root(tmp)) {
+            char cwd[PATH_MAX];
+            if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                if (cc__search_up_for_dev_repo_root(cwd, tmp, sizeof(tmp)) != 0) {
+                    tmp[0] = '\0';
+                }
+            } else {
+                tmp[0] = '\0';
+            }
         }
 
         if (!tmp[0]) {

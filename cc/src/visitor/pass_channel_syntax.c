@@ -1765,8 +1765,14 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         cc__format_channel_task_value_type(elem_ty, task_val_ty, sizeof(task_val_ty));
         snprintf(id_buf, sizeof(id_buf), "%d", tid);
         
-        /* { CCClosure0 __cc_st_cN = */
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ CCClosure0 __cc_st_c");
+        /* do {
+         *   CCClosure0 __cc_st_cN = ...;
+         *   CCTask __cc_st_tN = cc_fiber_spawn_closure0(__cc_st_cN);
+         *   int __cc_st_eN = cc_chan_send(...);
+         *   if (__cc_st_eN != 0) { (void)cc_block_on_intptr(__cc_st_tN); }
+         * } while (0)
+         */
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "do {\n  CCClosure0 __cc_st_c");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = ");
         
@@ -1793,63 +1799,68 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
             int lowered_block_tail = cc__extract_block_tail_expr(src, len, body_start, closure_end,
                                                                  &prefix_start, &prefix_end,
                                                                  &expr_s, &expr_e);
-            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{ ");
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "{\n");
             if (has_typed_result) {
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    ");
                 cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
                 cc__sb_append_cstr_local(&out, &o_len, &o_cap, "* __cc_st_r = (");
                 cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
                 cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*)cc_task_result_ptr(sizeof(");
                 cc__sb_append_cstr_local(&out, &o_len, &o_cap, task_val_ty);
-                cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); if (!__cc_st_r) return NULL; ");
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "));\n");
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    if (!__cc_st_r) return NULL;\n");
                 if (lowered_block_tail) {
                     if (prefix_end > prefix_start) {
+                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    ");
                         cc__sb_append_local(&out, &o_len, &o_cap, src + prefix_start, prefix_end - prefix_start);
-                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " ");
+                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "\n");
                     }
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    *__cc_st_r = (");
                     cc__sb_append_local(&out, &o_len, &o_cap, src + expr_s, expr_e - expr_s);
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n");
                 } else {
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    *__cc_st_r = (");
                     cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n");
                 }
             } else {
-                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*)); ");
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    void** __cc_st_r = (void**)cc_task_result_ptr(sizeof(void*));\n");
+                cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    if (!__cc_st_r) return NULL;\n");
                 if (lowered_block_tail) {
                     if (prefix_end > prefix_start) {
+                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    ");
                         cc__sb_append_local(&out, &o_len, &o_cap, src + prefix_start, prefix_end - prefix_start);
-                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " ");
+                        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "\n");
                     }
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    *__cc_st_r = (void*)(intptr_t)(");
                     cc__sb_append_local(&out, &o_len, &o_cap, src + expr_s, expr_e - expr_s);
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n");
                 } else {
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "*__cc_st_r = (void*)(intptr_t)(");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    *__cc_st_r = (void*)(intptr_t)(");
                     cc__sb_append_local(&out, &o_len, &o_cap, src + body_start, closure_end - body_start);
-                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); return __cc_st_r; }; CCTask __cc_st_t");
+                    cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n");
                 }
             }
+            cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    return __cc_st_r;\n  };\n  CCTask __cc_st_t");
         }
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = cc_fiber_spawn_closure0(__cc_st_c");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
-
-        /* Send the task handle.  Per spec §scheduler_v2 "Send-failure cleanup": if
-           send fails (channel closed or error) we must join the task to avoid
-           orphaning live fiber work. */
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); { int __cc_st_e = cc_chan_send((");
-        
-        /* Emit channel */
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "  int __cc_st_e");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = cc_chan_send((");
         cc__sb_append_local(&out, &o_len, &o_cap, src + ch_start, ch_end - ch_start);
-        
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, ").raw, &__cc_st_t");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, ", sizeof(__cc_st_t");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ")); if (__cc_st_e != 0) { (void)cc_block_on_intptr(__cc_st_t");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "));\n");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "  if (__cc_st_e");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, "); } } }");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " != 0) {\n    (void)cc_block_on_intptr(__cc_st_t");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n  }\n} while (0)");
         
         last_emit = paren_end + 1;
         i = paren_end;

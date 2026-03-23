@@ -1,8 +1,5 @@
 #!/bin/bash
-# compare_contention.sh - Compare Concurrent-C, Pthread, and Go channel isolation
-#
-# This script runs the "Channel Isolation Challenge" for both implementations and
-# measures how much independent channels interfere with each other under load.
+# compare_contention.sh - Compare Concurrent-C, Pthread, and Go shared-channel contention
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -10,16 +7,30 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CCC="$REPO_ROOT/out/cc/bin/ccc"
 
 echo "================================================================="
-echo "CHANNEL ISOLATION COMPARISON"
+echo "SHARED CHANNEL CONTENTION COMPARISON"
 echo "================================================================="
 echo ""
+
+: "${CC_CONTENTION_ITERATIONS:=200000}"
+: "${CC_CONTENTION_TRIALS:=2}"
+: "${CC_CONTENTION_PRODUCERS:=8}"
+: "${CC_CONTENTION_CONSUMERS:=8}"
+export CC_CONTENTION_ITERATIONS
+export CC_CONTENTION_TRIALS
+export CC_CONTENTION_PRODUCERS
+export CC_CONTENTION_CONSUMERS
+
+CONTENTION_SHAPE="${CC_CONTENTION_PRODUCERS}x${CC_CONTENTION_CONSUMERS}"
 
 # 1. Build implementations
 echo "Building tests..."
 mkdir -p "$SCRIPT_DIR/out"
 $CCC build --release "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/channel_contention"
 gcc -O2 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
-echo "Using best-of-15 samples."
+echo "Messages: ${CC_CONTENTION_ITERATIONS}"
+echo "Trials: ${CC_CONTENTION_TRIALS}"
+echo "Baseline shape: 1x1"
+echo "Contention shape: ${CONTENTION_SHAPE}"
 echo "Done."
 echo ""
 
@@ -54,7 +65,7 @@ CC_INTF=$(grep "^Interference:" cc_out.txt | awk '{print $2}' | tr -d '%')
 if [ -f go_out.txt ]; then
     GO_BASE=$(grep "^  Best baseline:" go_out.txt | awk '{print $3}')
     GO_CONT=$(grep "^  Best contention:" go_out.txt | awk '{print $3}')
-    GO_INTF=$(grep "^Interference:" go_out.txt | awk '{print $2}')
+    GO_INTF=$(grep "^Interference:" go_out.txt | awk '{print $2}' | tr -d '%')
 fi
 
 echo "DATA_PTHREAD_BASELINE_MS: $PTHREAD_BASE"
@@ -72,6 +83,7 @@ fi
 echo "================================================================="
 echo "FINAL VERDICT"
 echo "================================================================="
+echo "Baseline 1x1 vs contention ${CONTENTION_SHAPE}"
 printf "%-20s %-14s %-16s %-15s\n" "Implementation" "Baseline (ms)" "Contention (ms)" "Interference"
 printf "%-20s %-14s %-16s %-15s\n" "Pthread (Baseline)" "$PTHREAD_BASE" "$PTHREAD_CONT" "${PTHREAD_INTF}%"
 printf "%-20s %-14s %-16s %-15s\n" "Concurrent-C" "$CC_BASE" "$CC_CONT" "${CC_INTF}%"
@@ -80,11 +92,11 @@ if [ -n "$GO_INTF" ]; then
 fi
 echo "-----------------------------------------------------------------"
 
-# Closer to 0% = better isolation. Negative = no interference at all.
+# Closer to 0% = lower overhead relative to the 1x1 baseline.
 if [ "$(python3 -c "print(1 if float($CC_INTF) <= float($PTHREAD_INTF) + 10 else 0)")" -eq 1 ]; then
-    echo "RESULT: SUCCESS - Concurrent-C channels are well-isolated!"
+    echo "RESULT: SUCCESS - Concurrent-C stays competitive under shared contention."
 else
-    echo "RESULT: FAIL - Concurrent-C shows significant cross-channel interference."
+    echo "RESULT: FAIL - Concurrent-C adds significant shared-contention overhead."
 fi
 echo "================================================================="
 

@@ -2114,8 +2114,6 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
     char* defs = NULL;
     size_t defs_len = 0, defs_cap = 0;
 
-    cc__append_str(&defs, &defs_len, &defs_cap, "/* --- CC generated closures --- */\n");
-
     Edit edits[2048];
     int en = 0;
     if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
@@ -2179,14 +2177,17 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         }
 
         /* defs: env+drop+make */
-        cc__append_fmt(&defs, &defs_len, &defs_cap,
-                       "/* CC closure %d (from %s:%d) */\n",
-                       d->id,
-                       ctx->input_path ? ctx->input_path : "<input>",
-                       d->start_line);
-
         const char* cty = (d->param_count == 0 ? "CCClosure0" : (d->param_count == 1 ? "CCClosure1" : "CCClosure2"));
         const char* mkfn = (d->param_count == 0 ? "cc_closure0_make" : (d->param_count == 1 ? "cc_closure1_make" : "cc_closure2_make"));
+
+        if (ctx && ctx->input_path && d->start_line > 0) {
+            char rel[1024];
+            cc__append_fmt(&defs, &defs_len, &defs_cap, "#line %d \"%s\"\n",
+                           d->start_line,
+                           cc_path_rel_to_repo(ctx->input_path, rel, sizeof(rel)));
+        }
+        cc__append_fmt(&defs, &defs_len, &defs_cap,
+                       "/* CC closure %d */\n", d->id);
 
         if (d->cap_count > 0) {
             cc__append_fmt(&defs, &defs_len, &defs_cap, "typedef struct __cc_closure_env_%d {\n", d->id);
@@ -2228,9 +2229,8 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             }
             cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)malloc(sizeof(__cc_closure_env_%d));\n",
-                           d->id, d->id, d->id);
-            cc__append_str(&defs, &defs_len, &defs_cap, "  if (!__env) abort();\n");
+                           "  CC_CLOSURE_ENV_ALLOC(__cc_closure_env_%d, __env);\n",
+                           d->id);
             /* Cast opaque void* params back to their concrete types.  These
              * casts are safe because the definitions live at end-of-file where
              * all user-defined types are in scope. */
@@ -2277,9 +2277,8 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             }
             cc__append_str(&defs, &defs_len, &defs_cap, ") {\n");
             cc__append_fmt(&defs, &defs_len, &defs_cap,
-                           "  __cc_closure_env_%d* __env = (__cc_closure_env_%d*)cc_nursery_closure_env_alloc(__cc_nursery, sizeof(__cc_closure_env_%d), _Alignof(__cc_closure_env_%d));\n",
-                           d->id, d->id, d->id, d->id);
-            cc__append_str(&defs, &defs_len, &defs_cap, "  if (!__env) abort();\n");
+                           "  CC_CLOSURE_ENV_NURSERY_ALLOC(__cc_nursery, __cc_closure_env_%d, __env);\n",
+                           d->id);
             for (int ci = 0; ci < d->cap_count; ci++) {
                 int is_ref = (d->cap_flags && (d->cap_flags[ci] & 4) != 0);
                 const char* ty = d->cap_types[ci] ? d->cap_types[ci] : "int";
@@ -2440,8 +2439,6 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             free(call);
         }
     }
-    cc__append_str(&defs, &defs_len, &defs_cap, "/* --- end generated closures --- */\n");
-
     if (getenv("CC_DEBUG_CLOSURE_EDITS")) {
         fprintf(stderr, "CC_DEBUG_CLOSURE_EDITS: applying %d edits to source (len=%zu)\n", en, in_len);
     }

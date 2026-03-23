@@ -432,18 +432,28 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
         cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n");
         if (is_destroy && destroy_callee) {
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
-            if (destroy_body_s && destroy_body_e > destroy_body_s) {
+            int has_custom_body = (destroy_body_s && destroy_body_e > destroy_body_s);
+            if (!has_custom_body) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                if (pass_address) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
                 cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                if (pass_address) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                }
+                cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "); };\n");
             }
-            cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-            if (pass_address) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
-            }
-            cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "); };\n");
         }
 
         last_emit = semi + 1;
@@ -1133,9 +1143,9 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
    - `T[~ ... >] name` -> `CCChanTx name`
    - `T[~ ... <] name` -> `CCChanRx name`
 
-   Side effect: registers the element type as a typed wrapper family such as
-   `CCChanTx_int_send(tx, v)` / `CCChanRx_int_recv(rx, &out)` so UFCS lowering
-   and emitted declarations can target a canonical typed layer.
+   Side effect: registers the element type so later lowering can emit
+   direct `cc_channel_send(tx, v)` / `cc_channel_recv(rx, &out)` calls
+   with the correct typed channel declarations in scope.
 
    Requires explicit direction ('>' or '<'). Hard errors otherwise.
    Text-based: not valid C, so TCC must see rewritten code. */
@@ -4981,16 +4991,6 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             for (size_t i = 0; i < n_chan; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
                 if (inst && inst->type1 && inst->mangled_name) {
-                    fprintf(out, "typedef CCChanTx CCChanTx_%s;\n", inst->mangled_name);
-                    fprintf(out, "typedef CCChanRx CCChanRx_%s;\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_send(tx, value) CC_TYPED_CHAN_SEND((tx), (value))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_recv(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_try_send(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), (value))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_close(tx) CC_TYPED_CHAN_CLOSE((tx))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_close(rx) CC_TYPED_CHAN_CLOSE((rx))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_free(tx) CC_TYPED_CHAN_FREE((tx))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_free(rx) CC_TYPED_CHAN_FREE((rx))\n", inst->mangled_name);
                 }
             }
             
@@ -5155,16 +5155,6 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
             for (size_t i = 0; i < n_chan; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_channel(reg, i);
                 if (inst && inst->type1 && inst->mangled_name) {
-                    fprintf(out, "typedef CCChanTx CCChanTx_%s;\n", inst->mangled_name);
-                    fprintf(out, "typedef CCChanRx CCChanRx_%s;\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_send(tx, value) CC_TYPED_CHAN_SEND((tx), (value))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_recv(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_try_send(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), (value))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_try_recv(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_close(tx) CC_TYPED_CHAN_CLOSE((tx))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_close(rx) CC_TYPED_CHAN_CLOSE((rx))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanTx_%s_free(tx) CC_TYPED_CHAN_FREE((tx))\n", inst->mangled_name);
-                    fprintf(out, "#define CCChanRx_%s_free(rx) CC_TYPED_CHAN_FREE((rx))\n", inst->mangled_name);
                 }
             }
             
@@ -5766,11 +5756,11 @@ static const char* cc__parse_stubs =
        Field counts must match real headers to allow their initializers. */
     "#define __CC_VEC_GENERIC_DEFINED 1\n"
     "#define __CC_MAP_GENERIC_DEFINED 1\n"
-    "typedef struct { unsigned long len; unsigned long cap; void* data; void* arena; } __CCVecGeneric;\n"
+    "typedef struct { unsigned long len; unsigned long cap; void* data; void* arena; unsigned long long provenance; } __CCVecGeneric;\n"
     "typedef struct { unsigned long count; void* keys; void* vals; void* arena; } __CCMapGeneric;\n"
     "#define __CC_VEC(T) __CCVecGeneric\n"
     "#define __CC_MAP(K, V) __CCMapGeneric\n"
-    "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0})\n"
+    "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0, 0, 0})\n"
     "#define __CC_MAP_INIT(K, V, arena) ((__CCMapGeneric){0, 0})\n"
     /* Common Vec/Map types */
     "typedef __CCVecGeneric Vec_int;\n"

@@ -1286,6 +1286,8 @@ void arena_restore(ArenaCheckpoint);
 - Restoring a checkpoint releases all allocations performed after the checkpoint.
 - Checkpoints MUST NOT invalidate allocations made prior to the checkpoint.
 - Arena checkpoints do not alter arena ownership or lifetime rules.
+- Taking a checkpoint starts a fresh arena provenance epoch for subsequent allocations.
+- Restoring a checkpoint restores the checkpoint's provenance epoch so post-checkpoint allocations become stale while prior allocations remain valid.
 
 ### Blocking Pool and Saturation Handling
 
