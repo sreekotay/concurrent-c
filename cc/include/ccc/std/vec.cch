@@ -18,6 +18,7 @@
 #define CC_STD_VEC_H
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_optional.cch>  /* Must be before parser mode block for __CCOptionalGeneric */
@@ -46,6 +47,7 @@ typedef struct __CCVecGeneric {
     size_t cap;
     void *data;
     void *arena;  /* CCArena* */
+    uint64_t provenance;
 } __CCVecGeneric;
 #endif
 
@@ -59,7 +61,7 @@ typedef struct __CCVecGeneric {
 /* Generic constructor - parser mode doesn't actually run,
    so just return a zeroed struct for type checking. */
 static inline __CCVecGeneric __cc_vec_generic_init(void *arena) {
-    __CCVecGeneric v = {0, 0, NULL, arena};
+    __CCVecGeneric v = {0, 0, NULL, arena, 0};
     return v;
 }
 
@@ -205,15 +207,17 @@ typedef __CCVecGeneric Vec_intptr;
         size_t cap;                                                               \
         T *data;                                                                  \
         CCArena *arena;                                                           \
+        uint64_t provenance;                                                      \
     } Name;                                                                       \
                                                                                   \
     static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
-        Name v = {0, 0, NULL, arena};                                             \
+        Name v = {0, 0, NULL, arena, 0};                                          \
         if (!arena) return v;                                                     \
         size_t cap = initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP;          \
         v.data = (T *)cc_arena_alloc(arena, cap * sizeof(T), _Alignof(T));        \
         if (!v.data) { v.cap = 0; return v; }                                     \
         v.cap = cap;                                                              \
+        v.provenance = arena->provenance;                                         \
         return v;                                                                 \
     }                                                                             \
                                                                                   \
@@ -227,6 +231,7 @@ typedef __CCVecGeneric Vec_intptr;
         if (v->data && v->len) memcpy(new_data, v->data, v->len * sizeof(T));     \
         v->data = new_data;                                                       \
         v->cap = new_cap;                                                         \
+        v->provenance = v->arena->provenance;                                     \
         return 0;                                                                 \
     }                                                                             \
                                                                                   \

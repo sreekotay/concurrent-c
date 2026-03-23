@@ -1,7 +1,9 @@
 #include "driver.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "comptime/symbols.h"
 #include "visitor/pass.h"
@@ -36,7 +38,12 @@ int cc_compile_with_config(const char *input_path, const char *output_path, cons
 
     err = cc_run_main_pass(input_path, symbols, output_path);
     if (err != 0) {
-        fprintf(stderr, "cc: main pass failed for %s (err=%d)\n", input_path, err);
+        if (err > 0) {
+            fprintf(stderr, "cc: main pass failed for %s: %s (err=%d)\n",
+                    input_path, strerror(err), err);
+        } else {
+            fprintf(stderr, "cc: main pass failed for %s (err=%d)\n", input_path, err);
+        }
     }
 
     cc_symbols_free(symbols);

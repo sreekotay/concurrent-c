@@ -39,6 +39,7 @@ typedef struct {
     CCArena* arena;
     size_t offset;
     uint16_t block_idx;       // which block this checkpoint was taken in
+    uint64_t provenance;      // provenance for allocations that stay valid after restore
 } CCArenaCheckpoint;
 
 // Global provenance counter (defined in runtime).
@@ -321,6 +322,12 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     cp.arena = arena;
     cp.offset = arena ? CC_ATOMIC_LOAD(&arena->offset) : 0;
     cp.block_idx = arena ? arena->block_idx : 0;
+    cp.provenance = arena ? arena->provenance : 0;
+    if (arena) {
+        // Start a fresh provenance epoch so allocations after the checkpoint can
+        // be distinguished from allocations that survive a later restore.
+        arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
+    }
     return cp;
 }
 
@@ -337,7 +344,8 @@ static CCArenaCheckpoint checkpoint();
 // If the arena has grown since the checkpoint, this unwinds the growth chain:
 // frees all extents newer than the checkpoint's block_idx and restores the
 // root to the checkpointed block's state.
-// Note: This does NOT bump provenance; allocations before the checkpoint remain valid.
+// Restoring also restores the checkpoint's provenance epoch so allocations made
+// after the checkpoint become stale while earlier allocations remain valid.
 static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     CCArena* arena = checkpoint.arena;
     if (!arena) return;
@@ -384,6 +392,7 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     size_t off = checkpoint.offset;
     if (off > arena->capacity) off = arena->capacity;
     CC_ATOMIC_STORE(&arena->offset, off);
+    arena->provenance = checkpoint.provenance;
 }
 
 // Convenience: compute how many bytes remain.

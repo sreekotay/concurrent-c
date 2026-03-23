@@ -8,17 +8,17 @@ int main(void) {
     CCChan* ch = cc_channel_pair(&tx, &rx);
 
     int v = 0;
-    (void)CCChanTx_int_send(tx, 42);
-    (void)CCChanRx_int_recv(rx, &v);
+    (void)cc_channel_send(tx, 42);
+    (void)cc_channel_recv(rx, &v);
     assert(v == 42);
 
     v = 0;
-    (void)CCChanTx_int_try_send(tx, 7);
-    (void)CCChanRx_int_try_recv(rx, &v);
+    (void)cc_channel_try_send(tx, 7);
+    (void)cc_channel_try_recv(rx, &v);
     assert(v == 7);
 
-    CCChanTx_int_close(tx);
-    CCChanRx_int_free(rx);
+    cc_channel_close(tx);
+    cc_channel_free(rx);
 
     printf("channel_ops_typed_lowered_smoke: PASS\n");
     (void)ch;

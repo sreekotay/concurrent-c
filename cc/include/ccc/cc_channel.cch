@@ -356,38 +356,8 @@ static inline CCTaskIntptr cc_channel_raw_recv_task(CCChan* ch, void* out_value,
     return cc_chan_recv_task(ch, out_value, value_size);
 }
 
-/* Canonical typed/manual-C wrapper families over the erased runtime core.
-   The compiler should target the stable `cc_channel_*` family and let these
-   typed fronts deal with handle/raw/sizeof details. */
-#ifdef CC_PARSER_MODE
-#define CC_TYPED_CHAN_SEND(tx, value) (cc_ok_CCResult_bool_CCIoError(true))
-#define CC_TYPED_CHAN_RECV(rx, out_ptr) (cc_ok_CCResult_bool_CCIoError(true))
-#define CC_TYPED_CHAN_TRY_SEND(tx, value) (cc_ok_CCResult_bool_CCIoError(true))
-#define CC_TYPED_CHAN_TRY_RECV(rx, out_ptr) (cc_ok_CCResult_bool_CCIoError(true))
-#define CC_TYPED_CHAN_CLOSE(h) ((void)0)
-#define CC_TYPED_CHAN_FREE(h) ((void)0)
-#elif (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
-#define CC_TYPED_CHAN_SEND(tx, value) ({ \
-    __typeof__(value) __cc_tmp = (value); \
-    cc_chan_result_from_errno(cc_channel_raw_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
-})
-#define CC_TYPED_CHAN_RECV(rx, out_ptr) cc__chan_recv_ordered((rx), (void*)(out_ptr), sizeof(*(out_ptr)))
-#define CC_TYPED_CHAN_TRY_SEND(tx, value) ({ \
-    __typeof__(value) __cc_tmp = (value); \
-    cc_chan_result_from_errno(cc_channel_raw_try_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
-})
-#define CC_TYPED_CHAN_TRY_RECV(rx, out_ptr) (cc_chan_result_from_errno(cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr)))))
-#define CC_TYPED_CHAN_CLOSE(h) (cc_channel_raw_close((h).raw))
-#define CC_TYPED_CHAN_FREE(h) (cc_channel_raw_free((h).raw))
-#else
-#define CC_TYPED_CHAN_SEND(tx, value) (cc_chan_result_from_errno(cc_channel_raw_send((tx).raw, &(value), sizeof(value))))
-#define CC_TYPED_CHAN_RECV(rx, out_ptr) cc__chan_recv_ordered((rx), (void*)(out_ptr), sizeof(*(out_ptr)))
-#define CC_TYPED_CHAN_TRY_SEND(tx, value) (cc_chan_result_from_errno(cc_channel_raw_try_send((tx).raw, &(value), sizeof(value))))
-#define CC_TYPED_CHAN_TRY_RECV(rx, out_ptr) (cc_chan_result_from_errno(cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr)))))
-#define CC_TYPED_CHAN_CLOSE(h) (cc_channel_raw_close((h).raw))
-#define CC_TYPED_CHAN_FREE(h) (cc_channel_raw_free((h).raw))
-#endif
-
+/* Canonical typed/manual-C wrappers over the erased runtime core.
+   The compiler should target the stable `cc_channel_*` family directly. */
 static inline void cc__channel_close_tx(CCChanTx tx) { cc_channel_raw_close(tx.raw); }
 static inline void cc__channel_close_rx(CCChanRx rx) { cc_channel_raw_close(rx.raw); }
 static inline void cc__channel_free_tx(CCChanTx tx) { cc_channel_raw_free(tx.raw); }
@@ -397,19 +367,45 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
 }
 
 #define CC__CHANNEL_SELECT_2_OR_3(_1, _2, _3, NAME, ...) NAME
-#define cc_channel_send_typed(tx, value) CC_TYPED_CHAN_SEND((tx), value)
 #define cc_channel_send_raw3(ch, value, value_size) cc_channel_raw_send((ch), (value), (value_size))
+#ifdef CC_PARSER_MODE
+#define cc_channel_send_typed(tx, value) (cc_ok_CCResult_bool_CCIoError(true))
+#elif (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
+#define cc_channel_send_typed(tx, value) ({ \
+    __typeof__(value) __cc_tmp = (value); \
+    cc_chan_result_from_errno(cc_channel_raw_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
+})
+#else
+#define cc_channel_send_typed(tx, value) (cc_chan_result_from_errno(cc_channel_raw_send((tx).raw, &(value), sizeof(value))))
+#endif
 #define cc_channel_send(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_send_raw3, cc_channel_send_typed)(__VA_ARGS__)
 
-#define cc_channel_recv_typed(rx, out_ptr) CC_TYPED_CHAN_RECV((rx), (out_ptr))
+#ifdef CC_PARSER_MODE
+#define cc_channel_recv_typed(rx, out_ptr) (cc_ok_CCResult_bool_CCIoError(true))
+#else
+#define cc_channel_recv_typed(rx, out_ptr) cc__chan_recv_ordered((rx), (void*)(out_ptr), sizeof(*(out_ptr)))
+#endif
 #define cc_channel_recv_raw3(ch, out_value, value_size) cc_channel_raw_recv((ch), (out_value), (value_size))
 #define cc_channel_recv(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_recv_raw3, cc_channel_recv_typed)(__VA_ARGS__)
 
-#define cc_channel_try_send_typed(tx, value) CC_TYPED_CHAN_TRY_SEND((tx), value)
 #define cc_channel_try_send_raw3(ch, value, value_size) cc_channel_raw_try_send((ch), (value), (value_size))
+#ifdef CC_PARSER_MODE
+#define cc_channel_try_send_typed(tx, value) (cc_ok_CCResult_bool_CCIoError(true))
+#elif (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
+#define cc_channel_try_send_typed(tx, value) ({ \
+    __typeof__(value) __cc_tmp = (value); \
+    cc_chan_result_from_errno(cc_channel_raw_try_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
+})
+#else
+#define cc_channel_try_send_typed(tx, value) (cc_chan_result_from_errno(cc_channel_raw_try_send((tx).raw, &(value), sizeof(value))))
+#endif
 #define cc_channel_try_send(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_try_send_raw3, cc_channel_try_send_typed)(__VA_ARGS__)
 
-#define cc_channel_try_recv_typed(rx, out_ptr) CC_TYPED_CHAN_TRY_RECV((rx), (out_ptr))
+#ifdef CC_PARSER_MODE
+#define cc_channel_try_recv_typed(rx, out_ptr) (cc_ok_CCResult_bool_CCIoError(true))
+#else
+#define cc_channel_try_recv_typed(rx, out_ptr) (cc_chan_result_from_errno(cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr)))))
+#endif
 #define cc_channel_try_recv_raw3(ch, out_value, value_size) cc_channel_raw_try_recv((ch), (out_value), (value_size))
 #define cc_channel_try_recv(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_try_recv_raw3, cc_channel_try_recv_typed)(__VA_ARGS__)
 

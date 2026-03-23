@@ -43,7 +43,12 @@ CCSlice cc_string_as_slice(const CCString *str) {
     if (!str || !str->data) {
         return cc_slice_empty();
     }
-    return cc_slice_from_parts(str->data, str->len, CC_SLICE_ID_UNTRACKED, str->cap);
+    return cc_slice_from_parts(
+        str->data,
+        str->len,
+        cc_slice_make_id(str->provenance, false, false, false),
+        str->cap
+    );
 }
 
 const char *cc_string_cstr(CCString *str) {

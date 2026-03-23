@@ -1319,7 +1319,7 @@ int process_path(const char* path, int num_workers, int level, int strategy) {
     int ret = g.decode ? decompress_file(path, output_file, num_workers)
                        : compress_file(path, output_file, num_workers, level, strategy);
     
-    if (ret == 0 && !g.to_stdout) {
+    if (ret == 0 && !g.to_stdout && !g.test && !g.list) {
         copymeta(path, output_file);
         if (!g.keep) {
             unlink(path);

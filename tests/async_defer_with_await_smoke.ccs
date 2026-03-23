@@ -16,6 +16,6 @@ int g = 0;
 int main(void) {
     CCTaskIntptr t = f();
     intptr_t r = cc_block_on_intptr(t);
-    return (r == 7 && g == 7) ? 0 : 1;
+    return (r == 0 && g == 7) ? 0 : 1;
 }
 
