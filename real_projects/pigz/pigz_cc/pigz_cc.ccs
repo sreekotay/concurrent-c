@@ -1369,7 +1369,7 @@ static const CCArgSpec PIGZ_ARGS[] = {
     { .long_ = "fast",                       .maps_to = cc_strs("level", "1"),                  .kind = CC_ARG_ALIAS, .desc = "Compression level 1" },
     { .long_ = "best",                       .maps_to = cc_strs("level", "9"),                  .kind = CC_ARG_ALIAS, .desc = "Compression level 9" },
     { .long_ = "level",       .short_ = '1', .short_aliases = cc_strs("0", "2", "3", "4", "5", "6", "7", "8", "9", "11"), .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "LEVEL", .desc = "Compression level (0-9, 11)" },
-    { .long_ = "processes",   .short_ = 'p',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "N", .allow_short_attached = true, .desc = "Allow up to N compression workers [default: 4]" },
+    { .long_ = "processes",   .short_ = 'p',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "N", .allow_short_attached = true, .desc = "Allow up to N compression workers [default: scheduler default]" },
     { .long_ = "blocksize",   .short_ = 'b',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "KB", .allow_short_attached = true, .desc = "Block size in KB [default: 128]" },
     { .long_ = "max-memory",                                                                  .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_INT, .value_name = "MB", .desc = "Max memory in MB [default: 0]" },
     { .long_ = "suffix",      .short_ = 'S',                                                    .kind = CC_ARG_VALUE, .value_kind = CC_VALUE_STRING, .value_name = "SUFFIX", .desc = "Suffix instead of .gz [default: .gz]" },
@@ -1381,6 +1381,7 @@ static const CCArgSpec PIGZ_ARGS[] = {
 int main(int argc, char *argv[]) {
     bool show_version = false;
     int64_t num_workers = 4;
+    bool user_set_num_workers = false;
     int64_t block_kb = BLOCK_SIZE / 1024;
     int64_t max_mem_mb = 0;
     CCArena cli_arena = cc_arena_heap(kilobytes(16)) @destroy;
@@ -1437,6 +1438,7 @@ int main(int argc, char *argv[]) {
             if (!pigz_cli_parse_i64(arg->value, "--processes", &num_workers)) {
                 return 1;
             }
+            user_set_num_workers = true;
         } else if (strcmp(arg->key, "blocksize") == 0) {
             if (!pigz_cli_parse_i64(arg->value, "--blocksize", &block_kb)) {
                 return 1;
@@ -1463,7 +1465,9 @@ int main(int argc, char *argv[]) {
     int strategy = g.strategy;
     if (worker_count < 1) worker_count = 1;
     if (worker_count > MAX_WORKERS) worker_count = MAX_WORKERS;
-    cc_sched_set_num_workers((size_t)worker_count);
+    if (user_set_num_workers) {
+        cc_sched_set_num_workers((size_t)worker_count);
+    }
     
     /* Process path recursively for each input file (matches pigz.c:4600-4620) */
     int ret = 0;
