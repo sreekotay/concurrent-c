@@ -310,6 +310,7 @@ String <primitive>.to_str(Arena* a);          // e.g. 42.to_str(&arena)
 **Slice Lifetime:** The sentinel slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
 
 **Template slots:** `@string(policy, \`...\`, a)` accepts string-oriented slot expressions (`char*`, `char[:]`, `String`). Non-string values may bridge through the conventional `to_str(a)` UFCS helper when available.
+Backtick template bodies preserve whitespace, indentation, and embedded newlines exactly as written, matching ordinary JavaScript template-literal whitespace behavior (no implicit dedent or trim).
 
 **Builder Pattern (Fluent, UFCS-enabled):**
 

@@ -11,7 +11,7 @@ static CCSlice demo_policy(CCArena *arena, CCSlice tag, CCSlice value) {
     out.append("=");
     out.append(value);
     out.append("]");
-    return cc_string_as_slice(&out);
+    return out.as_slice();
 }
 
 int main(void) {
@@ -20,18 +20,27 @@ int main(void) {
     CCArena *arena = &arena_storage;
 
     CCString literal = @string("hello", arena);
-    assert(cc_slice_eq_cstr(cc_string_as_slice(&literal), "hello"));
+    char[:0] literal_view = literal.as_slice();
+    assert(literal_view.eq_cstr("hello"));
 
     CCString bridged = @string(42, arena);
-    assert(cc_slice_eq_cstr(cc_string_as_slice(&bridged), "42"));
+    char[:0] bridged_view = bridged.as_slice();
+    assert(bridged_view.eq_cstr("42"));
 
     int age = 37;
     CCString via_ufcs = age.to_str(arena);
-    assert(cc_slice_eq_cstr(cc_string_as_slice(&via_ufcs), "37"));
+    char[:0] via_ufcs_view = via_ufcs.as_slice();
+    assert(via_ufcs_view.eq_cstr("37"));
 
     const char *name = "Ada";
     CCString tpl = @string(demo_policy, `name=${name}; age=$meta{age}`, arena);
     assert(strcmp(cc_string_cstr(&tpl), "name=Ada; age=[meta=37]") == 0);
+
+    CCString multiline = @string(demo_policy, `
+name=${name}
+age=$meta{age}`, arena);
+    char[:0] multiline_view = multiline.as_slice();
+    assert(multiline_view.eq_cstr("\nname=Ada\nage=[meta=37]"));
 
     printf("string_template_smoke: PASS\n");
     return 0;

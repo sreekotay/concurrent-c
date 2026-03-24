@@ -5257,6 +5257,7 @@ String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
 - `@string(expr, a)` builds a `String` from a literal, `char*`, `char[:]`, `String`, or a value that supports `to_str(a)`.
 - `@string(policy, \`...\`, a)` lowers to `String` builder operations over literal chunks plus interpolation slots.
 - Template slots are string-oriented. Accepted slot forms are `char*`, `char[:]`, and `String`; non-string values may bridge through `expr.to_str(a)` if the receiver type provides that UFCS conversion.
+- Backtick template bodies preserve whitespace, indentation, and embedded newlines exactly as written, matching ordinary JavaScript template-literal whitespace behavior (no implicit dedent or trim).
 
 Example:
 ```c
