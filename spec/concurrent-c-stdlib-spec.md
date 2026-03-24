@@ -1,7 +1,7 @@
 # Concurrent-C Standard Library Specification
 
 **Version:** 1.0  
-**Date:** 2026-01-07  
+**Date:** 2026-03-24  
 **Status:** Normative standard-library and lowering specification
 
 ---
@@ -21,7 +21,7 @@ s.trim().split(",").map(process);
 
 // Direct library-call style (when exposed)
 char[:] trimmed = cc_slice_trim(s);
-String built = string_from(&arena, trimmed);
+String built = @string(trimmed, &arena);
 ```
 
 **Scope:** This document defines the standard-library surface APIs together with their normative lowering contracts at the C boundary.
@@ -51,7 +51,7 @@ For the standard library, UFCS lowering is part of the normative API surface:
 
 - Dispatch is chosen from the resolved receiver type and the full receiver expression to the left of `.` or `->`.
 - Stdlib families normally define custom lowering through type-owned registration such as `cc_type_register(...)`. `cc_ufcs_register(...)` remains a compatibility mechanism for UFCS-only registration.
-- Constructors and helper calls such as `string_new(...)`, `string_from(...)`, `file_open(...)`, `vec_new<T>(...)`, and `map_new<K, V>(...)` are direct library calls, not UFCS.
+- Constructors and helper calls such as `string_new(...)`, `cc_string_from(...)`, `@string(...)`, `file_open(...)`, `vec_new<T>(...)`, and `map_new<K, V>(...)` are direct library calls or syntax sugar, not UFCS.
 - Exact generated helper names are normative where this document names them explicitly; otherwise, the family-level lowering contract is normative.
 
 ### Type Notation Precedence
@@ -238,6 +238,8 @@ Concurrent-C slices (`char[:]`) are efficient views for immutable string data. T
 
 - **String type:** Arena-backed growable string (used for building, formatting, accumulation).
 - **Slice operations:** Non-owning UFCS methods on `char[:]` (split, trim, find, parse) that work with any slice.
+- **Canonical string views:** `char[:0]` from `String.as_slice()` and `@slice("...")`.
+- **Builder sugar:** `@string(expr, arena)` and `@string(policy, \`...\`, arena)` for direct and templated string construction.
 
 All operations are accessible via UFCS method syntax for ergonomics:
 
@@ -267,11 +269,15 @@ s.append("Hello")
 
 **Handle semantics:** `String` is a small, moveable handle to an arena-backed buffer (a Vec<char>). Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
 
-**Direct library-call constructors**
+**Direct construction surface**
 
 ```c
 String string_new(Arena* a);
-String string_from(Arena* a, char[:] initial);
+String cc_string_from(expr, Arena* a);            // expression-generic helper
+String cc_string_from_slice(Arena* a, char[:] initial);
+char[:0] @slice("...");
+String @string(expr, Arena* a);
+String @string(policy, `...`, Arena* a);
 
 // UFCS surface methods
 String* String.append(char[:] data);          // Append data, return for chaining
@@ -281,9 +287,10 @@ String* String.push_int(i64 value);           // Append formatted i64
 String* String.push_float(f64 value);         // Append formatted f64
 String* String.push_uint(u64 value);          // Append formatted u64
 String* String.clear();                       // Clear contents, reuse allocation
-char[:] String.as_slice();                    // Get immutable view
+char[:0] String.as_slice();                   // Get immutable sentinel view
 size_t String.len();                          // Length in bytes (Vec<T> UFCS)
 size_t String.cap();                          // Capacity (Vec<T> UFCS)
+String <primitive>.to_str(Arena* a);          // e.g. 42.to_str(&arena)
 ```
 
 **Normative lowering:**
@@ -295,8 +302,14 @@ size_t String.cap();                          // Capacity (Vec<T> UFCS)
 - `s.clear()` lowers to `cc_string_clear(&s)`.
 - `s.as_slice()` lowers to `cc_string_as_slice(&s)`.
 - `s.len()` / `s.cap()` lower to `cc_string_len(&s)` / `cc_string_cap(&s)`.
+- `@slice("...")` lowers to a build-time canonical `char[:0]` via `cc_slice_from_cstr("...")`.
+- `@string(expr, a)` lowers to `cc_string_from((expr), (a))`.
+- `@string(policy, \`...\`, a)` lowers to `cc_string_new(a)` plus `cc_string_push_slice(...)` / `cc_string_push_policy(...)` calls for literal and interpolated segments.
+- Built-in primitive `x.to_str(a)` forms lower to helpers such as `int_to_str(x, a)` or `double_to_str(x, a)`.
 
-**Slice Lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
+**Slice Lifetime:** The sentinel slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `clear()`). For stable references, use `.clone()` to create an independent copy in the arena.
+
+**Template slots:** `@string(policy, \`...\`, a)` accepts string-oriented slot expressions (`char*`, `char[:]`, `String`). Non-string values may bridge through the conventional `to_str(a)` UFCS helper when available.
 
 **Builder Pattern (Fluent, UFCS-enabled):**
 
@@ -307,8 +320,8 @@ Arena arena = arena(megabytes(1));
 String sb = string_new(&arena);
 sb.append("count=")
   .append("x")
-  .append_int(42);
-char[:] result = sb.as_slice();  // "count=x42"
+  .push_int(42);
+char[:0] result = sb.as_slice();  // "count=x42"
 
 // Or more readable step-by-step
 String greeting = string_new(&arena);
@@ -316,6 +329,9 @@ greeting.append("Hello");
 greeting.push_char(' ');
 greeting.append("world");
 printf("%.*s\n", (int)greeting.as_slice().len, greeting.as_slice().ptr);
+
+String msg = @string(42, &arena);
+String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
 ```
 
 **Practical Examples:**
@@ -2790,7 +2806,7 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | Method | Purpose |
 |--------|---------|
 | `string_new(a)` | Create |
-| `.append()`, `.append_char()`, `.append_int()`, `.append_float()` | Append |
+| `.append()`, `.push_char()`, `.push_int()`, `.push_float()` | Append |
 | `.append_if()` | Conditional append |
 | `.as_slice()` | Finalize to view |
 | `.len()`, `.cap()` | Info |

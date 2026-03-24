@@ -60,6 +60,10 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
 // Returns malloc'd string on success, NULL on error. Caller must free().
 char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path);
 
+// Rewrite `@slice(...)`, `@string(...)`, and backtick template literals in a
+// source fragment used by later text-based lowering/codegen passes.
+char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path);
+
 // Rewrite @link("lib") directives to marker comments for linker extraction.
 // Returns newly allocated string, or NULL if no rewrites needed.
 char* cc__rewrite_link_directives(const char* src, size_t n);

@@ -100,14 +100,33 @@ char* cc__rewrite_slice_types_text(const CCVisitorCtx* ctx, const char* src, siz
 
         if (c == '[') {
             size_t j = i + 1;
-            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-            if (j < n && src[j] == ':') {
-                size_t k = j + 1;
-                while (k < n && src[k] == ':') k++;
-                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+            size_t colon = (size_t)-1;
+            size_t close = (size_t)-1;
+            while (j < n) {
+                if (src[j] == ']') { close = j; break; }
+                if (src[j] == ':' && colon == (size_t)-1) colon = j;
+                if (src[j] == '\n') break;
+                j++;
+            }
+            if (colon != (size_t)-1 && close != (size_t)-1) {
+                int valid_slice = 1;
+                int bang_count = 0;
+                for (size_t t = i + 1; t < close; t++) {
+                    unsigned char ch = (unsigned char)src[t];
+                    if (ch == ':') continue;
+                    if (ch == '!') { bang_count++; continue; }
+                    if (ch == ' ' || ch == '\t') continue;
+                    if (isalnum(ch) || ch == '_') continue;
+                    valid_slice = 0;
+                    break;
+                }
+                if (bang_count > 1) valid_slice = 0;
+                if (!valid_slice) { i++; col++; continue; }
+                size_t k = close;
+                size_t unique_pos = close;
                 int is_unique = 0;
-                if (k < n && src[k] == '!') { is_unique = 1; k++; }
-                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                while (unique_pos > colon && (src[unique_pos - 1] == ' ' || src[unique_pos - 1] == '\t')) unique_pos--;
+                if (unique_pos > colon && src[unique_pos - 1] == '!') is_unique = 1;
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
                     cc_pass_error_cat(cc_path_rel_to_repo(ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel)),

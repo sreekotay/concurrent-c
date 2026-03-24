@@ -9,7 +9,7 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
 **Draft Version:** 1.0-draft.11  
-**Last Updated:** 2026-03-13
+**Last Updated:** 2026-03-24
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
@@ -67,16 +67,18 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@for await (T x : ch) { }` | Async iteration (consume channel) | `@for await (int x : ch) { process(x); }` |
 | `@comptime if (cond) { }` | Compile-time conditional | `@comptime if (FEATURE_X) { }` |
 
-### Type Constructors (4)
+### Type Constructors (6)
 
 | Constructor | Meaning | Example |
 |-------------|---------|---------|
 | `T!>(E)` | Result type: success (T) or error (E) | `int!>(IoError) read(path);` |
 | `T?` | Optional type: value (T) or absent (null) | `int? find(arr, key);` |
 | `char[:]` | Slice (variable-length view with provenance metadata) | `void process(char[:] data);` |
-| `char[:!]` | Unique slice (move-only, exclusive ownership) | `char[:!] buf = recv(ch);` |
+| `char[4:]` | Fixed-length slice refinement | `void hash(char[32:] digest);` |
+| `char[:0]` | Sentinel slice refinement | `char[:0] name = s.as_slice();` |
+| `char[:0!]` | Sentinel unique slice refinement | `char[:0!] buf = recv(ch);` |
 
-### Expression Forms (4)
+### Expression Forms (6)
 
 | Form | Purpose | Example |
 |------|---------|---------|
@@ -84,6 +86,8 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `try expr` | Unwrap Result, propagate error if present | `File f = try open(path);` |
 | `if @try (T x = expr)` | Bind and unwrap result in conditional | `if @try (int x = parse(s)) { use(x); }` |
 | `spawn (expr)` | Create new task (only valid in `@nursery`) | `spawn (handler(req));` |
+| `@slice("...")` | Build-time canonical sentinel slice | `char[:0] mode = @slice("recv");` |
+| `@string(expr, arena)` / `@string(policy, \`...\`, arena)` | Direct or templated string construction | `CCString msg = @string(user_id, arena);` |
 
 ### Block Forms (2)
 
@@ -531,7 +535,12 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | **Type Constructors** | `T!>(E)` | Result type (success or error) | `int!>(IoError) read(path);` |
 | | `T?` | Optional type (value or null) | `int? find(arr, key);` |
 | | `char[:]` | Slice (variable-length view) | `void process(char[:] data);` |
-| | `char[:!]` | Unique slice (move-only) | `char[:!] buf = recv(ch);` |
+| | `char[n:]` | Fixed-length slice refinement | `void hash(char[32:] digest);` |
+| | `char[:k]` | Sentinel slice refinement | `char[:0] name = s.as_slice();` |
+| | `char[:k!]` | Sentinel unique slice refinement | `char[:0!] buf = recv(ch);` |
+| **String Forms** | `@slice("...")` | Build-time canonical sentinel slice | `char[:0] tag = @slice("attr");` |
+| | `@string(expr, arena)` | Direct string construction | `CCString msg = @string(42, arena);` |
+| | `@string(policy, \`...\`, arena)` | Policy-driven template builder | `CCString html = @string(html_policy, \`<h1>${name}</h1>\`, arena);` |
 | **Expression Forms** | `await expr` | Suspend and unwrap task result | `int result = await fetch();` |
 | | `try expr` | Unwrap Result, propagate error | `File f = try open(path);` |
 | | `spawn (expr)` | Create task (must be in `@nursery`) | `spawn (handler(request));` |
@@ -578,14 +587,16 @@ This section documents recommended style for Concurrent-C code.
 | Result | `T!>(E)` | `T ! E` or `T! E` |
 | Slice | `char[:]` | `char [:]` or `char[ : ]` |
 | Nested slice | `char[::]`, `char[:::]` | `char[:: ]` or C-array spellings |
-| Unique slice | `char[:!]` | `char[: !]` |
+| Fixed-length slice | `char[n:]` | `char[:n]` |
+| Sentinel slice | `char[:0]` | `char[: 0 ]` |
+| Unique sentinel slice | `char[:0!]` | `char[: 0 !]` |
 | Generic type | `Vec<int>` | `Vec < int >` |
 | Nested generic | `Map<K, V>` | `Map < K, V >` (spaces ok inside `<>` for args) |
 | Function return | `fn() -> T!>(E)` | `fn ( ) -> T !> (E)` |
 
 **Examples:**
 
-**Nested slice note:** `T[::]`, `T[:::]`, and deeper forms mean nested slice ranks (`T[:]`, `T[:][:]`, `T[:][:][:]`, etc.). These are slice/view types, not C arrays.
+**Nested slice note:** `T[::]`, `T[:::]`, and deeper forms mean nested slice ranks (`T[:]`, `T[:][:]`, `T[:][:][:]`, etc.). These are slice/view types, not C arrays. Refinements compose on the innermost rank (`T[:0:]`, `T[4::]`, etc.) and still lower to the same slice ABI family.
 
 ```c
 // Correct
@@ -1010,17 +1021,26 @@ int!>(Error)[~10 >] results_tx;          // sender for channel of results
 | ------- | ----------- | ---------------------- | ------------------- |
 | `T[n]`  | fixed array | inline                 | compile-time        |
 | `T[:]`  | slice       | ptr + len + provenance | runtime             |
-| `T[:n]` | slice       | ptr + len + provenance | compile-time length |
+| `T[n:]` | slice       | ptr + len + provenance | compile-time length |
+| `T[:k]` | slice       | ptr + len + provenance | runtime + sentinel  |
+| `T[:k!]` | slice      | ptr + len + provenance | runtime + sentinel + unique |
 
 Slices are *views*; they do not own memory.
 
-**Rule (T[:n] semantics):** `T[:n]` is a slice type with a compile-time known length `n`. It has the same ABI as `T[:]` (32 bytes), but the type system statically guarantees `len == n`. This enables bounds-checked indexing to elide runtime checks. `T[:n]` implicitly converts to `T[:]` (information is erased, not lost).
+**Rule (`T[n:]` semantics):** `T[n:]` is a slice type with a compile-time known length `n`. It has the same ABI as `T[:]` (32 bytes), but the type system statically guarantees `len == n`. This enables bounds-checked indexing to elide runtime checks. `T[n:]` implicitly converts to `T[:]` (information is erased, not lost).
+
+**Rule (`T[:k]` / `T[:k!]` semantics):** Sentinel slices are also ABI-identical to `T[:]`. The sentinel value `k` is a type-level guarantee about the element just past the logical end of the view. `T[:k!]` additionally carries unique / move-only semantics on the slice value.
+
+**Compatibility note:** Current implementations may still accept legacy `T[:!]` as a compatibility spelling for a unique slice. The normative surface going forward is `T[:k!]` (most commonly `T[:0!]` for strings).
 
 **Implicit conversions:**
 
 * `T[n]` → `T[:]`
-* `T[n]` → `T[:n]`
-* `T[:n]` → `T[:]`
+* `T[n]` → `T[n:]`
+* `T[n:]` → `T[:]`
+* `T[:k]` → `T[:]`
+* `T[:k!]` → `T[:k]`
+* `T[:k!]` → `T[:]`
 
 **Explicit conversions:**
 
@@ -5195,19 +5215,25 @@ This same contract applies to standard-library families such as channels, files,
 
 `String` is a small, moveable handle to an arena-backed buffer. Copying a `String` aliases the same storage. To obtain an independent copy, use `as_slice().clone(a)`. String contents live until the arena is reset/freed.
 
+`String.as_slice()` is the canonical sentinel string view: it returns `char[:0]`, not plain `char[:]`.
+
 #### 8.1.1 Core API
 
 ```c
 // Direct library-call constructors and C ABI
-String  string_new(Arena* a);
-String  string_from(Arena* a, char[:] initial);
+String   string_new(Arena* a);
+String   cc_string_from(expr, Arena* a);          // expression-generic helper
+String   cc_string_from_slice(Arena* a, char[:] initial);
+char[:0] @slice("...");                           // build-time canonical slice
+String   @string(expr, Arena* a);                 // literal/single-value builder
+String   @string(policy, `...`, Arena* a);        // templated builder
 String* cc_string_push(String* s, char[:] data);
 String* cc_string_push_char(String* s, char c);
 String* cc_string_push_int(String* s, i64 value);
 String* cc_string_push_uint(String* s, u64 value);
 String* cc_string_push_float(String* s, f64 value);
 String* cc_string_clear(String* s);
-char[:] cc_string_as_slice(String* s);
+char[:0] cc_string_as_slice(String* s);
 
 // UFCS (primary for users)
 String* s.append(char[:] data);        // alias for push
@@ -5217,12 +5243,20 @@ String* s.push_int(i64 value);
 String* s.push_uint(u64 value);
 String* s.push_float(f64 value);
 String* s.clear();
-char[:] s.as_slice();
+char[:0] s.as_slice();
 size_t  s.len();
 size_t  s.cap();
+String  <primitive>.to_str(Arena* a);           // e.g. 42.to_str(&arena)
 ```
 
-**Slice lifetime:** The slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `push()`, `clear()`). For stable references, use `.clone(a)`.
+**Slice lifetime:** The sentinel slice returned by `as_slice()` remains valid until the next mutating call on the same `String` (e.g., `append()`, `push()`, `clear()`). For stable references, use `.clone(a)`.
+
+**String construction model:**
+
+- `@slice("...")` yields a build-time canonical `char[:0]` inside the existing slice/provenance model.
+- `@string(expr, a)` builds a `String` from a literal, `char*`, `char[:]`, `String`, or a value that supports `to_str(a)`.
+- `@string(policy, \`...\`, a)` lowers to `String` builder operations over literal chunks plus interpolation slots.
+- Template slots are string-oriented. Accepted slot forms are `char*`, `char[:]`, and `String`; non-string values may bridge through `expr.to_str(a)` if the receiver type provides that UFCS conversion.
 
 Example:
 ```c
@@ -5231,7 +5265,10 @@ String s = string_new(&arena);
 s.append("count=")
  .push_char('x')
  .push_int(42);
-char[:] view = s.as_slice();
+char[:0] view = s.as_slice();
+
+String msg = @string(42, &arena);
+String html = @string(html_policy, `<h1>${title}</h1>`, &arena);
 ```
 
 #### 8.1.6 Formatting (Global)

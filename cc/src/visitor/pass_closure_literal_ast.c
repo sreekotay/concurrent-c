@@ -2377,12 +2377,15 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
         if (lowered_body && lowered_body[0] == '{') {
             char* lowered2 = cc__lower_nursery_spawn_in_body_text(d->id, lowered_body);
             if (!lowered2) lowered2 = strdup(lowered_body);
+            char* lowered_tpl = cc_rewrite_string_templates_text(lowered2, strlen(lowered2),
+                                                                 ctx ? ctx->input_path : NULL);
+            const char* src_for_templates = lowered_tpl ? lowered_tpl : lowered2;
             /* Rewrite T!E result types in closure body */
-            char* lowered3 = cc__rewrite_result_types_text(ctx, lowered2, strlen(lowered2));
+            char* lowered3 = cc__rewrite_result_types_text(ctx, src_for_templates, strlen(src_for_templates));
             /* Rewrite @defer in closure body */
             char* lowered4 = NULL;
             size_t lowered4_len = 0;
-            const char* src_for_defer = lowered3 ? lowered3 : lowered2;
+            const char* src_for_defer = lowered3 ? lowered3 : src_for_templates;
             if (cc__rewrite_defer_syntax(ctx, src_for_defer, strlen(src_for_defer), &lowered4, &lowered4_len) > 0 && lowered4) {
                 /* Rewrite captured closure calls in the body */
                 char* lowered5 = cc__rewrite_captured_closure_calls_in_body(lowered4, d);
@@ -2403,6 +2406,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", src_for_defer);
                 }
             }
+            free(lowered_tpl);
             free(lowered3);
             free(lowered2);
         } else {

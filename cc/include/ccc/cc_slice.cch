@@ -14,6 +14,7 @@
 #define CC_SLICE_H
 
 #include <ccc/cc_compat.cch>
+#include <string.h>
 
 // Explicit "untracked" id - signals this slice has no provenance tracking.
 // Use sparingly: passing untracked slices through channels or storing them
@@ -31,6 +32,9 @@
 #define CC_SLICE_ID_TRANSFERABLE (1ULL << 61)
 #define CC_SLICE_ID_SUBSLICE     (1ULL << 62)
 #define CC_SLICE_ID_UNIQUE       (1ULL << 63)
+/* Distinguished static/build-time canonical allocation class for `@slice("...")`
+   and other interned sentinel string views. */
+#define CC_SLICE_ID_CANONICAL_ALLOC CC_SLICE_ID_ALLOC_MASK
 
 typedef struct {
     void *ptr;
@@ -40,8 +44,11 @@ typedef struct {
 } CCSlice;
 
 /* Surface type sugar:
-   - `T[:]`  lowers to `CCSlice`
-   - `T[:!]` lowers to `CCSliceUnique` (still ABI-identical to CCSlice) */
+   - `T[:]`   lowers to `CCSlice`
+   - `T[n:]`  lowers to `CCSlice`
+   - `T[:k]`  lowers to `CCSlice`
+   - `T[:k!]` lowers to `CCSliceUnique`
+   - legacy `T[:!]` still lowers to `CCSliceUnique` (ABI-identical to CCSlice) */
 typedef CCSlice CCSliceUnique;
 
 static inline CCSlice cc_slice_empty(void) {
@@ -64,9 +71,13 @@ static inline uint64_t cc_slice_clear_flags(uint64_t id, uint64_t flags) {
 static inline bool cc_slice_is_unique_id(uint64_t id) { return (id & CC_SLICE_ID_UNIQUE) != 0; }
 static inline bool cc_slice_is_transferable_id(uint64_t id) { return (id & CC_SLICE_ID_TRANSFERABLE) != 0; }
 static inline bool cc_slice_is_subslice_id(uint64_t id) { return (id & CC_SLICE_ID_SUBSLICE) != 0; }
+static inline bool cc_slice_is_canonical_id(uint64_t id) {
+    return (id & CC_SLICE_ID_ALLOC_MASK) == CC_SLICE_ID_CANONICAL_ALLOC;
+}
 static inline bool cc_slice_is_unique(CCSlice s) { return cc_slice_is_unique_id(s.id); }
 static inline bool cc_slice_is_transferable(CCSlice s) { return cc_slice_is_transferable_id(s.id); }
 static inline bool cc_slice_is_subslice(CCSlice s) { return cc_slice_is_subslice_id(s.id); }
+static inline bool cc_slice_is_canonical(CCSlice s) { return cc_slice_is_canonical_id(s.id); }
 
 static inline CCSlice cc_slice_from_buffer(void *ptr, size_t len) {
     // Creates an UNTRACKED slice - safe only for static/global buffers or
@@ -81,6 +92,15 @@ static inline CCSlice cc_slice_from_parts(void *ptr,
                                           size_t available_len) {
     CCSlice s = {ptr, len, id, available_len};
     return s;
+}
+
+static inline CCSlice cc_slice_from_cstr(const char *cstr) {
+    if (!cstr) return cc_slice_empty();
+    size_t len = strlen(cstr);
+    return cc_slice_from_parts((void *)cstr,
+                               len,
+                               cc_slice_make_id(CC_SLICE_ID_CANONICAL_ALLOC, false, false, false),
+                               len);
 }
 
 static inline bool cc_slice_is_empty(CCSlice s) {

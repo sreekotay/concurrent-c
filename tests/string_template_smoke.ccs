@@ -1,0 +1,38 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+static CCSlice demo_policy(CCArena *arena, CCSlice tag, CCSlice value) {
+    if (cc_slice_is_empty(tag)) return value;
+    CCString out = cc_string_new(arena);
+    out.append("[");
+    out.append(tag);
+    out.append("=");
+    out.append(value);
+    out.append("]");
+    return cc_string_as_slice(&out);
+}
+
+int main(void) {
+    CCArena arena_storage = @create(kilobytes(8)) @destroy;
+    if (!arena_storage.base) abort();
+    CCArena *arena = &arena_storage;
+
+    CCString literal = @string("hello", arena);
+    assert(cc_slice_eq_cstr(cc_string_as_slice(&literal), "hello"));
+
+    CCString bridged = @string(42, arena);
+    assert(cc_slice_eq_cstr(cc_string_as_slice(&bridged), "42"));
+
+    int age = 37;
+    CCString via_ufcs = age.to_str(arena);
+    assert(cc_slice_eq_cstr(cc_string_as_slice(&via_ufcs), "37"));
+
+    const char *name = "Ada";
+    CCString tpl = @string(demo_policy, `name=${name}; age=$meta{age}`, arena);
+    assert(strcmp(cc_string_cstr(&tpl), "name=Ada; age=[meta=37]") == 0);
+
+    printf("string_template_smoke: PASS\n");
+    return 0;
+}

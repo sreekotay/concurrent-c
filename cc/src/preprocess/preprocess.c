@@ -1136,6 +1136,514 @@ static size_t cc__scan_back_to_delim(const char* s, size_t from) {
     return i;
 }
 
+static void cc__sb_append_fmt_local(char** out,
+                                    size_t* out_len,
+                                    size_t* out_cap,
+                                    const char* fmt,
+                                    ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (n <= 0) return;
+    if ((size_t)n >= sizeof(buf)) n = (int)sizeof(buf) - 1;
+    cc_sb_append(out, out_len, out_cap, buf, (size_t)n);
+}
+
+static int cc__is_template_tag_start(const char* src, size_t n, size_t pos) {
+    return pos < n && (cc_is_ident_start(src[pos]) || src[pos] == '_');
+}
+
+static int cc__scan_interp_body(const char* src,
+                                size_t n,
+                                size_t brace_pos,
+                                size_t* body_end_out) {
+    size_t i = brace_pos + 1;
+    int brace_depth = 1;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    if (!src || !body_end_out || brace_pos >= n || src[brace_pos] != '{') return -1;
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = 0;
+            i++;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && c2 == '/') {
+                in_block_comment = 0;
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) {
+                i += 2;
+                continue;
+            }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) {
+                i += 2;
+                continue;
+            }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+        if (c == '/' && c2 == '/') {
+            in_line_comment = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            in_block_comment = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '"') {
+            in_str = 1;
+            i++;
+            continue;
+        }
+        if (c == '\'') {
+            in_chr = 1;
+            i++;
+            continue;
+        }
+        if (c == '{') {
+            brace_depth++;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            brace_depth--;
+            if (brace_depth == 0 && paren_depth == 0 && bracket_depth == 0) {
+                *body_end_out = i;
+                return 0;
+            }
+            i++;
+            continue;
+        }
+        if (c == '(') paren_depth++;
+        else if (c == ')' && paren_depth > 0) paren_depth--;
+        else if (c == '[') bracket_depth++;
+        else if (c == ']' && bracket_depth > 0) bracket_depth--;
+        i++;
+    }
+    return -1;
+}
+
+static int cc__scan_template_literal(const char* src,
+                                     size_t n,
+                                     size_t tick_pos,
+                                     size_t* tick_end_out) {
+    size_t i = tick_pos + 1;
+    if (!src || !tick_end_out || tick_pos >= n || src[tick_pos] != '`') return -1;
+    while (i < n) {
+        char c = src[i];
+        if (c == '\\' && i + 1 < n) {
+            i += 2;
+            continue;
+        }
+        if (c == '`') {
+            *tick_end_out = i;
+            return 0;
+        }
+        if (c == '$' && i + 1 < n) {
+            size_t brace_pos = (size_t)-1;
+            if (src[i + 1] == '{') {
+                brace_pos = i + 1;
+            } else if (cc__is_template_tag_start(src, n, i + 1)) {
+                size_t t = i + 1;
+                while (t < n && cc_is_ident_char(src[t])) t++;
+                if (t < n && src[t] == '{') brace_pos = t;
+            }
+            if (brace_pos != (size_t)-1) {
+                size_t body_end = 0;
+                if (cc__scan_interp_body(src, n, brace_pos, &body_end) != 0) return -1;
+                i = body_end + 1;
+                continue;
+            }
+        }
+        i++;
+    }
+    return -1;
+}
+
+static size_t cc__scan_to_top_level_delim(const char* src,
+                                          size_t n,
+                                          size_t start,
+                                          char delim1,
+                                          char delim2) {
+    size_t i = start;
+    int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = 0;
+            i++;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && c2 == '/') {
+                in_block_comment = 0;
+                i += 2;
+                continue;
+            }
+            i++;
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) {
+                i += 2;
+                continue;
+            }
+            if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) {
+                i += 2;
+                continue;
+            }
+            if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+        if (c == '/' && c2 == '/') {
+            in_line_comment = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            in_block_comment = 1;
+            i += 2;
+            continue;
+        }
+        if (c == '"') {
+            in_str = 1;
+            i++;
+            continue;
+        }
+        if (c == '\'') {
+            in_chr = 1;
+            i++;
+            continue;
+        }
+        if (c == '`') {
+            size_t tick_end = 0;
+            if (cc__scan_template_literal(src, n, i, &tick_end) != 0) return n;
+            i = tick_end + 1;
+            continue;
+        }
+        if (c == '(') paren_depth++;
+        else if (c == ')') {
+            if (paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 &&
+                (c == delim1 || c == delim2)) {
+                return i;
+            }
+            if (paren_depth > 0) paren_depth--;
+        } else if (c == '{') brace_depth++;
+        else if (c == '}') {
+            if (brace_depth > 0) brace_depth--;
+        } else if (c == '[') bracket_depth++;
+        else if (c == ']') {
+            if (bracket_depth > 0) bracket_depth--;
+        }
+        if (paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 &&
+            (c == delim1 || c == delim2)) {
+            return i;
+        }
+        i++;
+    }
+    return n;
+}
+
+static void cc__append_c_string_escaped(char** out,
+                                        size_t* out_len,
+                                        size_t* out_cap,
+                                        const char* src,
+                                        size_t len) {
+    cc_sb_append(out, out_len, out_cap, "\"", 1);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '\\' && i + 1 < len) {
+            unsigned char next = (unsigned char)src[i + 1];
+            switch (next) {
+                case 'n': cc_sb_append(out, out_len, out_cap, "\\n", 2); i++; continue;
+                case 'r': cc_sb_append(out, out_len, out_cap, "\\r", 2); i++; continue;
+                case 't': cc_sb_append(out, out_len, out_cap, "\\t", 2); i++; continue;
+                case '\\': cc_sb_append(out, out_len, out_cap, "\\\\", 2); i++; continue;
+                case '"': cc_sb_append(out, out_len, out_cap, "\\\"", 2); i++; continue;
+                case '`': cc_sb_append(out, out_len, out_cap, "`", 1); i++; continue;
+                case '$': cc_sb_append(out, out_len, out_cap, "$", 1); i++; continue;
+                default:
+                    break;
+            }
+        }
+        if (c == '\\') cc_sb_append(out, out_len, out_cap, "\\\\", 2);
+        else if (c == '"') cc_sb_append(out, out_len, out_cap, "\\\"", 2);
+        else if (c == '\n') cc_sb_append(out, out_len, out_cap, "\\n", 2);
+        else if (c == '\r') cc_sb_append(out, out_len, out_cap, "\\r", 2);
+        else if (c == '\t') cc_sb_append(out, out_len, out_cap, "\\t", 2);
+        else cc_sb_append(out, out_len, out_cap, (const char*)&c, 1);
+    }
+    cc_sb_append(out, out_len, out_cap, "\"", 1);
+}
+
+static void cc__emit_template_literal_push(char** out,
+                                           size_t* out_len,
+                                           size_t* out_cap,
+                                           const char* builder_name,
+                                           const char* src,
+                                           size_t len) {
+    if (!builder_name || !src || len == 0) return;
+    cc__sb_append_fmt_local(out, out_len, out_cap,
+                            "cc_string_push_slice(&%s, cc_slice_from_cstr(",
+                            builder_name);
+    cc__append_c_string_escaped(out, out_len, out_cap, src, len);
+    cc_sb_append_cstr(out, out_len, out_cap, ")); ");
+}
+
+static int cc__rewrite_template_body(char** out,
+                                     size_t* out_len,
+                                     size_t* out_cap,
+                                     const char* src,
+                                     size_t n,
+                                     size_t body_s,
+                                     size_t body_e,
+                                     const char* builder_name,
+                                     const char* policy_name,
+                                     const char* arena_name) {
+    size_t i = body_s;
+    size_t lit_start = body_s;
+    while (i < body_e) {
+        if (src[i] == '\\' && i + 1 < body_e) {
+            i += 2;
+            continue;
+        }
+        if (src[i] == '$' && i + 1 < body_e) {
+            size_t tag_s = 0, tag_e = 0, brace_pos = 0;
+            int tagged = 0;
+            if (src[i + 1] == '{') {
+                brace_pos = i + 1;
+            } else if (cc__is_template_tag_start(src, body_e, i + 1)) {
+                size_t t = i + 1;
+                while (t < body_e && cc_is_ident_char(src[t])) t++;
+                if (t < body_e && src[t] == '{') {
+                    tagged = 1;
+                    tag_s = i + 1;
+                    tag_e = t;
+                    brace_pos = t;
+                }
+            } else {
+                i++;
+                continue;
+            }
+            if (lit_start < i) {
+                cc__emit_template_literal_push(out, out_len, out_cap, builder_name, src + lit_start, i - lit_start);
+            }
+            {
+                size_t expr_end = 0;
+                if (cc__scan_interp_body(src, n, brace_pos, &expr_end) != 0) return -1;
+                cc__sb_append_fmt_local(out, out_len, out_cap,
+                                        "cc_string_push_policy(&%s, %s, %s, ",
+                                        builder_name, policy_name, arena_name);
+                if (tagged) {
+                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
+                    cc__append_c_string_escaped(out, out_len, out_cap, src + tag_s, tag_e - tag_s);
+                    cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                } else {
+                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_empty(), ");
+                }
+                cc_sb_append_cstr(out, out_len, out_cap, "cc__string_slot_arg((");
+                cc_sb_append(out, out_len, out_cap, src + brace_pos + 1, expr_end - (brace_pos + 1));
+                cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+                cc_sb_append_cstr(out, out_len, out_cap, ")); ");
+                i = expr_end + 1;
+                lit_start = i;
+                continue;
+            }
+        }
+        i++;
+    }
+    if (lit_start < body_e) {
+        cc__emit_template_literal_push(out, out_len, out_cap, builder_name, src + lit_start, body_e - lit_start);
+    }
+    return 0;
+}
+
+static char* cc__rewrite_string_templates(const char* src, size_t n, const char* input_path) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    int in_line_comment = 0, in_block_comment = 0, in_str = 0, in_chr = 0;
+    int line = 1, col = 1;
+    int rewrite_count = 0;
+    if (!src || n == 0) return NULL;
+    while (i < n) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (c == '\n') { line++; col = 1; }
+        if (in_line_comment) { if (c == '\n') in_line_comment = 0; i++; if (c != '\n') col++; continue; }
+        if (in_block_comment) { if (c == '*' && c2 == '/') { in_block_comment = 0; i += 2; col += 2; continue; } i++; col++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '"') in_str = 0; i++; col++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; col += 2; continue; } if (c == '\'') in_chr = 0; i++; col++; continue; }
+        if (c == '/' && c2 == '/') { in_line_comment = 1; i += 2; col += 2; continue; }
+        if (c == '/' && c2 == '*') { in_block_comment = 1; i += 2; col += 2; continue; }
+        if (c == '"') { in_str = 1; i++; col++; continue; }
+        if (c == '\'') { in_chr = 1; i++; col++; continue; }
+        if (c == '@' && i + 6 < n && memcmp(src + i, "@slice(", 7) == 0) {
+            size_t arg_s = cc_skip_ws_and_comments(src, n, i + 7);
+            size_t arg_e = cc__scan_to_top_level_delim(src, n, arg_s, ')', '\0');
+            if (arg_e >= n || src[arg_e] != ')') {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax", "unterminated @slice(...)");
+                free(out);
+                return (char*)-1;
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_slice_from_cstr(");
+            cc_sb_append(&out, &out_len, &out_cap, src + arg_s, arg_e - arg_s);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+            rewrite_count++;
+            last_emit = arg_e + 1;
+            i = arg_e + 1;
+            continue;
+        }
+        if (c == '@' && i + 7 < n && memcmp(src + i, "@string(", 8) == 0) {
+            size_t arg1_s = cc_skip_ws_and_comments(src, n, i + 8);
+            size_t arg1_e = cc__scan_to_top_level_delim(src, n, arg1_s, ',', ')');
+            if (arg1_e >= n) {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax", "unterminated @string(...)");
+                free(out);
+                return (char*)-1;
+            }
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+            if (src[arg1_e] == ')') {
+                char rel[1024];
+                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                line, col, "syntax", "@string(...) requires an arena argument");
+                free(out);
+                return (char*)-1;
+            }
+            {
+                size_t arg2_s = cc_skip_ws_and_comments(src, n, arg1_e + 1);
+                if (arg2_s < n && src[arg2_s] == '`') {
+                    size_t tick_e = 0;
+                    size_t arg3_s, arg3_e;
+                    char builder_name[64], policy_name[64], arena_name[64];
+                    if (cc__scan_template_literal(src, n, arg2_s, &tick_e) != 0) {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "unterminated template literal in @string(...)");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    arg3_s = cc_skip_ws_and_comments(src, n, tick_e + 1);
+                    if (arg3_s >= n || src[arg3_s] != ',') {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "@string(policy, `...`, arena) requires a trailing arena argument");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    arg3_s = cc_skip_ws_and_comments(src, n, arg3_s + 1);
+                    arg3_e = cc__scan_to_top_level_delim(src, n, arg3_s, ')', '\0');
+                    if (arg3_e >= n || src[arg3_e] != ')') {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "unterminated @string(policy, `...`, arena)");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    snprintf(builder_name, sizeof(builder_name), "__cc_tpl_%d", rewrite_count);
+                    snprintf(policy_name, sizeof(policy_name), "__cc_tpl_policy_%d", rewrite_count);
+                    snprintf(arena_name, sizeof(arena_name), "__cc_tpl_arena_%d", rewrite_count);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "({ ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCArena* ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = (");
+                    cc_sb_append(&out, &out_len, &out_cap, src + arg3_s, arg3_e - arg3_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCStringPolicy ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, policy_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = (");
+                    cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = cc_string_new(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    if (cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
+                                                  arg2_s + 1, tick_e, builder_name,
+                                                  policy_name, arena_name) != 0) {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "unterminated interpolation in @string template");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "; })");
+                    rewrite_count++;
+                    last_emit = arg3_e + 1;
+                    i = arg3_e + 1;
+                    continue;
+                } else {
+                    size_t arg2_e = cc__scan_to_top_level_delim(src, n, arg2_s, ')', '\0');
+                    if (arg2_e >= n || src[arg2_e] != ')') {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "unterminated @string(expr, arena)");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_string_from((");
+                    cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "), (");
+                    cc_sb_append(&out, &out_len, &out_cap, src + arg2_s, arg2_e - arg2_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "))");
+                    rewrite_count++;
+                    last_emit = arg2_e + 1;
+                    i = arg2_e + 1;
+                    continue;
+                }
+            }
+        }
+        i++;
+        col++;
+    }
+    if (rewrite_count == 0) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* input_path) {
+    return cc__rewrite_string_templates(src, n, input_path);
+}
+
 static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t out_sz);
 
 /* Rewrite channel handle types (surface syntax) into runtime handle structs.
@@ -3521,14 +4029,33 @@ static char* cc__rewrite_slice_types(const char* src, size_t n, const char* inpu
 
         if (c == '[') {
             size_t j = i + 1;
-            while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
-            if (j < n && src[j] == ':') {
-                size_t k = j + 1;
-                while (k < n && src[k] == ':') k++;
-                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+            size_t colon = (size_t)-1;
+            size_t close = (size_t)-1;
+            while (j < n) {
+                if (src[j] == ']') { close = j; break; }
+                if (src[j] == ':' && colon == (size_t)-1) colon = j;
+                if (src[j] == '\n') break;
+                j++;
+            }
+            if (colon != (size_t)-1 && close != (size_t)-1) {
+                int valid_slice = 1;
+                int bang_count = 0;
+                for (size_t t = i + 1; t < close; t++) {
+                    unsigned char ch = (unsigned char)src[t];
+                    if (ch == ':') continue;
+                    if (ch == '!') { bang_count++; continue; }
+                    if (ch == ' ' || ch == '\t') continue;
+                    if (isalnum(ch) || ch == '_') continue;
+                    valid_slice = 0;
+                    break;
+                }
+                if (bang_count > 1) valid_slice = 0;
+                if (!valid_slice) { i++; continue; }
+                size_t k = close;
+                size_t unique_pos = close;
                 int is_unique = 0;
-                if (k < n && src[k] == '!') { is_unique = 1; k++; }
-                while (k < n && (src[k] == ' ' || src[k] == '\t')) k++;
+                while (unique_pos > colon && (src[unique_pos - 1] == ' ' || src[unique_pos - 1] == '\t')) unique_pos--;
+                if (unique_pos > colon && src[unique_pos - 1] == '!') is_unique = 1;
                 if (k >= n || src[k] != ']') {
                     char rel[1024];
                     cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
@@ -5583,8 +6110,9 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
     cc_type_registry_clear(reg);
 
     cc_pass_chain_init(&chain, src, input_len);
-    if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc__rewrite_string_templates(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc__rewrite_chan_handle_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
+    if (cc_pass_chain_apply(&chain, cc__rewrite_slice_types(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
     if (cc_pass_chain_apply(&chain, cc_rewrite_generic_containers(chain.src, chain.len, input_path)) < 0) goto chain_cleanup;
 
     if (chain.src != src) out = strdup(chain.src);
@@ -5651,8 +6179,9 @@ static int cc__apply_phase1_canonical_passes(CCPassChain* chain,
     /* Shared phase-1 bucket: normalize CC surface syntax into more canonical
        CC, but do not introduce parser stubs or host-C survival/lowering. */
     if (cc_pass_chain_apply(chain, cc__canonicalize_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
-    if (cc_pass_chain_apply(chain, cc__rewrite_slice_types(chain->src, chain->len, input_path)) < 0) return -1;
+    if (cc_pass_chain_apply(chain, cc__rewrite_string_templates(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_chan_handle_types(chain->src, chain->len, input_path)) < 0) return -1;
+    if (cc_pass_chain_apply(chain, cc__rewrite_slice_types(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc_rewrite_generic_containers(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_types(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_inferred_result_ctors(chain->src, chain->len)) < 0) return -1;
@@ -5864,16 +6393,24 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         cur_len = strlen(cur);
         buf_idx++;
     }
-    
-    /* Pass 1: Rewrite channel handle types T[~N >] -> CCChanTx, T[~N <] -> CCChanRx */
+
+    /* Pass 1: Rewrite @slice/@string forms and eliminate raw backtick templates early. */
+    buffers[buf_idx] = cc__rewrite_string_templates(cur, cur_len, input_path);
+    if (buffers[buf_idx]) {
+        cur = buffers[buf_idx];
+        cur_len = strlen(cur);
+        buf_idx++;
+    }
+
+    /* Pass 2: Rewrite channel handle types T[~N >] -> CCChanTx, T[~N <] -> CCChanRx */
     buffers[buf_idx] = cc__rewrite_chan_handle_types(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
         cur_len = strlen(cur);
         buf_idx++;
     }
-    
-    /* Pass 2: Rewrite slice types T[:] -> CCSlice */
+
+    /* Pass 3: Rewrite slice types T[:]/T[n:]/T[:k]/T[:k!] -> CCSlice */
     buffers[buf_idx] = cc__rewrite_slice_types(cur, cur_len, input_path);
     if (buffers[buf_idx]) {
         cur = buffers[buf_idx];
@@ -5881,7 +6418,7 @@ char* cc_preprocess_simple(const char* input, size_t input_len, const char* inpu
         buf_idx++;
     }
 
-    /* Pass 3: Rewrite Vec<T>/Map<K,V> into parser-safe container forms early,
+    /* Pass 4: Rewrite Vec<T>/Map<K,V> into parser-safe container forms early,
        so parser-survival UFCS can resolve field receiver types correctly. */
     buffers[buf_idx] = cc_rewrite_generic_containers(cur, cur_len, input_path);
     if (buffers[buf_idx]) {

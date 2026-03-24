@@ -1,9 +1,15 @@
-#include <ccc/cc_runtime.cch>
+#include <ccc/std/prelude.cch>
+#include <assert.h>
 
 int main(void) {
     char[:] s = cc_slice_empty();
     (void)s;
-    char[:!] u = cc_slice_from_parts(NULL, 0, cc_slice_make_id(1, true, true, false), 0);
+    char[0:] fixed = cc_slice_empty();
+    (void)fixed;
+    char[:0] sent = @slice("hi");
+    assert(cc_slice_eq_cstr(sent, "hi"));
+    assert(cc_slice_is_canonical(sent));
+    char[:0!] u = cc_slice_from_parts(NULL, 0, cc_slice_make_id(1, true, true, false), 0);
     (void)u;
     return 0;
 }
