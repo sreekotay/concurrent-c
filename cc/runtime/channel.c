@@ -593,6 +593,7 @@ static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_w
 #define CC_LF_YIELD_INTERVAL 32
 static __thread unsigned int cc__tls_lf_ops = 0;
 static _Atomic int g_chan_minimal_path_mode = -1; /* -1 unknown, 0 off, 1 on */
+static _Atomic int g_chan_mutex_minimal_mode = -1; /* -1 unknown, 0 off, 1 on */
 
 static inline int cc__chan_minimal_path_enabled(void) {
     int cached = atomic_load_explicit(&g_chan_minimal_path_mode, memory_order_relaxed);
@@ -608,6 +609,22 @@ static inline int cc__chan_minimal_path_enabled(void) {
                                                       memory_order_relaxed,
                                                       memory_order_relaxed);
         cached = atomic_load_explicit(&g_chan_minimal_path_mode, memory_order_relaxed);
+    }
+    return cached;
+}
+
+static inline int cc__chan_mutex_minimal_enabled(void) {
+    int cached = atomic_load_explicit(&g_chan_mutex_minimal_mode, memory_order_relaxed);
+    if (cached < 0) {
+        const char* env = getenv("CC_CHAN_MUTEX_MINIMAL");
+        int enabled = (env && env[0] == '1');
+        int expected = -1;
+        (void)atomic_compare_exchange_strong_explicit(&g_chan_mutex_minimal_mode,
+                                                      &expected,
+                                                      enabled,
+                                                      memory_order_relaxed,
+                                                      memory_order_relaxed);
+        cached = atomic_load_explicit(&g_chan_mutex_minimal_mode, memory_order_relaxed);
     }
     return cached;
 }
@@ -2417,6 +2434,53 @@ static inline int cc__chan_dequeue_lockfree_minimal(CCChan* ch, void* out_value,
     return 0;
 }
 
+static inline int cc__chan_enqueue_mutex_minimal(CCChan* ch, const void* value) {
+    cc_chan_lock(ch);
+    if (ch->closed) {
+        pthread_mutex_unlock(&ch->mu);
+        return EPIPE;
+    }
+    if (ch->rx_error_closed) {
+        int err = ch->rx_error_code;
+        pthread_mutex_unlock(&ch->mu);
+        return err;
+    }
+    if (ch->count >= ch->cap) {
+        pthread_mutex_unlock(&ch->mu);
+        return EAGAIN;
+    }
+    void *slot = (uint8_t*)ch->buf + ch->tail * ch->elem_size;
+    channel_store_slot(slot, value, ch->elem_size);
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->count++;
+    pthread_cond_signal(&ch->not_empty);
+    if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
+        cc__chan_signal_recv_waiter(ch);
+    }
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
+    return 0;
+}
+
+static inline int cc__chan_dequeue_mutex_minimal(CCChan* ch, void* out_value) {
+    cc_chan_lock(ch);
+    if (ch->count <= 0) {
+        pthread_mutex_unlock(&ch->mu);
+        return EAGAIN;
+    }
+    void *slot = (uint8_t*)ch->buf + ch->head * ch->elem_size;
+    channel_load_slot(slot, out_value, ch->elem_size);
+    ch->head = (ch->head + 1) % ch->cap;
+    ch->count--;
+    pthread_cond_signal(&ch->not_full);
+    if (atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire)) {
+        cc__chan_wake_one_send_waiter(ch);
+    }
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
+    return 0;
+}
+
 /* Fast-path enqueue: no guard checks, no inflight tracking.
  * Caller MUST have already verified use_lockfree, cap>0, buf, elem_size<=sizeof(void*).
  * Use only on the hot send path where the channel is known to be open and valid. */
@@ -2832,14 +2896,20 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
      * Skips guards, debug, timing, signal_activity.
      * Checks recv_waiters_head to wake parked receivers (pipeline correctness). */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
-        if (cc__chan_enqueue_lockfree_minimal(ch, value, NULL) == 0) {
-            if (__builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire) != 0, 0)) {
-                cc_chan_lock(ch);
-                cc__chan_signal_recv_waiter(ch);
-                pthread_mutex_unlock(&ch->mu);
-                wake_batch_flush();
+        if (cc__chan_mutex_minimal_enabled()) {
+            int rc = cc__chan_enqueue_mutex_minimal(ch, value);
+            if (rc == 0) return 0;
+            if (rc != EAGAIN) return rc;
+        } else {
+            if (cc__chan_enqueue_lockfree_minimal(ch, value, NULL) == 0) {
+                if (__builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire) != 0, 0)) {
+                    cc_chan_lock(ch);
+                    cc__chan_signal_recv_waiter(ch);
+                    pthread_mutex_unlock(&ch->mu);
+                    wake_batch_flush();
+                }
+                return 0;
             }
-            return 0;
         }
         /* Buffer full — fall through to full path for yield-retry / blocking */
     }
@@ -3250,15 +3320,21 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
      * Skips guards, debug, timing, signal_activity.
      * Checks send_waiters_head to wake parked senders (pipeline correctness). */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
-        if (cc__chan_dequeue_lockfree_minimal(ch, out_value, NULL) == 0) {
-            if (__builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire) != 0, 0)) {
-                cc_chan_lock(ch);
-                cc__chan_wake_one_send_waiter(ch);
-                pthread_cond_signal(&ch->not_full);
-                pthread_mutex_unlock(&ch->mu);
-                wake_batch_flush();
+        if (cc__chan_mutex_minimal_enabled()) {
+            if (cc__chan_dequeue_mutex_minimal(ch, out_value) == 0) {
+                return 0;
             }
-            return 0;
+        } else {
+            if (cc__chan_dequeue_lockfree_minimal(ch, out_value, NULL) == 0) {
+                if (__builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire) != 0, 0)) {
+                    cc_chan_lock(ch);
+                    cc__chan_wake_one_send_waiter(ch);
+                    pthread_cond_signal(&ch->not_full);
+                    pthread_mutex_unlock(&ch->mu);
+                    wake_batch_flush();
+                }
+                return 0;
+            }
         }
         /* Buffer empty — fall through to full path for yield-retry / blocking */
     }
