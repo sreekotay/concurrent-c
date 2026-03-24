@@ -1,0 +1,16 @@
+# Upstream Redis source tree fetched by setup.sh
+redis_c/
+
+# Local build output
+out/
+tmp/
+
+# Download artifacts
+*.tar.gz
+
+# Redis persistence artifacts
+*.rdb
+*.aof
+
+# Benchmark output
+benchmarks/generated/

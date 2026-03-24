@@ -1,0 +1,75 @@
+/*
+ * Shared Redis project types.
+ *
+ * These types exist to keep tutorial, idiomatic, and production versions on
+ * the same conceptual model from the start.
+ */
+#ifndef REDIS_CC_SHARED_H
+#define REDIS_CC_SHARED_H
+
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+
+typedef enum RedisCommandKind {
+    REDIS_CMD_PING = 0,
+    REDIS_CMD_GET,
+    REDIS_CMD_SET,
+    REDIS_CMD_DEL,
+    REDIS_CMD_EXISTS,
+    REDIS_CMD_INCR,
+    REDIS_CMD_EXPIRE,
+    REDIS_CMD_TTL,
+} RedisCommandKind;
+
+typedef enum RedisReplyKind {
+    REDIS_REPLY_SIMPLE_STRING = 0,
+    REDIS_REPLY_BULK_STRING,
+    REDIS_REPLY_INTEGER,
+    REDIS_REPLY_NULL_BULK,
+    REDIS_REPLY_ERROR,
+} RedisReplyKind;
+
+typedef struct RedisRequest {
+    uint64_t conn_id;
+    uint64_t request_id;
+    uint32_t shard_id;
+    RedisCommandKind kind;
+    CCSlice key;
+    CCSlice value;
+    int64_t int_arg;
+} RedisRequest;
+
+typedef struct RedisReply {
+    uint64_t conn_id;
+    uint64_t request_id;
+    RedisReplyKind kind;
+    CCSlice data;
+    int64_t int_value;
+} RedisReply;
+
+static inline const char* redis_command_name(RedisCommandKind kind) {
+    switch (kind) {
+        case REDIS_CMD_PING: return "PING";
+        case REDIS_CMD_GET: return "GET";
+        case REDIS_CMD_SET: return "SET";
+        case REDIS_CMD_DEL: return "DEL";
+        case REDIS_CMD_EXISTS: return "EXISTS";
+        case REDIS_CMD_INCR: return "INCR";
+        case REDIS_CMD_EXPIRE: return "EXPIRE";
+        case REDIS_CMD_TTL: return "TTL";
+        default: return "UNKNOWN";
+    }
+}
+
+static inline const char* redis_reply_name(RedisReplyKind kind) {
+    switch (kind) {
+        case REDIS_REPLY_SIMPLE_STRING: return "simple-string";
+        case REDIS_REPLY_BULK_STRING: return "bulk-string";
+        case REDIS_REPLY_INTEGER: return "integer";
+        case REDIS_REPLY_NULL_BULK: return "null-bulk";
+        case REDIS_REPLY_ERROR: return "error";
+        default: return "unknown";
+    }
+}
+
+#endif

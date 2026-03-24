@@ -1,0 +1,36 @@
+/*
+ * redis_idiomatic.ccs
+ *
+ * This is the compact reference implementation for the Redis port. Its job is
+ * to preserve the production ownership model while staying readable enough to
+ * teach the system.
+ *
+ * The difference from `redis_tutorial.ccs` should be breadth and robustness,
+ * not a different architecture.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "redis_cc/redis_cc.cch"
+
+static void print_scope(void) {
+    puts("redis_idiomatic scaffold");
+    puts("");
+    puts("Architectural commitments:");
+    puts("  - one fiber per connection");
+    puts("  - typed request/reply messages");
+    puts("  - channel handoff into shard-owner fibers");
+    puts("  - shard count scales the same model used by production");
+    puts("");
+    puts("Planned first commands:");
+    puts("  PING, GET, SET, DEL, EXISTS, INCR, EXPIRE, TTL");
+}
+
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+
+    print_scope();
+    printf("Example reply kind: %s\n", redis_reply_name(REDIS_REPLY_SIMPLE_STRING));
+    return 0;
+}
