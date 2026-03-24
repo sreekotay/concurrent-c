@@ -1,0 +1,33 @@
+/*
+ * redis_cc.ccs
+ *
+ * Production-oriented home for the near-full Redis port.
+ *
+ * This starts as a scaffold, but the intent is that it grows by modularization
+ * and feature coverage rather than by changing the underlying concurrency
+ * model established in the tutorial and idiomatic versions.
+ */
+
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include "redis_cc.cch"
+
+static void print_roadmap(void) {
+    puts("redis_cc scaffold");
+    puts("");
+    puts("Growth path:");
+    puts("  1. RESP parsing and reply encoding");
+    puts("  2. request routing and shard ownership");
+    puts("  3. strings and expiration");
+    puts("  4. richer data structures");
+    puts("  5. persistence and replication");
+}
+
+int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
+
+    print_roadmap();
+    printf("Representative command: %s\n", redis_command_name(REDIS_CMD_SET));
+    return 0;
+}
