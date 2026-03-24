@@ -148,6 +148,35 @@ static int cc__is_slice_recv_type(const char* type_name) {
             strcmp(type_name, "CCSliceUnique*") == 0);
 }
 
+static const char* cc__builtin_to_str_callee(const char* type_name) {
+    if (!type_name || !type_name[0]) return NULL;
+    if (strcmp(type_name, "char") == 0) return "char_to_str";
+    if (strcmp(type_name, "signed char") == 0) return "signed_char_to_str";
+    if (strcmp(type_name, "unsigned char") == 0) return "unsigned_char_to_str";
+    if (strcmp(type_name, "short") == 0) return "short_to_str";
+    if (strcmp(type_name, "unsigned short") == 0) return "unsigned_short_to_str";
+    if (strcmp(type_name, "int") == 0) return "int_to_str";
+    if (strcmp(type_name, "unsigned") == 0 || strcmp(type_name, "unsigned int") == 0) return "unsigned_to_str";
+    if (strcmp(type_name, "long") == 0) return "long_to_str";
+    if (strcmp(type_name, "unsigned long") == 0) return "unsigned_long_to_str";
+    if (strcmp(type_name, "long long") == 0) return "long_long_to_str";
+    if (strcmp(type_name, "unsigned long long") == 0) return "unsigned_long_long_to_str";
+    if (strcmp(type_name, "int8_t") == 0) return "int8_t_to_str";
+    if (strcmp(type_name, "uint8_t") == 0) return "uint8_t_to_str";
+    if (strcmp(type_name, "int16_t") == 0) return "int16_t_to_str";
+    if (strcmp(type_name, "uint16_t") == 0) return "uint16_t_to_str";
+    if (strcmp(type_name, "int32_t") == 0) return "int32_t_to_str";
+    if (strcmp(type_name, "uint32_t") == 0) return "uint32_t_to_str";
+    if (strcmp(type_name, "int64_t") == 0) return "int64_t_to_str";
+    if (strcmp(type_name, "uint64_t") == 0) return "uint64_t_to_str";
+    if (strcmp(type_name, "intptr_t") == 0) return "intptr_t_to_str";
+    if (strcmp(type_name, "uintptr_t") == 0) return "uintptr_t_to_str";
+    if (strcmp(type_name, "float") == 0) return "float_to_str";
+    if (strcmp(type_name, "double") == 0) return "double_to_str";
+    if (strcmp(type_name, "_Bool") == 0 || strcmp(type_name, "bool") == 0) return "bool_to_str";
+    return NULL;
+}
+
 static int cc__is_family_recv_type(const char* type_name) {
     return type_name &&
            (strncmp(type_name, "Vec_", 4) == 0 ||
@@ -767,6 +796,17 @@ static int emit_desugared_call(char* out,
                                  : "cc_std_err_write_auto";
         if (!has_args || !args_rewritten) return snprintf(out, cap, "%s(", callee);
         return snprintf(out, cap, "%s(%s)", callee, args_rewritten);
+    }
+    if (strcmp(method, "to_str") == 0) {
+        const char* callee = cc__builtin_to_str_callee(ctx.recv_type_name);
+        if (callee) {
+            if (!has_args || !args_rewritten) {
+                return recv_is_ptr ? snprintf(out, cap, "%s(*%s)", callee, recv)
+                                   : snprintf(out, cap, "%s(%s)", callee, recv);
+            }
+            return recv_is_ptr ? snprintf(out, cap, "%s(*%s, %s)", callee, recv, args_rewritten)
+                               : snprintf(out, cap, "%s(%s, %s)", callee, recv, args_rewritten);
+        }
     }
     dispatch_n = cc__emit_type_driven_dispatch(out, cap, recv, method, recv_is_ptr, args_rewritten, has_args, &ctx);
     if (dispatch_n >= 0) return dispatch_n;

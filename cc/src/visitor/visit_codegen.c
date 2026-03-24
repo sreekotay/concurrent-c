@@ -2285,6 +2285,18 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         /* Final safety: ensure invalid surface syntax like `T[~ ... >]` does not reach the C compiler. */
         {
+            char* rew_string = cc_rewrite_string_templates_text(src_ufcs, src_ufcs_len, ctx->input_path);
+            if (rew_string == (char*)-1) {
+                fclose(out);
+                return EINVAL;
+            }
+            if (rew_string) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rew_string;
+                src_ufcs_len = strlen(src_ufcs);
+            }
+        }
+        {
             char* rew_slice = cc__rewrite_slice_types_text(ctx, src_ufcs, src_ufcs_len);
             if (!rew_slice) {
                 fclose(out);
