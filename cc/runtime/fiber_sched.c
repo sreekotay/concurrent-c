@@ -6829,17 +6829,7 @@ queued:
     const char* preferred_src = cc__last_worker_src_name(f->last_worker_src);
     const char* route_name = "none";
     int route_target = -2;
-    if (preferred >= 0 &&
-        preferred != tls_worker_id &&
-        f->last_worker_src == 1 &&
-        f->park_reason &&
-        strncmp(f->park_reason, "chan_", 5) == 0) {
-        /* Cross-worker channel wakes should not inherit plain "last ran here"
-        * history. That signal is weak and often reflects old execution rather
-        * than current producer/consumer locality, so drop it entirely. */
-        preferred = -1;
-        preferred_src = "run_weak";
-    }
+    /* Sticky by default: preserve preferred-worker affinity for channel wakes. */
     if (preferred >= 0 && preferred < (int)g_sched.num_workers) {
         int divert = 0;
         if (preferred != tls_worker_id && g_sched.worker_heartbeat) {
