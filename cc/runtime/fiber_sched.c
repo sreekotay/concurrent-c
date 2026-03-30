@@ -156,10 +156,18 @@ static _Atomic int g_cc_join_help_mode = -1;          /* -1 unknown, 0 off, 1 on
 
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
     if (out_calls) {
+#if CC_V3_DIAGNOSTICS
         *out_calls = atomic_load_explicit(&g_cc_fiber_unpark_calls, memory_order_relaxed);
+#else
+        *out_calls = 0;
+#endif
     }
     if (out_enqueues) {
+#if CC_V3_DIAGNOSTICS
         *out_enqueues = atomic_load_explicit(&g_cc_fiber_unpark_enqueues, memory_order_relaxed);
+#else
+        *out_enqueues = 0;
+#endif
     }
 }
 
@@ -199,7 +207,7 @@ static inline int cc_join_help_enabled(void) {
 
 static int spawn_timing_enabled(void) {
     if (g_timing_enabled < 0) {
-        g_timing_enabled = getenv("CC_SPAWN_TIMING") != NULL;
+        g_timing_enabled = 0;
     }
     return g_timing_enabled;
 }
@@ -619,7 +627,7 @@ static inline const char* cc__enqueue_src_name(int src) {
 static inline int cc_trace_nw_spawn_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_TRACE_NW_SPAWN") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
@@ -627,7 +635,7 @@ static inline int cc_trace_nw_spawn_enabled(void) {
 static inline int cc_trace_chan_wake_enabled_sched(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_TRACE_CHAN_WAKE") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
@@ -635,7 +643,7 @@ static inline int cc_trace_chan_wake_enabled_sched(void) {
 static inline int cc_trace_spawn_run_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_TRACE_SPAWN_RUN") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
@@ -643,25 +651,13 @@ static inline int cc_trace_spawn_run_enabled(void) {
 static inline int cc_trace_fiber_migrate_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_TRACE_FIBER_MIGRATE") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
 
 static inline uint64_t cc_trace_fiber_migrate_limit(void) {
-    static uint64_t limit = UINT64_MAX;
-    static int initialized = 0;
-    if (!initialized) {
-        const char* v = getenv("CC_TRACE_FIBER_MIGRATE_LIMIT");
-        if (v && v[0]) {
-            unsigned long long parsed = strtoull(v, NULL, 10);
-            if (parsed > 0) limit = (uint64_t)parsed;
-        } else {
-            limit = 200;
-        }
-        initialized = 1;
-    }
-    return limit;
+    return 0;
 }
 
 static inline const char* cc__spawn_publish_route_name(unsigned char route) {
@@ -676,8 +672,7 @@ static inline const char* cc__spawn_publish_route_name(unsigned char route) {
 static inline int cc_nonworker_spawn_group_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        const char* v = getenv("CC_NW_SPAWN_GROUP_HINT");
-        enabled = (v && v[0] != '0') ? 1 : 0;
+        enabled = 0;
     }
     return enabled;
 }
@@ -730,7 +725,7 @@ static _Atomic uint64_t g_cc_v3_wm_empty_loops = 0;
 static inline int cc_v3_worker_stats_enabled(void) {
     int mode = atomic_load_explicit(&g_cc_v3_worker_stats_mode, memory_order_acquire);
     if (mode >= 0) return mode;
-    mode = (getenv("CC_V3_SCHED_STATS") || getenv("CC_V3_SCHED_STATS_DUMP")) ? 1 : 0;
+    mode = 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_stats_mode,
                                                 &expected,
@@ -743,7 +738,7 @@ static inline int cc_v3_worker_stats_enabled(void) {
 static inline int cc_v3_worker_dump_enabled(void) {
     int mode = atomic_load_explicit(&g_cc_v3_worker_dump_mode, memory_order_acquire);
     if (mode >= 0) return mode;
-    mode = getenv("CC_V3_SCHED_STATS_DUMP") ? 1 : 0;
+    mode = 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_dump_mode,
                                                 &expected,
@@ -1196,14 +1191,14 @@ static int g_inbox_dump = -1;   /* -1 = not checked, 0 = disabled, 1 = enabled *
 
 static int inbox_debug_enabled(void) {
     if (g_inbox_debug < 0) {
-        g_inbox_debug = getenv("CC_DEBUG_INBOX") != NULL;
+        g_inbox_debug = 0;
     }
     return g_inbox_debug;
 }
 
 static int inbox_dump_enabled(void) {
     if (g_inbox_dump < 0) {
-        g_inbox_dump = getenv("CC_DEBUG_INBOX_DUMP") != NULL;
+        g_inbox_dump = 0;
     }
     return g_inbox_dump;
 }
@@ -1211,7 +1206,7 @@ static int inbox_dump_enabled(void) {
 static int join_debug_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_DEBUG_JOIN") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
@@ -1219,7 +1214,7 @@ static int join_debug_enabled(void) {
 static int wake_debug_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_DEBUG_WAKE") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
@@ -1560,7 +1555,7 @@ static inline uint64_t cc__mono_ns_sched(void) {
 static inline int cc_worker_gap_stats_enabled(void) {
     int mode = atomic_load_explicit(&g_cc_worker_gap_stats.mode, memory_order_acquire);
     if (mode >= 0) return mode;
-    mode = (getenv("CC_WORKER_GAP_STATS") || getenv("CC_WORKER_GAP_STATS_DUMP")) ? 1 : 0;
+    mode = 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&g_cc_worker_gap_stats.mode,
                                                 &expected,
@@ -1573,7 +1568,7 @@ static inline int cc_worker_gap_stats_enabled(void) {
 static inline int cc_worker_gap_stats_dump_enabled(void) {
     int mode = atomic_load_explicit(&g_cc_worker_gap_stats.dump_mode, memory_order_acquire);
     if (mode >= 0) return mode;
-    mode = getenv("CC_WORKER_GAP_STATS_DUMP") ? 1 : 0;
+    mode = 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&g_cc_worker_gap_stats.dump_mode,
                                                 &expected,
@@ -1589,7 +1584,7 @@ static inline int cc_worker_gap_stats_live_enabled(void) {
     static _Atomic int mode = -1;
     int v = atomic_load_explicit(&mode, memory_order_acquire);
     if (v >= 0) return v;
-    v = getenv("CC_WORKER_GAP_STATS_LIVE") ? 1 : 0;
+    v = 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&mode,
                                                 &expected,
@@ -1603,8 +1598,7 @@ static inline int cc_worker_gap_trace_enabled(void) {
     static _Atomic int mode = -1;
     int v = atomic_load_explicit(&mode, memory_order_acquire);
     if (v >= 0) return v;
-    /* Opt-in noisy trace for targeted stall diagnosis. */
-    v = getenv("CC_WORKER_GAP_STATS_TRACE") ? 1 : 0;
+    v = 0;
     int expected = -1;
     (void)atomic_compare_exchange_strong_explicit(&mode,
                                                 &expected,
@@ -1618,15 +1612,8 @@ static inline uint64_t cc_worker_gap_trace_every(void) {
     static _Atomic uint64_t cached = 0;
     uint64_t v = atomic_load_explicit(&cached, memory_order_acquire);
     if (v != 0) return v;
-    uint64_t parsed = 1024; /* default: one sample every 1024 publishes */
-    const char* env = getenv("CC_WORKER_GAP_TRACE_EVERY");
-    if (env && env[0] != '\0') {
-        char* endptr = NULL;
-        unsigned long long tmp = strtoull(env, &endptr, 10);
-        if (endptr != env && tmp > 0) parsed = (uint64_t)tmp;
-    }
-    atomic_store_explicit(&cached, parsed, memory_order_release);
-    return parsed;
+    atomic_store_explicit(&cached, 1024, memory_order_release);
+    return 1024;
 }
 
 static inline void cc_worker_gap_trace_nw_publish(size_t target, int nw_ready, int pushed, int inbox_edge) {
@@ -2394,8 +2381,7 @@ static inline int64_t cc_sched_pressure_add(int64_t delta) {
 static inline int cc_v3_pressure_dump_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        const char* v = getenv("CC_V3_PRESSURE_STATS_DUMP");
-        enabled = (v && v[0] == '1') ? 1 : 0;
+        enabled = 0;
     }
     return enabled;
 }
@@ -2479,7 +2465,7 @@ static inline size_t get_total_timed_parked(void) {
 static int deadlock_debug_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) {
-        enabled = getenv("CC_DEBUG_DEADLOCK_RUNTIME") != NULL;
+        enabled = 0;
     }
     return enabled;
 }
@@ -3068,7 +3054,6 @@ static inline int pool_ready_for_nonworker_inbox_publish(void) {
     * - keep very small startup bursts on global for launch-order fairness
     * - once backlog reaches one worker-wave, allow inbox fan-out */
     if (active == 0 && spinning == 0 && sleeping == 0) return 0;
-    if (sleeping > 0) return 1;
     return 1;
 }
 
@@ -3891,8 +3876,7 @@ static void* replacement_worker(void* arg) {
 static int stall_debug_enabled(void) {
     static int val = -1;
     if (val == -1) {
-        const char* v = getenv("CC_DEBUG_STALL");
-        val = (v && v[0] == '1') ? 1 : 0;
+        val = 0;
     }
     return val;
 }
@@ -3900,8 +3884,7 @@ static int stall_debug_enabled(void) {
 static int sysmon_debug_enabled(void) {
     static int val = -1;
     if (val == -1) {
-        const char* v = getenv("CC_DEBUG_SYSMON");
-        val = (v && v[0] == '1') ? 1 : 0;
+        val = 0;
     }
     return val;
 }
@@ -5151,14 +5134,6 @@ static void* worker_main(void* arg) {
 
 static void cc_fiber_atexit_stats(void) {
     if (atomic_load(&g_initialized) != 2) return;
-    
-    if (getenv("CC_FIBER_STATS")) {
-        cc_fiber_dump_spawn_stats();
-    }
-    if (getenv("CC_SPAWN_TIMING")) {
-        cc_fiber_dump_timing();
-        cc_nursery_dump_timing();
-    }
     if (cc_worker_gap_stats_dump_enabled()) {
         cc_worker_gap_stats_dump();
     }
@@ -5275,10 +5250,6 @@ int cc_fiber_sched_init(size_t num_workers) {
         }
     }
     
-    if (getenv("CC_FIBER_STATS") || getenv("CC_VERBOSE")) {
-        fprintf(stderr, "[cc] fiber scheduler initialized with %zu workers\n", num_workers);
-    }
-    
     for (size_t i = 0; i < num_workers; i++) {
         pthread_create(&g_sched.workers[i], NULL, worker_main, (void*)i);
     }
@@ -5301,16 +5272,7 @@ int cc_fiber_sched_init(size_t num_workers) {
 
 void cc_fiber_sched_shutdown(void) {
     if (atomic_load_explicit(&g_initialized, memory_order_acquire) != 2) return;
-    
-    /* Dump spawn timing stats if env var is set */
-    if (getenv("CC_FIBER_STATS")) {
-        cc_fiber_dump_spawn_stats();
-    }
-    if (getenv("CC_SPAWN_TIMING")) {
-        cc_fiber_dump_timing();
-        cc_nursery_dump_timing();
-    }
-    
+
     /* Wait for all in-flight fibers to complete before tearing down.
     * The spec says "drain until active_tasks == 0".  In practice this
     * loop rarely iterates because nursery join already waits for
@@ -6020,8 +5982,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     }
     
     /* Track reuse stats (only when CC_FIBER_STATS is set) */
-    static int stats_enabled = -1;
-    if (stats_enabled < 0) stats_enabled = getenv("CC_FIBER_STATS") != NULL;
+    static int stats_enabled = 0;
     if (stats_enabled) {
         if (reused) {
             atomic_fetch_add_explicit(&g_sched.coro_reused, 1, memory_order_relaxed);
@@ -6594,8 +6555,7 @@ static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct 
 #if CC_V3_DIAGNOSTICS
     static int park_dbg = -1;
     if (park_dbg == -1) {
-        const char* v = getenv("CC_PARK_DEBUG");
-        park_dbg = (v && v[0] == '1') ? 1 : 0;
+        park_dbg = 0;
     }
 #endif
 
@@ -6686,8 +6646,7 @@ void cc__fiber_clear_pending_unpark(void) {
     if (old) {
         static int park_dbg = -1;
         if (park_dbg == -1) {
-            const char* v = getenv("CC_PARK_DEBUG");
-            park_dbg = (v && v[0] == '1') ? 1 : 0;
+            park_dbg = 0;
         }
         if (park_dbg) {
             fprintf(stderr, "CC_PARK_DEBUG: clear_pending fiber=%lu old=%d\n",
@@ -6713,7 +6672,9 @@ void cc__fiber_unpark(void* fiber_ptr) {
     fiber_task* f = (fiber_task*)fiber_ptr;
     if (!f) return;
     const int gap_stats = cc_worker_gap_stats_enabled();
+#if CC_V3_DIAGNOSTICS
     atomic_fetch_add_explicit(&g_cc_fiber_unpark_calls, 1, memory_order_relaxed);
+#endif
     int claimed_parked = 0;
     if (atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
         /* Another wake path won before the timer fired. Unlink the stale timed
@@ -6732,68 +6693,67 @@ void cc__fiber_unpark(void* fiber_ptr) {
     * If PARKING, the fiber's stack is still active
     * on its owning worker — we must NOT enqueue.  Just set pending_unpark
     * and let the owning worker's park_if see it and bail out. */
-    while (1) {
-        int64_t expected = CTRL_PARKED;
-        if (atomic_compare_exchange_strong_explicit(&f->control, &expected, CTRL_QUEUED,
-                                                    memory_order_acq_rel,
-                                                    memory_order_acquire)) {
-            claimed_parked = 1;
-            goto queued;
-        }
-        if (expected == CTRL_PARKING) {
-            /* LP (§10 Waker sees PARKING): publish wake-pending only. */
-            /* Fiber is mid-park — its stack is still live on another worker.
-            * Set pending_unpark so park_if will abort when it checks.
-            * Do NOT CAS or enqueue — the owning worker handles everything. */
-            atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
-            return;
-        }
-        static int chan_dbg_verbose = -1;
-        if (chan_dbg_verbose == -1) {
-            const char* v = getenv("CC_CHAN_DEBUG_VERBOSE");
-            chan_dbg_verbose = (v && v[0] == '1') ? 1 : 0;
-        }
-        if (chan_dbg_verbose && f->park_reason && strncmp(f->park_reason, "chan_", 5) == 0) {
-            fprintf(stderr,
-                    "CC_CHAN_DEBUG: unpark_skip fiber=%lu control=%lld reason=%s obj=%p\n",
-                    (unsigned long)f->fiber_id,
-                    (long long)expected,
-                    f->park_reason,
-                    f->park_obj);
-        }
-        if (CTRL_IS_OWNED(expected) || expected == CTRL_QUEUED) {
-            /* Fiber is running or already queued — latch early wake so a later
-            * park doesn't lose it. */
-            /* seq_cst: Dekker ordering — unpark does store(pending_unpark)
-            * then read(control), park does store(control) then
-            * read(pending_unpark). seq_cst on both sides prevents the
-            * store-load reordering that would cause a lost wakeup. */
-            atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
-            if (chan_dbg_verbose) {
-                fprintf(stderr, "CC_CHAN_DEBUG: pending_unpark_set fiber=%lu control=%lld reason=%s\n",
-                        (unsigned long)f->fiber_id, (long long)expected, f->park_reason ? f->park_reason : "null");
-            }
-        }
-        if (expected == CTRL_DONE) {
-            if (join_debug_enabled()) {
-                fprintf(stderr,
-                        "[join] unpark: fiber=%lu already done\n",
-                        (unsigned long)f->fiber_id);
-            }
-            return;  /* Already completed, nothing to do */
-        }
-        if (join_debug_enabled()) {
-            fprintf(stderr,
-                    "[join] unpark: fiber=%lu control=%lld (skipped, not parked)\n",
-                    (unsigned long)f->fiber_id,
-                    (long long)expected);
-        }
+    int64_t expected = CTRL_PARKED;
+    if (atomic_compare_exchange_strong_explicit(&f->control, &expected, CTRL_QUEUED,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        claimed_parked = 1;
+        goto queued;
+    }
+    if (expected == CTRL_PARKING) {
+        /* LP (§10 Waker sees PARKING): publish wake-pending only. */
+        /* Fiber is mid-park — its stack is still live on another worker.
+        * Set pending_unpark so park_if will abort when it checks.
+        * Do NOT CAS or enqueue — the owning worker handles everything. */
+        atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
         return;
     }
+    static int chan_dbg_verbose = -1;
+    if (chan_dbg_verbose == -1) {
+        chan_dbg_verbose = 0;
+    }
+    if (chan_dbg_verbose && f->park_reason && strncmp(f->park_reason, "chan_", 5) == 0) {
+        fprintf(stderr,
+                "CC_CHAN_DEBUG: unpark_skip fiber=%lu control=%lld reason=%s obj=%p\n",
+                (unsigned long)f->fiber_id,
+                (long long)expected,
+                f->park_reason,
+                f->park_obj);
+    }
+    if (CTRL_IS_OWNED(expected) || expected == CTRL_QUEUED) {
+        /* Fiber is running or already queued — latch early wake so a later
+        * park doesn't lose it. */
+        /* seq_cst: Dekker ordering — unpark does store(pending_unpark)
+        * then read(control), park does store(control) then
+        * read(pending_unpark). seq_cst on both sides prevents the
+        * store-load reordering that would cause a lost wakeup. */
+        atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
+        if (chan_dbg_verbose) {
+            fprintf(stderr, "CC_CHAN_DEBUG: pending_unpark_set fiber=%lu control=%lld reason=%s\n",
+                    (unsigned long)f->fiber_id, (long long)expected, f->park_reason ? f->park_reason : "null");
+        }
+    }
+    if (expected == CTRL_DONE) {
+        if (join_debug_enabled()) {
+            fprintf(stderr,
+                    "[join] unpark: fiber=%lu already done\n",
+                    (unsigned long)f->fiber_id);
+        }
+        return;  /* Already completed, nothing to do */
+    }
+    if (join_debug_enabled()) {
+        fprintf(stderr,
+                "[join] unpark: fiber=%lu control=%lld (skipped, not parked)\n",
+                (unsigned long)f->fiber_id,
+                (long long)expected);
+    }
+    return;
 queued:
     /* §9 row: PARKED -> RUNNABLE by waker claim owner only. */
     cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(waker)", claimed_parked);
+#if CC_V3_DIAGNOSTICS
     atomic_fetch_add_explicit(&g_cc_fiber_unpark_enqueues, 1, memory_order_relaxed);
+#endif
     /* Decrement parked counter (incremented by worker_commit_park). */
     atomic_fetch_sub_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
     if (cc_worker_gap_stats_enabled()) {
@@ -6872,12 +6832,8 @@ queued:
                 pushed = 1;
                 route_name = "divert_global";
                 route_target = -1;
-                if (gap_stats) {
-                    if (divert_stale) {
-                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, 1, memory_order_relaxed);
-                    } else {
-                        atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_fallback, 1, memory_order_relaxed);
-                    }
+                if (gap_stats && divert_stale) {
+                    atomic_fetch_add_explicit(&g_cc_worker_gap_stats.unpark_push_global_divert_stale, 1, memory_order_relaxed);
                 }
             }
         } else if (preferred == tls_worker_id) {
