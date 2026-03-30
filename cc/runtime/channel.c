@@ -822,7 +822,6 @@ struct CCChan {
     _Atomic int lfqueue_count __attribute__((aligned(128))); /* Approximate count for fast full/empty check */
     _Atomic int lfqueue_inflight;                   /* Active lock-free enqueue attempts */
     _Atomic size_t slot_counter;                    /* Per-channel slot counter for large elements */
-    _Atomic int recv_fairness_ctr;                  /* For yield-every-N fairness */
 
     /* Debug counters (per-channel, lock-free focus) */
     _Atomic uint64_t dbg_lf_enq_ok;
@@ -1584,7 +1583,6 @@ static CCChan* cc_chan_create_internal(size_t capacity, CCChanMode mode, bool al
     atomic_store(&ch->lfqueue_count, 0);
     atomic_store(&ch->lfqueue_inflight, 0);
     atomic_store(&ch->slot_counter, 0);
-    atomic_store(&ch->recv_fairness_ctr, 0);
     
     if (cap > 1) {  /* Only use lock-free for cap > 1 (liblfds needs at least 2) */
         const char* disable_lf = getenv("CC_CHAN_NO_LOCKFREE");
