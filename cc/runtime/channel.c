@@ -70,117 +70,6 @@ extern __thread CCNursery* cc__tls_current_nursery;
 /* Thread-local current deadline scope (set by with_deadline lowering). */
 __thread CCDeadline* cc__tls_current_deadline = NULL;
 
-/* ============================================================================
- * Channel timing instrumentation
- * Enables CC_CHANNEL_TIMING=1 to report send/recv lock/enqueue/dequeue costs.
- * ============================================================================
- */
-
-typedef struct {
-    _Atomic uint64_t send_cycles;
-    _Atomic uint64_t send_lock_cycles;
-    _Atomic uint64_t send_enqueue_cycles;
-    _Atomic uint64_t send_wake_cycles;
-    _Atomic uint64_t recv_cycles;
-    _Atomic uint64_t recv_lock_cycles;
-    _Atomic uint64_t recv_dequeue_cycles;
-    _Atomic uint64_t recv_wake_cycles;
-    _Atomic size_t send_count;
-    _Atomic size_t recv_count;
-} channel_timing;
-
-static channel_timing g_channel_timing = {0};
-static int g_channel_timing_enabled = -1;
-
-static inline uint64_t channel_rdtsc(void) {
-    #if defined(__x86_64__) || defined(_M_X64)
-    unsigned int lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-    #elif defined(__aarch64__) || defined(__arm64__)
-    uint64_t val;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
-    return val;
-    #else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-    #endif
-}
-
-static void __attribute__((unused)) channel_timing_dump(void) {
-    size_t send = atomic_load_explicit(&g_channel_timing.send_count, memory_order_relaxed);
-    size_t recv = atomic_load_explicit(&g_channel_timing.recv_count, memory_order_relaxed);
-    if (send == 0 && recv == 0) return;
-    fprintf(stderr, "\n=== CHANNEL TIMING ===\n");
-    if (send) {
-        uint64_t total = atomic_load_explicit(&g_channel_timing.send_cycles, memory_order_relaxed);
-        uint64_t lock = atomic_load_explicit(&g_channel_timing.send_lock_cycles, memory_order_relaxed);
-        uint64_t enqueue = atomic_load_explicit(&g_channel_timing.send_enqueue_cycles, memory_order_relaxed);
-        uint64_t wake = atomic_load_explicit(&g_channel_timing.send_wake_cycles, memory_order_relaxed);
-        fprintf(stderr, "  send: total=%8.1f cycles (%zu ops)\n", (double)total / send, send);
-        fprintf(stderr, "    lock=%8.1f cycles/op (%5.1f%%) enqueue=%8.1f cycles/op (%5.1f%%)\n",
-                (double)lock / send, total ? 100.0 * lock / total : 0.0,
-                (double)enqueue / send, total ? 100.0 * enqueue / total : 0.0);
-        fprintf(stderr, "    wake=%8.1f cycles/op (%5.1f%%)\n",
-                (double)wake / send, total ? 100.0 * wake / total : 0.0);
-    }
-    if (recv) {
-        uint64_t total = atomic_load_explicit(&g_channel_timing.recv_cycles, memory_order_relaxed);
-        uint64_t lock = atomic_load_explicit(&g_channel_timing.recv_lock_cycles, memory_order_relaxed);
-        uint64_t dequeue = atomic_load_explicit(&g_channel_timing.recv_dequeue_cycles, memory_order_relaxed);
-        uint64_t wake = atomic_load_explicit(&g_channel_timing.recv_wake_cycles, memory_order_relaxed);
-        fprintf(stderr, "  recv: total=%8.1f cycles (%zu ops)\n", (double)total / recv, recv);
-        fprintf(stderr, "    lock=%8.1f cycles/op (%5.1f%%) dequeue=%8.1f cycles/op (%5.1f%%)\n",
-                (double)lock / recv, total ? 100.0 * lock / total : 0.0,
-                (double)dequeue / recv, total ? 100.0 * dequeue / total : 0.0);
-        fprintf(stderr, "    wake=%8.1f cycles/op (%5.1f%%)\n",
-                (double)wake / recv, total ? 100.0 * wake / total : 0.0);
-    }
-    fprintf(stderr, "======================\n\n");
-}
-
-static int channel_timing_enabled(void) {
-    if (g_channel_timing_enabled < 0) {
-        g_channel_timing_enabled = 0;
-    }
-    return g_channel_timing_enabled;
-}
-
-static inline void channel_timing_record_send(uint64_t start, uint64_t lock, uint64_t enqueue, uint64_t wake, uint64_t end) {
-    atomic_fetch_add_explicit(&g_channel_timing.send_cycles, end - start, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.send_lock_cycles, lock - start, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.send_enqueue_cycles, enqueue - lock, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.send_wake_cycles, end - wake, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.send_count, 1, memory_order_relaxed);
-}
-
-static inline void channel_timing_record_recv(uint64_t start, uint64_t lock, uint64_t dequeue, uint64_t wake, uint64_t end) {
-    atomic_fetch_add_explicit(&g_channel_timing.recv_cycles, end - start, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.recv_lock_cycles, lock - start, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.recv_dequeue_cycles, dequeue - lock, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.recv_wake_cycles, end - wake, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_channel_timing.recv_count, 1, memory_order_relaxed);
-}
-
-static int cc_trace_chan_wake_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
-
-static int cc_channel_partner_hint_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        /* Recorded investigation result: partner affinity improved the
-         * contention microbench but regressed pigz materially enough that
-         * the runtime now keeps it hard-disabled. */
-        enabled = 0;
-    }
-    return enabled;
-}
 
 static int cc_channel_recv_dedupe_enabled(void) {
     static int enabled = -1;
@@ -191,133 +80,20 @@ static int cc_channel_recv_dedupe_enabled(void) {
     return enabled;
 }
 
-static void cc__trace_chan_wake(const char* kind, CCChan* ch, cc__fiber_wait_node* node) {
-    if (!cc_trace_chan_wake_enabled() || !node || !node->fiber) return;
-    fprintf(stderr,
-            "[cc][chanwake] kind=%s ch=%p from_w=%d fiber=%" PRIu64 " pref=%d park=%s notified=%d\n",
-            kind,
-            (void*)ch,
-            cc__sched_current_worker_id(),
-            (uint64_t)cc__fiber_debug_id(node->fiber),
-            cc__fiber_debug_last_worker(node->fiber),
-            cc__fiber_debug_park_reason(node->fiber) ? cc__fiber_debug_park_reason(node->fiber) : "null",
-            atomic_load_explicit(&node->notified, memory_order_relaxed));
-}
-
-static inline void cc__chan_hint_partner_worker(cc__fiber_wait_node* node) {
-    if (!node || !node->fiber) return;
-    if (!cc_channel_partner_hint_enabled()) return;
-    int worker_id = cc__sched_current_worker_id();
-    if (worker_id < 0) return;
-    cc__fiber_hint_channel_partner(node->fiber, worker_id);
-}
-
-/* ============================================================================
- * Channel debug counters (lock-free focus)
- * ============================================================================ */
-
-typedef struct {
-    _Atomic uint64_t lf_enq_attempt;
-    _Atomic uint64_t lf_enq_ok;
-    _Atomic uint64_t lf_enq_fail;
-    _Atomic uint64_t lf_deq_attempt;
-    _Atomic uint64_t lf_deq_ok;
-    _Atomic uint64_t lf_deq_fail;
-    _Atomic uint64_t lf_send_waiter_add;
-    _Atomic uint64_t lf_recv_waiter_add;
-    _Atomic uint64_t lf_send_waiter_remove;
-    _Atomic uint64_t lf_recv_waiter_remove;
-    _Atomic uint64_t lf_send_waiter_wake;
-    _Atomic uint64_t lf_recv_waiter_wake;
-    _Atomic uint64_t lf_send_notify_signal;
-    _Atomic uint64_t lf_send_notify_close;
-    _Atomic uint64_t lf_send_notify_cancel;
-    _Atomic uint64_t lf_recv_notify_signal;
-    _Atomic uint64_t lf_recv_notify_data;
-    _Atomic uint64_t lf_recv_notify_close;
-    _Atomic uint64_t lf_recv_notify_cancel;
-    _Atomic uint64_t lf_recv_wake_no_waiter;
-    _Atomic uint64_t lf_close_calls;
-    _Atomic uint64_t lf_close_drain_calls;
-    _Atomic uint64_t lf_direct_send;
-    _Atomic uint64_t lf_direct_recv;
-    _Atomic uint64_t lf_has_recv_waiters_true;
-    _Atomic uint64_t lf_has_recv_waiters_false;
-    _Atomic uint64_t lf_has_send_waiters_true;
-    _Atomic uint64_t lf_has_send_waiters_false;
-    _Atomic uint64_t lf_wake_lock_send;
-    _Atomic uint64_t lf_wake_lock_recv;
-    _Atomic uint64_t lf_waiter_ticket_stale;
-} CCChanDebugCounters;
 
 typedef struct __attribute__((aligned(64))) {
     _Atomic size_t seq;
     void* value;
 } cc__ring_cell;
 
-static CCChanDebugCounters g_chan_dbg = {0};
-static int g_chan_dbg_enabled = -1;
-static int g_chan_dbg_verbose = -1;
-static int g_chan_dbg_summary_enabled = -1;
-static _Atomic uint64_t g_chan_dbg_close_seq = 0;
-static _Atomic uintptr_t g_chan_dbg_last_close = 0;
-
-static inline int cc__chan_dbg_enabled(void);
-static inline int cc__chan_dbg_summary_enabled(void);
-static inline int cc__chan_dbg_verbose_enabled(void);
-void cc__chan_debug_dump_global(void);
 
 
-static inline int cc__chan_dbg_enabled(void) {
-    if (g_chan_dbg_enabled == -1) {
-        g_chan_dbg_enabled = 0;
-    }
-    return g_chan_dbg_enabled;
-}
+#define cc__chan_dbg_select_event(e, n) ((void)0)
+#define cc__chan_dbg_select_group(e, g) ((void)0)
+#define cc__chan_dbg_select_wait(e, g, idx, n) ((void)0)
+#define cc__chan_debug_invariant(ch, where, msg) ((void)0)
+#define cc__chan_debug_check_recv_close(ch, where) ((void)0)
 
-static inline int cc__chan_dbg_summary_enabled(void) {
-    if (g_chan_dbg_summary_enabled == -1) {
-        g_chan_dbg_summary_enabled = 0;
-    }
-    return g_chan_dbg_summary_enabled;
-}
-
-static inline int cc__chan_dbg_verbose_enabled(void) {
-    if (g_chan_dbg_verbose == -1) {
-        g_chan_dbg_verbose = 0;
-    }
-    return g_chan_dbg_verbose;
-}
-
-/* Verbose logging gated on channel closed flag -- only emit noise once
- * the channel is closing / closed so we capture the deadlock-relevant
- * window without drowning in happy-path output.
- * Defined as a macro to avoid forward-declaration issues with CCChan. */
-#define cc__chan_dbg_verbose_closing(ch) \
-    (cc__chan_dbg_verbose_enabled() && (ch)->closed)
-
-static inline void cc__chan_dbg_select_event(const char* event, cc__fiber_wait_node* node) {
-    if (!cc__chan_dbg_verbose_enabled()) return;
-    if (!node || !node->is_select || !node->select_group) return;
-    fprintf(stderr,
-            "CC_CHAN_DEBUG: select_%s group=%p node=%p fiber=%p idx=%zu notified=%d\n",
-            event,
-            node->select_group,
-            (void*)node,
-            (void*)node->fiber,
-            node->select_index,
-            atomic_load_explicit(&node->notified, memory_order_relaxed));
-}
-
-static inline void cc__chan_dbg_inc(_Atomic uint64_t* c) {
-    if (!cc__chan_dbg_summary_enabled()) return;
-    atomic_fetch_add_explicit(c, 1, memory_order_relaxed);
-}
-
-static inline void cc__chan_dbg_add(_Atomic uint64_t* c, uint64_t delta) {
-    if (delta == 0 || !cc__chan_dbg_summary_enabled()) return;
-    atomic_fetch_add_explicit(c, delta, memory_order_relaxed);
-}
 
 static inline void cc__chan_cpu_pause(void) {
 #if defined(__aarch64__) || defined(__arm64__)
@@ -341,87 +117,6 @@ static inline void cc__chan_select_dbg_inc(_Atomic uint64_t* counter) {
 #else
     (void)counter;
 #endif
-}
-
-void cc__chan_debug_dump_global(void) {
-    if (!cc__chan_dbg_summary_enabled()) return;
-    uint64_t enq_ok = atomic_load_explicit(&g_chan_dbg.lf_enq_ok, memory_order_relaxed);
-    uint64_t deq_ok = atomic_load_explicit(&g_chan_dbg.lf_deq_ok, memory_order_relaxed);
-    uint64_t direct_send = atomic_load_explicit(&g_chan_dbg.lf_direct_send, memory_order_relaxed);
-    uint64_t direct_recv = atomic_load_explicit(&g_chan_dbg.lf_direct_recv, memory_order_relaxed);
-    uint64_t send_wait_add = atomic_load_explicit(&g_chan_dbg.lf_send_waiter_add, memory_order_relaxed);
-    uint64_t recv_wait_add = atomic_load_explicit(&g_chan_dbg.lf_recv_waiter_add, memory_order_relaxed);
-    uint64_t wake_lock_send = atomic_load_explicit(&g_chan_dbg.lf_wake_lock_send, memory_order_relaxed);
-    uint64_t wake_lock_recv = atomic_load_explicit(&g_chan_dbg.lf_wake_lock_recv, memory_order_relaxed);
-    uint64_t send_enqueued = enq_ok;
-    uint64_t recv_dequeued = deq_ok;
-    uint64_t send_ops = send_enqueued + direct_send;
-    uint64_t recv_ops = recv_dequeued + direct_recv;
-    fprintf(stderr, "Channel debug counters (lock-free):\n");
-    fprintf(stderr, "  enqueue attempts: %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_enq_attempt, memory_order_relaxed));
-    fprintf(stderr, "  enqueue ok:       %" PRIu64 "\n", enq_ok);
-    fprintf(stderr, "  enqueue fail:     %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_enq_fail, memory_order_relaxed));
-    fprintf(stderr, "  dequeue attempts: %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_deq_attempt, memory_order_relaxed));
-    fprintf(stderr, "  dequeue ok:       %" PRIu64 "\n", deq_ok);
-    fprintf(stderr, "  dequeue fail:     %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_deq_fail, memory_order_relaxed));
-    fprintf(stderr, "  send waiters add: %" PRIu64 "\n", send_wait_add);
-    fprintf(stderr, "  recv waiters add: %" PRIu64 "\n", recv_wait_add);
-    fprintf(stderr, "  send waiters rm:  %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_send_waiter_remove, memory_order_relaxed));
-    fprintf(stderr, "  recv waiters rm:  %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_waiter_remove, memory_order_relaxed));
-    fprintf(stderr, "  send waiters wake:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_send_waiter_wake, memory_order_relaxed));
-    fprintf(stderr, "  recv waiters wake:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_waiter_wake, memory_order_relaxed));
-    fprintf(stderr, "  send notify sig:  %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_send_notify_signal, memory_order_relaxed));
-    fprintf(stderr, "  send notify close:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_send_notify_close, memory_order_relaxed));
-    fprintf(stderr, "  send notify cancel:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_send_notify_cancel, memory_order_relaxed));
-    fprintf(stderr, "  recv notify sig:  %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_notify_signal, memory_order_relaxed));
-    fprintf(stderr, "  recv notify data: %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_notify_data, memory_order_relaxed));
-    fprintf(stderr, "  recv notify close:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_notify_close, memory_order_relaxed));
-    fprintf(stderr, "  recv notify cancel:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_notify_cancel, memory_order_relaxed));
-    fprintf(stderr, "  recv wake no wait:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_recv_wake_no_waiter, memory_order_relaxed));
-    fprintf(stderr, "  close calls:      %" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_close_calls, memory_order_relaxed));
-    fprintf(stderr, "  close drain calls:%" PRIu64 "\n", atomic_load_explicit(&g_chan_dbg.lf_close_drain_calls, memory_order_relaxed));
-    fprintf(stderr, "  direct send:      %" PRIu64 "\n", direct_send);
-    fprintf(stderr, "  direct recv:      %" PRIu64 "\n", direct_recv);
-    fprintf(stderr, "  has_recv_waiters true/false: %" PRIu64 " / %" PRIu64 "\n",
-            atomic_load_explicit(&g_chan_dbg.lf_has_recv_waiters_true, memory_order_relaxed),
-            atomic_load_explicit(&g_chan_dbg.lf_has_recv_waiters_false, memory_order_relaxed));
-    fprintf(stderr, "  has_send_waiters true/false: %" PRIu64 " / %" PRIu64 "\n",
-            atomic_load_explicit(&g_chan_dbg.lf_has_send_waiters_true, memory_order_relaxed),
-            atomic_load_explicit(&g_chan_dbg.lf_has_send_waiters_false, memory_order_relaxed));
-    fprintf(stderr, "  wake-path lock enter send/recv: %" PRIu64 " / %" PRIu64 "\n",
-            wake_lock_send, wake_lock_recv);
-    fprintf(stderr, "  stale waiter tickets:%" PRIu64 "\n",
-            atomic_load_explicit(&g_chan_dbg.lf_waiter_ticket_stale, memory_order_relaxed));
-    fprintf(stderr, "  last close ptr:   %p (seq=%" PRIu64 ")\n",
-            (void*)atomic_load_explicit(&g_chan_dbg_last_close, memory_order_relaxed),
-            atomic_load_explicit(&g_chan_dbg_close_seq, memory_order_relaxed));
-    fprintf(stderr, "\nBuffered lock-free summary:\n");
-    fprintf(stderr, "  send ops (enqueue + direct): %" PRIu64 "\n", send_ops);
-    fprintf(stderr, "  recv ops (dequeue + direct): %" PRIu64 "\n", recv_ops);
-    if (send_ops) {
-        fprintf(stderr, "  send enqueue:          %5.1f%%  direct handoff: %5.1f%%  parked: %5.1f%%  wake-lock: %5.1f%%\n",
-                100.0 * (double)enq_ok / (double)send_ops,
-                100.0 * (double)direct_send / (double)send_ops,
-                100.0 * (double)send_wait_add / (double)send_ops,
-                100.0 * (double)wake_lock_send / (double)send_ops);
-    }
-    if (recv_ops) {
-        fprintf(stderr, "  recv dequeue:          %5.1f%%  direct handoff: %5.1f%%  parked: %5.1f%%  wake-lock: %5.1f%%\n",
-                100.0 * (double)deq_ok / (double)recv_ops,
-                100.0 * (double)direct_recv / (double)recv_ops,
-                100.0 * (double)recv_wait_add / (double)recv_ops,
-                100.0 * (double)wake_lock_recv / (double)recv_ops);
-    }
-    fprintf(stderr, "\nSelect handoff accounting:\n");
-    uint64_t ds = atomic_load_explicit(&g_dbg_select_data_set, memory_order_relaxed);
-    uint64_t dr = atomic_load_explicit(&g_dbg_select_data_returned, memory_order_relaxed);
-    uint64_t tr = atomic_load_explicit(&g_dbg_select_try_returned, memory_order_relaxed);
-    uint64_t cr = atomic_load_explicit(&g_dbg_select_close_returned, memory_order_relaxed);
-    fprintf(stderr, "  select notified=DATA set:     %" PRIu64 "\n", ds);
-    fprintf(stderr, "  select returned via DATA:     %" PRIu64 "\n", dr);
-    fprintf(stderr, "  select returned via try:      %" PRIu64 "\n", tr);
-    fprintf(stderr, "  select returned via CLOSE:    %" PRIu64 "\n", cr);
-    fprintf(stderr, "  DELTA (set - data - try):     %" PRId64 "\n", (int64_t)(ds - dr - tr));
 }
 
 
@@ -576,16 +271,6 @@ static inline int cc__chan_mutex_minimal_enabled(void) {
     return cached;
 }
 
-/* Pass has_waiters=1 when parked waiters exist; only then pay the global
- * round-trip.  For 1P-1C free-running flows both sides are already running
- * and a global yield adds overhead without any fairness benefit. */
-static inline int cc__chan_retry_yield_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
 
 static inline int cc__chan_lf_count(CCChan* ch);
 
@@ -643,31 +328,6 @@ typedef struct cc__select_wait_group {
     _Atomic int selected_index;
 } cc__select_wait_group;
 
-static inline void cc__chan_dbg_select_group(const char* event, cc__select_wait_group* group) {
-    if (!cc__chan_dbg_verbose_enabled()) return;
-    if (!group) return;
-    fprintf(stderr,
-            "CC_CHAN_DEBUG: select_%s group=%p fiber=%p selected=%d signaled=%d\n",
-            event,
-            (void*)group,
-            (void*)group->fiber,
-            atomic_load_explicit(&group->selected_index, memory_order_relaxed),
-            atomic_load_explicit(&group->signaled, memory_order_relaxed));
-}
-
-static inline void cc__chan_dbg_select_wait(const char* event, cc__select_wait_group* group, size_t idx, int notified) {
-    if (!cc__chan_dbg_verbose_enabled()) return;
-    if (!group) return;
-    fprintf(stderr,
-            "CC_CHAN_DEBUG: select_%s group=%p fiber=%p idx=%zu selected=%d notified=%d signaled=%d\n",
-            event,
-            (void*)group,
-            (void*)group->fiber,
-            idx,
-            atomic_load_explicit(&group->selected_index, memory_order_relaxed),
-            notified,
-            atomic_load_explicit(&group->signaled, memory_order_relaxed));
-}
 
 static inline int cc__chan_waiter_ticket_valid(cc__fiber_wait_node* node) {
     if (!node) return 0;
@@ -680,21 +340,11 @@ static inline int cc__chan_waiter_ticket_valid(cc__fiber_wait_node* node) {
 
 static inline int cc__chan_waiter_ticket_valid_dbg(cc__fiber_wait_node* node,
                                                     const char* where) {
+    (void)where;
     if (cc__chan_waiter_ticket_valid(node)) return 1;
-    cc__chan_dbg_inc(&g_chan_dbg.lf_waiter_ticket_stale);
-    if (cc__chan_dbg_verbose_enabled() && node) {
-        fprintf(stderr,
-                "CC_CHAN_DEBUG: stale_waiter_ticket where=%s node=%p fiber=%p ticket=%" PRIu64 "\n",
-                where ? where : "(unknown)",
-                (void*)node,
-                (void*)node->fiber,
-                (uint64_t)node->wait_ticket);
-    }
     return 0;
 }
 
-static inline void cc__chan_debug_invariant(CCChan* ch, const char* where, const char* msg);
-static inline void cc__chan_debug_check_recv_close(CCChan* ch, const char* where);
 
 struct CCChan {
     size_t cap;
@@ -757,128 +407,9 @@ struct CCChan {
     _Atomic int lfqueue_inflight;                   /* Active lock-free enqueue attempts */
     _Atomic size_t slot_counter;                    /* Per-channel slot counter for large elements */
 
-    /* Debug counters (per-channel, lock-free focus) */
-    _Atomic uint64_t dbg_lf_enq_ok;
-    _Atomic uint64_t dbg_lf_deq_ok;
-    _Atomic uint64_t dbg_lf_send_calls;
-    _Atomic uint64_t dbg_lf_recv_calls;
-    _Atomic uint64_t dbg_lf_direct_send;
-    _Atomic uint64_t dbg_lf_direct_recv;
-    _Atomic uint64_t dbg_lf_recv_remove_zero;
-    _Atomic uint64_t dbg_lf_recv_waiter_add;
-    _Atomic uint64_t dbg_lf_recv_waiter_wake;
-    _Atomic uint64_t dbg_lf_recv_wake_no_waiter;
 
-    /* Debug counters for unbuffered (rendezvous) channels */
-    _Atomic uint64_t dbg_rv_send_handoff;       /* sender found recv waiter, did handoff */
-    _Atomic uint64_t dbg_rv_send_parked;        /* sender parked waiting for receiver */
-    _Atomic uint64_t dbg_rv_send_got_data;      /* sender woke with notified=DATA */
-    _Atomic uint64_t dbg_rv_send_got_signal;    /* sender woke with notified=SIGNAL */
-    _Atomic uint64_t dbg_rv_send_got_zero;      /* sender woke with notified=0 (spurious) */
-    _Atomic uint64_t dbg_rv_send_inner_handoff; /* sender found recv waiter in inner loop (line 1880) */
-    _Atomic uint64_t dbg_rv_recv_handoff;       /* receiver found send waiter, did handoff */
-    _Atomic uint64_t dbg_rv_recv_parked;        /* receiver parked waiting for sender */
-    _Atomic uint64_t dbg_rv_recv_got_data;      /* receiver woke with notified=DATA */
-    _Atomic uint64_t dbg_rv_recv_got_signal;    /* receiver woke with notified=SIGNAL */
-    _Atomic uint64_t dbg_rv_recv_got_zero;      /* receiver woke with notified=0 (spurious) */
-    _Atomic uint64_t dbg_rv_recv_park_skip;     /* receiver park_if returned (pending_unpark) */
 };
 
-static inline void cc__chan_debug_invariant(CCChan* ch, const char* where, const char* msg) {
-    if (!cc__chan_dbg_enabled()) return;
-    fprintf(stderr, "CC_CHAN_INVARIANT: %s ch=%p %s\n", where, (void*)ch, msg);
-}
-
-static inline void cc__chan_debug_check_recv_close(CCChan* ch, const char* where) {
-    if (!cc__chan_dbg_enabled() || !ch || !ch->closed) return;
-    if (ch->use_lockfree) {
-        int inflight = atomic_load_explicit(&ch->lfqueue_inflight, memory_order_acquire);
-        int count = cc__chan_lf_count(ch);
-        if (count > 0 || inflight > 0) {
-            fprintf(stderr,
-                    "CC_CHAN_INVARIANT: %s ch=%p recv_close with inflight=%d count=%d\n",
-                    where, (void*)ch, inflight, count);
-        }
-    } else if (ch->cap > 0 && ch->count > 0) {
-        fprintf(stderr,
-                "CC_CHAN_INVARIANT: %s ch=%p recv_close with count=%zu\n",
-                where, (void*)ch, ch->count);
-    }
-}
-
-void cc__chan_debug_dump_chan(void* ch_ptr) {
-    if (!cc__chan_dbg_enabled() || !ch_ptr) return;
-    CCChan* ch = (CCChan*)ch_ptr;
-    int locked = pthread_mutex_trylock(&ch->mu) == 0;
-    size_t send_waiters = 0;
-    size_t recv_waiters = 0;
-    if (locked) {
-        for (cc__fiber_wait_node* n = ch->send_waiters_head; n; n = n->next) send_waiters++;
-        for (cc__fiber_wait_node* n = ch->recv_waiters_head; n; n = n->next) recv_waiters++;
-    }
-    lfds711_pal_uint_t lf_ri = ch->use_lockfree ? ch->lfqueue_state.read_index : 0;
-    lfds711_pal_uint_t lf_wi = ch->use_lockfree ? ch->lfqueue_state.write_index : 0;
-    lfds711_pal_uint_t lf_ne = ch->use_lockfree ? ch->lfqueue_state.number_elements : 0;
-    lfds711_pal_uint_t lf_mask = ch->use_lockfree ? ch->lfqueue_state.mask : 0;
-    lfds711_pal_uint_t lf_est = lf_wi - lf_ri;
-    fprintf(stderr,
-            "  [chan %p] cap=%zu elem=%zu closed=%d rx_err=%d lf=%d lfcap=%zu count=%d inflight=%d ne=%" PRIu64 " mask=%" PRIu64 " ri=%" PRIu64 " wi=%" PRIu64 " est=%" PRIu64 " send_waiters=%zu recv_waiters=%zu%s\n",
-            (void*)ch,
-            ch->cap,
-            ch->elem_size,
-            ch->closed,
-            ch->rx_error_closed,
-            ch->use_lockfree,
-            ch->lfqueue_cap,
-            atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire),
-            atomic_load_explicit(&ch->lfqueue_inflight, memory_order_relaxed),
-            (uint64_t)lf_ne,
-            (uint64_t)lf_mask,
-            (uint64_t)lf_ri,
-            (uint64_t)lf_wi,
-            (uint64_t)lf_est,
-            send_waiters,
-            recv_waiters,
-            locked ? "" : " (lock busy)");
-    fprintf(stderr,
-            "    dbg: send_calls=%" PRIu64 " recv_calls=%" PRIu64 " enq_ok=%" PRIu64 " deq_ok=%" PRIu64 "\n",
-            atomic_load_explicit(&ch->dbg_lf_send_calls, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_recv_calls, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_enq_ok, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_deq_ok, memory_order_relaxed));
-    fprintf(stderr,
-            "    dbg: direct_send=%" PRIu64 " direct_recv=%" PRIu64 " recv_rm0=%" PRIu64 " recv_add=%" PRIu64 " recv_wake=%" PRIu64 " wake_no_waiter=%" PRIu64 "\n",
-            atomic_load_explicit(&ch->dbg_lf_direct_send, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_direct_recv, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_recv_remove_zero, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_recv_waiter_add, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_recv_waiter_wake, memory_order_relaxed),
-            atomic_load_explicit(&ch->dbg_lf_recv_wake_no_waiter, memory_order_relaxed));
-    /* Unbuffered (rendezvous) debug counters */
-    if (ch->cap == 0) {
-        fprintf(stderr,
-                "    rv_send: handoff=%" PRIu64 " inner_handoff=%" PRIu64 " parked=%" PRIu64
-                " got_data=%" PRIu64 " got_signal=%" PRIu64 " got_zero=%" PRIu64 "\n",
-                atomic_load_explicit(&ch->dbg_rv_send_handoff, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_send_inner_handoff, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_send_parked, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_send_got_data, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_send_got_signal, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_send_got_zero, memory_order_relaxed));
-        fprintf(stderr,
-                "    rv_recv: handoff=%" PRIu64 " parked=%" PRIu64
-                " got_data=%" PRIu64 " got_signal=%" PRIu64 " got_zero=%" PRIu64 " park_skip=%" PRIu64 "\n",
-                atomic_load_explicit(&ch->dbg_rv_recv_handoff, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_recv_parked, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_recv_got_data, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_recv_got_signal, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_recv_got_zero, memory_order_relaxed),
-                atomic_load_explicit(&ch->dbg_rv_recv_park_skip, memory_order_relaxed));
-    }
-    if (locked) {
-        pthread_mutex_unlock(&ch->mu);
-    }
-}
 
 static inline void cc_chan_lock(CCChan* ch) { pthread_mutex_lock(&ch->mu); }
 static inline void cc_chan_unlock(CCChan* ch) { pthread_mutex_unlock(&ch->mu); }
@@ -922,10 +453,6 @@ int cc_chan_pair_create_full(size_t capacity,
     }
     out_tx->raw = ch;
     out_rx->raw = ch;
-    if (cc__chan_dbg_enabled()) {
-        fprintf(stderr, "CC_CHAN_DEBUG: pair_create ch=%p tx=%p rx=%p cap=%zu elem=%zu\n",
-                (void*)ch, (void*)out_tx->raw, (void*)out_rx->raw, capacity, elem_size);
-    }
     return 0;
 }
 
@@ -952,10 +479,6 @@ CCChan* cc_chan_pair_create_returning(size_t capacity,
     }
     out_tx->raw = ch;
     out_rx->raw = ch;
-    if (cc__chan_dbg_enabled()) {
-        fprintf(stderr, "CC_CHAN_DEBUG: pair_create_returning ch=%p tx=%p rx=%p cap=%zu elem=%zu\n",
-                (void*)ch, (void*)out_tx->raw, (void*)out_rx->raw, capacity, elem_size);
-    }
     return ch;
 }
 
@@ -997,7 +520,6 @@ static int cc__chan_select_try_win(cc__fiber_wait_node* node) {
     cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
     int sel = atomic_load_explicit(&group->selected_index, memory_order_acquire);
     if (sel == (int)node->select_index) {
-        cc__chan_dbg_select_event("already", node);
         return 1;
     }
     if (sel != -1) {
@@ -1008,7 +530,6 @@ static int cc__chan_select_try_win(cc__fiber_wait_node* node) {
                                                 (int)node->select_index,
                                                 memory_order_acq_rel,
                                                 memory_order_acquire)) {
-        cc__chan_dbg_select_event("win", node);
         return 1;
     }
     return 0;
@@ -1020,23 +541,9 @@ static inline void cc__chan_select_cancel_node(cc__fiber_wait_node* node) {
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CANCEL, memory_order_release);
     if (node->is_select && node->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
-        int sig_before = atomic_load_explicit(&group->signaled, memory_order_acquire);
         atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-        if (cc__chan_dbg_enabled()) {
-            int sig_after = atomic_load_explicit(&group->signaled, memory_order_acquire);
-            fprintf(stderr, "CC_CHAN_DEBUG: cancel_node_signaled fiber=%p group=%p sig=%d->%d\n",
-                    (void*)node->fiber, (void*)group, sig_before, sig_after);
-        }
     }
     if (node->fiber) {
-        cc__chan_hint_partner_worker(node);
-        if (cc__chan_dbg_enabled() && node->is_select && node->select_group) {
-            cc__select_wait_group* g = (cc__select_wait_group*)node->select_group;
-            fprintf(stderr, "CC_CHAN_DEBUG: wake_batch_add_cancel fiber=%p group=%p sel=%d sig=%d\n",
-                    (void*)node->fiber, (void*)g,
-                    atomic_load_explicit(&g->selected_index, memory_order_acquire),
-                    atomic_load_explicit(&g->signaled, memory_order_acquire));
-        }
         wake_batch_add(node->fiber);
     }
 }
@@ -1045,7 +552,6 @@ static inline void cc__chan_select_cancel_node(cc__fiber_wait_node* node) {
 static void cc__chan_add_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_send_waiter_add);
     }
     cc__chan_add_waiter(&ch->send_waiters_head, &ch->send_waiters_tail, node);
     atomic_store_explicit(&ch->has_send_waiters, 1, memory_order_release);
@@ -1055,8 +561,6 @@ static void cc__chan_add_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
 static void cc__chan_add_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_add);
-        cc__chan_dbg_inc(&ch->dbg_lf_recv_waiter_add);
     }
     cc__chan_add_waiter(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
     atomic_store_explicit(&ch->has_recv_waiters, 1, memory_order_release);
@@ -1115,7 +619,6 @@ static void cc__chan_remove_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
         return;
     }
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_send_waiter_remove);
     }
     cc__chan_remove_waiter_list(&ch->send_waiters_head, &ch->send_waiters_tail, node);
     cc__chan_refresh_has_send_waiters(ch);
@@ -1130,7 +633,6 @@ static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
         return;
     }
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_remove);
     }
     cc__chan_remove_waiter_list(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
     cc__chan_refresh_has_recv_waiters(ch);
@@ -1151,7 +653,6 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
         node->in_wait_list = 0;
         if (!cc__chan_select_try_win(node)) {
             if (ch->use_lockfree) {
-                cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_cancel);
             }
             cc__chan_select_cancel_node(node);
             continue;
@@ -1161,19 +662,14 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
         }
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
         if (ch->use_lockfree) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_signal);
         }
         if (node->is_select && node->select_group) {
             cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-            cc__chan_dbg_select_event("signal_send", node);
         }
         if (ch->use_lockfree) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_send_waiter_wake);
         }
         cc__chan_refresh_has_send_waiters(ch);
-        cc__chan_hint_partner_worker(node);
-        cc__trace_chan_wake("send_waiter_signal", ch, node);
         wake_batch_add(node->fiber);
         return;
     }
@@ -1189,13 +685,7 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
  * balancing. */
 static void cc__chan_signal_recv_waiter(CCChan* ch) {
     if (!ch) return;
-    if (!ch->recv_waiters_head) {
-        if (ch->use_lockfree && atomic_load_explicit(&ch->lfqueue_count, memory_order_relaxed) > 0) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_recv_wake_no_waiter);
-            cc__chan_dbg_inc(&ch->dbg_lf_recv_wake_no_waiter);
-        }
-        return;
-    }
+    if (!ch->recv_waiters_head) return;
     /* Wake the first selectable waiter */
     for (cc__fiber_wait_node* node = ch->recv_waiters_head; node; node = node->next) {
         int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
@@ -1204,7 +694,6 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
         }
         if (!cc__chan_select_try_win(node)) {
             if (ch->use_lockfree) {
-                cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_cancel);
             }
             cc__chan_select_cancel_node(node);
             continue;
@@ -1214,20 +703,14 @@ static void cc__chan_signal_recv_waiter(CCChan* ch) {
         }
         atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
         if (ch->use_lockfree) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_signal);
         }
         if (node->is_select && node->select_group) {
             cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-            cc__chan_dbg_select_event("signal_recv", node);
         }
         if (ch->use_lockfree) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_recv_waiter_wake);
-            cc__chan_dbg_inc(&ch->dbg_lf_recv_waiter_wake);
         }
         cc__chan_refresh_has_recv_waiters(ch);
-        cc__chan_hint_partner_worker(node);
-        cc__trace_chan_wake("recv_waiter_signal", ch, node);
         wake_batch_add(node->fiber);
         return;
     }
@@ -1359,7 +842,6 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     node->in_wait_list = 0;
     if (node->is_select && !cc__chan_select_try_win(node)) {
         if (ch->use_lockfree) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_cancel);
         }
         cc__chan_select_cancel_node(node);
         return;
@@ -1369,14 +851,11 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     }
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_close);
     }
     if (node->is_select && node->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-        cc__chan_dbg_select_event("signal_close_recv", node);
     }
-    cc__chan_hint_partner_worker(node);
     wake_batch_add(node->fiber);
 }
 
@@ -1394,7 +873,6 @@ static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
     node->in_wait_list = 0;
     if (node->is_select && !cc__chan_select_try_win(node)) {
         if (ch->use_lockfree) {
-            cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_cancel);
         }
         cc__chan_select_cancel_node(node);
         return;
@@ -1404,14 +882,11 @@ static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
     }
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_close);
     }
     if (node->is_select && node->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-        cc__chan_dbg_select_event("signal_close_send", node);
     }
-    cc__chan_hint_partner_worker(node);
     wake_batch_add(node->fiber);
 }
 
@@ -1620,11 +1095,6 @@ int cc_chan_is_ordered(CCChan* ch) {
 void cc_chan_close(CCChan* ch) {
     if (!ch) return;
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_close_calls);
-    }
-    if (cc__chan_dbg_enabled()) {
-        atomic_store_explicit(&g_chan_dbg_last_close, (uintptr_t)ch, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_chan_dbg_close_seq, 1, memory_order_relaxed);
     }
     ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
@@ -1642,11 +1112,6 @@ void cc_chan_close(CCChan* ch) {
 void cc_chan_close_err(CCChan* ch, int err) {
     if (!ch) return;
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_close_calls);
-    }
-    if (cc__chan_dbg_enabled()) {
-        atomic_store_explicit(&g_chan_dbg_last_close, (uintptr_t)ch, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_chan_dbg_close_seq, 1, memory_order_relaxed);
     }
     ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
@@ -1681,12 +1146,6 @@ void cc_chan_rx_close_err(CCChan* ch, int err) {
 void cc_chan_free(CCChan* ch) {
     if (!ch) return;
     
-    /* Dump debug counters on first free (once per process) */
-    static int dumped = 0;
-    if (!dumped && cc__chan_dbg_summary_enabled()) {
-        dumped = 1;
-        cc__chan_debug_dump_global();
-    }
     
     /* For owned channels, destroy remaining items in the buffer */
     if (ch->is_owned && ch->on_destroy.fn && ch->buf && ch->elem_size > 0) {
@@ -1908,7 +1367,6 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     
     if (ch->rx_error_closed) return ch->rx_error_code;
     if (ch->closed) {
-        cc__chan_debug_check_recv_close(ch, "wait_full_close");
         return EPIPE;
     }
     return 0;
@@ -1931,7 +1389,6 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
         }
 
         
-
         if (fiber) {
             /* Fiber-aware blocking */
             while (!ch->closed && !ch->rv_has_value) {
@@ -1983,10 +1440,6 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
          * which wakes senders. Senders need to see rv_recv_waiters > 0 to proceed.
          * The caller must decrement rv_recv_waiters AFTER dequeue. */
         if (ch->closed && !ch->rv_has_value) {
-            if (ch->send_waiters_head) {
-                cc__chan_debug_invariant(ch, "wait_empty_rendezvous",
-                                         "closed with pending send waiters");
-            }
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
             return ch->tx_error_code ? ch->tx_error_code : EPIPE;
         }
@@ -2011,7 +1464,6 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
     }
 
     
-
     if (fiber) {
         /* Fiber-aware blocking */
         while (!ch->closed && ch->count == 0) {
@@ -2250,6 +1702,16 @@ static inline int cc__queue_dequeue_raw(CCChan* ch, void** out_val) {
     return lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, out_val);
 }
 
+static inline void chan_inflight_inc(CCChan* ch) {
+    if (!ch->use_ring_queue)
+        chan_inflight_inc(ch);
+}
+
+static inline void chan_inflight_dec(CCChan* ch) {
+    if (!ch->use_ring_queue)
+        chan_inflight_dec(ch);
+}
+
 static inline int cc__chan_lf_count(CCChan* ch) {
     if (ch->use_ring_queue) {
         size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
@@ -2275,50 +1737,19 @@ static int cc__chan_try_enqueue_lockfree_impl(CCChan* ch, const void* value) {
     memcpy(&queue_val, value, ch->elem_size);
     
     /* Try to enqueue - liblfds returns 1 on success, 0 if full */
-    cc__chan_dbg_inc(&g_chan_dbg.lf_enq_attempt);
     /* Note: inflight managed by caller */
     int ok = cc__queue_enqueue_raw(ch, queue_val);
-    if (ok) {
+    if (ok && !ch->use_ring_queue) {
         atomic_fetch_add_explicit(&ch->lfqueue_count, 1, memory_order_release);
-        cc__chan_dbg_inc(&g_chan_dbg.lf_enq_ok);
-        cc__chan_dbg_inc(&ch->dbg_lf_enq_ok);
-    } else {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_enq_fail);
-        if (cc__chan_dbg_enabled()) {
-            int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-            if (count < (int)ch->cap) {
-                lfds711_pal_uint_t lf_ri = ch->lfqueue_state.read_index;
-                lfds711_pal_uint_t lf_wi = ch->lfqueue_state.write_index;
-                lfds711_pal_uint_t lf_ne = ch->lfqueue_state.number_elements;
-                lfds711_pal_uint_t lf_mask = ch->lfqueue_state.mask;
-                lfds711_pal_uint_t lf_est = lf_wi - lf_ri;
-                struct lfds711_queue_bmm_element* lf_elem =
-                    &ch->lfqueue_state.element_array[lf_wi & lf_mask];
-                lfds711_pal_uint_t lf_seq = lf_elem->sequence_number;
-                lfds711_pal_int_t lf_diff = (lfds711_pal_int_t)lf_seq - (lfds711_pal_int_t)lf_wi;
-                fprintf(stderr,
-                        "CC_CHAN_DEBUG: enqueue_fail_count_lt_cap ch=%p count=%d cap=%zu ne=%" PRIu64 " mask=%" PRIu64 " ri=%" PRIu64 " wi=%" PRIu64 " est=%" PRIu64 " seq=%" PRIu64 " diff=%" PRId64 "\n",
-                        (void*)ch,
-                        count,
-                        ch->cap,
-                        (uint64_t)lf_ne,
-                        (uint64_t)lf_mask,
-                        (uint64_t)lf_ri,
-                        (uint64_t)lf_wi,
-                        (uint64_t)lf_est,
-                        (uint64_t)lf_seq,
-                        (int64_t)lf_diff);
-            }
-        }
     }
     return ok ? 0 : EAGAIN;
 }
 
 /* Wrapper that manages inflight counter automatically */
 static int cc_chan_try_enqueue_lockfree(CCChan* ch, const void* value) {
-    atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+    chan_inflight_inc(ch);
     int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-    atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+    chan_inflight_dec(ch);
     return rc;
 }
 
@@ -2407,7 +1838,6 @@ static inline int cc__chan_dequeue_mutex_minimal(CCChan* ch, void* out_value) {
 static inline int cc__chan_enqueue_lockfree_fast(CCChan* ch, const void* value, int* old_count_out) {
     void *queue_val = NULL;
     memcpy(&queue_val, value, ch->elem_size);
-    cc__chan_dbg_inc(&g_chan_dbg.lf_enq_attempt);
     int ok = cc__queue_enqueue_raw(ch, queue_val);
     if (ok) {
         if (!ch->use_ring_queue) {
@@ -2416,10 +1846,7 @@ static inline int cc__chan_enqueue_lockfree_fast(CCChan* ch, const void* value, 
         } else {
             (void)old_count_out;
         }
-        cc__chan_dbg_inc(&g_chan_dbg.lf_enq_ok);
-        cc__chan_dbg_inc(&ch->dbg_lf_enq_ok);
     } else {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_enq_fail);
     }
     return ok ? 0 : EAGAIN;
 }
@@ -2428,14 +1855,10 @@ static inline int cc__chan_enqueue_lockfree_fast(CCChan* ch, const void* value, 
  * Caller MUST have already verified use_lockfree, cap>0, buf, elem_size<=sizeof(void*). */
 static inline int cc__chan_dequeue_lockfree_fast(CCChan* ch, void* out_value, int* old_count_out) {
     void *val;
-    cc__chan_dbg_inc(&g_chan_dbg.lf_deq_attempt);
     int ok = cc__queue_dequeue_raw(ch, &val);
     if (!ok) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_deq_fail);
         return EAGAIN;
     }
-    cc__chan_dbg_inc(&g_chan_dbg.lf_deq_ok);
-    cc__chan_dbg_inc(&ch->dbg_lf_deq_ok);
     if (!ch->use_ring_queue) {
         int old_count = atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
         if (old_count_out) *old_count_out = old_count;
@@ -2459,34 +1882,10 @@ static int cc_chan_try_dequeue_lockfree(CCChan* ch, void* out_value) {
     void *val;
     
     /* Try to dequeue - liblfds returns 1 on success, 0 if empty */
-    cc__chan_dbg_inc(&g_chan_dbg.lf_deq_attempt);
     int ok = cc__queue_dequeue_raw(ch, &val);
     if (!ok) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_deq_fail);
-        if (cc__chan_dbg_enabled()) {
-            int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-            if (count > 0 && !ch->use_ring_queue) {
-                lfds711_pal_uint_t lf_ri = ch->lfqueue_state.read_index;
-                lfds711_pal_uint_t lf_wi = ch->lfqueue_state.write_index;
-                lfds711_pal_uint_t lf_ne = ch->lfqueue_state.number_elements;
-                lfds711_pal_uint_t lf_mask = ch->lfqueue_state.mask;
-                lfds711_pal_uint_t lf_est = lf_wi - lf_ri;
-                fprintf(stderr,
-                        "CC_CHAN_DEBUG: dequeue_fail_count_gt_zero ch=%p count=%d cap=%zu ne=%" PRIu64 " mask=%" PRIu64 " ri=%" PRIu64 " wi=%" PRIu64 " est=%" PRIu64 "\n",
-                        (void*)ch,
-                        count,
-                        ch->cap,
-                        (uint64_t)lf_ne,
-                        (uint64_t)lf_mask,
-                        (uint64_t)lf_ri,
-                        (uint64_t)lf_wi,
-                        (uint64_t)lf_est);
-            }
-        }
         return EAGAIN;
     }
-    cc__chan_dbg_inc(&g_chan_dbg.lf_deq_ok);
-    cc__chan_dbg_inc(&ch->dbg_lf_deq_ok);
     if (!ch->use_ring_queue) {
         atomic_fetch_sub_explicit(&ch->lfqueue_count, 1, memory_order_release);
     }
@@ -2507,24 +1906,16 @@ static inline int cc__chan_timespec_expired(const struct timespec* abs_deadline)
 
 static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value, const struct timespec* abs_deadline) {
     if (ch->use_lockfree) {
-        cc__chan_dbg_inc(&g_chan_dbg.lf_close_drain_calls);
     }
-    int loops = 0;
     while (1) {
         if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
-            if (cc__chan_dbg_enabled() && loops > 0) {
-                fprintf(stderr, "CC_CHAN_DEBUG: drain_got_item ch=%p loops=%d\n", (void*)ch, loops);
-            }
             return 0;
         }
+        if (ch->use_ring_queue) {
+            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+        }
         int inflight = atomic_load_explicit(&ch->lfqueue_inflight, memory_order_acquire);
-        int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
         if (inflight == 0) {
-            if (cc__chan_dbg_enabled()) {
-                fprintf(stderr, "CC_CHAN_DEBUG: drain_epipe ch=%p count=%d inflight=%d loops=%d\n",
-                        (void*)ch, count, inflight, loops);
-            }
-            cc__chan_debug_check_recv_close(ch, "lf_drain_close");
             return ch->tx_error_code ? ch->tx_error_code : EPIPE;
         }
         if (cc__chan_timespec_expired(abs_deadline)) {
@@ -2535,7 +1926,6 @@ static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value, con
         } else {
             sched_yield();
         }
-        loops++;
     }
 }
 
@@ -2554,29 +1944,9 @@ static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wai
     if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
     if (rnode->is_select && rnode->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
-        int sel = atomic_load_explicit(&group->selected_index, memory_order_acquire);
-        int sig_before = atomic_load_explicit(&group->signaled, memory_order_acquire);
-        if (cc__chan_dbg_enabled() && sel == -1) {
-            fprintf(stderr, "CC_CHAN_DEBUG: BUG! handoff_send but selected_index=-1 group=%p node=%p idx=%zu\n",
-                    (void*)group, (void*)rnode, rnode->select_index);
-        }
         atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-        if (cc__chan_dbg_verbose_enabled()) {
-            int sig_after = atomic_load_explicit(&group->signaled, memory_order_acquire);
-            fprintf(stderr, "CC_CHAN_DEBUG: handoff_send_signaled group=%p fiber=%p sel=%d sig=%d->%d\n",
-                    (void*)group, (void*)rnode->fiber, sel, sig_before, sig_after);
-        }
-        cc__chan_dbg_select_event("handoff_send", rnode);
     }
     if (rnode->fiber) {
-        if (cc__chan_dbg_enabled() && rnode->is_select && rnode->select_group) {
-            cc__select_wait_group* g = (cc__select_wait_group*)rnode->select_group;
-            fprintf(stderr, "CC_CHAN_DEBUG: wake_batch_add_handoff fiber=%p group=%p sel=%d sig=%d\n",
-                    (void*)rnode->fiber, (void*)g,
-                    atomic_load_explicit(&g->selected_index, memory_order_acquire),
-                    atomic_load_explicit(&g->signaled, memory_order_acquire));
-        }
-        cc__chan_hint_partner_worker(rnode);
         wake_batch_add(rnode->fiber);
     } else {
         pthread_cond_signal(&ch->not_empty);
@@ -2590,7 +1960,6 @@ static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_w
     if (snode->is_select && snode->select_group) {
         cc__select_wait_group* group = (cc__select_wait_group*)snode->select_group;
         atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-        cc__chan_dbg_select_event("handoff_recv", snode);
     }
     if (snode->fiber) {
         wake_batch_add(snode->fiber);
@@ -2607,7 +1976,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         /* If a receiver is waiting, handoff directly */
         cc__fiber_wait_node* rnode = ch->recv_waiters_head ? cc__chan_pop_recv_waiter(ch) : NULL;
         if (rnode) {
-            cc__chan_dbg_inc(&ch->dbg_rv_send_handoff);
             cc__chan_finish_send_to_recv_waiter(ch, rnode, value);
             cc__chan_signal_activity(ch);
             return 0;
@@ -2634,7 +2002,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 cc__fiber_wait_node* rnode2 = ch->recv_waiters_head ? cc__chan_pop_recv_waiter(ch) : NULL;
                 if (rnode2) {
                     /* Found a receiver! Remove ourselves from send wait list and do handoff. */
-                    cc__chan_dbg_inc(&ch->dbg_rv_send_inner_handoff);
                     cc__chan_remove_send_waiter(ch, &node);
                     cc__chan_finish_send_to_recv_waiter(ch, rnode2, value);
                     cc__chan_signal_activity(ch);
@@ -2643,7 +2010,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
-                    cc__chan_dbg_inc(&ch->dbg_rv_send_parked);
                     (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 }
                 pthread_mutex_lock(&ch->mu);
@@ -2660,7 +2026,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         {
             int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notify_val == CC_CHAN_NOTIFY_SIGNAL) {
-                cc__chan_dbg_inc(&ch->dbg_rv_send_got_signal);
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_send_waiter(ch, &node);
                 continue;
@@ -2668,7 +2033,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
             if (notify_val == CC_CHAN_NOTIFY_DATA) {
                 /* notified=1 means a receiver actually took our data.
                  * The receiver already popped us from the list. */
-                cc__chan_dbg_inc(&ch->dbg_rv_send_got_data);
                 return 0;
             }
             if (notify_val == CC_CHAN_NOTIFY_CLOSE) {
@@ -2681,7 +2045,6 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
              * restarting the outer loop -- otherwise the node (a stack local) is
              * re-initialized while still linked, corrupting the doubly-linked
              * list. */
-            cc__chan_dbg_inc(&ch->dbg_rv_send_got_zero);
             cc__chan_remove_send_waiter(ch, &node);
         }
 
@@ -2709,7 +2072,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         /* If a sender is waiting, handoff directly */
         cc__fiber_wait_node* snode = ch->send_waiters_head ? cc__chan_pop_send_waiter(ch) : NULL;
         if (snode) {
-            cc__chan_dbg_inc(&ch->dbg_rv_recv_handoff);
             cc__chan_finish_recv_from_send_waiter(ch, snode, out_value);
             cc__chan_signal_activity(ch);
             return 0;
@@ -2734,7 +2096,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 pthread_mutex_unlock(&ch->mu);
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     cc__fiber_set_park_obj(ch);
-                    cc__chan_dbg_inc(&ch->dbg_rv_recv_parked);
                     (void)cc__chan_wait_notified_mark_close(&node, NULL);
                 }
                 pthread_mutex_lock(&ch->mu);
@@ -2751,7 +2112,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         {
             int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notify_val == CC_CHAN_NOTIFY_SIGNAL) {
-                cc__chan_dbg_inc(&ch->dbg_rv_recv_got_signal);
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
@@ -2760,7 +2120,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
             if (notify_val == CC_CHAN_NOTIFY_DATA) {
                 /* notified=1 means a sender actually delivered data.
                  * The sender already popped us from the list. */
-                cc__chan_dbg_inc(&ch->dbg_rv_recv_got_data);
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
                 return 0;
             }
@@ -2775,7 +2134,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
              * restarting the outer loop -- otherwise the node (a stack local) is
              * re-initialized at line 1981 while still linked, corrupting the
              * doubly-linked list. */
-            cc__chan_dbg_inc(&ch->dbg_rv_recv_got_zero);
             cc__chan_remove_recv_waiter(ch, &node);
             if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
         }
@@ -2783,7 +2141,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         if (ch->closed) {
             /* node already removed above */
             if (ch->send_waiters_head) {
-                cc__chan_debug_invariant(ch, "recv_unbuffered", "closed with pending send waiters");
             }
             return ch->tx_error_code ? ch->tx_error_code : EPIPE;
         }
@@ -2793,7 +2150,6 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         }
     }
     if (ch->send_waiters_head) {
-        cc__chan_debug_invariant(ch, "recv_unbuffered", "closed with pending send waiters");
     }
     return ch->tx_error_code ? ch->tx_error_code : EPIPE;
 }
@@ -2834,7 +2190,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         /* Buffer full — fall through to full path for yield-retry / blocking */
     }
     if (!ch || !value || value_size == 0) return EINVAL;
-    cc__chan_dbg_inc(&ch->dbg_lf_send_calls);
     
     /* Owned channel (pool): call on_reset before returning item to pool */
     if (ch->is_owned && ch->on_reset.fn) {
@@ -2848,11 +2203,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (cc__tls_current_deadline) {
         return cc_chan_deadline_send(ch, value, value_size, cc__tls_current_deadline);
     }
-    int timing = channel_timing_enabled();
-    uint64_t t0 = timing ? channel_rdtsc() : 0;
-    uint64_t t_lock = 0;
-    uint64_t t_enqueue = 0;
-    uint64_t t_wake = 0;
     
     /* Lock-free fast path for buffered channels with small elements.
      * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
@@ -2874,13 +2224,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 /* Direct handoff to waiting receiver */
                 channel_store_slot(rnode->data, value, ch->elem_size);
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc(&ch->dbg_lf_direct_send);
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_direct_send);
-                }
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: direct_send ch=%p node=%p fiber=%p in_list=%d notified=%d\n", 
-                            (void*)ch, (void*)rnode, (void*)rnode->fiber, rnode->in_wait_list,
-                            atomic_load_explicit(&rnode->notified, memory_order_relaxed));
                 }
                 atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
                 if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
@@ -2890,8 +2233,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
                 }
                 if (rnode->fiber) {
-                    cc__chan_hint_partner_worker(rnode);
-                    cc__trace_chan_wake("direct_send_handoff", ch, rnode);
                     wake_batch_add(rnode->fiber);
                 } else {
                     pthread_cond_signal(&ch->not_empty);
@@ -2900,10 +2241,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 cc__chan_signal_recv_waiter(ch);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
-                if (timing) {
-                    uint64_t done = channel_rdtsc();
-                    channel_timing_record_send(t0, t0, done, done, done);
-                }
                 cc__chan_signal_activity(ch);
                 return 0;
             }
@@ -2912,30 +2249,16 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         
         /* No waiters - try lock-free enqueue to buffer (fast path, no inflight) */
         int rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
-        if (rc != 0 && !ch->closed && cc__fiber_in_context() && cc__chan_retry_yield_enabled()) {
-            /* Buffer full — local yield keeps co-located P/C on the same worker,
-             * allowing the receiver (in the same local queue or inbox) to drain a
-             * slot before we retry.  One retry before falling to blocking path. */
-            cc__fiber_yield();
-            rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
-        }
         if (rc == 0) {
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_send(t0, t0, done, done, done);
-            }
             /* Signal any waiters that might have joined the queue.
              * Use atomic Dekker flag — recv_waiters_head is mutex-protected
              * and cannot be read safely without the lock. */
             if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
-                cc__chan_dbg_inc(&g_chan_dbg.lf_has_recv_waiters_true);
-                cc__chan_dbg_inc(&g_chan_dbg.lf_wake_lock_send);
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             } else {
-                cc__chan_dbg_inc(&g_chan_dbg.lf_has_recv_waiters_false);
             }
             cc__chan_signal_activity(ch);
             return 0;
@@ -2953,15 +2276,9 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     
     /* Standard mutex path (unbuffered, initial setup, or lock-free full) */
     cc_chan_lock(ch);
-    if (timing) t_lock = channel_rdtsc();
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) {
-        if (cc__chan_dbg_enabled()) {
-            int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-            fprintf(stderr, "CC_CHAN_DEBUG: send_epipe_early ch=%p count=%d cap=%zu\n",
-                    (void*)ch, count, ch->cap);
-        }
         pthread_mutex_unlock(&ch->mu);
         return EPIPE;
     }
@@ -2980,10 +2297,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         pthread_mutex_unlock(&ch->mu);
         int rc = cc_chan_try_enqueue_lockfree(ch, value);
         if (rc == 0) {
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_send(t0, t_lock, done, done, done);
-            }
             cc_chan_lock(ch);
             cc__chan_signal_recv_waiter(ch);
             pthread_cond_signal(&ch->not_empty);
@@ -3007,33 +2320,19 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             /* Increment inflight BEFORE unlocking to prevent drain race.
              * If we unlock first, drain might see inflight=0 and queue empty,
              * returning EPIPE before we enqueue. */
-            atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_inc(ch);
             pthread_mutex_unlock(&ch->mu);
             int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-            atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_dec(ch);
             if (rc == 0) {
                 
-                if (timing) t_enqueue = channel_rdtsc();
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
                 pthread_cond_signal(&ch->not_empty);
                 pthread_mutex_unlock(&ch->mu);
-                if (timing) t_wake = channel_rdtsc();
                 wake_batch_flush();
                 cc__chan_signal_activity(ch);
-                if (timing) {
-                    uint64_t done = channel_rdtsc();
-                    channel_timing_record_send(t0, t_lock, t_enqueue, t_wake, done);
-                }
                 return 0;
-            }
-            if (fiber) {
-                int count = cc__chan_lf_count(ch);
-                if (count < (int)ch->cap && !ch->closed && cc__chan_retry_yield_enabled()) {
-                    cc__fiber_yield();
-                    cc_chan_lock(ch);
-                    continue;
-                }
             }
             cc_chan_lock(ch);
             
@@ -3047,22 +2346,17 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 cc__fiber_set_park_obj(ch);
                 /* Re-check enqueue before parking to avoid missed wakeups.
                  * This authoritative queue op replaces the old count heuristic. */
-                atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                chan_inflight_inc(ch);
                 int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-                atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                chan_inflight_dec(ch);
                 if (rc == 0) {
                     cc_chan_lock(ch);
                     cc__chan_remove_send_waiter(ch, &node);
                     cc__chan_signal_recv_waiter(ch);
                     pthread_cond_signal(&ch->not_empty);
                     pthread_mutex_unlock(&ch->mu);
-                    if (timing) t_wake = channel_rdtsc();
                     wake_batch_flush();
                     cc__chan_signal_activity(ch);
-                    if (timing) {
-                        uint64_t done = channel_rdtsc();
-                        channel_timing_record_send(t0, t_lock, t_enqueue ? t_enqueue : done, t_wake ? t_wake : done, done);
-                    }
                     return 0;
                 }
                 /* Dekker pre-park: wake any parked receiver before we sleep.
@@ -3080,7 +2374,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     if (ch->use_lockfree) {
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_signal);
                     }
                     atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                     cc__chan_remove_send_waiter(ch, &node);
@@ -3088,23 +2381,17 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                      * Close only prevents NEW work - a sender already waiting
                      * should complete if there's space. */
                     /* Increment inflight BEFORE unlocking to prevent drain race. */
-                    atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                    chan_inflight_inc(ch);
                     pthread_mutex_unlock(&ch->mu);
                     int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-                    atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                    chan_inflight_dec(ch);
                     if (rc == 0) {
-                        if (timing) t_enqueue = channel_rdtsc();
                         cc_chan_lock(ch);
                         cc__chan_signal_recv_waiter(ch);
                         pthread_cond_signal(&ch->not_empty);
                         pthread_mutex_unlock(&ch->mu);
-                        if (timing) t_wake = channel_rdtsc();
                         wake_batch_flush();
                         cc__chan_signal_activity(ch);
-                        if (timing) {
-                            uint64_t done = channel_rdtsc();
-                            channel_timing_record_send(t0, t_lock, t_enqueue, t_wake, done);
-                        }
                         return 0;
                     }
                     /* Enqueue failed after wake — buffer still full.
@@ -3119,7 +2406,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 }
                 if (!notified) {
                     if (ch->use_lockfree) {
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_send_notify_cancel);
                     }
                     cc__chan_remove_send_waiter(ch, &node);
                 }
@@ -3132,32 +2418,18 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
          * This handles the race where close happens right as we're woken. */
         /* Increment inflight BEFORE unlocking to prevent drain race.
          * If we don't, drain might see inflight=0 and return EPIPE before we enqueue. */
-        atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_inc(ch);
         pthread_mutex_unlock(&ch->mu);
         int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-        atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_dec(ch);
         if (rc == 0) {
-            if (timing) t_enqueue = channel_rdtsc();
             cc_chan_lock(ch);
             cc__chan_signal_recv_waiter(ch);
             pthread_cond_signal(&ch->not_empty);
             pthread_mutex_unlock(&ch->mu);
-            if (timing) t_wake = channel_rdtsc();
             wake_batch_flush();
             cc__chan_signal_activity(ch);
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_send(t0, t_lock, t_enqueue, t_wake, done);
-            }
-            if (cc__chan_dbg_enabled()) {
-                fprintf(stderr, "CC_CHAN_DEBUG: send_after_close_ok ch=%p\n", (void*)ch);
-            }
             return 0;
-        }
-        if (cc__chan_dbg_enabled()) {
-            int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-            fprintf(stderr, "CC_CHAN_DEBUG: send_epipe_closed ch=%p count=%d cap=%zu\n",
-                    (void*)ch, count, ch->cap);
         }
         return EPIPE;
     }
@@ -3168,14 +2440,8 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     }
     cc_chan_enqueue(ch, value);
-    if (timing) t_enqueue = channel_rdtsc();
     pthread_mutex_unlock(&ch->mu);
-    if (timing) t_wake = channel_rdtsc();
     wake_batch_flush();  /* Flush any pending fiber wakes */
-    if (timing && err == 0) {
-        uint64_t done = channel_rdtsc();
-        channel_timing_record_send(t0, t_lock ? t_lock : t0, t_enqueue ? t_enqueue : done, t_wake ? t_wake : done, done);
-    }
     return 0;
 }
 
@@ -3256,7 +2522,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         /* Buffer empty — fall through to full path for yield-retry / blocking */
     }
     if (!ch || !out_value || value_size == 0) return EINVAL;
-    cc__chan_dbg_inc(&ch->dbg_lf_recv_calls);
     
     /* Owned channel (pool) special handling */
     if (ch->is_owned) {
@@ -3268,52 +2533,27 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     if (cc__tls_current_deadline) {
         return cc_chan_deadline_recv(ch, out_value, value_size, cc__tls_current_deadline);
     }
-    int timing = channel_timing_enabled();
-    uint64_t t0 = timing ? channel_rdtsc() : 0;
-    uint64_t t_lock = 0;
-    uint64_t t_dequeue = 0;
-    uint64_t t_wake = 0;
     
     /* Lock-free fast path for buffered channels with small elements.
      * Large elements (> sizeof(void*)) use mutex path to avoid slot wrap-around race. */
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
-        if (rc != 0 && !ch->closed && cc__fiber_in_context() && cc__chan_retry_yield_enabled()) {
-            /* Buffer empty — local yield keeps co-located P/C on the same worker,
-             * allowing the sender (in the same local queue or inbox) to add a
-             * slot before we retry.  One retry before falling to blocking path. */
-            cc__fiber_yield();
-            rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
-        }
         if (rc == 0) {
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_recv(t0, t0, done, done, done);
-            }
             /* Signal send waiters — use atomic Dekker flag, not the
              * mutex-protected send_waiters_head. */
             if (atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire)) {
-                cc__chan_dbg_inc(&g_chan_dbg.lf_has_send_waiters_true);
-                cc__chan_dbg_inc(&g_chan_dbg.lf_wake_lock_recv);
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
                 pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
             } else {
-                cc__chan_dbg_inc(&g_chan_dbg.lf_has_send_waiters_false);
             }
             cc__chan_signal_activity(ch);
             return 0;
         }
         if (ch->closed) {
-            if (cc__chan_dbg_enabled()) {
-                int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
-                int inflight = atomic_load_explicit(&ch->lfqueue_inflight, memory_order_acquire);
-                fprintf(stderr, "CC_CHAN_DEBUG: recv_fast_closed ch=%p count=%d inflight=%d\n",
-                        (void*)ch, count, inflight);
-            }
             return cc__chan_try_drain_lockfree_on_close(ch, out_value, NULL);
         }
         /* Fall through to blocking path */
@@ -3321,25 +2561,14 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     
     /* Standard mutex path */
     pthread_mutex_lock(&ch->mu);
-    if (timing) t_lock = channel_rdtsc();
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     
     /* Unbuffered rendezvous: direct handoff */
     if (ch->cap == 0) {
         err = cc_chan_recv_unbuffered(ch, out_value, NULL);
-        if (cc__chan_dbg_enabled() && err != 0) {
-            fprintf(stderr, "CC_CHAN_DEBUG: recv_unbuffered_err ch=%p err=%d closed=%d rx_err=%d send_w=%p recv_w=%p\n",
-                    (void*)ch, err, ch->closed, ch->rx_error_closed,
-                    (void*)ch->send_waiters_head, (void*)ch->recv_waiters_head);
-        }
         pthread_mutex_unlock(&ch->mu);
-        if (timing) t_wake = channel_rdtsc();
         wake_batch_flush();
-        if (timing && err == 0) {
-            uint64_t done = channel_rdtsc();
-            channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
-        }
         return err;
     }
 
@@ -3349,17 +2578,11 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         err = cc_chan_wait_empty(ch, NULL);
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
         cc_chan_dequeue(ch, out_value);
-        if (timing) t_dequeue = channel_rdtsc();
         /* Wake a sender waiting for space (buffered channel). */
         cc__chan_wake_one_send_waiter(ch);
         pthread_cond_signal(&ch->not_full);
         pthread_mutex_unlock(&ch->mu);
-        if (timing) t_wake = channel_rdtsc();
         wake_batch_flush();
-        if (timing && err == 0) {
-            uint64_t done = channel_rdtsc();
-            channel_timing_record_recv(t0, t_lock ? t_lock : t0, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
-        }
         return 0;
     }
     
@@ -3390,27 +2613,13 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         if (rc == 0) {
             
-            if (timing) t_dequeue = channel_rdtsc();
             cc_chan_lock(ch);
             cc__chan_wake_one_send_waiter(ch);
             pthread_cond_signal(&ch->not_full);
             pthread_mutex_unlock(&ch->mu);
-            if (timing) t_wake = channel_rdtsc();
             wake_batch_flush();
             cc__chan_signal_activity(ch);
-            if (timing) {
-                uint64_t done = channel_rdtsc();
-                channel_timing_record_recv(t0, t_lock, t_dequeue, t_wake, done);
-            }
             return 0;
-        }
-        if (fiber) {
-            int count = cc__chan_lf_count(ch);
-            if (count > 0 && !ch->closed && cc__chan_retry_yield_enabled()) {
-                cc__fiber_yield();
-                pthread_mutex_lock(&ch->mu);
-                continue;
-            }
         }
         pthread_mutex_lock(&ch->mu);
 
@@ -3460,13 +2669,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 int early = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (early == CC_CHAN_NOTIFY_DATA) {
                     if (ch->use_lockfree) {
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                        cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
-                    }
-                    if (timing) {
-                        uint64_t done = channel_rdtsc();
-                        channel_timing_record_recv(t0, t_lock, done, done, done);
                     }
                     return 0;
                 }
@@ -3479,13 +2681,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     if (late == CC_CHAN_NOTIFY_DATA) {
                         pthread_mutex_unlock(&ch->mu);
                         if (ch->use_lockfree) {
-                            cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
-                            cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                            cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
-                        }
-                        if (timing) {
-                            uint64_t done = channel_rdtsc();
-                            channel_timing_record_recv(t0, t_lock, done, done, done);
                         }
                         return 0;
                     }
@@ -3503,13 +2698,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 int early2 = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (early2 == CC_CHAN_NOTIFY_DATA) {
                     if (ch->use_lockfree) {
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                        cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
-                    }
-                    if (timing) {
-                        uint64_t done = channel_rdtsc();
-                        channel_timing_record_recv(t0, t_lock, done, done, done);
                     }
                     return 0;
                 }
@@ -3530,18 +2718,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 if (pre_deq_notified == CC_CHAN_NOTIFY_DATA) {
                     /* Direct handoff — data already in out_value */
                     if (ch->use_lockfree) {
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
-                        cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                        cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
-                    }
-                    if (cc__chan_dbg_enabled()) {
-                        fprintf(stderr, "CC_CHAN_DEBUG: direct_recv_pre_deq ch=%p node=%p\n", (void*)ch, (void*)&node);
                     }
                     pthread_mutex_unlock(&ch->mu);
-                    if (timing) {
-                        uint64_t done = channel_rdtsc();
-                        channel_timing_record_recv(t0, t_lock, done, done, done);
-                    }
                     return 0;
                 }
                 if (pre_deq_notified != 0 || ch->closed) {
@@ -3579,13 +2757,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 cc__chan_wake_one_send_waiter(ch);
                 pthread_cond_signal(&ch->not_full);
                 pthread_mutex_unlock(&ch->mu);
-                if (timing) t_wake = channel_rdtsc();
                 wake_batch_flush();
                 cc__chan_signal_activity(ch);
-                if (timing) {
-                    uint64_t done = channel_rdtsc();
-                    channel_timing_record_recv(t0, t_lock, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
-                }
                 return 0;
             }
             /* CAS contention — node already removed but we'll re-add
@@ -3594,15 +2767,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             continue;
         recv_post_park_notified: ;
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
-            if (cc__chan_dbg_enabled()) {
-                fprintf(stderr, "CC_CHAN_DEBUG: recv_post_park ch=%p notified=%d in_list=%d closed=%d count=%d\n",
-                        (void*)ch, notified, node.in_wait_list,
-                        ch->closed,
-                        atomic_load_explicit(&ch->lfqueue_count, memory_order_relaxed));
-            }
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_signal);
                 }
                 atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
@@ -3610,33 +2776,18 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             }
             if (notified == CC_CHAN_NOTIFY_DATA) {
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                    cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
-                }
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: direct_recv ch=%p node=%p\n", (void*)ch, (void*)&node);
                 }
                 /* Sender did direct handoff - data is already in out_value */
                 pthread_mutex_unlock(&ch->mu);
-                if (timing) {
-                    uint64_t done = channel_rdtsc();
-                    channel_timing_record_recv(t0, t_lock, done, done, done);
-                }
                 return 0;
             }
             if (notified == CC_CHAN_NOTIFY_CLOSE || ch->closed) {
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_close);
                 }
                 /* Channel closed while we were waiting - drain in-flight sends before returning EPIPE. */
                 cc__chan_remove_recv_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
                 int rc = cc__chan_try_drain_lockfree_on_close(ch, out_value, NULL);
-                if (rc == 0 && timing) {
-                    uint64_t done = channel_rdtsc();
-                    channel_timing_record_recv(t0, t_lock, t_dequeue ? t_dequeue : done, t_wake ? t_wake : done, done);
-                }
                 return rc;
             }
             /* notified == 0: spurious wakeup or early wake via pending_unpark.
@@ -3646,31 +2797,13 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             if (recheck == CC_CHAN_NOTIFY_DATA) {
                 /* Data was delivered after all! */
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_data);
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_direct_recv);
-                    cc__chan_dbg_inc(&ch->dbg_lf_direct_recv);
-                }
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: direct_recv_recheck ch=%p node=%p\n", (void*)ch, (void*)&node);
                 }
                 pthread_mutex_unlock(&ch->mu);
-                if (timing) {
-                    uint64_t done = channel_rdtsc();
-                    channel_timing_record_recv(t0, t_lock, done, done, done);
-                }
                 return 0;
             }
             {
-                int pre_in_list = node.in_wait_list;
-                int pre_notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 cc__chan_remove_recv_waiter(ch, &node);
                 if (ch->use_lockfree) {
-                    cc__chan_dbg_inc(&g_chan_dbg.lf_recv_notify_cancel);
-                    cc__chan_dbg_inc(&ch->dbg_lf_recv_remove_zero);
-                }
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: recv_remove_zero ch=%p node=%p pre_in_list=%d pre_notified=%d post_in_list=%d\n",
-                            (void*)ch, (void*)&node, pre_in_list, pre_notified, node.in_wait_list);
                 }
             }
         } else {
@@ -3681,10 +2814,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     /* Channel closed - drain in-flight sends before returning EPIPE */
     pthread_mutex_unlock(&ch->mu);
     int rc = cc__chan_try_drain_lockfree_on_close(ch, out_value, NULL);
-    if (rc == 0 && timing) {
-        uint64_t done = channel_rdtsc();
-        channel_timing_record_recv(t0, t_lock, done, done, done);
-    }
     return rc;
 }
 
@@ -3697,17 +2826,17 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
         /* Manually manage inflight to cover the gap between checking closed and enqueueing */
-        atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_inc(ch);
         if (ch->closed) {
-            atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_dec(ch);
             return EPIPE;
         }
         if (ch->rx_error_closed) {
-            atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_dec(ch);
             return ch->rx_error_code;
         }
         int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-        atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_dec(ch);
         if (rc == 0) {
             /* Signal any waiters */
             cc_chan_lock(ch);
@@ -3749,8 +2878,6 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         }
         if (rnode->fiber) {
-            cc__chan_hint_partner_worker(rnode);
-            cc__trace_chan_wake("try_send_handoff", ch, rnode);
             wake_batch_add(rnode->fiber);
         } else {
             pthread_cond_signal(&ch->not_empty);
@@ -3764,10 +2891,10 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     /* Buffered with lock-free small elements: try lock-free first */
     if (ch->use_lockfree && ch->elem_size <= sizeof(void*)) {
         /* Increment inflight BEFORE unlocking to prevent drain race. */
-        atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_inc(ch);
         pthread_mutex_unlock(&ch->mu);
         int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-        atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_dec(ch);
         if (rc == 0) {
             cc_chan_lock(ch);
             cc__chan_signal_recv_waiter(ch);
@@ -3878,17 +3005,17 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         ch->elem_size <= sizeof(void*)) {
         /* Manually manage inflight to cover the gap between checking closed and enqueueing */
-        atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_inc(ch);
         if (ch->closed) {
-            atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_dec(ch);
             return EPIPE;
         }
         if (ch->rx_error_closed) {
-            atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_dec(ch);
             return ch->rx_error_code;
         }
         int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-        atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+        chan_inflight_dec(ch);
         if (rc == 0) {
             /* Always signal pthread cond for timed waiters.
              * Unlike the fiber path, timed recv uses pthread_cond_timedwait
@@ -3922,10 +3049,10 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
         cc__fiber* fiber_ts = in_fiber ? cc__fiber_current() : NULL;
         while (!ch->closed) {
             /* Try lock-free enqueue */
-            atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_inc(ch);
             pthread_mutex_unlock(&ch->mu);
             int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-            atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+            chan_inflight_dec(ch);
             if (rc == 0) {
                 cc_chan_lock(ch);
                 cc__chan_signal_recv_waiter(ch);
@@ -3945,13 +3072,6 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 }
             }
             if (fiber_ts) {
-                /* Yield-retry if count suggests space */
-                int count = cc__chan_lf_count(ch);
-                if (count < (int)ch->cap && !ch->closed && cc__chan_retry_yield_enabled()) {
-                    cc__fiber_yield();
-                    cc_chan_lock(ch);
-                    continue;
-                }
                 /* Register as send waiter, then use robust Dekker protocol */
                 cc_chan_lock(ch);
                 if (ch->closed) break;
@@ -3971,9 +3091,9 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 }
                 /* Retry enqueue one more time (we're registered, so any future
                  * recv will wake us). */
-                atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                chan_inflight_inc(ch);
                 rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-                atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                chan_inflight_dec(ch);
                 if (rc == 0) {
                     cc_chan_lock(ch);
                     cc__chan_remove_send_waiter(ch, &node);
@@ -4000,10 +3120,10 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                     cc__chan_remove_send_waiter(ch, &node);
                     /* Retry enqueue after wake */
-                    atomic_fetch_add_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                    chan_inflight_inc(ch);
                     pthread_mutex_unlock(&ch->mu);
                     rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-                    atomic_fetch_sub_explicit(&ch->lfqueue_inflight, 1, memory_order_relaxed);
+                    chan_inflight_dec(ch);
                     if (rc == 0) {
                         cc_chan_lock(ch);
                         cc__chan_signal_recv_waiter(ch);
@@ -4129,13 +3249,6 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 }
             }
             if (fiber_tr) {
-                /* Yield-retry if count suggests data */
-                int count_r = cc__chan_lf_count(ch);
-                if (count_r > 0 && !ch->closed && cc__chan_retry_yield_enabled()) {
-                    cc__fiber_yield();
-                    cc_chan_lock(ch);
-                    continue;
-                }
                 /* Register as recv waiter, then use robust Dekker protocol */
                 cc_chan_lock(ch);
                 if (ch->closed) break;
@@ -4545,40 +3658,15 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 }
             }
             int need_rearm = 0;
-            if (cc__chan_dbg_enabled()) {
-                fprintf(stderr, "CC_CHAN_DEBUG: select_enter_park_loop group=%p selected=%d signaled=%d\n",
-                        (void*)&group,
-                        atomic_load_explicit(&group.selected_index, memory_order_acquire),
-                        atomic_load_explicit(&group.signaled, memory_order_acquire));
-            }
             while (atomic_load_explicit(&group.selected_index, memory_order_acquire) == -1) {
-                cc__chan_dbg_select_group("park", &group);
                 int seq = atomic_load_explicit(&group.signaled, memory_order_acquire);
                 if (atomic_load_explicit(&group.selected_index, memory_order_acquire) != -1) {
                     break;
                 }
-                int pre_signaled = atomic_load_explicit(&group.signaled, memory_order_acquire);
-                int pre_selected = atomic_load_explicit(&group.selected_index, memory_order_acquire);
                 /* Clear pending_unpark right before parking to avoid consuming a wakeup
                  * that was meant for a previous operation or a different channel. */
                 cc__fiber_clear_pending_unpark();
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: select_pre_park group=%p seq=%d pre_sig=%d pre_sel=%d fiber=%p\n",
-                            (void*)&group, seq, pre_signaled, pre_selected, (void*)fiber);
-                }
                 CC_FIBER_PARK_IF(&group.signaled, seq, "chan_match: waiting");
-                int wake_signaled = atomic_load_explicit(&group.signaled, memory_order_acquire);
-                int wake_selected = atomic_load_explicit(&group.selected_index, memory_order_acquire);
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: select_post_park group=%p wake_sig=%d wake_sel=%d fiber=%p\n",
-                            (void*)&group, wake_signaled, wake_selected, (void*)fiber);
-                }
-                cc__chan_dbg_select_group("wake", &group);
-                if (cc__chan_dbg_enabled() && wake_signaled == seq && wake_selected == -1) {
-                    /* Check if we actually parked or skipped due to pending_unpark */
-                    fprintf(stderr, "CC_CHAN_DEBUG: select_spurious_wake group=%p seq=%d pre=%d signaled=%d selected=%d fiber=%p\n",
-                            (void*)&group, seq, pre_signaled, wake_signaled, wake_selected, (void*)fiber);
-                }
                 /* NOTE: We intentionally do NOT call cc_chan_match_try() here.
                  * Doing a non-blocking try while our nodes are still in wait lists
                  * creates a race: try can succeed on channel A while a sender on
@@ -4589,9 +3677,6 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 int saw_notify = 0;
                 for (size_t i = 0; i < n; ++i) {
                     int notified = atomic_load_explicit(&nodes[i].notified, memory_order_acquire);
-                    if (cc__chan_dbg_enabled() && wake_signaled == seq && wake_selected == -1) {
-                        fprintf(stderr, "CC_CHAN_DEBUG: select_check_notified i=%zu notified=%d\n", i, notified);
-                    }
                     if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                         atomic_store_explicit(&nodes[i].notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                         notified = CC_CHAN_NOTIFY_NONE;
@@ -4607,17 +3692,9 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                     }
                 }
                 if (saw_notify) {
-                    if (cc__chan_dbg_enabled()) {
-                        fprintf(stderr, "CC_CHAN_DEBUG: select_break_saw_notify group=%p fiber=%p\n",
-                                (void*)&group, (void*)fiber);
-                    }
                     break;
                 }
                 if (need_rearm) {
-                    if (cc__chan_dbg_enabled()) {
-                        fprintf(stderr, "CC_CHAN_DEBUG: select_break_need_rearm group=%p fiber=%p\n",
-                                (void*)&group, (void*)fiber);
-                    }
                     break;
                 }
             }
@@ -4641,16 +3718,10 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
             /* Check if any node has DATA or CLOSE notification.
              * This must be done BEFORE checking need_rearm, because we might
              * have seen CANCEL on one node and DATA on another. */
-            int found_data = 0;
             for (size_t i = 0; i < n; ++i) {
                 int notified = atomic_load_explicit(&nodes[i].notified, memory_order_acquire);
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: select_post_cleanup_check i=%zu notified=%d need_rearm=%d\n",
-                            i, notified, need_rearm);
-                }
                 if (notified == CC_CHAN_NOTIFY_DATA) {
                     *ready_index = i;
-                    found_data = 1;
                     cc__chan_select_dbg_inc(&g_dbg_select_data_returned);
                     return 0;
                 }
@@ -4660,9 +3731,6 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 }
             }
             if (need_rearm) {
-                if (cc__chan_dbg_enabled()) {
-                    fprintf(stderr, "CC_CHAN_DEBUG: select_rearm found_data=%d\n", found_data);
-                }
                 continue;
             }
             int sel = atomic_load_explicit(&group.selected_index, memory_order_acquire);
@@ -4682,7 +3750,6 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                         *ready_index = (size_t)sel;
                         return EPIPE;
                     }
-                    cc__chan_dbg_select_wait("winner_wait", &group, (size_t)sel, notified);
                     if (!fiber) {
                         break;
                     }
