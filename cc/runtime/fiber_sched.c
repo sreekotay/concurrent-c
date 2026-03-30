@@ -838,6 +838,7 @@ static void fq_init(fiber_queue* q) {
 static int fq_push_ring(fiber_queue* q, fiber_task* f) {
     cc_v3_assert_enqueue_runnable(f, "global_ring");
     runnable_ref ref = runnable_ref_snapshot(f);
+    int spins = 0;
     for (int retry = 0; retry < 64; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
         size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
@@ -854,7 +855,9 @@ static int fq_push_ring(fiber_queue* q, fiber_task* f) {
             atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
             return 0;
         }
-        cpu_pause();
+        for (int i = 0; i <= spins; i++)
+            cpu_pause();
+        spins++;
     }
     return -1;
 }
@@ -1227,17 +1230,12 @@ static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
     if (was_empty) *was_empty = 0;
     cc_v3_assert_enqueue_runnable(f, "inbox");
     runnable_ref ref = runnable_ref_snapshot(f);
-    int pause_round = 0;
+    int spins = 0;
     for (int retry = 0; retry < 1000; retry++) {
         size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
         size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
         if (tail - head >= INBOX_QUEUE_SIZE) {
-            if (++pause_round >= 16) {
-                pause_round = 0;
-                sched_yield();
-            } else {
-                cpu_pause();
-            }
+            sched_yield();
             continue;
         }
         if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
@@ -1248,8 +1246,9 @@ static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
             if (was_empty) *was_empty = (tail == head);
             return 0;
         }
-        pause_round = 0;
-        cpu_pause();
+        for (int i = 0; i <= spins; i++)
+            cpu_pause();
+        spins++;
     }
     sched_yield();
     atomic_fetch_add_explicit(&g_inbox_overflow, 1, memory_order_relaxed);
