@@ -101,10 +101,12 @@ static void cc_guarded_dealloc(void* ptr, size_t size, void* allocator_data) {
 * ============================================================================ */
 
 static inline void cpu_pause(void) {
-    #if defined(__x86_64__) || defined(_M_X64)
+    #if defined(__aarch64__) || defined(__arm64__)
+    __asm__ volatile("isb");
+    #elif defined(__x86_64__) || defined(_M_X64)
     __asm__ volatile("pause");
-    #elif defined(__aarch64__) || defined(__arm64__)
-    __asm__ volatile("yield");
+    #else
+    __asm__ volatile("" ::: "memory");
     #endif
 }
 
