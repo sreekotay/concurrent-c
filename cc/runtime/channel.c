@@ -346,10 +346,10 @@ static inline void cc__chan_dbg_add(_Atomic uint64_t* c, uint64_t delta) {
 }
 
 static inline void cc__chan_cpu_pause(void) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__aarch64__) || defined(__arm64__)
+    __asm__ volatile("isb");
+#elif defined(__x86_64__) || defined(_M_X64)
     __asm__ volatile("pause");
-#elif defined(__aarch64__) || defined(__arm64__)
-    __asm__ volatile("yield");
 #else
     __asm__ volatile("" ::: "memory");
 #endif
@@ -2269,6 +2269,7 @@ static void cc_chan_dequeue(CCChan* ch, void* out_value) {
 
 static inline int cc__ring_enqueue_raw(CCChan* ch, void* queue_val) {
     size_t pos = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
+    int spins = 0;
     for (;;) {
         cc__ring_cell* cell = &ch->ring_cells[pos & (ch->lfqueue_cap - 1)];
         size_t seq = atomic_load_explicit(&cell->seq, memory_order_acquire);
@@ -2281,18 +2282,20 @@ static inline int cc__ring_enqueue_raw(CCChan* ch, void* queue_val) {
                 atomic_store_explicit(&cell->seq, pos + 1, memory_order_release);
                 return 1;
             }
-            cc__chan_cpu_pause();
         } else if (dif < 0) {
             return 0; /* full */
         } else {
-            cc__chan_cpu_pause();
             pos = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
         }
+        for (int i = 0; i <= spins; i++)
+            cc__chan_cpu_pause();
+        spins++;
     }
 }
 
 static inline int cc__ring_dequeue_raw(CCChan* ch, void** out_val) {
     size_t pos = atomic_load_explicit(&ch->ring_head, memory_order_relaxed);
+    int spins = 0;
     for (;;) {
         cc__ring_cell* cell = &ch->ring_cells[pos & (ch->lfqueue_cap - 1)];
         size_t seq = atomic_load_explicit(&cell->seq, memory_order_acquire);
@@ -2305,13 +2308,14 @@ static inline int cc__ring_dequeue_raw(CCChan* ch, void** out_val) {
                 atomic_store_explicit(&cell->seq, pos + ch->lfqueue_cap, memory_order_release);
                 return 1;
             }
-            cc__chan_cpu_pause();
         } else if (dif < 0) {
             return 0; /* empty */
         } else {
-            cc__chan_cpu_pause();
             pos = atomic_load_explicit(&ch->ring_head, memory_order_relaxed);
         }
+        for (int i = 0; i <= spins; i++)
+            cc__chan_cpu_pause();
+        spins++;
     }
 }
 
