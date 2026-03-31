@@ -1530,10 +1530,99 @@ static char* cc__emit_awaits_in_expr(Emit* e, const char* expr, int* io_aw_next)
     return out;
 }
 
+static char* cc__normalize_result_generic_bool_calls(const char* expr) {
+    const char* ok_pat = "__CCResultGeneric_is_ok(";
+    const char* err_pat = "__CCResultGeneric_is_err(";
+    size_t ok_len = strlen(ok_pat);
+    size_t err_len = strlen(err_pat);
+    size_t n = 0, i = 0, last_emit = 0;
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    int changed = 0;
+    if (!expr) return NULL;
+    n = strlen(expr);
+    while (i < n) {
+        const char* repl = NULL;
+        size_t pat_len = 0;
+        if (i + ok_len <= n && memcmp(expr + i, ok_pat, ok_len) == 0) {
+            repl = "cc_is_ok(";
+            pat_len = ok_len;
+        } else if (i + err_len <= n && memcmp(expr + i, err_pat, err_len) == 0) {
+            repl = "cc_is_err(";
+            pat_len = err_len;
+        } else {
+            i++;
+            continue;
+        }
+        size_t arg_start = i + pat_len;
+        size_t arg_end = arg_start;
+        int depth = 1, in_str = 0, in_chr = 0;
+        for (; arg_end < n; arg_end++) {
+            char ch = expr[arg_end];
+            if (in_str) {
+                if (ch == '\\' && arg_end + 1 < n) { arg_end++; continue; }
+                if (ch == '"') in_str = 0;
+                continue;
+            }
+            if (in_chr) {
+                if (ch == '\\' && arg_end + 1 < n) { arg_end++; continue; }
+                if (ch == '\'') in_chr = 0;
+                continue;
+            }
+            if (ch == '"') { in_str = 1; continue; }
+            if (ch == '\'') { in_chr = 1; continue; }
+            if (ch == '(') depth++;
+            else if (ch == ')') {
+                depth--;
+                if (depth == 0) break;
+            }
+        }
+        if (arg_end >= n || expr[arg_end] != ')') { i++; continue; }
+        while (arg_start < arg_end && isspace((unsigned char)expr[arg_start])) arg_start++;
+        while (arg_end > arg_start && isspace((unsigned char)expr[arg_end - 1])) arg_end--;
+        if (arg_start < arg_end && expr[arg_start] == '&') {
+            arg_start++;
+            while (arg_start < arg_end && isspace((unsigned char)expr[arg_start])) arg_start++;
+        }
+        cc_sb_append(&out, &out_len, &out_cap, expr + last_emit, i - last_emit);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, repl);
+        cc_sb_append(&out, &out_len, &out_cap, expr + arg_start, arg_end - arg_start);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+        last_emit = arg_end + 1;
+        i = arg_end + 1;
+        changed = 1;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc_sb_append(&out, &out_len, &out_cap, expr + last_emit, n - last_emit);
+    return out;
+}
+
 static int cc__emit_semi_like(Emit* e, const char* text) {
     if (!e || !text) return 1;
     const char* p = cc__skip_ws(text);
     if (p[0] == 0) return 1;
+
+    /* Some bare compound blocks still reach this path as raw text instead of ST_BLOCK
+       nodes. Re-parse their contents so declaration rewrites run on the inner statements. */
+    if (p[0] == '{') {
+        size_t plen = strlen(p);
+        size_t rbrace = 0;
+        if (cc__find_matching_brace(p, plen, 0, &rbrace)) {
+            const char* tail = cc__skip_ws(p + rbrace + 1);
+            Stmt* inner = NULL;
+            int inner_n = 0;
+            if (cc__parse_stmt_list_from_text_range(p, plen, 1, rbrace, &inner, &inner_n)) {
+                int ok = cc__emit_stmt_list(e, inner, inner_n);
+                cc__free_stmt_list(inner, inner_n);
+                if (!ok) return 0;
+                if (*tail) return cc__emit_semi_like(e, tail);
+                return 1;
+            }
+        }
+    }
 
     /* Some stub STMT spans can cover multiple semicolon-terminated statements (especially after
        other rewrites inserted helper decls + await statements). Split and emit each. */
@@ -1581,6 +1670,28 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         if (*p == 0) { if (alloc_p) free(alloc_p); return 1; }
     }
 
+    if (p[0] == '{') {
+        size_t plen = strlen(p);
+        size_t rbrace = 0;
+        if (cc__find_matching_brace(p, plen, 0, &rbrace)) {
+            const char* tail = cc__skip_ws(p + rbrace + 1);
+            Stmt* inner = NULL;
+            int inner_n = 0;
+            if (cc__parse_stmt_list_from_text_range(p, plen, 1, rbrace, &inner, &inner_n)) {
+                int ok = cc__emit_stmt_list(e, inner, inner_n);
+                cc__free_stmt_list(inner, inner_n);
+                if (!ok) { if (alloc_p) free(alloc_p); return 0; }
+                if (*tail) {
+                    int tail_ok = cc__emit_semi_like(e, tail);
+                    if (alloc_p) free(alloc_p);
+                    return tail_ok;
+                }
+                if (alloc_p) free(alloc_p);
+                return 1;
+            }
+        }
+    }
+
     if (strncmp(p, "return", 6) == 0 && !cc__is_ident_char(p[6])) {
         const char* rp = cc__skip_ws(p + 6);
         if (e->ret_is_void && rp[0] == 0) {
@@ -1593,10 +1704,22 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         }
         int aw_next = 0;
         char* expr2 = cc__emit_awaits_in_expr(e, rp, &aw_next);
+        char* expr2_norm = NULL;
         if (!expr2) return 0;
+        expr2_norm = cc__normalize_result_generic_bool_calls(expr2);
+        if (expr2_norm) {
+            free(expr2);
+            expr2 = expr2_norm;
+        }
         char* ex3 = cc__rewrite_idents(expr2, e->map_names, e->map_repls, e->map_n);
+        char* ex3_norm = NULL;
         free(expr2);
         if (!ex3) return 0;
+        ex3_norm = cc__normalize_result_generic_bool_calls(ex3);
+        if (ex3_norm) {
+            free(ex3);
+            ex3 = ex3_norm;
+        }
         cc__emit_line_fmt(e, "__f->__r = (intptr_t)(%s);", ex3);
         cc__emit_line(e, "__f->__st = 999;");
         cc__emit_line(e, "return CC_FUTURE_PENDING;");
@@ -1668,7 +1791,13 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                                 q = cc__skip_ws(q);
                                 int aw_next = 0;
                                 char* init2 = cc__emit_awaits_in_expr(e, q, &aw_next);
+                                char* init2_norm = NULL;
                                 if (!init2) return 0;
+                                init2_norm = cc__normalize_result_generic_bool_calls(init2);
+                                if (init2_norm) {
+                                    free(init2);
+                                    init2 = init2_norm;
+                                }
                                 char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
                                 char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
                                 free(init2);
@@ -1796,7 +1925,13 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                             q = cc__skip_ws(q);
                             int aw_next = 0;
                             char* init2 = cc__emit_awaits_in_expr(e, q, &aw_next);
+                            char* init2_norm = NULL;
                             if (!init2) return 0;
+                            init2_norm = cc__normalize_result_generic_bool_calls(init2);
+                            if (init2_norm) {
+                                free(init2);
+                                init2 = init2_norm;
+                            }
                             char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
                             char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
                             const char* ty2 = cc__emit_lookup_local_type(e, nm);
@@ -1829,6 +1964,12 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         else if (strncmp(q, "intptr_t ", 9) == 0) q += 9;
         else q += 10;
         q = cc__skip_ws(q);
+        /* Pointer declarators like `int *p = ...;` are handled by the
+           pointer-like path above, or should fall through to generic emission.
+           Do not consume them as scalar decls. */
+        if (*q == '*') {
+            /* fall through */
+        } else {
         const char* ns = q;
         if (!cc__is_ident_start(*q)) return 1;
         q++;
@@ -1855,7 +1996,13 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         q = cc__skip_ws(q);
         int aw_next = 0;
         char* init2 = cc__emit_awaits_in_expr(e, q, &aw_next);
+        char* init2_norm = NULL;
         if (!init2) return 0;
+        init2_norm = cc__normalize_result_generic_bool_calls(init2);
+        if (init2_norm) {
+            free(init2);
+            init2 = init2_norm;
+        }
         char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
         char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
         free(init2);
@@ -1863,6 +2010,7 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         free(lhs2);
         free(rhs2);
         return 1;
+        }
         }
     }
 
@@ -1899,10 +2047,22 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
         if (s->kind == ST_IF) {
             int aw_next = 0;
             char* cond2 = cc__emit_awaits_in_expr(e, s->cond ? s->cond : "0", &aw_next);
+            char* cond2_norm = NULL;
             if (!cond2) return 0;
+            cond2_norm = cc__normalize_result_generic_bool_calls(cond2);
+            if (cond2_norm) {
+                free(cond2);
+                cond2 = cond2_norm;
+            }
             char* cond3 = cc__rewrite_idents(cond2, e->map_names, e->map_repls, e->map_n);
+            char* cond3_norm = NULL;
             free(cond2);
             if (!cond3) return 0;
+            cond3_norm = cc__normalize_result_generic_bool_calls(cond3);
+            if (cond3_norm) {
+                free(cond3);
+                cond3 = cond3_norm;
+            }
 
             int then_state = cc__alloc_state(e);
             int else_state = cc__alloc_state(e);
@@ -1969,10 +2129,22 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             {
                 int aw_next = 0;
                 char* cond2 = cc__emit_awaits_in_expr(e, s->cond ? s->cond : "0", &aw_next);
+                char* cond2_norm = NULL;
                 if (!cond2) return 0;
+                cond2_norm = cc__normalize_result_generic_bool_calls(cond2);
+                if (cond2_norm) {
+                    free(cond2);
+                    cond2 = cond2_norm;
+                }
                 char* cond3 = cc__rewrite_idents(cond2, e->map_names, e->map_repls, e->map_n);
+                char* cond3_norm = NULL;
                 free(cond2);
                 if (!cond3) return 0;
+                cond3_norm = cc__normalize_result_generic_bool_calls(cond3);
+                if (cond3_norm) {
+                    free(cond3);
+                    cond3 = cond3_norm;
+                }
                 cc__emit_line_fmt(e, "int __cc_wh_c%d = (%s);", cond_state, cond3);
                 cc__emit_line_fmt(e, "__f->__st = __cc_wh_c%d ? %d : %d;", cond_state, body_state, after_state);
                 cc__emit_line(e, "return CC_FUTURE_PENDING;");
@@ -2030,10 +2202,22 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
             {
                 int aw_next = 0;
                 char* cond2 = cc__emit_awaits_in_expr(e, (s->cond && cc__skip_ws(s->cond)[0]) ? s->cond : "1", &aw_next);
+                char* cond2_norm = NULL;
                 if (!cond2) return 0;
+                cond2_norm = cc__normalize_result_generic_bool_calls(cond2);
+                if (cond2_norm) {
+                    free(cond2);
+                    cond2 = cond2_norm;
+                }
                 char* cond3 = cc__rewrite_idents(cond2, e->map_names, e->map_repls, e->map_n);
+                char* cond3_norm = NULL;
                 free(cond2);
                 if (!cond3) return 0;
+                cond3_norm = cc__normalize_result_generic_bool_calls(cond3);
+                if (cond3_norm) {
+                    free(cond3);
+                    cond3 = cond3_norm;
+                }
                 cc__emit_line_fmt(e, "int __cc_for_c%d = (%s);", cond_state, cond3);
                 cc__emit_line_fmt(e, "__f->__st = __cc_for_c%d ? %d : %d;", cond_state, body_state, after_state);
                 cc__emit_line(e, "return CC_FUTURE_PENDING;");
@@ -2261,26 +2445,28 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
         snprintf(poll_fn, sizeof(poll_fn), "%s_poll", sym_base);
         snprintf(drop_fn, sizeof(drop_fn), "%s_drop", sym_base);
 
-        /* Build structured stmt list from stub-AST statement nodes under the body BLOCK.
-           Fall back to brace-bounded text parsing if STMT nodes are missing. */
+        /* Build structured stmt list from the transformed source text first.
+           Phase-3 passes (especially autoblock/await normalization) can inject
+           declaration statements that the reparse stub-AST does not model as
+           ordinary statement nodes. After those rewrites, the source text is the
+           authoritative view of the function body. */
         Stmt* st = NULL;
         int st_n = 0;
         int built = 0;
-        if (fn->body_block_idx >= 0) {
-            built = cc__build_stmt_list_from_block(root, ctx, n, cur, cur_len, fn->body_block_idx, &st, &st_n);
-        }
-        if (!built) {
-            if (fn->lbrace > 0 && fn->rbrace > fn->lbrace && fn->rbrace <= cur_len) {
-                if (!cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n)) {
-                    fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body)\n", fn->name);
-                    free(cur);
-                    return -1;
-                }
-            } else {
-                fprintf(stderr, "CC: async_ast: failed to build statement list for @async function '%s' (no body block + no braces)\n", fn->name);
+        if (fn->lbrace > 0 && fn->rbrace > fn->lbrace && fn->rbrace <= cur_len) {
+            built = cc__build_stmt_list_from_text_body(cur, cur_len, fn->lbrace, fn->rbrace, &st, &st_n);
+            if (!built) {
+                fprintf(stderr, "CC: async_ast: failed to parse statement list for @async function '%s' (text body)\n", fn->name);
                 free(cur);
                 return -1;
             }
+        } else if (fn->body_block_idx >= 0) {
+            built = cc__build_stmt_list_from_block(root, ctx, n, cur, cur_len, fn->body_block_idx, &st, &st_n);
+        }
+        if (!built) {
+            fprintf(stderr, "CC: async_ast: failed to build statement list for @async function '%s' (no body block + no braces)\n", fn->name);
+            free(cur);
+            return -1;
         }
         if (getenv("CC_DEBUG_ASYNC_AST")) {
             cc__debug_dump_stmt_list(fn->name, st, st_n, 0);
@@ -2368,7 +2554,17 @@ int cc_async_rewrite_state_machine_ast(const CCASTRoot* root,
                             break;
                         }
                         if (hit) {
-                            char* ty_text = cc__strndup_trim_ws(ls, (size_t)(hit - ls));
+                            const char* ty_s = ls;
+                            const char* cut = hit;
+                            while (cut > ls) {
+                                char prev = cut[-1];
+                                if (prev == ';' || prev == '{' || prev == '}' || prev == ':') {
+                                    ty_s = cut;
+                                    break;
+                                }
+                                cut--;
+                            }
+                            char* ty_text = cc__strndup_trim_ws(ty_s, (size_t)(hit - ty_s));
                             /* Reject if the extracted "type" starts with a control-flow keyword
                                (e.g. `for (int i` → "for (int" is not a valid type). */
                             if (ty_text) {

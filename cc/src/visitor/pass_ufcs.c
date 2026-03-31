@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "preprocess/preprocess.h"
 #include "util/path.h"
 #include "visitor/pass_common.h"
 #include "visitor/ufcs.h"
@@ -132,7 +133,9 @@ static int cc__rewrite_ufcs_text_fallback(const char* in_src,
                 free(out);
                 return -1;
             }
+            cc_ufcs_set_source_context(in_src, line_start);
             int rc = cc_ufcs_rewrite_line(line, rewritten, rew_cap);
+            cc_ufcs_set_source_context(NULL, 0);
             if (rc == CC_UFCS_REWRITE_OK && strcmp(rewritten, line) != 0) {
                 emit = rewritten;
                 changed = 1;
@@ -259,22 +262,20 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
     cur[in_len] = '\0';
     size_t cur_len = in_len;
 
-    /* Sort nodes so rewrites on the same line proceed right-to-left.
-       This keeps line/col offsets valid after earlier replacements. */
+    /* Sort nodes from later source positions to earlier ones.
+       Rewriting bottom-up keeps AST line/col anchors valid for nodes that
+       have not been processed yet, even when earlier rewrites change line width. */
     for (int i = 0; i < node_count; i++) {
         for (int j = i + 1; j < node_count; j++) {
-            int li = nodes[i].line_end - nodes[i].line_start;
-            int lj = nodes[j].line_end - nodes[j].line_start;
             int swap = 0;
-            if (lj > li) swap = 1;
-            else if (lj == li) {
-                if (nodes[j].line_start < nodes[i].line_start) swap = 1;
-                else if (nodes[j].line_start == nodes[i].line_start) {
-                    /* Same line: process right-to-left by column when available. */
-                    if (nodes[j].col_start > 0 && nodes[i].col_start > 0 &&
-                        nodes[j].col_start > nodes[i].col_start) {
-                        swap = 1;
-                    }
+            if (nodes[j].line_start > nodes[i].line_start) swap = 1;
+            else if (nodes[j].line_start == nodes[i].line_start) {
+                if (nodes[j].col_start > 0 && nodes[i].col_start > 0) {
+                    if (nodes[j].col_start > nodes[i].col_start) swap = 1;
+                    else if (nodes[j].col_start == nodes[i].col_start &&
+                             nodes[j].col_end > nodes[i].col_end) swap = 1;
+                } else if (nodes[j].line_end > nodes[i].line_end) {
+                    swap = 1;
                 }
             }
             if (swap) {
@@ -346,8 +347,10 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         }
         /* Use full rewrite with await context, type info, and receiver type. */
         {
+            cc_ufcs_set_source_context(cur, sp.start);
             int rewrite_rc = cc_ufcs_rewrite_line_full(expr, out_buf, out_cap, nodes[i].is_under_await,
                                                        nodes[i].recv_type_is_ptr, nodes[i].recv_type);
+            cc_ufcs_set_source_context(NULL, 0);
             if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED) {
                 char rel[1024];
                 char recv_expr[256];
@@ -660,21 +663,31 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
     char* rewritten = NULL;
     size_t rewritten_len = 0;
     int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
-    if (r >= 0) {
-        const char* base_src = (r > 0 && rewritten) ? rewritten : eb->src;
-        size_t base_len = (r > 0 && rewritten) ? rewritten_len : eb->src_len;
+    /* Keep the AST-driven path primary, but if it finds nothing, give the
+       source-context-aware line fallback a chance to lower simple local UFCS
+       that the stub AST failed to surface. */
+    if ((r == 0 || !rewritten) && eb->src && eb->src_len > 0) {
         char* fallback = NULL;
         size_t fallback_len = 0;
-        int fr = cc__rewrite_ufcs_text_fallback(base_src, base_len, &fallback, &fallback_len);
+        int fr = cc__rewrite_ufcs_text_fallback(eb->src, eb->src_len, &fallback, &fallback_len);
         if (fr < 0) {
             cc_ufcs_set_symbols(NULL);
-            free(rewritten);
             return -1;
         }
-        if (fr > 0) {
-            free(rewritten);
+        if (fr > 0 && fallback) {
             rewritten = fallback;
             rewritten_len = fallback_len;
+            r = 1;
+        }
+    }
+    {
+        const char* base_src = rewritten ? rewritten : eb->src;
+        size_t base_len = rewritten ? rewritten_len : eb->src_len;
+        char* family_rewritten = cc_rewrite_generic_family_ufcs_concrete(base_src, base_len);
+        if (family_rewritten) {
+            if (rewritten) free(rewritten);
+            rewritten = family_rewritten;
+            rewritten_len = strlen(rewritten);
             r = 1;
         }
     }

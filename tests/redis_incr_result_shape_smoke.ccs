@@ -1,0 +1,36 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/string.cch>
+#include <assert.h>
+#include "../real_projects/redis/redis_cc/redis_cc.cch"
+
+static RedisReply reply_simple_local(const char* s) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_SIMPLE_STRING;
+    r.data = cc_slice_from_cstr(s);
+    return r;
+}
+
+static RedisReply !>(CCError) db_set_local(char[:] key, char[:] value) {
+    (void)key;
+    (void)value;
+    return cc_ok(reply_simple_local("OK"));
+}
+
+static int64_t !>(CCError) incr_local(char[:] key, int64_t value) {
+    char buf[64];
+    CCArena a = @create(buf, sizeof(buf)) @destroy;
+    if (!a.base) return cc_err(CC_ERROR(CC_ERR_OUT_OF_MEMORY, "alloc"));
+
+    CCString s = @string(value, &a);
+    char[:0] v = s.as_slice();
+    RedisReply !>(CCError) res = db_set_local(key, v);
+    if (res.is_err()) return cc_err(res.error());
+    return cc_ok(value);
+}
+
+int main(void) {
+    int64_t !>(CCError) out = incr_local(cc_slice_from_cstr("k"), 5);
+    assert(out.is_ok());
+    assert(out.value() == 5);
+    return 0;
+}

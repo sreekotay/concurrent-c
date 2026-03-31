@@ -90,6 +90,63 @@ static char* cc__blank_comptime_blocks_preserve_layout_parse(const char* src, si
     return out;
 }
 
+static char* cc__neutralize_comments_preserve_layout_parse(const char* src, size_t n) {
+    char* out;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src) return NULL;
+    out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, src, n);
+    out[n] = '\0';
+    for (size_t i = 0; i < n; ++i) {
+        char c = out[i];
+        char c2 = (i + 1 < n) ? out[i + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            else out[i] = ' ';
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                in_bc = 0;
+                ++i;
+                continue;
+            }
+            if (c != '\n' && c != '\r' && c != '\t') out[i] = ' ';
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) { ++i; continue; }
+            if (c == '"') in_str = 0;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) { ++i; continue; }
+            if (c == '\'') in_chr = 0;
+            continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '/' && c2 == '/') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            in_lc = 1;
+            ++i;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            in_bc = 1;
+            ++i;
+            continue;
+        }
+    }
+    return out;
+}
+
 static int cc__is_ident_start_parse(char c) {
     return isalpha((unsigned char)c) || c == '_';
 }
@@ -411,7 +468,9 @@ int cc_parse_to_ast(const char* input_path, CCSymbolTable* symbols, CCASTRoot** 
        Use same relative path for virtual filename that #line directive uses. */
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
-    CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(pp_buf, rel_path, input_path, symbols);
+    char* parse_input = cc__neutralize_comments_preserve_layout_parse(pp_buf, strlen(pp_buf));
+    CCASTRoot* root = cc_tcc_bridge_parse_string_to_ast(parse_input ? parse_input : pp_buf, rel_path, input_path, symbols);
+    free(parse_input);
     free(pp_buf);
     if (root) {
         root->original_path = input_path;

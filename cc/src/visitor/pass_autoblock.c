@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "comptime/symbols.h"
+#include "result_spec.h"
 #include "util/path.h"
 #include "visitor/pass_common.h"
 
@@ -120,6 +121,25 @@ static int cc__append_fmt(char** buf, size_t* len, size_t* cap, const char* fmt,
     return cc__append_str(buf, len, cap, tmp);
 }
 
+static int cc__append_autoblock_capture_name_fmt(char** buf,
+                                                 size_t* len,
+                                                 size_t* cap,
+                                                 int* first,
+                                                 const char* fmt,
+                                                 ...) {
+    char tmp[256];
+    va_list ap;
+    if (!buf || !len || !cap || !first || !fmt) return 0;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return 0;
+    tmp[sizeof(tmp) - 1] = '\0';
+    if (!*first && !cc__append_str(buf, len, cap, ", ")) return 0;
+    *first = 0;
+    return cc__append_str(buf, len, cap, tmp);
+}
+
 static int cc__ab_only_ws_comments(const char* s, size_t a, size_t b) {
     if (!s) return 0;
     size_t i = a;
@@ -158,6 +178,237 @@ static int cc__is_typed_chan_recv_wrapper(const char* name) {
     return n > 5 && strcmp(name + n - 5, "_recv") == 0;
 }
 
+static int cc__is_intptr_compatible_type(const char* type_str) {
+    char buf[256];
+    size_t n = 0;
+    size_t i = 0;
+    if (!type_str) return 0;
+    while (*type_str == ' ' || *type_str == '\t') type_str++;
+    while (type_str[i] && n + 1 < sizeof(buf)) {
+        char c = type_str[i++];
+        if (c == ' ' || c == '\t') {
+            if (n > 0 && buf[n - 1] != ' ') buf[n++] = ' ';
+            continue;
+        }
+        buf[n++] = c;
+    }
+    while (n > 0 && buf[n - 1] == ' ') n--;
+    buf[n] = '\0';
+    if (buf[0] == '\0') return 0;
+
+    if (strcmp(buf, "char") == 0 ||
+        strcmp(buf, "signed char") == 0 ||
+        strcmp(buf, "unsigned char") == 0 ||
+        strcmp(buf, "short") == 0 ||
+        strcmp(buf, "short int") == 0 ||
+        strcmp(buf, "unsigned short") == 0 ||
+        strcmp(buf, "unsigned short int") == 0 ||
+        strcmp(buf, "int") == 0 ||
+        strcmp(buf, "unsigned") == 0 ||
+        strcmp(buf, "unsigned int") == 0 ||
+        strcmp(buf, "long") == 0 ||
+        strcmp(buf, "long int") == 0 ||
+        strcmp(buf, "unsigned long") == 0 ||
+        strcmp(buf, "unsigned long int") == 0 ||
+        strcmp(buf, "long long") == 0 ||
+        strcmp(buf, "long long int") == 0 ||
+        strcmp(buf, "unsigned long long") == 0 ||
+        strcmp(buf, "unsigned long long int") == 0 ||
+        strcmp(buf, "intptr_t") == 0 ||
+        strcmp(buf, "uintptr_t") == 0 ||
+        strcmp(buf, "size_t") == 0 ||
+        strcmp(buf, "ssize_t") == 0 ||
+        strcmp(buf, "ptrdiff_t") == 0 ||
+        strcmp(buf, "bool") == 0) {
+        return 1;
+    }
+    if (strncmp(buf, "enum ", 5) == 0) return 1;
+    return 0;
+}
+
+static const char* cc__normalize_autoblock_decl_type(const char* type_str, char* buf, size_t buf_cap) {
+    const char* p = NULL;
+    size_t prefix_len = 0;
+    if (!type_str || !buf || buf_cap == 0) return type_str;
+    p = strstr(type_str, "struct __CCGenericError");
+    if (!p) p = strstr(type_str, "__CCGenericError");
+    if (!p) return type_str;
+    prefix_len = (size_t)(p - type_str);
+    if (prefix_len + strlen("CCError") + strlen(p) + 1 >= buf_cap) return type_str;
+    memcpy(buf, type_str, prefix_len);
+    buf[prefix_len] = '\0';
+    strcat(buf, "CCError");
+    if (strncmp(p, "struct __CCGenericError", 23) == 0) strcat(buf, p + 23);
+    else strcat(buf, p + 16);
+    return buf;
+}
+
+static const char* cc__known_autoblock_param_type(const char* callee, int arg_index) {
+    if (!callee) return NULL;
+    if (arg_index == 0 &&
+        (strcmp(callee, "cc_run_blocking_task") == 0 ||
+         strcmp(callee, "cc_run_blocking_closure0") == 0 ||
+         strcmp(callee, "cc_run_blocking_closure0_ptr") == 0 ||
+         strcmp(callee, "cc_thread_spawn_closure0") == 0 ||
+         strcmp(callee, "cc_fiber_spawn_closure0") == 0)) {
+        return "CCClosure0";
+    }
+    if (arg_index == 1 &&
+        (strcmp(callee, "cc_nursery_spawn_closure0") == 0 ||
+         strcmp(callee, "cc_nursery_spawn_child_closure0") == 0 ||
+         strcmp(callee, "cc_thread_spawn_closure0_legacy") == 0)) {
+        return "CCClosure0";
+    }
+    return NULL;
+}
+
+static const char* cc__canonicalize_autoblock_value_type(const char* type_str, char* buf, size_t buf_cap) {
+    const char* bang = NULL;
+    const char* ok_s = NULL;
+    const char* ok_e = NULL;
+    const char* err_s = NULL;
+    const char* err_e = NULL;
+    const char* opt_q = NULL;
+    char mangled_ok[128];
+    char mangled_err[128];
+    char mangled_elem[128];
+    char norm_buf[256];
+    const char* norm = cc__normalize_autoblock_decl_type(type_str, norm_buf, sizeof(norm_buf));
+    if (!norm || !buf || buf_cap == 0) return norm;
+
+    opt_q = strrchr(norm, '?');
+    if (opt_q && opt_q[1] == '\0') {
+        ok_s = norm;
+        ok_e = opt_q;
+        while (ok_s < ok_e && isspace((unsigned char)*ok_s)) ok_s++;
+        while (ok_e > ok_s && isspace((unsigned char)ok_e[-1])) ok_e--;
+        cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_elem, sizeof(mangled_elem));
+        if (mangled_elem[0]) {
+            snprintf(buf, buf_cap, "CCOptional_%s", mangled_elem);
+            return buf;
+        }
+        return norm;
+    }
+
+    bang = strchr(norm, '!');
+    if (!bang || bang[1] == '=') return norm;
+    ok_s = norm;
+    ok_e = bang;
+    while (ok_s < ok_e && isspace((unsigned char)*ok_s)) ok_s++;
+    while (ok_e > ok_s && isspace((unsigned char)ok_e[-1])) ok_e--;
+
+    err_s = bang + 1;
+    while (*err_s == ' ' || *err_s == '\t') err_s++;
+    if (*err_s == '>') {
+        err_s++;
+        while (*err_s == ' ' || *err_s == '\t') err_s++;
+        if (*err_s == '(') {
+            err_s++;
+            err_e = strchr(err_s, ')');
+            if (!err_e) err_e = err_s + strlen(err_s);
+        } else {
+            err_e = err_s + strlen(err_s);
+        }
+    } else {
+        err_e = err_s;
+        while (*err_e && (isalnum((unsigned char)*err_e) || *err_e == '_')) err_e++;
+    }
+    while (err_s < err_e && isspace((unsigned char)*err_s)) err_s++;
+    while (err_e > err_s && isspace((unsigned char)err_e[-1])) err_e--;
+    if (ok_e <= ok_s || err_e <= err_s) return norm;
+    cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_ok, sizeof(mangled_ok));
+    cc_result_spec_mangle_type(err_s, (size_t)(err_e - err_s), mangled_err, sizeof(mangled_err));
+    if (!mangled_ok[0] || !mangled_err[0]) return norm;
+    snprintf(buf, buf_cap, "CCResult_%s_%s", mangled_ok, mangled_err);
+    return buf;
+}
+
+static const char* cc__select_autoblock_box_type(const char* decl_type, const char* ret_type) {
+    if (decl_type && (strstr(decl_type, "!>") != NULL || strchr(decl_type, '?') != NULL)) {
+        return decl_type;
+    }
+    return ret_type ? ret_type : decl_type;
+}
+
+static size_t cc__scan_call_paren_end(const char* src, size_t len, size_t lparen) {
+    int par = 0, brk = 0, br = 0;
+    int ins = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+    char q = 0;
+    if (!src || lparen >= len || src[lparen] != '(') return 0;
+    for (size_t i = lparen + 1; i < len; i++) {
+        char ch = src[i];
+        char ch2 = (i + 1 < len) ? src[i + 1] : 0;
+        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; i++; } continue; }
+        if (ins) {
+            if (ch == '\\' && i + 1 < len) { i++; continue; }
+            if (ch == q) ins = 0;
+            continue;
+        }
+        if (in_chr) {
+            if (ch == '\\' && i + 1 < len) { i++; continue; }
+            if (ch == '\'') in_chr = 0;
+            continue;
+        }
+        if (ch == '/' && ch2 == '/') { in_lc = 1; i++; continue; }
+        if (ch == '/' && ch2 == '*') { in_bc = 1; i++; continue; }
+        if (ch == '"') { ins = 1; q = ch; continue; }
+        if (ch == '\'') { in_chr = 1; continue; }
+        if (ch == '(') par++;
+        else if (ch == ')') {
+            if (par == 0 && brk == 0 && br == 0) return i + 1;
+            if (par) par--;
+        } else if (ch == '[') brk++;
+        else if (ch == ']') { if (brk) brk--; }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+    }
+    return 0;
+}
+
+static int cc__relocate_call_span_on_line(const char* src,
+                                          size_t len,
+                                          size_t line_start,
+                                          size_t line_end,
+                                          size_t hint,
+                                          const char* callee,
+                                          size_t* out_start,
+                                          size_t* out_end) {
+    size_t best_start = 0;
+    size_t best_end = 0;
+    size_t best_dist = (size_t)-1;
+    size_t callee_n = 0;
+    if (!src || !callee || !callee[0] || !out_start || !out_end) return 0;
+    if (line_start >= len) return 0;
+    if (line_end > len) line_end = len;
+    if (line_end <= line_start) return 0;
+    callee_n = strlen(callee);
+    for (size_t i = line_start; i + callee_n <= line_end; i++) {
+        size_t after = i + callee_n;
+        size_t lparen = 0;
+        size_t call_end = 0;
+        size_t dist = 0;
+        if (memcmp(src + i, callee, callee_n) != 0) continue;
+        if (i > line_start && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_')) continue;
+        if (after < len && (isalnum((unsigned char)src[after]) || src[after] == '_')) continue;
+        while (after < len && (src[after] == ' ' || src[after] == '\t' || src[after] == '\r' || src[after] == '\n')) after++;
+        if (after >= len || src[after] != '(') continue;
+        lparen = after;
+        call_end = cc__scan_call_paren_end(src, len, lparen);
+        if (!call_end) continue;
+        dist = (i > hint) ? (i - hint) : (hint - i);
+        if (!best_end || dist < best_dist) {
+            best_start = i;
+            best_end = call_end;
+            best_dist = dist;
+        }
+    }
+    if (!best_end) return 0;
+    *out_start = best_start;
+    *out_end = best_end;
+    return 1;
+}
+
 /* ---- end small helpers ---- */
 
 int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
@@ -182,10 +433,11 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         CC_AB_REWRITE_BATCH_STMTS_THEN_ASSIGN = 5,
         CC_AB_REWRITE_RETURN_EXPR_CALL = 6,
         CC_AB_REWRITE_ASSIGN_EXPR_CALL = 7,
+        CC_AB_REWRITE_DECL_INIT_CALL = 8,
         /* LEGACY: For `await chan_*` - wraps the blocking call to produce CCTaskIntptr.
            Future: Use cc_channel_send_task/cc_channel_recv_task which return CCTaskIntptr directly,
            eliminating the need for this wrapping. See: CCTASKINTPTR_CHANNEL_OPS_DESIGN.md */
-        CC_AB_REWRITE_AWAIT_OPERAND_CALL = 8,
+        CC_AB_REWRITE_AWAIT_OPERAND_CALL = 9,
     } CCAutoBlockRewriteKind;
 
     typedef struct {
@@ -204,7 +456,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         size_t call_end;  /* end of ')' */
         int line_start;
         const char* callee;
-        const char* lhs_name; /* for assign */
+        char* lhs_name; /* owned; for assign/decl-init */
+        char* decl_type; /* owned; for decl-init */
         CCAutoBlockRewriteKind kind;
         int raw_call; /* reserved */
         int is_chan_recv; /* 1 if chan_recv, 0 if chan_send */
@@ -212,6 +465,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         int ret_is_ptr;
         int ret_is_void;
         int ret_is_structy;
+        char* ret_type; /* owned */
         char* param_types[16]; /* owned */
         size_t indent_start;
         size_t indent_len;
@@ -237,6 +491,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (is_ufcs) continue;
         if (!n[i].aux_s1) continue; /* callee name */
         if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
+        /* Nested closure literals are lowered by a later pass; rewriting sync calls
+           inside them here can emit `await` into non-async closure bodies. */
+        if (cc__node_is_descendant_of_kind(root, n, i, 9 /* CC_AST_NODE_CLOSURE */)) continue;
 
         /* Calls inside `await ...` are async call sites; skip unless it's a channel op.
            Channel ops return CCTaskIntptr via cc_chan_*_task, so they must be awaited.
@@ -273,6 +530,13 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             }
             cur = n[cur].parent;
         }
+        if (getenv("CC_DEBUG_AUTOBLOCK_CALLS")) {
+            fprintf(stderr, "autoblock call node line=%d callee=%s owner=%s owner_async=%d\n",
+                    n[i].line_start,
+                    n[i].aux_s1 ? n[i].aux_s1 : "<null>",
+                    owner ? owner : "<null>",
+                    (owner_attrs & CC_FN_ATTR_ASYNC) != 0);
+        }
         if (!owner || ((owner_attrs & CC_FN_ATTR_ASYNC) == 0)) continue;
 
         /* NOTE: Channel ops in @async are wrapped automatically by autoblock,
@@ -284,8 +548,16 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (!cc__lookup_func_attrs(root, ctx, n[i].aux_s1, &callee_attrs)) {
             (void)cc_symbols_lookup_fn_attrs(ctx->symbols, n[i].aux_s1, &callee_attrs);
         }
+        if (getenv("CC_DEBUG_AUTOBLOCK_CALLS")) {
+            fprintf(stderr, "  attrs async=%d noblock=%d under_await=%d chan=%d\n",
+                    (callee_attrs & CC_FN_ATTR_ASYNC) != 0,
+                    (callee_attrs & CC_FN_ATTR_NOBLOCK) != 0,
+                    is_under_await,
+                    is_chan_op);
+        }
         if (callee_attrs & CC_FN_ATTR_ASYNC) continue;
         if (callee_attrs & CC_FN_ATTR_NOBLOCK) continue;
+        if (strcmp(n[i].aux_s1, "cc_channel_pair") == 0) continue;
 
         /* Compute span offsets in the CURRENT input buffer using line/col. */
         if (n[i].line_start <= 0 || n[i].col_start <= 0) continue;
@@ -305,18 +577,39 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
 
         /* is_ufcs already handled above */
 
-        /* Next non-ws token after call. */
-        size_t j = call_end;
-        while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t' || in_src[j] == '\n' || in_src[j] == '\r')) j++;
-        int is_stmt_form = (j < in_len && in_src[j] == ';') ? 1 : 0;
-        size_t stmt_end = is_stmt_form ? (j + 1) : call_end;
-
         /* Line + indent info */
         size_t lb = cc__offset_of_line_1based(in_src, in_len, n[i].line_start);
         size_t first = lb;
         while (first < in_len && (in_src[first] == ' ' || in_src[first] == '\t')) first++;
         size_t indent_start = lb;
         size_t indent_len = first > lb ? (first - lb) : 0;
+        {
+            size_t line_end = cc__offset_of_line_1based(in_src, in_len, n[i].line_start + 1);
+            if (line_end <= lb || line_end > in_len) line_end = in_len;
+            if (!cc__relocate_call_span_on_line(in_src, in_len, lb, line_end, call_start, n[i].aux_s1, &call_start, &call_end)) {
+                size_t search_start = lb;
+                size_t search_end = line_end;
+                while (search_end < in_len && search_end > search_start &&
+                       in_src[search_end - 1] != ';' && in_src[search_end - 1] != '{' && in_src[search_end - 1] != '}') {
+                    size_t next = cc__offset_of_line_1based(in_src, in_len, n[i].line_start + 2);
+                    if (next <= search_end || next > in_len) break;
+                    search_end = next;
+                }
+                (void)cc__relocate_call_span_on_line(in_src, in_len, search_start, search_end, call_start, n[i].aux_s1, &call_start, &call_end);
+            }
+        }
+        /* Next non-ws token after relocated call. */
+        size_t j = call_end;
+        while (j < in_len && (in_src[j] == ' ' || in_src[j] == '\t' || in_src[j] == '\n' || in_src[j] == '\r')) j++;
+        int is_stmt_form = (j < in_len && in_src[j] == ';') ? 1 : 0;
+        size_t stmt_end = is_stmt_form ? (j + 1) : call_end;
+        if (getenv("CC_DEBUG_AUTOBLOCK_CALLS")) {
+            size_t dbg_n = call_end > call_start ? (call_end - call_start) : 0;
+            if (dbg_n > 120) dbg_n = 120;
+            fprintf(stderr, "  span='%.*s' stmt=%d next='%c'\n",
+                    (int)dbg_n, in_src + call_start, is_stmt_form,
+                    (j < in_len ? in_src[j] : '?'));
+        }
 
         /* Prefer FUNC/PARAM stub nodes; fallback to DECL_ITEM text signature. */
         const char* ret_str = NULL;
@@ -328,7 +621,6 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         for (int k = 0; k < root->node_count; k++) {
             if (n[k].kind != 17) continue; /* CC_AST_NODE_FUNC */
             if (!n[k].aux_s1 || strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
-            if (!cc_pass_node_in_tu(root, ctx, n[k].file)) continue;
             found_func = 1;
             ret_str = n[k].aux_s2;
             /* collect params */
@@ -345,7 +637,6 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             for (int k = 0; k < root->node_count; k++) {
                 if (n[k].kind != 12) continue; /* DECL_ITEM */
                 if (!n[k].aux_s1 || !n[k].aux_s2) continue;
-                if (!cc_pass_node_in_tu(root, ctx, n[k].file)) continue;
                 if (strcmp(n[k].aux_s1, n[i].aux_s1) != 0) continue;
                 if (!strchr(n[k].aux_s2, '(')) continue;
                 callee_sig = n[k].aux_s2;
@@ -379,8 +670,14 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         }
 
         if (ret_str) {
-            if (strstr(ret_str, "struct") || strstr(ret_str, "CCSlice")) ret_is_structy = 1;
             if (strchr(ret_str, '*')) ret_is_ptr = 1;
+            if (!ret_is_ptr &&
+                (strstr(ret_str, "struct") ||
+                 strstr(ret_str, "union") ||
+                 strstr(ret_str, "CCSlice") ||
+                 !cc__is_intptr_compatible_type(ret_str))) {
+                ret_is_structy = 1;
+            }
             if (!ret_is_ptr && !ret_is_structy) {
                 const char* v = strstr(ret_str, "void");
                 if (v) {
@@ -503,7 +800,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                         size_t after_call = call_end;
                         while (after_call < in_len && (in_src[after_call] == ' ' || in_src[after_call] == '\t')) after_call++;
                         if (p == call_start && after_call == j) {
-                            if (!ret_is_void && !ret_is_structy) {
+                            if (!ret_is_void) {
                                 kind = CC_AB_REWRITE_ASSIGN_CALL;
                                 stmt_start = lb;
                             }
@@ -542,7 +839,132 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
                     }
                 }
             }
-        } else if (kind != CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
+        }
+        if (kind == CC_AB_REWRITE_STMT_CALL && is_stmt_form) {
+            /* declaration initializer: `TYPE lhs = call(...);` */
+            size_t decl_first = first;
+            while (decl_first > 0) {
+                size_t p = decl_first;
+                while (p > 0) {
+                    char ch = in_src[p - 1];
+                    if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+                        p--;
+                        continue;
+                    }
+                    break;
+                }
+                if (p == 0) {
+                    decl_first = 0;
+                    break;
+                }
+                char prev = in_src[p - 1];
+                if (prev == ';' || prev == '{' || prev == '}') break;
+                size_t prev_line = p;
+                while (prev_line > 0 && in_src[prev_line - 1] != '\n') prev_line--;
+                if (prev_line == decl_first) break;
+                decl_first = prev_line;
+            }
+            size_t eq = call_start;
+            while (eq > decl_first) {
+                eq--;
+                if (in_src[eq] == '=') break;
+            }
+            if (eq > decl_first && in_src[eq] == '=') {
+                size_t after_eq = eq + 1;
+                while (after_eq < call_start &&
+                       (in_src[after_eq] == ' ' || in_src[after_eq] == '\t' ||
+                        in_src[after_eq] == '\r' || in_src[after_eq] == '\n')) after_eq++;
+                if (after_eq == call_start) {
+                    size_t lhs_end = eq;
+                    while (lhs_end > decl_first && (in_src[lhs_end - 1] == ' ' || in_src[lhs_end - 1] == '\t')) lhs_end--;
+                    size_t lhs_start = lhs_end;
+                    while (lhs_start > decl_first &&
+                           (isalnum((unsigned char)in_src[lhs_start - 1]) || in_src[lhs_start - 1] == '_')) lhs_start--;
+                    if (lhs_start < lhs_end) {
+                        int type_ok = 1;
+                        size_t type_end = lhs_start;
+                        while (type_end > decl_first && (in_src[type_end - 1] == ' ' || in_src[type_end - 1] == '\t')) type_end--;
+                        if (type_end > decl_first) {
+                            for (size_t tk = decl_first; tk < type_end; tk++) {
+                                char ch = in_src[tk];
+                                if (!(isalnum((unsigned char)ch) || ch == '_' || ch == ' ' || ch == '\t' ||
+                                      ch == '*' || ch == '!' || ch == '>' || ch == '<' || ch == '(' ||
+                                      ch == ')' || ch == ',' || ch == '[' || ch == ']' || ch == ':' ||
+                                      ch == '?' || ch == '~')) {
+                                    type_ok = 0;
+                                    break;
+                                }
+                            }
+                            if (type_ok) {
+                                size_t lhs_n = lhs_end - lhs_start;
+                                size_t type_n = type_end - decl_first;
+                                char* lhs_dup = (char*)malloc(lhs_n + 1);
+                                char* type_dup = (char*)malloc(type_n + 1);
+                                if (lhs_dup && type_dup) {
+                                    memcpy(lhs_dup, in_src + lhs_start, lhs_n);
+                                    lhs_dup[lhs_n] = 0;
+                                    memcpy(type_dup, in_src + decl_first, type_n);
+                                    type_dup[type_n] = 0;
+                                    lhs_name = lhs_dup;
+                                    kind = CC_AB_REWRITE_DECL_INIT_CALL;
+                                    stmt_start = decl_first;
+                                    if (rep_n == rep_cap) {
+                                        rep_cap = rep_cap ? rep_cap * 2 : 64;
+                                        reps = (Replace*)realloc(reps, (size_t)rep_cap * sizeof(*reps));
+                                        if (!reps) return 0;
+                                    }
+                                    reps[rep_n] = (Replace){
+                                        .start = stmt_start,
+                                        .end = stmt_end,
+                                        .call_start = call_start,
+                                        .call_end = call_end,
+                                        .line_start = n[i].line_start,
+                                        .callee = n[i].aux_s1,
+                                        .lhs_name = lhs_dup,
+                                        .decl_type = type_dup,
+                                        .kind = kind,
+                                        .raw_call = 0,
+                                        .is_chan_recv = is_chan_recv,
+                                        .argc = paramc,
+                                        .ret_is_ptr = ret_is_ptr,
+                                        .ret_is_void = ret_is_void,
+                                        .ret_is_structy = ret_is_structy,
+                                        .ret_type = ret_str ? strdup(ret_str) : NULL,
+                                        .indent_start = indent_start,
+                                        .indent_len = indent_len,
+                                        .batch = NULL,
+                                        .batch_n = 0,
+                                        .tail_kind = 0,
+                                        .tail_call_start = 0,
+                                        .tail_call_end = 0,
+                                        .tail_callee = NULL,
+                                        .tail_lhs_name = NULL,
+                                        .tail_argc = 0,
+                                        .tail_ret_is_ptr = 0,
+                                    };
+                                    for (int pi = 0; pi < paramc; pi++) reps[rep_n].param_types[pi] = param_types[pi];
+                                    for (int pi = paramc; pi < 16; pi++) reps[rep_n].param_types[pi] = NULL;
+                                    for (int pi = 0; pi < 16; pi++) reps[rep_n].tail_param_types[pi] = NULL;
+                                    if (getenv("CC_DEBUG_AUTOBLOCK_MATCHES")) {
+                                        fprintf(stderr, "autoblock decl-init line=%d callee=%s decl='%s' lhs='%s'\n",
+                                                n[i].line_start,
+                                                n[i].aux_s1 ? n[i].aux_s1 : "<null>",
+                                                type_dup,
+                                                lhs_dup);
+                                    }
+                                    rep_n++;
+                                    continue;
+                                }
+                                free(lhs_dup);
+                                free(type_dup);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (kind == CC_AB_REWRITE_STMT_CALL) {
             /* plain statement call: require call begins statement token */
             if (is_stmt_form) {
                 int ok = 1;
@@ -571,6 +993,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         if (kind != CC_AB_REWRITE_STMT_CALL &&
             kind != CC_AB_REWRITE_RETURN_CALL &&
             kind != CC_AB_REWRITE_ASSIGN_CALL &&
+            kind != CC_AB_REWRITE_DECL_INIT_CALL &&
             kind != CC_AB_REWRITE_RETURN_EXPR_CALL &&
             kind != CC_AB_REWRITE_ASSIGN_EXPR_CALL &&
             kind != CC_AB_REWRITE_AWAIT_OPERAND_CALL) {
@@ -594,7 +1017,8 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             .call_end = call_end,
             .line_start = n[i].line_start,
             .callee = n[i].aux_s1,
-            .lhs_name = lhs_name,
+            .lhs_name = lhs_name ? strdup(lhs_name) : NULL,
+            .decl_type = NULL,
             .kind = kind,
             .raw_call = 0,
             .is_chan_recv = is_chan_recv,
@@ -602,6 +1026,7 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             .ret_is_ptr = ret_is_ptr,
             .ret_is_void = ret_is_void,
             .ret_is_structy = ret_is_structy,
+            .ret_type = ret_str ? strdup(ret_str) : NULL,
             .indent_start = indent_start,
             .indent_len = indent_len,
             .batch = NULL,
@@ -617,6 +1042,13 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         for (int pi = 0; pi < paramc; pi++) reps[rep_n].param_types[pi] = param_types[pi];
         for (int pi = paramc; pi < 16; pi++) reps[rep_n].param_types[pi] = NULL;
         for (int pi = 0; pi < 16; pi++) reps[rep_n].tail_param_types[pi] = NULL;
+        if (getenv("CC_DEBUG_AUTOBLOCK_MATCHES")) {
+            fprintf(stderr, "autoblock kind=%d line=%d callee=%s lhs=%s\n",
+                    kind,
+                    n[i].line_start,
+                    n[i].aux_s1 ? n[i].aux_s1 : "<null>",
+                    lhs_name ? lhs_name : "<null>");
+        }
         rep_n++;
     }
 
@@ -926,7 +1358,24 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             /* Task-based auto-blocking: create a CCClosure0 value first, then await the task.
                This avoids embedding multiline `() => { ... }` directly inside `await <expr>` which
                interacts badly with later closure-elision + #line resync. */
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => {\n", I, reps[ri].line_start);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+            {
+                int first_cap = 1;
+                for (int bi = 0; bi < reps[ri].batch_n; bi++) {
+                    const CCAutoBlockBatchItem* it = &reps[ri].batch[bi];
+                    for (int ai = 0; ai < it->argc; ai++) {
+                        cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                              "__cc_ab_l%d_b%d_a%d",
+                                                              reps[ri].line_start, bi, ai);
+                    }
+                }
+                for (int ai = 0; ai < reps[ri].tail_argc; ai++) {
+                    cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                          "__cc_ab_l%d_t_a%d",
+                                                          reps[ri].line_start, ai);
+                }
+            }
+            cc__append_str(&repl, &repl_len, &repl_cap, "] {\n");
             for (int bi = 0; bi < reps[ri].batch_n; bi++) {
                 const CCAutoBlockBatchItem* it = &reps[ri].batch[bi];
                 cc__append_fmt(&repl, &repl_len, &repl_cap, "%s    %s(", I, it->callee ? it->callee : "");
@@ -1067,11 +1516,38 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
         const char* I = ind ? ind : "";
 
         for (int ai = 0; ai < argc; ai++) {
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCAbIntptr __cc_ab_l%d_arg%d = (CCAbIntptr)(%.*s);\n",
-                           I,
-                           reps[ri].line_start,
-                           ai,
-                           (int)(arg_ends[ai] - arg_starts[ai]), call_txt + arg_starts[ai]);
+            size_t arg_s = arg_starts[ai];
+            size_t arg_e = arg_ends[ai];
+            while (arg_s < arg_e && (call_txt[arg_s] == ' ' || call_txt[arg_s] == '\t')) arg_s++;
+            while (arg_e > arg_s && (call_txt[arg_e - 1] == ' ' || call_txt[arg_e - 1] == '\t')) arg_e--;
+            {
+                char norm_type[256];
+                const char* forced_type = cc__known_autoblock_param_type(reps[ri].callee, ai);
+                const char* decl_type = NULL;
+                if (forced_type) {
+                    decl_type = forced_type;
+                } else if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
+                    decl_type = cc__normalize_autoblock_decl_type(reps[ri].param_types[ai], norm_type, sizeof(norm_type));
+                }
+                if (decl_type) {
+                    if (getenv("CC_DEBUG_AUTOBLOCK_PARAM_TYPES")) {
+                        fprintf(stderr, "autoblock callee=%s arg=%d raw='%s' norm='%s'\n",
+                                reps[ri].callee ? reps[ri].callee : "<null>",
+                                ai,
+                                reps[ri].param_types[ai] ? reps[ri].param_types[ai] : "<null>",
+                                decl_type ? decl_type : "<null>");
+                    }
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s%s __cc_ab_l%d_arg%d = ",
+                                   I, decl_type, reps[ri].line_start, ai);
+                    cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
+                    cc__append_str(&repl, &repl_len, &repl_cap, ";\n");
+                } else {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCAbIntptr __cc_ab_l%d_arg%d = (CCAbIntptr)(",
+                                   I, reps[ri].line_start, ai);
+                    cc__append_n(&repl, &repl_len, &repl_cap, call_txt + arg_s, arg_e - arg_s);
+                    cc__append_str(&repl, &repl_len, &repl_cap, ");\n");
+                }
+            }
         }
         if (reps[ri].kind == CC_AB_REWRITE_RETURN_EXPR_CALL || reps[ri].kind == CC_AB_REWRITE_ASSIGN_EXPR_CALL) {
             char tmp_name[96];
@@ -1080,18 +1556,23 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             /* Emit a CCClosure0 value first (avoid embedding closure literal directly in `await <expr>`),
                then await the task into an intptr temp, then emit the original statement with the call
                replaced by that temp. */
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%sCCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+            {
+                int first_cap = 1;
+                for (int ai = 0; ai < argc; ai++) {
+                    cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                          "__cc_ab_l%d_arg%d",
+                                                          reps[ri].line_start, ai);
+                }
+            }
+            cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
             if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
             else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
             cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
             cc__append_str(&repl, &repl_len, &repl_cap, "(");
             for (int ai = 0; ai < argc; ai++) {
                 if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
-                } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
-                }
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
             }
             cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
             cc__append_fmt(&repl, &repl_len, &repl_cap, "%sintptr_t %s = 0;\n", I, tmp_name);
@@ -1191,53 +1672,177 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
             cc__append_n(&repl, &repl_len, &repl_cap, stmt_txt + call_e, stmt_len - call_e);
             if (repl_len > 0 && repl[repl_len - 1] != '\n') cc__append_str(&repl, &repl_len, &repl_cap, "\n");
         } else if (reps[ri].kind == CC_AB_REWRITE_STMT_CALL) {
-            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { ", I, reps[ri].line_start);
+            cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+            {
+                int first_cap = 1;
+                for (int ai = 0; ai < argc; ai++) {
+                    cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                          "__cc_ab_l%d_arg%d",
+                                                          reps[ri].line_start, ai);
+                }
+            }
+            cc__append_str(&repl, &repl_len, &repl_cap, "] { ");
             cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
             cc__append_str(&repl, &repl_len, &repl_cap, "(");
             for (int ai = 0; ai < argc; ai++) {
                 if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
-                } else {
-                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
-                }
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
             }
             cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
             cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
         } else {
             if (reps[ri].kind == CC_AB_REWRITE_RETURN_CALL) {
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
+                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+                {
+                    int first_cap = 1;
+                    for (int ai = 0; ai < argc; ai++) {
+                        cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                              "__cc_ab_l%d_arg%d",
+                                                              reps[ri].line_start, ai);
+                    }
+                }
+                cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
                 if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
                 else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
                 cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
                 cc__append_str(&repl, &repl_len, &repl_cap, "(");
                 for (int ai = 0; ai < argc; ai++) {
                     if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                    if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
-                    } else {
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
-                    }
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
                 }
                 cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
                 cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  return await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n", I, reps[ri].line_start);
             } else if (reps[ri].kind == CC_AB_REWRITE_ASSIGN_CALL && reps[ri].lhs_name) {
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => { return ", I, reps[ri].line_start);
-                if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
-                else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
-                cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
-                cc__append_str(&repl, &repl_len, &repl_cap, "(");
-                for (int ai = 0; ai < argc; ai++) {
-                    if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
-                    if (ai < reps[ri].argc && reps[ri].param_types[ai]) {
-                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)__cc_ab_l%d_arg%d", reps[ri].param_types[ai], reps[ri].line_start, ai);
-                    } else {
+                if (reps[ri].ret_is_structy) {
+                    char box_type_buf[256];
+                    const char* box_type = cc__canonicalize_autoblock_value_type(
+                        reps[ri].ret_type ? reps[ri].ret_type : "void*",
+                        box_type_buf, sizeof(box_type_buf));
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s cc_ab_ret_l%d;\n",
+                                   I, box_type ? box_type : "void*", reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s* cc_ab_retp_l%d = &cc_ab_ret_l%d;\n",
+                                   I, box_type ? box_type : "void*", reps[ri].line_start, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [",
+                                   I, reps[ri].line_start);
+                    {
+                        int first_cap = 1;
+                        cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                              "cc_ab_retp_l%d",
+                                                              reps[ri].line_start);
+                        for (int ai = 0; ai < argc; ai++) {
+                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                                  "__cc_ab_l%d_arg%d",
+                                                                  reps[ri].line_start, ai);
+                        }
+                    }
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "] { *cc_ab_retp_l%d = ",
+                                   reps[ri].line_start);
+                    cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "(");
+                    for (int ai = 0; ai < argc; ai++) {
+                        if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
                         cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
                     }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
+                    cc__append_fmt(&repl, &repl_len, &repl_cap,
+                                   "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                                   I, reps[ri].line_start, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap,
+                                   "%s  %s = cc_ab_ret_l%d;\n",
+                                   I, reps[ri].lhs_name,
+                                   reps[ri].line_start);
+                } else {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+                    {
+                        int first_cap = 1;
+                        for (int ai = 0; ai < argc; ai++) {
+                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                                  "__cc_ab_l%d_arg%d",
+                                                                  reps[ri].line_start, ai);
+                        }
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
+                    if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+                    else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+                    cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "(");
+                    for (int ai = 0; ai < argc; ai++) {
+                        if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                                   I, reps[ri].lhs_name, reps[ri].line_start);
                 }
-                cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
-                cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s = await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
-                               I, reps[ri].lhs_name, reps[ri].line_start);
+            } else if (reps[ri].kind == CC_AB_REWRITE_DECL_INIT_CALL && reps[ri].lhs_name && reps[ri].decl_type) {
+                if (reps[ri].ret_is_structy) {
+                    char box_type_buf[256];
+                    char decl_emit_type_buf[256];
+                    const char* box_src = cc__select_autoblock_box_type(reps[ri].decl_type, reps[ri].ret_type);
+                    const char* box_type = cc__canonicalize_autoblock_value_type(box_src, box_type_buf, sizeof(box_type_buf));
+                    const char* decl_emit_type = cc__canonicalize_autoblock_value_type(reps[ri].decl_type, decl_emit_type_buf, sizeof(decl_emit_type_buf));
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s cc_ab_ret_l%d;\n",
+                                   I, box_type ? box_type : reps[ri].decl_type, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s* cc_ab_retp_l%d = &cc_ab_ret_l%d;\n",
+                                   I, box_type ? box_type : reps[ri].decl_type, reps[ri].line_start, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [",
+                                   I, reps[ri].line_start);
+                    {
+                        int first_cap = 1;
+                        cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                              "cc_ab_retp_l%d",
+                                                              reps[ri].line_start);
+                        for (int ai = 0; ai < argc; ai++) {
+                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                                  "__cc_ab_l%d_arg%d",
+                                                                  reps[ri].line_start, ai);
+                        }
+                    }
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "] { *cc_ab_retp_l%d = ",
+                                   reps[ri].line_start);
+                    cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "(");
+                    for (int ai = 0; ai < argc; ai++) {
+                        if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "); return NULL; };\n");
+                    cc__append_fmt(&repl, &repl_len, &repl_cap,
+                                   "%s  await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                                   I, reps[ri].line_start, reps[ri].line_start);
+                    cc__append_fmt(&repl, &repl_len, &repl_cap,
+                                   "%s  %s %s = cc_ab_ret_l%d;\n",
+                                   I, decl_emit_type ? decl_emit_type : reps[ri].decl_type, reps[ri].lhs_name,
+                                   reps[ri].line_start);
+                } else {
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  CCClosure0 __cc_ab_c_l%d = () => [", I, reps[ri].line_start);
+                    {
+                        int first_cap = 1;
+                        for (int ai = 0; ai < argc; ai++) {
+                            cc__append_autoblock_capture_name_fmt(&repl, &repl_len, &repl_cap, &first_cap,
+                                                                  "__cc_ab_l%d_arg%d",
+                                                                  reps[ri].line_start, ai);
+                        }
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "] { return ");
+                    if (!reps[ri].ret_is_ptr) cc__append_str(&repl, &repl_len, &repl_cap, "(void*)(intptr_t)");
+                    else cc__append_str(&repl, &repl_len, &repl_cap, "(void*)");
+                    cc__append_str(&repl, &repl_len, &repl_cap, reps[ri].callee);
+                    cc__append_str(&repl, &repl_len, &repl_cap, "(");
+                    for (int ai = 0; ai < argc; ai++) {
+                        if (ai) cc__append_str(&repl, &repl_len, &repl_cap, ", ");
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "__cc_ab_l%d_arg%d", reps[ri].line_start, ai);
+                    }
+                    cc__append_str(&repl, &repl_len, &repl_cap, "); };\n");
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "%s  %s %s = ", I, reps[ri].decl_type, reps[ri].lhs_name);
+                    if (reps[ri].ret_is_ptr && reps[ri].ret_type) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)(void*)", reps[ri].ret_type);
+                    } else if (reps[ri].ret_type && !reps[ri].ret_is_ptr) {
+                        cc__append_fmt(&repl, &repl_len, &repl_cap, "(%s)", reps[ri].ret_type);
+                    }
+                    cc__append_fmt(&repl, &repl_len, &repl_cap, "await cc_run_blocking_task_intptr(__cc_ab_c_l%d);\n",
+                                   reps[ri].line_start);
+                }
             }
         }
 
@@ -1261,6 +1866,9 @@ int cc__rewrite_autoblocking_calls_with_nodes(const CCASTRoot* root,
     }
 
     for (int i = 0; i < rep_n; i++) {
+        free(reps[i].lhs_name);
+        free(reps[i].decl_type);
+        free(reps[i].ret_type);
         for (int j = 0; j < reps[i].argc; j++) free(reps[i].param_types[j]);
         if ((reps[i].kind == CC_AB_REWRITE_BATCH_STMT_CALLS ||
              reps[i].kind == CC_AB_REWRITE_BATCH_STMTS_THEN_RETURN ||

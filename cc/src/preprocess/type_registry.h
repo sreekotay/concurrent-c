@@ -42,6 +42,11 @@ const char* cc_type_registry_lookup_field(CCTypeRegistry* reg,
 const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
                                                    const char* recv_expr,
                                                    int* out_recv_is_ptr);
+const char* cc_type_registry_resolve_receiver_expr_at(CCTypeRegistry* reg,
+                                                      const char* recv_expr,
+                                                      const char* source_text,
+                                                      size_t use_offset,
+                                                      int* out_recv_is_ptr);
 const char* cc_type_registry_resolve_expr_type(CCTypeRegistry* reg, const char* expr);
 const char* cc_type_registry_lookup_channel_elem_type(CCTypeRegistry* reg, const char* handle_type_name);
 

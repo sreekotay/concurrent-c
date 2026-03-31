@@ -7,8 +7,11 @@
 #include "type_registry.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "result_spec.h"
 
 /* Variable -> type entry */
 typedef struct {
@@ -272,6 +275,248 @@ static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) 
     out[len] = '\0';
 }
 
+static void cc__parse_decl_name_and_type_local(const char* stmt,
+                                               const char* stmt_end,
+                                               char* out_name,
+                                               size_t out_name_sz,
+                                               char* out_type,
+                                               size_t out_type_sz) {
+    const char* p = stmt;
+    const char* semi = stmt_end;
+    const char* name_s = NULL;
+    size_t name_n = 0;
+    const char* cur;
+    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
+    out_name[0] = '\0';
+    out_type[0] = '\0';
+    while (p < semi && isspace((unsigned char)*p)) p++;
+    if (p >= semi) return;
+    cur = p;
+    while (cur < semi) {
+        if (*cur == '"' || *cur == '\'') {
+            char q = *cur++;
+            while (cur < semi) {
+                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                if (*cur == q) { cur++; break; }
+                cur++;
+            }
+            continue;
+        }
+        if (*cur == '=' || *cur == ';') break;
+        if (!(isalpha((unsigned char)*cur) || *cur == '_')) { cur++; continue; }
+        {
+            const char* s = cur++;
+            while (cur < semi && (isalnum((unsigned char)*cur) || *cur == '_')) cur++;
+            name_s = s;
+            name_n = (size_t)(cur - s);
+        }
+    }
+    if (!name_s || name_n == 0) return;
+    {
+        const char* after = name_s + name_n;
+        const char* eq = NULL;
+        const char* lp = NULL;
+        for (const char* t = p; t < semi; ++t) {
+            if (*t == '=' && !eq) eq = t;
+            if (*t == '(' && !lp) lp = t;
+            if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) {
+                return;
+            }
+        }
+        while (after < semi && isspace((unsigned char)*after)) after++;
+        if (after >= semi || (*after != '=' && *after != ';' && *after != '[')) {
+            return;
+        }
+        if (lp && lp < name_s && (!eq || eq > lp)) {
+            return;
+        }
+    }
+    {
+        const char* ty_s = p;
+        const char* ty_e = name_s;
+        while (ty_s < ty_e && isspace((unsigned char)*ty_s)) ty_s++;
+        while (ty_e > ty_s && isspace((unsigned char)ty_e[-1])) ty_e--;
+        if (ty_e <= ty_s) return;
+        {
+            size_t type_len = (size_t)(ty_e - ty_s);
+            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
+            memcpy(out_type, ty_s, type_len);
+            out_type[type_len] = '\0';
+        }
+        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
+        memcpy(out_name, name_s, name_n);
+        out_name[name_n] = '\0';
+    }
+}
+
+static int cc__is_non_decl_stmt_type(const char* type_name) {
+    return type_name &&
+           (strcmp(type_name, "return") == 0 ||
+            strcmp(type_name, "break") == 0 ||
+            strcmp(type_name, "continue") == 0 ||
+            strcmp(type_name, "goto") == 0 ||
+            strcmp(type_name, "case") == 0 ||
+            strcmp(type_name, "default") == 0);
+}
+
+static void cc__trim_type_span(const char** start, const char** end) {
+    while (*start < *end && isspace((unsigned char)**start)) (*start)++;
+    while (*end > *start && isspace((unsigned char)(*end)[-1])) (*end)--;
+}
+
+static void cc__normalize_local_decl_type(char* out, size_t out_sz, const char* type_name) {
+    const char* bang;
+    const char* chan_l;
+    const char* chan_r;
+    const char* ok_s;
+    const char* ok_e;
+    const char* err_s;
+    const char* err_e;
+    const char* elem_s;
+    const char* elem_e;
+    char mangled_ok[128];
+    char mangled_err[128];
+    char mangled_elem[128];
+    int chan_is_tx = 0;
+    int chan_is_rx = 0;
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name || !type_name[0]) return;
+    chan_l = strchr(type_name, '[');
+    if (chan_l) {
+        chan_r = strchr(chan_l, ']');
+        if (chan_r && memchr(chan_l, '~', (size_t)(chan_r - chan_l)) != NULL) {
+            if (memchr(chan_l, '>', (size_t)(chan_r - chan_l)) != NULL) chan_is_tx = 1;
+            if (memchr(chan_l, '<', (size_t)(chan_r - chan_l)) != NULL) chan_is_rx = 1;
+            if (chan_is_tx || chan_is_rx) {
+                elem_s = type_name;
+                elem_e = chan_l;
+                cc__trim_type_span(&elem_s, &elem_e);
+                if (elem_e > elem_s) {
+                    cc_result_spec_mangle_type(elem_s, (size_t)(elem_e - elem_s),
+                                               mangled_elem, sizeof(mangled_elem));
+                    if (mangled_elem[0]) {
+                        snprintf(out, out_sz, "%s_%s",
+                                 chan_is_tx ? "CCChanTx" : "CCChanRx", mangled_elem);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    bang = strchr(type_name, '!');
+    if (!bang || bang[1] == '=') {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    ok_s = type_name;
+    ok_e = bang;
+    cc__trim_type_span(&ok_s, &ok_e);
+    err_s = bang + 1;
+    while (*err_s == ' ' || *err_s == '\t') err_s++;
+    if (*err_s == '>') {
+        err_s++;
+        while (*err_s == ' ' || *err_s == '\t') err_s++;
+        if (*err_s == '(') {
+            err_s++;
+            err_e = strchr(err_s, ')');
+            if (!err_e) err_e = err_s + strlen(err_s);
+        } else {
+            err_e = err_s + strlen(err_s);
+        }
+    } else {
+        err_e = err_s;
+        while (*err_e && (isalnum((unsigned char)*err_e) || *err_e == '_')) err_e++;
+    }
+    cc__trim_type_span(&err_s, &err_e);
+    if (ok_e <= ok_s || err_e <= err_s) {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_ok, sizeof(mangled_ok));
+    cc_result_spec_mangle_type(err_s, (size_t)(err_e - err_s), mangled_err, sizeof(mangled_err));
+    if (!mangled_ok[0] || !mangled_err[0]) {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    snprintf(out, out_sz, "CCResult_%s_%s", mangled_ok, mangled_err);
+}
+
+static const char* cc__lookup_scoped_local_var_type(const char* src,
+                                                    size_t limit,
+                                                    const char* var_name,
+                                                    char* out_type,
+                                                    size_t out_type_sz) {
+    typedef struct {
+        int scope_id;
+        char type_name[256];
+    } LocalDecl;
+    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
+    LocalDecl decls[MAX_DECLS];
+    int decl_count = 0;
+    int scope_stack[MAX_SCOPES];
+    int scope_depth = 1;
+    int next_scope_id = 1;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    size_t stmt_start = 0;
+    size_t i = 0;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    scope_stack[0] = 0;
+    while (i < limit) {
+        char c = src[i];
+        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '{') {
+            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
+            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
+            if (scope_depth > 1) scope_depth--;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == ';') {
+            char decl_name[128];
+            char decl_type[256];
+            cc__parse_decl_name_and_type_local(src + stmt_start, src + i,
+                                               decl_name, sizeof(decl_name),
+                                               decl_type, sizeof(decl_type));
+            if (decl_name[0] &&
+                strcmp(decl_name, var_name) == 0 &&
+                !cc__is_non_decl_stmt_type(decl_type) &&
+                decl_count < MAX_DECLS) {
+                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
+                cc__normalize_local_decl_type(decls[decl_count].type_name,
+                                              sizeof(decls[decl_count].type_name),
+                                              decl_type);
+                decl_count++;
+            }
+            stmt_start = i + 1;
+        }
+        i++;
+    }
+    if (decl_count == 0) return NULL;
+    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
+    out_type[out_type_sz - 1] = '\0';
+    return out_type;
+}
+
 const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
                                                    const char* recv_expr,
                                                    int* out_recv_is_ptr) {
@@ -309,6 +554,88 @@ const char* cc_type_registry_resolve_receiver_expr(CCTypeRegistry* reg,
         p += rn;
     }
     type_name = cc_type_registry_lookup_var(reg, root);
+    if (!type_name) return NULL;
+    strncpy(resolved_type, type_name, sizeof(resolved_type) - 1);
+    resolved_type[sizeof(resolved_type) - 1] = '\0';
+    while (*p) {
+        char field_name[128];
+        char base_type[256];
+        size_t fn = 0;
+        int is_arrow = 0;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '.') {
+            p++;
+        } else if (*p == '-' && p[1] == '>') {
+            is_arrow = 1;
+            p += 2;
+        } else {
+            break;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+        if (!(isalnum((unsigned char)*p) || *p == '_') || !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
+            return NULL;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
+            if (fn + 1 < sizeof(field_name)) field_name[fn] = *p;
+            fn++;
+            p++;
+        }
+        field_name[fn < sizeof(field_name) ? fn : sizeof(field_name) - 1] = '\0';
+        cc__copy_type_base(base_type, sizeof(base_type), resolved_type);
+        if (is_arrow && base_type[0] == '\0') return NULL;
+        type_name = cc_type_registry_lookup_field(reg, base_type, field_name);
+        if (!type_name) return NULL;
+        strncpy(resolved_type, type_name, sizeof(resolved_type) - 1);
+        resolved_type[sizeof(resolved_type) - 1] = '\0';
+    }
+    if (out_recv_is_ptr) *out_recv_is_ptr = recv_is_ptr || strchr(resolved_type, '*') != NULL;
+    return resolved_type;
+}
+
+const char* cc_type_registry_resolve_receiver_expr_at(CCTypeRegistry* reg,
+                                                      const char* recv_expr,
+                                                      const char* source_text,
+                                                      size_t use_offset,
+                                                      int* out_recv_is_ptr) {
+    static _Thread_local char resolved_type[256];
+    char local_type[256];
+    char expr[256];
+    char root[128];
+    const char* p;
+    const char* type_name;
+    int recv_is_ptr = 0;
+    size_t len;
+    if (out_recv_is_ptr) *out_recv_is_ptr = 0;
+    if (!reg || !recv_expr) return NULL;
+    while (*recv_expr == ' ' || *recv_expr == '\t' || *recv_expr == '\n' || *recv_expr == '\r') recv_expr++;
+    len = strlen(recv_expr);
+    while (len > 0 &&
+           (recv_expr[len - 1] == ' ' || recv_expr[len - 1] == '\t' ||
+            recv_expr[len - 1] == '\n' || recv_expr[len - 1] == '\r')) len--;
+    if (len == 0 || len >= sizeof(expr)) return NULL;
+    memcpy(expr, recv_expr, len);
+    expr[len] = '\0';
+    p = expr;
+    if (*p == '&') {
+        recv_is_ptr = 1;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (!(isalnum((unsigned char)*p) || *p == '_') || !(((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_')))
+        return NULL;
+    {
+        size_t rn = 0;
+        while (p[rn] && (isalnum((unsigned char)p[rn]) || p[rn] == '_')) rn++;
+        if (rn >= sizeof(root)) rn = sizeof(root) - 1;
+        memcpy(root, p, rn);
+        root[rn] = '\0';
+        p += rn;
+    }
+    type_name = NULL;
+    if (source_text) {
+        type_name = cc__lookup_scoped_local_var_type(source_text, use_offset, root,
+                                                     local_type, sizeof(local_type));
+    }
+    if (!type_name) type_name = cc_type_registry_lookup_var(reg, root);
     if (!type_name) return NULL;
     strncpy(resolved_type, type_name, sizeof(resolved_type) - 1);
     resolved_type[sizeof(resolved_type) - 1] = '\0';

@@ -63,10 +63,7 @@ static inline CCError __cc_error_make(CCErrorKind kind, const char* msg) {
 #endif /* CC_PARSER_MODE */
 
 #ifdef CC_PARSER_MODE
-/* Parser-mode placeholder for shorthand error construction in cc_err(...). */
-#ifndef CC_ERROR
-#define CC_ERROR(kind, msg) (0)
-#endif
+/* Parser-mode CCError support is declared later, after the placeholder type is available. */
 #endif
 
 /*
@@ -253,6 +250,12 @@ typedef struct __CCGenericError {
 typedef __CCGenericError CCError;
 #endif
 
+/* Parser-mode error construction must still produce a CCError-shaped value so local
+   declarations like `CCError err = CC_ERROR(...)` remain parseable. */
+#ifndef CC_ERROR
+#define CC_ERROR(err_kind, err_msg) ((CCError){ (int)(err_kind), 0, 0, (err_msg) })
+#endif
+
 /* Parser-mode UFCS method stubs for raw method syntax before result UFCS
    has been lowered to Type_method(...) calls. */
 static intptr_t unwrap();
@@ -362,8 +365,8 @@ static inline __CCGenericError __CCResultGeneric_unwrap_err(__CCResultGeneric r)
 
 /* Macro-based ok/err that accept any type - parser mode just validates types.
    The value/error is unused but the expression is type-checked. */
-#define __CC_RESULT_OK(T, E, v) ((void)(v), __cc_result_generic_ok())
-#define __CC_RESULT_ERR(T, E, e) ((void)(e), __cc_result_generic_err())
+#define __CC_RESULT_OK(T, E, v) __cc_result_generic_ok()
+#define __CC_RESULT_ERR(T, E, e) __cc_result_generic_err()
 
 /* try expressions are handled natively by TCC (CC_AST_NODE_TRY) */
 

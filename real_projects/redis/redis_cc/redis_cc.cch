@@ -8,10 +8,12 @@
 #define REDIS_CC_SHARED_H
 
 #include <ccc/std/prelude.cch>
+#include <ccc/cc_chan_handle.cch>
 #include <stdint.h>
 
 typedef enum RedisCommandKind {
     REDIS_CMD_PING = 0,
+    REDIS_CMD_CONFIG_GET,
     REDIS_CMD_GET,
     REDIS_CMD_SET,
     REDIS_CMD_DEL,
@@ -27,16 +29,18 @@ typedef enum RedisReplyKind {
     REDIS_REPLY_INTEGER,
     REDIS_REPLY_NULL_BULK,
     REDIS_REPLY_ERROR,
+    REDIS_REPLY_RAW,
 } RedisReplyKind;
 
 typedef struct RedisRequest {
     uint64_t conn_id;
     uint64_t request_id;
     uint32_t shard_id;
+    CCChanTx reply_tx;
+    CCArena arena;
     RedisCommandKind kind;
-    CCSlice key;
-    CCSlice value;
-    int64_t int_arg;
+    size_t argc;
+    CCSlice argv[3];
 } RedisRequest;
 
 typedef struct RedisReply {
@@ -50,6 +54,7 @@ typedef struct RedisReply {
 static inline const char* redis_command_name(RedisCommandKind kind) {
     switch (kind) {
         case REDIS_CMD_PING: return "PING";
+        case REDIS_CMD_CONFIG_GET: return "CONFIG_GET";
         case REDIS_CMD_GET: return "GET";
         case REDIS_CMD_SET: return "SET";
         case REDIS_CMD_DEL: return "DEL";
@@ -68,6 +73,7 @@ static inline const char* redis_reply_name(RedisReplyKind kind) {
         case REDIS_REPLY_INTEGER: return "integer";
         case REDIS_REPLY_NULL_BULK: return "null-bulk";
         case REDIS_REPLY_ERROR: return "error";
+        case REDIS_REPLY_RAW: return "raw";
         default: return "unknown";
     }
 }

@@ -47,6 +47,7 @@ int cc_ufcs_rewrite_line_full(const char* in, char* out, size_t out_cap,
 
 /* Provide the active compile-time symbol table for UFCS registry lookups. */
 void cc_ufcs_set_symbols(CCSymbolTable* symbols);
+void cc_ufcs_set_source_context(const char* source_text, size_t source_offset);
 
 /* Resolve builtin channel UFCS lowering from receiver type + method + mode. */
 static inline const char* cc_ufcs_channel_callee(const char* recv_type_name,
