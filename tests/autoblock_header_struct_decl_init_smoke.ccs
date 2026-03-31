@@ -1,0 +1,17 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_closure.cch>
+#include <ccc/std/task.cch>
+#include "autoblock_header_helper.cch"
+
+static intptr_t g_main_tid = 0;
+
+@async int f(void) {
+    HeaderPair p = header_make_pair(42);
+    return (p.tid == g_main_tid) ? 0 : p.value;
+}
+
+int main(void) {
+    g_main_tid = (intptr_t)pthread_self();
+    int r = cc_block_on(int, f());
+    return (r == 42) ? 0 : 1;
+}

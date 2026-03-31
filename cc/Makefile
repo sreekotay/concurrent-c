@@ -62,8 +62,8 @@ OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
 DEPS := $(OBJS:.o=.d)
-REAL_BINARY := $(OUT_BINDIR)/ccc
-WRAPPER := bin/ccc
+REAL_BINARY := bin/ccc
+WRAPPER := $(OUT_BINDIR)/ccc
 
 # CCCN (CCC Next) refactor - uses existing TCC bridge + preprocessor
 CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
@@ -78,8 +78,8 @@ CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
     src/util/path.c \
     src/visitor/visitor_fileutil.c
 CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
-CCCN_BINARY := $(OUT_BINDIR)/cccn
-CCCN_WRAPPER := bin/cccn
+CCCN_BINARY := bin/cccn
+CCCN_WRAPPER := $(OUT_BINDIR)/cccn
 LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/header/lower_header.c \
 	src/preprocess/preprocess.c \
@@ -121,7 +121,7 @@ $(WRAPPER): $(REAL_BINARY)
 	@printf '%s\n' '#!/bin/sh' > $@
 	@printf '%s\n' 'set -e' >> $@
 	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
-	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/ccc" "$$@"' >> $@
+	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/ccc" "$$@"' >> $@
 	@chmod +x $@
 
 $(CCCN_BINARY): $(CCCN_OBJS) $(TCC_LIB_DEP)
@@ -133,7 +133,7 @@ $(CCCN_WRAPPER): $(CCCN_BINARY)
 	@printf '%s\n' '#!/bin/sh' > $@
 	@printf '%s\n' 'set -e' >> $@
 	@printf '%s\n' 'SELF_DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $@
-	@printf '%s\n' 'exec "$$SELF_DIR/../../out/cc/bin/cccn" "$$@"' >> $@
+	@printf '%s\n' 'exec "$$SELF_DIR/../../../cc/bin/cccn" "$$@"' >> $@
 	@chmod +x $@
 
 $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS)

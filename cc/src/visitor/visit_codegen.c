@@ -30,6 +30,7 @@
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
 #include "preprocess/type_registry.h"
+#include "result_spec.h"
 #include "util/path.h"
 #include "util/text.h"
 
@@ -50,6 +51,24 @@ static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n);
 static char* cc__rewrite_result_helper_calls_for_parser(const char* src, size_t n);
 static int cc__is_parser_placeholder_type_codegen(const char* type_name);
+typedef int (*CCCodegenEditCollectorFn)(const CCASTRoot* root,
+                                        const CCVisitorCtx* ctx,
+                                        CCEditBuffer* eb);
+static int cc__apply_coarse_codegen_pass(const CCASTRoot* root,
+                                         const CCVisitorCtx* ctx,
+                                         char** src_io,
+                                         size_t* len_io,
+                                         const char* base_src,
+                                         CCCodegenEditCollectorFn collect,
+                                         int* out_changed);
+
+static const char* cc__canonicalize_placeholder_family_type_codegen(const char* type_name,
+                                                                    char* scratch,
+                                                                    size_t scratch_cap);
+static const char* cc__normalize_bool_spelling_codegen(const char* type_name,
+                                                       char* scratch,
+                                                       size_t scratch_cap);
+static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n);
 
 static void cc__emit_line_directive(FILE* out, int line, const char* path) {
     char rel[1024];
@@ -75,6 +94,487 @@ static void cc__maybe_format_lowered_output(const char* out_path) {
     (void)system(cmd);
 }
 
+static void cc__debug_dump_reparse_source(const char* stage,
+                                          const char* src,
+                                          size_t src_len,
+                                          const char* input_path) {
+    const char* dir = getenv("CC_DEBUG_REPARSE_DUMP_DIR");
+    char rel[1024];
+    char safe[1024];
+    char path[1536];
+    FILE* f = NULL;
+    size_t i = 0;
+    const char* shown;
+    if (!dir || !dir[0] || !stage || !stage[0] || !src) return;
+    shown = cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel));
+    for (; shown[i] && i + 1 < sizeof(safe); ++i) {
+        char c = shown[i];
+        safe[i] = (isalnum((unsigned char)c) || c == '_' || c == '-') ? c : '_';
+    }
+    safe[i] = '\0';
+    snprintf(path, sizeof(path), "%s/%s_%s.c", dir, stage, safe[0] ? safe : "input");
+    f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(src, 1, src_len, f);
+    fclose(f);
+}
+
+static char* cc__neutralize_comments_for_reparse(const char* src, size_t n) {
+    char* out = NULL;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src) return NULL;
+    out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, src, n);
+    out[n] = '\0';
+    for (size_t i = 0; i < n; i++) {
+        char c = out[i];
+        char c2 = (i + 1 < n) ? out[i + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            else out[i] = ' ';
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                in_bc = 0;
+                i++;
+                continue;
+            }
+            if (c != '\n' && c != '\r' && c != '\t') out[i] = ' ';
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && i + 1 < n) { i++; continue; }
+            if (c == '"') in_str = 0;
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && i + 1 < n) { i++; continue; }
+            if (c == '\'') in_chr = 0;
+            continue;
+        }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        if (c == '/' && c2 == '/') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            in_lc = 1;
+            i++;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            in_bc = 1;
+            i++;
+            continue;
+        }
+    }
+    return out;
+}
+
+static int cc__apply_coarse_codegen_pass(const CCASTRoot* root,
+                                         const CCVisitorCtx* ctx,
+                                         char** src_io,
+                                         size_t* len_io,
+                                         const char* base_src,
+                                         CCCodegenEditCollectorFn collect,
+                                         int* out_changed) {
+    CCEditBuffer eb;
+    if (out_changed) *out_changed = 0;
+    if (!root || !ctx || !src_io || !*src_io || !len_io || !collect) return 0;
+    cc_edit_buffer_init(&eb, *src_io, *len_io);
+    if (collect(root, ctx, &eb) < 0) {
+        cc_edit_buffer_free(&eb);
+        return -1;
+    }
+    if (eb.count > 0) {
+        size_t new_len = 0;
+        char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
+        if (rewritten) {
+            if (*src_io != base_src) free(*src_io);
+            *src_io = rewritten;
+            *len_io = new_len;
+            if (out_changed) *out_changed = 1;
+        }
+    }
+    cc_edit_buffer_free(&eb);
+    return 0;
+}
+
+static const char* cc__canonicalize_placeholder_family_type_codegen(const char* type_name,
+                                                                    char* scratch,
+                                                                    size_t scratch_cap) {
+    if (!type_name || !scratch || scratch_cap == 0) return type_name;
+    if (strncmp(type_name, "Vec_", 4) == 0 || strncmp(type_name, "Map_", 4) == 0) {
+        return type_name;
+    }
+    if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
+        const char* args = type_name + 9;
+        const char* close = strrchr(args, ')');
+        char mangled[128];
+        if (!close || close <= args) return type_name;
+        cc_result_spec_mangle_type(args, (size_t)(close - args), mangled, sizeof(mangled));
+        if (!mangled[0]) return type_name;
+        snprintf(scratch, scratch_cap, "Vec_%s", mangled);
+        return scratch;
+    }
+    if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
+        const char* args = type_name + 9;
+        const char* close = strrchr(args, ')');
+        const char* comma = NULL;
+        int par = 0, br = 0, brc = 0, ang = 0;
+        char mangled_k[128];
+        char mangled_v[128];
+        if (!close || close <= args) return type_name;
+        for (const char* p = args; p < close; ++p) {
+            if (*p == '(') par++;
+            else if (*p == ')' && par > 0) par--;
+            else if (*p == '[') br++;
+            else if (*p == ']' && br > 0) br--;
+            else if (*p == '{') brc++;
+            else if (*p == '}' && brc > 0) brc--;
+            else if (*p == '<') ang++;
+            else if (*p == '>' && ang > 0) ang--;
+            else if (*p == ',' && par == 0 && br == 0 && brc == 0 && ang == 0) {
+                comma = p;
+                break;
+            }
+        }
+        if (!comma) return type_name;
+        cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_k, sizeof(mangled_k));
+        cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_v, sizeof(mangled_v));
+        if (!mangled_k[0] || !mangled_v[0]) return type_name;
+        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_k, mangled_v);
+        return scratch;
+    }
+    return type_name;
+}
+
+static const char* cc__normalize_bool_spelling_codegen(const char* type_name,
+                                                       char* scratch,
+                                                       size_t scratch_cap) {
+    size_t out = 0;
+    int changed = 0;
+    if (!type_name || !scratch || scratch_cap == 0) return type_name;
+    for (size_t i = 0; type_name[i] && out + 1 < scratch_cap; ) {
+        if (strncmp(type_name + i, "_Bool", 5) == 0) {
+            if (out + 4 >= scratch_cap) break;
+            memcpy(scratch + out, "bool", 4);
+            out += 4;
+            i += 5;
+            changed = 1;
+            continue;
+        }
+        scratch[out++] = type_name[i++];
+    }
+    scratch[out] = '\0';
+    return changed ? scratch : type_name;
+}
+
+static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0, last_emit = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+
+    for (size_t i = 0; i < n; ) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < n) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+
+        if ((i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            i + 9 < n && memcmp(src + i, "CCString_", 9) == 0) {
+            size_t method_start = i + 9;
+            size_t method_end = method_start;
+            const char* replacement = NULL;
+            while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+            if (method_end < n && src[method_end] == '(') {
+                size_t method_len = method_end - method_start;
+                if (method_len == 6 && memcmp(src + method_start, "append", 6) == 0) replacement = "cc_string_push";
+                else if (method_len == 4 && memcmp(src + method_start, "push", 4) == 0) replacement = "cc_string_push";
+                else if (method_len == 8 && memcmp(src + method_start, "as_slice", 8) == 0) replacement = "cc_string_as_slice";
+                else if (method_len == 5 && memcmp(src + method_start, "clear", 5) == 0) replacement = "cc_string_clear";
+                else if (method_len == 4 && memcmp(src + method_start, "cstr", 4) == 0) replacement = "cc_string_cstr";
+                else if (method_len == 3 && memcmp(src + method_start, "len", 3) == 0) replacement = "cc_string_len";
+                else if (method_len == 3 && memcmp(src + method_start, "cap", 3) == 0) replacement = "cc_string_cap";
+                else if (method_len > 0) {
+                    static _Thread_local char buf[128];
+                    snprintf(buf, sizeof(buf), "cc_string_%.*s", (int)method_len, src + method_start);
+                    replacement = buf;
+                }
+                if (replacement) {
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                    cc__sb_append_cstr_local(&out, &out_len, &out_cap, replacement);
+                    last_emit = method_end;
+                    i = method_end;
+                    changed = 1;
+                    continue;
+                }
+            }
+        }
+
+        if ((i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 17 < n && memcmp(src + i, "__cc_vec_generic_", 17) == 0)) {
+            size_t prefix_len = 17;
+            size_t method_start = i + prefix_len;
+            size_t method_end = method_start;
+            while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+            if (method_end < n && src[method_end] == '(') {
+                size_t arg_start = method_end + 1;
+                size_t p = arg_start;
+                int par = 0, br = 0, brc = 0, in_s = 0, in_c = 0;
+                size_t arg_end = arg_start;
+                while (p < n) {
+                    char d = src[p];
+                    if (in_s) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '"') in_s = 0; p++; continue; }
+                    if (in_c) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '\'') in_c = 0; p++; continue; }
+                    if (d == '"') { in_s = 1; p++; continue; }
+                    if (d == '\'') { in_c = 1; p++; continue; }
+                    if (d == '(') par++;
+                    else if (d == ')' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
+                    else if (d == ')' && par > 0) par--;
+                    else if (d == '[') br++;
+                    else if (d == ']' && br > 0) br--;
+                    else if (d == '{') brc++;
+                    else if (d == '}' && brc > 0) brc--;
+                    else if (d == ',' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
+                    p++;
+                }
+                if (arg_end > arg_start && reg) {
+                    char arg_expr[256];
+                    char family_buf[256];
+                    const char* recv_s = src + arg_start;
+                    const char* recv_e = src + arg_end;
+                    while (recv_s < recv_e && isspace((unsigned char)*recv_s)) recv_s++;
+                    while (recv_e > recv_s && isspace((unsigned char)recv_e[-1])) recv_e--;
+                    if ((size_t)(recv_e - recv_s) < sizeof(arg_expr)) {
+                        memcpy(arg_expr, recv_s, (size_t)(recv_e - recv_s));
+                        arg_expr[recv_e - recv_s] = '\0';
+                        {
+                            int recv_is_ptr = 0;
+                            char root[64] = {0};
+                            char field[64] = {0};
+                            const char* q = arg_expr;
+                            const char* root_ty = NULL;
+                            const char* field_ty = NULL;
+                            size_t rn = 0, fn = 0;
+                            const char* type_name = cc_type_registry_resolve_receiver_expr_at(
+                                reg, arg_expr, src, (size_t)(recv_s - src), &recv_is_ptr);
+                            if (*q == '&') q++;
+                            while (*q == ' ' || *q == '\t') q++;
+                            while (q[rn] && (isalnum((unsigned char)q[rn]) || q[rn] == '_') && rn + 1 < sizeof(root)) rn++;
+                            memcpy(root, q, rn);
+                            root[rn] = '\0';
+                            root_ty = root[0] ? cc_type_registry_lookup_var(reg, root) : NULL;
+                            q += rn;
+                            if (*q == '.') q++;
+                            while (q[fn] && (isalnum((unsigned char)q[fn]) || q[fn] == '_') && fn + 1 < sizeof(field)) fn++;
+                            memcpy(field, q, fn);
+                            field[fn] = '\0';
+                            field_ty = (root_ty && field[0]) ? cc_type_registry_lookup_field(reg, root_ty, field) : NULL;
+                            if (!type_name && field_ty) type_name = field_ty;
+                            const char* family_name = cc__canonicalize_placeholder_family_type_codegen(type_name, family_buf, sizeof(family_buf));
+                            if (getenv("CC_DEBUG_PLACEHOLDER_UFCS")) {
+                                fprintf(stderr, "placeholder vec recv='%s' type='%s' family='%s'\n",
+                                        arg_expr,
+                                        type_name ? type_name : "<null>",
+                                        family_name ? family_name : "<null>");
+                            }
+                            if (family_name && strncmp(family_name, "Vec_", 4) == 0) {
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, family_name);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + method_start, method_end - method_start);
+                                last_emit = method_end;
+                                i = method_end;
+                                changed = 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if ((i == 0 || !cc_is_ident_char(src[i - 1])) &&
+            (i + 17 < n && memcmp(src + i, "__cc_map_generic_", 17) == 0)) {
+            size_t prefix_len = 17;
+            size_t method_start = i + prefix_len;
+            size_t method_end = method_start;
+            while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+            if (method_end < n && src[method_end] == '(') {
+                size_t arg_start = method_end + 1;
+                size_t p = arg_start;
+                int par = 0, br = 0, brc = 0, in_s = 0, in_c = 0;
+                size_t arg_end = arg_start;
+                while (p < n) {
+                    char d = src[p];
+                    if (in_s) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '"') in_s = 0; p++; continue; }
+                    if (in_c) { if (d == '\\' && p + 1 < n) { p += 2; continue; } if (d == '\'') in_c = 0; p++; continue; }
+                    if (d == '"') { in_s = 1; p++; continue; }
+                    if (d == '\'') { in_c = 1; p++; continue; }
+                    if (d == '(') par++;
+                    else if (d == ')' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
+                    else if (d == ')' && par > 0) par--;
+                    else if (d == '[') br++;
+                    else if (d == ']' && br > 0) br--;
+                    else if (d == '{') brc++;
+                    else if (d == '}' && brc > 0) brc--;
+                    else if (d == ',' && par == 0 && br == 0 && brc == 0) { arg_end = p; break; }
+                    p++;
+                }
+                if (arg_end > arg_start && reg) {
+                    char arg_expr[256];
+                    char family_buf[256];
+                    const char* recv_s = src + arg_start;
+                    const char* recv_e = src + arg_end;
+                    while (recv_s < recv_e && isspace((unsigned char)*recv_s)) recv_s++;
+                    while (recv_e > recv_s && isspace((unsigned char)recv_e[-1])) recv_e--;
+                    if ((size_t)(recv_e - recv_s) < sizeof(arg_expr)) {
+                        memcpy(arg_expr, recv_s, (size_t)(recv_e - recv_s));
+                        arg_expr[recv_e - recv_s] = '\0';
+                        {
+                            int recv_is_ptr = 0;
+                            char root[64] = {0};
+                            char field[64] = {0};
+                            const char* q = arg_expr;
+                            const char* root_ty = NULL;
+                            const char* field_ty = NULL;
+                            size_t rn = 0, fn = 0;
+                            const char* type_name = cc_type_registry_resolve_receiver_expr_at(
+                                reg, arg_expr, src, (size_t)(recv_s - src), &recv_is_ptr);
+                            if (*q == '&') q++;
+                            while (*q == ' ' || *q == '\t') q++;
+                            while (q[rn] && (isalnum((unsigned char)q[rn]) || q[rn] == '_') && rn + 1 < sizeof(root)) rn++;
+                            memcpy(root, q, rn);
+                            root[rn] = '\0';
+                            root_ty = root[0] ? cc_type_registry_lookup_var(reg, root) : NULL;
+                            q += rn;
+                            if (*q == '.') q++;
+                            while (q[fn] && (isalnum((unsigned char)q[fn]) || q[fn] == '_') && fn + 1 < sizeof(field)) fn++;
+                            memcpy(field, q, fn);
+                            field[fn] = '\0';
+                            field_ty = (root_ty && field[0]) ? cc_type_registry_lookup_field(reg, root_ty, field) : NULL;
+                            if (!type_name && field_ty) type_name = field_ty;
+                            const char* family_name = cc__canonicalize_placeholder_family_type_codegen(type_name, family_buf, sizeof(family_buf));
+                            if (getenv("CC_DEBUG_PLACEHOLDER_UFCS")) {
+                                fprintf(stderr, "placeholder map recv='%s' type='%s' family='%s'\n",
+                                        arg_expr,
+                                        type_name ? type_name : "<null>",
+                                        family_name ? family_name : "<null>");
+                            }
+                            if (family_name && strncmp(family_name, "Map_", 4) == 0) {
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, family_name);
+                                cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
+                                cc__sb_append_local(&out, &out_len, &out_cap, src + method_start, method_end - method_start);
+                                last_emit = method_end;
+                                i = method_end;
+                                changed = 1;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (src[i] == '.' || (i + 1 < n && src[i] == '-' && src[i + 1] == '>')) {
+            size_t sep_len = (src[i] == '.') ? 1 : 2;
+            size_t method_start = i + sep_len;
+            size_t method_end = method_start;
+            size_t recv_start = i;
+            const char* lowered_method = NULL;
+            while (method_start < n && isspace((unsigned char)src[method_start])) method_start++;
+            while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+            if (method_end > method_start && method_end < n && src[method_end] == '(' && reg) {
+                size_t recv_end = i;
+                char recv_expr[256];
+                char lowered[384];
+                int recv_is_ptr = 0;
+                const char* type_name;
+                while (recv_start > 0 && isspace((unsigned char)src[recv_start - 1])) recv_start--;
+                while (recv_start > 0) {
+                    char prev = src[recv_start - 1];
+                    if (cc_is_ident_char(prev) || prev == '&') {
+                        recv_start--;
+                        continue;
+                    }
+                    if (prev == '.') {
+                        recv_start--;
+                        while (recv_start > 0 && isspace((unsigned char)src[recv_start - 1])) recv_start--;
+                        continue;
+                    }
+                    if (recv_start >= 2 && src[recv_start - 1] == '>' && src[recv_start - 2] == '-') {
+                        recv_start -= 2;
+                        while (recv_start > 0 && isspace((unsigned char)src[recv_start - 1])) recv_start--;
+                        continue;
+                    }
+                    break;
+                }
+                while (recv_start < recv_end && isspace((unsigned char)src[recv_start])) recv_start++;
+                while (recv_end > recv_start && isspace((unsigned char)src[recv_end - 1])) recv_end--;
+                if (recv_end > recv_start && (recv_end - recv_start) < sizeof(recv_expr)) {
+                    memcpy(recv_expr, src + recv_start, recv_end - recv_start);
+                    recv_expr[recv_end - recv_start] = '\0';
+                    type_name = cc_type_registry_resolve_receiver_expr_at(
+                        reg, recv_expr, src, recv_start, &recv_is_ptr);
+                    if (type_name && strncmp(type_name, "CCResult_", 9) == 0) {
+                        char result_type_buf[256];
+                        const char* result_type_name =
+                            cc__normalize_bool_spelling_codegen(type_name, result_type_buf, sizeof(result_type_buf));
+                        size_t method_len = method_end - method_start;
+                        if (method_len == 5 && memcmp(src + method_start, "value", 5) == 0) lowered_method = "unwrap";
+                        else if (method_len == 5 && memcmp(src + method_start, "error", 5) == 0) lowered_method = "error";
+                        else if (method_len == 5 && memcmp(src + method_start, "is_ok", 5) == 0) lowered_method = "is_ok";
+                        else if (method_len == 6 && memcmp(src + method_start, "is_err", 6) == 0) lowered_method = "is_err";
+                        else if (method_len == 9 && memcmp(src + method_start, "unwrap_or", 9) == 0) lowered_method = "unwrap_or";
+                        if (lowered_method) {
+                            if (strcmp(lowered_method, "is_ok") == 0) {
+                                snprintf(lowered, sizeof(lowered), "cc_is_ok(%s", recv_expr);
+                            } else if (strcmp(lowered_method, "is_err") == 0) {
+                                snprintf(lowered, sizeof(lowered), "cc_is_err(%s", recv_expr);
+                            } else {
+                                snprintf(lowered, sizeof(lowered), "%s_%s(%s",
+                                         result_type_name, lowered_method, recv_expr);
+                            }
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, lowered);
+                            last_emit = method_end + 1;
+                            i = method_end + 1;
+                            changed = 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        i++;
+    }
+
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 /* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
                                             const char* input_path, CCSymbolTable* symbols) {
@@ -83,6 +583,7 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
     char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto(src, src_len, input_path);
     char* registered_create = NULL;
     char* family_rewritten = NULL;
+    char* reparse_clean = NULL;
     CCASTRoot* root = NULL;
     if (temp_reg) cc_type_registry_set_global(temp_reg);
     const char* pp_in = nursery_rewritten ? nursery_rewritten : src;
@@ -106,10 +607,16 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
         pp_in = family_rewritten;
         pp_in_len = strlen(family_rewritten);
     }
+    reparse_clean = cc__neutralize_comments_for_reparse(pp_in, pp_in_len);
+    if (reparse_clean) {
+        pp_in = reparse_clean;
+        pp_in_len = strlen(reparse_clean);
+    }
     char* pp_buf = cc_preprocess_to_string_ex(pp_in, pp_in_len, input_path, 1);
     if (nursery_rewritten) free(nursery_rewritten);
     if (registered_create) free(registered_create);
     if (family_rewritten) free(family_rewritten);
+    if (reparse_clean) free(reparse_clean);
     if (!pp_buf) goto done;
     {
         size_t st_len = 0;
@@ -1925,16 +2432,17 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     char* closure_defs = NULL;
     size_t closure_defs_len = 0;
 
-    /* UNIFIED Phase 3: Collect all AST-driven edits (UFCS, closure_calls, autoblock, await_normalize)
-       via CCEditBuffer, apply once. Replaces 4 sequential rewrite passes. */
+    /* Phase 3 currently uses coarse whole-file rewrites for several AST-driven
+       passes. Run them sequentially with reparsing between changed passes so
+       whole-file snapshots do not collide in the shared edit buffer. */
 #ifdef CC_TCC_EXT_AVAILABLE
     if (src_ufcs && root && root->nodes && root->node_count > 0 && ctx->symbols) {
+        const CCASTRoot* phase3_root = root;
+        CCASTRoot* phase3_owned_root = NULL;
+        int phase3_changed = 0;
         cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
-        CCEditBuffer eb;
-        cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
-        
-        /* Collect edits from all Phase 3 passes */
-        if (cc__collect_ufcs_edits(root, ctx, &eb) < 0) {
+        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                          src_all, cc__collect_ufcs_edits, &phase3_changed) < 0) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
             free(src_all);
@@ -1942,22 +2450,92 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             free(closure_defs);
             return EINVAL;
         }
-        cc__collect_closure_calls_edits(root, ctx, &eb);
-        cc__collect_autoblocking_edits(root, ctx, &eb);
-        cc__collect_await_normalize_edits(root, ctx, &eb);
-        
-        /* Apply all edits at once if any were collected */
-        if (eb.count > 0) {
-            size_t new_len = 0;
-            char* rewritten = cc_edit_buffer_apply(&eb, &new_len);
-            if (rewritten) {
+        if (phase3_changed) {
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            if (!phase3_owned_root) {
+                fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rewritten;
-                src_ufcs_len = new_len;
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
             }
+            phase3_root = phase3_owned_root;
         }
-        cc_edit_buffer_free(&eb);
-        
+        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                          src_all, cc__collect_closure_calls_edits, &phase3_changed) < 0) {
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (phase3_changed) {
+            if (getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP") && src_ufcs) {
+                const char* dump_path = getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP");
+                FILE* df = dump_path ? fopen(dump_path, "w") : NULL;
+                if (df) {
+                    fwrite(src_ufcs, 1, src_ufcs_len, df);
+                    fclose(df);
+                }
+            }
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            if (!phase3_owned_root) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            phase3_root = phase3_owned_root;
+        }
+        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                          src_all, cc__collect_autoblocking_edits, &phase3_changed) < 0) {
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (phase3_changed) {
+            if (getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP") && src_ufcs) {
+                const char* dump_path = getenv("CC_DEBUG_POST_AUTOBLOCK_DUMP");
+                FILE* df = dump_path ? fopen(dump_path, "w") : NULL;
+                if (df) {
+                    fwrite(src_ufcs, 1, src_ufcs_len, df);
+                    fclose(df);
+                }
+            }
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            if (!phase3_owned_root) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(src_all);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            phase3_root = phase3_owned_root;
+        }
+        if (cc__apply_coarse_codegen_pass(phase3_root, ctx, &src_ufcs, &src_ufcs_len,
+                                          src_all, cc__collect_await_normalize_edits, &phase3_changed) < 0) {
+            if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+            fclose(out);
+            if (src_ufcs != src_all) free(src_ufcs);
+            free(src_all);
+            free(closure_protos);
+            free(closure_defs);
+            return EINVAL;
+        }
+        if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
+
         /* Debug output for await rewrite */
         if (getenv("CC_DEBUG_AWAIT_REWRITE") && src_ufcs) {
             const char* needle = "@async int f";
@@ -2032,10 +2610,24 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             src_ufcs_len = strlen(src_ufcs);
         }
     }
+    /* Some concrete UFCS families are still parser-fragile in nested expression
+       contexts (for example Vec methods inside printf args, or CCFile/CCString
+       methods that TCC records inconsistently). Normalize those known-safe
+       receiver families before the reparse-driven AST passes so later stages see
+       stable lowered calls instead of relying on span matching. */
+    if (src_ufcs && ctx) {
+        char* rew = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
+        if (rew) {
+            if (src_ufcs != src_all) free(src_ufcs);
+            src_ufcs = rew;
+            src_ufcs_len = strlen(src_ufcs);
+        }
+    }
 
     /* Reparse the current TU source to get an up-to-date stub-AST for statement-level lowering.
        These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
+        cc__debug_dump_reparse_source("stage1_pre_stmt", src_ufcs, src_ufcs_len, ctx->input_path);
         CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (!root3) {
             fclose(out);
@@ -2101,6 +2693,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        IMPORTANT: run after statement-level lowering so closure rewrites are already reflected. */
     if (src_ufcs && ctx && ctx->symbols &&
         (strstr(src_ufcs, "@async") != NULL || strstr(src_ufcs, "await") != NULL)) {
+        cc__debug_dump_reparse_source("stage2_pre_async", src_ufcs, src_ufcs_len, ctx->input_path);
         CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
         if (getenv("CC_DEBUG_REPARSE")) {
             fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2 ? root2->node_count : -1);
@@ -2247,13 +2840,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
 
     /* Result type declarations are emitted later, after they're collected during
        cc__rewrite_result_types_text processing. */
-
-    /* Captures are lowered via __cc_closure_make_N factories. */
-    if (closure_protos && closure_protos_len > 0) {
-        fputs("/* --- CC closure forward decls --- */\n", out);
-        fwrite(closure_protos, 1, closure_protos_len, out);
-        fputs("/* --- end closure forward decls --- */\n\n", out);
-    }
 
     /* Preserve diagnostics mapping to the original input (repo-relative for readability). */
     {
@@ -2474,14 +3060,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
-        {
-            char* rew_family = cc_rewrite_generic_family_ufcs_parser_safe(src_ufcs, src_ufcs_len);
-            if (rew_family) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rew_family;
-                src_ufcs_len = strlen(src_ufcs);
-            }
-        }
+        /* Keep generic-family UFCS in source form here. The final AST-aware UFCS
+           pass has better receiver type information, while the older parser-safe
+           textual rewrite can leak parser-generic names like __cc_vec_generic_* into
+           emitted host C. */
         {
             char* rew_channel = cc_rewrite_channel_ufcs_concrete(src_ufcs, src_ufcs_len);
             if (rew_channel) {
@@ -2525,8 +3107,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            lowering). Reparse the current source and lower any remaining UFCS
            spans before emitting C. */
         if (ctx && ctx->symbols) {
+            CCTypeRegistry* saved_reg = cc_type_registry_get_global();
+            CCTypeRegistry* temp_reg = cc_type_registry_new();
+            cc__debug_dump_reparse_source("stage3_pre_final_ufcs", src_ufcs, src_ufcs_len, ctx->input_path);
             CCASTRoot* final_ufcs_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
             if (!final_ufcs_root) {
+                if (temp_reg) cc_type_registry_free(temp_reg);
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
                 free(closure_protos);
@@ -2534,11 +3120,16 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 return EINVAL;
             }
 
+            if (temp_reg) cc_type_registry_set_global(temp_reg);
             cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
             CCEditBuffer eb;
             cc_edit_buffer_init(&eb, src_ufcs, src_ufcs_len);
             if (cc__collect_ufcs_edits(final_ufcs_root, ctx, &eb) < 0) {
                 cc_tcc_bridge_free_ast(final_ufcs_root);
+                if (temp_reg) {
+                    cc_type_registry_set_global(saved_reg);
+                    cc_type_registry_free(temp_reg);
+                }
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
                 free(src_all);
@@ -2557,6 +3148,23 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
             cc_edit_buffer_free(&eb);
             cc_tcc_bridge_free_ast(final_ufcs_root);
+            if (temp_reg) {
+                cc_type_registry_set_global(saved_reg);
+                cc_type_registry_free(temp_reg);
+            }
+        }
+
+        /* Final concrete-family sweep: pointer-backed family types like Map_* can
+           still survive the AST UFCS pass in raw surface form (for example
+           `m.insert(...)` where `m` is already `Map_K_V*`). Normalize any
+           remaining concrete family UFCS before emitting host C. */
+        {
+            char* rewritten = cc_rewrite_generic_family_ufcs_concrete(src_ufcs, src_ufcs_len);
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = strlen(rewritten);
+            }
         }
 
         /* Insert result type declarations INTO the source at the right position.
@@ -2613,11 +3221,32 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = new_len;
             }
         }
+
+        {
+            char* rewritten = NULL;
+            CCTypeRegistry* saved_reg = cc_type_registry_get_global();
+            CCTypeRegistry* temp_reg = cc_type_registry_new();
+            if (temp_reg) {
+                cc_type_registry_set_global(temp_reg);
+                if (ctx && ctx->symbols) {
+                    cc__collect_registered_ufcs_var_types(ctx->symbols, src_ufcs, src_ufcs_len);
+                }
+            }
+            rewritten = cc__rewrite_parser_placeholder_ufcs_lowers(src_ufcs, src_ufcs_len);
+            if (temp_reg) {
+                cc_type_registry_set_global(saved_reg);
+                cc_type_registry_free(temp_reg);
+            }
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = strlen(rewritten);
+            }
+        }
         
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);
 
-        free(closure_protos);
         if (closure_defs && closure_defs_len > 0) {
             /* Run @defer lowering on closure definitions too (handles @defer inside spawn closures) */
             if (strstr(closure_defs, "@defer") != NULL || strstr(closure_defs, "cancel") != NULL) {
@@ -2631,14 +3260,9 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
             }
 
-            {
-                char* rewritten = cc_rewrite_generic_family_ufcs_parser_safe(closure_defs, closure_defs_len);
-                if (rewritten) {
-                    free(closure_defs);
-                    closure_defs = rewritten;
-                    closure_defs_len = strlen(rewritten);
-                }
-            }
+            /* Same rationale as the main source path above: leave family UFCS for the
+               final AST-aware rewrite instead of baking parser-safe generic names into
+               emitted closure definitions. */
             {
                 char* rewritten = cc_rewrite_channel_ufcs_concrete(closure_defs, closure_defs_len);
                 if (rewritten) {
@@ -2656,11 +3280,39 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     closure_defs_len = rewritten_len;
                 }
             }
+            {
+                char* rewritten = NULL;
+                CCTypeRegistry* saved_reg = cc_type_registry_get_global();
+                CCTypeRegistry* temp_reg = cc_type_registry_new();
+                if (temp_reg) {
+                    cc_type_registry_set_global(temp_reg);
+                    if (ctx && ctx->symbols) {
+                        cc__collect_registered_ufcs_var_types(ctx->symbols, closure_defs, closure_defs_len);
+                    }
+                }
+                rewritten = cc__rewrite_parser_placeholder_ufcs_lowers(closure_defs, closure_defs_len);
+                if (temp_reg) {
+                    cc_type_registry_set_global(saved_reg);
+                    cc_type_registry_free(temp_reg);
+                }
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
+            }
             
-            /* Emit closure definitions at end-of-file so global names are in scope. */
+            /* Emit closure declarations/definitions at end-of-file so all user
+               types are already in scope and exact signatures are valid. */
+            if (closure_protos && closure_protos_len > 0) {
+                fputs("\n/* --- CC closure declarations --- */\n", out);
+                fwrite(closure_protos, 1, closure_protos_len, out);
+                fputs("/* --- end closure declarations --- */\n", out);
+            }
             fputs("\n/* --- CC generated closures --- */\n", out);
             fwrite(closure_defs, 1, closure_defs_len, out);
         }
+        free(closure_protos);
         free(closure_defs);
         if (src_ufcs != src_all) free(src_ufcs);
         free(src_all);

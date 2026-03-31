@@ -1,0 +1,17 @@
+#ifndef AUTOBLOCK_HEADER_HELPER_CCH
+#define AUTOBLOCK_HEADER_HELPER_CCH
+
+#include <pthread.h>
+#include <stdint.h>
+
+typedef struct {
+    intptr_t tid;
+    int value;
+} HeaderPair;
+
+static HeaderPair header_make_pair(int value) {
+    HeaderPair p = { .tid = (intptr_t)pthread_self(), .value = value };
+    return p;
+}
+
+#endif

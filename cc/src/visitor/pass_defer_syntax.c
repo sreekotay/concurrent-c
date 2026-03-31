@@ -1150,8 +1150,8 @@ int cc__rewrite_defer_syntax(const CCVisitorCtx* ctx,
                                    "if (__cc_ret_set_%d) return __cc_retval_%d;\n",
                                    fn_scope.cleanup_label_id, fn_scope.cleanup_label_id);
                     cc_sb_append_fmt(&out, &outl, &outc,
-                                   "return (%s){0};\n",
-                                   fn_scope.return_type);
+                                   "return (__typeof__(__cc_retval_%d)){0};\n",
+                                   fn_scope.cleanup_label_id);
                 }
                 fn_scope.active = 0;
             } else if (defer_counts[d] > 0) {

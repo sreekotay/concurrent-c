@@ -453,12 +453,16 @@ static void cc_init_paths(const char* argv0) {
         snprintf(g_cc_runtime_c, sizeof(g_cc_runtime_c), "%s/cc/runtime/concurrent_c.c", g_repo_root);
     }
 
-    // Fingerprint the *real* compiler binary for cache keys. `./cc/bin/ccc` is a small wrapper script
-    // that often doesn't change when the compiler is rebuilt, while `./out/cc/bin/ccc` does.
-    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+    // Fingerprint the actual compiler binary for cache keys. In dev layout the canonical
+    // compiler now lives at `./cc/bin/ccc`, while `./out/cc/bin/ccc` is kept as a
+    // compatibility wrapper for older scripts.
+    snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/cc/bin/ccc", g_repo_root);
     if (!file_exists(g_ccc_sig_path)) {
-        strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
-        g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+        snprintf(g_ccc_sig_path, sizeof(g_ccc_sig_path), "%s/out/cc/bin/ccc", g_repo_root);
+        if (!file_exists(g_ccc_sig_path)) {
+            strncpy(g_ccc_sig_path, g_ccc_path, sizeof(g_ccc_sig_path));
+            g_ccc_sig_path[sizeof(g_ccc_sig_path) - 1] = '\0';
+        }
     }
     cc_set_out_dir(NULL, NULL);
 

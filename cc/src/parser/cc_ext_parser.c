@@ -156,21 +156,21 @@ static void cc_parse_closure_body_ex(int has_typed_params) {
         /* Skip body without type-checking - TCC doesn't know param types */
         cc_skip_closure_body(is_block);
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux2 |= (is_block ? 1 : 2);
+            int idx = tcc_state->cc_nodes ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
+            if (idx >= 0) tcc_state->cc_nodes[idx].aux2 |= (is_block ? 1 : 2);
         }
     } else if (is_block) {
         block(0);
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux2 |= 1; /* body is block */
+            int idx = tcc_state->cc_nodes ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
+            if (idx >= 0) tcc_state->cc_nodes[idx].aux2 |= 1; /* body is block */
         }
     } else {
         expr_eq();
         vpop();
         if (tcc_state && tcc_state->cc_nodes && tcc_state->cc_node_stack_top >= 0) {
-            int idx = tcc_state->cc_node_stack[tcc_state->cc_node_stack_top];
-            tcc_state->cc_nodes[idx].aux2 |= 2; /* body is expr */
+            int idx = tcc_state->cc_nodes ? tcc_state->cc_node_stack[tcc_state->cc_node_stack_top] : -1;
+            if (idx >= 0) tcc_state->cc_nodes[idx].aux2 |= 2; /* body is expr */
         }
     }
     

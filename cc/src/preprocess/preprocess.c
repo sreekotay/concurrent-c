@@ -2336,10 +2336,34 @@ static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) 
     out[len] = '\0';
 }
 
+static void cc__normalize_bool_family_type(char* type_name, size_t type_name_sz) {
+    if (!type_name || type_name_sz == 0 || !strstr(type_name, "_Bool")) return;
+    char tmp[256];
+    size_t out = 0;
+    for (size_t i = 0; type_name[i] && out + 1 < sizeof(tmp); ) {
+        if (strncmp(type_name + i, "_Bool", 5) == 0) {
+            if (out + 4 >= sizeof(tmp)) break;
+            memcpy(tmp + out, "bool", 4);
+            out += 4;
+            i += 5;
+            continue;
+        }
+        tmp[out++] = type_name[i++];
+    }
+    tmp[out] = '\0';
+    snprintf(type_name, type_name_sz, "%s", tmp);
+}
+
 static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* type_name) {
     const char* start;
     const char* end;
     const char* base_end;
+    const char* chan_l;
+    const char* chan_r;
+    const char* elem_s;
+    const char* elem_e;
+    int chan_is_tx = 0;
+    int chan_is_rx = 0;
     int ptr_count = 0;
     if (!out || out_sz == 0) return;
     out[0] = '\0';
@@ -2363,6 +2387,30 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         break;
     }
     while (base_end > start && (base_end[-1] == ' ' || base_end[-1] == '\t')) base_end--;
+    chan_l = memchr(start, '[', (size_t)(base_end - start));
+    if (chan_l) {
+        chan_r = memchr(chan_l, ']', (size_t)(base_end - chan_l));
+        if (chan_r && memchr(chan_l, '~', (size_t)(chan_r - chan_l)) != NULL) {
+            char mangled_elem[128];
+            if (memchr(chan_l, '>', (size_t)(chan_r - chan_l)) != NULL) chan_is_tx = 1;
+            if (memchr(chan_l, '<', (size_t)(chan_r - chan_l)) != NULL) chan_is_rx = 1;
+            if (chan_is_tx || chan_is_rx) {
+                elem_s = start;
+                elem_e = chan_l;
+                cc__trim_span_ws(&elem_s, &elem_e);
+                if (elem_e > elem_s) {
+                    cc__mangle_type_name(elem_s, (size_t)(elem_e - elem_s), mangled_elem, sizeof(mangled_elem));
+                    if (mangled_elem[0]) {
+                        snprintf(out, out_sz, "%s_%s%.*s",
+                                 chan_is_tx ? "CCChanTx" : "CCChanRx",
+                                 mangled_elem,
+                                 ptr_count, "********");
+                        return;
+                    }
+                }
+            }
+        }
+    }
     if ((size_t)(base_end - start) > 4 && memcmp(start, "Vec<", 4) == 0 && base_end[-1] == '>') {
         size_t inner_len = (size_t)(base_end - (start + 4) - 1);
         snprintf(out, out_sz, "__CC_VEC(%.*s)%.*s",
@@ -2496,6 +2544,25 @@ static void cc__parse_decl_name_and_type(const char* stmt,
     }
     if (!name_s || name_n == 0) return;
     {
+        const char* after = name_s + name_n;
+        const char* eq = NULL;
+        const char* lp = NULL;
+        for (const char* t = p; t < semi; ++t) {
+            if (*t == '=' && !eq) eq = t;
+            if (*t == '(' && !lp) lp = t;
+            if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) {
+                return;
+            }
+        }
+        while (after < semi && isspace((unsigned char)*after)) after++;
+        if (after >= semi || (*after != '=' && *after != ';' && *after != '[')) {
+            return;
+        }
+        if (lp && lp < name_s && (!eq || eq > lp)) {
+            return;
+        }
+    }
+    {
         const char* ty_s = p;
         const char* ty_e = name_s;
         while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
@@ -2511,6 +2578,88 @@ static void cc__parse_decl_name_and_type(const char* stmt,
         memcpy(out_name, name_s, name_n);
         out_name[name_n] = '\0';
     }
+}
+
+static int cc__is_non_decl_stmt_type_pre_ufcs(const char* type_name) {
+    return type_name &&
+           (strcmp(type_name, "return") == 0 ||
+            strcmp(type_name, "break") == 0 ||
+            strcmp(type_name, "continue") == 0 ||
+            strcmp(type_name, "goto") == 0 ||
+            strcmp(type_name, "case") == 0 ||
+            strcmp(type_name, "default") == 0);
+}
+
+static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
+                                                   size_t limit,
+                                                   const char* var_name,
+                                                   char* out_type,
+                                                   size_t out_type_sz) {
+    typedef struct {
+        int scope_id;
+        char type_name[256];
+    } LocalDecl;
+    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
+    LocalDecl decls[MAX_DECLS];
+    int decl_count = 0;
+    int scope_stack[MAX_SCOPES];
+    int scope_depth = 1;
+    int next_scope_id = 1;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    size_t stmt_start = 0;
+    size_t i = 0;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    scope_stack[0] = 0;
+    while (i < limit) {
+        char c = src[i];
+        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '{') {
+            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
+            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
+            if (scope_depth > 1) scope_depth--;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == ';') {
+            char decl_name[128];
+            char decl_type[256];
+            cc__parse_decl_name_and_type(src + stmt_start, src + i,
+                                         decl_name, sizeof(decl_name),
+                                         decl_type, sizeof(decl_type));
+            if (decl_name[0] &&
+                strcmp(decl_name, var_name) == 0 &&
+                !cc__is_non_decl_stmt_type_pre_ufcs(decl_type) &&
+                decl_count < MAX_DECLS) {
+                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
+                cc__normalize_ufcs_type_name(decls[decl_count].type_name,
+                                             sizeof(decls[decl_count].type_name),
+                                             decl_type);
+                decl_count++;
+            }
+            stmt_start = i + 1;
+        }
+        i++;
+    }
+    if (decl_count == 0) return NULL;
+    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
+    out_type[out_type_sz - 1] = '\0';
+    return out_type;
 }
 
 static void cc__collect_generic_ufcs_types(const char* src,
@@ -2557,6 +2706,9 @@ static void cc__collect_generic_ufcs_types(const char* src,
                                 cc__parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name), field_type, sizeof(field_type));
                                 if (field_name[0] && field_type[0]) {
                                     cc__record_ufcs_field(fields, field_count, field_cap, struct_name, field_name, field_type);
+                                    if (reg) {
+                                        cc_type_registry_add_field(reg, struct_name, field_name, field_type);
+                                    }
                                 }
                                 stmt = semi + 1;
                             }
@@ -2634,6 +2786,8 @@ static void cc__collect_generic_ufcs_types(const char* src,
 }
 
 static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
+                                                  const char* source_text,
+                                                  size_t use_offset,
                                                   const CCUfcsVarInfo* vars,
                                                   size_t var_count,
                                                   const CCUfcsFieldInfo* fields,
@@ -2642,11 +2796,13 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
                                                   size_t out_type_sz,
                                                   int* out_recv_is_ptr) {
     char expr[256];
+    char local_type[256];
     size_t len;
     char root[128];
     const char* p;
     const char* type_name;
     int recv_is_ptr = 0;
+    CCTypeRegistry* reg = cc_type_registry_get_global();
     if (!recv || !out_type || out_type_sz == 0) return 0;
     out_type[0] = '\0';
     if (out_recv_is_ptr) *out_recv_is_ptr = 0;
@@ -2671,7 +2827,15 @@ static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
         root[rn] = '\0';
         p += rn;
     }
-    type_name = cc__lookup_ufcs_var_type(vars, var_count, root);
+    type_name = NULL;
+    if (source_text) {
+        type_name = cc__lookup_scoped_ufcs_var_type(source_text, use_offset, root,
+                                                    local_type, sizeof(local_type));
+    }
+    if (!type_name && reg) {
+        type_name = cc_type_registry_resolve_receiver_expr_at(reg, recv, source_text, use_offset, &recv_is_ptr);
+    }
+    if (!type_name) type_name = cc__lookup_ufcs_var_type(vars, var_count, root);
     if (!type_name) return 0;
     strncpy(out_type, type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
@@ -2746,10 +2910,13 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         char recv_type_base[256];
         int recv_is_ptr = 0;
         int family_by_value = 0;
+        int family_pass_direct = 0;
         int parser_vec = 0;
         int parser_map = 0;
         int command_like = 0;
         int file_like = 0;
+        int string_like = 0;
+        int nursery_like = 0;
         int chan_tx = 0;
         int chan_rx = 0;
         const char* channel_callee = NULL;
@@ -2783,20 +2950,24 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             memcpy(recv_expr, recv_s, (size_t)(recv_e - recv_s));
             recv_expr[recv_e - recv_s] = '\0';
         }
-        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, vars, var_count, fields, field_count,
+        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
+                                                    vars, var_count, fields, field_count,
                                                     recv_type, sizeof(recv_type), &recv_is_ptr)) {
             i++;
             continue;
         }
         cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
+        cc__normalize_bool_family_type(recv_type_base, sizeof(recv_type_base));
         parser_vec = cc__type_is_parser_vec(recv_type_base);
         parser_map = cc__type_is_parser_map(recv_type_base);
-        command_like = parser_safe &&
-                       (strcmp(recv_type_base, "CCCommand") == 0 ||
+        command_like = (strcmp(recv_type_base, "CCCommand") == 0 ||
                         strcmp(recv_type_base, "CCCommand*") == 0);
-        file_like = parser_safe &&
-                    (strcmp(recv_type_base, "CCFile") == 0 ||
+        file_like = (strcmp(recv_type_base, "CCFile") == 0 ||
                      strcmp(recv_type_base, "CCFile*") == 0);
+        string_like = (strcmp(recv_type_base, "CCString") == 0 ||
+                       strcmp(recv_type_base, "CCString*") == 0);
+        nursery_like = (strcmp(recv_type_base, "CCNursery") == 0 ||
+                        strcmp(recv_type_base, "CCNursery*") == 0);
         chan_tx = (strncmp(recv_type_base, "CCChanTx_", 9) == 0 ||
                    strcmp(recv_type_base, "CCChanTx") == 0 ||
                    strcmp(recv_type_base, "CCChanTx*") == 0);
@@ -2805,7 +2976,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                    strcmp(recv_type_base, "CCChanRx*") == 0);
         if (!(strncmp(recv_type_base, "Vec_", 4) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
-              parser_vec || parser_map || command_like || file_like ||
+              parser_vec || parser_map || command_like || file_like || string_like || nursery_like ||
               chan_tx || chan_rx ||
               strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
@@ -2816,25 +2987,27 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             i++;
             continue;
         }
+        if (nursery_like) {
+            if (!(strcmp(method_name, "wait") == 0 ||
+                  strcmp(method_name, "free") == 0 ||
+                  strcmp(method_name, "cancel") == 0 ||
+                  strcmp(method_name, "destroy") == 0 ||
+                  strcmp(method_name, "close_on") == 0)) {
+                i++;
+                continue;
+            }
+            if (strcmp(method_name, "close_on") == 0) {
+                strcpy(method_name, "add_closing_tx");
+            }
+        }
         if (chan_tx || chan_rx) {
             /* Channel UFCS now stays alive for the parser/TCC + later type-owned path. */
             i++;
             continue;
         }
-        if (parser_safe && (parser_vec || parser_map) &&
-            !(strcmp(method_name, "push") == 0 ||
-              strcmp(method_name, "insert") == 0 ||
-              strcmp(method_name, "get") == 0 ||
-              strcmp(method_name, "pop") == 0 ||
-              strcmp(method_name, "get_ptr") == 0 ||
-              strcmp(method_name, "len") == 0 ||
-              strcmp(method_name, "remove") == 0)) {
-            i++;
-            continue;
-        }
-        family_by_value = (strncmp(recv_type_base, "Map_", 4) == 0 ||
-                           strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
+        family_by_value = (strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
                            strncmp(recv_type_base, "CCResult_", 9) == 0);
+        family_pass_direct = parser_map || (strncmp(recv_type_base, "Map_", 4) == 0);
         if (strncmp(recv_type_base, "CCResult_", 9) == 0) {
             if (!(strcmp(method_name, "value") == 0 ||
                   strcmp(method_name, "error") == 0 ||
@@ -2853,7 +3026,12 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
         {
             char concrete_type[256];
+            int is_result_bool_method = 0;
             concrete_type[0] = '\0';
+            if (strncmp(recv_type_base, "CCResult_", 9) == 0 &&
+                (strcmp(method_name, "is_ok") == 0 || strcmp(method_name, "is_err") == 0)) {
+                is_result_bool_method = 1;
+            }
             if (parser_vec || parser_map) {
                 const char* lp = strchr(recv_type_base, '(');
                 const char* rp = lp ? strrchr(recv_type_base, ')') : NULL;
@@ -2891,7 +3069,10 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                     }
                 }
             }
-            if (channel_callee) {
+            if (is_result_bool_method) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap,
+                                  strcmp(method_name, "is_ok") == 0 ? "cc_is_ok" : "cc_is_err");
+            } else if (channel_callee) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, channel_callee);
             } else if (concrete_type[0]) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, concrete_type);
@@ -2909,6 +3090,14 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             } else if (file_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_file_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else if (string_like) {
+                const char* string_method = method_name;
+                if (strcmp(method_name, "append") == 0) string_method = "push";
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_string_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, string_method);
+            } else if (nursery_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, recv_type_base);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "_");
@@ -2916,7 +3105,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             }
         }
         cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
-        if (channel_callee || family_by_value || recv_is_ptr) {
+        if (channel_callee || family_by_value || family_pass_direct || nursery_like || recv_is_ptr) {
             cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
         } else {
             cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
@@ -3010,7 +3199,8 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
         paren_pos = cc_skip_ws_and_comments(src, n, method_end);
         if (paren_pos >= n || src[paren_pos] != '(') { i = recv_end; continue; }
         if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i = recv_end; continue; }
-        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, vars, var_count, fields, field_count,
+        if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
+                                                    vars, var_count, fields, field_count,
                                                     recv_type, sizeof(recv_type), &recv_is_ptr)) {
             i = recv_end;
             continue;
@@ -3472,17 +3662,17 @@ static char* cc__rewrite_result_constructors(const char* src, size_t n) {
             size_t call_end = k + 1;
             
             /* Emit everything up to function name.
-               Use comma expression: ((void)(arg), (__CCResultGeneric){.ok=1/0})
-               This evaluates the arg (so it appears in TCC's AST for codegen to find)
-               while returning the generic stub type. Visitor pass will rewrite output. */
+               Route through the parser-mode helper macros so TCC sees the value/error
+               expression in the AST, but we avoid spelling a raw generic compound
+               literal inline in control-flow contexts like `return ...;` inside switch. */
             cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-            cc_sb_append_cstr(&out, &out_len, &out_cap, "((void)(");
-            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
             if (is_ok) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "), ((__CCResultGeneric){.ok = 1}))");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_OK(0, 0, ");
             } else {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "), ((__CCResultGeneric){.ok = 0}))");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_RESULT_ERR(0, 0, ");
             }
+            cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
             last_emit = call_end;
             i = call_end;
             continue;
@@ -6339,8 +6529,8 @@ static const char* cc__parse_stubs =
        cccn handles the real types in codegen. */
     "#ifndef __CC_RESULT_CTORS_DEFINED\n"
     "#define __CC_RESULT_CTORS_DEFINED\n"
-    "#define cc_ok(v) ((void)(v), (__CCResultGeneric){.ok = 1})\n"
-    "#define cc_err(...) ((__CCResultGeneric){.ok = 0})\n"
+    "#define cc_ok(v) __cc_result_generic_ok()\n"
+    "#define cc_err(...) __cc_result_generic_err()\n"
     "#endif\n"
     /* Optional constructors - same approach */
     "#ifndef __CC_OPT_CTORS_DEFINED\n"
