@@ -1397,8 +1397,9 @@ static int cc__param_is_const_ptr(const char* ty) {
     return 1;
 }
 
-/* Check if a type string represents a safe wrapper that allows mutation in reference captures.
-   Safe wrappers: @atomic T, Atomic<T>, Mutex<T>, CCChan*, CCChanTx, CCChanRx */
+/* Check if a type string represents a safe wrapper that allows mutation in
+   reference captures. Safe wrappers: @atomic T, Atomic<T>, cc_atomic_*,
+   Mutex<T>, CCChan*, CCChanTx, CCChanRx. */
 static int cc__is_safe_wrapper_type(const char* ty) {
     if (!ty) return 0;
     /* Skip leading whitespace */
@@ -1407,6 +1408,9 @@ static int cc__is_safe_wrapper_type(const char* ty) {
     if (strncmp(ty, "@atomic", 7) == 0 && (ty[7] == ' ' || ty[7] == '\t' || ty[7] == '\0')) return 1;
     /* Atomic<T> */
     if (strncmp(ty, "Atomic<", 7) == 0) return 1;
+    /* Concrete C atomic typedefs from cc_atomic.cch */
+    if (strncmp(ty, "cc_atomic_", 10) == 0) return 1;
+    if (strncmp(ty, "_Atomic ", 8) == 0 || strncmp(ty, "_Atomic(", 8) == 0) return 1;
     /* Mutex<T> */
     if (strncmp(ty, "Mutex<", 6) == 0) return 1;
     /* CCChan* */

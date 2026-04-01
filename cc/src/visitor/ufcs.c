@@ -85,6 +85,186 @@ static int is_addr_of_ident(const char* s) {
     return is_ident_only(s);
 }
 
+static void cc__ufcs_trim_type_span(const char** start, const char** end) {
+    while (*start < *end && isspace((unsigned char)**start)) (*start)++;
+    while (*end > *start && isspace((unsigned char)(*end)[-1])) (*end)--;
+}
+
+static void cc__ufcs_normalize_decl_type(char* out, size_t out_sz, const char* type_name) {
+    const char* bang;
+    const char* ok_s;
+    const char* ok_e;
+    const char* err_s;
+    const char* err_e;
+    char mangled_ok[128];
+    char mangled_err[128];
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name || !type_name[0]) return;
+    bang = strchr(type_name, '!');
+    if (!bang || bang[1] == '=') {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    ok_s = type_name;
+    ok_e = bang;
+    cc__ufcs_trim_type_span(&ok_s, &ok_e);
+    err_s = bang + 1;
+    while (*err_s == ' ' || *err_s == '\t') err_s++;
+    if (*err_s == '>') {
+        err_s++;
+        while (*err_s == ' ' || *err_s == '\t') err_s++;
+        if (*err_s == '(') {
+            err_s++;
+            err_e = strchr(err_s, ')');
+            if (!err_e) err_e = err_s + strlen(err_s);
+        } else {
+            err_e = err_s + strlen(err_s);
+        }
+    } else {
+        err_e = err_s;
+        while (*err_e && is_ident_char(*err_e)) err_e++;
+    }
+    cc__ufcs_trim_type_span(&err_s, &err_e);
+    if (ok_e <= ok_s || err_e <= err_s) {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_ok, sizeof(mangled_ok));
+    cc_result_spec_mangle_type(err_s, (size_t)(err_e - err_s), mangled_err, sizeof(mangled_err));
+    if (!mangled_ok[0] || !mangled_err[0]) {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    snprintf(out, out_sz, "CCResult_%s_%s", mangled_ok, mangled_err);
+}
+
+static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
+                                                         size_t limit,
+                                                         const char* recv_expr,
+                                                         char* out_type,
+                                                         size_t out_type_sz) {
+    typedef struct {
+        int scope_id;
+        char type_name[256];
+    } LocalDecl;
+    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
+    LocalDecl decls[MAX_DECLS];
+    int decl_count = 0;
+    int scope_stack[MAX_SCOPES];
+    int scope_depth = 1;
+    int next_scope_id = 1;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    size_t stmt_start = 0;
+    size_t i = 0;
+    const char* name = recv_expr;
+    char root[128];
+    if (!src || !recv_expr || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    name = skip_ws(name);
+    if (*name == '&') {
+        name++;
+        name = skip_ws(name);
+    }
+    if (!is_ident_only(name)) return NULL;
+    if (strlen(name) >= sizeof(root)) return NULL;
+    strcpy(root, name);
+    scope_stack[0] = 0;
+    while (i < limit) {
+        char c = src[i];
+        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '{') {
+            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
+            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
+            if (scope_depth > 1) scope_depth--;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == ';') {
+            char decl_name[128];
+            char decl_type[256];
+            const char* p = src + stmt_start;
+            const char* semi = src + i;
+            const char* name_s = NULL;
+            size_t name_n = 0;
+            const char* cur = p;
+            while (p < semi && isspace((unsigned char)*p)) p++;
+            while (cur < semi) {
+                if (*cur == '"' || *cur == '\'') {
+                    char q = *cur++;
+                    while (cur < semi) {
+                        if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                        if (*cur == q) { cur++; break; }
+                        cur++;
+                    }
+                    continue;
+                }
+                if (*cur == '=' || *cur == ';') break;
+                if (!is_ident_start(*cur)) { cur++; continue; }
+                name_s = cur++;
+                while (cur < semi && is_ident_char(*cur)) cur++;
+                name_n = (size_t)(cur - name_s);
+            }
+            decl_name[0] = '\0';
+            decl_type[0] = '\0';
+            if (name_s && name_n > 0) {
+                const char* ty_s = p;
+                const char* ty_e = name_s;
+                while (ty_s < ty_e && isspace((unsigned char)*ty_s)) ty_s++;
+                while (ty_e > ty_s && isspace((unsigned char)ty_e[-1])) ty_e--;
+                if (ty_e > ty_s) {
+                    size_t type_len = (size_t)(ty_e - ty_s);
+                    if (type_len >= sizeof(decl_type)) type_len = sizeof(decl_type) - 1;
+                    memcpy(decl_type, ty_s, type_len);
+                    decl_type[type_len] = '\0';
+                    if (name_n >= sizeof(decl_name)) name_n = sizeof(decl_name) - 1;
+                    memcpy(decl_name, name_s, name_n);
+                    decl_name[name_n] = '\0';
+                }
+            }
+            if (decl_name[0] &&
+                strcmp(decl_name, root) == 0 &&
+                strcmp(decl_type, "return") != 0 &&
+                strcmp(decl_type, "break") != 0 &&
+                strcmp(decl_type, "continue") != 0 &&
+                strcmp(decl_type, "goto") != 0 &&
+                strcmp(decl_type, "case") != 0 &&
+                strcmp(decl_type, "default") != 0 &&
+                decl_count < MAX_DECLS) {
+                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
+                cc__ufcs_normalize_decl_type(decls[decl_count].type_name,
+                                             sizeof(decls[decl_count].type_name),
+                                             decl_type);
+                decl_count++;
+            }
+            stmt_start = i + 1;
+        }
+        i++;
+    }
+    if (decl_count == 0) return NULL;
+    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
+    out_type[out_type_sz - 1] = '\0';
+    return out_type;
+}
+
 static int cc__skip_balanced_suffix(const char** pp, char open, char close) {
     const char* p = *pp;
     int depth = 1;
@@ -589,6 +769,7 @@ static int cc__emit_registered_callable(char* out,
 static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     const char* reg_type_name = NULL;
+    char local_type_buf[256];
     int reg_recv_is_ptr = 0;
     int recv_is_member_chain = 0;
     if (!ctx) return;
@@ -599,10 +780,19 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     ctx->recv_type_name = g_ufcs_recv_type;
     recv_is_member_chain = recv && (strstr(recv, ".") != NULL || strstr(recv, "->") != NULL);
     if (reg) {
-        if (g_ufcs_source_text) {
+        if (g_ufcs_source_text && (is_ident_only(recv) || is_addr_of_ident(recv))) {
+            const char* local_type_name = cc__ufcs_lookup_scoped_local_var_type(
+                g_ufcs_source_text, g_ufcs_source_offset, recv, local_type_buf, sizeof(local_type_buf));
+            if (local_type_name &&
+                (strncmp(local_type_name, "CCResult_", 9) == 0 ||
+                 strncmp(local_type_name, "CCOptional_", 11) == 0)) {
+                reg_type_name = local_type_name;
+            }
+        }
+        if (!reg_type_name && g_ufcs_source_text) {
             reg_type_name = cc_type_registry_resolve_receiver_expr_at(
                 reg, recv, g_ufcs_source_text, g_ufcs_source_offset, &reg_recv_is_ptr);
-        } else {
+        } else if (!reg_type_name) {
             reg_type_name = cc_type_registry_resolve_receiver_expr(reg, recv, &reg_recv_is_ptr);
         }
         if ((recv_is_member_chain && reg_type_name && reg_type_name[0]) ||
