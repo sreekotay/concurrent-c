@@ -57,6 +57,12 @@ void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeou
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg);
 // Spawn a CCClosure0 (env freed via drop, if provided). Returns 0 on success.
 int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c);
+// Spawn an existing async task under nursery ownership without blocking a worker.
+#if defined(CC_PARSER_MODE)
+#define cc_nursery_spawn_async(n, task_expr) (0)
+#else
+int cc_nursery_spawn_async(CCNursery* n, CCTask task);
+#endif
 // Lowered helpers for future explicit nursery-handle syntax:
 // create a child nursery, spawn the root closure into it, and return the child handle.
 CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c);

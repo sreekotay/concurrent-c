@@ -46,6 +46,13 @@ CCChan* cc_channel_pair(CCChanTx* tx, CCChanRx* rx);
 #define cc_cancel() cc_cancel_current()
 #define cc_is_cancelled() cc_is_cancelled_current()
 
+/* Narrow deadlock-detector suppression for the current dynamic scope.
+   Intended for cases like an intentional parked wait at the edge of the system.
+   Use with `@defer cc_deadlock_suppress_leave();` to keep suppression lexical. */
+void cc_deadlock_suppress_enter(void);
+void cc_deadlock_suppress_leave(void);
+int cc_deadlock_suppressed(void);
+
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;
 /* CCTask is now defined in <ccc/std/task.cch> as a value type */

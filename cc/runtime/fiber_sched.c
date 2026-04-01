@@ -26,6 +26,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,11 @@
 
 /* TSan annotations for synchronization and fiber context switching */
 #include "tsan_helpers.h"
+
+/* Implemented in channel.c; used by deadlock diagnostics to snapshot parked
+ * channel state without reaching into channel internals from this file. */
+void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
+int cc__chan_debug_req_wake_match(void* ch_obj);
 
 /* High-frequency replacement probe counters are useful for deep diagnosis but
 * expensive/noisy in hot loops. Keep them compile-time gated for quick A/B runs.
@@ -135,6 +141,7 @@ static _Atomic uint64_t g_cc_join_park_loops = 0;
 static _Atomic uint64_t g_cc_join_help_attempts = 0;  /* help-first steal attempts */
 static _Atomic uint64_t g_cc_join_help_hits = 0;      /* help-first steal successes */
 static _Atomic size_t g_total_timed_parked = 0;
+static _Atomic size_t g_deadlock_suppressed_timed_parked = 0;
 static _Atomic int g_cc_join_help_mode = -1;          /* -1 unknown, 0 off, 1 on */
 
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
@@ -206,6 +213,7 @@ struct fiber_task;
 struct fiber_task* cc_sched_worker_next(void);
 struct fiber_task* cc_sched_worker_idle_probe(void);
 #endif
+void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
 
 /* ============================================================================
 * Spin-then-condvar constants
@@ -393,6 +401,9 @@ typedef struct fiber_task {
     _Atomic int timed_park_registered;   /* Timer wait is visible to the timer queue */
     _Atomic int timed_park_fired;        /* Timer path woke this fiber */
     CCNursery* saved_nursery;       /* Nursery context saved across fiber migrations */
+    unsigned deadlock_suppress_depth; /* Local deadlock-suppression scope carried across yields */
+    unsigned external_wait;         /* Parked on external progress (e.g. socket readiness) */
+    unsigned external_wait_parked;  /* This park instance contributed to g_external_wait_parked */
     CCNursery* admission_nursery;   /* Admission boundary checked on first entry */
     
     /* Debug: track who last enqueued this fiber */
@@ -411,6 +422,10 @@ typedef struct {
     fiber_task* fiber;
     uint64_t generation;
 } runnable_ref;
+
+static inline int cc__fiber_deadlock_suppressed(const fiber_task* f) {
+    return f && f->deadlock_suppress_depth > 0;
+}
 
 typedef struct {
     fiber_task* _Atomic fiber;
@@ -1076,6 +1091,9 @@ static size_t tpq_drain(void) {
                 atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
                 atomic_store_explicit(&f->timed_park_fired, 1, memory_order_release);
                 atomic_fetch_sub_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
+                if (cc__fiber_deadlock_suppressed(f)) {
+                    atomic_fetch_sub_explicit(&g_deadlock_suppressed_timed_parked, 1, memory_order_relaxed);
+                }
                 woken++;
             }
         } else {
@@ -1248,6 +1266,7 @@ typedef struct {
     
     /* Global parked-fiber count for deadlock detection (lightweight, always maintained). */
     _Atomic size_t total_parked;
+    _Atomic size_t deadlock_suppressed_parked;
 
     /* Per-worker parked counts — diagnostic only, updated only when gap-stats enabled. */
     _Atomic size_t* worker_parked;
@@ -1297,6 +1316,7 @@ enum {
 static _Atomic int g_initialized = 0;
 static _Atomic int g_deadlock_reported = 0;
 static _Atomic uint64_t g_deadlock_first_seen = 0;  /* Timestamp when deadlock state first seen */
+static _Atomic size_t g_external_wait_parked = 0;
 static _Atomic size_t g_requested_workers = 0;  /* User-requested worker count (0 = auto) */
 static _Atomic int g_cc_v3_pressure_stats_atexit = 0;
 static _Atomic int g_sharded_runq_mode = -1; /* -1 unknown, 0 off, 1 on */
@@ -1557,16 +1577,82 @@ static fiber_task* g_all_fibers_head = NULL;
 static _Atomic size_t g_fibers_spawned = 0;  /* Total fibers ever created */
 
 static void all_fibers_track(fiber_task* f) {
-    (void)f;
+    if (!f) return;
+    pthread_mutex_lock(&g_all_fibers_mu);
+    f->debug_next = g_all_fibers_head;
+    g_all_fibers_head = f;
+    pthread_mutex_unlock(&g_all_fibers_mu);
 }
 
 static inline size_t get_total_parked(void) {
     return atomic_load_explicit(&g_sched.total_parked, memory_order_relaxed);
 }
 
+static inline size_t get_total_deadlock_suppressed_parked(void) {
+    return atomic_load_explicit(&g_sched.deadlock_suppressed_parked, memory_order_relaxed);
+}
 
 static inline size_t get_total_timed_parked(void) {
     return atomic_load_explicit(&g_total_timed_parked, memory_order_relaxed);
+}
+
+static inline size_t get_total_deadlock_suppressed_timed_parked(void) {
+    return atomic_load_explicit(&g_deadlock_suppressed_timed_parked, memory_order_relaxed);
+}
+
+static void cc__fiber_dump_parked_channel_state(const fiber_task* f) {
+    if (!f || !f->park_reason || !f->park_obj) return;
+    if (strncmp(f->park_reason, "chan_", 5) != 0) return;
+
+    int control = (int)atomic_load_explicit(&f->control, memory_order_acquire);
+    int pending_unpark = atomic_load_explicit(&f->pending_unpark, memory_order_relaxed);
+
+    fprintf(stderr,
+            "    fiber state: control=%d pending_unpark=%d\n",
+            control,
+            pending_unpark);
+    cc__chan_debug_dump_state(f->park_obj, "    chan state: ");
+}
+
+static void cc__fiber_dump_parked_fibers(void) {
+    size_t shown = 0;
+    size_t parked_total = 0;
+    size_t internal_total = 0;
+    pthread_mutex_lock(&g_all_fibers_mu);
+    for (fiber_task* f = g_all_fibers_head; f; f = f->debug_next) {
+        int64_t control = atomic_load_explicit(&f->control, memory_order_acquire);
+        if (control != CTRL_PARKED) continue;
+        parked_total++;
+        if (f->external_wait_parked || cc__fiber_deadlock_suppressed(f)) continue;
+        internal_total++;
+        if (shown < 8) {
+            fprintf(stderr,
+                    "  parked fiber id=%llu reason=%s where=%s:%d obj=%p external=%u suppressed=%u pending_unpark=%d control=%lld\n",
+                    (unsigned long long)f->fiber_id,
+                    f->park_reason ? f->park_reason : "unknown",
+                    f->park_file ? f->park_file : "?",
+                    f->park_line,
+                    f->park_obj,
+                    (unsigned)f->external_wait_parked,
+                    (unsigned)cc__fiber_deadlock_suppressed(f),
+                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed),
+                    (long long)control);
+            cc__fiber_dump_parked_channel_state(f);
+            shown++;
+        }
+    }
+    pthread_mutex_unlock(&g_all_fibers_mu);
+    if (parked_total == 0) {
+        fprintf(stderr, "  parked fibers: none visible in debug list\n");
+        return;
+    }
+    if (internal_total == 0) {
+        fprintf(stderr, "  parked fibers: no internal parked fibers visible\n");
+        return;
+    }
+    if (internal_total > shown) {
+        fprintf(stderr, "  ... %zu more internal parked fibers not shown\n", internal_total - shown);
+    }
 }
 
 
@@ -1588,14 +1674,23 @@ static void cc__fiber_check_deadlock(void) {
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
     size_t blocked = atomic_load_explicit(&g_sched.blocked_threads, memory_order_acquire);
     size_t parked = get_total_parked();
+    size_t suppressed_parked = get_total_deadlock_suppressed_parked();
     size_t timed_parked = get_total_timed_parked();
-    size_t deadlock_parked = (parked > timed_parked) ? (parked - timed_parked) : 0;
+    size_t suppressed_timed_parked = get_total_deadlock_suppressed_timed_parked();
+    size_t unsuppressed_parked = (parked > suppressed_parked) ? (parked - suppressed_parked) : 0;
+    size_t unsuppressed_timed_parked =
+        (timed_parked > suppressed_timed_parked) ? (timed_parked - suppressed_timed_parked) : 0;
+    size_t deadlock_parked =
+        (unsuppressed_parked > unsuppressed_timed_parked) ? (unsuppressed_parked - unsuppressed_timed_parked) : 0;
+    size_t external_wait_parked = atomic_load_explicit(&g_external_wait_parked, memory_order_relaxed);
+    size_t internal_deadlock_parked =
+        (deadlock_parked > external_wait_parked) ? (deadlock_parked - external_wait_parked) : 0;
     size_t temp_workers = atomic_load_explicit(&g_sched.temp_worker_count, memory_order_acquire);
     size_t total_workers = g_sched.num_workers + temp_workers;
     
     /* Potential deadlock: all workers unavailable + parked fibers waiting */
     size_t unavailable = sleeping + blocked;
-    if (unavailable >= total_workers && deadlock_parked > 0) {
+    if (unavailable >= total_workers && internal_deadlock_parked > 0) {
         uint64_t now = cc__monotonic_ms();
         uint64_t first = atomic_load(&g_deadlock_first_seen);
         
@@ -1622,9 +1717,19 @@ static void cc__fiber_check_deadlock(void) {
                     parked, (size_t)atomic_load(&g_sched.completed),
                     (size_t)atomic_load_explicit(&g_fibers_spawned, memory_order_relaxed),
                     (size_t)atomic_load_explicit(&g_sched.pending, memory_order_relaxed));
+            if (suppressed_parked > 0) {
+                fprintf(stderr, "  Ignored: %zu parked waits are inside deadlock-suppressed scopes\n",
+                        suppressed_parked);
+            }
             if (timed_parked > 0) {
                 fprintf(stderr, "  Timers:  %zu parked waits still have deadline wakeups\n", timed_parked);
             }
+            if (external_wait_parked > 0) {
+                fprintf(stderr, "  I/O waits: %zu parked waits are awaiting external progress\n",
+                        external_wait_parked);
+            }
+            fprintf(stderr, "  Internal parked fibers:\n");
+            cc__fiber_dump_parked_fibers();
             fprintf(stderr, "\n");
             cc__fiber_dump_queue_state();
             fprintf(stderr, "\n");
@@ -1658,9 +1763,17 @@ static void cc__fiber_check_deadlock(void) {
 
 /* Per-worker thread-local state */
 static __thread fiber_task* tls_current_fiber = NULL;
+static __thread unsigned tls_deadlock_suppress_depth = 0;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
 static _Atomic size_t g_spawn_counter = 0;
 static const uint64_t cc_orphan_threshold_cycles_hint = 3000000ULL;
+
+static inline int cc__req_wake_trace_fiber(const fiber_task* f) {
+    return f &&
+           f->park_reason &&
+           strcmp(f->park_reason, "chan_recv_wait_empty") == 0 &&
+           cc__chan_debug_req_wake_match(f->park_obj);
+}
 
 /* Spawn-pair grouping: when a base worker routes a fiber to a remote inbox,
 * remember the target so the NEXT inbox-bound spawn from the same calling
@@ -1799,6 +1912,25 @@ void cc__deadlock_thread_block(void) {
 void cc__deadlock_thread_unblock(void) {
     if (tls_worker_id < 0) return;  /* Not a fiber worker thread */
     atomic_fetch_sub_explicit(&g_sched.blocked_threads, 1, memory_order_relaxed);
+}
+
+void cc_deadlock_suppress_enter(void) {
+    if (tls_deadlock_suppress_depth < UINT32_MAX) tls_deadlock_suppress_depth++;
+    if (tls_current_fiber) {
+        tls_current_fiber->deadlock_suppress_depth = tls_deadlock_suppress_depth;
+    }
+}
+
+void cc_deadlock_suppress_leave(void) {
+    if (tls_deadlock_suppress_depth == 0) return;
+    tls_deadlock_suppress_depth--;
+    if (tls_current_fiber) {
+        tls_current_fiber->deadlock_suppress_depth = tls_deadlock_suppress_depth;
+    }
+}
+
+int cc_deadlock_suppressed(void) {
+    return tls_deadlock_suppress_depth > 0;
 }
 
 /* Fast local queue push (single producer) */
@@ -2219,6 +2351,9 @@ static fiber_task* fiber_alloc(void) {
             f->timed_park_requested = 0;
             f->timer_next = NULL;
             f->saved_nursery = NULL;
+            f->deadlock_suppress_depth = 0;
+            f->external_wait = 0;
+            f->external_wait_parked = 0;
             f->admission_nursery = NULL;
             f->next = NULL;
             /* f->coro and f->fiber_id are kept for reuse! */
@@ -2250,6 +2385,9 @@ static fiber_task* fiber_alloc(void) {
         nf->spawn_global_pop_valid = 0;
         nf->spawn_publish_valid = 0;
         nf->saved_nursery = NULL;
+        nf->deadlock_suppress_depth = 0;
+        nf->external_wait = 0;
+        nf->external_wait_parked = 0;
         nf->admission_nursery = NULL;
     }
     return nf;
@@ -2992,6 +3130,16 @@ static inline int worker_run_fiber(runnable_ref ref) {
                                                 memory_order_acquire)) {
         return 0;  /* Stale/duplicate queue entry */
     }
+    if (cc__req_wake_trace_fiber(f)) {
+        fprintf(stderr,
+                "CC_REQ_WAKE_RUN: start fiber=%lu worker=%d obj=%p enqueue_src=%d enqueue_ctrl=%lld pending=%d\n",
+                (unsigned long)f->fiber_id,
+                wid,
+                f->park_obj,
+                f->enqueue_src,
+                (long long)f->enqueue_ctrl,
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+    }
     cc_v3_assert_control_is(f, owned, "RUNNABLE->RUNNING");
     tls_current_fiber = f;
     /* Only base workers should refresh run affinity. Replacement/timer workers
@@ -3007,10 +3155,25 @@ static inline int worker_run_fiber(runnable_ref ref) {
     * different OS thread (e.g. a replacement or timer-service worker).
     * Save the previous value so we can restore it after the fiber yields. */
     CCNursery* prev_nursery = cc__tls_current_nursery;
+    unsigned prev_deadlock_suppress_depth = tls_deadlock_suppress_depth;
     cc__tls_current_nursery = f->saved_nursery;
+    tls_deadlock_suppress_depth = f->deadlock_suppress_depth;
     fiber_resume(f);
+    if (cc__req_wake_trace_fiber(f)) {
+        fprintf(stderr,
+                "CC_REQ_WAKE_RUN: resumed fiber=%lu worker=%d obj=%p dest=%d done=%d control=%lld pending=%d\n",
+                (unsigned long)f->fiber_id,
+                wid,
+                f->park_obj,
+                f->yield_dest,
+                atomic_load_explicit(&f->done, memory_order_relaxed),
+                (long long)atomic_load_explicit(&f->control, memory_order_relaxed),
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+    }
+    f->deadlock_suppress_depth = tls_deadlock_suppress_depth;
     f->saved_nursery = cc__tls_current_nursery;
     cc__tls_current_nursery = prev_nursery;
+    tls_deadlock_suppress_depth = prev_deadlock_suppress_depth;
     tls_current_fiber = NULL;
     
     /* ---- Trampoline: mco_resume returned, stack is quiescent ----
@@ -4729,8 +4892,20 @@ static void worker_commit_park(fiber_task* f, int wid) {
         atomic_store_explicit(&f->timed_park_registered, 1, memory_order_release);
         tpq_push(f);
         atomic_fetch_add_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
+        if (cc__fiber_deadlock_suppressed(f)) {
+            atomic_fetch_add_explicit(&g_deadlock_suppressed_timed_parked, 1, memory_order_relaxed);
+        }
     }
     atomic_fetch_add_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
+    if (cc__fiber_deadlock_suppressed(f)) {
+        atomic_fetch_add_explicit(&g_sched.deadlock_suppressed_parked, 1, memory_order_relaxed);
+    }
+    if (f->external_wait) {
+        f->external_wait_parked = 1;
+        atomic_fetch_add_explicit(&g_external_wait_parked, 1, memory_order_relaxed);
+    } else {
+        f->external_wait_parked = 0;
+    }
 }
 
 static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
@@ -4750,16 +4925,12 @@ static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct 
 #endif
         return 0;
     }
+#endif
 
-    /* Debug metadata for deadlock/stall reporting. */
+    /* Always retain park metadata so deadlock dumps stay informative in normal builds. */
     f->park_reason = reason;
     f->park_file = file;
     f->park_line = line;
-#else
-    (void)reason;
-    (void)file;
-    (void)line;
-#endif
 
 #if CC_V3_DIAGNOSTICS
     static int park_dbg = -1;
@@ -4825,6 +4996,16 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
     (void)cc__fiber_park_if_impl(flag, expected, NULL, reason, file, line);
 }
 
+void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
+                                   const char* reason, const char* file, int line) {
+    fiber_task* f = tls_current_fiber;
+    if (!f || !f->coro) return;
+    f->external_wait = 1;
+    f->external_wait_parked = 0;
+    cc__fiber_park_if(flag, expected, reason, file, line);
+    f->external_wait = 0;
+}
+
 int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
                             const char* reason, const char* file, int line) {
     return cc__fiber_park_if_impl(flag, expected, abs_deadline, reason, file, line);
@@ -4875,6 +5056,8 @@ void cc__fiber_unpark(void* fiber_ptr) {
 #if CC_V3_DIAGNOSTICS
     atomic_fetch_add_explicit(&g_cc_fiber_unpark_calls, 1, memory_order_relaxed);
 #endif
+    int trace_recv_empty = 0;
+    int trace_req_wake = 0;
     int claimed_parked = 0;
     if (atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
         /* Another wake path won before the timer fired. Unlink the stale timed
@@ -4882,6 +5065,9 @@ void cc__fiber_unpark(void* fiber_ptr) {
         * in the intrusive timer queue. */
         (void)tpq_remove_if_present(f);
         atomic_fetch_sub_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
+        if (cc__fiber_deadlock_suppressed(f)) {
+            atomic_fetch_sub_explicit(&g_deadlock_suppressed_timed_parked, 1, memory_order_relaxed);
+        }
     }
 
 
@@ -4902,20 +5088,55 @@ void cc__fiber_unpark(void* fiber_ptr) {
         /* Fiber is mid-park — its stack is still live on another worker.
         * Set pending_unpark so park_if will abort when it checks.
         * Do NOT CAS or enqueue — the owning worker handles everything. */
+        if (trace_req_wake) {
+            fprintf(stderr,
+                    "CC_REQ_WAKE_UNPARK: parking fiber=%lu obj=%p pending_before=%d\n",
+                    (unsigned long)f->fiber_id,
+                    f->park_obj,
+                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+        }
         atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
+        if (trace_req_wake) {
+            fprintf(stderr,
+                    "CC_REQ_WAKE_UNPARK: parking_set_pending fiber=%lu obj=%p pending_after=%d\n",
+                    (unsigned long)f->fiber_id,
+                    f->park_obj,
+                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+        }
         return;
     }
     static int chan_dbg_verbose = -1;
     if (chan_dbg_verbose == -1) {
-        chan_dbg_verbose = 0;
+        const char* env = getenv("CC_CHAN_TRACE_RECV_EMPTY");
+        chan_dbg_verbose = (env && env[0] == '1') ? 1 : 0;
     }
-    if (chan_dbg_verbose && f->park_reason && strncmp(f->park_reason, "chan_", 5) == 0) {
+    if (chan_dbg_verbose &&
+        f->park_reason &&
+        strcmp(f->park_reason, "chan_recv_wait_empty") == 0) {
+        trace_recv_empty = 1;
+    }
+    if (f->park_reason &&
+        strcmp(f->park_reason, "chan_recv_wait_empty") == 0 &&
+        cc__chan_debug_req_wake_match(f->park_obj)) {
+        trace_req_wake = 1;
+    }
+    if (trace_recv_empty) {
         fprintf(stderr,
-                "CC_CHAN_DEBUG: unpark_skip fiber=%lu control=%lld reason=%s obj=%p\n",
+                "CC_CHAN_DEBUG: unpark_observe fiber=%lu control=%lld reason=%s obj=%p pending=%d\n",
                 (unsigned long)f->fiber_id,
                 (long long)expected,
                 f->park_reason,
-                f->park_obj);
+                f->park_obj,
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+    }
+    if (trace_req_wake) {
+        fprintf(stderr,
+                "CC_REQ_WAKE_UNPARK: observe fiber=%lu control=%lld reason=%s obj=%p pending=%d\n",
+                (unsigned long)f->fiber_id,
+                (long long)expected,
+                f->park_reason ? f->park_reason : "unknown",
+                f->park_obj,
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
     }
     if (CTRL_IS_OWNED(expected) || expected == CTRL_QUEUED) {
         /* Fiber is running or already queued — latch early wake so a later
@@ -4925,6 +5146,14 @@ void cc__fiber_unpark(void* fiber_ptr) {
         * read(pending_unpark). seq_cst on both sides prevents the
         * store-load reordering that would cause a lost wakeup. */
         atomic_store_explicit(&f->pending_unpark, 1, memory_order_seq_cst);
+        if (trace_req_wake) {
+            fprintf(stderr,
+                    "CC_REQ_WAKE_UNPARK: latch_pending fiber=%lu control=%lld obj=%p pending=%d\n",
+                    (unsigned long)f->fiber_id,
+                    (long long)expected,
+                    f->park_obj,
+                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+        }
     }
     if (expected == CTRL_DONE) {
         return;  /* Already completed, nothing to do */
@@ -4933,11 +5162,32 @@ void cc__fiber_unpark(void* fiber_ptr) {
 queued:
     /* §9 row: PARKED -> RUNNABLE by waker claim owner only. */
     cc_v3_assert_matrix_row(f, "PARKED->RUNNABLE(waker)", claimed_parked);
+    if (trace_recv_empty) {
+        fprintf(stderr,
+                "CC_CHAN_DEBUG: unpark_enqueue fiber=%lu reason=%s obj=%p\n",
+                (unsigned long)f->fiber_id,
+                f->park_reason ? f->park_reason : "unknown",
+                f->park_obj);
+    }
+    if (trace_req_wake) {
+        fprintf(stderr,
+                "CC_REQ_WAKE_UNPARK: enqueue fiber=%lu reason=%s obj=%p\n",
+                (unsigned long)f->fiber_id,
+                f->park_reason ? f->park_reason : "unknown",
+                f->park_obj);
+    }
 #if CC_V3_DIAGNOSTICS
     atomic_fetch_add_explicit(&g_cc_fiber_unpark_enqueues, 1, memory_order_relaxed);
 #endif
     /* Decrement parked counter (incremented by worker_commit_park). */
     atomic_fetch_sub_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
+    if (cc__fiber_deadlock_suppressed(f)) {
+        atomic_fetch_sub_explicit(&g_sched.deadlock_suppressed_parked, 1, memory_order_relaxed);
+    }
+    if (f->external_wait_parked) {
+        atomic_fetch_sub_explicit(&g_external_wait_parked, 1, memory_order_relaxed);
+        f->external_wait_parked = 0;
+    }
     f->enqueue_src = 8;
     f->enqueue_ctrl = CTRL_PARKED;
 
@@ -5119,6 +5369,18 @@ queued:
             * peer-inbox fallback / stale-divert paths. */
             wake_target_worker_if_sleeping(route_target);
         }
+    }
+    if (trace_req_wake) {
+        fprintf(stderr,
+                "CC_REQ_WAKE_UNPARK: route fiber=%lu preferred=%d route=%s target=%d pushed=%d global=%d local_current=%d pending=%d\n",
+                (unsigned long)f->fiber_id,
+                preferred,
+                route_name,
+                route_target,
+                pushed,
+                pushed_global,
+                pushed_to_current_local,
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
     }
 }
 

@@ -63,10 +63,10 @@ static int cc__lookup_func_attrs(const CCASTRoot* root,
     if (!root || !name) return 0;
     const NodeView* n = (const NodeView*)root->nodes;
     for (int i = 0; i < root->node_count; i++) {
-        if (n[i].kind != 17) continue; /* CC_AST_NODE_FUNC */
+        if (n[i].kind != 12) continue; /* CC_AST_NODE_DECL_ITEM (functions) */
         if (!n[i].aux_s1 || strcmp(n[i].aux_s1, name) != 0) continue;
         if (!cc_pass_node_in_tu(root, ctx, n[i].file)) continue;
-        if (out_attrs) *out_attrs = (unsigned int)n[i].aux1;
+        if (out_attrs) *out_attrs = (unsigned int)n[i].aux2;
         return 1;
     }
     return 0;

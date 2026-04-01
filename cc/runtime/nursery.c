@@ -8,6 +8,7 @@
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_arena.cch>
+#include <ccc/std/task.cch>
 
 #include "wake_primitive.h"
 
@@ -60,11 +61,15 @@ static int g_nursery_timing_enabled = -1;
 static int nursery_timing_enabled(void) {
     if (g_nursery_timing_enabled < 0) {
         g_nursery_timing_enabled = getenv("CC_SPAWN_TIMING") != NULL;
+        if (g_nursery_timing_enabled) {
+            extern void cc_nursery_dump_timing(void);
+            atexit(cc_nursery_dump_timing);
+        }
     }
     return g_nursery_timing_enabled;
 }
 
-void cc_nursery_dump_timing(void) {
+__attribute__((used)) void cc_nursery_dump_timing(void) {
     size_t spawn_count = atomic_load(&g_nursery_timing.spawn_count);
     size_t wait_calls = atomic_load(&g_nursery_timing.wait_calls);
     uint64_t setup = atomic_load(&g_nursery_timing.setup_cycles);
@@ -153,7 +158,7 @@ static CCNursery* cc__nursery_alloc(void) {
     CCNursery* n = (CCNursery*)malloc(sizeof(CCNursery));
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
-    n->cap = 8;
+    n->cap = 1024;
     n->tasks = (fiber_task**)calloc(n->cap, sizeof(fiber_task*));
     if (!n->tasks) {
         free(n);
@@ -305,6 +310,35 @@ static int cc_nursery_grow(CCNursery* n) {
     return 0;
 }
 
+typedef struct {
+    CCTask task;
+} cc_nursery_async_spawn;
+
+static void* cc__nursery_async_runner(void* arg) {
+    cc_nursery_async_spawn* a = (cc_nursery_async_spawn*)arg;
+    intptr_t result = 0;
+    int err = 0;
+    int cancel_sent = 0;
+    if (!a) return NULL;
+
+    for (;;) {
+        if (!cancel_sent && cc_cancelled()) {
+            cc_task_cancel(&a->task);
+            cancel_sent = 1;
+        }
+        CCFutureStatus st = cc_task_poll(&a->task, &result, &err);
+        if (st == CC_FUTURE_PENDING) {
+            cc_yield();
+            continue;
+        }
+        break;
+    }
+
+    cc_task_free(&a->task);
+    free(a);
+    return NULL;
+}
+
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     if (!n || !fn) return EINVAL;
     
@@ -328,18 +362,23 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 
     if (timing) t2 = nursery_rdtsc();
 
-    pthread_mutex_lock(&n->mu);
-    /* Grow if needed */
-    if (n->count == n->cap) {
-        int grow_err = cc_nursery_grow(n);
-        if (grow_err != 0) {
-            pthread_mutex_unlock(&n->mu);
-            cc_fiber_task_free(t);
-            return grow_err;
+    /* Fast path: single-producer append without mutex when capacity allows.
+     * The common case is one thread spawning into its own nursery. */
+    if (n->count < n->cap) {
+        n->tasks[n->count++] = t;
+    } else {
+        pthread_mutex_lock(&n->mu);
+        if (n->count == n->cap) {
+            int grow_err = cc_nursery_grow(n);
+            if (grow_err != 0) {
+                pthread_mutex_unlock(&n->mu);
+                cc_fiber_task_free(t);
+                return grow_err;
+            }
         }
+        n->tasks[n->count++] = t;
+        pthread_mutex_unlock(&n->mu);
     }
-    n->tasks[n->count++] = t;
-    pthread_mutex_unlock(&n->mu);
     
     if (timing) {
         t3 = nursery_rdtsc();
@@ -351,6 +390,27 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     }
     
     return 0;
+}
+
+int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
+    cc_nursery_async_spawn* a;
+    int err;
+    if (!n || task.kind == CC_TASK_KIND_INVALID) {
+        cc_task_free(&task);
+        return EINVAL;
+    }
+    a = (cc_nursery_async_spawn*)malloc(sizeof(*a));
+    if (!a) {
+        cc_task_free(&task);
+        return ENOMEM;
+    }
+    a->task = task;
+    err = cc_nursery_spawn(n, cc__nursery_async_runner, a);
+    if (err != 0) {
+        cc_task_free(&a->task);
+        free(a);
+    }
+    return err;
 }
 
 int cc_nursery_wait(CCNursery* n) {

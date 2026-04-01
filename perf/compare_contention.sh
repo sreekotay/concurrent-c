@@ -4,7 +4,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CCC="$REPO_ROOT/out/cc/bin/ccc"
+CCC="$REPO_ROOT/cc/bin/ccc"
 
 echo "================================================================="
 echo "SHARED CHANNEL CONTENTION COMPARISON"
