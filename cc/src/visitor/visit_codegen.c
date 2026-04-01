@@ -68,6 +68,12 @@ static const char* cc__canonicalize_placeholder_family_type_codegen(const char* 
 static const char* cc__normalize_bool_spelling_codegen(const char* type_name,
                                                        char* scratch,
                                                        size_t scratch_cap);
+static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
+                                                            size_t limit,
+                                                            const char* var_name,
+                                                            char* out_type,
+                                                            size_t out_type_sz);
+static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, size_t n);
 static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n);
 
 static void cc__emit_line_directive(FILE* out, int line, const char* path) {
@@ -504,6 +510,7 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
             if (method_end > method_start && method_end < n && src[method_end] == '(' && reg) {
                 size_t recv_end = i;
                 char recv_expr[256];
+                char local_type_buf[256];
                 char lowered[384];
                 int recv_is_ptr = 0;
                 const char* type_name;
@@ -531,8 +538,12 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
                 if (recv_end > recv_start && (recv_end - recv_start) < sizeof(recv_expr)) {
                     memcpy(recv_expr, src + recv_start, recv_end - recv_start);
                     recv_expr[recv_end - recv_start] = '\0';
-                    type_name = cc_type_registry_resolve_receiver_expr_at(
-                        reg, recv_expr, src, recv_start, &recv_is_ptr);
+                    type_name = cc__lookup_scoped_local_var_type_codegen(
+                        src, recv_start, recv_expr, local_type_buf, sizeof(local_type_buf));
+                    if (!type_name) {
+                        type_name = cc_type_registry_resolve_receiver_expr_at(
+                            reg, recv_expr, src, recv_start, &recv_is_ptr);
+                    }
                     if (type_name && strncmp(type_name, "CCResult_", 9) == 0) {
                         char result_type_buf[256];
                         const char* result_type_name =
@@ -1869,6 +1880,232 @@ static void cc__parse_decl_name_and_type_codegen(const char* stmt,
     }
 }
 
+static int cc__is_non_decl_stmt_type_codegen(const char* type_name) {
+    return type_name &&
+           (strcmp(type_name, "return") == 0 ||
+            strcmp(type_name, "break") == 0 ||
+            strcmp(type_name, "continue") == 0 ||
+            strcmp(type_name, "goto") == 0 ||
+            strcmp(type_name, "case") == 0 ||
+            strcmp(type_name, "default") == 0);
+}
+
+static void cc__trim_type_span_codegen(const char** start, const char** end) {
+    while (*start < *end && isspace((unsigned char)**start)) (*start)++;
+    while (*end > *start && isspace((unsigned char)(*end)[-1])) (*end)--;
+}
+
+static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_sz, const char* type_name) {
+    const char* bang;
+    const char* ok_s;
+    const char* ok_e;
+    const char* err_s;
+    const char* err_e;
+    char mangled_ok[128];
+    char mangled_err[128];
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!type_name || !type_name[0]) return;
+    bang = strchr(type_name, '!');
+    if (!bang || bang[1] == '=') {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    ok_s = type_name;
+    ok_e = bang;
+    cc__trim_type_span_codegen(&ok_s, &ok_e);
+    err_s = bang + 1;
+    while (*err_s == ' ' || *err_s == '\t') err_s++;
+    if (*err_s == '>') {
+        err_s++;
+        while (*err_s == ' ' || *err_s == '\t') err_s++;
+        if (*err_s == '(') {
+            err_s++;
+            err_e = strchr(err_s, ')');
+            if (!err_e) err_e = err_s + strlen(err_s);
+        } else {
+            err_e = err_s + strlen(err_s);
+        }
+    } else {
+        err_e = err_s;
+        while (*err_e && (isalnum((unsigned char)*err_e) || *err_e == '_')) err_e++;
+    }
+    cc__trim_type_span_codegen(&err_s, &err_e);
+    if (ok_e <= ok_s || err_e <= err_s) {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_ok, sizeof(mangled_ok));
+    cc_result_spec_mangle_type(err_s, (size_t)(err_e - err_s), mangled_err, sizeof(mangled_err));
+    if (!mangled_ok[0] || !mangled_err[0]) {
+        strncpy(out, type_name, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return;
+    }
+    snprintf(out, out_sz, "CCResult_%s_%s", mangled_ok, mangled_err);
+}
+
+static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
+                                                            size_t limit,
+                                                            const char* var_name,
+                                                            char* out_type,
+                                                            size_t out_type_sz) {
+    typedef struct {
+        int scope_id;
+        char type_name[256];
+    } LocalDecl;
+    enum { MAX_DECLS = 256, MAX_SCOPES = 256 };
+    LocalDecl decls[MAX_DECLS];
+    int decl_count = 0;
+    int scope_stack[MAX_SCOPES];
+    int scope_depth = 1;
+    int next_scope_id = 1;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    size_t stmt_start = 0;
+    size_t i = 0;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    scope_stack[0] = 0;
+    while (i < limit) {
+        char c = src[i];
+        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '{') {
+            if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == '}') {
+            int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
+            while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
+            if (scope_depth > 1) scope_depth--;
+            stmt_start = i + 1;
+            i++;
+            continue;
+        }
+        if (c == ';') {
+            char decl_name[128];
+            char decl_type[256];
+            cc__parse_decl_name_and_type_codegen(src + stmt_start, src + i,
+                                                 decl_name, sizeof(decl_name),
+                                                 decl_type, sizeof(decl_type));
+            if (decl_name[0] &&
+                strcmp(decl_name, var_name) == 0 &&
+                !cc__is_non_decl_stmt_type_codegen(decl_type) &&
+                decl_count < MAX_DECLS) {
+                decls[decl_count].scope_id = scope_stack[scope_depth - 1];
+                cc__normalize_decl_type_for_receiver_codegen(decls[decl_count].type_name,
+                                                             sizeof(decls[decl_count].type_name),
+                                                             decl_type);
+                decl_count++;
+            }
+            stmt_start = i + 1;
+        }
+        i++;
+    }
+    if (decl_count == 0) return NULL;
+    strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
+    out_type[out_type_sz - 1] = '\0';
+    return out_type;
+}
+
+static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    if (!src || n == 0) return NULL;
+    while (i < n) {
+        size_t ident_start;
+        size_t ident_end;
+        size_t ident_len;
+        size_t suffix_len = 0;
+        size_t paren_open;
+        size_t paren_end = 0;
+        const char* suffix = NULL;
+        char helper_type[256];
+        char actual_type[256];
+        char arg_name[128];
+        size_t arg_start;
+        size_t arg_end;
+        if (!cc_is_ident_start(src[i])) {
+            i++;
+            continue;
+        }
+        ident_start = i;
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        ident_end = i;
+        ident_len = ident_end - ident_start;
+        if (ident_len <= 9 || memcmp(src + ident_start, "CCResult_", 9) != 0) continue;
+        paren_open = cc_skip_ws_and_comments(src, n, ident_end);
+        if (paren_open >= n || src[paren_open] != '(') continue;
+        if (!cc_find_matching_paren(src, n, paren_open, &paren_end)) continue;
+        if (ident_len > 10 && memcmp(src + ident_end - 10, "_unwrap_or", 10) == 0) {
+            suffix = "_unwrap_or";
+            suffix_len = 10;
+        } else if (ident_len > 7 && memcmp(src + ident_end - 7, "_unwrap", 7) == 0) {
+            suffix = "_unwrap";
+            suffix_len = 7;
+        } else if (ident_len > 6 && memcmp(src + ident_end - 6, "_error", 6) == 0) {
+            suffix = "_error";
+            suffix_len = 6;
+        } else {
+            continue;
+        }
+        if (ident_len - suffix_len >= sizeof(helper_type)) continue;
+        memcpy(helper_type, src + ident_start, ident_len - suffix_len);
+        helper_type[ident_len - suffix_len] = '\0';
+        arg_start = cc_skip_ws_and_comments(src, n, paren_open + 1);
+        arg_end = arg_start;
+        if (suffix_len == 10) {
+            int par = 0, br = 0, brc = 0;
+            while (arg_end < paren_end) {
+                char c = src[arg_end];
+                if (c == '(') par++;
+                else if (c == ')' && par > 0) par--;
+                else if (c == '[') br++;
+                else if (c == ']' && br > 0) br--;
+                else if (c == '{') brc++;
+                else if (c == '}' && brc > 0) brc--;
+                else if (c == ',' && par == 0 && br == 0 && brc == 0) break;
+                arg_end++;
+            }
+        } else {
+            arg_end = paren_end;
+        }
+        while (arg_end > arg_start && isspace((unsigned char)src[arg_end - 1])) arg_end--;
+        if (arg_end <= arg_start || (arg_end - arg_start) >= sizeof(arg_name)) continue;
+        memcpy(arg_name, src + arg_start, arg_end - arg_start);
+        arg_name[arg_end - arg_start] = '\0';
+        if (!cc__lookup_scoped_local_var_type_codegen(src, ident_start, arg_name, actual_type, sizeof(actual_type))) {
+            continue;
+        }
+        if (strncmp(actual_type, "CCResult_", 9) != 0 || strcmp(actual_type, helper_type) == 0) continue;
+        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+        cc__sb_append_cstr_local(&out, &out_len, &out_cap, actual_type);
+        cc__sb_append_cstr_local(&out, &out_len, &out_cap, suffix);
+        last_emit = ident_end;
+        changed = 1;
+    }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     size_t i = 0;
@@ -3160,6 +3397,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
            remaining concrete family UFCS before emitting host C. */
         {
             char* rewritten = cc_rewrite_generic_family_ufcs_concrete(src_ufcs, src_ufcs_len);
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = strlen(rewritten);
+            }
+        }
+        {
+            char* rewritten = cc__rewrite_result_helper_family_to_visible_type(src_ufcs, src_ufcs_len);
             if (rewritten) {
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rewritten;

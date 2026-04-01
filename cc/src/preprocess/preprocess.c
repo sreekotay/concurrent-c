@@ -2358,6 +2358,7 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
     const char* start;
     const char* end;
     const char* base_end;
+    const char* bang;
     const char* chan_l;
     const char* chan_r;
     const char* elem_s;
@@ -2422,6 +2423,45 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         snprintf(out, out_sz, "__CC_MAP(%.*s)%.*s",
                  (int)inner_len, start + 4, ptr_count, "********");
         return;
+    }
+    bang = memchr(start, '!', (size_t)(base_end - start));
+    if (bang && (bang + 1) < base_end && bang[1] == '>') {
+        const char* ok_s = start;
+        const char* ok_e = bang;
+        const char* err_s = bang + 2;
+        const char* err_e = base_end;
+        char mangled_ok[128];
+        char mangled_err[128];
+        cc__trim_span_ws(&ok_s, &ok_e);
+        cc__trim_span_ws(&err_s, &err_e);
+        if (err_s < err_e && *err_s == '(') {
+            err_s++;
+            if (err_e > err_s && err_e[-1] == ')') err_e--;
+            cc__trim_span_ws(&err_s, &err_e);
+        }
+        if (ok_e > ok_s && err_e > err_s) {
+            cc__mangle_type_name(ok_s, (size_t)(ok_e - ok_s), mangled_ok, sizeof(mangled_ok));
+            cc__mangle_type_name(err_s, (size_t)(err_e - err_s), mangled_err, sizeof(mangled_err));
+            if (mangled_ok[0] && mangled_err[0]) {
+                snprintf(out, out_sz, "CCResult_%s_%s%.*s",
+                         mangled_ok, mangled_err, ptr_count, "********");
+                return;
+            }
+        }
+    }
+    if (base_end > start && base_end[-1] == '?') {
+        const char* inner_s = start;
+        const char* inner_e = base_end - 1;
+        char mangled_inner[128];
+        cc__trim_span_ws(&inner_s, &inner_e);
+        if (inner_e > inner_s) {
+            cc__mangle_type_name(inner_s, (size_t)(inner_e - inner_s), mangled_inner, sizeof(mangled_inner));
+            if (mangled_inner[0]) {
+                snprintf(out, out_sz, "CCOptional_%s%.*s",
+                         mangled_inner, ptr_count, "********");
+                return;
+            }
+        }
     }
     {
         size_t base_len = (size_t)(base_end - start);
@@ -3207,12 +3247,7 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
         }
         cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
         callee = cc_ufcs_channel_callee(recv_type_base, method_name, 0, &channel_kind, NULL);
-        if (channel_kind != CC_UFCS_CHANNEL_KIND_RAW) {
-            i = recv_end;
-            continue;
-        }
-        if (!callee) { i = recv_end; continue; }
-        if (!(strcmp(method_name, "recv") == 0 || strcmp(method_name, "try_recv") == 0)) {
+        if (channel_kind == CC_UFCS_CHANNEL_KIND_NONE || !callee) {
             i = recv_end;
             continue;
         }
@@ -3228,28 +3263,39 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
                    (src[args_end - 1] == ' ' || src[args_end - 1] == '\t' || src[args_end - 1] == '\n' || src[args_end - 1] == '\r')) {
                 args_end--;
             }
-            if (args_end <= args_start) {
-                i = recv_end;
-                continue;
-            }
-            {
-                const char* raw_fn = (strcmp(method_name, "recv") == 0)
-                    ? "cc_channel_raw_recv"
-                    : "cc_channel_raw_try_recv";
-                cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_chan_result_from_errno(");
-                cc_sb_append_cstr(&out, &out_len, &out_cap, raw_fn);
+            cc_sb_append(&out, &out_len, &out_cap, src + last_emit, recv_start - last_emit);
+            if (args_end > args_start) {
+                if (channel_kind == CC_UFCS_CHANNEL_KIND_RAW &&
+                    (strcmp(method_name, "recv") == 0 || strcmp(method_name, "try_recv") == 0)) {
+                    const char* raw_fn = (strcmp(method_name, "recv") == 0)
+                        ? "cc_channel_raw_recv"
+                        : "cc_channel_raw_try_recv";
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_chan_result_from_errno(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, raw_fn);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", sizeof(*");
+                    cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")))");
+                } else {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, callee);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
+                    cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
+                }
+            } else {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, callee);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, recv_expr);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
-                cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ", sizeof(*");
-                cc_sb_append(&out, &out_len, &out_cap, src + args_start, args_end - args_start);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ")))");
-                last_emit = paren_end + 1;
-                i = paren_end + 1;
-                continue;
+                cc_sb_append_cstr(&out, &out_len, &out_cap, ")");
             }
+            last_emit = paren_end + 1;
+            i = paren_end + 1;
+            continue;
         }
         (void)recv_is_ptr;
     }

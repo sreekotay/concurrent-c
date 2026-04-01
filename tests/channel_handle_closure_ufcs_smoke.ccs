@@ -1,0 +1,61 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+/* Regression test for pigz-style channel-handle UFCS that survives into
+   generated closure definitions:
+   - rx.recv(&value) inside a spawned closure loop
+   - tx.close() inside @destroy teardown and an error path
+   - local atomic captured by reference across spawned work */
+
+int main(void) {
+    int[~4 >] tx;
+    int[~4 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) {
+        printf("channel_handle_closure_ufcs_smoke: FAIL create\n");
+        return 1;
+    }
+    @defer ch.free();
+
+    cc_atomic_int total = 0;
+
+    {
+        CCNursery* consumer = @create(NULL, () => [&total, rx] {
+            int value = 0;
+            while (cc_io_avail(rx.recv(&value))) {
+                cc_atomic_fetch_add(&total, value);
+            }
+        }) @destroy;
+        if (!consumer) {
+            printf("channel_handle_closure_ufcs_smoke: FAIL consumer\n");
+            return 1;
+        }
+
+        CCNursery* producer = @create(consumer) @destroy {
+            tx.close();
+        };
+        if (!producer) {
+            tx.close();
+            printf("channel_handle_closure_ufcs_smoke: FAIL producer\n");
+            return 1;
+        }
+
+        producer->spawn(() => [tx] {
+            for (int i = 1; i <= 3; i++) {
+                if (!cc_io_avail(tx.send(i))) {
+                    tx.close();
+                    break;
+                }
+            }
+        });
+    }
+
+    if (cc_atomic_load(&total) != 6) {
+        printf("channel_handle_closure_ufcs_smoke: FAIL total=%d\n", cc_atomic_load(&total));
+        return 1;
+    }
+
+    printf("channel_handle_closure_ufcs_smoke: PASS\n");
+    return 0;
+}
