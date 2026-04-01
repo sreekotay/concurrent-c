@@ -102,7 +102,7 @@ char* cc__write_temp_c_file(const char* buf, size_t len, const char* original_pa
     return strdup(tmpl);
 }
 
-char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len) {
+char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len, const char* original_path) {
     if (!buf || !out_len) return NULL;
     *out_len = 0;
     /* Prelude for reparse: must provide CC runtime types used by intermediate rewrites
@@ -133,13 +133,22 @@ char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len) 
         "typedef struct { void (*fn)(int); int arg; } __cc_spawn_int_arg;\n"
         "static void* __cc_spawn_thunk_void(void*);\n"
         "static void* __cc_spawn_thunk_int(void*);\n";
+    char rel[1024];
+    const char* lp = cc_path_rel_to_repo(original_path ? original_path : "<input>", rel, sizeof(rel));
+    char line_buf[1024];
+    int ln = snprintf(line_buf, sizeof(line_buf), "#line 1 \"%s\"\n", lp ? lp : "<input>");
     size_t pre_len = strlen(prelude);
-    size_t total = pre_len + len;
+    size_t line_len = (ln > 0 && (size_t)ln < sizeof(line_buf)) ? (size_t)ln : 0;
+    size_t total = pre_len + line_len + len;
     char* out = (char*)malloc(total + 1);
     if (!out) return NULL;
     size_t off = 0;
     memcpy(out + off, prelude, pre_len);
     off += pre_len;
+    if (line_len > 0) {
+        memcpy(out + off, line_buf, line_len);
+        off += line_len;
+    }
     memcpy(out + off, buf, len);
     off += len;
     out[off] = '\0';

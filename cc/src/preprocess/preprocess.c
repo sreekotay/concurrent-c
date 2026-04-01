@@ -3199,17 +3199,16 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
     if (!src || n == 0) return NULL;
     cc__collect_generic_ufcs_types(src, n, vars, &var_count, sizeof(vars) / sizeof(vars[0]),
                                    fields, &field_count, sizeof(fields) / sizeof(fields[0]));
-    if (var_count == 0) return NULL;
+    if (var_count == 0 && field_count == 0) return NULL;
     cc_scanner_init(&scan);
     while (i < n) {
-        size_t recv_start = i;
-        size_t recv_end;
         size_t sep_pos;
         size_t method_start;
         size_t method_end;
+        size_t recv_start;
         size_t paren_pos;
         size_t paren_end = 0;
-        char recv_expr[128];
+        char recv_expr[256];
         char recv_type[256];
         char recv_type_base[256];
         char method_name[64];
@@ -3217,38 +3216,46 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
         CCUfcsChannelKind channel_kind = CC_UFCS_CHANNEL_KIND_NONE;
         int recv_is_ptr = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (!cc_is_ident_start(src[i])) { i++; continue; }
-        recv_end = i;
-        while (recv_end < n && cc_is_ident_char(src[recv_end])) recv_end++;
-        if (recv_end - recv_start >= sizeof(recv_expr)) { i = recv_end; continue; }
-        memcpy(recv_expr, src + recv_start, recv_end - recv_start);
-        recv_expr[recv_end - recv_start] = '\0';
-        sep_pos = cc_skip_ws_and_comments(src, n, recv_end);
-        if (sep_pos >= n || (src[sep_pos] != '.' && !(sep_pos + 1 < n && src[sep_pos] == '-' && src[sep_pos + 1] == '>'))) {
-            i = recv_end;
+        if (src[i] == '.') {
+            sep_pos = i;
+            method_start = cc_skip_ws_and_comments(src, n, i + 1);
+        } else if (i + 1 < n && src[i] == '-' && src[i + 1] == '>') {
+            sep_pos = i;
+            method_start = cc_skip_ws_and_comments(src, n, i + 2);
+        } else {
+            i++;
             continue;
         }
-        method_start = cc_skip_ws_and_comments(src, n, sep_pos + (src[sep_pos] == '.' ? 1 : 2));
-        if (method_start >= n || !cc_is_ident_start(src[method_start])) { i = recv_end; continue; }
+        if (method_start >= n || !cc_is_ident_start(src[method_start])) { i++; continue; }
         method_end = method_start;
         while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
-        if (method_end - method_start >= sizeof(method_name)) { i = recv_end; continue; }
+        if (method_end - method_start >= sizeof(method_name)) { i++; continue; }
         memcpy(method_name, src + method_start, method_end - method_start);
         method_name[method_end - method_start] = '\0';
-        if (cc__ufcs_preceded_by_await(src, recv_start)) { i = recv_end; continue; }
         paren_pos = cc_skip_ws_and_comments(src, n, method_end);
-        if (paren_pos >= n || src[paren_pos] != '(') { i = recv_end; continue; }
-        if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i = recv_end; continue; }
+        if (paren_pos >= n || src[paren_pos] != '(') { i++; continue; }
+        if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i++; continue; }
+        recv_start = cc_scan_back_for_member_access(src, method_start, 0);
+        if (recv_start >= sep_pos || sep_pos - recv_start >= sizeof(recv_expr)) { i++; continue; }
+        {
+            const char* recv_s = src + recv_start;
+            const char* recv_e = src + sep_pos;
+            cc__trim_span_ws(&recv_s, &recv_e);
+            if (recv_e <= recv_s || (size_t)(recv_e - recv_s) >= sizeof(recv_expr)) { i++; continue; }
+            memcpy(recv_expr, recv_s, (size_t)(recv_e - recv_s));
+            recv_expr[recv_e - recv_s] = '\0';
+        }
+        if (cc__ufcs_preceded_by_await(src, recv_start)) { i++; continue; }
         if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
                                                     vars, var_count, fields, field_count,
                                                     recv_type, sizeof(recv_type), &recv_is_ptr)) {
-            i = recv_end;
+            i++;
             continue;
         }
         cc__copy_type_base(recv_type_base, sizeof(recv_type_base), recv_type);
         callee = cc_ufcs_channel_callee(recv_type_base, method_name, 0, &channel_kind, NULL);
         if (channel_kind == CC_UFCS_CHANNEL_KIND_NONE || !callee) {
-            i = recv_end;
+            i++;
             continue;
         }
 

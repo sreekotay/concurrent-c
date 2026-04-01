@@ -1,0 +1,33 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/std/task.cch>
+#include <stdio.h>
+
+@async int noop(int v) { return v; }
+
+/* Regression: after @async frame rewriting, field-backed channel UFCS like
+   `tx.close()` and deferred raw channel cleanup `ch.free()` must still lower
+   to plain C calls, not malformed `__f->cc_channel_free(ch)` style output. */
+@async int exercise_channel_fields(void) {
+    int[~2 >] tx;
+    int[~2 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 10;
+
+    @defer ch.free();
+
+    int waited = await noop(7);
+    if (waited != 7) return 20;
+
+    tx.close();
+    return 0;
+}
+
+int main(void) {
+    int rc = cc_block_on(int, exercise_channel_fields());
+    if (rc != 0) {
+        printf("async_defer_channel_field_ufcs_smoke: FAIL rc=%d\n", rc);
+        return 1;
+    }
+    printf("async_defer_channel_field_ufcs_smoke: PASS\n");
+    return 0;
+}

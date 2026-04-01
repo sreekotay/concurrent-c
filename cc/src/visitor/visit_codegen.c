@@ -125,6 +125,100 @@ static void cc__debug_dump_reparse_source(const char* stage,
     fclose(f);
 }
 
+static int cc__count_lines_codegen(const char* src, size_t src_len) {
+    int lines = 1;
+    if (!src || src_len == 0) return 0;
+    for (size_t i = 0; i < src_len; ++i) {
+        if (src[i] == '\n') lines++;
+    }
+    return lines;
+}
+
+static char* cc__write_failed_reparse_dump(const char* stage,
+                                           const char* src,
+                                           size_t src_len,
+                                           const char* input_path) {
+    char tmpl[] = "/tmp/cc_reparse_fail_XXXXXX.c";
+    char rel[1024];
+    char header[2048];
+    const char* shown = NULL;
+    int fd = -1;
+    int header_len = 0;
+    size_t off = 0;
+    if (!src || src_len == 0) return NULL;
+    shown = cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel));
+#ifdef __APPLE__
+    fd = mkstemps(tmpl, 2);
+#else
+    fd = mkstemp(tmpl);
+#endif
+    if (fd < 0) return NULL;
+    header_len = snprintf(header, sizeof(header),
+                          "/* cc internal reparse failure\n"
+                          " * stage: %s\n"
+                          " * input: %s\n"
+                          " */\n"
+                          "#line 1 \"%s\"\n",
+                          (stage && stage[0]) ? stage : "<unknown>",
+                          shown ? shown : "<input>",
+                          shown ? shown : "<input>");
+    if (header_len <= 0 || (size_t)header_len >= sizeof(header)) {
+        close(fd);
+        unlink(tmpl);
+        return NULL;
+    }
+    while (off < (size_t)header_len) {
+        ssize_t n = write(fd, header + off, (size_t)header_len - off);
+        if (n <= 0) {
+            close(fd);
+            unlink(tmpl);
+            return NULL;
+        }
+        off += (size_t)n;
+    }
+    off = 0;
+    while (off < src_len) {
+        ssize_t n = write(fd, src + off, src_len - off);
+        if (n <= 0) {
+            close(fd);
+            unlink(tmpl);
+            return NULL;
+        }
+        off += (size_t)n;
+    }
+    close(fd);
+    return strdup(tmpl);
+}
+
+static void cc__report_reparse_failure(const char* stage,
+                                       const char* input_path,
+                                       const char* transformed_src,
+                                       size_t transformed_len,
+                                       const char* prepared_src,
+                                       size_t prepared_len) {
+    char rel[1024];
+    const char* shown = cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel));
+    int transformed_lines = cc__count_lines_codegen(transformed_src, transformed_len);
+    int prepared_lines = cc__count_lines_codegen(prepared_src, prepared_len);
+    char* dump_path = cc__write_failed_reparse_dump(stage, transformed_src, transformed_len, input_path);
+    fprintf(stderr, "cc: internal reparse failed during %s for %s\n",
+            (stage && stage[0]) ? stage : "unknown stage",
+            shown ? shown : "<input>");
+    fprintf(stderr, "cc: parser diagnostics above refer to transformed compiler output, not raw user source\n");
+    if (transformed_lines > 0) {
+        if (prepared_lines > transformed_lines) {
+            fprintf(stderr, "cc: transformed source is %d lines (%d lines after parser prelude/normalization)\n",
+                    transformed_lines, prepared_lines);
+        } else {
+            fprintf(stderr, "cc: transformed source is %d lines\n", transformed_lines);
+        }
+    }
+    if (dump_path) {
+        fprintf(stderr, "cc: wrote transformed source dump to %s\n", dump_path);
+        free(dump_path);
+    }
+}
+
 static char* cc__neutralize_comments_for_reparse(const char* src, size_t n) {
     char* out = NULL;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
@@ -588,7 +682,8 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
 
 /* Helper: reparse source string to AST (in-memory). */
 static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
-                                            const char* input_path, CCSymbolTable* symbols) {
+                                            const char* input_path, CCSymbolTable* symbols,
+                                            const char* stage) {
     CCTypeRegistry* saved_reg = cc_type_registry_get_global();
     CCTypeRegistry* temp_reg = cc_type_registry_new();
     char* nursery_rewritten = cc_rewrite_nursery_create_destroy_proto(src, src_len, input_path);
@@ -639,7 +734,7 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
         }
     }
     size_t pp_len = strlen(pp_buf);
-    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len);
+    char* prep = cc__prepend_reparse_prelude(pp_buf, pp_len, &pp_len, input_path);
     free(pp_buf);
     if (!prep) goto done;
     {
@@ -653,6 +748,9 @@ static CCASTRoot* cc__reparse_source_to_ast(const char* src, size_t src_len,
     char rel_path[1024];
     cc_path_rel_to_repo(input_path, rel_path, sizeof(rel_path));
     root = cc_tcc_bridge_parse_string_to_ast(prep, rel_path, input_path, symbols);
+    if (!root) {
+        cc__report_reparse_failure(stage, input_path, src, src_len, prep, pp_len);
+    }
     free(prep);
 done:
     if (temp_reg) {
@@ -2688,7 +2786,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             return EINVAL;
         }
         if (phase3_changed) {
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                          "phase3 after coarse UFCS rewrite");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -2719,7 +2818,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
             }
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                          "phase3 after closure-call rewrite");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -2750,7 +2850,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
             }
             if (phase3_owned_root) cc_tcc_bridge_free_ast(phase3_owned_root);
-            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            phase3_owned_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                          "phase3 after autoblock rewrite");
             if (!phase3_owned_root) {
                 fclose(out);
                 if (src_ufcs != src_all) free(src_ufcs);
@@ -2865,7 +2966,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        These rewrites run before marker stripping to keep spans stable. */
     if (src_ufcs && ctx && ctx->symbols) {
         cc__debug_dump_reparse_source("stage1_pre_stmt", src_ufcs, src_ufcs_len, ctx->input_path);
-        CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+        CCASTRoot* root3 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                     "statement-lowering input");
         if (!root3) {
             fclose(out);
             if (src_ufcs != src_all) free(src_ufcs);
@@ -2931,7 +3033,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     if (src_ufcs && ctx && ctx->symbols &&
         (strstr(src_ufcs, "@async") != NULL || strstr(src_ufcs, "await") != NULL)) {
         cc__debug_dump_reparse_source("stage2_pre_async", src_ufcs, src_ufcs_len, ctx->input_path);
-        CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+        CCASTRoot* root2 = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                     "async-lowering input");
         if (getenv("CC_DEBUG_REPARSE")) {
             fprintf(stderr, "CC: reparse: stub ast node_count=%d\n", root2 ? root2->node_count : -1);
         }
@@ -3347,7 +3450,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             CCTypeRegistry* saved_reg = cc_type_registry_get_global();
             CCTypeRegistry* temp_reg = cc_type_registry_new();
             cc__debug_dump_reparse_source("stage3_pre_final_ufcs", src_ufcs, src_ufcs_len, ctx->input_path);
-            CCASTRoot* final_ufcs_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols);
+            CCASTRoot* final_ufcs_root = cc__reparse_source_to_ast(src_ufcs, src_ufcs_len, ctx->input_path, ctx->symbols,
+                                                                   "final-UFCS input");
             if (!final_ufcs_root) {
                 if (temp_reg) cc_type_registry_free(temp_reg);
                 fclose(out);
