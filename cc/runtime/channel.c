@@ -128,13 +128,15 @@ static inline void cc__chan_select_dbg_inc(_Atomic uint64_t* counter) {
 
 typedef struct {
     cc__fiber* fibers[WAKE_BATCH_SIZE];
+    uint32_t attribs[WAKE_BATCH_SIZE];
     size_t count;
 } wake_batch;
 
-static __thread wake_batch tls_wake_batch = {{NULL}, 0};
+static __thread wake_batch tls_wake_batch = {{NULL}, {0}, 0};
 
 /* Forward declaration */
 static inline void wake_batch_flush(void);
+static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch);
 
 /* Add a fiber to the wake batch */
 static inline void wake_batch_add(cc__fiber* f) {
@@ -146,14 +148,26 @@ static inline void wake_batch_add(cc__fiber* f) {
     b->fibers[b->count++] = f;
 }
 
+static inline void wake_batch_add_chan(CCChan* ch, cc__fiber* f) {
+    if (!f) return;
+    wake_batch* b = &tls_wake_batch;
+    if (b->count >= WAKE_BATCH_SIZE) {
+        wake_batch_flush();
+    }
+    b->fibers[b->count] = f;
+    b->attribs[b->count] = cc__chan_wake_sched_attrib(ch);
+    b->count++;
+}
+
 /* Flush all pending wakes */
 static inline void wake_batch_flush(void) {
     wake_batch* b = &tls_wake_batch;
     for (size_t i = 0; i < b->count; i++) {
         if (b->fibers[i]) {
-            cc__fiber_unpark_channel_attrib();
+            cc__fiber_unpark_channel_attrib(b->attribs[i]);
             cc_sched_fiber_wake((CCSchedFiber*)b->fibers[i]);
             b->fibers[i] = NULL;
+            b->attribs[i] = 0;
         }
     }
     b->count = 0;
@@ -387,6 +401,7 @@ static inline cc_sched_wait_result cc__chan_wait_notified_mark_close(cc__fiber_w
 
 static _Atomic int g_chan_minimal_path_mode = -1; /* -1 unknown, 0 off, 1 on */
 static _Atomic int g_chan_mutex_minimal_mode = -1; /* -1 unknown, 0 off, 1 on */
+static _Atomic int g_chan_recv_wake_target = -1; /* -1 unknown, otherwise bounded wake target */
 
 static inline int cc__chan_minimal_path_enabled(void) {
     int cached = atomic_load_explicit(&g_chan_minimal_path_mode, memory_order_relaxed);
@@ -418,6 +433,28 @@ static inline int cc__chan_mutex_minimal_enabled(void) {
                                                       memory_order_relaxed,
                                                       memory_order_relaxed);
         cached = atomic_load_explicit(&g_chan_mutex_minimal_mode, memory_order_relaxed);
+    }
+    return cached;
+}
+
+static inline int cc__chan_recv_wake_target(void) {
+    int cached = atomic_load_explicit(&g_chan_recv_wake_target, memory_order_relaxed);
+    if (cached < 0) {
+        /* Default to 1: once a receiver is already on the way, let it drain
+         * the hot queue before waking more. Raise with env for tuning. */
+        const char* env = getenv("CC_CHAN_RECV_WAKE_TARGET");
+        int target = 1;
+        if (env && env[0]) {
+            int parsed = atoi(env);
+            if (parsed > 0) target = parsed;
+        }
+        int expected = -1;
+        (void)atomic_compare_exchange_strong_explicit(&g_chan_recv_wake_target,
+                                                      &expected,
+                                                      target,
+                                                      memory_order_relaxed,
+                                                      memory_order_relaxed);
+        cached = atomic_load_explicit(&g_chan_recv_wake_target, memory_order_relaxed);
     }
     return cached;
 }
@@ -539,11 +576,13 @@ struct CCChan {
     cc__fiber_wait_node* send_waiters_tail;
     cc__fiber_wait_node* recv_waiters_head;
     cc__fiber_wait_node* recv_waiters_tail;
-    /* Dekker flags: set by add_waiter, cleared by remove_waiter (NOT by wake_one).
-     * This ensures the flag remains visible between wake_one removing the node
-     * and the woken fiber calling remove_waiter, closing the lost-wakeup window. */
+    cc__fiber_wait_node* recv_signal_hint;          /* Next recv waiter to scan when signaling. */
+    /* has_send_waiters stays boolean. has_recv_waiters is now a count of
+     * linked recv waiters with notified==NONE, so senders can avoid both the
+     * O(N) refresh walk and signal-all thundering herds. */
     _Atomic int has_send_waiters;
     _Atomic int has_recv_waiters;
+    _Atomic int recv_wake_inflight;                 /* Signaled recv waiters not yet consumed. */
     
     /* Lock-free MPMC queue for buffered channels (cap > 0) */
     int use_lockfree;                               /* 1 = use lock-free queue, 0 = use mutex */
@@ -560,6 +599,13 @@ struct CCChan {
 
 
 };
+
+static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch) {
+    if (ch && ch->fast_path_ok) {
+        return CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL;
+    }
+    return CC_FIBER_UNPARK_ATTR_NONE;
+}
 
 static inline void cc__chan_trace_flow(CCChan* ch,
                                        const char* event,
@@ -859,12 +905,69 @@ static void cc__chan_add_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
 }
 
 /* Add a fiber to recv waiters queue (must hold ch->mu) */
+static inline void cc__chan_recv_waiter_count_inc(CCChan* ch) {
+    atomic_fetch_add_explicit(&ch->has_recv_waiters, 1, memory_order_release);
+}
+
+static inline void cc__chan_recv_waiter_count_dec(CCChan* ch) {
+    int old = atomic_fetch_sub_explicit(&ch->has_recv_waiters, 1, memory_order_release);
+    if (old <= 1) {
+        atomic_store_explicit(&ch->has_recv_waiters, 0, memory_order_release);
+    }
+}
+
+static inline void cc__chan_recv_wake_inflight_inc(CCChan* ch) {
+    atomic_fetch_add_explicit(&ch->recv_wake_inflight, 1, memory_order_release);
+}
+
+static inline void cc__chan_recv_wake_inflight_dec(CCChan* ch) {
+    int old = atomic_fetch_sub_explicit(&ch->recv_wake_inflight, 1, memory_order_release);
+    if (old <= 1) {
+        atomic_store_explicit(&ch->recv_wake_inflight, 0, memory_order_release);
+    }
+}
+
+static inline int cc__chan_recv_wake_budget(CCChan* ch) {
+    int target = cc__chan_recv_wake_target();
+    int inflight = atomic_load_explicit(&ch->recv_wake_inflight, memory_order_acquire);
+    int deficit = target - inflight;
+    return deficit > 0 ? deficit : 0;
+}
+
+static inline void cc__chan_recv_signal_hint_advance(CCChan* ch, cc__fiber_wait_node* node, cc__fiber_wait_node* next) {
+    if (!ch) return;
+    if (ch->recv_signal_hint == node) {
+        ch->recv_signal_hint = next ? next : ch->recv_waiters_head;
+    }
+    if (!ch->recv_waiters_head) {
+        ch->recv_signal_hint = NULL;
+    } else if (!ch->recv_signal_hint) {
+        ch->recv_signal_hint = ch->recv_waiters_head;
+    }
+}
+
+static inline void cc__chan_recv_waiter_rearm(CCChan* ch, cc__fiber_wait_node* node) {
+    if (!ch || !node || !node->in_wait_list) return;
+    cc__chan_recv_waiter_count_inc(ch);
+    if (!ch->recv_signal_hint) {
+        ch->recv_signal_hint = node;
+    }
+}
+
+static inline void cc__chan_recv_waiter_consume_signal(CCChan* ch, cc__fiber_wait_node* node) {
+    if (!ch || !node || !node->in_wait_list) return;
+    cc__chan_recv_wake_inflight_dec(ch);
+}
+
 static void cc__chan_add_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
     if (ch->use_lockfree) {
     }
     cc__chan_add_waiter(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
-    atomic_store_explicit(&ch->has_recv_waiters, 1, memory_order_release);
+    cc__chan_recv_waiter_count_inc(ch);
+    if (!ch->recv_signal_hint) {
+        ch->recv_signal_hint = node;
+    }
     cc__chan_trace_recv_empty(ch, "recv_add", node,
                               atomic_load_explicit(&node->notified, memory_order_relaxed));
 }
@@ -906,12 +1009,6 @@ static inline void cc__chan_refresh_has_send_waiters(CCChan* ch) {
                           memory_order_release);
 }
 
-static inline void cc__chan_refresh_has_recv_waiters(CCChan* ch) {
-    atomic_store_explicit(&ch->has_recv_waiters,
-                          cc__chan_has_wakeable_waiter(ch->recv_waiters_head),
-                          memory_order_release);
-}
-
 static void cc__chan_remove_send_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
     if (!node->in_wait_list) {
@@ -931,19 +1028,28 @@ static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
     if (!ch || !node) return;
     if (!node->in_wait_list) {
         /* Node was unlinked by another path (e.g. wake_all_waiters on close).
-         * If the list is now empty, clear the flag. */
-        if (!ch->recv_waiters_head)
+         * If the list is now empty, clear the counter and hint. */
+        if (!ch->recv_waiters_head) {
             atomic_store_explicit(&ch->has_recv_waiters, 0, memory_order_release);
+            ch->recv_signal_hint = NULL;
+        }
         cc__chan_trace_recv_empty(ch, "recv_remove_unlinked", node,
                                   atomic_load_explicit(&node->notified, memory_order_relaxed));
         return;
     }
     if (ch->use_lockfree) {
     }
+    int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
+    cc__fiber_wait_node* next = node->next;
     cc__chan_trace_recv_empty(ch, "recv_remove_linked", node,
                               atomic_load_explicit(&node->notified, memory_order_relaxed));
     cc__chan_remove_waiter_list(&ch->recv_waiters_head, &ch->recv_waiters_tail, node);
-    cc__chan_refresh_has_recv_waiters(ch);
+    if (notify == CC_CHAN_NOTIFY_NONE) {
+        cc__chan_recv_waiter_count_dec(ch);
+    } else if (notify == CC_CHAN_NOTIFY_SIGNAL) {
+        cc__chan_recv_wake_inflight_dec(ch);
+    }
+    cc__chan_recv_signal_hint_advance(ch, node, next);
 }
 
 /* Wake one send waiter (must hold ch->mu) - uses batch */
@@ -978,7 +1084,7 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
         if (ch->use_lockfree) {
         }
         cc__chan_refresh_has_send_waiters(ch);
-        wake_batch_add(node->fiber);
+        wake_batch_add_chan(ch, node->fiber);
         return;
     }
     /* All nodes were cancelled selects — list is now empty, clear flag */
@@ -991,56 +1097,61 @@ static void cc__chan_wake_one_send_waiter(CCChan* ch) {
  * Re-signaling an already-signaled node creates wake storms without making
  * forward progress. Uses simple FIFO - work stealing provides natural load
  * balancing. */
-static void cc__chan_signal_recv_waiter(CCChan* ch) {
-    if (!ch) return;
-    if (!ch->recv_waiters_head) return;
-    /* Wake the first selectable waiter */
-    for (cc__fiber_wait_node* node = ch->recv_waiters_head; node; node = node->next) {
-        int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
-        if (cc_channel_recv_dedupe_enabled() && notify != CC_CHAN_NOTIFY_NONE) {
-            continue;
-        }
-        if (!cc__chan_select_try_win(node)) {
-            if (ch->use_lockfree) {
+static int cc__chan_signal_recv_waiters(CCChan* ch, int max_wake) {
+    if (!ch || max_wake <= 0) return 0;
+    if (!ch->recv_waiters_head) return 0;
+    cc__fiber_wait_node* start = ch->recv_signal_hint ? ch->recv_signal_hint : ch->recv_waiters_head;
+    if (!start) start = ch->recv_waiters_head;
+    int signaled = 0;
+    for (int pass = 0; pass < 2 && signaled < max_wake; ++pass) {
+        cc__fiber_wait_node* stop = (pass == 0) ? NULL : start;
+        cc__fiber_wait_node* node = (pass == 0) ? start : ch->recv_waiters_head;
+        for (; node && node != stop; node = node->next) {
+            cc__fiber_wait_node* next = node->next;
+            int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
+            if (cc_channel_recv_dedupe_enabled() && notify != CC_CHAN_NOTIFY_NONE) {
+                continue;
             }
-            cc__chan_select_cancel_node(node);
-            continue;
+            if (!cc__chan_select_try_win(node)) {
+                cc__chan_select_cancel_node(node);
+                cc__chan_recv_waiter_count_dec(ch);
+                continue;
+            }
+            if (!cc__chan_waiter_ticket_valid_dbg(node, "signal_recv")) {
+                continue;
+            }
+            cc__chan_trace_req_wake(ch, "signal_recv_before", NULL, node);
+            cc__chan_trace_recv_empty(ch, "recv_signal_before", node, notify);
+            atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
+            cc__chan_recv_waiter_count_dec(ch);
+            cc__chan_recv_wake_inflight_inc(ch);
+            if (node->is_select && node->select_group) {
+                cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
+                atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+            }
+            cc__chan_trace_req_wake(ch, "signal_recv_after", NULL, node);
+            cc__chan_trace_recv_empty(ch, "recv_signal_after", node,
+                                      atomic_load_explicit(&node->notified, memory_order_relaxed));
+            wake_batch_add_chan(ch, node->fiber);
+            cc__chan_trace_req_wake(ch, "signal_recv_wake_batch_add", NULL, node);
+            cc__chan_trace_recv_empty(ch, "recv_wake_batch_add", node,
+                                      atomic_load_explicit(&node->notified, memory_order_relaxed));
+            signaled++;
+            if (signaled >= max_wake) {
+                ch->recv_signal_hint = next ? next : ch->recv_waiters_head;
+                return signaled;
+            }
         }
-        if (!cc__chan_waiter_ticket_valid_dbg(node, "signal_recv")) {
-            continue;
+        if (start == ch->recv_waiters_head) {
+            break;
         }
-        cc__chan_trace_req_wake(ch, "signal_recv_before", NULL, node);
-        cc__chan_trace_recv_empty(ch, "recv_signal_before", node, notify);
-        atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
-        if (ch->use_lockfree) {
-        }
-        if (node->is_select && node->select_group) {
-            cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
-            atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-        }
-        if (ch->use_lockfree) {
-        }
-        /* Refresh the flag so subsequent senders can skip the wake lock
-         * when no NONE waiters remain.  The brief Dekker window (flag=0
-         * until the signaled waiter runs and re-registers) is safe:
-         * Fix 2's authoritative dequeue probe ensures the next recv()
-         * call catches any items enqueued during the window. */
-        cc__chan_refresh_has_recv_waiters(ch);
-        cc__chan_trace_req_wake(ch, "signal_recv_after", NULL, node);
-        cc__chan_trace_recv_empty(ch, "recv_signal_after", node,
-                                  atomic_load_explicit(&node->notified, memory_order_relaxed));
-        wake_batch_add(node->fiber);
-        cc__chan_trace_req_wake(ch, "signal_recv_wake_batch_add", NULL, node);
-        cc__chan_trace_recv_empty(ch, "recv_wake_batch_add", node,
-                                  atomic_load_explicit(&node->notified, memory_order_relaxed));
-        return;
     }
-    /* All nodes were already signaled/cancelled — but they are still on the
-     * list and will be removed by their owning fibers.  Do NOT refresh
-     * has_recv_waiters here: clearing the flag while nodes are still linked
-     * opens a window where concurrent senders skip signaling, causing
-     * lost wakes.  The flag will be cleared naturally when the last node
-     * is removed via cc__chan_remove_recv_waiter. */
+    ch->recv_signal_hint = ch->recv_waiters_head;
+    return signaled;
+}
+
+static void cc__chan_signal_recv_waiter(CCChan* ch) {
+    (void)cc__chan_signal_recv_waiters(ch, 1);
 }
 
 /* Pop a send waiter (must hold ch->mu). */
@@ -1108,6 +1219,7 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
          * were signaled to try the buffer (SIGNAL). Only pop nodes with
          * notified=NONE (0) that are truly waiting for data. */
         if (notify != CC_CHAN_NOTIFY_NONE) {
+            cc__fiber_wait_node* next = node->next;
             ch->recv_waiters_head = node->next;
             if (ch->recv_waiters_head) {
                 ch->recv_waiters_head->prev = NULL;
@@ -1116,9 +1228,14 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
             }
             node->next = node->prev = NULL;
             node->in_wait_list = 0;
+            if (notify == CC_CHAN_NOTIFY_SIGNAL) {
+                cc__chan_recv_wake_inflight_dec(ch);
+            }
+            cc__chan_recv_signal_hint_advance(ch, node, next);
             continue;
         }
         if (node->is_select && !cc__chan_select_try_win(node)) {
+            cc__fiber_wait_node* next = node->next;
             ch->recv_waiters_head = node->next;
             if (ch->recv_waiters_head) {
                 ch->recv_waiters_head->prev = NULL;
@@ -1128,9 +1245,12 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
             node->next = node->prev = NULL;
             node->in_wait_list = 0;
             cc__chan_select_cancel_node(node);
+            cc__chan_recv_waiter_count_dec(ch);
+            cc__chan_recv_signal_hint_advance(ch, node, next);
             continue;
         }
         if (!cc__chan_waiter_ticket_valid_dbg(node, "pop_recv")) {
+            cc__fiber_wait_node* next = node->next;
             ch->recv_waiters_head = node->next;
             if (ch->recv_waiters_head) {
                 ch->recv_waiters_head->prev = NULL;
@@ -1139,8 +1259,11 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
             }
             node->next = node->prev = NULL;
             node->in_wait_list = 0;
+            cc__chan_recv_waiter_count_dec(ch);
+            cc__chan_recv_signal_hint_advance(ch, node, next);
             continue;
         }
+        cc__fiber_wait_node* next = node->next;
         ch->recv_waiters_head = node->next;
         if (ch->recv_waiters_head) {
             ch->recv_waiters_head->prev = NULL;
@@ -1149,6 +1272,8 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
         }
         node->next = node->prev = NULL;
         node->in_wait_list = 0;
+        cc__chan_recv_waiter_count_dec(ch);
+        cc__chan_recv_signal_hint_advance(ch, node, next);
         return node;
     }
     return NULL;
@@ -1158,6 +1283,8 @@ static cc__fiber_wait_node* cc__chan_pop_recv_waiter(CCChan* ch) {
 static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     if (!ch || !ch->recv_waiters_head) return;
     cc__fiber_wait_node* node = ch->recv_waiters_head;
+    int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
+    cc__fiber_wait_node* next = node->next;
     cc__chan_trace_close(ch, "wake_one_recv_close_before", node,
                          atomic_load_explicit(&node->notified, memory_order_relaxed));
     ch->recv_waiters_head = node->next;
@@ -1168,6 +1295,12 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     }
     node->next = node->prev = NULL;
     node->in_wait_list = 0;
+    if (notify == CC_CHAN_NOTIFY_NONE) {
+        cc__chan_recv_waiter_count_dec(ch);
+    } else if (notify == CC_CHAN_NOTIFY_SIGNAL) {
+        cc__chan_recv_wake_inflight_dec(ch);
+    }
+    cc__chan_recv_signal_hint_advance(ch, node, next);
     if (node->is_select && !cc__chan_select_try_win(node)) {
         if (ch->use_lockfree) {
         }
@@ -1185,7 +1318,7 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
     }
-    wake_batch_add(node->fiber);
+    wake_batch_add_chan(ch, node->fiber);
 }
 
 /* Wake one send waiter for close (notified=3 means "woken by close") */
@@ -1219,7 +1352,7 @@ static void cc__chan_wake_one_send_waiter_close(CCChan* ch) {
         cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
     }
-    wake_batch_add(node->fiber);
+    wake_batch_add_chan(ch, node->fiber);
 }
 
 /* Wake all waiters (for close) - batched, uses notified=3 */
@@ -1847,8 +1980,8 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
 
             int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
-                atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
+                atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 continue;
             }
             if (notified == CC_CHAN_NOTIFY_CLOSE) {
@@ -2305,7 +2438,7 @@ static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wai
         atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
     }
     if (rnode->fiber) {
-        wake_batch_add(rnode->fiber);
+        wake_batch_add_chan(ch, rnode->fiber);
     } else {
         pthread_cond_signal(&ch->not_empty);
     }
@@ -2320,7 +2453,7 @@ static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_w
         atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
     }
     if (snode->fiber) {
-        wake_batch_add(snode->fiber);
+        wake_batch_add_chan(ch, snode->fiber);
     } else {
         pthread_cond_signal(&ch->not_full);
     }
@@ -2468,8 +2601,8 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         {
             int notify_val = atomic_load_explicit(&node.notified, memory_order_acquire);
             if (notify_val == CC_CHAN_NOTIFY_SIGNAL) {
-                atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
+                atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
                 continue;
             }
@@ -2535,11 +2668,18 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
         } else {
             if (cc__chan_enqueue_lockfree_minimal(ch, value, NULL) == 0) {
                 if (__builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire) != 0, 0)) {
-                    cc__chan_trace_req_wake(ch, "send_minimal_seen_waiter", value, NULL);
-                    cc_chan_lock(ch);
-                    cc__chan_signal_recv_waiter(ch);
-                    pthread_mutex_unlock(&ch->mu);
-                    wake_batch_flush();
+                    int wake_budget = cc__chan_recv_wake_budget(ch);
+                    if (wake_budget > 0) {
+                        cc__chan_trace_req_wake(ch, "send_minimal_seen_waiter", value, NULL);
+                        if (pthread_mutex_trylock(&ch->mu) == 0) {
+                            wake_budget = cc__chan_recv_wake_budget(ch);
+                            if (wake_budget > 0) {
+                                (void)cc__chan_signal_recv_waiters(ch, wake_budget);
+                            }
+                            pthread_mutex_unlock(&ch->mu);
+                            wake_batch_flush();
+                        }
+                    }
                 }
                 return 0;
             }
@@ -2591,19 +2731,14 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
                 }
                 if (rnode->fiber) {
-                    wake_batch_add(rnode->fiber);
+                    wake_batch_add_chan(ch, rnode->fiber);
                 } else {
                     pthread_cond_signal(&ch->not_empty);
                 }
                 cc__chan_trace_req_wake(ch, "send_direct_handoff", value, rnode);
-                /* NOTE: Do NOT call signal_recv_waiter here.  The handoff
-                 * already consumed the item — there is nothing in the buffer
-                 * for a "next" waiter to dequeue.  Calling signal+refresh on
-                 * an empty list clears has_recv_waiters=0, opening a window
-                 * where concurrent senders that enqueue to the buffer skip
-                 * signaling because they see the stale flag.  That is the
-                 * root cause of the lost-wake / deadlock on N:1 channels. */
-                cc__chan_trace_flow(ch, "send_handoff_waiter", value, 0);
+                /* Do NOT signal remaining receivers here — the handoff
+                 * consumed the item, so the post-enqueue bounded wake path
+                 * does not apply here. */
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
                 cc__chan_signal_activity(ch);
@@ -2612,19 +2747,23 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             pthread_mutex_unlock(&ch->mu);
         }
         
-        /* No waiters - try lock-free enqueue to buffer (fast path, no inflight) */
+        /* Try lock-free enqueue to buffer (fast path, no inflight) */
         int rc = cc__chan_enqueue_lockfree_fast(ch, value, NULL);
         if (rc == 0) {
-            /* Signal any waiters that might have joined the queue.
-             * Use atomic Dekker flag — recv_waiters_head is mutex-protected
-             * and cannot be read safely without the lock. */
+            /* Wake only when additional receiver wakeups are actually needed. */
             if (atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
-                cc__chan_trace_req_wake(ch, "send_enqueue_seen_waiter", value, NULL);
-                cc_chan_lock(ch);
-                cc__chan_signal_recv_waiter(ch);
-                pthread_mutex_unlock(&ch->mu);
-                wake_batch_flush();
-            } else {
+                int wake_budget = cc__chan_recv_wake_budget(ch);
+                if (wake_budget > 0) {
+                    cc__chan_trace_req_wake(ch, "send_enqueue_seen_waiter", value, NULL);
+                    if (pthread_mutex_trylock(&ch->mu) == 0) {
+                        wake_budget = cc__chan_recv_wake_budget(ch);
+                        if (wake_budget > 0) {
+                            (void)cc__chan_signal_recv_waiters(ch, wake_budget);
+                        }
+                        pthread_mutex_unlock(&ch->mu);
+                        wake_batch_flush();
+                    }
+                }
             }
             cc__chan_signal_activity(ch);
             return 0;
@@ -2979,7 +3118,6 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         pthread_mutex_unlock(&ch->mu);
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         if (rc == 0) {
-            
             cc_chan_lock(ch);
             cc__chan_wake_one_send_waiter(ch);
             pthread_cond_signal(&ch->not_full);
@@ -3160,8 +3298,8 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                 if (ch->use_lockfree) {
                 }
-                atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_remove_recv_waiter(ch, &node);
+                atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                 cc__chan_trace_req_recv(ch, "post_signal_remove_retry", &node, notified, 0);
                 continue;
             }
@@ -3271,7 +3409,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         }
         if (rnode->fiber) {
-            wake_batch_add(rnode->fiber);
+            wake_batch_add_chan(ch, rnode->fiber);
         } else {
             pthread_cond_signal(&ch->not_empty);
         }
@@ -3358,7 +3496,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         }
         if (snode->fiber) {
-            wake_batch_add(snode->fiber);
+            wake_batch_add_chan(ch, snode->fiber);
         } else {
             pthread_cond_signal(&ch->not_full);
         }
@@ -3680,8 +3818,8 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 pthread_mutex_lock(&ch->mu);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
-                    atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                     cc__chan_remove_recv_waiter(ch, &node);
+                    atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
                     /* Retry dequeue after wake */
                     pthread_mutex_unlock(&ch->mu);
                     rc = cc_chan_try_dequeue_lockfree(ch, out_value);
@@ -4069,11 +4207,20 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 for (size_t i = 0; i < n; ++i) {
                     int notified = atomic_load_explicit(&nodes[i].notified, memory_order_acquire);
                     if (notified == CC_CHAN_NOTIFY_SIGNAL) {
+                        if (!cases[i].is_send && cases[i].ch) {
+                            cc__chan_recv_waiter_consume_signal(cases[i].ch, &nodes[i]);
+                        }
                         atomic_store_explicit(&nodes[i].notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
+                        if (!cases[i].is_send && cases[i].ch) {
+                            cc__chan_recv_waiter_rearm(cases[i].ch, &nodes[i]);
+                        }
                         notified = CC_CHAN_NOTIFY_NONE;
                     }
                     if (notified == CC_CHAN_NOTIFY_CANCEL) {
                         atomic_store_explicit(&nodes[i].notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
+                        if (!cases[i].is_send && cases[i].ch) {
+                            cc__chan_recv_waiter_rearm(cases[i].ch, &nodes[i]);
+                        }
                         need_rearm = 1;
                         continue;
                     }
@@ -4129,7 +4276,13 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 for (;;) {
                     int notified = atomic_load_explicit(&nodes[sel].notified, memory_order_acquire);
                     if (notified == CC_CHAN_NOTIFY_SIGNAL) {
+                        if (!cases[sel].is_send && cases[sel].ch) {
+                            cc__chan_recv_waiter_consume_signal(cases[sel].ch, &nodes[sel]);
+                        }
                         atomic_store_explicit(&nodes[sel].notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
+                        if (!cases[sel].is_send && cases[sel].ch) {
+                            cc__chan_recv_waiter_rearm(cases[sel].ch, &nodes[sel]);
+                        }
                         notified = CC_CHAN_NOTIFY_NONE;
                     }
                     if (notified == CC_CHAN_NOTIFY_DATA) {

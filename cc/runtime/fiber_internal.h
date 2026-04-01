@@ -42,7 +42,11 @@ int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timesp
 void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
                                    const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
-void cc__fiber_unpark_channel_attrib(void);
+enum {
+    CC_FIBER_UNPARK_ATTR_NONE = 0u,
+    CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL = 1u << 0,
+};
+void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags);
 void cc__fiber_yield(void);         /* Cooperative yield - push to local queue */
 void cc__fiber_yield_global(void);  /* Yield to global queue for fairness */
 void cc__fiber_sched_enqueue(void* fiber);

@@ -21,6 +21,10 @@
 #define MINICORO_IMPL
 #include "minicoro.h"
 
+#ifndef CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL
+#define CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL (1u << 0)
+#endif
+
 /* Note: We access minicoro internals (_mco_context, _mco_ctxbuf, _mco_wrap_main, _mco_main)
 * for fast coroutine reset. These are defined in minicoro.h when MINICORO_IMPL is set. */
 
@@ -1136,6 +1140,7 @@ static size_t tpq_drain(void) {
 * then pulls all their partners onto the same worker too — serialising what
 * should be parallel work. */
 #define CC_SPAWN_LOCAL_DEPTH_LIMIT 2
+#define CC_CHAN_UNPARK_LOCAL_DEPTH_LIMIT 2
 /* Per-worker inbox for cross-thread spawns.
 * If this fills, we fall back to the global queue and optionally warn. */
 #define INBOX_QUEUE_SIZE 1024
@@ -1898,6 +1903,7 @@ static __thread void* tls_tsan_sched_fiber = NULL;
 static __thread uint32_t tls_chan_attr_calls_batch = 0;
 static __thread uint32_t tls_chan_attr_startup_batch = 0;
 static __thread uint32_t tls_chan_attr_sleepers_batch = 0;
+static __thread uint32_t tls_chan_attr_local_handoff = 0;
 
 /* Called when a thread is about to block in cc_block_on.
 * Only tracks blocking on fiber worker threads - blocking on executor threads
@@ -5059,6 +5065,11 @@ void cc__fiber_unpark(void* fiber_ptr) {
     int trace_recv_empty = 0;
     int trace_req_wake = 0;
     int claimed_parked = 0;
+    int channel_local_handoff = 0;
+    if (tls_chan_attr_local_handoff) {
+        channel_local_handoff = 1;
+        tls_chan_attr_local_handoff = 0;
+    }
     if (atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
         /* Another wake path won before the timer fired. Unlink the stale timed
         * wait node now so a pooled fiber cannot be reused while still present
@@ -5259,6 +5270,20 @@ queued:
             * Skip only if it is provably sleeping (stale hb) AND spinning
             * peers exist — they'll pick up the work without a wake syscall. */
             int use_preferred = 1;
+            if (channel_local_handoff && tls_worker_id >= 0) {
+                size_t sleeping_now = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+                if (sleeping_now == 0) {
+                    size_t local_depth_now = lq_depth(&g_sched.local_queues[tls_worker_id]);
+                    if (local_depth_now < CC_CHAN_UNPARK_LOCAL_DEPTH_LIMIT &&
+                            lq_push(&g_sched.local_queues[tls_worker_id], f) == 0) {
+                        pushed = 1;
+                        pushed_to_current_local = 1;
+                        use_preferred = 0;
+                        route_name = "channel_local";
+                        route_target = tls_worker_id;
+                    }
+                }
+            }
             if (g_sched.worker_heartbeat) {
                 uint64_t hb = atomic_load_explicit(
                     &g_sched.worker_heartbeat[preferred].heartbeat, memory_order_relaxed);
@@ -5384,8 +5409,11 @@ queued:
     }
 }
 
-void cc__fiber_unpark_channel_attrib(void) {
+void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags) {
     tls_chan_attr_calls_batch++;
+    if ((attrib_flags & CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL) && tls_worker_id >= 0) {
+        tls_chan_attr_local_handoff = 1;
+    }
     if (pool_startup_spinning_no_sleep()) {
         tls_chan_attr_startup_batch++;
         if (atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed) > 0) {
