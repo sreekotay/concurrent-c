@@ -1,0 +1,88 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_nursery.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <ccc/cc_atomic.cch>
+
+#define CLIENTS 4
+#define REQUESTS 10
+
+static cc_atomic_int g_clients_left = 0;
+
+typedef struct {
+    int client_id;
+    int request_id;
+    CCChanTx reply_tx;
+} Req;
+
+static void owner(CCChanRx req_rx) {
+    Req* r = NULL;
+    while (cc_io_avail(cc_channel_recv(req_rx, &r))) {
+        if (!r) continue;
+        int reply = r->client_id * 1000 + r->request_id;
+        cc_channel_send(r->reply_tx, reply);
+        free(r);
+    }
+}
+
+@async int client_loop(int id, CCChanTx req_tx) {
+    int[~1 1:1 >] rtx;
+    int[~1 1:1 <] rrx;
+    CCChan* rch = cc_channel_pair(&rtx, &rrx);
+    if (!rch) return 1;
+
+    for (int i = 1; i <= REQUESTS; ++i) {
+        Req* r = malloc(sizeof(Req));
+        r->client_id = id;
+        r->request_id = i;
+        r->reply_tx = rtx;
+
+        int serr = (int)(await cc_channel_send_task(req_tx, r));
+        if (serr != 0) { free(r); break; }
+
+        int reply = -1;
+        int rerr = (int)(await cc_channel_recv_task(rrx, &reply));
+        if (rerr != 0) break;
+
+        int expected = id * 1000 + i;
+        if (reply != expected) {
+            fprintf(stderr, "MISMATCH client=%d req=%d got=%d expected=%d\n", id, i, reply, expected);
+            break;
+        }
+    }
+
+    cc_channel_close(rtx);
+    if (cc_atomic_fetch_sub(&g_clients_left, 1) == 1) {
+        cc_channel_close(req_tx);
+    }
+    cc_channel_free(rch);
+    return 0;
+}
+
+int main(void) {
+    cc_atomic_store(&g_clients_left, CLIENTS);
+    Req*[~32 N:1 >] req_tx;
+    Req*[~32 N:1 <] req_rx;
+    CCChan* rch = cc_channel_pair(&req_tx, &req_rx);
+    if (!rch) return 1;
+
+    CCNursery* n = cc_nursery_create();
+    if (!n) return 2;
+
+    CCChanRx rx_raw = req_rx;
+    n.spawn(() => [rx_raw] { owner(rx_raw); });
+
+    for (int i = 0; i < CLIENTS; ++i) {
+        CCChanTx tx_raw = req_tx;
+        cc_nursery_spawn_async(n, client_loop(i + 1, tx_raw));
+    }
+
+    cc_nursery_wait(n);
+    cc_channel_free(rch);
+    cc_nursery_free(n);
+
+    printf("async_chan_minimal_smoke: PASS (%d clients x %d requests)\n", CLIENTS, REQUESTS);
+    return 0;
+}
