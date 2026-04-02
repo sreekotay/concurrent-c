@@ -26,6 +26,26 @@
 
 #define CC_NET_FLAG_NONBLOCK 0x01
 
+static cc__io_owned_watcher* cc__net_ensure_socket_watcher(CCSocket* sock) {
+    if (!sock || sock->fd < 0) return NULL;
+    if (sock->watcher) return (cc__io_owned_watcher*)sock->watcher;
+    cc__io_owned_watcher* watcher = cc__io_watcher_create(sock->fd);
+    if (watcher) {
+        sock->watcher = watcher;
+    }
+    return watcher;
+}
+
+static cc__io_owned_watcher* cc__net_ensure_listener_watcher(CCListener* ln) {
+    if (!ln || ln->fd < 0) return NULL;
+    if (ln->watcher) return (cc__io_owned_watcher*)ln->watcher;
+    cc__io_owned_watcher* watcher = cc__io_watcher_create(ln->fd);
+    if (watcher) {
+        ln->watcher = watcher;
+    }
+    return watcher;
+}
+
 /* ============================================================================
  * Helpers
  * ============================================================================ */
@@ -167,7 +187,7 @@ static int parse_addr(const char* addr, size_t addr_len,
  * ============================================================================ */
 
 CCSocket cc_tcp_connect(const char* addr, size_t addr_len, CCNetError* out_err) {
-    CCSocket sock = {.fd = -1, .flags = 0};
+    CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
     *out_err = CC_NET_OK;
 
     struct sockaddr_storage sa;
@@ -197,7 +217,7 @@ CCSocket cc_tcp_connect(const char* addr, size_t addr_len, CCNetError* out_err) 
  * ============================================================================ */
 
 CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err) {
-    CCListener ln = {.fd = -1, .flags = 0};
+    CCListener ln = {.fd = -1, .flags = 0, .watcher = NULL};
     *out_err = CC_NET_OK;
 
     struct sockaddr_storage sa;
@@ -229,11 +249,12 @@ CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err)
     }
 
     ln.fd = fd;
+    ln.watcher = cc__io_watcher_create(fd);
     return ln;
 }
 
 CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
-    CCSocket sock = {.fd = -1, .flags = 0};
+    CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
     *out_err = CC_NET_OK;
 
     struct sockaddr_storage client_addr;
@@ -259,7 +280,9 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
             return sock;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            int wait_err = cc__io_wait_fd(ln->fd, POLLIN);
+            cc__io_owned_watcher* watcher = cc__net_ensure_listener_watcher(ln);
+            int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLIN)
+                                   : cc__io_wait_fd(ln->fd, POLLIN);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
                 return sock;
@@ -274,7 +297,12 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
 
 void cc_listener_close(CCListener* ln) {
     if (ln->fd >= 0) {
-        cc__io_wait_forget_fd(ln->fd);
+        if (ln->watcher) {
+            cc__io_watcher_destroy((cc__io_owned_watcher*)ln->watcher);
+            ln->watcher = NULL;
+        } else {
+            cc__io_wait_forget_fd(ln->fd);
+        }
         close(ln->fd);
         ln->fd = -1;
     }
@@ -310,7 +338,9 @@ size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetErr
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             cc__net_trace_read("wait_begin", sock->fd, n, errno);
-            int wait_err = cc__io_wait_fd(sock->fd, POLLIN);
+            cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
+            int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLIN)
+                                   : cc__io_wait_fd(sock->fd, POLLIN);
             cc__net_trace_read("wait_end", sock->fd, n, wait_err);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
@@ -356,7 +386,9 @@ size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError*
             return (size_t)n;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            int wait_err = cc__io_wait_fd(sock->fd, POLLOUT);
+            cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
+            int wait_err = watcher ? cc__io_watcher_wait(watcher, POLLOUT)
+                                   : cc__io_wait_fd(sock->fd, POLLOUT);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
                 return 0;
@@ -386,7 +418,12 @@ void cc_socket_shutdown(CCSocket* sock, CCShutdownMode mode, CCNetError* out_err
 
 void cc_socket_close(CCSocket* sock) {
     if (sock->fd >= 0) {
-        cc__io_wait_forget_fd(sock->fd);
+        if (sock->watcher) {
+            cc__io_watcher_destroy((cc__io_owned_watcher*)sock->watcher);
+            sock->watcher = NULL;
+        } else {
+            cc__io_wait_forget_fd(sock->fd);
+        }
         close(sock->fd);
         sock->fd = -1;
     }

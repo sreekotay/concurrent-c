@@ -45,12 +45,14 @@ typedef enum CCNetError {
 typedef struct CCSocket {
     int fd;
     uint8_t flags;  /* Internal: closed, etc. */
+    void* watcher;  /* Internal runtime-owned I/O watcher */
 } CCSocket;
 
 /* TCP listener */
 typedef struct CCListener {
     int fd;
     uint8_t flags;
+    void* watcher;  /* Internal runtime-owned I/O watcher */
 } CCListener;
 
 /* UDP socket */
