@@ -1,0 +1,37 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+typedef struct {
+    int value;
+} TinyReply;
+
+static bool !>(CCError) bool_ok(void) {
+    return cc_ok(true);
+}
+
+static TinyReply !>(CCError) reply_ok(int v) {
+    TinyReply reply = { .value = v };
+    return cc_ok(reply);
+}
+
+static bool !>(CCError) use_bool_res(void) {
+    bool !>(CCError) res = bool_ok();
+    if (res.is_err()) return cc_err(res.error());
+    return cc_ok(res.value());
+}
+
+static TinyReply !>(CCError) use_reply_res(void) {
+    TinyReply !>(CCError) res = reply_ok(7);
+    if (res.is_err()) return cc_err(res.error());
+    return cc_ok(res.value());
+}
+
+int main(void) {
+    bool !>(CCError) ok1 = use_bool_res();
+    TinyReply !>(CCError) ok2 = use_reply_res();
+    assert(ok1.is_ok());
+    assert(ok1.value());
+    assert(ok2.is_ok());
+    assert(ok2.value().value == 7);
+    return 0;
+}
