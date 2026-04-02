@@ -1,0 +1,107 @@
+#include <ccc/cc_runtime.cch>
+
+#include <signal.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+enum {
+    MODE_UNSUPPRESSED = 0,
+    MODE_SUPPRESSED = 1,
+    MODE_LEAVE_RESTORES = 2,
+};
+
+static int g_mode = MODE_UNSUPPRESSED;
+
+static void child_deadlock_case(void) {
+    setenv("CC_WORKERS", "1", 1);
+    setenv("CC_DEADLOCK_ABORT", "1", 1);
+
+    int[~ >] tx;
+    int[~ <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) _exit(20);
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) _exit(21);
+
+        n->spawn(() => {
+            int v = 0;
+            if (g_mode == MODE_SUPPRESSED) {
+                cc_deadlock_suppress_enter();
+                (void)chan_recv(rx, &v);
+                cc_deadlock_suppress_leave();
+            } else {
+                if (g_mode == MODE_LEAVE_RESTORES) {
+                    cc_deadlock_suppress_enter();
+                    cc_deadlock_suppress_leave();
+                }
+                (void)chan_recv(rx, &v);
+            }
+        });
+    }
+
+    chan_free(ch);
+    _exit(30);
+}
+
+static int run_child_expect_exit124(int mode, int timeout_ms) {
+    g_mode = mode;
+    pid_t pid = fork();
+    if (pid < 0) return 10;
+    if (pid == 0) child_deadlock_case();
+
+    int status = 0;
+    int waited_ms = 0;
+    while (waited_ms < timeout_ms) {
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 124) return 0;
+            return 11;
+        }
+        if (rc < 0) return 12;
+        usleep(100 * 1000);
+        waited_ms += 100;
+    }
+
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    return 13;
+}
+
+static int run_child_expect_suppressed_hang(int mode, int timeout_ms) {
+    g_mode = mode;
+    pid_t pid = fork();
+    if (pid < 0) return 20;
+    if (pid == 0) child_deadlock_case();
+
+    int status = 0;
+    int waited_ms = 0;
+    while (waited_ms < timeout_ms) {
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            return 21;
+        }
+        if (rc < 0) return 22;
+        usleep(100 * 1000);
+        waited_ms += 100;
+    }
+
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    return 0;
+}
+
+int main(void) {
+    int rc = run_child_expect_exit124(MODE_UNSUPPRESSED, 3000);
+    if (rc != 0) return rc;
+
+    rc = run_child_expect_suppressed_hang(MODE_SUPPRESSED, 1800);
+    if (rc != 0) return rc;
+
+    rc = run_child_expect_exit124(MODE_LEAVE_RESTORES, 3000);
+    if (rc != 0) return rc;
+
+    return 0;
+}
