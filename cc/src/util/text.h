@@ -241,4 +241,142 @@ static inline int cc_range_contains_token(const char* s, size_t n, const char* t
     return 0;
 }
 
+/* ---- Declaration helpers ---- */
+
+static inline int cc_is_non_decl_stmt_type(const char* type_name) {
+    return type_name &&
+           (strcmp(type_name, "return") == 0 ||
+            strcmp(type_name, "break") == 0 ||
+            strcmp(type_name, "continue") == 0 ||
+            strcmp(type_name, "goto") == 0 ||
+            strcmp(type_name, "case") == 0 ||
+            strcmp(type_name, "default") == 0);
+}
+
+/* ---- Declaration parsing ---- */
+
+/*
+ * Extract variable name and type from a C declaration statement.
+ * Given a pointer range [stmt, stmt_end) representing text like "int x" or
+ * "Container c", writes the variable name into out_name and the type into
+ * out_type. Handles leading/inline comments, string/char literals, __CC_*
+ * type macros, and rejects non-declaration statements (assignments to fields,
+ * function calls, etc.).
+ */
+static inline void cc_parse_decl_name_and_type(const char* stmt,
+                                               const char* stmt_end,
+                                               char* out_name,
+                                               size_t out_name_sz,
+                                               char* out_type,
+                                               size_t out_type_sz) {
+    const char* p = stmt;
+    const char* semi = stmt_end;
+    const char* name_s = NULL;
+    size_t name_n = 0;
+    const char* cur;
+    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
+    out_name[0] = '\0';
+    out_type[0] = '\0';
+    for (;;) {
+        while (p < semi && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+        if (p + 1 < semi && p[0] == '/' && p[1] == '/') {
+            p += 2;
+            while (p < semi && *p != '\n') p++;
+            continue;
+        }
+        if (p + 1 < semi && p[0] == '/' && p[1] == '*') {
+            p += 2;
+            while (p + 1 < semi && !(p[0] == '*' && p[1] == '/')) p++;
+            if (p + 1 < semi) p += 2;
+            continue;
+        }
+        break;
+    }
+    if (p >= semi) return;
+    cur = p;
+    while (cur < semi) {
+        if (cur + 1 < semi && cur[0] == '/' && cur[1] == '/') {
+            cur += 2;
+            while (cur < semi && *cur != '\n') cur++;
+            continue;
+        }
+        if (cur + 1 < semi && cur[0] == '/' && cur[1] == '*') {
+            cur += 2;
+            while (cur + 1 < semi && !(cur[0] == '*' && cur[1] == '/')) cur++;
+            if (cur + 1 < semi) cur += 2;
+            continue;
+        }
+        if (*cur == '"' || *cur == '\'') {
+            char q = *cur++;
+            while (cur < semi) {
+                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
+                if (*cur == q) { cur++; break; }
+                cur++;
+            }
+            continue;
+        }
+        if (*cur == '=' || *cur == ';') break;
+        if (!cc_is_ident_start(*cur)) { cur++; continue; }
+        {
+            const char* s = cur++;
+            while (cur < semi && cc_is_ident_char(*cur)) cur++;
+            name_s = s;
+            name_n = (size_t)(cur - s);
+        }
+    }
+    if (!name_s || name_n == 0) return;
+    {
+        const char* after = name_s + name_n;
+        const char* eq = NULL;
+        const char* lp = NULL;
+        for (const char* t = p; t < semi; ++t) {
+            if (t + 1 < semi && t[0] == '/' && t[1] == '/') {
+                t += 2;
+                while (t < semi && *t != '\n') t++;
+                if (t >= semi) break;
+                continue;
+            }
+            if (t + 1 < semi && t[0] == '/' && t[1] == '*') {
+                t += 2;
+                while (t + 1 < semi && !(t[0] == '*' && t[1] == '/')) t++;
+                if (t + 1 < semi) t++;
+                continue;
+            }
+            if (*t == '=' && !eq) eq = t;
+            if (*t == '(' && !lp) lp = t;
+            if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) {
+                return;
+            }
+        }
+        while (after < semi && (after[0] == ' ' || after[0] == '\t' ||
+               after[0] == '\n' || after[0] == '\r')) after++;
+        if (after < semi && *after != '=' && *after != ';' && *after != '[') {
+            return;
+        }
+        if (lp && lp < name_s && (!eq || eq > lp)) {
+            const char* macro_start = lp;
+            while (macro_start > p && cc_is_ident_char(macro_start[-1])) macro_start--;
+            if (!((size_t)(lp - macro_start) >= 5 && memcmp(macro_start, "__CC_", 5) == 0)) {
+                return;
+            }
+        }
+    }
+    {
+        const char* ty_s = p;
+        const char* ty_e = name_s;
+        while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
+        while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
+        if (ty_e <= ty_s) return;
+        {
+            size_t type_len = (size_t)(ty_e - ty_s);
+            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
+            memcpy(out_type, ty_s, type_len);
+            out_type[type_len] = '\0';
+        }
+        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
+        memcpy(out_name, name_s, name_n);
+        out_name[name_n] = '\0';
+    }
+}
+
 #endif /* CC_UTIL_TEXT_H */
