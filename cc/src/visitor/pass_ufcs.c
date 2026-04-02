@@ -445,6 +445,34 @@ static size_t cc__scan_member_chain_start_left(const char* s, size_t range_start
             break;
         }
         while (q > range_start && isspace((unsigned char)s[q - 1])) q--;
+        if (q > range_start && s[q - 1] == ')') {
+            int depth = 1;
+            size_t pp = q - 1;
+            while (pp > range_start && depth > 0) {
+                pp--;
+                if (s[pp] == ')') depth++;
+                else if (s[pp] == '(') depth--;
+            }
+            if (depth == 0) {
+                seg_start = pp;
+                continue;
+            }
+            break;
+        }
+        if (q > range_start && s[q - 1] == ']') {
+            int depth = 1;
+            size_t pp = q - 1;
+            while (pp > range_start && depth > 0) {
+                pp--;
+                if (s[pp] == ']') depth++;
+                else if (s[pp] == '[') depth--;
+            }
+            if (depth == 0) {
+                seg_start = pp;
+                continue;
+            }
+            break;
+        }
         if (q <= range_start || !cc__is_ident_char_char(s[q - 1])) break;
         seg_start = q;
         while (seg_start > range_start && cc__is_ident_char_char(s[seg_start - 1])) seg_start--;

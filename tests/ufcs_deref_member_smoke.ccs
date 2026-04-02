@@ -1,0 +1,37 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+typedef struct Entry {
+    struct Entry* next;
+    CCString key;
+    CCString value;
+} Entry;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    assert(arena.base);
+
+    Entry e = {0};
+    e.key = CCString_from_slice(&arena, @slice("hello"));
+    e.value = CCString_from_slice(&arena, @slice("world"));
+
+    Entry* p = &e;
+    Entry** link = &p;
+
+    /* Simple member UFCS: p->key.as_slice() */
+    CCSlice s1 = p->key.as_slice();
+    assert(s1.len == 5);
+
+    /* Deref + arrow + member UFCS: (*link)->key.as_slice() */
+    CCSlice s2 = (*link)->key.as_slice();
+    assert(s2.len == 5);
+    assert(memcmp(s2.ptr, "hello", 5) == 0);
+
+    /* Same for value */
+    CCSlice s3 = (*link)->value.as_slice();
+    assert(s3.len == 5);
+    assert(memcmp(s3.ptr, "world", 5) == 0);
+
+    return 0;
+}

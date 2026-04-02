@@ -430,9 +430,9 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
         }
 
         cc_sb_append(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
-        cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n");
         if (is_destroy && destroy_callee) {
             int has_custom_body = (destroy_body_s && destroy_body_e > destroy_body_s);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "; ");
             if (!has_custom_body) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
@@ -454,10 +454,13 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
                 cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "); };\n");
             }
+        } else {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, ";\n");
         }
 
         last_emit = semi + 1;
-        i = semi + 1;
+        if (last_emit < n && src[last_emit] == '\n') last_emit++;
+        i = last_emit;
         changed = 1;
     }
 
@@ -1129,7 +1132,7 @@ static size_t cc__scan_back_to_delim(const char* s, size_t from) {
             if (paren_depth > 0) { paren_depth--; i--; continue; }
             break;
         }
-        if (paren_depth == 0 && (p == ';' || p == '{' || p == '}' || p == ',' || p == '\n')) break;
+        if (paren_depth == 0 && (p == ';' || p == '{' || p == '}' || p == ',' || p == '<' || p == '\n')) break;
         i--;
     }
     while (s[i] && (s[i] == ' ' || s[i] == '\t')) i++;
@@ -2204,16 +2207,14 @@ static int cc_is_ident_char_local(char c) {
 }
 
 /* Scan backwards from pos to find the start of a member access chain (e.g., obj.field or ptr->field).
-   Returns the start position of the full expression. Handles chains like a.b.c or a->b->c.
-   Limitation: does not handle (expr).field, arr[i].field, or func().field patterns. */
+   Returns the start position of the full expression.
+   Handles chains like a.b.c, a->b->c, (*p)->field, arr[i].field, func().field. */
 static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t limit) {
     if (pos == 0 || pos <= limit) return pos;
     
     size_t p = pos;
-    /* Skip whitespace backwards */
     while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
     
-    /* Check for '.' or '->' before this position */
     int has_access = 0;
     if (p > limit && src[p-1] == '.') {
         has_access = 1;
@@ -2225,15 +2226,40 @@ static size_t cc_scan_back_for_member_access(const char* src, size_t pos, size_t
     
     if (!has_access) return pos;
     
-    /* Scan back through identifier chain (a.b->c.d pattern) */
     while (p > limit && (src[p-1] == ' ' || src[p-1] == '\t')) p--;
+    int last_was_ident = 0;
     while (p > limit) {
         if (cc_is_ident_char(src[p-1])) {
             p--;
+            last_was_ident = 1;
         } else if (src[p-1] == '.') {
             p--;
+            last_was_ident = 0;
         } else if (p >= 2 + limit && src[p-1] == '>' && src[p-2] == '-') {
             p -= 2;
+            last_was_ident = 0;
+        } else if (src[p-1] == ')') {
+            if (last_was_ident) break;
+            int depth = 1;
+            size_t q = p - 1;
+            while (q > limit && depth > 0) {
+                q--;
+                if (src[q] == ')') depth++;
+                else if (src[q] == '(') depth--;
+            }
+            if (depth == 0) p = q;
+            else break;
+            last_was_ident = 0;
+        } else if (src[p-1] == ']') {
+            int depth = 1;
+            size_t q = p - 1;
+            while (q > limit && depth > 0) {
+                q--;
+                if (src[q] == ']') depth++;
+                else if (src[q] == '[') depth--;
+            }
+            if (depth == 0) p = q;
+            else break;
         } else {
             break;
         }
@@ -2935,6 +2961,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int parser_map = 0;
         int command_like = 0;
         int file_like = 0;
+        int arena_like = 0;
         int string_like = 0;
         int nursery_like = 0;
         int chan_tx = 0;
@@ -2947,6 +2974,12 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                                              recv_expr, sizeof(recv_expr))) {
             i++;
             continue;
+        }
+        if (recv_start > 0) {
+            size_t rs = recv_start;
+            while (rs > 0 && (src[rs - 1] == ' ' || src[rs - 1] == '\t')) rs--;
+            if (rs > 0 && src[rs - 1] == '.') { i++; continue; }
+            if (rs >= 2 && src[rs - 2] == '-' && src[rs - 1] == '>') { i++; continue; }
         }
         if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
                                                     vars, var_count, fields, field_count,
@@ -2962,6 +2995,15 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                         strcmp(recv_type_base, "CCCommand*") == 0);
         file_like = (strcmp(recv_type_base, "CCFile") == 0 ||
                      strcmp(recv_type_base, "CCFile*") == 0);
+        if (strcmp(recv_type_base, "CCArena") == 0 ||
+            strcmp(recv_type_base, "CCArena*") == 0) {
+            arena_like = (strcmp(method_name, "free") == 0 ||
+                          strcmp(method_name, "destroy") == 0 ||
+                          strcmp(method_name, "detach") == 0 ||
+                          strcmp(method_name, "reset") == 0 ||
+                          strcmp(method_name, "checkpoint") == 0 ||
+                          strcmp(method_name, "remaining") == 0);
+        }
         string_like = (strcmp(recv_type_base, "CCString") == 0 ||
                        strcmp(recv_type_base, "CCString*") == 0);
         nursery_like = (strcmp(recv_type_base, "CCNursery") == 0 ||
@@ -2974,7 +3016,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                    strcmp(recv_type_base, "CCChanRx*") == 0);
         if (!(strncmp(recv_type_base, "Vec_", 4) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
-              parser_vec || parser_map || command_like || file_like || string_like || nursery_like ||
+              parser_vec || parser_map || command_like || file_like || arena_like || string_like || nursery_like ||
               chan_tx || chan_rx ||
               strncmp(recv_type_base, "CCOptional_", 11) == 0 ||
               strncmp(recv_type_base, "CCResult_", 9) == 0)) {
@@ -3087,6 +3129,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (file_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_file_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
+            } else if (arena_like) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_arena_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, method_name);
             } else if (string_like) {
                 const char* string_method = method_name;
@@ -3679,6 +3724,15 @@ static char* cc__rewrite_result_constructors(const char* src, size_t n) {
  * Also: vec_new<T>(...) -> Vec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
  * ============================================================================ */
 
+/* Normalize T[:] -> CCSlice, T[:!] -> CCSliceUnique in a type string */
+static void cc__normalize_slice_in_type(char* type, size_t type_sz) {
+    if (!type || !strstr(type, "[:")) return;
+    if (strstr(type, "!]"))
+        snprintf(type, type_sz, "CCSliceUnique");
+    else
+        snprintf(type, type_sz, "CCSlice");
+}
+
 /* Mangle a type parameter for container names (int -> int, char[:] -> charslice, etc.) */
 static void cc__mangle_container_type_param(const char* src, size_t len, char* out, size_t out_sz) {
     if (!src || len == 0 || !out || out_sz == 0) { if (out && out_sz > 0) out[0] = 0; return; }
@@ -3828,8 +3882,9 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 if (orig_len >= sizeof(orig_elem_type)) orig_len = sizeof(orig_elem_type) - 1;
                 memcpy(orig_elem_type, params + ti, orig_len);
                 orig_elem_type[orig_len] = 0;
+                cc__normalize_slice_in_type(orig_elem_type, sizeof(orig_elem_type));
                 
-                cc__mangle_container_type_param(params, params_len, elem_type, sizeof(elem_type));
+                cc__mangle_container_type_param(orig_elem_type, strlen(orig_elem_type), elem_type, sizeof(elem_type));
                 snprintf(mangled, sizeof(mangled), "Vec_%s", elem_type);
                 
                 if (reg) {
@@ -3883,8 +3938,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     orig_val_type[orig_len] = 0;
                 }
                 
-                cc__mangle_container_type_param(params, k_len, key_type, sizeof(key_type));
-                cc__mangle_container_type_param(params + v_start, v_len, val_type, sizeof(val_type));
+                cc__normalize_slice_in_type(orig_key_type, sizeof(orig_key_type));
+                cc__normalize_slice_in_type(orig_val_type, sizeof(orig_val_type));
+                
+                cc__mangle_container_type_param(orig_key_type, strlen(orig_key_type), key_type, sizeof(key_type));
+                cc__mangle_container_type_param(orig_val_type, strlen(orig_val_type), val_type, sizeof(val_type));
                 snprintf(mangled, sizeof(mangled), "Map_%s_%s", key_type, val_type);
                 
                 if (reg) {
@@ -5679,18 +5737,19 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             for (size_t i = 0; i < n_map; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                 if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                    /* Determine hash/eq functions based on key type */
                     const char* hash_fn = "cc_kh_hash_i32";
                     const char* eq_fn = "cc_kh_eq_i32";
                     if (strcmp(inst->type1, "int") == 0) {
                         hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
                     } else if (strstr(inst->type1, "64") != NULL) {
                         hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
-                    } else if (strstr(inst->type1, "slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
+                    } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
                         hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
                     }
-                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
-                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                    char mangled_val[128];
+                    cc_result_spec_mangle_type(inst->type2, strlen(inst->type2), mangled_val, sizeof(mangled_val));
+                    fprintf(out, "CC_MAP_DECL_ARENA_FULL(%s, %s, %s, CCOptional_%s, %s, %s)\n", 
+                            inst->type1, inst->type2, inst->mangled_name, mangled_val, hash_fn, eq_fn);
                 }
             }
 
@@ -5850,11 +5909,13 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                         hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
                     } else if (strstr(inst->type1, "64") != NULL) {
                         hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
-                    } else if (strstr(inst->type1, "slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
+                    } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
                         hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
                     }
-                    fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
-                            inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                    char mangled_val[128];
+                    cc_result_spec_mangle_type(inst->type2, strlen(inst->type2), mangled_val, sizeof(mangled_val));
+                    fprintf(out, "CC_MAP_DECL_ARENA_FULL(%s, %s, %s, CCOptional_%s, %s, %s)\n", 
+                            inst->type1, inst->type2, inst->mangled_name, mangled_val, hash_fn, eq_fn);
                 }
             }
 

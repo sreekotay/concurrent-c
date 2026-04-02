@@ -29,7 +29,7 @@
 #define REQUEST_ARENA_CAP kilobytes(4)
 #define ENTRY_ARENA_OVERHEAD 128
 #define REQUEST_CHAN_CAP 128
-#define REPLY_CHAN_CAP 1
+#define REPLY_CHAN_CAP 64
 
 typedef struct RespReader {
     char* data;
@@ -40,10 +40,17 @@ typedef struct RespReader {
 
 typedef struct RedisEntry {
     struct RedisEntry* next;
-    CCSlice key;
-    CCSlice value;
-    CCArena arena;
+    CCString key;
+    CCString value;
+    CCArena key_arena;
+    CCArena value_arena;
 } RedisEntry;
+
+typedef struct RedisDb {
+    CCArena arena;
+    Map<char[:], RedisEntry*> entries;
+    RedisEntry* head;
+} RedisDb;
 
 static CCSlice rs_pol(CCArena* arena, CCSlice tag, CCSlice value) {
     (void)arena;
@@ -100,6 +107,42 @@ static void redis_vlogf(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     fprintf(stderr, "[redis:v] ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+}
+
+static int redis_conn_trace_enabled(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("REDIS_TRACE_CONN");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
+}
+
+static int redis_direct_get_null_enabled(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("REDIS_DIRECT_GET_NULL");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
+}
+
+static int redis_edge_batch_budget(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("REDIS_EDGE_BATCH");
+    mode = env ? atoi(env) : 1;
+    if (mode < 1) mode = 1;
+    if (mode > REPLY_CHAN_CAP) mode = REPLY_CHAN_CAP;
+    return mode;
+}
+
+static void redis_conn_tracef(const char* fmt, ...) {
+    if (!redis_conn_trace_enabled()) return;
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "[redis:conn] ");
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);
@@ -228,37 +271,82 @@ static bool !>(CCError) resp_reader_fill(RespReader* r, CCSocket* sock, CCArena*
         return cc_err(mkerr(CC_ERR_OVERFLOW, "request exceeds read buffer"));
     }
 
-    read_arena->reset();
     CCNetError err = CC_NET_OK;
-    CCSlice chunk = cc_socket_read(sock, read_arena, READ_CHUNK, &err);
+    size_t max_bytes = READ_CHUNK;
+    size_t avail = r->cap - r->end;
+    if (max_bytes > avail) max_bytes = avail;
+    redis_vlogf("sock read bytes<=%zu buf_before=%zu", max_bytes, r->end - r->start);
+    size_t n = cc_socket_read_into(sock, r->data + r->end, max_bytes, &err);
     if (err != CC_NET_OK) return cc_err(neterr(err, "socket read failed"));
-    if (chunk.len == 0) return cc_err(mkerr(CC_ERR_CLOSED, "connection closed"));
-    if ((r->cap - r->end) < chunk.len) {
-        return cc_err(mkerr(CC_ERR_OVERFLOW, "request exceeds read buffer"));
-    }
-
-    redis_vlogf("sock read bytes=%zu buf_before=%zu", chunk.len, r->end - r->start);
-    memcpy(r->data + r->end, chunk.ptr, chunk.len);
-    r->end += chunk.len;
-    redis_vlogf("sock read done bytes=%zu buf_after=%zu", chunk.len, r->end - r->start);
+    if (n == 0) return cc_err(mkerr(CC_ERR_CLOSED, "connection closed"));
+    r->end += n;
+    redis_vlogf("sock read done bytes=%zu buf_after=%zu", n, r->end - r->start);
     return cc_ok(true);
+}
+
+static bool resp_try_read_line(RespReader* r, CCSlice* out) {
+    for (size_t i = r->start; i + 1 < r->end; ++i) {
+        if (r->data[i] == '\r' && r->data[i + 1] == '\n') {
+            *out = cc_slice_from_parts(r->data + r->start,
+                                       i - r->start,
+                                       CC_SLICE_ID_UNTRACKED,
+                                       i - r->start);
+            r->start = i + 2;
+            return true;
+        }
+    }
+    return false;
 }
 
 static CCSlice !>(CCError) resp_read_line(RespReader* r, CCSocket* sock, CCArena* read_arena) {
     while (true) {
-        for (size_t i = r->start; i + 1 < r->end; ++i) {
-            if (r->data[i] == '\r' && r->data[i + 1] == '\n') {
-                CCSlice line = cc_slice_from_parts(r->data + r->start,
-                                                   i - r->start,
-                                                   CC_SLICE_ID_UNTRACKED,
-                                                   i - r->start);
-                r->start = i + 2;
-                return cc_ok(line);
-            }
-        }
+        CCSlice line = {0};
+        if (resp_try_read_line(r, &line)) return cc_ok(line);
         bool !>(CCError) fill_res = resp_reader_fill(r, sock, read_arena);
         if (fill_res.is_err()) return cc_err(fill_res.error());
     }
+}
+
+static int resp_try_read_bulk(RespReader* r, CCSlice* out, CCError* err) {
+    size_t start0 = r->start;
+    CCSlice line = {0};
+    if (!resp_try_read_line(r, &line)) return 0;
+    if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
+        if (err) *err = mkerr(CC_ERR_PARSE, "expected bulk string");
+        r->start = start0;
+        return -1;
+    }
+
+    int64_t !>(CCError) len_res = parse_i64(CCSlice_sub(&line, 1, line.len));
+    if (len_res.is_err()) {
+        if (err) *err = len_res.error();
+        r->start = start0;
+        return -1;
+    }
+    int64_t n = len_res.value();
+    if (n < 0) {
+        if (err) *err = mkerr(CC_ERR_PARSE, "negative bulk length");
+        r->start = start0;
+        return -1;
+    }
+
+    size_t need = (size_t)n + 2;
+    if ((r->end - r->start) < need) {
+        r->start = start0;
+        return 0;
+    }
+    if (r->data[r->start + n] != '\r' || r->data[r->start + n + 1] != '\n') {
+        if (err) *err = mkerr(CC_ERR_PARSE, "malformed bulk string");
+        r->start = start0;
+        return -1;
+    }
+
+    *out = cc_slice_from_parts(r->data + r->start,
+                               (size_t)n,
+                               CC_SLICE_ID_UNTRACKED,
+                               (size_t)n);
+    r->start += need;
+    return 1;
 }
 
 static CCSlice !>(CCError) resp_read_bulk(RespReader* r, CCSocket* sock, CCArena* read_arena) {
@@ -389,79 +477,268 @@ static RedisRequest* !>(CCError) parse_request(RespReader* r,
     return cc_ok(req);
 }
 
-static RedisEntry* db_find(RedisEntry* head, char[:] key) {
-    for (RedisEntry* cur = head; cur; cur = cur->next) {
-        if (cur->key.len == key.len && memcmp(cur->key.ptr, key.ptr, key.len) == 0) {
-            return cur;
+typedef struct ParseAttempt {
+    int status; /* 1 ok, 0 need more, -1 error */
+    RedisRequest* req;
+    CCError err;
+} ParseAttempt;
+
+static ParseAttempt parse_request_buffered(RespReader* r,
+                                           CCChanTx reply_tx,
+                                           uint64_t conn_id,
+                                           uint64_t request_id) {
+    ParseAttempt out = {0};
+    size_t start0 = r->start;
+    CCArena req_arena_storage = @create(REQUEST_ARENA_CAP) @destroy;
+    if (!req_arena_storage.base) {
+        out.status = -1;
+        out.err = mkerr(CC_ERR_OUT_OF_MEMORY, "request arena allocation failed");
+        return out;
+    }
+    CCArena* req_arena = &req_arena_storage;
+
+    CCSlice line = {0};
+    if (!resp_try_read_line(r, &line)) {
+        r->start = start0;
+        return out;
+    }
+
+    CCSlice args[4] = {0};
+    size_t argc = 0;
+    if (line.len > 0 && ((const char*)line.ptr)[0] == '*') {
+        int64_t !>(CCError) argc_res = parse_i64(CCSlice_sub(&line, 1, line.len));
+        if (argc_res.is_err()) {
+            out.status = -1;
+            out.err = argc_res.error();
+            r->start = start0;
+            return out;
+        }
+        int64_t argc_i64 = argc_res.value();
+        if (argc_i64 < 1 || argc_i64 > 4) {
+            out.status = -1;
+            out.err = mkerr(CC_ERR_PARSE, "unsupported argument count");
+            r->start = start0;
+            return out;
+        }
+        argc = (size_t)argc_i64;
+        for (size_t i = 0; i < argc; ++i) {
+            CCSlice bulk = {0};
+            CCError bulk_err = {0};
+            int bulk_status = resp_try_read_bulk(r, &bulk, &bulk_err);
+            if (bulk_status == 0) {
+                r->start = start0;
+                return out;
+            }
+            if (bulk_status < 0) {
+                out.status = -1;
+                out.err = bulk_err;
+                r->start = start0;
+                return out;
+            }
+            args[i] = bulk;
+        }
+    } else {
+        size_t !>(CCError) inline_res = parse_inline_args(line, args, 4);
+        if (inline_res.is_err()) {
+            out.status = -1;
+            out.err = inline_res.error();
+            r->start = start0;
+            return out;
+        }
+        argc = inline_res.value();
+    }
+
+    RedisCommandKind kind = REDIS_CMD_PING;
+    size_t req_argc = argc - 1;
+    size_t arg_start = 1;
+    if (slice_eq_ignore_case(args[0], "CONFIG")) {
+        if (argc != 3 || !slice_eq_ignore_case(args[1], "GET")) {
+            out.status = -1;
+            out.err = mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command");
+            r->start = start0;
+            return out;
+        }
+        kind = REDIS_CMD_CONFIG_GET;
+        req_argc = 1;
+        arg_start = 2;
+    } else {
+        kind = cmd_kind(args[0], argc - 1);
+        if ((int)kind < 0) {
+            out.status = -1;
+            out.err = mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command");
+            r->start = start0;
+            return out;
         }
     }
-    return NULL;
+
+    RedisRequest* req = cc_arena_alloc_T(RedisRequest, req_arena);
+    if (!req) {
+        out.status = -1;
+        out.err = mkerr(CC_ERR_OUT_OF_MEMORY, "request allocation failed");
+        r->start = start0;
+        return out;
+    }
+    memset(req, 0, sizeof(*req));
+    req->conn_id = conn_id;
+    req->request_id = request_id;
+    req->reply_tx = reply_tx;
+    req->kind = kind;
+    req->argc = req_argc;
+    for (size_t i = 0; i < req_argc; ++i) {
+        req->argv[i] = cc_slice_clone(req_arena, args[arg_start + i]);
+        if (args[arg_start + i].len > 0 && !req->argv[i].ptr) {
+            out.status = -1;
+            out.err = mkerr(CC_ERR_OUT_OF_MEMORY, "request argument clone failed");
+            r->start = start0;
+            return out;
+        }
+    }
+    req->arena = req_arena->detach();
+    redis_logf("req parsed buffered conn=%llu req=%llu cmd=%s argc=%zu key=%.*s",
+               (unsigned long long)req->conn_id,
+               (unsigned long long)req->request_id,
+               redis_command_name(req->kind),
+               req->argc,
+               (int)((req->argc > 0 && req->argv[0].len < 64) ? req->argv[0].len : (req->argc > 0 ? 64 : 0)),
+               (req->argc > 0 && req->argv[0].ptr) ? (const char*)req->argv[0].ptr : "");
+    out.status = 1;
+    out.req = req;
+    return out;
 }
 
-static bool !>(CCError) db_entry_replace(RedisEntry* e, char[:] key, char[:] value) {
-    size_t arena_size = key.len + value.len + ENTRY_ARENA_OVERHEAD;
+static bool !>(CCError) db_clone_owned_string(CCString* out, CCArena* out_arena, char[:] src, const char* err_msg) {
+    size_t arena_size = src.len + ENTRY_ARENA_OVERHEAD;
     if (arena_size < ENTRY_ARENA_OVERHEAD) arena_size = ENTRY_ARENA_OVERHEAD;
 
-    CCArena arena_storage = @create(arena_size) @destroy;
+    CCArena arena_storage = cc_arena_heap(arena_size) @destroy;
     if (!arena_storage.base) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry arena allocation failed"));
-    }
-    CCArena* a = &arena_storage;
-
-    CCSlice k = cc_slice_clone(a, key);
-    CCSlice v = cc_slice_clone(a, value);
-    if ((key.len > 0 && !k.ptr) || (value.len > 0 && !v.ptr)) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry clone failed"));
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, err_msg));
     }
 
-    CCArena own = a->detach();
-    if (e->arena.base) e->arena.free();
-    e->key = k;
-    e->value = v;
-    e->arena = own;
+    CCString cloned = CCString_from_slice(&arena_storage, src);
+    if (src.len > 0 && CCString_len(&cloned) != src.len) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, err_msg));
+    }
+
+    *out = cloned;
+    *out_arena = arena_storage.detach();
     return cc_ok(true);
 }
 
-static RedisReply !>(CCError) db_set(RedisEntry** head, char[:] key, char[:] value) {
-    RedisEntry* e = db_find(*head, key);
-    if (!e) {
-        e = calloc(1, sizeof(*e));
-        if (!e) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
-        e->next = *head;
-        *head = e;
+static bool db_init(RedisDb* db, size_t bucket_count) {
+    if (!db || bucket_count == 0) return false;
+    size_t arena_size = bucket_count * (sizeof(CCSlice) + sizeof(RedisEntry*) + 8);
+    if (arena_size < megabytes(4)) arena_size = megabytes(4);
+    db->arena = cc_arena_heap(arena_size);
+    if (!db->arena.base) return false;
+    db->entries = map_new<char[:], RedisEntry*>(&db->arena);
+    db->head = NULL;
+    return db->entries != NULL;
+}
+
+static bool !>(CCError) db_entry_init(RedisEntry* e, char[:] key, char[:] value) {
+    CCString owned_key = {0};
+    CCString owned_value = {0};
+    CCArena key_arena = {0};
+    CCArena value_arena = {0};
+
+    bool !>(CCError) key_res = db_clone_owned_string(&owned_key, &key_arena, key, "entry key clone failed");
+    if (key_res.is_err()) return cc_err(key_res.error());
+
+    bool !>(CCError) value_res = db_clone_owned_string(&owned_value, &value_arena, value, "entry value clone failed");
+    if (value_res.is_err()) {
+        if (key_arena.base) key_arena.free();
+        return cc_err(value_res.error());
     }
 
-    bool !>(CCError) res = db_entry_replace(e, key, value);
-    if (res.is_err()) return cc_err(res.error());
+    e->key = owned_key;
+    e->value = owned_value;
+    e->key_arena = key_arena;
+    e->value_arena = value_arena;
+    return cc_ok(true);
+}
+
+static bool !>(CCError) db_entry_replace_value(RedisEntry* e, char[:] value) {
+    CCString owned_value = {0};
+    CCArena value_arena = {0};
+    bool !>(CCError) value_res = db_clone_owned_string(&owned_value, &value_arena, value, "entry value clone failed");
+    if (value_res.is_err()) return cc_err(value_res.error());
+
+    if (e->value_arena.base) e->value_arena.free();
+    e->value = owned_value;
+    e->value_arena = value_arena;
+    return cc_ok(true);
+}
+
+static void db_free_entry(RedisEntry* e) {
+    if (!e) return;
+    if (e->key_arena.base) e->key_arena.free();
+    if (e->value_arena.base) e->value_arena.free();
+    free(e);
+}
+
+static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
+    if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+    /* Keep a local alias here: generic UFCS on struct fields has been a
+     * moving target in the frontend, while local map values lower reliably. */
+    Map<char[:], RedisEntry*> entries = db->entries;
+    RedisEntry** entry_slot = entries.get_ptr(key);
+    if (entry_slot && *entry_slot) {
+        bool !>(CCError) replace_res = db_entry_replace_value(*entry_slot, value);
+        if (replace_res.is_err()) return cc_err(replace_res.error());
+        return cc_ok(reply_simple("OK"));
+    }
+
+    RedisEntry* e = calloc(1, sizeof(*e));
+    if (!e) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
+
+    bool !>(CCError) init_res = db_entry_init(e, key, value);
+    if (init_res.is_err()) {
+        free(e);
+        return cc_err(init_res.error());
+    }
+
+    if (entries.insert(CCString_as_slice(&e->key), e) != 0) {
+        db_free_entry(e);
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
+    }
+    e->next = db->head;
+    db->head = e;
+
     return cc_ok(reply_simple("OK"));
 }
 
-static RedisReply db_get(RedisEntry* head, char[:] key) {
-    RedisEntry* e = db_find(head, key);
+static RedisReply db_get(RedisDb* db, char[:] key) {
+    if (!db || !db->entries) return reply_null();
+    Map<char[:], RedisEntry*> entries = db->entries;
+    RedisEntry** entry_slot = entries.get_ptr(key);
+    RedisEntry* e = (entry_slot && *entry_slot) ? *entry_slot : NULL;
     if (!e) return reply_null();
-    return reply_bulk(e->value);
+    return reply_bulk(CCString_as_slice(&e->value));
 }
 
-static RedisReply db_del(RedisEntry** head, char[:] key) {
-    RedisEntry* p = NULL;
-    for (RedisEntry* h = *head; h; h = h->next) {
-        if (h->key.len == key.len && memcmp(h->key.ptr, key.ptr, key.len) == 0) {
-            if (p) p->next = h->next;
-            else *head = h->next;
-            if (h->arena.base) h->arena.free();
-            free(h);
-            return reply_integer(1);
-        }
-        p = h;
-    }
-    return reply_integer(0);
+static RedisReply db_del(RedisDb* db, char[:] key) {
+    if (!db || !db->entries) return reply_integer(0);
+    Map<char[:], RedisEntry*> entries = db->entries;
+    RedisEntry** entry_slot = entries.get_ptr(key);
+    RedisEntry* e = (entry_slot && *entry_slot) ? *entry_slot : NULL;
+    if (!e) return reply_integer(0);
+    if (!entries.remove(key)) return reply_integer(0);
+    RedisEntry** link = &db->head;
+    while (*link && *link != e) link = &(*link)->next;
+    if (*link == e) *link = e->next;
+    db_free_entry(e);
+    return reply_integer(1);
 }
 
-static RedisReply !>(CCError) db_incr(RedisEntry** head, char[:] key) {
-    RedisEntry* e = db_find(*head, key);
+static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
+    if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+    Map<char[:], RedisEntry*> entries = db->entries;
+    RedisEntry** entry_slot = entries.get_ptr(key);
+    RedisEntry* e = (entry_slot && *entry_slot) ? *entry_slot : NULL;
     int64_t value = 0;
     if (e) {
-        int64_t !>(CCError) parsed = parse_i64(e->value);
+        int64_t !>(CCError) parsed = parse_i64(CCString_as_slice(&e->value));
         if (parsed.is_err()) {
             return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
         }
@@ -478,12 +755,17 @@ static RedisReply !>(CCError) db_incr(RedisEntry** head, char[:] key) {
 
     CCString s = @string(value, &a);
     char[:0] v = s.as_slice();
-    RedisReply !>(CCError) res = db_set(head, key, v);
-    if (res.is_err()) return cc_err(res.error());
+    if (e) {
+        bool !>(CCError) replace_res = db_entry_replace_value(e, v);
+        if (replace_res.is_err()) return cc_err(replace_res.error());
+    } else {
+        RedisReply !>(CCError) set_res = db_set(db, key, v);
+        if (set_res.is_err()) return cc_err(set_res.error());
+    }
     return cc_ok(reply_integer(value));
 }
 
-static RedisReply !>(CCError) execute_request(RedisEntry** db, RedisRequest* req) {
+static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
             if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
@@ -491,7 +773,7 @@ static RedisReply !>(CCError) execute_request(RedisEntry** db, RedisRequest* req
         case REDIS_CMD_CONFIG_GET:
             return cc_ok(reply_raw(config_get_reply(req->argv[0])));
         case REDIS_CMD_GET:
-            return cc_ok(db_get(*db, req->argv[0]));
+            return cc_ok(db_get(db, req->argv[0]));
         case REDIS_CMD_SET:
             return db_set(db, req->argv[0], req->argv[1]);
         case REDIS_CMD_DEL:
@@ -503,29 +785,36 @@ static RedisReply !>(CCError) execute_request(RedisEntry** db, RedisRequest* req
     }
 }
 
-static void db_free_all(RedisEntry* h) {
-    while (h) {
-        RedisEntry* n = h->next;
-        if (h->arena.base) h->arena.free();
-        free(h);
-        h = n;
+static void db_free_all(RedisDb* db) {
+    if (!db || !db->entries) return;
+    RedisEntry* entry = db->head;
+    while (entry) {
+        RedisEntry* next = entry->next;
+        db_free_entry(entry);
+        entry = next;
     }
+    Map<char[:], RedisEntry*> entries = db->entries;
+    entries.destroy();
+    db->entries = NULL;
+    db->head = NULL;
+    if (db->arena.base) db->arena.free();
+    db->arena = (CCArena){0};
 }
 
-static bool write_all(CCSocket* sock, const char* data, size_t len) {
+static bool write_all(CCSocket* sock, CCSlice data) {
     CCNetError err = CC_NET_OK;
     size_t off = 0;
-    redis_vlogf("sock write begin len=%zu", len);
-    while (off < len) {
-        size_t n = cc_socket_write(sock, data + off, len - off, &err);
+    redis_vlogf("sock write begin len=%zu", data.len);
+    while (off < data.len) {
+        size_t n = cc_socket_write(sock, (const char*)data.ptr + off, data.len - off, &err);
         if (err != CC_NET_OK || n == 0) {
-            redis_vlogf("sock write fail off=%zu len=%zu err=%d wrote=%zu", off, len, err, n);
+            redis_vlogf("sock write fail off=%zu len=%zu err=%d wrote=%zu", off, data.len, err, n);
             return false;
         }
         off += n;
-        redis_vlogf("sock write step off=%zu len=%zu", off, len);
+        redis_vlogf("sock write step off=%zu len=%zu", off, data.len);
     }
-    redis_vlogf("sock write done len=%zu", len);
+    redis_vlogf("sock write done len=%zu", data.len);
     return true;
 }
 
@@ -537,8 +826,7 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `+${reply.data}\r\n`, &a);
-            char[:0] out = CCString_as_slice(&s);
-            return write_all(sock, out.ptr, out.len);
+            return write_all(sock, CCString_as_slice(&s));
         }
         case REDIS_REPLY_BULK_STRING: {
             size_t frame_cap = reply.data.len + 64;
@@ -546,30 +834,27 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `$${reply.data.len}\r\n${reply.data}\r\n`, &a);
-            char[:0] out = CCString_as_slice(&s);
-            return write_all(sock, out.ptr, out.len);
+            return write_all(sock, CCString_as_slice(&s));
         }
         case REDIS_REPLY_INTEGER: {
             char buf[64];
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `:${reply.int_value}\r\n`, &a);
-            char[:0] out = CCString_as_slice(&s);
-            return write_all(sock, out.ptr, out.len);
+            return write_all(sock, CCString_as_slice(&s));
         }
         case REDIS_REPLY_NULL_BULK:
-            return write_all(sock, "$-1\r\n", 5);
+            return write_all(sock, cc_slice_from_cstr("$-1\r\n"));
         case REDIS_REPLY_ERROR: {
             size_t frame_cap = reply.data.len + 16;
             char buf[frame_cap];
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `-${reply.data}\r\n`, &a);
-            char[:0] out = CCString_as_slice(&s);
-            return write_all(sock, out.ptr, out.len);
+            return write_all(sock, CCString_as_slice(&s));
         }
         case REDIS_REPLY_RAW:
-            return write_all(sock, reply.data.ptr, reply.data.len);
+            return write_all(sock, reply.data);
         default:
             return false;
     }
@@ -580,7 +865,8 @@ static void free_request(RedisRequest* req) {
 }
 
 static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
-    RedisEntry* db = NULL;
+    RedisDb db = {0};
+    if (!db_init(&db, 16384)) return;
     RedisRequest* req = NULL;
     while (cc_io_avail(req_rx.recv(&req))) {
         if (!req) continue;
@@ -619,7 +905,7 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
                    redis_reply_name(reply.kind));
         free_request(req);
     }
-    db_free_all(db);
+    db_free_all(&db);
 }
 
 static void handle_client(CCSocket* pclient, RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx, uint64_t conn_id) {
@@ -628,12 +914,13 @@ static void handle_client(CCSocket* pclient, RedisRequest*[~REQUEST_CHAN_CAP N:1
     if (!pclient) return;
     CCSocket client = *pclient;
     free(pclient);
-    redis_logf("conn open id=%llu", (unsigned long long)conn_id);
+    int fd = client.fd;
+    redis_logf("conn open id=%llu fd=%d", (unsigned long long)conn_id, fd);
 
     char read_buf[READ_BUF_CAP];
     CCArena read_arena = @create(kilobytes(8)) @destroy;
     if (!read_arena.base) {
-        redis_logf("conn close id=%llu reason=read_arena_alloc_failed", (unsigned long long)conn_id);
+        redis_logf("conn close id=%llu fd=%d reason=read_arena_alloc_failed", (unsigned long long)conn_id, fd);
         cc_socket_close(&client);
         return;
     }
@@ -644,10 +931,11 @@ static void handle_client(CCSocket* pclient, RedisRequest*[~REQUEST_CHAN_CAP N:1
     RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
     if (!reply_ch) {
-        redis_logf("conn close id=%llu reason=reply_channel_create_failed", (unsigned long long)conn_id);
+        redis_logf("conn close id=%llu fd=%d reason=reply_channel_create_failed", (unsigned long long)conn_id, fd);
         cc_socket_close(&client);
         return;
     }
+    redis_logf("conn reply_ch id=%llu fd=%d ch=%p", (unsigned long long)conn_id, fd, (void*)reply_ch);
     @defer reply_ch.free();
 
     uint64_t req_id = 1;
@@ -655,70 +943,157 @@ static void handle_client(CCSocket* pclient, RedisRequest*[~REQUEST_CHAN_CAP N:1
     uint64_t last_sent = 0;
     uint64_t last_reply_recv = 0;
     uint64_t last_write_ok = 0;
+    size_t batch_budget = (size_t)redis_edge_batch_budget();
+    size_t inflight = 0;
     while (true) {
-        redis_vlogf("conn wait parse id=%llu next_req=%llu buf=%zu",
+        redis_conn_tracef("state id=%llu fd=%d next_req=%llu parsed=%llu sent=%llu recv=%llu wrote=%llu inflight=%zu buf=%zu",
+                          (unsigned long long)conn_id,
+                          fd,
+                          (unsigned long long)req_id,
+                          (unsigned long long)last_parsed,
+                          (unsigned long long)last_sent,
+                          (unsigned long long)last_reply_recv,
+                          (unsigned long long)last_write_ok,
+                          inflight,
+                          reader.end - reader.start);
+        redis_vlogf("conn wait parse id=%llu next_req=%llu inflight=%zu buf=%zu",
                     (unsigned long long)conn_id,
                     (unsigned long long)req_id,
+                    inflight,
                     reader.end - reader.start);
-        RedisRequest* !>(CCError) req_res =
-            parse_request(&reader, &client, &read_arena, reply_tx, conn_id, req_id++);
-        if (req_res.is_err()) {
-            CCError err = req_res.error();
-            if (err.kind != CC_ERR_CLOSED) {
-                redis_logf("conn error id=%llu req=%llu stage=parse kind=%d msg=%s",
-                           (unsigned long long)conn_id,
-                           (unsigned long long)(req_id - 1),
-                           err.kind,
-                           err.message ? err.message : "unknown");
-                (void)write_reply(&client, err_reply(err));
+        while (inflight < batch_budget) {
+            RedisRequest* req = NULL;
+            CCError err = {0};
+            uint64_t current_req_id = req_id++;
+            if (inflight == 0) {
+                RedisRequest* !>(CCError) req_res =
+                    parse_request(&reader, &client, &read_arena, reply_tx, conn_id, current_req_id);
+                if (req_res.is_err()) {
+                    err = req_res.error();
+                } else {
+                    req = req_res.value();
+                }
+            } else {
+                ParseAttempt buffered = parse_request_buffered(&reader, reply_tx, conn_id, current_req_id);
+                if (buffered.status == 0) {
+                    req_id--;
+                    break;
+                }
+                if (buffered.status < 0) {
+                    err = buffered.err;
+                } else {
+                    req = buffered.req;
+                }
             }
-            break;
-        }
 
-        RedisRequest* req = req_res.value();
-        last_parsed = req->request_id;
-        if (!cc_io_avail(req_tx.send(req))) {
-            redis_logf("conn error id=%llu req=%llu stage=send_request",
+            if (!req) {
+                if (err.kind != CC_ERR_CLOSED) {
+                    redis_logf("conn error id=%llu fd=%d req=%llu stage=parse kind=%d msg=%s buf=%zu",
+                               (unsigned long long)conn_id,
+                               fd,
+                               (unsigned long long)current_req_id,
+                               err.kind,
+                               err.message ? err.message : "unknown",
+                               reader.end - reader.start);
+                    (void)write_reply(&client, err_reply(err));
+                }
+                goto conn_done;
+            }
+            last_parsed = req->request_id;
+            if (redis_direct_get_null_enabled() && req->kind == REDIS_CMD_GET && inflight == 0) {
+                RedisReply reply = reply_null();
+                reply.conn_id = req->conn_id;
+                reply.request_id = req->request_id;
+                redis_logf("conn direct-get id=%llu fd=%d req=%llu",
+                           (unsigned long long)conn_id,
+                           fd,
+                           (unsigned long long)req->request_id);
+                if (!write_reply(&client, reply)) {
+                    redis_logf("conn error id=%llu fd=%d req=%llu stage=write_reply_direct",
+                               (unsigned long long)conn_id,
+                               fd,
+                               (unsigned long long)reply.request_id);
+                    free_request(req);
+                    goto conn_done;
+                }
+                last_write_ok = reply.request_id;
+                last_reply_recv = reply.request_id;
+                free_request(req);
+                continue;
+            }
+            if (!cc_io_avail(req_tx.send(req))) {
+                redis_logf("conn error id=%llu fd=%d req=%llu stage=send_request",
+                           (unsigned long long)conn_id,
+                           fd,
+                           (unsigned long long)req->request_id);
+                free_request(req);
+                goto conn_done;
+            }
+            last_sent = req->request_id;
+            inflight++;
+            redis_logf("conn queued id=%llu fd=%d req=%llu inflight=%zu",
                        (unsigned long long)conn_id,
-                       (unsigned long long)req->request_id);
-            free_request(req);
-            break;
+                       fd,
+                       (unsigned long long)req->request_id,
+                       inflight);
         }
-        last_sent = req->request_id;
-        redis_logf("conn queued id=%llu req=%llu",
-                   (unsigned long long)conn_id,
-                   (unsigned long long)req->request_id);
+        if (inflight == 0) continue;
 
         RedisReply reply;
-        redis_vlogf("conn wait reply id=%llu req=%llu", (unsigned long long)conn_id, (unsigned long long)req->request_id);
+        redis_conn_tracef("wait_reply id=%llu fd=%d inflight=%zu parsed=%llu sent=%llu recv=%llu wrote=%llu",
+                          (unsigned long long)conn_id,
+                          fd,
+                          inflight,
+                          (unsigned long long)last_parsed,
+                          (unsigned long long)last_sent,
+                          (unsigned long long)last_reply_recv,
+                          (unsigned long long)last_write_ok);
+        redis_vlogf("conn wait reply id=%llu inflight=%zu", (unsigned long long)conn_id, inflight);
         if (!cc_io_avail(reply_rx.recv(&reply))) {
-            redis_logf("conn error id=%llu stage=recv_reply", (unsigned long long)conn_id);
+            redis_logf("conn error id=%llu fd=%d stage=recv_reply", (unsigned long long)conn_id, fd);
             break;
         }
         last_reply_recv = reply.request_id;
-        redis_logf("conn reply recv id=%llu req=%llu kind=%s",
+        redis_logf("conn reply recv id=%llu fd=%d req=%llu kind=%s inflight=%zu",
                    (unsigned long long)conn_id,
+                   fd,
                    (unsigned long long)reply.request_id,
-                   redis_reply_name(reply.kind));
-        redis_vlogf("conn write begin id=%llu req=%llu kind=%s",
+                   redis_reply_name(reply.kind),
+                   inflight);
+        redis_conn_tracef("write_begin id=%llu fd=%d req=%llu kind=%s inflight=%zu",
+                          (unsigned long long)conn_id,
+                          fd,
+                          (unsigned long long)reply.request_id,
+                          redis_reply_name(reply.kind),
+                          inflight);
+        redis_vlogf("conn write begin id=%llu req=%llu kind=%s inflight=%zu",
                     (unsigned long long)conn_id,
                     (unsigned long long)reply.request_id,
-                    redis_reply_name(reply.kind));
+                    redis_reply_name(reply.kind),
+                    inflight);
         if (!write_reply(&client, reply)) {
-            redis_logf("conn error id=%llu req=%llu stage=write_reply", (unsigned long long)conn_id, (unsigned long long)reply.request_id);
+            redis_logf("conn error id=%llu fd=%d req=%llu stage=write_reply",
+                       (unsigned long long)conn_id,
+                       fd,
+                       (unsigned long long)reply.request_id);
             break;
         }
         last_write_ok = reply.request_id;
-        redis_logf("conn reply wrote id=%llu req=%llu kind=%s",
+        inflight--;
+        redis_logf("conn reply wrote id=%llu fd=%d req=%llu kind=%s inflight=%zu",
                    (unsigned long long)conn_id,
+                   fd,
                    (unsigned long long)reply.request_id,
-                   redis_reply_name(reply.kind));
+                   redis_reply_name(reply.kind),
+                   inflight);
     }
 
+conn_done:
     reply_tx.close();
     cc_socket_close(&client);
-    redis_logf("conn close id=%llu parsed=%llu sent=%llu recv=%llu wrote=%llu",
+    redis_logf("conn close id=%llu fd=%d parsed=%llu sent=%llu recv=%llu wrote=%llu",
                (unsigned long long)conn_id,
+               fd,
                (unsigned long long)last_parsed,
                (unsigned long long)last_sent,
                (unsigned long long)last_reply_recv,
@@ -779,7 +1154,7 @@ int main(int argc, char** argv) {
                 }
 
                 uint64_t id = next_conn_id++;
-                redis_logf("accept conn=%llu", (unsigned long long)id);
+                redis_logf("accept conn=%llu fd=%d", (unsigned long long)id, client.fd);
                 CCSocket* pclient = malloc(sizeof(*pclient));
                 if (!pclient) {
                     cc_socket_close(&client);
