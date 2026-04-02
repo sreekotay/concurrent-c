@@ -1,0 +1,64 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/std/task.cch>
+
+static cc_atomic_int g_sum = 0;
+
+@async int add_value(int v) {
+    cc_atomic_fetch_add(&g_sum, v);
+    return v;
+}
+
+@async int produce(int[~8 >] tx, int base) {
+    for (int i = 0; i < 3; ++i) {
+        if (!cc_io_avail(tx.send(base + i))) return 1;
+        cc_yield();
+    }
+    return 0;
+}
+
+int main(void) {
+    cc_atomic_store(&g_sum, 0);
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 10;
+        if (n->spawn_async(add_value(7)) != 0) return 11;
+        if (n->spawn_async(add_value(11)) != 0) return 12;
+    }
+
+    if (cc_atomic_load(&g_sum) != 18) return 13;
+
+    int[~8 >] tx;
+    int[~8 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 20;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) {
+            cc_chan_free(ch);
+            return 21;
+        }
+        (void)n->close_on(tx);
+        if (n->spawn_async(produce(tx, 10)) != 0) {
+            cc_chan_free(ch);
+            return 22;
+        }
+        if (n->spawn_async(produce(tx, 20)) != 0) {
+            cc_chan_free(ch);
+            return 23;
+        }
+    }
+
+    int count = 0;
+    int sum = 0;
+    int v = 0;
+    while (cc_io_avail(rx.recv(&v))) {
+        count++;
+        sum += v;
+    }
+    cc_chan_free(ch);
+
+    return (count == 6 && sum == 96) ? 0 : 24;
+}

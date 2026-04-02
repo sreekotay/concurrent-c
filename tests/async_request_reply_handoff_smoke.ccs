@@ -1,0 +1,125 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+
+#include <stdio.h>
+#include <stdlib.h>
+
+#define REQUESTS 4000
+#define REQUEST_CHAN_CAP 128
+
+typedef struct {
+    int request_id;
+    int expected_reply;
+} HandoffRequest;
+
+static cc_atomic_int g_errors = 0;
+static cc_atomic_int g_owner_seen = 0;
+
+static int expected_reply_value(int request_id) {
+    return request_id * 17;
+}
+
+static void handoff_owner(CCChanRx req_rx, CCChanTx reply_tx) {
+    HandoffRequest* req = NULL;
+    while (cc_io_avail(cc_channel_recv(req_rx, &req))) {
+        if (!req) continue;
+        cc_atomic_fetch_add(&g_owner_seen, 1);
+
+        int expected = expected_reply_value(req->request_id);
+        if (req->expected_reply != expected) {
+            cc_atomic_fetch_add(&g_errors, 1);
+        }
+
+        if (!cc_io_avail(cc_channel_send(reply_tx, req->expected_reply))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+        }
+
+        free(req);
+        if ((expected & 31) == 0) cc_yield();
+    }
+}
+
+static void handoff_client(CCChanTx req_tx, CCChanRx reply_rx) {
+    /* The direct @async version of this test hit lowering-time
+     * `field not found: __f` errors in the compiler. Use nursery spawn
+     * closures as a local workaround so we can keep the handoff coverage
+     * and stay focused on the Redis repro instead of the lowering bug. */
+    HandoffRequest* req = NULL;
+    int expected = 0;
+    int reply = -1;
+    for (int request_id = 1; request_id <= REQUESTS; ++request_id) {
+        req = malloc(sizeof(HandoffRequest));
+        if (!req) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            return;
+        }
+
+        expected = expected_reply_value(request_id);
+        req->request_id = request_id;
+        req->expected_reply = expected;
+
+        if ((request_id & 7) == 0) cc_yield();
+        if (!cc_io_avail(cc_channel_send(req_tx, req))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            free(req);
+            return;
+        }
+
+        reply = -1;
+        if (!cc_io_avail(cc_channel_recv(reply_rx, &reply))) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            return;
+        }
+        if (reply != expected) {
+            cc_atomic_fetch_add(&g_errors, 1);
+            return;
+        }
+    }
+    /* Close explicitly from the producer side so the owner recv loop can
+     * terminate without depending on nursery-closing order. */
+    cc_channel_close(req_tx);
+}
+
+int main(void) {
+    cc_sched_set_num_workers(4);
+    cc_atomic_store(&g_errors, 0);
+    cc_atomic_store(&g_owner_seen, 0);
+
+    HandoffRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx;
+    HandoffRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx;
+    CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx);
+    if (!req_ch) return 10;
+    @defer req_ch.free();
+    CCChanTx req_tx_raw = req_tx;
+    CCChanRx req_rx_raw = req_rx;
+
+    int[~1 >] reply_tx_h;
+    int[~1 <] reply_rx_h;
+    CCChan* reply_ch = cc_channel_pair(&reply_tx_h, &reply_rx_h);
+    if (!reply_ch) return 11;
+    @defer reply_ch.free();
+    CCChanTx reply_tx_raw = reply_tx_h;
+    CCChanRx reply_rx_raw = reply_rx_h;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 12;
+        n->spawn(() => [req_rx_raw, reply_tx_raw] {
+            handoff_owner(req_rx_raw, reply_tx_raw);
+        });
+        n->spawn(() => [req_tx_raw, reply_rx_raw] {
+            handoff_client(req_tx_raw, reply_rx_raw);
+        });
+    }
+
+    int expected_total = REQUESTS;
+    int errors = cc_atomic_load(&g_errors);
+    int owner_seen = cc_atomic_load(&g_owner_seen);
+    if (errors != 0) return 20;
+    if (owner_seen != expected_total) return 21;
+
+    printf("async_request_reply_handoff_smoke: PASS (%d requests)\n", expected_total);
+    return 0;
+}
