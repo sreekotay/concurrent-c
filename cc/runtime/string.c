@@ -4,23 +4,23 @@
 
 #include <string.h>
 
-CCString cc_string_new(CCArena *arena) {
+CCString CCString_new(CCArena *arena) {
     CCString s = Vec_char_init(arena, 0);
     if (s.data) s.data[0] = '\0';
     return s;
 }
 
-CCString cc_string_from_slice(CCArena *arena, CCSlice slice) {
-    CCString s = cc_string_new(arena);
+CCString CCString_from_slice(CCArena *arena, CCSlice slice) {
+    CCString s = CCString_new(arena);
     if (!s.data) return s;
-    if (!cc_string_push(&s, slice)) {
+    if (!CCString_push(&s, slice)) {
         CCString empty = {0};
         return empty;
     }
     return s;
 }
 
-CCString* cc_string_push_slice(CCString *str, CCSlice data) {
+CCString* CCString_push_slice(CCString *str, CCSlice data) {
     if (!str || !str->arena) return NULL;
     size_t new_len = str->len + data.len;
     if (Vec_char_reserve(str, new_len + 1) != 0) return NULL;
@@ -32,14 +32,14 @@ CCString* cc_string_push_slice(CCString *str, CCSlice data) {
     return str;
 }
 
-CCString* cc_string_clear(CCString *str) {
+CCString* CCString_clear(CCString *str) {
     if (!str) return NULL;
     str->len = 0;
     if (str->data) str->data[0] = '\0';
     return str;
 }
 
-CCSlice cc_string_as_slice(const CCString *str) {
+CCSlice CCString_as_slice(const CCString *str) {
     if (!str || !str->data) {
         return cc_slice_empty();
     }
@@ -51,7 +51,7 @@ CCSlice cc_string_as_slice(const CCString *str) {
     );
 }
 
-const char *cc_string_cstr(CCString *str) {
+const char *CCString_cstr(CCString *str) {
     if (!str || !str->data) {
         return NULL;
     }
@@ -61,5 +61,4 @@ const char *cc_string_cstr(CCString *str) {
     str->data[str->len] = '\0';
     return str->data;
 }
-
 

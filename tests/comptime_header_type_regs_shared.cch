@@ -9,7 +9,7 @@ static CCSlice header_registered_arena_ufcs(CCSlice recv_type, CCSlice method, C
     (void)argv;
     (void)arg_types;
     (void)arena;
-    if (cc_slice_eq_cstr(method, "avail")) {
+    if (CCSlice_eq_cstr(&method, "avail")) {
         return cc_slice_from_buffer((void*)"cc_arena_remaining", sizeof("cc_arena_remaining") - 1);
     }
     return cc_slice_empty();

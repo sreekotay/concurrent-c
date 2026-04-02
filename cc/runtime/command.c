@@ -13,11 +13,11 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     offset = old_len;
 
     if (Vec_size_t_push(&cmd->offsets, offset) != 0) return -1;
-    if (!cc_string_push_slice(&cmd->storage, arg)) {
+    if (!CCString_push_slice(&cmd->storage, arg)) {
         cmd->offsets.len--;
         return -1;
     }
-    if (!cc_string_push_char(&cmd->storage, '\0')) {
+    if (!CCString_push_char(&cmd->storage, '\0')) {
         cmd->storage.len = old_len;
         if (cmd->storage.data) cmd->storage.data[old_len] = '\0';
         cmd->offsets.len--;
@@ -29,7 +29,7 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
 CCCommand cc_command_new(CCArena *arena, const char *program) {
     CCCommand cmd = {0};
     cmd.arena = arena;
-    cmd.storage = cc_string_new(arena);
+    cmd.storage = CCString_new(arena);
     cmd.offsets = Vec_size_t_init(arena, 0);
 
     if (!arena || !cmd.storage.arena || !cmd.offsets.arena) {
@@ -236,7 +236,7 @@ __CC_RESULT(int, CCIoError) cc_command_status(CCCommand *cmd) {
                 cc_process_close_stdin(&proc);
                 return cc_err_CCResult_int_CCIoError(cc_unwrap_err(write_res));
             }
-            input = cc_slice_sub(input, cc_unwrap(write_res), input.len);
+            input = CCSlice_sub(&input, cc_unwrap(write_res), input.len);
         }
         cc_process_close_stdin(&proc);
     }

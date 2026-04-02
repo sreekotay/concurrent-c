@@ -947,7 +947,7 @@ CCResult_CCProcessOutput_CCIoError cc_process_run_with_input(CCArena* arena,
             }
             {
                 size_t wrote = cc_unwrap(write_res);
-                input = cc_slice_sub(input, wrote, input.len);
+                input = CCSlice_sub(&input, wrote, input.len);
             }
         }
         cc_process_close_stdin(&proc);

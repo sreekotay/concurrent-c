@@ -4,8 +4,8 @@
 #include <string.h>
 
 static CCSlice demo_policy(CCArena *arena, CCSlice tag, CCSlice value) {
-    if (cc_slice_is_empty(tag)) return value;
-    CCString out = cc_string_new(arena);
+    if (CCSlice_is_empty(&tag)) return value;
+    CCString out = CCString_new(arena);
     out.append("[");
     out.append(tag);
     out.append("=");
@@ -34,7 +34,7 @@ int main(void) {
 
     const char *name = "Ada";
     CCString tpl = @string(demo_policy, `name=${name}; age=$meta{age}`, arena);
-    assert(strcmp(cc_string_cstr(&tpl), "name=Ada; age=[meta=37]") == 0);
+    assert(strcmp(CCString_cstr(&tpl), "name=Ada; age=[meta=37]") == 0);
 
     CCString multiline = @string(demo_policy, `
 name=${name}

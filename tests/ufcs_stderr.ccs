@@ -5,7 +5,7 @@ int main(void) {
         CCArena __cc_arena12 = @create(kilobytes(4)) @destroy;
         if (!__cc_arena12.base) abort();
         CCArena* ar = &__cc_arena12;
-        CCString s = cc_string_new(ar);
+        CCString s = CCString_new(ar);
         s.append("stderr line1\n");
         s.append("stderr line2\n");
         cc_std_err.write("stderr literal\n");

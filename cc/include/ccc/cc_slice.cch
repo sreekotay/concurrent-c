@@ -103,8 +103,8 @@ static inline CCSlice cc_slice_from_cstr(const char *cstr) {
                                len);
 }
 
-static inline bool cc_slice_is_empty(CCSlice s) {
-    return s.len == 0;
+static inline bool CCSlice_is_empty(CCSlice* s) {
+    return !s || s->len == 0;
 }
 
 static inline size_t cc_slice_capacity(CCSlice s) {

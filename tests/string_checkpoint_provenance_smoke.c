@@ -7,11 +7,11 @@ int main(void) {
     CCArena arena = cc_arena_create_init(buffer, sizeof(buffer));
     assert(arena.base != NULL);
 
-    CCString stable = cc_string_new(&arena);
+    CCString stable = CCString_new(&arena);
     assert(stable.data != NULL);
-    assert(cc_string_push(&stable, "stable") != NULL);
+    assert(CCString_push(&stable, "stable") != NULL);
 
-    CCSlice stable_view = cc_string_as_slice(&stable);
+    CCSlice stable_view = CCString_as_slice(&stable);
     uint64_t stable_id = cc_slice_make_id(stable.provenance, false, false, false);
     assert(stable_view.id == stable_id);
     assert(stable.provenance == arena.provenance);
@@ -22,10 +22,10 @@ int main(void) {
     assert(cp.provenance == stable.provenance);
     assert(arena.provenance != cp.provenance);
 
-    CCString transient = cc_string_new(&arena);
+    CCString transient = CCString_new(&arena);
     assert(transient.data != NULL);
-    assert(cc_string_push(&transient, "transient") != NULL);
-    CCSlice transient_view = cc_string_as_slice(&transient);
+    assert(CCString_push(&transient, "transient") != NULL);
+    CCSlice transient_view = CCString_as_slice(&transient);
     uint64_t transient_id = cc_slice_make_id(transient.provenance, false, false, false);
     assert(transient_view.id == transient_id);
     assert(transient_view.id != stable_view.id);
@@ -35,15 +35,15 @@ int main(void) {
 
     /* Pre-checkpoint strings keep their original epoch and remain valid. */
     assert(stable.provenance == cp.provenance);
-    stable_view = cc_string_as_slice(&stable);
+    stable_view = CCString_as_slice(&stable);
     assert(stable_view.id == stable_id);
     assert(memcmp(stable_view.ptr, "stable", stable_view.len) == 0);
 
     /* New allocations after restore re-enter the restored checkpoint epoch. */
-    CCString after_restore = cc_string_new(&arena);
+    CCString after_restore = CCString_new(&arena);
     assert(after_restore.data != NULL);
-    assert(cc_string_push(&after_restore, "after") != NULL);
-    CCSlice after_restore_view = cc_string_as_slice(&after_restore);
+    assert(CCString_push(&after_restore, "after") != NULL);
+    CCSlice after_restore_view = CCString_as_slice(&after_restore);
     assert(after_restore.provenance == cp.provenance);
     assert(after_restore_view.id == stable_id);
 

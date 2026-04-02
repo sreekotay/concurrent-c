@@ -39,14 +39,14 @@ static int test_attached_and_equals_forms(void) {
         return 3;
     }
     if (!cli.args.find_last_value("suffix", &suffix)
-        || !cc_slice_eq_cstr(suffix, ".zz")) {
+        || !CCSlice_eq_cstr(&suffix, ".zz")) {
         return 4;
     }
     if (cli.args.count("file") != 1) {
         return 5;
     }
     if (!cli.args.find_value_at("file", 0, &input)
-        || !cc_slice_eq_cstr(input, "input.ccs")) {
+        || !CCSlice_eq_cstr(&input, "input.ccs")) {
         return 6;
     }
     return 0;
@@ -72,7 +72,7 @@ static int test_next_arg_and_double_dash(void) {
         return 10;
     }
     if (!cli.args.find_value_at("file", 0, &value)
-        || !cc_slice_eq_cstr(value, "-literal")) {
+        || !CCSlice_eq_cstr(&value, "-literal")) {
         return 11;
     }
     return 0;
@@ -93,11 +93,11 @@ static int test_aliases_and_clusters(void) {
         return 14;
     }
     if (!cli.args.find_value_at("level", 0, &value)
-        || !cc_slice_eq_cstr(value, "1")) {
+        || !CCSlice_eq_cstr(&value, "1")) {
         return 15;
     }
     if (!cli.args.find_value_at("level", 1, &value)
-        || !cc_slice_eq_cstr(value, "11")) {
+        || !CCSlice_eq_cstr(&value, "11")) {
         return 16;
     }
     return 0;

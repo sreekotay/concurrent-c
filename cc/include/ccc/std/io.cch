@@ -121,11 +121,11 @@ static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCAren
     if (!file || !file->handle || !arena || !out) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
     }
-    CCString line = cc_string_new(arena);
+    CCString line = CCString_new(arena);
     if (!line.data) return CCRes_err(bool, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     int c;
     while ((c = fgetc(file->handle)) != EOF) {
-        if (!cc_string_push_char(&line, (char)c)) {
+        if (!CCString_push_char(&line, (char)c)) {
             return CCRes_err(bool, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }
         if (c == '\n') break;
@@ -136,7 +136,7 @@ static inline CCRes(bool, CCIoError) cc_file_read_line_into(CCFile *file, CCAren
         return CCRes_ok(bool, CCIoError, false);
     }
     // Got line - return Ok(true)
-    *out = cc_string_as_slice(&line);
+    *out = CCString_as_slice(&line);
     return CCRes_ok(bool, CCIoError, true);
 }
 
@@ -281,10 +281,10 @@ extern int cc_std_out;
 extern int cc_std_err;
 #endif
 static inline CCRes(size_t, CCIoError) cc_std_out_write_string(const CCString* s) {
-    return cc_std_out_write(cc_string_as_slice(s));
+    return cc_std_out_write(CCString_as_slice(s));
 }
 static inline CCRes(size_t, CCIoError) cc_std_err_write_string(const CCString* s) {
-    return cc_std_err_write(cc_string_as_slice(s));
+    return cc_std_err_write(CCString_as_slice(s));
 }
 static inline CCRes(size_t, CCIoError) cc_std_out_write_string_value(CCString s) {
     return cc_std_out_write_string(&s);
@@ -426,7 +426,7 @@ static inline CCResOpt(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *
     if (!r || !r->file || !r->file->handle || !arena) {
         return CCResOpt_err(CCSlice, CCIoError, cc_io_from_errno(EINVAL));
     }
-    CCString line = cc_string_new(arena);
+    CCString line = CCString_new(arena);
     if (!line.data) return CCResOpt_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
     while (1) {
         if (r->pos >= r->len) {
@@ -445,12 +445,12 @@ static inline CCResOpt(CCSlice, CCIoError) cc_buf_reader_read_line(CCBufReader *
         }
         if (r->pos >= r->len) break;
         char c = r->buf[r->pos++];
-        if (!cc_string_push_char(&line, c)) {
+        if (!CCString_push_char(&line, c)) {
             return CCResOpt_err(CCSlice, CCIoError, cc_io_error_os(CC_IO_OUT_OF_MEMORY, ENOMEM));
         }
         if (c == '\n') break;
     }
-    CCSlice slice = cc_string_as_slice(&line);
+    CCSlice slice = CCString_as_slice(&line);
     return CCResOpt_ok(CCSlice, CCIoError, CCOpt_some(CCSlice, slice));
 }
 

@@ -47,13 +47,13 @@ static void write_log(CCArena* arena, const char* path, const char* suffix,
     if (!data || len == 0) return;
     CCSlice base = cc_path_basename(arena, slice_from_cstr(path));
     // Build "<log_dir>/<basename><suffix>"
-    CCString full = cc_string_new(arena);
-    cc_string_push(&full, slice_from_cstr(LOG_DIR));
+    CCString full = CCString_new(arena);
+    CCString_push(&full, slice_from_cstr(LOG_DIR));
     if (full.len > 0 && ((char*)full.data)[full.len - 1] != cc_path_sep()) {
-        cc_string_push_char(&full, cc_path_sep());
+        CCString_push_char(&full, cc_path_sep());
     }
-    cc_string_push(&full, base);
-    cc_string_push(&full, slice_from_cstr(suffix));
+    CCString_push(&full, base);
+    CCString_push(&full, slice_from_cstr(suffix));
 
     CCFile f;
     if (cc_file_open(&f, (const char*)full.data, "w") == 0) {

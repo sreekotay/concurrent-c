@@ -269,7 +269,7 @@ static CCSlice !>(CCError) resp_read_bulk(RespReader* r, CCSocket* sock, CCArena
         return cc_err(mkerr(CC_ERR_PARSE, "expected bulk string"));
     }
 
-    int64_t !>(CCError) len_res = parse_i64(cc_slice_sub(line, 1, line.len));
+    int64_t !>(CCError) len_res = parse_i64(CCSlice_sub(&line, 1, line.len));
     if (len_res.is_err()) return cc_err(len_res.error());
     int64_t n = len_res.value();
     if (n < 0) return cc_err(mkerr(CC_ERR_PARSE, "negative bulk length"));
@@ -300,7 +300,7 @@ static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t 
         if (pos >= line.len) break;
         size_t start = pos;
         while (pos < line.len && ((const char*)line.ptr)[pos] != ' ') pos++;
-        args[argc++] = cc_slice_sub(line, start, pos);
+        args[argc++] = CCSlice_sub(&line, start, pos);
     }
     if (argc == 0) return cc_err(mkerr(CC_ERR_PARSE, "empty inline command"));
     return cc_ok(argc);
@@ -325,7 +325,7 @@ static RedisRequest* !>(CCError) parse_request(RespReader* r,
     size_t argc = 0;
 
     if (line.len > 0 && ((const char*)line.ptr)[0] == '*') {
-        int64_t !>(CCError) argc_res = parse_i64(cc_slice_sub(line, 1, line.len));
+        int64_t !>(CCError) argc_res = parse_i64(CCSlice_sub(&line, 1, line.len));
         if (argc_res.is_err()) return cc_err(argc_res.error());
         int64_t argc_i64 = argc_res.value();
         if (argc_i64 < 1 || argc_i64 > 4) {
@@ -537,7 +537,7 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `+${reply.data}\r\n`, &a);
-            char[:0] out = cc_string_as_slice(&s);
+            char[:0] out = CCString_as_slice(&s);
             return write_all(sock, out.ptr, out.len);
         }
         case REDIS_REPLY_BULK_STRING: {
@@ -546,7 +546,7 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `$${reply.data.len}\r\n${reply.data}\r\n`, &a);
-            char[:0] out = cc_string_as_slice(&s);
+            char[:0] out = CCString_as_slice(&s);
             return write_all(sock, out.ptr, out.len);
         }
         case REDIS_REPLY_INTEGER: {
@@ -554,7 +554,7 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `:${reply.int_value}\r\n`, &a);
-            char[:0] out = cc_string_as_slice(&s);
+            char[:0] out = CCString_as_slice(&s);
             return write_all(sock, out.ptr, out.len);
         }
         case REDIS_REPLY_NULL_BULK:
@@ -565,7 +565,7 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
             CCArena a = @create(buf, sizeof(buf)) @destroy;
             if (!a.base) return false;
             CCString s = @string(rs_pol, `-${reply.data}\r\n`, &a);
-            char[:0] out = cc_string_as_slice(&s);
+            char[:0] out = CCString_as_slice(&s);
             return write_all(sock, out.ptr, out.len);
         }
         case REDIS_REPLY_RAW:
@@ -678,12 +678,16 @@ static void handle_client(CCSocket* pclient, RedisRequest*[~REQUEST_CHAN_CAP N:1
         RedisRequest* req = req_res.value();
         last_parsed = req->request_id;
         if (!cc_io_avail(req_tx.send(req))) {
-            redis_logf("conn error id=%llu req=%llu stage=send_request", (unsigned long long)conn_id, (unsigned long long)req->request_id);
+            redis_logf("conn error id=%llu req=%llu stage=send_request",
+                       (unsigned long long)conn_id,
+                       (unsigned long long)req->request_id);
             free_request(req);
             break;
         }
         last_sent = req->request_id;
-        redis_logf("conn queued id=%llu req=%llu", (unsigned long long)conn_id, (unsigned long long)req->request_id);
+        redis_logf("conn queued id=%llu req=%llu",
+                   (unsigned long long)conn_id,
+                   (unsigned long long)req->request_id);
 
         RedisReply reply;
         redis_vlogf("conn wait reply id=%llu req=%llu", (unsigned long long)conn_id, (unsigned long long)req->request_id);
