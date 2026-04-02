@@ -1,0 +1,8 @@
+# Verify error line numbers remain accurate after compiler transformations
+# (@destroy -> @defer, UFCS rewriting, @slice expansion).
+# The undeclared function is on source line 14; the compiler reports it as
+# line 17 due to 3 extra lines inserted by the defer return-variable
+# prologue.  Once #line re-sync after the prologue is implemented, update
+# the expected line below to 14.
+error_line_accuracy_smoke.ccs:17
+this_function_does_not_exist

@@ -3185,7 +3185,11 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
     /* TSan macros and spawn helpers */
     fprintf(out, "#include <ccc/cc_closure_helper.h>\n\n");
 
-    /* Emit container type declarations from type registry (populated by generic rewriting) */
+    /* Build container type declarations from type registry (populated by generic rewriting).
+       These are buffered and inserted into the source AFTER user type definitions
+       so that user-defined types (e.g. Entry in Map<K, Entry*>) are visible. */
+    char* container_decl_buf = NULL;
+    size_t container_decl_len = 0, container_decl_cap = 0;
     {
         CCTypeRegistry* reg = cc_type_registry_get_global();
         if (reg) {
@@ -3208,23 +3212,23 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 fprintf(out, "#include <ccc/std/vec.h>\n");
                 fprintf(out, "#include <ccc/std/map.h>\n");
                 fprintf(out, "#include <ccc/cc_channel.h>\n");
-                /* Vec/Map declarations must be skipped in parser mode where they're
-                   already typedef'd to generic placeholders in vec.cch/map.cch */
-                fprintf(out, "#ifndef CC_PARSER_MODE\n");
+                fprintf(out, "/* --- end container declarations (macros inserted after typedefs) --- */\n\n");
+
+                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
+                    "/* --- CC container type macros (auto-positioned after typedefs) --- */\n");
+                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
+                    "#ifndef CC_PARSER_MODE\n");
                 
                 /* Emit Vec declarations */
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (inst && inst->type1 && inst->mangled_name) {
-                        /* Extract mangled element name from Vec_xxx */
                         const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
                         
-                        /* Skip Vec_char - it's predeclared in string.cch */
                         if (strcmp(mangled_elem, "char") == 0) {
                             continue;
                         }
                         
-                        /* Check if type is complex (pointer, struct) - needs FULL macro */
                         int is_complex = (strchr(inst->type1, '*') != NULL || 
                                           strncmp(inst->type1, "struct ", 7) == 0 ||
                                           strncmp(inst->type1, "union ", 6) == 0);
@@ -3233,34 +3237,64 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                                                    strcmp(mangled_elem, "intptr") == 0 ||
                                                    strcmp(mangled_elem, "voidptr") == 0);
                             if (!opt_predeclared) {
-                                fprintf(out, "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
+                                char line[512];
+                                snprintf(line, sizeof(line), "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
+                                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
                             }
-                            fprintf(out, "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
-                                    inst->type1, inst->mangled_name, mangled_elem);
+                            {
+                                char line[512];
+                                snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA_FULL(%s, %s, CCOptional_%s)\n", 
+                                        inst->type1, inst->mangled_name, mangled_elem);
+                                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
+                            }
                         } else {
-                            fprintf(out, "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                            char line[512];
+                            snprintf(line, sizeof(line), "CC_VEC_DECL_ARENA(%s, %s)\n", inst->type1, inst->mangled_name);
+                            cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
                         }
                     }
                 }
                 
-                /* Emit Map declarations */
+                /* Emit Map declarations (with CC_DECL_OPTIONAL for value type) */
                 for (size_t i = 0; i < n_map; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_map(reg, i);
                     if (inst && inst->type1 && inst->type2 && inst->mangled_name) {
-                        /* Use default hash functions for known types */
                         const char* hash_fn = "cc_kh_hash_i32";
                         const char* eq_fn = "cc_kh_eq_i32";
-                        if (strcmp(inst->type1, "uint64_t") == 0) {
-                            hash_fn = "cc_kh_hash_u64";
-                            eq_fn = "cc_kh_eq_u64";
+                        if (strcmp(inst->type1, "int") == 0) {
+                            hash_fn = "cc_kh_hash_i32"; eq_fn = "cc_kh_eq_i32";
+                        } else if (strstr(inst->type1, "64") != NULL) {
+                            hash_fn = "cc_kh_hash_u64"; eq_fn = "cc_kh_eq_u64";
+                        } else if (strstr(inst->type1, "slice") != NULL || strstr(inst->type1, "Slice") != NULL || strcmp(inst->type1, "charslice") == 0) {
+                            hash_fn = "cc_kh_hash_slice"; eq_fn = "cc_kh_eq_slice";
                         }
-                        fprintf(out, "CC_MAP_DECL_ARENA(%s, %s, %s, %s, %s)\n", 
-                                inst->type1, inst->type2, inst->mangled_name, hash_fn, eq_fn);
+                        char mangled_val[128];
+                        cc_result_spec_mangle_type(inst->type2, strlen(inst->type2), mangled_val, sizeof(mangled_val));
+                        {
+                            int opt_predeclared = (strcmp(mangled_val, "charptr") == 0 ||
+                                                   strcmp(mangled_val, "intptr") == 0 ||
+                                                   strcmp(mangled_val, "voidptr") == 0 ||
+                                                   strcmp(mangled_val, "int") == 0 ||
+                                                   strcmp(mangled_val, "char") == 0);
+                            if (!opt_predeclared) {
+                                char line[512];
+                                snprintf(line, sizeof(line), "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_val, inst->type2);
+                                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
+                            }
+                        }
+                        {
+                            char line[512];
+                            snprintf(line, sizeof(line), "CC_MAP_DECL_ARENA_FULL(%s, %s, %s, CCOptional_%s, %s, %s)\n", 
+                                    inst->type1, inst->type2, inst->mangled_name, mangled_val, hash_fn, eq_fn);
+                            cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap, line);
+                        }
                     }
                 }
 
-                fprintf(out, "#endif /* !CC_PARSER_MODE */\n");
-                fprintf(out, "/* --- end container declarations --- */\n\n");
+                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
+                    "#endif /* !CC_PARSER_MODE */\n");
+                cc__sb_append_cstr_local(&container_decl_buf, &container_decl_len, &container_decl_cap,
+                    "/* --- end container type macros --- */\n");
             }
         }
     }
@@ -3687,6 +3721,150 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(rewritten);
             }
         }
+        
+        /* Insert buffered container declarations after typedefs/structs but BEFORE
+           any struct that references a container type (e.g. __CC_MAP, Map_). */
+        if (container_decl_buf && container_decl_len > 0) {
+            size_t ctnr_pos = 0;
+            while (ctnr_pos < src_ufcs_len) {
+                size_t line_start = ctnr_pos;
+                size_t line_end = line_start;
+                while (line_end < src_ufcs_len && src_ufcs[line_end] != '\n') line_end++;
+                size_t p = line_start;
+                while (p < line_end && (src_ufcs[p] == ' ' || src_ufcs[p] == '\t' || src_ufcs[p] == '\r')) p++;
+                /* Skip blank lines */
+                if (p == line_end) {
+                    ctnr_pos = (line_end < src_ufcs_len) ? line_end + 1 : line_end;
+                    continue;
+                }
+                /* Skip block comments */
+                if (p + 1 < src_ufcs_len && src_ufcs[p] == '/' && src_ufcs[p + 1] == '*') {
+                    size_t end = p + 2;
+                    while (end + 1 < src_ufcs_len && !(src_ufcs[end] == '*' && src_ufcs[end + 1] == '/')) end++;
+                    ctnr_pos = (end + 1 < src_ufcs_len) ? end + 2 : src_ufcs_len;
+                    if (ctnr_pos < src_ufcs_len && src_ufcs[ctnr_pos] == '\n') ctnr_pos++;
+                    continue;
+                }
+                /* Skip line comments */
+                if (p + 1 < line_end && src_ufcs[p] == '/' && src_ufcs[p + 1] == '/') {
+                    ctnr_pos = (line_end < src_ufcs_len) ? line_end + 1 : line_end;
+                    continue;
+                }
+                /* Skip preprocessor directives */
+                if (src_ufcs[p] == '#') {
+                    ctnr_pos = (line_end < src_ufcs_len) ? line_end + 1 : line_end;
+                    continue;
+                }
+                /* Skip typedef, struct, union, enum blocks — but stop if the block
+                   references a container type (__CC_MAP, __CC_VEC, Map_, Vec_) since
+                   the container macros must be emitted before that struct. */
+                if ((p + 7 <= line_end && memcmp(src_ufcs + p, "typedef", 7) == 0 && !cc_is_ident_char(src_ufcs[p + 7])) ||
+                    (p + 6 <= line_end && memcmp(src_ufcs + p, "struct", 6) == 0 && !cc_is_ident_char(src_ufcs[p + 6])) ||
+                    (p + 5 <= line_end && memcmp(src_ufcs + p, "union", 5) == 0 && !cc_is_ident_char(src_ufcs[p + 5])) ||
+                    (p + 4 <= line_end && memcmp(src_ufcs + p, "enum", 4) == 0 && !cc_is_ident_char(src_ufcs[p + 4]))) {
+                    size_t block_start = p;
+                    size_t q = p;
+                    int brace_depth = 0;
+                    size_t block_end = src_ufcs_len;
+                    while (q < src_ufcs_len) {
+                        char c = src_ufcs[q];
+                        if (c == '{') brace_depth++;
+                        else if (c == '}') { brace_depth--; if (brace_depth < 0) brace_depth = 0; }
+                        else if (c == ';' && brace_depth == 0) {
+                            q++;
+                            if (q < src_ufcs_len && src_ufcs[q] == '\n') q++;
+                            block_end = q;
+                            break;
+                        }
+                        q++;
+                    }
+                    if (q >= src_ufcs_len) block_end = src_ufcs_len;
+                    /* Check if this block references container types */
+                    size_t block_sz = block_end - block_start;
+                    int refs_container = 0;
+                    for (size_t si = block_start; si + 7 < block_end && !refs_container; si++) {
+                        if (memcmp(src_ufcs + si, "__CC_MAP", 8) == 0 ||
+                            memcmp(src_ufcs + si, "__CC_VEC", 8) == 0) {
+                            refs_container = 1;
+                        } else if (si + 4 < block_end &&
+                                   ((memcmp(src_ufcs + si, "Map_", 4) == 0) ||
+                                    (memcmp(src_ufcs + si, "Vec_", 4) == 0))) {
+                            refs_container = 1;
+                        }
+                    }
+                    (void)block_sz;
+                    if (refs_container) {
+                        ctnr_pos = line_start;
+                        break;
+                    }
+                    ctnr_pos = block_end;
+                    continue;
+                }
+                break;
+            }
+            /* Splice container declarations into src_ufcs at ctnr_pos,
+               then re-sync line numbers with a #line directive. */
+            {
+                char* new_src = NULL;
+                size_t new_len = 0, new_cap = 0;
+
+                int resync_line = 0;
+                char resync_file[512] = {0};
+                {
+                    int last_line_num = 1;
+                    char last_file[512] = {0};
+                    int lines_since = 0;
+                    const char* s = src_ufcs;
+                    size_t si = 0;
+                    while (si < ctnr_pos) {
+                        if (si + 5 < ctnr_pos && s[si] == '#' && memcmp(s + si, "#line", 5) == 0) {
+                            size_t li = si + 5;
+                            while (li < ctnr_pos && (s[li] == ' ' || s[li] == '\t')) li++;
+                            int num = 0;
+                            while (li < ctnr_pos && s[li] >= '0' && s[li] <= '9') {
+                                num = num * 10 + (s[li] - '0');
+                                li++;
+                            }
+                            if (num > 0) {
+                                last_line_num = num;
+                                lines_since = 0;
+                                while (li < ctnr_pos && (s[li] == ' ' || s[li] == '\t')) li++;
+                                if (li < ctnr_pos && s[li] == '"') {
+                                    li++;
+                                    size_t fn = 0;
+                                    while (li < ctnr_pos && s[li] != '"' && fn + 1 < sizeof(last_file)) {
+                                        last_file[fn++] = s[li++];
+                                    }
+                                    last_file[fn] = '\0';
+                                }
+                            }
+                        }
+                        if (s[si] == '\n') lines_since++;
+                        si++;
+                    }
+                    resync_line = last_line_num + lines_since;
+                    if (last_file[0]) {
+                        memcpy(resync_file, last_file, sizeof(resync_file));
+                    }
+                }
+
+                cc__sb_append_local(&new_src, &new_len, &new_cap, src_ufcs, ctnr_pos);
+                cc__sb_append_local(&new_src, &new_len, &new_cap, container_decl_buf, container_decl_len);
+                cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, "\n");
+                if (resync_line > 0 && resync_file[0]) {
+                    char line_dir[640];
+                    snprintf(line_dir, sizeof(line_dir), "#line %d \"%s\"\n", resync_line, resync_file);
+                    cc__sb_append_cstr_local(&new_src, &new_len, &new_cap, line_dir);
+                }
+                cc__sb_append_local(&new_src, &new_len, &new_cap,
+                                    src_ufcs + ctnr_pos, src_ufcs_len - ctnr_pos);
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = new_src;
+                src_ufcs_len = new_len;
+            }
+        }
+        free(container_decl_buf);
+        container_decl_buf = NULL;
         
         fwrite(src_ufcs, 1, src_ufcs_len, out);
         if (src_ufcs_len == 0 || src_ufcs[src_ufcs_len - 1] != '\n') fputc('\n', out);

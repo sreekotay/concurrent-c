@@ -251,8 +251,29 @@ static int cc__skip_balanced_suffix(const char** pp, char open, char close) {
 
 static int cc__is_addressable_lvalue_expr(const char* s) {
     const char* p = skip_ws(s);
-    if (!p || !cc_is_ident_start(*p)) return 0;
-    while (cc_is_ident_char(*p)) p++;
+    if (!p) return 0;
+    if (*p == '(' && p[1] == '*') {
+        int depth = 1;
+        const char* q = p + 1;
+        while (*q && depth > 0) {
+            if (*q == '(') depth++;
+            else if (*q == ')') depth--;
+            q++;
+        }
+        if (depth != 0) return 0;
+        p = q;
+        p = skip_ws(p);
+        if (*p == '\0') return 1;
+        if (*p == '.' || (*p == '-' && p[1] == '>')) {
+            /* fall through to member chain scanning below */
+        } else {
+            return 0;
+        }
+    } else if (cc_is_ident_start(*p)) {
+        while (cc_is_ident_char(*p)) p++;
+    } else {
+        return 0;
+    }
     for (;;) {
         p = skip_ws(p);
         if (*p == '.') {
@@ -282,7 +303,9 @@ static int cc__is_string_recv_type(const char* type_name) {
            (strcmp(type_name, "CCString") == 0 ||
             strcmp(type_name, "CCString*") == 0 ||
             strcmp(type_name, "Vec_char") == 0 ||
-            strcmp(type_name, "Vec_char*") == 0);
+            strcmp(type_name, "Vec_char*") == 0 ||
+            strcmp(type_name, "__CCVecGeneric") == 0 ||
+            strcmp(type_name, "__CCVecGeneric*") == 0);
 }
 
 static int cc__is_slice_recv_type(const char* type_name) {
@@ -1222,8 +1245,24 @@ static int cc__parse_ufcs_chain(const char* in,
         if (c == '{') { brc++; continue; }
         if (c == '}') { if (brc > 0) brc--; continue; }
         if (par || br || brc) continue;
-        if (c == '.') { sep = p; sep_is_ptr = false; break; }
-        if (c == '-' && p[1] == '>') { sep = p; sep_is_ptr = true; break; }
+        if (c == '.' || (c == '-' && p[1] == '>')) {
+            bool cand_is_ptr = (c == '-');
+            const char* m = p + (cand_is_ptr ? 2 : 1);
+            while (*m && isspace((unsigned char)*m)) m++;
+            if (cc_is_ident_char(*m)) {
+                const char* me = m;
+                while (cc_is_ident_char(*me)) me++;
+                const char* after = me;
+                while (*after && isspace((unsigned char)*after)) after++;
+                if (*after == '(') {
+                    sep = p;
+                    sep_is_ptr = cand_is_ptr;
+                    break;
+                }
+            }
+            if (cand_is_ptr) p++;
+            continue;
+        }
     }
     if (!sep) return 0;
 
@@ -1412,6 +1451,34 @@ static const char* cc__recv_chain_start(const char* line_start, const char* recv
             break;
         }
         while (q > line_start && isspace((unsigned char)q[-1])) q--;
+        if (q > line_start && q[-1] == ')') {
+            int depth = 1;
+            const char* pp = q - 1;
+            while (pp > line_start && depth > 0) {
+                pp--;
+                if (*pp == ')') depth++;
+                else if (*pp == '(') depth--;
+            }
+            if (depth == 0) {
+                seg_start = pp;
+                continue;
+            }
+            break;
+        }
+        if (q > line_start && q[-1] == ']') {
+            int depth = 1;
+            const char* pp = q - 1;
+            while (pp > line_start && depth > 0) {
+                pp--;
+                if (*pp == ']') depth++;
+                else if (*pp == '[') depth--;
+            }
+            if (depth == 0) {
+                seg_start = pp;
+                continue;
+            }
+            break;
+        }
         if (q <= line_start || !cc_is_ident_char(q[-1])) return seg_start;
         seg_start = q;
         while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
@@ -1479,6 +1546,17 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
             p = sep + (recv_is_ptr ? 2 : 1);
             continue;
+        }
+        if (r_start > p) {
+            const char* pre = r_start - 1;
+            while (pre >= p && isspace((unsigned char)*pre)) pre--;
+            if (pre >= p && (*pre == '.' || (*pre == '>' && pre > p && *(pre-1) == '-'))) {
+                size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
+                if (chunk >= cap) chunk = cap - 1;
+                memcpy(o, p, chunk); o += chunk; cap -= chunk;
+                p = sep + (recv_is_ptr ? 2 : 1);
+                continue;
+            }
         }
         size_t recv_len = (size_t)(r_end - r_start + 1);
 

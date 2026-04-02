@@ -1,0 +1,48 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    Map<char[:], int*> m = map_new<char[:], int*>(&arena);
+
+    char[:] k1 = @slice("alpha");
+    char[:] k2 = @slice("beta");
+
+    int a = 7;
+    int b = 13;
+    int c = 29;
+
+    m.insert(k1, &a);
+    m.insert(k2, &b);
+
+    int** got = m.get_ptr(k2);
+    if (!got || !*got || **got != 13) {
+        printf("FAIL: get_ptr(beta) expected 13\n");
+        return 2;
+    }
+
+    m.insert(k2, &c);
+    got = m.get_ptr(k2);
+    if (!got || !*got || **got != 29) {
+        printf("FAIL: get_ptr(beta) expected updated 29\n");
+        return 3;
+    }
+
+    int removed = m.remove(k1);
+    if (!removed) {
+        printf("FAIL: remove(alpha) should return true\n");
+        return 4;
+    }
+
+    int** after = m.get_ptr(k1);
+    if (after) {
+        printf("FAIL: get_ptr(alpha) should be NULL after remove\n");
+        return 5;
+    }
+
+    printf("ufcs_map_charslice_ptr_smoke: PASS\n");
+    cc_arena_free(&arena);
+    return 0;
+}

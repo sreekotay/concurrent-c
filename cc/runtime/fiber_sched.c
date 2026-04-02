@@ -246,7 +246,7 @@ static int get_spin_fast_iters(void) {
     if (val < 0) {
         const char* env = getenv("CC_SPIN_FAST_ITERS");
         int new_val = env ? atoi(env) : SPIN_FAST_ITERS_DEFAULT;
-        if (new_val <= 0) new_val = SPIN_FAST_ITERS_DEFAULT;
+        if (new_val < 0) new_val = SPIN_FAST_ITERS_DEFAULT;
         /* Use compare-and-swap to ensure only one thread initializes */
         int expected = -1;
         if (atomic_compare_exchange_strong_explicit(&g_spin_fast_iters, &expected, new_val,
@@ -266,7 +266,7 @@ static int get_spin_yield_iters(void) {
     if (val < 0) {
         const char* env = getenv("CC_SPIN_YIELD_ITERS");
         int new_val = env ? atoi(env) : SPIN_YIELD_ITERS_DEFAULT;
-        if (new_val <= 0) new_val = SPIN_YIELD_ITERS_DEFAULT;
+        if (new_val < 0) new_val = SPIN_YIELD_ITERS_DEFAULT;
         /* Use compare-and-swap to ensure only one thread initializes */
         int expected = -1;
         if (atomic_compare_exchange_strong_explicit(&g_spin_yield_iters, &expected, new_val,
@@ -765,6 +765,132 @@ static inline void cc_v3_worker_stats_maybe_init(void) {
     }
 }
 #endif
+
+typedef struct {
+    _Atomic uint64_t spin_entries;
+    _Atomic uint64_t yield_calls;
+    _Atomic uint64_t yield_found_work;
+    _Atomic uint64_t sleep_entries;
+    _Atomic uint64_t sleep_wait_calls;
+    _Atomic uint64_t sleep_exits;
+    _Atomic uint64_t wake_one_calls;
+    _Atomic uint64_t wake_one_with_sleepers;
+    _Atomic uint64_t wake_one_delivered;
+    _Atomic uint64_t wake_target_calls;
+    _Atomic uint64_t wake_target_delivered;
+    _Atomic uint64_t wake_target_skipped_not_sleeping;
+    _Atomic uint64_t wake_unconditional_calls;
+    _Atomic uint64_t wake_unconditional_delivered;
+    _Atomic uint64_t wake_unconditional_no_sleepers;
+} cc_sched_wait_stats;
+
+static cc_sched_wait_stats g_cc_sched_wait_stats = {0};
+
+typedef struct {
+    _Atomic uint64_t nonworker_global_publish;
+    _Atomic uint64_t nonworker_global_edge;
+    _Atomic uint64_t nonworker_global_wake_one;
+    _Atomic uint64_t global_pop_hits;
+    _Atomic uint64_t run_attempts;
+    _Atomic uint64_t run_claims;
+    _Atomic uint64_t run_skip_stale;
+} cc_sched_io_wake_stats;
+
+static cc_sched_io_wake_stats g_cc_sched_io_wake_stats = {0};
+
+static int cc_sched_wait_stats_enabled(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("CC_SCHED_WAIT_STATS");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
+}
+
+static inline void cc_sched_wait_stat_inc(_Atomic uint64_t* counter) {
+    if (!cc_sched_wait_stats_enabled()) return;
+    atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
+}
+
+static int cc_sched_io_wake_stats_enabled(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("CC_SCHED_IO_WAKE_STATS");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
+}
+
+static inline void cc_sched_io_wake_stat_inc(_Atomic uint64_t* counter) {
+    if (!cc_sched_io_wake_stats_enabled()) return;
+    atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
+}
+
+static void cc_sched_wait_stats_dump(void) {
+    if (!cc_sched_wait_stats_enabled()) return;
+    uint64_t spin_entries = atomic_load_explicit(&g_cc_sched_wait_stats.spin_entries, memory_order_relaxed);
+    uint64_t yield_calls = atomic_load_explicit(&g_cc_sched_wait_stats.yield_calls, memory_order_relaxed);
+    uint64_t yield_found_work = atomic_load_explicit(&g_cc_sched_wait_stats.yield_found_work, memory_order_relaxed);
+    uint64_t sleep_entries = atomic_load_explicit(&g_cc_sched_wait_stats.sleep_entries, memory_order_relaxed);
+    uint64_t sleep_wait_calls = atomic_load_explicit(&g_cc_sched_wait_stats.sleep_wait_calls, memory_order_relaxed);
+    uint64_t sleep_exits = atomic_load_explicit(&g_cc_sched_wait_stats.sleep_exits, memory_order_relaxed);
+    uint64_t wake_one_calls = atomic_load_explicit(&g_cc_sched_wait_stats.wake_one_calls, memory_order_relaxed);
+    uint64_t wake_one_with_sleepers = atomic_load_explicit(&g_cc_sched_wait_stats.wake_one_with_sleepers, memory_order_relaxed);
+    uint64_t wake_one_delivered = atomic_load_explicit(&g_cc_sched_wait_stats.wake_one_delivered, memory_order_relaxed);
+    uint64_t wake_target_calls = atomic_load_explicit(&g_cc_sched_wait_stats.wake_target_calls, memory_order_relaxed);
+    uint64_t wake_target_delivered = atomic_load_explicit(&g_cc_sched_wait_stats.wake_target_delivered, memory_order_relaxed);
+    uint64_t wake_target_skipped = atomic_load_explicit(&g_cc_sched_wait_stats.wake_target_skipped_not_sleeping, memory_order_relaxed);
+    uint64_t wake_unconditional_calls = atomic_load_explicit(&g_cc_sched_wait_stats.wake_unconditional_calls, memory_order_relaxed);
+    uint64_t wake_unconditional_delivered = atomic_load_explicit(&g_cc_sched_wait_stats.wake_unconditional_delivered, memory_order_relaxed);
+    uint64_t wake_unconditional_no_sleepers = atomic_load_explicit(&g_cc_sched_wait_stats.wake_unconditional_no_sleepers, memory_order_relaxed);
+    if (spin_entries == 0 && yield_calls == 0 && sleep_entries == 0 &&
+        wake_one_calls == 0 && wake_target_calls == 0 && wake_unconditional_calls == 0) {
+        return;
+    }
+    fprintf(stderr,
+            "\n[cc:sched_wait] spin_entries=%llu yield_calls=%llu yield_found_work=%llu "
+            "sleep_entries=%llu sleep_wait_calls=%llu sleep_exits=%llu\n"
+            "[cc:sched_wait] wake_one calls=%llu sleepers=%llu delivered=%llu "
+            "wake_target calls=%llu delivered=%llu skipped_not_sleeping=%llu "
+            "wake_unconditional calls=%llu delivered=%llu no_sleepers=%llu\n",
+            (unsigned long long)spin_entries,
+            (unsigned long long)yield_calls,
+            (unsigned long long)yield_found_work,
+            (unsigned long long)sleep_entries,
+            (unsigned long long)sleep_wait_calls,
+            (unsigned long long)sleep_exits,
+            (unsigned long long)wake_one_calls,
+            (unsigned long long)wake_one_with_sleepers,
+            (unsigned long long)wake_one_delivered,
+            (unsigned long long)wake_target_calls,
+            (unsigned long long)wake_target_delivered,
+            (unsigned long long)wake_target_skipped,
+            (unsigned long long)wake_unconditional_calls,
+            (unsigned long long)wake_unconditional_delivered,
+            (unsigned long long)wake_unconditional_no_sleepers);
+}
+
+static void cc_sched_io_wake_stats_dump(void) {
+    if (!cc_sched_io_wake_stats_enabled()) return;
+    uint64_t nonworker_global_publish = atomic_load_explicit(&g_cc_sched_io_wake_stats.nonworker_global_publish, memory_order_relaxed);
+    uint64_t nonworker_global_edge = atomic_load_explicit(&g_cc_sched_io_wake_stats.nonworker_global_edge, memory_order_relaxed);
+    uint64_t nonworker_global_wake_one = atomic_load_explicit(&g_cc_sched_io_wake_stats.nonworker_global_wake_one, memory_order_relaxed);
+    uint64_t global_pop_hits = atomic_load_explicit(&g_cc_sched_io_wake_stats.global_pop_hits, memory_order_relaxed);
+    uint64_t run_attempts = atomic_load_explicit(&g_cc_sched_io_wake_stats.run_attempts, memory_order_relaxed);
+    uint64_t run_claims = atomic_load_explicit(&g_cc_sched_io_wake_stats.run_claims, memory_order_relaxed);
+    uint64_t run_skip_stale = atomic_load_explicit(&g_cc_sched_io_wake_stats.run_skip_stale, memory_order_relaxed);
+    if (nonworker_global_publish == 0 && global_pop_hits == 0 && run_attempts == 0) {
+        return;
+    }
+    fprintf(stderr,
+            "[cc:sched_io_wake] nonworker_global publish=%llu edge=%llu wake_one=%llu "
+            "global_pop_hits=%llu run_attempts=%llu run_claims=%llu run_skip_stale=%llu\n",
+            (unsigned long long)nonworker_global_publish,
+            (unsigned long long)nonworker_global_edge,
+            (unsigned long long)nonworker_global_wake_one,
+            (unsigned long long)global_pop_hits,
+            (unsigned long long)run_attempts,
+            (unsigned long long)run_claims,
+            (unsigned long long)run_skip_stale);
+}
 
 /* ============================================================================
 * Lock-Free MPMC Queue with overflow list
@@ -1469,7 +1595,12 @@ static inline runnable_ref sched_global_pop_for_worker(int worker_id) {
             return runnable_ref_null();
         }
         runnable_ref ref0 = fq_pop(&g_sched.run_queue[0]);
-        if (ref0.fiber) spawn_mark_global_pop(ref0.fiber);
+        if (ref0.fiber) {
+            if (ref0.fiber->enqueue_src == 8) {
+                cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
+            }
+            spawn_mark_global_pop(ref0.fiber);
+        }
         return ref0;
     }
 
@@ -1479,6 +1610,9 @@ static inline runnable_ref sched_global_pop_for_worker(int worker_id) {
         ref = fq_pop(&g_sched.run_queue[p]);
     }
     if (ref.fiber) {
+        if (ref.fiber->enqueue_src == 8) {
+            cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
+        }
         spawn_mark_global_pop(ref.fiber);
         return ref;
     }
@@ -1488,6 +1622,9 @@ static inline runnable_ref sched_global_pop_for_worker(int worker_id) {
             ref = fq_pop(&g_sched.run_queue[s]);
         }
         if (ref.fiber) {
+            if (ref.fiber->enqueue_src == 8) {
+                cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
+            }
             spawn_mark_global_pop(ref.fiber);
             return ref;
         }
@@ -1501,6 +1638,9 @@ static inline runnable_ref sched_global_pop_for_worker(int worker_id) {
         }
         ref = fq_pop(&g_sched.run_queue[idx]);
         if (ref.fiber) {
+            if (ref.fiber->enqueue_src == 8) {
+                cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
+            }
             spawn_mark_global_pop(ref.fiber);
             return ref;
         }
@@ -1773,6 +1913,21 @@ static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
 static _Atomic size_t g_spawn_counter = 0;
 static const uint64_t cc_orphan_threshold_cycles_hint = 3000000ULL;
 
+static inline int cc__io_wait_trace_enabled_sched(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("CC_IO_WAIT_TRACE");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
+}
+
+static inline int cc__io_wait_trace_fiber(const fiber_task* f) {
+    return cc__io_wait_trace_enabled_sched() &&
+           f &&
+           f->park_reason &&
+           strcmp(f->park_reason, "io_ready") == 0;
+}
+
 static inline int cc__req_wake_trace_fiber(const fiber_task* f) {
     return f &&
            f->park_reason &&
@@ -2001,11 +2156,13 @@ static inline runnable_ref lq_pop(local_queue* q) {
 }
 
 static inline void wake_one_if_sleeping(cc_wake_reason reason) {
+    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_calls);
     size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
     int allow_with_spinners = (reason == CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
     if (spinning > 0 && !allow_with_spinners) return;
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     if (sleeping == 0) return;
+    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_with_sleepers);
     int woke = 0;
     if (g_sched.worker_wake_prims && g_sched.worker_lifecycle) {
         for (size_t scan = 0; scan < g_sched.num_workers && !woke; scan++) {
@@ -2018,9 +2175,11 @@ static inline void wake_one_if_sleeping(cc_wake_reason reason) {
         }
     }
     if (!woke) wake_primitive_wake_one(&g_sched.wake_prim);
+    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_delivered);
 }
 
 static inline void wake_one_if_sleeping_unconditional(void) {
+    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_calls);
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     if (sleeping > 0) {
         int woke = 0;
@@ -2035,9 +2194,11 @@ static inline void wake_one_if_sleeping_unconditional(void) {
             }
         }
         if (!woke) wake_primitive_wake_one(&g_sched.wake_prim);
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_delivered);
     } else {
         /* No sleepers: bump all per-worker counters AND the global counter so
         * any worker racing into sleep sees a changed value and re-checks. */
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_no_sleepers);
         if (g_sched.worker_wake_prims) {
             for (size_t i = 0; i < g_sched.num_workers; i++) {
                 atomic_fetch_add_explicit(&g_sched.worker_wake_prims[i].value, 1, memory_order_relaxed);
@@ -2061,14 +2222,19 @@ static inline int pool_idle_for_global_edge_wake(void) {
 * primitive when per-worker prims are not yet allocated (startup). */
 static inline void wake_target_worker_if_sleeping(int target_worker) {
     if (target_worker < 0) return;
+    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_calls);
     if (!g_sched.worker_wake_prims || !g_sched.worker_lifecycle) {
         wake_primitive_wake_one(&g_sched.wake_prim);
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_delivered);
         return;
     }
     cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
         &g_sched.worker_lifecycle[target_worker], memory_order_relaxed);
     if (lc == CC_WL_SLEEP) {
         wake_primitive_wake_one(&g_sched.worker_wake_prims[target_worker]);
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_delivered);
+    } else {
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_skipped_not_sleeping);
     }
     /* If not sleeping (active or spinning), the worker will find the task
     * naturally in its inbox check — no wake needed. */
@@ -3128,13 +3294,42 @@ static inline int worker_run_fiber(runnable_ref ref) {
     fiber_task* f = ref.fiber;
     if (!f) return 0;
     if (!runnable_ref_matches_current(ref)) return 0;
+    if (f->enqueue_src == 8) {
+        cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.run_attempts);
+    }
     int wid = tls_worker_id;
     int64_t expected = CTRL_QUEUED;
     int64_t owned = (wid >= 0) ? CTRL_OWNED(wid) : CTRL_OWNED_TEMP;
     if (!atomic_compare_exchange_strong_explicit(&f->control, &expected, owned,
                                                 memory_order_acq_rel,
                                                 memory_order_acquire)) {
+        if (f->enqueue_src == 8) {
+            cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.run_skip_stale);
+        }
+        if (cc__io_wait_trace_fiber(f)) {
+            fprintf(stderr,
+                    "[cc:io_wait:sched] run_skip fiber=%p id=%lu worker=%d control=%lld pending=%d enqueue_src=%d\n",
+                    (void*)f,
+                    (unsigned long)f->fiber_id,
+                    wid,
+                    (long long)expected,
+                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed),
+                    f->enqueue_src);
+        }
         return 0;  /* Stale/duplicate queue entry */
+    }
+    if (f->enqueue_src == 8) {
+        cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.run_claims);
+    }
+    if (cc__io_wait_trace_fiber(f)) {
+        fprintf(stderr,
+                "[cc:io_wait:sched] run_start fiber=%p id=%lu worker=%d enqueue_src=%d enqueue_ctrl=%lld pending=%d\n",
+                (void*)f,
+                (unsigned long)f->fiber_id,
+                wid,
+                f->enqueue_src,
+                (long long)f->enqueue_ctrl,
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
     }
     if (cc__req_wake_trace_fiber(f)) {
         fprintf(stderr,
@@ -3165,6 +3360,17 @@ static inline int worker_run_fiber(runnable_ref ref) {
     cc__tls_current_nursery = f->saved_nursery;
     tls_deadlock_suppress_depth = f->deadlock_suppress_depth;
     fiber_resume(f);
+    if (cc__io_wait_trace_fiber(f)) {
+        fprintf(stderr,
+                "[cc:io_wait:sched] run_resume fiber=%p id=%lu worker=%d dest=%d control=%lld pending=%d done=%d\n",
+                (void*)f,
+                (unsigned long)f->fiber_id,
+                wid,
+                f->yield_dest,
+                (long long)atomic_load_explicit(&f->control, memory_order_relaxed),
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed),
+                atomic_load_explicit(&f->done, memory_order_relaxed));
+    }
     if (cc__req_wake_trace_fiber(f)) {
         fprintf(stderr,
                 "CC_REQ_WAKE_RUN: resumed fiber=%lu worker=%d obj=%p dest=%d done=%d control=%lld pending=%d\n",
@@ -3564,6 +3770,7 @@ static void* worker_main(void* arg) {
         /* No work - enter spinning state */
         cc_v3_worker_lifecycle_set(worker_id, CC_WL_IDLE_SPIN, "enter_spin");
         size_t old_spinning = atomic_fetch_add_explicit(&g_sched.spinning, 1, memory_order_seq_cst);
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.spin_entries);
         
         /* Spin briefly checking local, global, and stealing */
         int spin_found_work = 0;
@@ -3590,6 +3797,7 @@ static void* worker_main(void* arg) {
         * probing on every iteration (8 workers × 8 iters = stampede). */
         int yield_iters = SPIN_YIELD_ITERS;
         for (int y = 0; y < yield_iters; y++) {
+            cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.yield_calls);
             sched_yield();
             runnable_ref f = lq_pop(my_queue);
             if (!f.fiber) {
@@ -3601,6 +3809,7 @@ static void* worker_main(void* arg) {
             if (f.fiber) {
                 atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
                 cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "yield_found_work");
+                cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.yield_found_work);
                 worker_run_fiber_accounted(f);
                 goto next_iteration;
             }
@@ -3634,6 +3843,7 @@ static void* worker_main(void* arg) {
         atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
         cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.sleep_entries);
         
         /* Sleep using fast wake primitive (futex/ulock instead of condvar) */
         /* Note: we check queue emptiness, not pending count, because parked fibers
@@ -3725,11 +3935,13 @@ static void* worker_main(void* arg) {
             
             /* Use timed wait to periodically check for deadlock */
             uint64_t wait_start_ns = 0;
+            cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.sleep_wait_calls);
             wake_primitive_wait_timeout(my_wake, wake_val, 500);
             cc__fiber_check_deadlock();
         }
         atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
         cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "sleep_exit");
+        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.sleep_exits);
         if (g_sched.num_workers > 1) {
             size_t start = (size_t)(worker_id + 1) % g_sched.num_workers;
             for (size_t j = 0; j < g_sched.num_workers - 1; j++) {
@@ -3761,6 +3973,8 @@ static void* worker_main(void* arg) {
 
 static void cc_fiber_atexit_stats(void) {
     if (atomic_load(&g_initialized) != 2) return;
+    cc_sched_wait_stats_dump();
+    cc_sched_io_wake_stats_dump();
 }
 
 int cc_fiber_sched_init(size_t num_workers) {
@@ -5215,12 +5429,25 @@ queued:
     int global_edge = 0;
     int pushed_to_current_local = 0;
     int divert_stale = 0;
+    int nonworker_publish = (tls_worker_id < 0);
     int preferred = f->last_worker_id;
     const char* preferred_src = cc__last_worker_src_name(f->last_worker_src);
     const char* route_name = "none";
     int route_target = -2;
     /* Sticky by default: preserve preferred-worker affinity for channel wakes. */
-    if (preferred >= 0 && preferred < (int)g_sched.num_workers) {
+    if (nonworker_publish) {
+        /* Non-worker wakeups must not rely on a specific inbox wake race.
+         * Publish globally so any worker can observe the runnable fiber. */
+        cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.nonworker_global_publish);
+        global_edge = sched_global_push(f, preferred);
+        if (global_edge) {
+            cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.nonworker_global_edge);
+        }
+        pushed_global = 1;
+        pushed = 1;
+        route_name = "nonworker_global";
+        route_target = -1;
+    } else if (preferred >= 0 && preferred < (int)g_sched.num_workers) {
         int divert = 0;
         if (preferred != tls_worker_id && g_sched.worker_heartbeat) {
             uint64_t hb = atomic_load_explicit(
@@ -5387,6 +5614,12 @@ queued:
                 } else {
                     wake_one_if_sleeping(CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
                 }
+            } else if (nonworker_publish) {
+                size_t sleepers = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
+                if (sleepers > 0) {
+                    cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.nonworker_global_wake_one);
+                    wake_one_if_sleeping(CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
+                }
             }
         } else if (route_target >= 0) {
             /* Inbox-affinity unparks: wake the worker that actually received the
@@ -5407,7 +5640,23 @@ queued:
                 pushed_to_current_local,
                 atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
     }
+    if (cc__io_wait_trace_fiber(f)) {
+        fprintf(stderr,
+                "[cc:io_wait:sched] unpark_route fiber=%p id=%lu preferred=%d route=%s target=%d pushed=%d global=%d local_current=%d sleepers=%zu spinning=%zu pending=%d\n",
+                (void*)f,
+                (unsigned long)f->fiber_id,
+                preferred,
+                route_name,
+                route_target,
+                pushed,
+                pushed_global,
+                pushed_to_current_local,
+                atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed),
+                atomic_load_explicit(&g_sched.spinning, memory_order_relaxed),
+                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+    }
 }
+
 
 void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags) {
     tls_chan_attr_calls_batch++;

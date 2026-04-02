@@ -2886,6 +2886,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                         if (ty) {
                             if (!d->cap_types[ci]) d->cap_types[ci] = strdup(ty);
                         }
+                        
                         if (cc__cap_is_ref(d, caps[ci])) fl |= 4; /* bit 2: reference capture */
                         d->cap_flags[ci] = fl;
                         if (!ty) {
@@ -2990,10 +2991,21 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                 /* When entering a new scope, check if this is a function body and register its parameters.
                    This enables closures to capture function parameters, not just local variables. */
                 for (int si = 0; si < sig_n; si++) {
-                    if (sigs[si].line_start == line_num && sigs[si].param_names) {
+                    if (sigs[si].line_start == line_num && sigs[si].param_names && sigs[si].name) {
+                        size_t fname_len = strlen(sigs[si].name);
+                        int name_found = 0;
+                        for (const char* q = line_start; q + fname_len <= line_end; q++) {
+                            if (memcmp(q, sigs[si].name, fname_len) == 0 &&
+                                (q == line_start || !cc__is_ident_char2(q[-1])) &&
+                                (q + fname_len >= line_end || !cc__is_ident_char2(q[fname_len]))) {
+                                name_found = 1;
+                                break;
+                            }
+                        }
+                        if (!name_found) continue;
                         for (int pi = 0; pi < sigs[si].param_count; pi++) {
                             if (!sigs[si].param_names[pi] || !sigs[si].param_types[pi]) continue;
-                            /* Register this parameter as a declaration at current depth */
+                            
                             int cur_n = scope_counts[depth];
                             char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
                             char** tnext = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));

@@ -259,6 +259,7 @@ CCString CCString_from_slice(CCArena *arena, CCSlice slice);
 CCString* CCString_push_slice(CCString *str, CCSlice data);
 CCString* CCString_clear(CCString *str);
 CCSlice CCString_as_slice(const CCString *str);
+#define cc_string_as_slice CCString_as_slice
 const char *CCString_cstr(CCString *str);
 typedef CCSlice (*CCStringPolicy)(CCArena *arena, CCSlice tag, CCSlice value);
 static inline size_t CCString_len(const CCString *str) {

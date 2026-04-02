@@ -1,0 +1,57 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+/*
+ * Regression target: Redis wants a map from owned string-ish keys to entry
+ * pointers. The C map macros handle slice keys, but the .ccs frontend still
+ * mislowers some generic Map<char[:], T*> instantiations.
+ */
+typedef struct Entry {
+    int value;
+} Entry;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    Map<char[:], Entry*> m = map_new<char[:], Entry*>(&arena);
+
+    char[:] k1 = @slice("alpha");
+    char[:] k2 = @slice("beta");
+
+    Entry a = { .value = 7 };
+    Entry b = { .value = 13 };
+    Entry c = { .value = 29 };
+
+    m.insert(k1, &a);
+    m.insert(k2, &b);
+
+    Entry** got = m.get_ptr(k2);
+    if (!got || !*got || (*got)->value != 13) {
+        printf("FAIL: get_ptr(beta) expected 13\n");
+        return 2;
+    }
+
+    m.insert(k2, &c);
+    got = m.get_ptr(k2);
+    if (!got || !*got || (*got)->value != 29) {
+        printf("FAIL: get_ptr(beta) expected updated 29\n");
+        return 3;
+    }
+
+    int removed = m.remove(k1);
+    if (!removed) {
+        printf("FAIL: remove(alpha) should return true\n");
+        return 4;
+    }
+
+    Entry** after = m.get_ptr(k1);
+    if (after) {
+        printf("FAIL: get_ptr(alpha) should be NULL after remove\n");
+        return 5;
+    }
+
+    printf("ufcs_map_charslice_entry_ptr_smoke: PASS\n");
+    cc_arena_free(&arena);
+    return 0;
+}

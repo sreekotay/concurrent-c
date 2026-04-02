@@ -9,8 +9,6 @@
 
 #include <errno.h>
 #include <poll.h>
-#include <pthread.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -24,62 +22,9 @@
 #include <netdb.h>
 
 #include "fiber_internal.h"
+#include "io_wait.h"
 
-typedef struct cc_net_waiter {
-    struct cc_net_waiter* next;
-    struct cc_net_waiter* prev;
-    int fd;
-    short events;
-    void* fiber;
-    uint64_t wait_ticket;
-    _Atomic int ready;
-    _Atomic int cancelled;
-    _Atomic int refs;
-    int linked;
-} cc_net_waiter;
-
-typedef struct {
-    pthread_mutex_t mu;
-    pthread_once_t once;
-    pthread_t thread;
-    int wake_pipe[2];
-    int init_err;
-    cc_net_waiter* head;
-} cc_net_wait_state;
-
-static cc_net_wait_state g_cc_net_wait_state = {
-    .mu = PTHREAD_MUTEX_INITIALIZER,
-    .once = PTHREAD_ONCE_INIT,
-    .wake_pipe = {-1, -1},
-    .init_err = 0,
-    .head = NULL,
-};
-
-typedef struct {
-    _Atomic int enabled;
-    _Atomic int init;
-    _Atomic int atexit_registered;
-    _Atomic uint64_t wait_async_calls;
-    _Atomic uint64_t waiter_adds;
-    _Atomic uint64_t waiter_removes;
-    _Atomic uint64_t wake_notifications;
-    _Atomic uint64_t poll_loops;
-    _Atomic uint64_t poll_wake_pipe_hits;
-    _Atomic uint64_t poll_ready_slots;
-    _Atomic uint64_t current_waiters;
-    _Atomic uint64_t max_waiters;
-} cc_net_watch_stats;
-
-static cc_net_watch_stats g_cc_net_watch_stats = {
-    .enabled = -1,
-    .init = 0,
-    .atexit_registered = 0,
-};
-
-/* One background watcher owns the kernel readiness wait so scheduler workers
- * stay imperative and fiber-focused: socket ops keep local retry loops, fibers
- * park on "would block", and no worker is pinned in poll() or spinning on
- * EAGAIN while external I/O progress is pending. */
+#define CC_NET_FLAG_NONBLOCK 0x01
 
 /* ============================================================================
  * Helpers
@@ -107,278 +52,32 @@ static int cc__net_set_nonblocking(int fd) {
     return 0;
 }
 
-static int cc__net_wait_ready(int fd, short events) {
-    struct pollfd pfd = {.fd = fd, .events = events};
-    while (1) {
-        int rc = poll(&pfd, 1, -1);
-        if (rc > 0) {
-            if (pfd.revents & POLLNVAL) return EBADF;
-            if (pfd.revents & (POLLERR | POLLHUP)) return EIO;
-            return 0;
-        }
-        if (rc == 0) continue;
-        if (errno == EINTR) continue;
-        return errno;
-    }
+static void cc__net_set_cloexec_best_effort(int fd) {
+    int flags = fcntl(fd, F_GETFD, 0);
+    if (flags < 0) return;
+    (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
-static int cc__net_prepare_fiber_fd(int fd) {
+static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
     if (!cc__fiber_in_context()) return 0;
-    return cc__net_set_nonblocking(fd);
+    if (flags && (*flags & CC_NET_FLAG_NONBLOCK)) return 0;
+    int err = cc__net_set_nonblocking(fd);
+    if (err == 0 && flags) *flags |= CC_NET_FLAG_NONBLOCK;
+    return err;
 }
 
-static int cc__net_watch_stats_enabled(void) {
-    int mode = atomic_load_explicit(&g_cc_net_watch_stats.enabled, memory_order_acquire);
+static int cc__net_trace_read_enabled(void) {
+    static int mode = -1;
     if (mode >= 0) return mode;
-    mode = getenv("CC_NET_WATCH_STATS") ? 1 : 0;
-    int expected = -1;
-    (void)atomic_compare_exchange_strong_explicit(&g_cc_net_watch_stats.enabled,
-                                                  &expected,
-                                                  mode,
-                                                  memory_order_release,
-                                                  memory_order_acquire);
-    return atomic_load_explicit(&g_cc_net_watch_stats.enabled, memory_order_acquire);
+    const char* env = getenv("CC_NET_TRACE_READ");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
 }
 
-static void cc__net_watch_stats_dump(void) {
-    if (!cc__net_watch_stats_enabled()) return;
-    fprintf(stderr,
-            "\n[cc:net] watcher stats: waits=%llu adds=%llu removes=%llu notify=%llu "
-            "poll_loops=%llu wake_pipe_hits=%llu ready_slots=%llu current=%llu max=%llu\n",
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.wait_async_calls, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.waiter_adds, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.waiter_removes, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.wake_notifications, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.poll_loops, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.poll_wake_pipe_hits, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.poll_ready_slots, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.current_waiters, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_cc_net_watch_stats.max_waiters, memory_order_relaxed));
-}
-
-static void cc__net_watch_stats_init(void) {
-    if (!cc__net_watch_stats_enabled()) return;
-    if (atomic_exchange_explicit(&g_cc_net_watch_stats.init, 1, memory_order_acq_rel)) return;
-    if (!atomic_exchange_explicit(&g_cc_net_watch_stats.atexit_registered, 1, memory_order_acq_rel)) {
-        atexit(cc__net_watch_stats_dump);
-    }
-}
-
-static void cc__net_watch_stats_inc_current_waiters(void) {
-    uint64_t cur = atomic_fetch_add_explicit(&g_cc_net_watch_stats.current_waiters, 1, memory_order_relaxed) + 1;
-    uint64_t max = atomic_load_explicit(&g_cc_net_watch_stats.max_waiters, memory_order_relaxed);
-    while (cur > max &&
-           !atomic_compare_exchange_weak_explicit(&g_cc_net_watch_stats.max_waiters,
-                                                  &max,
-                                                  cur,
-                                                  memory_order_relaxed,
-                                                  memory_order_relaxed)) {
-    }
-}
-
-static void cc__net_watch_stats_dec_current_waiters(void) {
-    atomic_fetch_sub_explicit(&g_cc_net_watch_stats.current_waiters, 1, memory_order_relaxed);
-}
-
-static void cc__net_waiter_addref(cc_net_waiter* waiter) {
-    if (!waiter) return;
-    atomic_fetch_add_explicit(&waiter->refs, 1, memory_order_relaxed);
-}
-
-static void cc__net_waiter_release(cc_net_waiter* waiter) {
-    if (!waiter) return;
-    if (atomic_fetch_sub_explicit(&waiter->refs, 1, memory_order_acq_rel) == 1) {
-        free(waiter);
-    }
-}
-
-static void cc__net_waiter_notify(void) {
-    if (g_cc_net_wait_state.wake_pipe[1] < 0) return;
-    if (cc__net_watch_stats_enabled()) {
-        cc__net_watch_stats_init();
-        atomic_fetch_add_explicit(&g_cc_net_watch_stats.wake_notifications, 1, memory_order_relaxed);
-    }
-    unsigned char byte = 0;
-    ssize_t rc;
-    do {
-        rc = write(g_cc_net_wait_state.wake_pipe[1], &byte, 1);
-    } while (rc < 0 && errno == EINTR);
-}
-
-static void cc__net_waiter_drain_wake_pipe(void) {
-    if (g_cc_net_wait_state.wake_pipe[0] < 0) return;
-    char buf[128];
-    while (1) {
-        ssize_t n = read(g_cc_net_wait_state.wake_pipe[0], buf, sizeof(buf));
-        if (n > 0) continue;
-        if (n < 0 && errno == EINTR) continue;
-        break;
-    }
-}
-
-static void* cc__net_waiter_main(void* arg) {
-    (void)arg;
-    while (1) {
-        struct pollfd* pfds = NULL;
-        cc_net_waiter** waiters = NULL;
-        size_t count = 0;
-        size_t idx = 1;
-
-        pthread_mutex_lock(&g_cc_net_wait_state.mu);
-        for (cc_net_waiter* w = g_cc_net_wait_state.head; w; w = w->next) count++;
-        pfds = (struct pollfd*)calloc(count + 1, sizeof(*pfds));
-        waiters = (cc_net_waiter**)calloc(count ? count : 1, sizeof(*waiters));
-        if (!pfds || !waiters) {
-            pthread_mutex_unlock(&g_cc_net_wait_state.mu);
-            free(pfds);
-            free(waiters);
-            usleep(1000);
-            continue;
-        }
-        pfds[0].fd = g_cc_net_wait_state.wake_pipe[0];
-        pfds[0].events = POLLIN;
-        for (cc_net_waiter* w = g_cc_net_wait_state.head; w; w = w->next) {
-            cc__net_waiter_addref(w);
-            waiters[idx - 1] = w;
-            pfds[idx].fd = w->fd;
-            pfds[idx].events = w->events;
-            idx++;
-        }
-        pthread_mutex_unlock(&g_cc_net_wait_state.mu);
-
-        while (1) {
-            int rc = poll(pfds, idx, -1);
-            if (rc >= 0) break;
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (cc__net_watch_stats_enabled()) {
-            cc__net_watch_stats_init();
-            atomic_fetch_add_explicit(&g_cc_net_watch_stats.poll_loops, 1, memory_order_relaxed);
-        }
-
-        if (pfds[0].revents & POLLIN) {
-            if (cc__net_watch_stats_enabled()) {
-                atomic_fetch_add_explicit(&g_cc_net_watch_stats.poll_wake_pipe_hits, 1, memory_order_relaxed);
-            }
-            cc__net_waiter_drain_wake_pipe();
-        }
-
-        for (size_t i = 1; i < idx; ++i) {
-            cc_net_waiter* w = waiters[i - 1];
-            short revents = pfds[i].revents;
-            if (!w || revents == 0) continue;
-            if (cc__net_watch_stats_enabled()) {
-                atomic_fetch_add_explicit(&g_cc_net_watch_stats.poll_ready_slots, 1, memory_order_relaxed);
-            }
-            if (atomic_load_explicit(&w->cancelled, memory_order_acquire)) continue;
-            if (!(revents & (w->events | POLLERR | POLLHUP | POLLNVAL))) continue;
-            if (w->fiber && !cc__fiber_wait_ticket_matches(w->fiber, w->wait_ticket)) continue;
-            if (atomic_exchange_explicit(&w->ready, 1, memory_order_acq_rel) == 0) {
-                cc__fiber_unpark(w->fiber);
-            }
-        }
-
-        for (size_t i = 0; i + 1 < idx; ++i) {
-            cc__net_waiter_release(waiters[i]);
-        }
-        free(waiters);
-        free(pfds);
-    }
-    return NULL;
-}
-
-static void cc__net_waiter_init_once(void) {
-    if (pipe(g_cc_net_wait_state.wake_pipe) != 0) {
-        g_cc_net_wait_state.init_err = errno;
-        g_cc_net_wait_state.wake_pipe[0] = -1;
-        g_cc_net_wait_state.wake_pipe[1] = -1;
-        return;
-    }
-    if (cc__net_set_nonblocking(g_cc_net_wait_state.wake_pipe[0]) != 0 ||
-        cc__net_set_nonblocking(g_cc_net_wait_state.wake_pipe[1]) != 0) {
-        g_cc_net_wait_state.init_err = errno ? errno : EIO;
-        close(g_cc_net_wait_state.wake_pipe[0]);
-        close(g_cc_net_wait_state.wake_pipe[1]);
-        g_cc_net_wait_state.wake_pipe[0] = -1;
-        g_cc_net_wait_state.wake_pipe[1] = -1;
-        return;
-    }
-    int err = pthread_create(&g_cc_net_wait_state.thread, NULL, cc__net_waiter_main, NULL);
-    if (err != 0) {
-        g_cc_net_wait_state.init_err = err;
-        close(g_cc_net_wait_state.wake_pipe[0]);
-        close(g_cc_net_wait_state.wake_pipe[1]);
-        g_cc_net_wait_state.wake_pipe[0] = -1;
-        g_cc_net_wait_state.wake_pipe[1] = -1;
-        return;
-    }
-    pthread_detach(g_cc_net_wait_state.thread);
-}
-
-static int cc__net_waiter_ensure_running(void) {
-    pthread_once(&g_cc_net_wait_state.once, cc__net_waiter_init_once);
-    return g_cc_net_wait_state.init_err;
-}
-
-static int cc__net_wait_async(int fd, short events) {
-    int init_err = cc__net_waiter_ensure_running();
-    if (init_err != 0) return cc__net_wait_ready(fd, events);
-    if (cc__net_watch_stats_enabled()) {
-        cc__net_watch_stats_init();
-        atomic_fetch_add_explicit(&g_cc_net_watch_stats.wait_async_calls, 1, memory_order_relaxed);
-    }
-
-    cc_net_waiter* waiter = (cc_net_waiter*)calloc(1, sizeof(*waiter));
-    if (!waiter) return cc__net_wait_ready(fd, events);
-
-    waiter->fd = fd;
-    waiter->events = events;
-    waiter->fiber = cc__fiber_current();
-    waiter->wait_ticket = cc__fiber_publish_wait_ticket(waiter->fiber);
-    atomic_store_explicit(&waiter->ready, 0, memory_order_relaxed);
-    atomic_store_explicit(&waiter->cancelled, 0, memory_order_relaxed);
-    atomic_store_explicit(&waiter->refs, 1, memory_order_relaxed);
-
-    pthread_mutex_lock(&g_cc_net_wait_state.mu);
-    waiter->next = g_cc_net_wait_state.head;
-    if (waiter->next) waiter->next->prev = waiter;
-    g_cc_net_wait_state.head = waiter;
-    waiter->linked = 1;
-    pthread_mutex_unlock(&g_cc_net_wait_state.mu);
-    if (cc__net_watch_stats_enabled()) {
-        atomic_fetch_add_explicit(&g_cc_net_watch_stats.waiter_adds, 1, memory_order_relaxed);
-        cc__net_watch_stats_inc_current_waiters();
-    }
-    cc__net_waiter_notify();
-
-    cc__fiber_set_park_obj(waiter);
-    CC_FIBER_SUSPEND_UNTIL_READY(&waiter->ready, 0, "io_ready");
-    cc__fiber_set_park_obj(NULL);
-
-    atomic_store_explicit(&waiter->cancelled, 1, memory_order_release);
-    pthread_mutex_lock(&g_cc_net_wait_state.mu);
-    if (waiter->linked) {
-        if (waiter->prev) waiter->prev->next = waiter->next;
-        else g_cc_net_wait_state.head = waiter->next;
-        if (waiter->next) waiter->next->prev = waiter->prev;
-        waiter->linked = 0;
-    }
-    pthread_mutex_unlock(&g_cc_net_wait_state.mu);
-    if (cc__net_watch_stats_enabled()) {
-        atomic_fetch_add_explicit(&g_cc_net_watch_stats.waiter_removes, 1, memory_order_relaxed);
-        cc__net_watch_stats_dec_current_waiters();
-    }
-    cc__net_waiter_notify();
-    cc__net_waiter_release(waiter);
-    return 0;
-}
-
-static int cc__net_wait_would_block(int fd, short events) {
-    if (cc__fiber_in_context()) {
-        return cc__net_wait_async(fd, events);
-    }
-    return cc__net_wait_ready(fd, events);
+static void cc__net_trace_read(const char* action, int fd, ssize_t n, int err) {
+    if (!cc__net_trace_read_enabled()) return;
+    fprintf(stderr, "[cc:net:read] %s fd=%d n=%zd err=%d fiber=%p\n",
+            action, fd, n, err, cc__fiber_current());
 }
 
 /* Parse "host:port" into sockaddr.
@@ -539,7 +238,7 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
 
     struct sockaddr_storage client_addr;
     socklen_t client_len = sizeof(client_addr);
-    int prep_err = cc__net_prepare_fiber_fd(ln->fd);
+    int prep_err = cc__net_prepare_fiber_fd(ln->fd, &ln->flags);
     if (prep_err != 0) {
         *out_err = errno_to_net_error(prep_err);
         return sock;
@@ -548,11 +247,19 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
     while (1) {
         int fd = accept(ln->fd, (struct sockaddr*)&client_addr, &client_len);
         if (fd >= 0) {
+            int fd_err = cc__net_set_nonblocking(fd);
+            if (fd_err != 0) {
+                *out_err = errno_to_net_error(fd_err);
+                close(fd);
+                return sock;
+            }
+            cc__net_set_cloexec_best_effort(fd);
             sock.fd = fd;
+            sock.flags |= CC_NET_FLAG_NONBLOCK;
             return sock;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            int wait_err = cc__net_wait_would_block(ln->fd, POLLIN);
+            int wait_err = cc__io_wait_fd(ln->fd, POLLIN);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
                 return sock;
@@ -567,6 +274,7 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
 
 void cc_listener_close(CCListener* ln) {
     if (ln->fd >= 0) {
+        cc__io_wait_forget_fd(ln->fd);
         close(ln->fd);
         ln->fd = -1;
     }
@@ -575,6 +283,46 @@ void cc_listener_close(CCListener* ln) {
 /* ============================================================================
  * Socket I/O
  * ============================================================================ */
+
+size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetError* out_err) {
+    *out_err = CC_NET_OK;
+    if (!buf && max_bytes > 0) {
+        *out_err = CC_NET_OTHER;
+        return 0;
+    }
+
+    int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
+    if (prep_err != 0) {
+        *out_err = errno_to_net_error(prep_err);
+        return 0;
+    }
+
+    while (1) {
+        ssize_t n = read(sock->fd, buf, max_bytes);
+        if (n > 0) {
+            cc__net_trace_read("read_ok", sock->fd, n, 0);
+            return (size_t)n;
+        }
+        if (n == 0) {
+            cc__net_trace_read("read_eof", sock->fd, n, 0);
+            *out_err = CC_NET_CONNECTION_CLOSED;
+            return 0;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            cc__net_trace_read("wait_begin", sock->fd, n, errno);
+            int wait_err = cc__io_wait_fd(sock->fd, POLLIN);
+            cc__net_trace_read("wait_end", sock->fd, n, wait_err);
+            if (wait_err != 0) {
+                *out_err = errno_to_net_error(wait_err);
+                return 0;
+            }
+            continue;
+        }
+        cc__net_trace_read("read_err", sock->fd, n, errno);
+        *out_err = errno_to_net_error(errno);
+        return 0;
+    }
+}
 
 CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err) {
     CCSlice result = {0};
@@ -586,39 +334,17 @@ CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetEr
         return result;
     }
 
-    int prep_err = cc__net_prepare_fiber_fd(sock->fd);
-    if (prep_err != 0) {
-        *out_err = errno_to_net_error(prep_err);
-        return result;
+    size_t n = cc_socket_read_into(sock, buf, max_bytes, out_err);
+    if (*out_err == CC_NET_OK && n > 0) {
+        result.ptr = buf;
+        result.len = n;
     }
-
-    while (1) {
-        ssize_t n = read(sock->fd, buf, max_bytes);
-        if (n > 0) {
-            result.ptr = buf;
-            result.len = (size_t)n;
-            return result;
-        }
-        if (n == 0) {
-            *out_err = CC_NET_CONNECTION_CLOSED;
-            return result;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            int wait_err = cc__net_wait_would_block(sock->fd, POLLIN);
-            if (wait_err != 0) {
-                *out_err = errno_to_net_error(wait_err);
-                return result;
-            }
-            continue;
-        }
-        *out_err = errno_to_net_error(errno);
-        return result;
-    }
+    return result;
 }
 
 size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError* out_err) {
     *out_err = CC_NET_OK;
-    int prep_err = cc__net_prepare_fiber_fd(sock->fd);
+    int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
     if (prep_err != 0) {
         *out_err = errno_to_net_error(prep_err);
         return 0;
@@ -630,7 +356,7 @@ size_t cc_socket_write(CCSocket* sock, const char* data, size_t len, CCNetError*
             return (size_t)n;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            int wait_err = cc__net_wait_would_block(sock->fd, POLLOUT);
+            int wait_err = cc__io_wait_fd(sock->fd, POLLOUT);
             if (wait_err != 0) {
                 *out_err = errno_to_net_error(wait_err);
                 return 0;
@@ -660,6 +386,7 @@ void cc_socket_shutdown(CCSocket* sock, CCShutdownMode mode, CCNetError* out_err
 
 void cc_socket_close(CCSocket* sock) {
     if (sock->fd >= 0) {
+        cc__io_wait_forget_fd(sock->fd);
         close(sock->fd);
         sock->fd = -1;
     }

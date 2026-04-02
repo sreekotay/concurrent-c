@@ -1,0 +1,93 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+#define ENTRY_ARENA_OVERHEAD 128
+
+typedef struct {
+    CCArena key_arena;
+    CCArena value_arena;
+    CCString key;
+    CCString value;
+} OwnedEntry;
+
+static int clone_owned_string(CCString* out, CCArena* out_arena, CCSlice src) {
+    size_t arena_size = src.len + ENTRY_ARENA_OVERHEAD;
+    if (arena_size < ENTRY_ARENA_OVERHEAD) arena_size = ENTRY_ARENA_OVERHEAD;
+
+    CCArena arena = cc_arena_heap(arena_size) @destroy;
+    if (!arena.base) return -1;
+
+    CCString s = CCString_from_slice(&arena, src);
+    if (src.len > 0 && CCString_len(&s) != src.len) return -2;
+
+    *out = s;
+    *out_arena = arena.detach();
+    return 0;
+}
+
+static int owned_entry_init(OwnedEntry* e, CCSlice key, CCSlice value) {
+    if (!e) return -1;
+    memset(e, 0, sizeof(*e));
+
+    if (clone_owned_string(&e->key, &e->key_arena, key) != 0) return -2;
+    if (clone_owned_string(&e->value, &e->value_arena, value) != 0) {
+        if (e->key_arena.base) e->key_arena.free();
+        memset(e, 0, sizeof(*e));
+        return -3;
+    }
+    return 0;
+}
+
+static int owned_entry_replace_value(OwnedEntry* e, CCSlice value) {
+    CCString next = {0};
+    CCArena next_arena = {0};
+    if (!e) return -1;
+    if (clone_owned_string(&next, &next_arena, value) != 0) return -2;
+
+    if (e->value_arena.base) e->value_arena.free();
+    e->value = next;
+    e->value_arena = next_arena;
+    return 0;
+}
+
+static void owned_entry_free(OwnedEntry* e) {
+    if (!e) return;
+    if (e->key_arena.base) e->key_arena.free();
+    if (e->value_arena.base) e->value_arena.free();
+    memset(e, 0, sizeof(*e));
+}
+
+int main(void) {
+    OwnedEntry entry = {0};
+
+    {
+        CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
+        assert(req_arena.base);
+
+        CCString req_key = CCString_new(&req_arena);
+        CCString req_value = CCString_new(&req_arena);
+        CCString_push_cstr(&req_key, "alpha");
+        CCString_push_cstr(&req_value, "one");
+
+        assert(owned_entry_init(&entry, req_key.as_slice(), req_value.as_slice()) == 0);
+    }
+
+    assert(strcmp(CCString_cstr(&entry.key), "alpha") == 0);
+    assert(strcmp(CCString_cstr(&entry.value), "one") == 0);
+
+    {
+        CCArena req_arena = cc_arena_heap(kilobytes(4)) @destroy;
+        assert(req_arena.base);
+
+        CCString next_value = CCString_new(&req_arena);
+        CCString_push_cstr(&next_value, "two");
+        assert(owned_entry_replace_value(&entry, next_value.as_slice()) == 0);
+    }
+
+    assert(strcmp(CCString_cstr(&entry.key), "alpha") == 0);
+    assert(strcmp(CCString_cstr(&entry.value), "two") == 0);
+
+    owned_entry_free(&entry);
+    return 0;
+}

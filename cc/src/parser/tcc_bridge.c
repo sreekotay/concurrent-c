@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
 
 // Thin wrappers around patched TCC hooks when available. When built without
 // CC_TCC_EXT_AVAILABLE, we provide stubs that return NULL.
@@ -28,15 +30,47 @@ __attribute__((weak)) void cc_tcc_free_ast(struct CCASTStubRoot* r);
 __attribute__((weak)) void tcc_set_ext_parser(struct TCCExtParser const *p);
 extern const struct TCCExtParser cc_ext_parser;
 
+/* Capture TCC's stderr; on success discard it (benign warnings), on failure
+   replay it so the user sees actual error messages. */
+static void cc__tcc_stderr_capture_start(int* saved_fd, char* tmppath, size_t tmppath_sz) {
+    *saved_fd = -1;
+    tmppath[0] = '\0';
+    if (getenv("CC_DEBUG_TCC_WARNINGS")) return;
+    fflush(stderr);
+    *saved_fd = dup(STDERR_FILENO);
+    snprintf(tmppath, tmppath_sz, "/tmp/cc_tcc_stderr_XXXXXX");
+    int tmpfd = mkstemp(tmppath);
+    if (tmpfd >= 0) { dup2(tmpfd, STDERR_FILENO); close(tmpfd); }
+}
+static void cc__tcc_stderr_capture_end(int saved_fd, const char* tmppath, int parse_failed) {
+    if (saved_fd < 0) return;
+    fflush(stderr);
+    dup2(saved_fd, STDERR_FILENO);
+    close(saved_fd);
+    if (tmppath[0]) {
+        if (parse_failed) {
+            FILE* f = fopen(tmppath, "r");
+            if (f) {
+                char buf[512];
+                while (fgets(buf, sizeof(buf), f)) fputs(buf, stderr);
+                fclose(f);
+            }
+        }
+        unlink(tmppath);
+    }
+}
+
 // Call into patched TCC to parse and return an opaque AST root.
 CCASTRoot* cc_tcc_bridge_parse_to_ast(const char* preprocessed_path, const char* original_path, CCSymbolTable* symbols) {
     if (!preprocessed_path || !cc_tcc_parse_to_ast) return NULL;
-    // symbols currently unused; reserved for constexpr tables.
     (void)symbols;
     if (tcc_set_ext_parser) {
         tcc_set_ext_parser(&cc_ext_parser);
     }
+    int _saved_fd = -1; char _tmppath[256];
+    cc__tcc_stderr_capture_start(&_saved_fd, _tmppath, sizeof(_tmppath));
     struct CCASTStubRoot* r = cc_tcc_parse_to_ast(preprocessed_path, original_path, symbols);
+    cc__tcc_stderr_capture_end(_saved_fd, _tmppath, r == NULL);
     if (!r) return NULL;
     CCASTRoot* root = (CCASTRoot*)malloc(sizeof(CCASTRoot));
     if (!root) {
@@ -86,7 +120,10 @@ CCASTRoot* cc_tcc_bridge_parse_string_to_ast(const char* source_code, const char
     if (tcc_set_ext_parser) {
         tcc_set_ext_parser(&cc_ext_parser);
     }
+    int _saved_fd2 = -1; char _tmppath2[256];
+    cc__tcc_stderr_capture_start(&_saved_fd2, _tmppath2, sizeof(_tmppath2));
     struct CCASTStubRoot* r = cc_tcc_parse_string_to_ast(source_code, virtual_filename, original_path, symbols);
+    cc__tcc_stderr_capture_end(_saved_fd2, _tmppath2, r == NULL);
     if (!r) return NULL;
     CCASTRoot* root = (CCASTRoot*)malloc(sizeof(CCASTRoot));
     if (!root) {

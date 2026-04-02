@@ -1,0 +1,17 @@
+// Smoke test: verify compile error line numbers remain accurate after
+// compiler transformations (@destroy expansion, UFCS rewriting, etc.)
+#include <ccc/std/prelude.cch>
+#include <string.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4)) @destroy;
+    CCString s = CCString_from_slice(&arena, @slice("hello"));
+
+    CCSlice sl = s.as_slice();
+
+    // Intentional error: calling an undeclared function.
+    // The reported line number must point HERE, not to some internal offset.
+    int x = this_function_does_not_exist(sl.len);
+    (void)x;
+    return 0;
+}

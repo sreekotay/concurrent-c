@@ -440,7 +440,11 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             cc_sb_append_cstr(&out, &out_len, &out_cap, ", ");
             cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
         }
-        cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
+        {
+            int need_defer = (ownership == CC_CREATE_OWN_DESTROY &&
+                (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee));
+            cc_sb_append_cstr(&out, &out_len, &out_cap, need_defer ? "); " : ");\n");
+        }
         if (ownership == CC_CREATE_OWN_DESTROY &&
             (registered_pre_destroy_callee || destroy_body_s || registered_destroy_callee)) {
             int has_pre_destroy = (registered_pre_destroy_callee != NULL);
@@ -489,7 +493,8 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
             }
         }
         last_emit = semi + 1;
-        i = semi + 1;
+        if (last_emit < n && src[last_emit] == '\n') last_emit++;
+        i = last_emit;
         changed = 1;
     }
     if (!changed) {
