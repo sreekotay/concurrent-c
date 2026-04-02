@@ -1,0 +1,70 @@
+airm5@Srees-MacBook-Air pigz % curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+Install Nod
+airm5@Srees-MacBook-Air pigz % ls *.sh 
+bench_compress_only.sh  bench_go_vs_cc.sh       benchmark.sh            setup.sh
+airm5@Srees-MacBook-Air pigz % ./bench_go_vs_cc.sh  
+In file included from runtime/concurrent_c.c:13:
+In file included from runtime/channel.c:22:
+runtime/../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h:7:11: warning: unknown pragma ignored [-Wunknown-pragmas]
+    7 |   #pragma warning( push )
+      |           ^
+runtime/../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h:8:11: warning: unknown pragma ignored [-Wunknown-pragmas]
+    8 |   #pragma warning( disable : 4324 )                                          // TRD : 4324 disables MSVC warnings for structure alignment padding due to alignment specifiers
+      |           ^
+runtime/../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h:9:11: warning: unknown pragma ignored [-Wunknown-pragmas]
+    9 |   #pragma prefast( disable : 28113 28182 28183, "blah" )
+      |           ^
+In file included from runtime/concurrent_c.c:13:
+In file included from runtime/channel.c:22:
+In file included from runtime/../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h:17:
+runtime/../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711/lfds711_misc.h:222:9: warning: unknown pragma ignored [-Wunknown-pragmas]
+  222 | #pragma prefast( disable : 28112, "blah" )
+      |         ^
+In file included from runtime/concurrent_c.c:13:
+In file included from runtime/channel.c:22:
+runtime/../../third_party/liblfds/liblfds7.1.1/liblfds711/inc/liblfds711.h:30:11: warning: unknown pragma ignored [-Wunknown-pragmas]
+   30 |   #pragma warning( pop )
+      |           ^
+5 warnings generated.
+==========================================================
+pigz Full Comparison: CC vs Go vs Original
+==========================================================
+Input:  /Users/airm5/Documents/code/concurrent-c/real_projects/pigz/testdata/text_100mb.bin (100 MB)
+Runs:   10  (interleaved, best reported)
+OS:     Darwin 25.4.0
+==========================================================
+
+Measuring RSS (one pass per binary)...
+
+Running 10 interleaved rounds...
+Round  CC (Idiomatic)  CC (Full)       CC (Pthread)    Go (CGO+zlib)   Original pigz 
+    1  0.291           0.299           0.293           0.299           0.342         
+    2  0.327           0.302           0.284           0.309           0.348         
+    3  0.320           0.302           0.283           0.302           0.348         
+    4  0.301           0.304           0.289           0.309           0.356         
+    5  0.299           0.308           0.303           0.327           0.437         
+    6  0.311           0.334           0.292           0.315           0.355         
+    7  0.296           0.312           0.297           0.323           0.358         
+    8  0.296           0.311           0.291           0.321           0.357         
+    9  0.311           0.334           0.294           0.318           0.358         
+   10  0.298           0.310           0.294           0.311           0.360         
+
+============================================================================
+FINAL SUMMARY  (best of 10 interleaved runs)
+============================================================================
+Implementation  | Best(s)  | Worst(s) | Var      | Throughput   | Max RSS  | Bin Size
+--------------- | -------- | -------- | -------- | ------------ | -------- | --------
+CC (Idiomatic)  | 0.291s   | 0.327s   | 1.12x    | 343.6 MB/s   | 14MB     | 178K    
+CC (Full)       | 0.299s   | 0.334s   | 1.12x    | 334.4 MB/s   | 25MB     | 213K    
+CC (Pthread)    | 0.283s   | 0.303s   | 1.07x    | 353.4 MB/s   | 14MB     | 177K    
+Go (CGO+zlib)   | 0.299s   | 0.327s   | 1.09x    | 334.4 MB/s   | 27MB     | 1.6M    
+Original pigz   | 0.342s   | 0.437s   | 1.28x    | 292.4 MB/s   | 8MB      | 106K    
+============================================================================
+
+Ratios vs CC (Pthread):
+  CC (Idiomatic)   1.028x
+  CC (Full)        1.057x
+  CC (Pthread)     1.000x
+  Go (CGO+zlib)    1.057x
+  Original pigz    1.208x
+airm5@Srees-MacBook-Air pigz % 
