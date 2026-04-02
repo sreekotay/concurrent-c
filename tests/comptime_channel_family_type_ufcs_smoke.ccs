@@ -21,7 +21,7 @@ int[~1 <] g_rx;
             (void)mode;
             (void)argv;
             (void)arg_types;
-            if (cc_slice_eq_cstr(method, "close")) {
+            if (CCSlice_eq_cstr(&method, "close")) {
                 return cc_ufcs_emit_value_cstr(arena, "tracked_tx_close");
             }
             return cc_slice_empty();

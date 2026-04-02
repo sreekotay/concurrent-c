@@ -405,16 +405,16 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
             while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
             if (method_end < n && src[method_end] == '(') {
                 size_t method_len = method_end - method_start;
-                if (method_len == 6 && memcmp(src + method_start, "append", 6) == 0) replacement = "cc_string_push";
-                else if (method_len == 4 && memcmp(src + method_start, "push", 4) == 0) replacement = "cc_string_push";
-                else if (method_len == 8 && memcmp(src + method_start, "as_slice", 8) == 0) replacement = "cc_string_as_slice";
-                else if (method_len == 5 && memcmp(src + method_start, "clear", 5) == 0) replacement = "cc_string_clear";
-                else if (method_len == 4 && memcmp(src + method_start, "cstr", 4) == 0) replacement = "cc_string_cstr";
-                else if (method_len == 3 && memcmp(src + method_start, "len", 3) == 0) replacement = "cc_string_len";
-                else if (method_len == 3 && memcmp(src + method_start, "cap", 3) == 0) replacement = "cc_string_cap";
+                if (method_len == 6 && memcmp(src + method_start, "append", 6) == 0) replacement = "CCString_push";
+                else if (method_len == 4 && memcmp(src + method_start, "push", 4) == 0) replacement = "CCString_push";
+                else if (method_len == 8 && memcmp(src + method_start, "as_slice", 8) == 0) replacement = "CCString_as_slice";
+                else if (method_len == 5 && memcmp(src + method_start, "clear", 5) == 0) replacement = "CCString_clear";
+                else if (method_len == 4 && memcmp(src + method_start, "cstr", 4) == 0) replacement = "CCString_cstr";
+                else if (method_len == 3 && memcmp(src + method_start, "len", 3) == 0) replacement = "CCString_len";
+                else if (method_len == 3 && memcmp(src + method_start, "cap", 3) == 0) replacement = "CCString_cap";
                 else if (method_len > 0) {
                     static _Thread_local char buf[128];
-                    snprintf(buf, sizeof(buf), "cc_string_%.*s", (int)method_len, src + method_start);
+                    snprintf(buf, sizeof(buf), "CCString_%.*s", (int)method_len, src + method_start);
                     replacement = buf;
                 }
                 if (replacement) {
@@ -3766,10 +3766,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 "#include \"std/prelude.h\"\n"
                 "int main(void) {\n"
                 "  CCArena a = cc_heap_arena(kilobytes(1));\n"
-                "  CCString s = cc_string_new(&a);\n"
-                "  cc_string_push(&s, cc_slice_from_buffer(\"Hello, \", sizeof(\"Hello, \") - 1));\n"
-                "  cc_string_push(&s, cc_slice_from_buffer(\"Concurrent-C via UFCS!\\n\", sizeof(\"Concurrent-C via UFCS!\\n\") - 1));\n"
-                "  cc_std_out_write(cc_string_as_slice(&s));\n"
+                "  CCString s = CCString_new(&a);\n"
+                "  CCString_push(&s, cc_slice_from_buffer(\"Hello, \", sizeof(\"Hello, \") - 1));\n"
+                "  CCString_push(&s, cc_slice_from_buffer(\"Concurrent-C via UFCS!\\n\", sizeof(\"Concurrent-C via UFCS!\\n\") - 1));\n"
+                "  cc_std_out_write(CCString_as_slice(&s));\n"
                 "  return 0;\n"
                 "}\n");
     }

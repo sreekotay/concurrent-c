@@ -19,10 +19,10 @@ static CreateToy create_toy_from_cstr(const char* text) {
 static CCSlice create_toy_create(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena) {
     (void)type_name;
     (void)argv;
-    if (arg_types.len == 1 && cc_slice_eq_cstr(arg_types.items[0], "int")) {
+    if (arg_types.len == 1 && CCSlice_eq_cstr(&arg_types.items[0], "int")) {
         return cc_slice_from_buffer((void*)"create_toy_from_int", sizeof("create_toy_from_int") - 1);
     }
-    if (arg_types.len == 1 && cc_slice_eq_cstr(arg_types.items[0], "const char*")) {
+    if (arg_types.len == 1 && CCSlice_eq_cstr(&arg_types.items[0], "const char*")) {
         return cc_slice_from_buffer((void*)"create_toy_from_cstr", sizeof("create_toy_from_cstr") - 1);
     }
     (void)arena;

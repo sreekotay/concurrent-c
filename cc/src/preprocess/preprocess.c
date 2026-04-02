@@ -1412,7 +1412,7 @@ static void cc__emit_template_literal_push(char** out,
                                            size_t len) {
     if (!builder_name || !src || len == 0) return;
     cc__sb_append_fmt_local(out, out_len, out_cap,
-                            "cc_string_push_slice(&%s, cc_slice_from_cstr(",
+                            "CCString_push_slice(&%s, cc_slice_from_cstr(",
                             builder_name);
     cc__append_c_string_escaped(out, out_len, out_cap, src, len);
     cc_sb_append_cstr(out, out_len, out_cap, ")); ");
@@ -1460,7 +1460,7 @@ static int cc__rewrite_template_body(char** out,
                 size_t expr_end = 0;
                 if (cc__scan_interp_body(src, n, brace_pos, &expr_end) != 0) return -1;
                 cc__sb_append_fmt_local(out, out_len, out_cap,
-                                        "cc_string_push_policy(&%s, %s, %s, ",
+                                        "CCString_push_policy(&%s, %s, %s, ",
                                         builder_name, policy_name, arena_name);
                 if (tagged) {
                     cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
@@ -1590,7 +1590,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = cc_string_new(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = CCString_new(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
                     if (cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
@@ -1617,7 +1617,7 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                         free(out);
                         return (char*)-1;
                     }
-                    cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_string_from((");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString_from((");
                     cc_sb_append(&out, &out_len, &out_cap, src + arg1_s, arg1_e - arg1_s);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "), (");
                     cc_sb_append(&out, &out_len, &out_cap, src + arg2_s, arg2_e - arg2_s);
@@ -3091,7 +3091,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             } else if (string_like) {
                 const char* string_method = method_name;
                 if (strcmp(method_name, "append") == 0) string_method = "push";
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_string_");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString_");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, string_method);
             } else if (nursery_like) {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "cc_nursery_");

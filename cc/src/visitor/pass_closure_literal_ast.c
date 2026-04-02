@@ -526,14 +526,47 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
         }
         if (!eq) eq = NULL;
     }
+    /* Collect top-level comma positions to handle multi-declarations
+     * like: CCChanTx g_tx0, g_tx1, g_tx2; */
+    const char* comma_pos[64];
+    int comma_n = 0;
+    {
+        const char* cur = p;
+        int paren = 0, bracket = 0;
+        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
+        while (cur < semi) {
+            char c = *cur;
+            char c2 = (cur + 1 < semi) ? cur[1] : 0;
+            if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
+            if (in_str) { if (c == '\\' && c2) { cur += 2; continue; } if (c == '"') in_str = 0; cur++; continue; }
+            if (in_chr) { if (c == '\\' && c2) { cur += 2; continue; } if (c == '\'') in_chr = 0; cur++; continue; }
+            if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
+            if (c == '"') { in_str = 1; cur++; continue; }
+            if (c == '\'') { in_chr = 1; cur++; continue; }
+            if (c == '(') paren++;
+            else if (c == ')' && paren > 0) paren--;
+            else if (c == '[') bracket++;
+            else if (c == ']' && bracket > 0) bracket--;
+            else if (c == ',' && paren == 0 && bracket == 0 && comma_n < 64) {
+                comma_pos[comma_n++] = cur;
+            }
+            cur++;
+        }
+    }
+
+    /* Parse the first segment (before the first comma, or the whole statement)
+     * to extract the base type and first variable name. */
+    const char* first_seg_end = (comma_n > 0) ? comma_pos[0] : semi;
     const char* name_s = NULL;
     size_t name_n = 0;
     {
         const char* cur = p;
         int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
-        while (cur < semi) {
+        while (cur < first_seg_end) {
             char c = *cur;
-            char c2 = (cur + 1 < semi) ? cur[1] : 0;
+            char c2 = (cur + 1 < first_seg_end) ? cur[1] : 0;
             if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
             if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
             if (in_str) {
@@ -556,7 +589,7 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
             if (!cc__is_ident_start_char(c)) { cur++; continue; }
             {
                 const char* s = cur++;
-                while (cur < semi && cc__is_ident_char2(*cur)) cur++;
+                while (cur < first_seg_end && cc__is_ident_char2(*cur)) cur++;
                 size_t n = (size_t)(cur - s);
                 if (n == 0 || cc__is_keyword_tok(s, n)) continue;
                 name_s = s;
@@ -570,8 +603,12 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     {
         const char* after = name_s + name_n;
         int has_ident = 0;
-        while (after < semi && (*after == ' ' || *after == '\t')) after++;
-        if (after >= semi || (*after != '=' && *after != ';' && *after != '[')) return;
+        while (after < first_seg_end && (*after == ' ' || *after == '\t')) after++;
+        if (after >= first_seg_end) {
+            if (comma_n == 0) return;
+        } else if (*after != '=' && *after != ';' && *after != ',' && *after != '[') {
+            return;
+        }
         for (const char* q = ty_s; q < ty_e; q++) {
             if (cc__is_ident_start_char(*q)) { has_ident = 1; break; }
         }
@@ -581,32 +618,56 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t')) ty_e--;
     if (ty_e <= ty_s) return;
 
-    int cur_n = scope_counts[depth];
-    if (cc__name_in_list(scope_names[depth], cur_n, name_s, name_n)) return;
-
     unsigned char flags = 0;
     char* ty = cc__dup_decl_type_text(ty_s, ty_e, &flags);
     if (!ty) return;
 
-    char* name = (char*)malloc(name_n + 1);
-    if (!name) { free(ty); return; }
-    memcpy(name, name_s, name_n);
-    name[name_n] = '\0';
+    /* Helper: record a single name+type in the scope arrays. */
+    #define RECORD_NAME_IN_SCOPE(nm_s, nm_n, ty_dup) do { \
+        int cur_n_ = scope_counts[depth]; \
+        if (cc__name_in_list(scope_names[depth], cur_n_, (nm_s), (nm_n))) break; \
+        char* nm_ = (char*)malloc((nm_n) + 1); \
+        if (!nm_) break; \
+        memcpy(nm_, (nm_s), (nm_n)); nm_[(nm_n)] = '\0'; \
+        char** nn_ = (char**)realloc(scope_names[depth], (size_t)(cur_n_ + 1) * sizeof(char*)); \
+        if (!nn_) { free(nm_); break; } scope_names[depth] = nn_; \
+        char** tn_ = (char**)realloc(scope_types[depth], (size_t)(cur_n_ + 1) * sizeof(char*)); \
+        if (!tn_) { free(nm_); break; } scope_types[depth] = tn_; \
+        unsigned char* fn_ = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n_ + 1) * sizeof(unsigned char)); \
+        if (!fn_) { free(nm_); break; } scope_flags[depth] = fn_; \
+        scope_names[depth][cur_n_] = nm_; \
+        scope_types[depth][cur_n_] = strdup(ty_dup); \
+        scope_flags[depth][cur_n_] = flags; \
+        scope_counts[depth] = cur_n_ + 1; \
+    } while (0)
 
-    char** next = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
-    if (!next) { free(name); free(ty); return; }
-    scope_names[depth] = next;
-    char** tnext = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
-    if (!tnext) { free(name); free(ty); return; }
-    scope_types[depth] = tnext;
-    unsigned char* fnext = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n + 1) * sizeof(unsigned char));
-    if (!fnext) { free(name); free(ty); return; }
-    scope_flags[depth] = fnext;
+    RECORD_NAME_IN_SCOPE(name_s, name_n, ty);
 
-    scope_names[depth][cur_n] = name;
-    scope_types[depth][cur_n] = ty;
-    scope_flags[depth][cur_n] = flags;
-    scope_counts[depth] = cur_n + 1;
+    /* For comma-separated multi-declarations, record each additional name
+     * with the same base type. */
+    for (int ci = 0; ci < comma_n; ci++) {
+        const char* seg_s = comma_pos[ci] + 1;
+        const char* seg_e = (ci + 1 < comma_n) ? comma_pos[ci + 1] : semi;
+        while (seg_s < seg_e && (*seg_s == ' ' || *seg_s == '\t' || *seg_s == '\n' || *seg_s == '\r')) seg_s++;
+        const char* ex_name = NULL;
+        size_t ex_name_n = 0;
+        const char* cur = seg_s;
+        while (cur < seg_e) {
+            if (*cur == '=' || *cur == ';') break;
+            if (!cc__is_ident_start_char(*cur)) { cur++; continue; }
+            const char* s = cur++;
+            while (cur < seg_e && cc__is_ident_char2(*cur)) cur++;
+            size_t n = (size_t)(cur - s);
+            if (n == 0 || cc__is_keyword_tok(s, n)) continue;
+            ex_name = s;
+            ex_name_n = n;
+        }
+        if (ex_name && ex_name_n > 0) {
+            RECORD_NAME_IN_SCOPE(ex_name, ex_name_n, ty);
+        }
+    }
+    #undef RECORD_NAME_IN_SCOPE
+    free(ty);
 }
 
 static void cc__maybe_record_decl(char*** scope_names,
@@ -621,10 +682,12 @@ static void cc__maybe_record_decl(char*** scope_names,
         const char* semi = NULL;
         const char* cur = stmt;
         int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
-        int in_str = 0, in_chr = 0;
+        int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
         while (*cur) {
             char c = *cur;
             char c2 = cur[1];
+            if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
+            if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
             if (in_str) {
                 if (c == '\\' && c2) { cur += 2; continue; }
                 if (c == '"') in_str = 0;
@@ -637,6 +700,8 @@ static void cc__maybe_record_decl(char*** scope_names,
                 cur++;
                 continue;
             }
+            if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
+            if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
             if (c == '"') { in_str = 1; cur++; continue; }
             if (c == '\'') { in_chr = 1; cur++; continue; }
             if (c == '(') { paren_depth++; cur++; continue; }
@@ -661,11 +726,13 @@ static size_t cc__last_top_level_semi_offset(const char* line) {
     const char* cur = line;
     const char* last = NULL;
     int paren_depth = 0, brace_depth = 0, bracket_depth = 0;
-    int in_str = 0, in_chr = 0;
+    int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
     if (!line) return 0;
     while (*cur) {
         char c = *cur;
         char c2 = cur[1];
+        if (in_lc) { if (c == '\n') in_lc = 0; cur++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; cur += 2; continue; } cur++; continue; }
         if (in_str) {
             if (c == '\\' && c2) { cur += 2; continue; }
             if (c == '"') in_str = 0;
@@ -678,6 +745,8 @@ static size_t cc__last_top_level_semi_offset(const char* line) {
             cur++;
             continue;
         }
+        if (c == '/' && c2 == '/') { in_lc = 1; cur += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; cur += 2; continue; }
         if (c == '"') { in_str = 1; cur++; continue; }
         if (c == '\'') { in_chr = 1; cur++; continue; }
         if (c == '(') { paren_depth++; cur++; continue; }

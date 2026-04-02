@@ -171,7 +171,7 @@ static inline bool cc__cli_is_digit_str(CCSlice slice) {
 }
 
 static inline bool cc__cli_is_option_like(CCSlice slice) {
-    return slice.len > 0 && ((const char*)slice.ptr)[0] == '-' && !cc_slice_eq_cstr(slice, "-");
+    return slice.len > 0 && ((const char*)slice.ptr)[0] == '-' && !CCSlice_eq_cstr(&slice, "-");
 }
 
 static inline CCSlice cc__cli_cstr_slice(const char* text) {
@@ -195,11 +195,11 @@ static inline bool cc__cli_match_short_name(const CCArgSpec* spec, CCSlice name)
         char short_buf[2];
         short_buf[0] = spec->short_;
         short_buf[1] = '\0';
-        if (cc_slice_eq_cstr(name, short_buf)) return true;
+        if (CCSlice_eq_cstr(&name, short_buf)) return true;
     }
     for (i = 0; i < spec->short_aliases.len; i++) {
         const char* alias = spec->short_aliases.items[i];
-        if (alias && cc_slice_eq_cstr(name, alias)) return true;
+        if (alias && CCSlice_eq_cstr(&name, alias)) return true;
     }
     return false;
 }
@@ -207,10 +207,10 @@ static inline bool cc__cli_match_short_name(const CCArgSpec* spec, CCSlice name)
 static inline bool cc__cli_match_long_name(const CCArgSpec* spec, CCSlice name) {
     size_t i;
     if (!spec || name.len == 0) return false;
-    if (spec->long_ && cc_slice_eq_cstr(name, spec->long_)) return true;
+    if (spec->long_ && CCSlice_eq_cstr(&name, spec->long_)) return true;
     for (i = 0; i < spec->aliases.len; i++) {
         const char* alias = spec->aliases.items[i];
-        if (alias && cc_slice_eq_cstr(name, alias)) return true;
+        if (alias && CCSlice_eq_cstr(&name, alias)) return true;
     }
     return false;
 }
@@ -334,7 +334,7 @@ static inline bool cc__cli_parse_long(CCParsedArgs* out,
     CCSlice value = cc_slice_empty();
     size_t pos = 2;
     while (pos < arg.len && ((const char*)arg.ptr)[pos] != '=') pos++;
-    name = cc_slice_sub(arg, 2, pos);
+    name = CCSlice_sub(&arg, 2, pos);
     spec = cc__cli_find_long_spec(specs, spec_count, name);
     if (!spec) {
         fprintf(stderr, "Unknown option: %.*s\n", (int)arg.len, (const char*)arg.ptr);
@@ -355,7 +355,7 @@ static inline bool cc__cli_parse_long(CCParsedArgs* out,
         return true;
     }
     if (pos < arg.len) {
-        value = cc_slice_sub(arg, pos + 1, arg.len);
+        value = CCSlice_sub(&arg, pos + 1, arg.len);
     } else if (!cc__cli_take_next_value(argc, argv, index, &value)) {
         fprintf(stderr, "Missing value for %.*s\n", (int)arg.len, (const char*)arg.ptr);
         if (exit_code) *exit_code = 1;
@@ -377,7 +377,7 @@ static inline bool cc__cli_parse_short(CCParsedArgs* out,
                                        size_t spec_count,
                                        CCSlice arg,
                                        int* exit_code) {
-    CCSlice tail = cc_slice_sub(arg, 1, arg.len);
+    CCSlice tail = CCSlice_sub(&arg, 1, arg.len);
     const CCArgSpec* numeric_spec = cc__cli_find_numeric_short_value_spec(specs, spec_count, tail);
     size_t pos = 1;
     if (numeric_spec) {
@@ -415,7 +415,7 @@ static inline bool cc__cli_parse_short(CCParsedArgs* out,
                 if (exit_code) *exit_code = 1;
                 return false;
             }
-            if (!cc__cli_emit_spec(out, spec, cc_slice_sub(arg, pos + 1, arg.len), arg, *index)) {
+            if (!cc__cli_emit_spec(out, spec, CCSlice_sub(&arg, pos + 1, arg.len), arg, *index)) {
                 fprintf(stderr, "Out of memory while parsing arguments\n");
                 if (exit_code) *exit_code = 1;
                 return false;
@@ -460,7 +460,7 @@ static inline CCCliParse cc_cli_parse_args(int argc,
         CCSlice arg;
         if (!argv || !argv[index]) continue;
         arg = cc_slice_from_buffer((void*)argv[index], strlen(argv[index]));
-        if (!stop_options && cc_slice_eq_cstr(arg, "--")) {
+        if (!stop_options && CCSlice_eq_cstr(&arg, "--")) {
             stop_options = true;
             continue;
         }
@@ -471,7 +471,7 @@ static inline CCCliParse cc_cli_parse_args(int argc,
             }
             continue;
         }
-        if (!stop_options && arg.len > 1 && ((const char*)arg.ptr)[0] == '-' && !cc_slice_eq_cstr(arg, "-")) {
+        if (!stop_options && arg.len > 1 && ((const char*)arg.ptr)[0] == '-' && !CCSlice_eq_cstr(&arg, "-")) {
             if (!cc__cli_parse_short(&parse.args, argc, argv, &index, specs, spec_count, arg, &parse.exit_code)) {
                 parse.ok = false;
                 return parse;

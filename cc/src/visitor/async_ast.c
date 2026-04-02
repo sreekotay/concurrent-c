@@ -146,21 +146,68 @@ static char* cc__rewrite_idents(const char* s, const char* const* names, const c
     char* out = (char*)malloc(cap);
     if (!out) return NULL;
     size_t ol = 0;
+    int in_str = 0, in_chr = 0;
     for (size_t i = 0; i < sl; ) {
+        /* Skip string and character literals */
+        if (!in_str && !in_chr && s[i] == '"') {
+            in_str = 1;
+            if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+            out[ol++] = s[i++];
+            continue;
+        }
+        if (!in_str && !in_chr && s[i] == '\'') {
+            in_chr = 1;
+            if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+            out[ol++] = s[i++];
+            continue;
+        }
+        if (in_str) {
+            if (s[i] == '\\' && i + 1 < sl) {
+                if (ol + 3 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+                out[ol++] = s[i++]; out[ol++] = s[i++];
+            } else {
+                if (s[i] == '"') in_str = 0;
+                if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+                out[ol++] = s[i++];
+            }
+            continue;
+        }
+        if (in_chr) {
+            if (s[i] == '\\' && i + 1 < sl) {
+                if (ol + 3 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+                out[ol++] = s[i++]; out[ol++] = s[i++];
+            } else {
+                if (s[i] == '\'') in_chr = 0;
+                if (ol + 2 >= cap) { cap = cap * 2 + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+                out[ol++] = s[i++];
+            }
+            continue;
+        }
         if (cc__is_ident_start(s[i])) {
             size_t j = i + 1;
             while (j < sl && cc__is_ident_char(s[j])) j++;
+            /* Do not replace struct/union member names after '.' or '->' */
+            int is_member = 0;
+            if (i > 0 && s[i - 1] == '.') is_member = 1;
+            else if (i > 1 && s[i - 2] == '-' && s[i - 1] == '>') is_member = 1;
+            else if (i > 0 && s[i - 1] == '>') {
+                size_t b = i - 1;
+                while (b > 0 && s[b - 1] == ' ') b--;
+                if (b > 0 && s[b - 1] == '-') is_member = 1;
+            }
             int did = 0;
-            for (int k = 0; k < n; k++) {
-                size_t nl = strlen(names[k]);
-                if (nl == (j - i) && memcmp(s + i, names[k], nl) == 0) {
-                    const char* r = repls[k];
-                    size_t rl = strlen(r);
-                    if (ol + rl + 2 >= cap) { cap = cap * 2 + rl + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
-                    memcpy(out + ol, r, rl);
-                    ol += rl;
-                    did = 1;
-                    break;
+            if (!is_member) {
+                for (int k = 0; k < n; k++) {
+                    size_t nl = strlen(names[k]);
+                    if (nl == (j - i) && memcmp(s + i, names[k], nl) == 0) {
+                        const char* r = repls[k];
+                        size_t rl = strlen(r);
+                        if (ol + rl + 2 >= cap) { cap = cap * 2 + rl + 64; out = (char*)realloc(out, cap); if (!out) return NULL; }
+                        memcpy(out + ol, r, rl);
+                        ol += rl;
+                        did = 1;
+                        break;
+                    }
                 }
             }
             if (!did) {
@@ -1281,6 +1328,7 @@ static int cc__build_stmt_list_from_block(const CCASTRoot* root,
             st[i].text = full;
         }
     }
+
     *out_list = st;
     *out_n = ref_n;
     return 1;
@@ -1670,6 +1718,59 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         if (*p == 0) { if (alloc_p) free(alloc_p); return 1; }
     }
 
+    /* Handle label prefix (e.g. `__cc_cleanup_2:\n{...}\nif ...`):
+       emit the label, then recursively process the rest. */
+    if (cc__is_ident_start(p[0])) {
+        const char* q = p + 1;
+        while (cc__is_ident_char(*q)) q++;
+        if (*q == ':' && *(q + 1) != ':') {
+            char* label_raw = cc__strndup_trim_ws(p, (size_t)(q - p));
+            char* label_t = label_raw ? cc__rewrite_idents(label_raw, e->map_names, e->map_repls, e->map_n) : NULL;
+            free(label_raw);
+            if (label_t) {
+                cc__emit_line_fmt(e, "%s:", label_t);
+                free(label_t);
+            }
+            const char* rest = cc__skip_ws(q + 1);
+            if (*rest) {
+                int rest_ok = cc__emit_semi_like(e, rest);
+                if (alloc_p) free(alloc_p);
+                return rest_ok;
+            }
+            if (alloc_p) free(alloc_p);
+            return 1;
+        }
+    }
+
+    /* Handle inline `if (cond) stmt` that wasn't parsed as ST_IF (e.g. from defer cleanup).
+       Decompose into condition check + body so that `return` inside gets proper SM treatment. */
+    if (strncmp(p, "if", 2) == 0 && !cc__is_ident_char(p[2])) {
+        const char* q = cc__skip_ws(p + 2);
+        if (*q == '(') {
+            size_t plen = strlen(p);
+            size_t qoff = (size_t)(q - p);
+            size_t rp = 0;
+            if (cc__find_matching_paren(p, plen, qoff, &rp)) {
+                char* cond = cc__dup_slice(p, qoff + 1, rp);
+                const char* body = cc__skip_ws(p + rp + 1);
+                if (cond && body && body[0]) {
+                    char* cond2 = cc__rewrite_idents(cond, e->map_names, e->map_repls, e->map_n);
+                    free(cond);
+                    if (cond2) {
+                        cc__emit_line_fmt(e, "if (%s) {", cond2);
+                        free(cond2);
+                        int body_ok = cc__emit_semi_like(e, body);
+                        cc__emit_line(e, "}");
+                        if (alloc_p) free(alloc_p);
+                        return body_ok;
+                    }
+                } else {
+                    free(cond);
+                }
+            }
+        }
+    }
+
     if (p[0] == '{') {
         size_t plen = strlen(p);
         size_t rbrace = 0;
@@ -1807,6 +1908,78 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
                                 return 1;
                             }
                             /* pointer declaration without initializer (e.g. `T* x;`) - skip, variable is in frame */
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* scalar declaration (e.g. `int x = expr;`) hoisted into frame:
+       rewrite as assignment to the frame slot so we don't emit invalid `int __f->x = ...`. */
+    {
+        const char* q = p;
+        if (strncmp(q, "struct ", 7) == 0) q += 7;
+        else if (strncmp(q, "union ", 6) == 0) q += 6;
+        else if (strncmp(q, "enum ", 5) == 0) q += 5;
+        q = cc__skip_ws(q);
+        if (cc__is_ident_start(*q)) {
+            const char* type_start = q;
+            int type_tok_n = 0;
+            while (cc__is_ident_start(*q)) {
+                while (cc__is_ident_char(*q)) q++;
+                type_tok_n++;
+                q = cc__skip_ws(q);
+                if (!cc__is_ident_start(*q)) break;
+            }
+            if (type_tok_n >= 2) {
+                const char* ns = type_start;
+                const char* ne = NULL;
+                q = type_start;
+                while (cc__is_ident_start(*q)) {
+                    ns = q;
+                    while (cc__is_ident_char(*q)) q++;
+                    ne = q;
+                    q = cc__skip_ws(q);
+                    if (!cc__is_ident_start(*q)) break;
+                }
+                if (ns && ne && ne > ns) {
+                    size_t nn = (size_t)(ne - ns);
+                    char nm[128];
+                    if (nn < sizeof(nm)) {
+                        memcpy(nm, ns, nn);
+                        nm[nn] = 0;
+                        int is_frame = 0;
+                        for (int k = 0; k < e->map_n; k++) {
+                            if (e->map_names[k] && strcmp(e->map_names[k], nm) == 0) { is_frame = 1; break; }
+                        }
+                        if (is_frame) {
+                            q = cc__skip_ws(ne);
+                            if (*q == '=') {
+                                q++;
+                                q = cc__skip_ws(q);
+                                int aw_next = 0;
+                                char* init2 = cc__emit_awaits_in_expr(e, q, &aw_next);
+                                char* init2_norm = NULL;
+                                if (!init2) return 0;
+                                init2_norm = cc__normalize_result_generic_bool_calls(init2);
+                                if (init2_norm) { free(init2); init2 = init2_norm; }
+                                char* lhs2 = cc__rewrite_idents(nm, e->map_names, e->map_repls, e->map_n);
+                                char* rhs2 = cc__rewrite_idents(init2, e->map_names, e->map_repls, e->map_n);
+                                const char* ty2 = cc__emit_lookup_local_type(e, nm);
+                                free(init2);
+                                if (lhs2 && rhs2) {
+                                    if (ty2 && ty2[0] && cc__emit_rhs_is_brace_init(rhs2)) {
+                                        cc__emit_line_fmt(e, "%s = (%s)%s;", lhs2, ty2, rhs2);
+                                    } else {
+                                        cc__emit_line_fmt(e, "%s = (%s);", lhs2, rhs2);
+                                    }
+                                }
+                                free(lhs2);
+                                free(rhs2);
+                                return 1;
+                            }
                             return 1;
                         }
                     }
@@ -2022,7 +2195,12 @@ static int cc__emit_semi_like(Emit* e, const char* text) {
         char* t3 = cc__rewrite_idents(t2, e->map_names, e->map_repls, e->map_n);
         free(t2);
         if (t3) {
-            cc__emit_line_fmt(e, "%s;", t3);
+            const char* t3t = cc__skip_ws(t3);
+            if (strncmp(t3t, "__f->__cc_aw", 12) == 0 && !strchr(t3t, '=')) {
+                cc__emit_line_fmt(e, "(void)%s;", t3);
+            } else {
+                cc__emit_line_fmt(e, "%s;", t3);
+            }
             free(t3);
         }
     }
@@ -2250,6 +2428,26 @@ static int cc__emit_stmt_list(Emit* e, const Stmt* st, int n) {
 
             if (e->loop_depth > 0) e->loop_depth--;
             cc__emit_open_case(e, after_state);
+            continue;
+        }
+
+        if (s->kind == ST_BREAK) {
+            if (e->loop_depth <= 0) return 0;
+            int bs = e->break_state[e->loop_depth - 1];
+            cc__emit_line_fmt(e, "__f->__st = %d;", bs);
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_close_case(e);
+            *e->finished = 1;
+            continue;
+        }
+
+        if (s->kind == ST_CONTINUE) {
+            if (e->loop_depth <= 0) return 0;
+            int cs = e->cont_state[e->loop_depth - 1];
+            cc__emit_line_fmt(e, "__f->__st = %d;", cs);
+            cc__emit_line(e, "return CC_FUTURE_PENDING;");
+            cc__emit_close_case(e);
+            *e->finished = 1;
             continue;
         }
 

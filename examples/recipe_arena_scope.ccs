@@ -20,11 +20,11 @@ int main(void) {
             if (!arena_storage.base) return 1;
             CCArena* arena = &arena_storage;
             /* All allocations this iteration use this arena. */
-            CCString s = cc_string_new(arena);
+            CCString s = CCString_new(arena);
             
             /* UFCS: method syntax on plain C types. */
             s.append("Processing request ");
-            cc_string_push_int(&s, i);
+            CCString_push_int(&s, i);
             s.append("\n");
             
             cc_std_out.write(s);

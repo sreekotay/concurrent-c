@@ -1019,121 +1019,121 @@ static int emit_desugared_call(char* out,
        String-specific dispatch narrow so it does not steal other families'
        methods. */
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "as_slice") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_as_slice(%s)", recv)
-                           : snprintf(out, cap, "cc_string_as_slice(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_as_slice(%s)", recv)
+                           : snprintf(out, cap, "CCString_as_slice(&%s)", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) &&
         (strcmp(method, "append") == 0 || strcmp(method, "push") == 0)) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_string_push(%s, cc_slice_empty())", recv)
-                               : snprintf(out, cap, "cc_string_push(&%s, cc_slice_empty())", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCString_push(%s, cc_slice_empty())", recv)
+                               : snprintf(out, cap, "CCString_push(&%s, cc_slice_empty())", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_push(%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_string_push(&%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_push(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCString_push(&%s, %s)", recv, args_rewritten);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "push_char") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_char(%s, ", recv)
-                           : snprintf(out, cap, "cc_string_push_char(&%s, ", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_push_char(%s, ", recv)
+                           : snprintf(out, cap, "CCString_push_char(&%s, ", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "push_int") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_int(%s, ", recv)
-                           : snprintf(out, cap, "cc_string_push_int(&%s, ", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_push_int(%s, ", recv)
+                           : snprintf(out, cap, "CCString_push_int(&%s, ", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "push_uint") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_uint(%s, ", recv)
-                           : snprintf(out, cap, "cc_string_push_uint(&%s, ", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_push_uint(%s, ", recv)
+                           : snprintf(out, cap, "CCString_push_uint(&%s, ", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "push_float") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_push_float(%s, ", recv)
-                           : snprintf(out, cap, "cc_string_push_float(&%s, ", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_push_float(%s, ", recv)
+                           : snprintf(out, cap, "CCString_push_float(&%s, ", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "clear") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_clear(%s)", recv)
-                           : snprintf(out, cap, "cc_string_clear(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_clear(%s)", recv)
+                           : snprintf(out, cap, "CCString_clear(&%s)", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "len") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_len(%s)", recv)
-                           : snprintf(out, cap, "cc_string_len(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_len(%s)", recv)
+                           : snprintf(out, cap, "CCString_len(&%s)", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "cap") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_cap(%s)", recv)
-                           : snprintf(out, cap, "cc_string_cap(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_cap(%s)", recv)
+                           : snprintf(out, cap, "CCString_cap(&%s)", recv);
     }
     if (cc__is_string_recv_type(ctx.recv_type_name) && strcmp(method, "cstr") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_string_cstr(%s)", recv)
-                           : snprintf(out, cap, "cc_string_cstr(&%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCString_cstr(%s)", recv)
+                           : snprintf(out, cap, "CCString_cstr(&%s)", recv);
     }
     dispatch_n = cc__emit_type_driven_dispatch(out, cap, recv, method, recv_is_ptr, args_rewritten, has_args, &ctx);
     if (dispatch_n >= 0) return dispatch_n;
     
-    /* Slice UFCS methods dispatch to the canonical cc_slice_* helpers. */
+    /* Slice UFCS methods dispatch to CCSlice_* (pointer-receiver). */
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "len") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_len(*%s)", recv)
-                           : snprintf(out, cap, "cc_slice_len(%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_len(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_len(&%s)", recv);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "trim") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_trim(*%s)", recv)
-                           : snprintf(out, cap, "cc_slice_trim(%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_trim(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_trim(&%s)", recv);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "trim_left") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_trim_left(*%s)", recv)
-                           : snprintf(out, cap, "cc_slice_trim_left(%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_trim_left(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_trim_left(&%s)", recv);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "trim_right") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_trim_right(*%s)", recv)
-                           : snprintf(out, cap, "cc_slice_trim_right(%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_trim_right(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_trim_right(&%s)", recv);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "is_empty") == 0) {
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_is_empty(*%s)", recv)
-                           : snprintf(out, cap, "cc_slice_is_empty(%s)", recv);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_is_empty(%s)", recv)
+                           : snprintf(out, cap, "CCSlice_is_empty(&%s)", recv);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "at") == 0) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_slice_at(*%s, 0)", recv)
-                               : snprintf(out, cap, "cc_slice_at(%s, 0)", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_at(%s, 0)", recv)
+                               : snprintf(out, cap, "CCSlice_at(&%s, 0)", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_at(*%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_slice_at(%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_at(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_at(&%s, %s)", recv, args_rewritten);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "sub") == 0) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_slice_sub(*%s, 0, 0)", recv)
-                               : snprintf(out, cap, "cc_slice_sub(%s, 0, 0)", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_sub(%s, 0, 0)", recv)
+                               : snprintf(out, cap, "CCSlice_sub(&%s, 0, 0)", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_sub(*%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_slice_sub(%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_sub(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_sub(&%s, %s)", recv, args_rewritten);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "starts_with") == 0) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_slice_starts_with(*%s, (CCSlice){0})", recv)
-                               : snprintf(out, cap, "cc_slice_starts_with(%s, (CCSlice){0})", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_starts_with(%s, (CCSlice){0})", recv)
+                               : snprintf(out, cap, "CCSlice_starts_with(&%s, (CCSlice){0})", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_starts_with(*%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_slice_starts_with(%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_starts_with(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_starts_with(&%s, %s)", recv, args_rewritten);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "ends_with") == 0) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_slice_ends_with(*%s, (CCSlice){0})", recv)
-                               : snprintf(out, cap, "cc_slice_ends_with(%s, (CCSlice){0})", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_ends_with(%s, (CCSlice){0})", recv)
+                               : snprintf(out, cap, "CCSlice_ends_with(&%s, (CCSlice){0})", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_ends_with(*%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_slice_ends_with(%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_ends_with(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_ends_with(&%s, %s)", recv, args_rewritten);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "eq") == 0) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_slice_eq(*%s, (CCSlice){0})", recv)
-                               : snprintf(out, cap, "cc_slice_eq(%s, (CCSlice){0})", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq(%s, (CCSlice){0})", recv)
+                               : snprintf(out, cap, "CCSlice_eq(&%s, (CCSlice){0})", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_eq(*%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_slice_eq(%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_eq(&%s, %s)", recv, args_rewritten);
     }
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "eq_cstr") == 0) {
         if (!has_args || !args_rewritten) {
-            return recv_is_ptr ? snprintf(out, cap, "cc_slice_eq_cstr(*%s, \"\")", recv)
-                               : snprintf(out, cap, "cc_slice_eq_cstr(%s, \"\")", recv);
+            return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq_cstr(%s, \"\")", recv)
+                               : snprintf(out, cap, "CCSlice_eq_cstr(&%s, \"\")", recv);
         }
-        return recv_is_ptr ? snprintf(out, cap, "cc_slice_eq_cstr(*%s, %s)", recv, args_rewritten)
-                           : snprintf(out, cap, "cc_slice_eq_cstr(%s, %s)", recv, args_rewritten);
+        return recv_is_ptr ? snprintf(out, cap, "CCSlice_eq_cstr(%s, %s)", recv, args_rewritten)
+                           : snprintf(out, cap, "CCSlice_eq_cstr(&%s, %s)", recv, args_rewritten);
     }
     return CC_UFCS_EMIT_UNRESOLVED;
 }

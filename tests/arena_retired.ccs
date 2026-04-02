@@ -2,7 +2,7 @@
 
 int main(void) {
     @arena {
-        CCString s = cc_string_new(arena);
+        CCString s = CCString_new(arena);
         s.append("retired\n");
     }
     return 0;

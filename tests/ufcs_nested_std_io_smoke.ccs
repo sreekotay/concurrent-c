@@ -9,19 +9,19 @@ int main(void) {
         if (!arena_storage.base) abort();
         CCArena* arena = &arena_storage;
         // First string - simple case
-        CCString s1 = cc_string_new(arena);
+        CCString s1 = CCString_new(arena);
         s1.append("first:");
         cc_std_out.write(s1);
         
         // Second string - nested UFCS case
-        CCString s2 = cc_string_new(arena);
+        CCString s2 = CCString_new(arena);
         s2.append("second:");
         cc_std_out.write(
             s2.as_slice()
         );
         
         // Third string - single line nested UFCS
-        CCString s3 = cc_string_new(arena);
+        CCString s3 = CCString_new(arena);
         s3.append("third\n");
         cc_std_out.write(s3.as_slice());
     }

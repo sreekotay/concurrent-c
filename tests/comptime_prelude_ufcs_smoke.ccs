@@ -65,7 +65,7 @@ int main(void) {
         CCArena* arena = &arena_storage;
         NamedToy named = { 1 };
         LambdaToy lambda = { 2 };
-        CCString s = cc_string_new(arena);
+        CCString s = CCString_new(arena);
 
         named.bump();
         named.bump_by(4);
