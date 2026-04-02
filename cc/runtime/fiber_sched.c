@@ -1935,6 +1935,12 @@ static inline int cc__req_wake_trace_fiber(const fiber_task* f) {
            cc__chan_debug_req_wake_match(f->park_obj);
 }
 
+static inline int cc__io_ready_fiber(const fiber_task* f) {
+    return f &&
+           f->park_reason &&
+           strcmp(f->park_reason, "io_ready") == 0;
+}
+
 /* Spawn-pair grouping: when a base worker routes a fiber to a remote inbox,
 * remember the target so the NEXT inbox-bound spawn from the same calling
 * context can co-locate with it (if and only if the inbox still has exactly
@@ -5436,6 +5442,26 @@ queued:
     int route_target = -2;
     /* Sticky by default: preserve preferred-worker affinity for channel wakes. */
     if (nonworker_publish) {
+        if (cc__io_ready_fiber(f) &&
+            preferred >= 0 &&
+            preferred < (int)g_sched.num_workers &&
+            g_sched.worker_lifecycle) {
+            cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+                &g_sched.worker_lifecycle[preferred], memory_order_relaxed);
+            if (lc == CC_WL_ACTIVE || lc == CC_WL_IDLE_SPIN) {
+                int inbox_edge = 0;
+                for (int attempt = 0; attempt < 16 && !pushed; attempt++) {
+                    pushed = (iq_push_with_edge(&g_sched.inbox_queues[preferred], f, &inbox_edge) == 0);
+                    if (!pushed) cpu_pause();
+                }
+                if (pushed) {
+                    route_name = "io_ready_hot_inbox";
+                    route_target = preferred;
+                }
+            }
+        }
+    }
+    if (!pushed && nonworker_publish) {
         /* Non-worker wakeups must not rely on a specific inbox wake race.
          * Publish globally so any worker can observe the runnable fiber. */
         cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.nonworker_global_publish);
@@ -5614,7 +5640,7 @@ queued:
                 } else {
                     wake_one_if_sleeping(CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
                 }
-            } else if (nonworker_publish) {
+            } else if (nonworker_publish && pool_strict_idle_for_nonglobal_wake()) {
                 size_t sleepers = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
                 if (sleepers > 0) {
                     cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.nonworker_global_wake_one);

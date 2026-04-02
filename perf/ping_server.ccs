@@ -1,0 +1,112 @@
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <netinet/tcp.h>
+#include <stdio.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+
+#define DEFAULT_PORT 6545
+
+static int env_int_or_default(const char* name, int fallback, int min_value) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    int parsed = atoi(v);
+    return parsed < min_value ? fallback : parsed;
+}
+
+static size_t write_all(CCSocket* sock, const char* data, size_t len, CCNetError* out_err) {
+    size_t off = 0;
+    *out_err = CC_NET_OK;
+    while (off < len) {
+        size_t n = cc_socket_write(sock, data + off, len - off, out_err);
+        if (*out_err != CC_NET_OK || n == 0) return off;
+        off += n;
+    }
+    return off;
+}
+
+static _Atomic long long g_total_replies_remaining = -1;
+
+static int record_reply_and_should_exit(void) {
+    long long remaining = atomic_load_explicit(&g_total_replies_remaining, memory_order_relaxed);
+    if (remaining < 0) return 0;
+    remaining = atomic_fetch_sub_explicit(&g_total_replies_remaining, 1, memory_order_relaxed) - 1;
+    return remaining <= 0;
+}
+
+static void handle_client(CCSocket client) {
+    int one = 1;
+    (void)setsockopt(client.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    CCNetError err = CC_NET_OK;
+    char byte = 0;
+    const char reply = 'P';
+    while (1) {
+        size_t n = cc_socket_read_into(&client, &byte, 1, &err);
+        if (err != CC_NET_OK || n == 0) break;
+        if (write_all(&client, &reply, 1, &err) != 1 || err != CC_NET_OK) break;
+        if (record_reply_and_should_exit()) {
+            fflush(stdout);
+            fflush(stderr);
+            exit(0);
+        }
+    }
+    cc_socket_close(&client);
+}
+
+int main(int argc, char** argv) {
+    int port = DEFAULT_PORT;
+    if (argc > 1) {
+        port = atoi(argv[1]);
+        if (port <= 0) port = DEFAULT_PORT;
+    }
+    port = env_int_or_default("CC_PING_PORT", port, 1);
+    int total_replies = env_int_or_default("CC_PING_TOTAL_REPLIES", -1, -1);
+    atomic_store_explicit(&g_total_replies_remaining, (long long)total_replies, memory_order_relaxed);
+
+    char addr[64];
+    snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
+
+    CCNetError err = CC_NET_OK;
+    CCListener ln = cc_tcp_listen(addr, strlen(addr), &err);
+    if (err != CC_NET_OK) {
+        fprintf(stderr, "ping_server listen error: %d\n", err);
+        return 1;
+    }
+    int one = 1;
+    (void)setsockopt(ln.fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    printf("ping_server listening on %s\n", addr);
+    fflush(stdout);
+
+    CCListener* ln_ptr = &ln;
+    {
+        CCNursery* server = @create(NULL) @destroy;
+        if (!server) abort();
+        CCNursery* srv = server;
+
+        server->spawn(() => [ln_ptr, srv] {
+            while (1) {
+                CCNetError aerr = CC_NET_OK;
+                CCSocket client = cc_listener_accept(ln_ptr, &aerr);
+                if (aerr != CC_NET_OK) break;
+                CCSocket* pclient = malloc(sizeof(*pclient));
+                if (!pclient) {
+                    cc_socket_close(&client);
+                    continue;
+                }
+                *pclient = client;
+                srv->spawn(() => [pclient] {
+                    CCSocket c = *pclient;
+                    free(pclient);
+                    handle_client(c);
+                });
+            }
+        });
+    }
+
+    cc_listener_close(&ln);
+    return 0;
+}
