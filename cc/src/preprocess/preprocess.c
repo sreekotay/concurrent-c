@@ -2546,89 +2546,9 @@ static void cc__record_ufcs_field(CCUfcsFieldInfo* fields,
     (*field_count)++;
 }
 
-static void cc__parse_decl_name_and_type(const char* stmt,
-                                         const char* stmt_end,
-                                         char* out_name,
-                                         size_t out_name_sz,
-                                         char* out_type,
-                                         size_t out_type_sz) {
-    const char* p = stmt;
-    const char* semi = stmt_end;
-    const char* name_s = NULL;
-    size_t name_n = 0;
-    const char* cur;
-    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
-    out_name[0] = '\0';
-    out_type[0] = '\0';
-    while (p < semi && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    if (p >= semi) return;
-    cur = p;
-    while (cur < semi) {
-        if (*cur == '"' || *cur == '\'') {
-            char q = *cur++;
-            while (cur < semi) {
-                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
-                if (*cur == q) { cur++; break; }
-                cur++;
-            }
-            continue;
-        }
-        if (*cur == '=' || *cur == ';') break;
-        if (!cc_is_ident_start(*cur)) { cur++; continue; }
-        {
-            const char* s = cur++;
-            while (cur < semi && cc_is_ident_char(*cur)) cur++;
-            name_s = s;
-            name_n = (size_t)(cur - s);
-        }
-    }
-    if (!name_s || name_n == 0) return;
-    {
-        const char* after = name_s + name_n;
-        const char* eq = NULL;
-        const char* lp = NULL;
-        for (const char* t = p; t < semi; ++t) {
-            if (*t == '=' && !eq) eq = t;
-            if (*t == '(' && !lp) lp = t;
-            if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) {
-                return;
-            }
-        }
-        while (after < semi && isspace((unsigned char)*after)) after++;
-        if (after >= semi || (*after != '=' && *after != ';' && *after != '[')) {
-            return;
-        }
-        if (lp && lp < name_s && (!eq || eq > lp)) {
-            return;
-        }
-    }
-    {
-        const char* ty_s = p;
-        const char* ty_e = name_s;
-        while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
-        while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
-        if (ty_e <= ty_s) return;
-        {
-            size_t type_len = (size_t)(ty_e - ty_s);
-            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
-            memcpy(out_type, ty_s, type_len);
-            out_type[type_len] = '\0';
-        }
-        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
-        memcpy(out_name, name_s, name_n);
-        out_name[name_n] = '\0';
-    }
-}
+/* cc__parse_decl_name_and_type — now delegated to cc_parse_decl_name_and_type in util/text.h */
 
-static int cc__is_non_decl_stmt_type_pre_ufcs(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "return") == 0 ||
-            strcmp(type_name, "break") == 0 ||
-            strcmp(type_name, "continue") == 0 ||
-            strcmp(type_name, "goto") == 0 ||
-            strcmp(type_name, "case") == 0 ||
-            strcmp(type_name, "default") == 0);
-}
+/* cc__is_non_decl_stmt_type_pre_ufcs — now cc_is_non_decl_stmt_type in util/text.h */
 
 static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
                                                    size_t limit,
@@ -2679,12 +2599,12 @@ static const char* cc__lookup_scoped_ufcs_var_type(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            cc__parse_decl_name_and_type(src + stmt_start, src + i,
+            cc_parse_decl_name_and_type(src + stmt_start, src + i,
                                          decl_name, sizeof(decl_name),
                                          decl_type, sizeof(decl_type));
             if (decl_name[0] &&
                 strcmp(decl_name, var_name) == 0 &&
-                !cc__is_non_decl_stmt_type_pre_ufcs(decl_type) &&
+                !cc_is_non_decl_stmt_type(decl_type) &&
                 decl_count < MAX_DECLS) {
                 decls[decl_count].scope_id = scope_stack[scope_depth - 1];
                 cc__normalize_ufcs_type_name(decls[decl_count].type_name,
@@ -2743,7 +2663,7 @@ static void cc__collect_generic_ufcs_types(const char* src,
                                 if (!semi) break;
                                 char field_name[128];
                                 char field_type[256];
-                                cc__parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name), field_type, sizeof(field_type));
+                                cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name), field_type, sizeof(field_type));
                                 if (field_name[0] && field_type[0]) {
                                     cc__record_ufcs_field(fields, field_count, field_cap, struct_name, field_name, field_type);
                                     if (reg) {
@@ -2823,6 +2743,66 @@ static void cc__collect_generic_ufcs_types(const char* src,
             }
         }
     }
+}
+
+static int cc__scan_generic_ufcs_call_site(const char* src,
+                                           size_t n,
+                                           size_t pos,
+                                           size_t* out_sep_pos,
+                                           size_t* out_method_start,
+                                           size_t* out_method_end,
+                                           size_t* out_recv_start,
+                                           size_t* out_paren_pos,
+                                           size_t* out_paren_end,
+                                           char* out_method_name,
+                                           size_t out_method_name_sz,
+                                           char* out_recv_expr,
+                                           size_t out_recv_expr_sz) {
+    size_t sep_pos;
+    size_t method_start;
+    size_t method_end;
+    size_t recv_start;
+    size_t paren_pos;
+    size_t paren_end = 0;
+    if (!src || pos >= n || !out_method_name || out_method_name_sz == 0 ||
+        !out_recv_expr || out_recv_expr_sz == 0) {
+        return 0;
+    }
+    if (src[pos] == '.') {
+        sep_pos = pos;
+        method_start = cc_skip_ws_and_comments(src, n, pos + 1);
+    } else if (pos + 1 < n && src[pos] == '-' && src[pos + 1] == '>') {
+        sep_pos = pos;
+        method_start = cc_skip_ws_and_comments(src, n, pos + 2);
+    } else {
+        return 0;
+    }
+    if (method_start >= n || !cc_is_ident_start(src[method_start])) return 0;
+    method_end = method_start;
+    while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
+    if (method_end - method_start >= out_method_name_sz) return 0;
+    memcpy(out_method_name, src + method_start, method_end - method_start);
+    out_method_name[method_end - method_start] = '\0';
+    paren_pos = cc_skip_ws_and_comments(src, n, method_end);
+    if (paren_pos >= n || src[paren_pos] != '(') return 0;
+    if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) return 0;
+    recv_start = cc_scan_back_for_member_access(src, method_start, 0);
+    if (recv_start >= sep_pos || sep_pos - recv_start >= out_recv_expr_sz) return 0;
+    {
+        const char* recv_s = src + recv_start;
+        const char* recv_e = src + sep_pos;
+        cc__trim_span_ws(&recv_s, &recv_e);
+        if (recv_e <= recv_s || (size_t)(recv_e - recv_s) >= out_recv_expr_sz) return 0;
+        memcpy(out_recv_expr, recv_s, (size_t)(recv_e - recv_s));
+        out_recv_expr[recv_e - recv_s] = '\0';
+    }
+    if (out_sep_pos) *out_sep_pos = sep_pos;
+    if (out_method_start) *out_method_start = method_start;
+    if (out_method_end) *out_method_end = method_end;
+    if (out_recv_start) *out_recv_start = recv_start;
+    if (out_paren_pos) *out_paren_pos = paren_pos;
+    if (out_paren_end) *out_paren_end = paren_end;
+    return 1;
 }
 
 static int cc__resolve_generic_ufcs_receiver_type(const char* recv,
@@ -2935,7 +2915,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
     if (!src || n == 0) return NULL;
     cc__collect_generic_ufcs_types(src, n, vars, &var_count, sizeof(vars) / sizeof(vars[0]),
                                    fields, &field_count, sizeof(fields) / sizeof(fields[0]));
-    if (var_count == 0) return NULL;
+    if (var_count == 0 && field_count == 0) return NULL;
     cc_scanner_init(&scan);
     while (i < n) {
         size_t sep_pos;
@@ -2961,34 +2941,12 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         int chan_rx = 0;
         const char* channel_callee = NULL;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] == '.') {
-            sep_pos = i;
-            method_start = cc_skip_ws_and_comments(src, n, i + 1);
-        } else if (i + 1 < n && src[i] == '-' && src[i + 1] == '>') {
-            sep_pos = i;
-            method_start = cc_skip_ws_and_comments(src, n, i + 2);
-        } else {
+        if (!cc__scan_generic_ufcs_call_site(src, n, i, &sep_pos, &method_start, &method_end,
+                                             &recv_start, &paren_pos, &paren_end,
+                                             method_name, sizeof(method_name),
+                                             recv_expr, sizeof(recv_expr))) {
             i++;
             continue;
-        }
-        if (method_start >= n || !cc_is_ident_start(src[method_start])) { i++; continue; }
-        method_end = method_start;
-        while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
-        if (method_end - method_start >= sizeof(method_name)) { i++; continue; }
-        memcpy(method_name, src + method_start, method_end - method_start);
-        method_name[method_end - method_start] = '\0';
-        paren_pos = cc_skip_ws_and_comments(src, n, method_end);
-        if (paren_pos >= n || src[paren_pos] != '(') { i++; continue; }
-        if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i++; continue; }
-        recv_start = cc_scan_back_for_member_access(src, method_start, 0);
-        if (recv_start >= sep_pos || sep_pos - recv_start >= sizeof(recv_expr)) { i++; continue; }
-        {
-            const char* recv_s = src + recv_start;
-            const char* recv_e = src + sep_pos;
-            cc__trim_span_ws(&recv_s, &recv_e);
-            if (recv_e <= recv_s || (size_t)(recv_e - recv_s) >= sizeof(recv_expr)) { i++; continue; }
-            memcpy(recv_expr, recv_s, (size_t)(recv_e - recv_s));
-            recv_expr[recv_e - recv_s] = '\0';
         }
         if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,
                                                     vars, var_count, fields, field_count,
@@ -3216,34 +3174,12 @@ static char* cc__rewrite_channel_ufcs_impl(const char* src, size_t n) {
         CCUfcsChannelKind channel_kind = CC_UFCS_CHANNEL_KIND_NONE;
         int recv_is_ptr = 0;
         if (cc_scanner_skip_non_code(&scan, src, n, &i)) continue;
-        if (src[i] == '.') {
-            sep_pos = i;
-            method_start = cc_skip_ws_and_comments(src, n, i + 1);
-        } else if (i + 1 < n && src[i] == '-' && src[i + 1] == '>') {
-            sep_pos = i;
-            method_start = cc_skip_ws_and_comments(src, n, i + 2);
-        } else {
+        if (!cc__scan_generic_ufcs_call_site(src, n, i, &sep_pos, &method_start, &method_end,
+                                             &recv_start, &paren_pos, &paren_end,
+                                             method_name, sizeof(method_name),
+                                             recv_expr, sizeof(recv_expr))) {
             i++;
             continue;
-        }
-        if (method_start >= n || !cc_is_ident_start(src[method_start])) { i++; continue; }
-        method_end = method_start;
-        while (method_end < n && cc_is_ident_char(src[method_end])) method_end++;
-        if (method_end - method_start >= sizeof(method_name)) { i++; continue; }
-        memcpy(method_name, src + method_start, method_end - method_start);
-        method_name[method_end - method_start] = '\0';
-        paren_pos = cc_skip_ws_and_comments(src, n, method_end);
-        if (paren_pos >= n || src[paren_pos] != '(') { i++; continue; }
-        if (!cc_find_matching_paren(src, n, paren_pos, &paren_end)) { i++; continue; }
-        recv_start = cc_scan_back_for_member_access(src, method_start, 0);
-        if (recv_start >= sep_pos || sep_pos - recv_start >= sizeof(recv_expr)) { i++; continue; }
-        {
-            const char* recv_s = src + recv_start;
-            const char* recv_e = src + sep_pos;
-            cc__trim_span_ws(&recv_s, &recv_e);
-            if (recv_e <= recv_s || (size_t)(recv_e - recv_s) >= sizeof(recv_expr)) { i++; continue; }
-            memcpy(recv_expr, recv_s, (size_t)(recv_e - recv_s));
-            recv_expr[recv_e - recv_s] = '\0';
         }
         if (cc__ufcs_preceded_by_await(src, recv_start)) { i++; continue; }
         if (!cc__resolve_generic_ufcs_receiver_type(recv_expr, src, sep_pos,

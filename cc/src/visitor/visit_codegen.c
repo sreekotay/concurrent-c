@@ -74,6 +74,7 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
                                                             char* out_type,
                                                             size_t out_type_sz);
 static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, size_t n);
+static char* cc__rewrite_parser_generic_family_helpers_to_concrete(const char* src, size_t n);
 static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n);
 
 static void cc__emit_line_directive(FILE* out, int line, const char* path) {
@@ -1923,70 +1924,9 @@ static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const 
     }
 }
 
-static void cc__parse_decl_name_and_type_codegen(const char* stmt,
-                                                 const char* stmt_end,
-                                                 char* out_name,
-                                                 size_t out_name_sz,
-                                                 char* out_type,
-                                                 size_t out_type_sz) {
-    const char* p = stmt;
-    const char* semi = stmt_end;
-    const char* name_s = NULL;
-    size_t name_n = 0;
-    const char* cur;
-    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
-    out_name[0] = '\0';
-    out_type[0] = '\0';
-    while (p < semi && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    if (p >= semi) return;
-    cur = p;
-    while (cur < semi) {
-        if (*cur == '"' || *cur == '\'') {
-            char q = *cur++;
-            while (cur < semi) {
-                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
-                if (*cur == q) { cur++; break; }
-                cur++;
-            }
-            continue;
-        }
-        if (*cur == '=' || *cur == ';') break;
-        if (!(isalpha((unsigned char)*cur) || *cur == '_')) { cur++; continue; }
-        {
-            const char* s = cur++;
-            while (cur < semi && (isalnum((unsigned char)*cur) || *cur == '_')) cur++;
-            name_s = s;
-            name_n = (size_t)(cur - s);
-        }
-    }
-    if (!name_s || name_n == 0) return;
-    {
-        const char* ty_s = p;
-        const char* ty_e = name_s;
-        while (ty_s < ty_e && (*ty_s == ' ' || *ty_s == '\t' || *ty_s == '\n' || *ty_s == '\r')) ty_s++;
-        while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t' || ty_e[-1] == '\n' || ty_e[-1] == '\r')) ty_e--;
-        if (ty_e <= ty_s) return;
-        {
-            size_t type_len = (size_t)(ty_e - ty_s);
-            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
-            memcpy(out_type, ty_s, type_len);
-            out_type[type_len] = '\0';
-        }
-        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
-        memcpy(out_name, name_s, name_n);
-        out_name[name_n] = '\0';
-    }
-}
+/* cc__parse_decl_name_and_type_codegen — now delegated to cc_parse_decl_name_and_type in util/text.h */
 
-static int cc__is_non_decl_stmt_type_codegen(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "return") == 0 ||
-            strcmp(type_name, "break") == 0 ||
-            strcmp(type_name, "continue") == 0 ||
-            strcmp(type_name, "goto") == 0 ||
-            strcmp(type_name, "case") == 0 ||
-            strcmp(type_name, "default") == 0);
-}
+/* cc__is_non_decl_stmt_type_codegen — now cc_is_non_decl_stmt_type in util/text.h */
 
 static void cc__trim_type_span_codegen(const char** start, const char** end) {
     while (*start < *end && isspace((unsigned char)**start)) (*start)++;
@@ -2094,12 +2034,12 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            cc__parse_decl_name_and_type_codegen(src + stmt_start, src + i,
+            cc_parse_decl_name_and_type(src + stmt_start, src + i,
                                                  decl_name, sizeof(decl_name),
                                                  decl_type, sizeof(decl_type));
             if (decl_name[0] &&
                 strcmp(decl_name, var_name) == 0 &&
-                !cc__is_non_decl_stmt_type_codegen(decl_type) &&
+                !cc_is_non_decl_stmt_type(decl_type) &&
                 decl_count < MAX_DECLS) {
                 decls[decl_count].scope_id = scope_stack[scope_depth - 1];
                 cc__normalize_decl_type_for_receiver_codegen(decls[decl_count].type_name,
@@ -2204,6 +2144,153 @@ static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, s
     return out;
 }
 
+static const char* cc__canonicalize_parser_family_macro_codegen(const char* type_name,
+                                                                char* scratch,
+                                                                size_t scratch_cap) {
+    const char* args = NULL;
+    const char* close = NULL;
+    int is_map = 0;
+    char mangled_a[128];
+    char mangled_b[128];
+    if (!type_name || !scratch || scratch_cap == 0) return NULL;
+    if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
+        args = type_name + 9;
+    } else if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
+        args = type_name + 9;
+        is_map = 1;
+    } else if (strncmp(type_name, "Vec_", 4) == 0 || strncmp(type_name, "Map_", 4) == 0) {
+        strncpy(scratch, type_name, scratch_cap - 1);
+        scratch[scratch_cap - 1] = '\0';
+        return scratch;
+    } else {
+        return NULL;
+    }
+    close = strrchr(args, ')');
+    if (!close || close <= args) return NULL;
+    if (!is_map) {
+        cc_result_spec_mangle_type(args, (size_t)(close - args), mangled_a, sizeof(mangled_a));
+        if (!mangled_a[0]) return NULL;
+        snprintf(scratch, scratch_cap, "Vec_%s", mangled_a);
+        return scratch;
+    }
+    {
+        const char* comma = NULL;
+        int par = 0, br = 0, brc = 0, ang = 0;
+        for (const char* p = args; p < close; ++p) {
+            if (*p == '(') par++;
+            else if (*p == ')' && par > 0) par--;
+            else if (*p == '[') br++;
+            else if (*p == ']' && br > 0) br--;
+            else if (*p == '{') brc++;
+            else if (*p == '}' && brc > 0) brc--;
+            else if (*p == '<') ang++;
+            else if (*p == '>' && ang > 0) ang--;
+            else if (*p == ',' && par == 0 && br == 0 && brc == 0 && ang == 0) {
+                comma = p;
+                break;
+            }
+        }
+        if (!comma) return NULL;
+        cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_a, sizeof(mangled_a));
+        cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_b, sizeof(mangled_b));
+        if (!mangled_a[0] || !mangled_b[0]) return NULL;
+        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_a, mangled_b);
+        return scratch;
+    }
+}
+
+static char* cc__rewrite_parser_generic_family_helpers_to_concrete(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+    CCTypeRegistry* saved_reg = NULL;
+    CCTypeRegistry* temp_reg = NULL;
+    if (!src || n == 0) return NULL;
+    temp_reg = cc_type_registry_new();
+    if (temp_reg) {
+        saved_reg = cc_type_registry_get_global();
+        cc_type_registry_set_global(temp_reg);
+        cc__collect_ufcs_field_and_var_types(src, n);
+        cc_type_registry_set_global(saved_reg);
+    }
+    while (i < n) {
+        size_t ident_start = i;
+        size_t ident_end;
+        size_t paren_open;
+        size_t paren_end = 0;
+        size_t prefix_len = 0;
+        const char* method = NULL;
+        char recv_expr[256];
+        char concrete_type[256];
+        size_t arg_start;
+        size_t arg_end;
+        if (!cc_is_ident_start(src[i])) {
+            i++;
+            continue;
+        }
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        ident_end = i;
+        if (ident_end - ident_start > 17 &&
+            memcmp(src + ident_start, "__cc_vec_generic_", 17) == 0) {
+            prefix_len = 17;
+        } else if (ident_end - ident_start > 17 &&
+                   memcmp(src + ident_start, "__cc_map_generic_", 17) == 0) {
+            prefix_len = 17;
+        } else {
+            continue;
+        }
+        method = src + ident_start + prefix_len;
+        if (method >= src + ident_end) continue;
+        paren_open = cc_skip_ws_and_comments(src, n, ident_end);
+        if (paren_open >= n || src[paren_open] != '(') continue;
+        if (!cc_find_matching_paren(src, n, paren_open, &paren_end)) continue;
+        arg_start = cc_skip_ws_and_comments(src, n, paren_open + 1);
+        arg_end = arg_start;
+        {
+            int par = 0, br = 0, brc = 0;
+            while (arg_end < paren_end) {
+                char c = src[arg_end];
+                if (c == '(') par++;
+                else if (c == ')' && par > 0) par--;
+                else if (c == '[') br++;
+                else if (c == ']' && br > 0) br--;
+                else if (c == '{') brc++;
+                else if (c == '}' && brc > 0) brc--;
+                else if (c == ',' && par == 0 && br == 0 && brc == 0) break;
+                arg_end++;
+            }
+        }
+        while (arg_end > arg_start && isspace((unsigned char)src[arg_end - 1])) arg_end--;
+        if (arg_end <= arg_start || (arg_end - arg_start) >= sizeof(recv_expr)) continue;
+        memcpy(recv_expr, src + arg_start, arg_end - arg_start);
+        recv_expr[arg_end - arg_start] = '\0';
+        {
+            const char* actual_type = temp_reg
+                ? cc_type_registry_resolve_receiver_expr_at(
+                      temp_reg, recv_expr, src, ident_start, NULL)
+                : NULL;
+            const char* concrete = cc__canonicalize_parser_family_macro_codegen(
+                actual_type, concrete_type, sizeof(concrete_type));
+            if (!concrete || !concrete[0]) continue;
+            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+            cc__sb_append_cstr_local(&out, &out_len, &out_cap, concrete);
+            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
+            cc__sb_append_local(&out, &out_len, &out_cap, method, (size_t)((src + ident_end) - method));
+            last_emit = ident_end;
+            changed = 1;
+        }
+    }
+    if (temp_reg) cc_type_registry_free(temp_reg);
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
 static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     size_t i = 0;
@@ -2277,7 +2364,7 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                                 if (!semi) break;
                                 char field_name[128];
                                 char field_type[256];
-                                cc__parse_decl_name_and_type_codegen(stmt, semi, field_name, sizeof(field_name),
+                                cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name),
                                                                      field_type, sizeof(field_type));
                                 if (field_name[0] && field_type[0]) {
                                     cc_type_registry_add_field(reg, struct_name, field_name, field_type);
@@ -3509,6 +3596,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         {
             char* rewritten = cc__rewrite_result_helper_family_to_visible_type(src_ufcs, src_ufcs_len);
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = strlen(rewritten);
+            }
+        }
+        {
+            char* rewritten = cc__rewrite_parser_generic_family_helpers_to_concrete(src_ufcs, src_ufcs_len);
             if (rewritten) {
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rewritten;

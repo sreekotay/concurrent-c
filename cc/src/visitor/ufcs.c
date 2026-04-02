@@ -13,15 +13,7 @@
 #include "comptime/symbols.h"
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
-
-// Simple identifier check (ASCII-only for now).
-static int is_ident_start(char c) {
-    return isalpha((unsigned char)c) || c == '_';
-}
-
-static int is_ident_char(char c) {
-    return isalnum((unsigned char)c) || c == '_';
-}
+#include "util/text.h"
 
 // Thread-local context: set to 1 when rewriting UFCS inside `await`.
 // Channel ops should emit task-returning variants when set.
@@ -124,7 +116,7 @@ static void cc__ufcs_normalize_decl_type(char* out, size_t out_sz, const char* t
         }
     } else {
         err_e = err_s;
-        while (*err_e && is_ident_char(*err_e)) err_e++;
+        while (*err_e && cc_is_ident_char(*err_e)) err_e++;
     }
     cc__ufcs_trim_type_span(&err_s, &err_e);
     if (ok_e <= ok_s || err_e <= err_s) {
@@ -141,6 +133,8 @@ static void cc__ufcs_normalize_decl_type(char* out, size_t out_sz, const char* t
     }
     snprintf(out, out_sz, "CCResult_%s_%s", mangled_ok, mangled_err);
 }
+
+/* cc__ufcs_parse_decl_name_and_type — now delegated to cc_parse_decl_name_and_type in util/text.h */
 
 static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
                                                          size_t limit,
@@ -201,45 +195,11 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            const char* p = src + stmt_start;
-            const char* semi = src + i;
-            const char* name_s = NULL;
-            size_t name_n = 0;
-            const char* cur = p;
-            while (p < semi && isspace((unsigned char)*p)) p++;
-            while (cur < semi) {
-                if (*cur == '"' || *cur == '\'') {
-                    char q = *cur++;
-                    while (cur < semi) {
-                        if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
-                        if (*cur == q) { cur++; break; }
-                        cur++;
-                    }
-                    continue;
-                }
-                if (*cur == '=' || *cur == ';') break;
-                if (!is_ident_start(*cur)) { cur++; continue; }
-                name_s = cur++;
-                while (cur < semi && is_ident_char(*cur)) cur++;
-                name_n = (size_t)(cur - name_s);
-            }
             decl_name[0] = '\0';
             decl_type[0] = '\0';
-            if (name_s && name_n > 0) {
-                const char* ty_s = p;
-                const char* ty_e = name_s;
-                while (ty_s < ty_e && isspace((unsigned char)*ty_s)) ty_s++;
-                while (ty_e > ty_s && isspace((unsigned char)ty_e[-1])) ty_e--;
-                if (ty_e > ty_s) {
-                    size_t type_len = (size_t)(ty_e - ty_s);
-                    if (type_len >= sizeof(decl_type)) type_len = sizeof(decl_type) - 1;
-                    memcpy(decl_type, ty_s, type_len);
-                    decl_type[type_len] = '\0';
-                    if (name_n >= sizeof(decl_name)) name_n = sizeof(decl_name) - 1;
-                    memcpy(decl_name, name_s, name_n);
-                    decl_name[name_n] = '\0';
-                }
-            }
+            cc_parse_decl_name_and_type(src + stmt_start, src + i,
+                                              decl_name, sizeof(decl_name),
+                                              decl_type, sizeof(decl_type));
             if (decl_name[0] &&
                 strcmp(decl_name, root) == 0 &&
                 strcmp(decl_type, "return") != 0 &&
@@ -291,20 +251,20 @@ static int cc__skip_balanced_suffix(const char** pp, char open, char close) {
 
 static int cc__is_addressable_lvalue_expr(const char* s) {
     const char* p = skip_ws(s);
-    if (!p || !is_ident_start(*p)) return 0;
-    while (is_ident_char(*p)) p++;
+    if (!p || !cc_is_ident_start(*p)) return 0;
+    while (cc_is_ident_char(*p)) p++;
     for (;;) {
         p = skip_ws(p);
         if (*p == '.') {
             p = skip_ws(p + 1);
-            if (!is_ident_start(*p)) return 0;
-            while (is_ident_char(*p)) p++;
+            if (!cc_is_ident_start(*p)) return 0;
+            while (cc_is_ident_char(*p)) p++;
             continue;
         }
         if (p[0] == '-' && p[1] == '>') {
             p = skip_ws(p + 2);
-            if (!is_ident_start(*p)) return 0;
-            while (is_ident_char(*p)) p++;
+            if (!cc_is_ident_start(*p)) return 0;
+            while (cc_is_ident_char(*p)) p++;
             continue;
         }
         if (*p == '[') {
@@ -1278,13 +1238,13 @@ static int cc__parse_ufcs_chain(const char* in,
     const char* p = sep + (sep_is_ptr ? 2 : 1);
     for (;;) {
         while (*p && isspace((unsigned char)*p)) p++;
-        if (!is_ident_char(*p)) {
+        if (!cc_is_ident_char(*p)) {
             cc__free_ufcs_segments(segs, *seg_count);
             *seg_count = 0;
             return 0;
         }
         const char* m_start = p;
-        while (is_ident_char(*p)) p++;
+        while (cc_is_ident_char(*p)) p++;
         size_t m_len = (size_t)(p - m_start);
         if (m_len == 0 || m_len >= sizeof(segs[0].method)) {
             cc__free_ufcs_segments(segs, *seg_count);
@@ -1439,8 +1399,8 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
 
 static const char* cc__recv_chain_start(const char* line_start, const char* recv_end) {
     const char* seg_start = recv_end + 1;
-    while (seg_start > line_start && is_ident_char(*(seg_start - 1))) seg_start--;
-    if (seg_start > recv_end || !is_ident_start(*seg_start)) return NULL;
+    while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
+    if (seg_start > recv_end || !cc_is_ident_start(*seg_start)) return NULL;
     for (;;) {
         const char* q = seg_start;
         while (q > line_start && isspace((unsigned char)q[-1])) q--;
@@ -1452,10 +1412,10 @@ static const char* cc__recv_chain_start(const char* line_start, const char* recv
             break;
         }
         while (q > line_start && isspace((unsigned char)q[-1])) q--;
-        if (q <= line_start || !is_ident_char(q[-1])) return seg_start;
+        if (q <= line_start || !cc_is_ident_char(q[-1])) return seg_start;
         seg_start = q;
-        while (seg_start > line_start && is_ident_char(*(seg_start - 1))) seg_start--;
-        if (!is_ident_start(*seg_start)) return NULL;
+        while (seg_start > line_start && cc_is_ident_char(*(seg_start - 1))) seg_start--;
+        if (!cc_is_ident_start(*seg_start)) return NULL;
     }
     return seg_start;
 }
@@ -1485,13 +1445,13 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
 
             const char* m_start = sep + (cand_is_ptr ? 2 : 1);
             while (*m_start && isspace((unsigned char)*m_start)) m_start++;
-            if (!is_ident_char(*m_start)) {
+            if (!cc_is_ident_char(*m_start)) {
                 scan = sep + (cand_is_ptr ? 2 : 1);
                 sep = NULL;
                 continue;
             }
             const char* m_end = m_start;
-            while (is_ident_char(*m_end)) m_end++;
+            while (cc_is_ident_char(*m_end)) m_end++;
             const char* paren = m_end;
             while (*paren && isspace((unsigned char)*paren)) paren++;
             if (*paren == '(') {
@@ -1505,7 +1465,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         // Identify receiver
         const char* r_end = sep - 1;
         while (r_end >= p && isspace((unsigned char)*r_end)) r_end--;
-        if (r_end < p || !is_ident_char(*r_end)) {
+        if (r_end < p || !cc_is_ident_char(*r_end)) {
             size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
@@ -1525,7 +1485,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
         // Identify method
         const char* m_start = sep + (recv_is_ptr ? 2 : 1);
         while (*m_start && isspace((unsigned char)*m_start)) m_start++;
-        if (!is_ident_char(*m_start)) {
+        if (!cc_is_ident_char(*m_start)) {
             size_t chunk = (size_t)((sep + (recv_is_ptr ? 2 : 1)) - p);
             if (chunk >= cap) chunk = cap - 1;
             memcpy(o, p, chunk); o += chunk; cap -= chunk;
@@ -1533,7 +1493,7 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
             continue;
         }
         const char* m_end = m_start;
-        while (is_ident_char(*m_end)) m_end++;
+        while (cc_is_ident_char(*m_end)) m_end++;
         size_t method_len = (size_t)(m_end - m_start);
 
         // Next non-space after method must be '('

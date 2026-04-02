@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "result_spec.h"
+#include "util/text.h"
 
 /* Variable -> type entry */
 typedef struct {
@@ -227,6 +228,14 @@ int cc_type_registry_add_field(CCTypeRegistry* reg,
     for (size_t i = 0; i < reg->field_count; i++) {
         if (strcmp(reg->fields[i].struct_name, struct_name) == 0 &&
             strcmp(reg->fields[i].field_name, field_name) == 0) {
+            if (!cc__is_parser_placeholder_type(reg->fields[i].field_type) &&
+                cc__is_parser_placeholder_type(field_type)) {
+                return 0;
+            }
+            if (!cc__is_parser_placeholder_type(reg->fields[i].field_type) &&
+                strcmp(reg->fields[i].field_type, field_type) != 0) {
+                return 0;
+            }
             free(reg->fields[i].field_type);
             reg->fields[i].field_type = strdup(field_type);
             return reg->fields[i].field_type ? 0 : -1;
@@ -275,89 +284,9 @@ static void cc__copy_type_base(char* out, size_t out_sz, const char* type_name) 
     out[len] = '\0';
 }
 
-static void cc__parse_decl_name_and_type_local(const char* stmt,
-                                               const char* stmt_end,
-                                               char* out_name,
-                                               size_t out_name_sz,
-                                               char* out_type,
-                                               size_t out_type_sz) {
-    const char* p = stmt;
-    const char* semi = stmt_end;
-    const char* name_s = NULL;
-    size_t name_n = 0;
-    const char* cur;
-    if (!stmt || !stmt_end || stmt_end <= stmt || !out_name || !out_type) return;
-    out_name[0] = '\0';
-    out_type[0] = '\0';
-    while (p < semi && isspace((unsigned char)*p)) p++;
-    if (p >= semi) return;
-    cur = p;
-    while (cur < semi) {
-        if (*cur == '"' || *cur == '\'') {
-            char q = *cur++;
-            while (cur < semi) {
-                if (*cur == '\\' && (cur + 1) < semi) { cur += 2; continue; }
-                if (*cur == q) { cur++; break; }
-                cur++;
-            }
-            continue;
-        }
-        if (*cur == '=' || *cur == ';') break;
-        if (!(isalpha((unsigned char)*cur) || *cur == '_')) { cur++; continue; }
-        {
-            const char* s = cur++;
-            while (cur < semi && (isalnum((unsigned char)*cur) || *cur == '_')) cur++;
-            name_s = s;
-            name_n = (size_t)(cur - s);
-        }
-    }
-    if (!name_s || name_n == 0) return;
-    {
-        const char* after = name_s + name_n;
-        const char* eq = NULL;
-        const char* lp = NULL;
-        for (const char* t = p; t < semi; ++t) {
-            if (*t == '=' && !eq) eq = t;
-            if (*t == '(' && !lp) lp = t;
-            if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) {
-                return;
-            }
-        }
-        while (after < semi && isspace((unsigned char)*after)) after++;
-        if (after >= semi || (*after != '=' && *after != ';' && *after != '[')) {
-            return;
-        }
-        if (lp && lp < name_s && (!eq || eq > lp)) {
-            return;
-        }
-    }
-    {
-        const char* ty_s = p;
-        const char* ty_e = name_s;
-        while (ty_s < ty_e && isspace((unsigned char)*ty_s)) ty_s++;
-        while (ty_e > ty_s && isspace((unsigned char)ty_e[-1])) ty_e--;
-        if (ty_e <= ty_s) return;
-        {
-            size_t type_len = (size_t)(ty_e - ty_s);
-            if (type_len >= out_type_sz) type_len = out_type_sz - 1;
-            memcpy(out_type, ty_s, type_len);
-            out_type[type_len] = '\0';
-        }
-        if (name_n >= out_name_sz) name_n = out_name_sz - 1;
-        memcpy(out_name, name_s, name_n);
-        out_name[name_n] = '\0';
-    }
-}
+/* cc__parse_decl_name_and_type_local — now delegated to cc_parse_decl_name_and_type in util/text.h */
 
-static int cc__is_non_decl_stmt_type(const char* type_name) {
-    return type_name &&
-           (strcmp(type_name, "return") == 0 ||
-            strcmp(type_name, "break") == 0 ||
-            strcmp(type_name, "continue") == 0 ||
-            strcmp(type_name, "goto") == 0 ||
-            strcmp(type_name, "case") == 0 ||
-            strcmp(type_name, "default") == 0);
-}
+/* cc__is_non_decl_stmt_type — now cc_is_non_decl_stmt_type in util/text.h */
 
 static void cc__trim_type_span(const char** start, const char** end) {
     while (*start < *end && isspace((unsigned char)**start)) (*start)++;
@@ -494,12 +423,12 @@ static const char* cc__lookup_scoped_local_var_type(const char* src,
         if (c == ';') {
             char decl_name[128];
             char decl_type[256];
-            cc__parse_decl_name_and_type_local(src + stmt_start, src + i,
+            cc_parse_decl_name_and_type(src + stmt_start, src + i,
                                                decl_name, sizeof(decl_name),
                                                decl_type, sizeof(decl_type));
             if (decl_name[0] &&
                 strcmp(decl_name, var_name) == 0 &&
-                !cc__is_non_decl_stmt_type(decl_type) &&
+                !cc_is_non_decl_stmt_type(decl_type) &&
                 decl_count < MAX_DECLS) {
                 decls[decl_count].scope_id = scope_stack[scope_depth - 1];
                 cc__normalize_local_decl_type(decls[decl_count].type_name,
