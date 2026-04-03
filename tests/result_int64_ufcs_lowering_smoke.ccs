@@ -1,0 +1,68 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+/* Repro: in some builds, mixing `size_t !>(CCError)` and
+   `int64_t !>(CCError)` UFCS calls in the same function causes the
+   `int64_t` path to lower against the `size_t` Result specialization. */
+
+static size_t !>(CCError) parse_inline_args_local(char[:] line) {
+    if (line.len == 0) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty"));
+    return cc_ok((size_t)1);
+}
+
+static int64_t !>(CCError) parse_i64_local(char[:] s) {
+    if (s.len == 0) return cc_err(CC_ERROR(CC_ERR_PARSE, "empty integer"));
+    int64_t value = 0;
+    for (size_t i = 0; i < s.len; ++i) {
+        char ch = ((const char*)s.ptr)[i];
+        if (ch < '0' || ch > '9') {
+            return cc_err(CC_ERROR(CC_ERR_PARSE, "bad integer"));
+        }
+        value = value * 10 + (int64_t)(ch - '0');
+    }
+    return cc_ok(value);
+}
+
+static int rr_try_read_bulk_buffered_local(char[:] line, int64_t* out_value, CCError* err) {
+    int64_t !>(CCError) n_res = parse_i64_local(line);
+    if (n_res.is_err()) {
+        *err = n_res.error();
+        return -1;
+    }
+    *out_value = n_res.value();
+    return 0;
+}
+
+static int rr_try_read_args_buffered_local(char[:] line, size_t* out_argc, int64_t* out_value, CCError* err) {
+    if (!(line.len > 0 && ((const char*)line.ptr)[0] == '*')) {
+        size_t !>(CCError) argc_res = parse_inline_args_local(line);
+        if (argc_res.is_err()) {
+            *err = argc_res.error();
+            return -1;
+        }
+        *out_argc = argc_res.value();
+    }
+
+    int64_t !>(CCError) argc_res_i64 = parse_i64_local(line);
+    if (argc_res_i64.is_err()) {
+        *err = argc_res_i64.error();
+        return -1;
+    }
+    *out_value = argc_res_i64.value();
+    return 0;
+}
+
+int main(void) {
+    size_t argc = 0;
+    int64_t bulk_value = 0;
+    int64_t argc_value = 0;
+    CCError err = {0};
+    int rc = rr_try_read_bulk_buffered_local(cc_slice_from_cstr("42"), &bulk_value, &err);
+    assert(rc == 0);
+    assert(bulk_value == 42);
+
+    rc = rr_try_read_args_buffered_local(cc_slice_from_cstr("42"), &argc, &argc_value, &err);
+    assert(rc == 0);
+    assert(argc == 1);
+    assert(argc_value == 42);
+    return 0;
+}

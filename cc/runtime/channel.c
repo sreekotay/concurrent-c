@@ -63,6 +63,8 @@
 
 #include "fiber_internal.h"
 #include "fiber_sched_boundary.h"
+#include "wait_select_internal.h"
+#include "channel_wait_internal.h"
 /* fiber_sched.c is now included in concurrent_c.c */
 
 /* Defined in nursery.c (same translation unit via runtime/concurrent_c.c). */
@@ -1044,22 +1046,7 @@ static void cc__chan_add_waiter(cc__fiber_wait_node** head, cc__fiber_wait_node*
 
 static int cc__chan_select_try_win(cc__fiber_wait_node* node) {
     if (!node->is_select || !node->select_group) return 1;
-    cc__select_wait_group* group = (cc__select_wait_group*)node->select_group;
-    int sel = atomic_load_explicit(&group->selected_index, memory_order_acquire);
-    if (sel == (int)node->select_index) {
-        return 1;
-    }
-    if (sel != -1) {
-        return 0;
-    }
-    int expected = -1;
-    if (atomic_compare_exchange_strong_explicit(&group->selected_index, &expected,
-                                                (int)node->select_index,
-                                                memory_order_acq_rel,
-                                                memory_order_acquire)) {
-        return 1;
-    }
-    return 0;
+    return cc__wait_select_try_win(node->select_group, node->select_index);
 }
 
 static inline void cc__chan_select_cancel_node(cc__fiber_wait_node* node) {
@@ -1230,6 +1217,64 @@ static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
         cc__chan_recv_wake_inflight_dec(ch);
     }
     cc__chan_recv_signal_hint_advance(ch, node, next);
+}
+
+int cc__chan_publish_recv_wait_select(CCChan* ch,
+                                      cc__fiber_wait_node* node,
+                                      void* out_value,
+                                      void* select_group,
+                                      size_t select_index) {
+    if (!ch || !node) return CC__CHAN_WAIT_CLOSE;
+
+    cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
+    cc_chan_lock(ch);
+
+    if (ch->closed || ch->tx_error_closed) {
+        int closed = (ch->closed || ch->tx_error_closed);
+        pthread_mutex_unlock(&ch->mu);
+        return closed ? CC__CHAN_WAIT_CLOSE : CC__CHAN_WAIT_PUBLISHED;
+    }
+
+    if (ch->cap == 0) {
+        cc__fiber_wait_node* snode = ch->send_waiters_head ? cc__chan_pop_send_waiter(ch) : NULL;
+        if (snode) {
+            cc__chan_finish_recv_from_send_waiter(ch, snode, out_value);
+            cc__chan_signal_activity(ch);
+            pthread_mutex_unlock(&ch->mu);
+            wake_batch_flush();
+            return CC__CHAN_WAIT_DATA;
+        }
+    } else {
+        int ready = ch->use_lockfree ? (cc__chan_lf_count(ch) > 0) : (ch->count > 0);
+        if (ready) {
+            pthread_mutex_unlock(&ch->mu);
+            return CC__CHAN_WAIT_SIGNAL;
+        }
+    }
+
+    memset(node, 0, sizeof(*node));
+    node->fiber = fiber;
+    node->wait_ticket = fiber ? cc__fiber_publish_wait_ticket(fiber) : 0;
+    node->data = out_value;
+    node->select_group = select_group;
+    node->select_index = select_index;
+    node->is_select = 1;
+    atomic_store_explicit(&node->notified, 0, memory_order_release);
+    cc__chan_add_recv_waiter(ch, node);
+    cc__chan_signal_activity(ch);
+    pthread_mutex_unlock(&ch->mu);
+    return CC__CHAN_WAIT_PUBLISHED;
+}
+
+int cc__chan_finish_recv_wait_select(CCChan* ch, cc__fiber_wait_node* node) {
+    if (!ch || !node) return CC_CHAN_NOTIFY_CLOSE;
+    cc_chan_lock(ch);
+    int notify = atomic_load_explicit(&node->notified, memory_order_acquire);
+    if (notify != CC_CHAN_NOTIFY_DATA) {
+        cc__chan_remove_recv_waiter(ch, node);
+    }
+    pthread_mutex_unlock(&ch->mu);
+    return notify;
 }
 
 /* Wake one send waiter (must hold ch->mu) - uses batch */

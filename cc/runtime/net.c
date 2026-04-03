@@ -6,6 +6,7 @@
  */
 
 #include <ccc/std/net.cch>
+#include <ccc/cc_channel.cch>
 
 #include <errno.h>
 #include <poll.h>
@@ -23,6 +24,8 @@
 
 #include "fiber_internal.h"
 #include "io_wait.h"
+#include "channel_wait_internal.h"
+#include "wait_select_internal.h"
 
 #define CC_NET_FLAG_NONBLOCK 0x01
 
@@ -93,6 +96,87 @@ static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
     int err = cc__net_set_nonblocking(fd);
     if (err == 0 && flags) *flags |= CC_NET_FLAG_NONBLOCK;
     return err;
+}
+
+CCSocketOrRecvWaitKind cc_socket_wait_readable_or_recv(CCSocket* sock,
+                                                       CCChanRx rx,
+                                                       void* out_value,
+                                                       size_t value_size,
+                                                       CCNetError* out_err) {
+    if (out_err) *out_err = CC_NET_OK;
+    if (!sock || sock->fd < 0 || !rx.raw || !out_value || value_size == 0) {
+        if (out_err) *out_err = CC_NET_OTHER;
+        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+    }
+
+    int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
+    if (prep_err != 0) {
+        if (out_err) *out_err = errno_to_net_error(prep_err);
+        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+    }
+
+    int rc = cc_chan_try_recv(rx.raw, out_value, value_size);
+    if (rc == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
+    if (rc == EPIPE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
+    if (rc != EAGAIN) {
+        if (out_err) *out_err = CC_NET_OTHER;
+        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+    }
+
+    cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
+    if (!watcher) {
+        int wait_err = cc__io_wait_fd(sock->fd, POLLIN);
+        if (wait_err != 0) {
+            if (out_err) *out_err = errno_to_net_error(wait_err);
+            return CC_SOCKET_OR_RECV_WAIT_ERROR;
+        }
+        return CC_SOCKET_OR_RECV_WAIT_SOCKET;
+    }
+
+    cc__wait_select_group group = {
+        .fiber = (cc__fiber*)cc__fiber_current(),
+        .signaled = 0,
+        .selected_index = -1,
+    };
+    cc__fiber_wait_node recv_node = {0};
+    int recv_pub = cc__chan_publish_recv_wait_select(rx.raw, &recv_node, out_value, &group, 0);
+    if (recv_pub == CC__CHAN_WAIT_DATA) return CC_SOCKET_OR_RECV_WAIT_RECV;
+    if (recv_pub == CC__CHAN_WAIT_CLOSE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
+    if (recv_pub == CC__CHAN_WAIT_SIGNAL) {
+        rc = cc_chan_try_recv(rx.raw, out_value, value_size);
+        if (rc == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
+        if (rc == EPIPE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
+    }
+
+    cc__io_wait_select_handle io_handle = {0};
+    int io_pub = cc__io_wait_select_publish(watcher, POLLIN, &group, 1, &io_handle);
+    if (io_pub != 0) {
+        (void)cc__chan_finish_recv_wait_select(rx.raw, &recv_node);
+        if (out_err) *out_err = errno_to_net_error(io_pub);
+        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+    }
+
+    if (atomic_load_explicit(&group.signaled, memory_order_acquire) == 0) {
+        cc_sched_wait_on_flag(&group.signaled, 0, "socket_or_recv_wait");
+    }
+
+    int selected = atomic_load_explicit(&group.selected_index, memory_order_acquire);
+    cc__io_wait_select_finish(&io_handle);
+    int notify = cc__chan_finish_recv_wait_select(rx.raw, &recv_node);
+
+    if (selected == 0 || notify == CC_CHAN_NOTIFY_DATA || notify == CC_CHAN_NOTIFY_SIGNAL) {
+        if (notify == CC_CHAN_NOTIFY_SIGNAL) {
+            rc = cc_chan_try_recv(rx.raw, out_value, value_size);
+            if (rc == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
+            if (rc == EPIPE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
+            if (out_err) *out_err = CC_NET_OTHER;
+            return CC_SOCKET_OR_RECV_WAIT_ERROR;
+        }
+        if (notify == CC_CHAN_NOTIFY_DATA) return CC_SOCKET_OR_RECV_WAIT_RECV;
+        if (selected == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
+    }
+    if (notify == CC_CHAN_NOTIFY_CLOSE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
+    return CC_SOCKET_OR_RECV_WAIT_SOCKET;
 }
 
 static int cc__net_trace_read_enabled(void) {
