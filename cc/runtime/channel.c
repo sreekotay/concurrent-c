@@ -642,6 +642,15 @@ int cc__chan_debug_req_wake_match(void* ch_obj) {
     return ch->cap > 1;
 }
 
+int cc__chan_debug_is_open(void* ch_obj) {
+    CCChan* ch = (CCChan*)ch_obj;
+    if (!ch) return 0;
+    pthread_mutex_lock(&ch->mu);
+    int is_open = !ch->closed;
+    pthread_mutex_unlock(&ch->mu);
+    return is_open;
+}
+
 static inline void cc__chan_trace_req_wake(CCChan* ch,
                                            const char* event,
                                            const void* item,

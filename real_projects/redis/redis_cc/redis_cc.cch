@@ -49,6 +49,7 @@ typedef struct RedisReply {
     RedisReplyKind kind;
     CCSlice data;
     int64_t int_value;
+    CCArena arena;
 } RedisReply;
 
 static inline const char* redis_command_name(RedisCommandKind kind) {

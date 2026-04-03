@@ -49,6 +49,7 @@
  * channel state without reaching into channel internals from this file. */
 void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
 int cc__chan_debug_req_wake_match(void* ch_obj);
+int cc__chan_debug_is_open(void* ch_obj);
 
 /* High-frequency replacement probe counters are useful for deep diagnosis but
 * expensive/noisy in hot loops. Keep them compile-time gated for quick A/B runs.
@@ -1800,6 +1801,31 @@ static void cc__fiber_dump_parked_fibers(void) {
     }
 }
 
+static int cc__fiber_is_open_channel_recv_wait(const fiber_task* f) {
+    return f &&
+           f->park_reason &&
+           strcmp(f->park_reason, "chan_recv_wait_empty") == 0 &&
+           f->park_obj &&
+           cc__chan_debug_is_open(f->park_obj);
+}
+
+static int cc__fiber_only_open_channel_recv_waits(void) {
+    int saw_internal = 0;
+    pthread_mutex_lock(&g_all_fibers_mu);
+    for (fiber_task* f = g_all_fibers_head; f; f = f->debug_next) {
+        int64_t control = atomic_load_explicit(&f->control, memory_order_acquire);
+        if (control != CTRL_PARKED) continue;
+        if (f->external_wait_parked || cc__fiber_deadlock_suppressed(f)) continue;
+        saw_internal = 1;
+        if (!cc__fiber_is_open_channel_recv_wait(f)) {
+            pthread_mutex_unlock(&g_all_fibers_mu);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_all_fibers_mu);
+    return saw_internal;
+}
+
 
 /* Get monotonic time in milliseconds */
 static uint64_t cc__monotonic_ms(void) {
@@ -1832,6 +1858,13 @@ static void cc__fiber_check_deadlock(void) {
         (deadlock_parked > external_wait_parked) ? (deadlock_parked - external_wait_parked) : 0;
     size_t temp_workers = atomic_load_explicit(&g_sched.temp_worker_count, memory_order_acquire);
     size_t total_workers = g_sched.num_workers + temp_workers;
+
+    if (external_wait_parked > 0 &&
+        internal_deadlock_parked > 0 &&
+        cc__fiber_only_open_channel_recv_waits()) {
+        atomic_store(&g_deadlock_first_seen, 0);
+        return;
+    }
     
     /* Potential deadlock: all workers unavailable + parked fibers waiting */
     size_t unavailable = sleeping + blocked;
