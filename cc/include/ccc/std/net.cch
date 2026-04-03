@@ -9,6 +9,7 @@
 #define CC_STD_NET_H
 
 #include <ccc/cc_arena.cch>
+#include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
 #include "io.cch"
@@ -36,6 +37,13 @@ typedef enum CCNetError {
     CC_NET_TLS_CERTIFICATE_ERROR,
     CC_NET_OTHER,               /* os_code in extended info */
 } CCNetError;
+
+typedef enum CCSocketOrRecvWaitKind {
+    CC_SOCKET_OR_RECV_WAIT_ERROR = 0,
+    CC_SOCKET_OR_RECV_WAIT_SOCKET = 1,
+    CC_SOCKET_OR_RECV_WAIT_RECV = 2,
+    CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED = 3,
+} CCSocketOrRecvWaitKind;
 
 /* ============================================================================
  * Socket Types
@@ -113,6 +121,14 @@ CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetEr
 /* Read up to max_bytes directly into caller buffer. Returns bytes read.
  * Returns 0 with CC_NET_CONNECTION_CLOSED on EOF. */
 size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetError* out_err);
+
+/* Wait until either the socket becomes readable or a channel receive completes.
+ * If the channel wins, one value is received into out_value. */
+CCSocketOrRecvWaitKind cc_socket_wait_readable_or_recv(CCSocket* sock,
+                                                       CCChanRx rx,
+                                                       void* out_value,
+                                                       size_t value_size,
+                                                       CCNetError* out_err);
 
 /* Async read */
 /* @async CCSlice cc_socket_read_async(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
