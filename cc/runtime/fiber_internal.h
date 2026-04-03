@@ -17,6 +17,8 @@ typedef struct fiber_task cc__fiber;
 typedef struct cc__fiber_wait_node {
     cc__fiber* fiber;
     uint64_t wait_ticket;
+    _Atomic uint64_t wait_start_ns;
+    _Atomic uint64_t wake_publish_ns;
     struct cc__fiber_wait_node* next;
     struct cc__fiber_wait_node* prev;
     void* data;

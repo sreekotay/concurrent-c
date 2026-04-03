@@ -1,0 +1,60 @@
+// Smoke test: struct field name collides with closure-captured variable name.
+//
+// Reproduces the pattern from redis_idiomatic.ccs where a struct field has the
+// same name as a channel endpoint variable captured by closures (including
+// nested closures).  The closure lowering must not confuse the two.
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <string.h>
+
+typedef struct Conn {
+    CCChanTx ready_tx;
+    int id;
+} Conn;
+
+static Conn* conn_create(CCChanTx ready_tx, int id) {
+    Conn* c = (Conn*)malloc(sizeof(Conn));
+    if (!c) return NULL;
+    memset(c, 0, sizeof(Conn));
+    c->ready_tx = ready_tx;
+    c->id = id;
+    return c;
+}
+
+static void handle_conn(CCChanTx ready_tx, int id) {
+    Conn* conn = conn_create(ready_tx, id);
+    if (!conn) return;
+    // Use the field — same name as captured variable in caller's closure
+    cc_channel_send(conn->ready_tx, conn->id);
+    free(conn);
+}
+
+int main(void) {
+    int[~4 >] ready_tx;
+    int[~4 <] ready_rx;
+    CCChan* ch = cc_channel_pair(&ready_tx, &ready_rx);
+    if (!ch) return 1;
+
+    {
+        CCNursery* nursery = @create(NULL) @destroy;
+        if (!nursery) { cc_chan_free(ch); return 1; }
+
+        // Outer closure captures `ready_tx` — same name as struct field Conn.ready_tx
+        nursery->spawn(() => [ready_tx, nursery] {
+            // Nested closure also captures `ready_tx`
+            nursery->spawn(() => [ready_tx] {
+                handle_conn(ready_tx, 42);
+            });
+        });
+    }
+
+    int result = 0;
+    int rc = cc_chan_recv(ready_rx.raw, &result, sizeof(result));
+    assert(rc == 0);
+    assert(result == 42);
+
+    cc_chan_free(ch);
+
+    printf("closure_field_capture_name_collision_smoke: OK\n");
+    return 0;
+}

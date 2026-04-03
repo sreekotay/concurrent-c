@@ -1,6 +1,7 @@
 #ifndef CC_FIBER_SCHED_BOUNDARY_H
 #define CC_FIBER_SCHED_BOUNDARY_H
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <time.h>
 
@@ -34,6 +35,7 @@ typedef struct cc_sched_waitable_ops {
 } cc_sched_waitable_ops;
 
 /* Internal runtime boundary for scheduler/channel integration. */
+CCSchedFiber* cc_sched_current(void);
 void cc_sched_schedule(CCSchedFiber* fiber);
 CCSchedFiber* cc_sched_worker_next(void);
 CCSchedFiber* cc_sched_worker_idle_probe(void);
@@ -50,5 +52,6 @@ cc_sched_wait_result cc_sched_fiber_wait_until(
     const struct timespec* abs_deadline
 );
 void cc_sched_fiber_wake(CCSchedFiber* fiber);
+void cc_sched_wait_on_flag(_Atomic int* flag, int expected, const char* reason);
 
 #endif /* CC_FIBER_SCHED_BOUNDARY_H */
