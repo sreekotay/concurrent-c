@@ -36,7 +36,7 @@ typedef struct RedisRequest {
     uint64_t conn_id;
     uint64_t request_id;
     uint32_t shard_id;
-    CCChanTx reply_tx;
+    void* reply_ctx;
     CCArena arena;
     RedisCommandKind kind;
     size_t argc;

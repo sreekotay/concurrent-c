@@ -10,6 +10,10 @@ CCSchedFiber* cc_sched_v3_idle_probe_impl(void);
  * implementation remains the existing fiber scheduler.
  */
 
+CCSchedFiber* cc_sched_current(void) {
+    return (CCSchedFiber*)cc__fiber_current();
+}
+
 void cc_sched_schedule(CCSchedFiber* fiber) {
     /* LP (§10 Enqueue RUNNABLE): queue publication of runnable visibility. */
     cc__fiber_sched_enqueue(fiber);
@@ -104,4 +108,12 @@ cc_sched_wait_result cc_sched_fiber_wait_until(
 void cc_sched_fiber_wake(CCSchedFiber* fiber) {
     /* LP (§10 Waker claim + wake enqueue): delegated to scheduler wake path. */
     cc__fiber_unpark(fiber);
+}
+
+void cc_sched_wait_on_flag(_Atomic int* flag, int expected, const char* reason) {
+    cc__fiber_suspend_until_ready(flag,
+                                  expected,
+                                  reason ? reason : "cc_sched_wait_on_flag",
+                                  __FILE__,
+                                  __LINE__);
 }

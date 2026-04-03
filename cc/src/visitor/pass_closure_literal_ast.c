@@ -505,7 +505,8 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
         }
         if (lp && (!eq || eq > lp)) return;
     }
-    /* Ignore member assignments like `g.block = ...` or `p->field = ...` */
+    /* Ignore member assignments like `g.block = ...` or `p->field = ...`.
+       Two-pass: first find `=`, then check for `.`/`->` before it. */
     {
         const char* eq = NULL;
         int in_str = 0, in_chr = 0, in_lc = 0, in_bc = 0;
@@ -520,11 +521,14 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
             if (c == '/' && c2 == '*') { in_bc = 1; t += 2; continue; }
             if (c == '"') { in_str = 1; t++; continue; }
             if (c == '\'') { in_chr = 1; t++; continue; }
-            if (c == '=' && !eq) eq = t;
-            if (eq && t < eq && (c == '.' || (c == '>' && t > p && t[-1] == '-'))) return;
+            if (c == '=' && c2 != '=') { eq = t; break; }
             t++;
         }
-        if (!eq) eq = NULL;
+        if (eq) {
+            for (const char* t = p; t < eq; t++) {
+                if (*t == '.' || (*t == '>' && t > p && t[-1] == '-')) return;
+            }
+        }
     }
     /* Collect top-level comma positions to handle multi-declarations
      * like: CCChanTx g_tx0, g_tx1, g_tx2; */
@@ -603,10 +607,12 @@ static void cc__maybe_record_decl_stmt(char*** scope_names,
     {
         const char* after = name_s + name_n;
         int has_ident = 0;
-        while (after < first_seg_end && (*after == ' ' || *after == '\t')) after++;
-        if (after >= first_seg_end) {
-            if (comma_n == 0) return;
-        } else if (*after != '=' && *after != ';' && *after != ',' && *after != '[') {
+        while (after <= semi && (*after == ' ' || *after == '\t')) after++;
+        if (after <= semi && (*after == '=' || *after == ';' || *after == ',' || *after == '[')) {
+            /* looks like a valid declaration */
+        } else if (after > semi && comma_n > 0) {
+            /* multi-decl: name is past first comma, fall through */
+        } else {
             return;
         }
         for (const char* q = ty_s; q < ty_e; q++) {
@@ -928,11 +934,14 @@ static char* cc__lookup_internal_generated_decl_type(const char* src,
         {
             int has_ident = 0;
             int has_eq = 0;
+            int has_member_access = 0;
             for (const char* p = ty_s; p < ty_e; p++) {
                 if (*p == '=') { has_eq = 1; break; }
+                if (*p == '.' || (*p == '-' && p + 1 < ty_e && p[1] == '>'))
+                    has_member_access = 1;
                 if (cc__is_ident_start_char(*p)) has_ident = 1;
             }
-            if (has_eq || !has_ident) continue;
+            if (has_eq || !has_ident || has_member_access) continue;
         }
         return cc__dup_decl_type_text(ty_s, ty_e, out_flags);
     }
@@ -1649,6 +1658,12 @@ static int cc__find_mutation_in_body(const char* body,
         if (strncmp(body + i, var_name, var_len) != 0) continue;
         char after = (i + var_len < body_len) ? body[i + var_len] : 0;
         if (cc__is_ident_char2(after)) continue;
+        /* Skip struct field accesses: ptr->field or obj.field */
+        if (i >= 2) {
+            size_t k = i - 1;
+            while (k > 0 && (body[k] == ' ' || body[k] == '\t')) k--;
+            if (body[k] == '.' || (body[k] == '>' && k > 0 && body[k-1] == '-')) continue;
+        }
         
         /* Found var_name at position i. Check for mutation. */
         size_t j = i + var_len;
@@ -2910,6 +2925,30 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                             free(idxs);
                             return -1;
                         }
+                    }
+                }
+            }
+            /* Register resolved captures in the scope table so that nested
+               closures can find them through the normal scope walk instead of
+               falling through to error-prone text-based fallbacks. */
+            if (d->cap_count > 0 && d->cap_types && depth >= 0 && depth < 255) {
+                for (int ci = 0; ci < d->cap_count; ci++) {
+                    const char* nm = d->cap_names ? d->cap_names[ci] : NULL;
+                    const char* ty = d->cap_types[ci];
+                    if (!nm || !ty) continue;
+                    if (cc__name_in_list(scope_names[depth], scope_counts[depth], nm, strlen(nm))) continue;
+                    int cur_n = scope_counts[depth];
+                    char** nn = (char**)realloc(scope_names[depth], (size_t)(cur_n + 1) * sizeof(char*));
+                    char** tn = (char**)realloc(scope_types[depth], (size_t)(cur_n + 1) * sizeof(char*));
+                    unsigned char* fn = (unsigned char*)realloc(scope_flags[depth], (size_t)(cur_n + 1) * sizeof(unsigned char));
+                    if (nn && tn && fn) {
+                        scope_names[depth] = nn;
+                        scope_types[depth] = tn;
+                        scope_flags[depth] = fn;
+                        scope_names[depth][cur_n] = strdup(nm);
+                        scope_types[depth][cur_n] = strdup(ty);
+                        scope_flags[depth][cur_n] = 0;
+                        scope_counts[depth] = cur_n + 1;
                     }
                 }
             }

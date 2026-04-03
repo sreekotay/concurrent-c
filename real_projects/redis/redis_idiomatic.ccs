@@ -1,24 +1,28 @@
 /*
- * redis_idiomatic_v2.ccs
+ * redis_idiomatic.ccs
  *
  * A cleaner Redis reference implementation:
  *   - one accept loop
  *   - one fiber per client
  *   - RESP decode on the connection edge
  *   - one owner fiber serializing state updates
- *   - replies routed back over a per-connection channel
+ *   - replies appended to a per-connection outbox
  *
  * This version favors clarity over benchmark scaffolding. The architecture
- * stays faithful to the production shape, but the connection path is kept
- * intentionally simple: one request in flight per client.
+ * stays faithful to the production shape while allowing a small bounded amount
+ * of per-connection pipelining.
  */
 
 #include <ccc/std/prelude.cch>
 #include <ccc/std/net.cch>
 #include <ccc/std/string.cch>
+#include "../../cc/runtime/fiber_sched_boundary.h"
 #include <stdio.h>
+#include <stdatomic.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "redis_cc/redis_cc.cch"
 
 #define DEFAULT_PORT 6380
@@ -26,8 +30,8 @@
 #define READ_BUF_CAP (16 * 1024)
 #define REQUEST_ARENA_CAP kilobytes(4)
 #define ENTRY_ARENA_OVERHEAD 128
-#define REQUEST_CHAN_CAP 128
-#define REPLY_CHAN_CAP 64
+#define OWNER_READY_CAP 1024
+#define PIPELINE_LIMIT 8
 
 typedef struct RespReader {
     char* data;
@@ -49,6 +53,479 @@ typedef struct RedisDb {
     Map<char[:], RedisEntry*> entries;
     RedisEntry* head;
 } RedisDb;
+
+typedef struct RedisCmdNode {
+    struct RedisCmdNode* next;
+    uint64_t request_id;
+    RedisCommandKind kind;
+    size_t argc;
+    CCSlice argv[3];
+    CCArena arena;
+} RedisCmdNode;
+
+typedef struct RedisReplyNode {
+    struct RedisReplyNode* next;
+    RedisReply reply;
+} RedisReplyNode;
+
+/*
+ * The socket-facing fiber stays attached to the whole connection.
+ * The owner only drains parsed commands and appends replies to this
+ * connection-owned state; we do not create a per-reply execution shape.
+ */
+typedef struct RedisConn {
+    _Atomic uint32_t refs;
+    _Atomic int closed;
+    _Atomic int client_wake_flag;
+    _Atomic(void*) client_waiter;
+    pthread_mutex_t cmd_mu;
+    RedisCmdNode* cmd_head;
+    RedisCmdNode* cmd_tail;
+    size_t cmd_count;
+    int owner_queued;
+    int owner_running;
+    pthread_mutex_t outbox_mu;
+    RedisReplyNode* outbox_head;
+    RedisReplyNode* outbox_tail;
+    CCChanTx owner_ready_tx;
+    uint64_t conn_id;
+    uint64_t next_request_id;
+    char read_buf[READ_BUF_CAP];
+    RespReader reader;
+    CCArena read_arena;
+} RedisConn;
+
+static void free_reply(RedisReply* reply);
+static void free_command(RedisCmdNode* cmd);
+
+static void redis_conn_wake_client(RedisConn* conn) {
+    if (!conn) return;
+    atomic_store_explicit(&conn->client_wake_flag, 1, memory_order_release);
+    CCSchedFiber* waiter =
+        (CCSchedFiber*)atomic_exchange_explicit(&conn->client_waiter, NULL, memory_order_acq_rel);
+    if (waiter) cc_sched_fiber_wake(waiter);
+}
+
+static RedisConn* redis_conn_create(CCChanTx owner_ready_tx, uint64_t conn_id) {
+    RedisConn* conn = malloc(sizeof(*conn));
+    if (!conn) return NULL;
+
+    memset(conn, 0, sizeof(*conn));
+    atomic_init(&conn->refs, 1);
+    atomic_init(&conn->closed, 0);
+    atomic_init(&conn->client_wake_flag, 0);
+    atomic_init(&conn->client_waiter, NULL);
+    if (pthread_mutex_init(&conn->cmd_mu, NULL) != 0) {
+        free(conn);
+        return NULL;
+    }
+    if (pthread_mutex_init(&conn->outbox_mu, NULL) != 0) {
+        pthread_mutex_destroy(&conn->cmd_mu);
+        free(conn);
+        return NULL;
+    }
+    conn->owner_ready_tx = owner_ready_tx;
+    conn->conn_id = conn_id;
+    conn->next_request_id = 1;
+    conn->reader.data = conn->read_buf;
+    conn->reader.start = 0;
+    conn->reader.end = 0;
+    conn->reader.cap = sizeof(conn->read_buf);
+    conn->read_arena = cc_arena_heap(kilobytes(8));
+    if (!conn->read_arena.base) {
+        pthread_mutex_destroy(&conn->outbox_mu);
+        pthread_mutex_destroy(&conn->cmd_mu);
+        free(conn);
+        return NULL;
+    }
+    return conn;
+}
+
+static void redis_conn_acquire(RedisConn* conn) {
+    if (!conn) return;
+    atomic_fetch_add_explicit(&conn->refs, 1, memory_order_relaxed);
+}
+
+static void redis_conn_close(RedisConn* conn) {
+    if (!conn) return;
+    if (atomic_exchange_explicit(&conn->closed, 1, memory_order_acq_rel) == 0) {
+        redis_conn_wake_client(conn);
+    }
+}
+
+static void redis_conn_release(RedisConn* conn) {
+    if (!conn) return;
+    if (atomic_fetch_sub_explicit(&conn->refs, 1, memory_order_acq_rel) != 1) return;
+
+    pthread_mutex_lock(&conn->cmd_mu);
+    RedisCmdNode* cmd = conn->cmd_head;
+    conn->cmd_head = NULL;
+    conn->cmd_tail = NULL;
+    conn->cmd_count = 0;
+    pthread_mutex_unlock(&conn->cmd_mu);
+
+    pthread_mutex_lock(&conn->outbox_mu);
+    RedisReplyNode* node = conn->outbox_head;
+    conn->outbox_head = NULL;
+    conn->outbox_tail = NULL;
+    pthread_mutex_unlock(&conn->outbox_mu);
+
+    while (cmd) {
+        RedisCmdNode* next = cmd->next;
+        free_command(cmd);
+        cmd = next;
+    }
+
+    while (node) {
+        RedisReplyNode* next = node->next;
+        free_reply(&node->reply);
+        free(node);
+        node = next;
+    }
+
+    if (conn->read_arena.base) conn->read_arena.free();
+    pthread_mutex_destroy(&conn->outbox_mu);
+    pthread_mutex_destroy(&conn->cmd_mu);
+    free(conn);
+}
+
+static int redis_conn_notify_owner(RedisConn* conn) {
+    if (!conn) return 0;
+    redis_conn_acquire(conn);
+    if (!cc_io_avail(cc_channel_send(conn->owner_ready_tx, conn))) {
+        redis_conn_release(conn);
+        return 0;
+    }
+    return 1;
+}
+
+static int redis_conn_has_buffered_input(RedisConn* conn) {
+    return conn && conn->reader.start < conn->reader.end;
+}
+
+static int redis_conn_has_command_capacity(RedisConn* conn) {
+    if (!conn) return 0;
+    pthread_mutex_lock(&conn->cmd_mu);
+    int has_capacity = conn->cmd_count < PIPELINE_LIMIT;
+    pthread_mutex_unlock(&conn->cmd_mu);
+    return has_capacity;
+}
+
+static int redis_conn_has_owner_work(RedisConn* conn) {
+    if (!conn) return 0;
+    pthread_mutex_lock(&conn->cmd_mu);
+    int has_work = (conn->cmd_head != NULL) || conn->owner_queued || conn->owner_running;
+    pthread_mutex_unlock(&conn->cmd_mu);
+    return has_work;
+}
+
+static int redis_conn_has_reply(RedisConn* conn) {
+    if (!conn) return 0;
+    pthread_mutex_lock(&conn->outbox_mu);
+    int has_reply = (conn->outbox_head != NULL);
+    pthread_mutex_unlock(&conn->outbox_mu);
+    return has_reply;
+}
+
+static int redis_conn_push_command(RedisConn* conn, RedisCmdNode* cmd) {
+    if (!conn || !cmd) return 0;
+
+    int notify_owner = 0;
+    pthread_mutex_lock(&conn->cmd_mu);
+    if (atomic_load_explicit(&conn->closed, memory_order_acquire)) {
+        pthread_mutex_unlock(&conn->cmd_mu);
+        return 0;
+    }
+    cmd->next = NULL;
+    if (conn->cmd_tail) {
+        conn->cmd_tail->next = cmd;
+    } else {
+        conn->cmd_head = cmd;
+    }
+    conn->cmd_tail = cmd;
+    conn->cmd_count++;
+    if (!conn->owner_running && !conn->owner_queued) {
+        conn->owner_queued = 1;
+        notify_owner = 1;
+    }
+    pthread_mutex_unlock(&conn->cmd_mu);
+
+    if (!notify_owner) return 1;
+    if (redis_conn_notify_owner(conn)) return 1;
+
+    pthread_mutex_lock(&conn->cmd_mu);
+    conn->owner_queued = 0;
+    conn->cmd_head = NULL;
+    conn->cmd_tail = NULL;
+    conn->cmd_count = 0;
+    pthread_mutex_unlock(&conn->cmd_mu);
+    return 0;
+}
+
+static int redis_conn_owner_begin_drain(RedisConn* conn) {
+    if (!conn) return 0;
+    pthread_mutex_lock(&conn->cmd_mu);
+    conn->owner_queued = 0;
+    conn->owner_running = 1;
+    int has_work = (conn->cmd_head != NULL);
+    pthread_mutex_unlock(&conn->cmd_mu);
+    return has_work;
+}
+
+static int redis_conn_pop_command(RedisConn* conn, RedisCmdNode** out) {
+    if (!conn || !out) return 0;
+    pthread_mutex_lock(&conn->cmd_mu);
+    RedisCmdNode* cmd = conn->cmd_head;
+    if (!cmd) {
+        pthread_mutex_unlock(&conn->cmd_mu);
+        return 0;
+    }
+    conn->cmd_head = cmd->next;
+    if (!conn->cmd_head) conn->cmd_tail = NULL;
+    if (conn->cmd_count > 0) conn->cmd_count--;
+    pthread_mutex_unlock(&conn->cmd_mu);
+
+    cmd->next = NULL;
+    *out = cmd;
+    return 1;
+}
+
+static void redis_conn_owner_end_drain(RedisConn* conn) {
+    if (!conn) return;
+
+    int notify_owner = 0;
+    pthread_mutex_lock(&conn->cmd_mu);
+    conn->owner_running = 0;
+    if (conn->cmd_head && !conn->owner_queued) {
+        conn->owner_queued = 1;
+        notify_owner = 1;
+    }
+    pthread_mutex_unlock(&conn->cmd_mu);
+
+    if (notify_owner && !redis_conn_notify_owner(conn)) {
+        pthread_mutex_lock(&conn->cmd_mu);
+        conn->owner_queued = 0;
+        pthread_mutex_unlock(&conn->cmd_mu);
+    }
+    redis_conn_wake_client(conn);
+}
+
+static int redis_conn_push_reply(RedisConn* conn, RedisReply reply) {
+    if (!conn) return 0;
+
+    RedisReplyNode* node = malloc(sizeof(*node));
+    if (!node) return 0;
+
+    node->next = NULL;
+    node->reply = reply;
+
+    int should_wake = 0;
+    pthread_mutex_lock(&conn->outbox_mu);
+    if (atomic_load_explicit(&conn->closed, memory_order_acquire)) {
+        pthread_mutex_unlock(&conn->outbox_mu);
+        free(node);
+        return 0;
+    }
+
+    should_wake = (conn->outbox_head == NULL);
+    if (conn->outbox_tail) {
+        conn->outbox_tail->next = node;
+    } else {
+        conn->outbox_head = node;
+    }
+    conn->outbox_tail = node;
+    pthread_mutex_unlock(&conn->outbox_mu);
+
+    if (should_wake) {
+        redis_conn_wake_client(conn);
+    }
+    return 1;
+}
+
+static int redis_conn_pop_reply(RedisConn* conn, RedisReply* out) {
+    if (!conn || !out) return 0;
+
+    pthread_mutex_lock(&conn->outbox_mu);
+    RedisReplyNode* node = conn->outbox_head;
+    if (!node) {
+        pthread_mutex_unlock(&conn->outbox_mu);
+        return 0;
+    }
+
+    conn->outbox_head = node->next;
+    if (!conn->outbox_head) conn->outbox_tail = NULL;
+    pthread_mutex_unlock(&conn->outbox_mu);
+
+    *out = node->reply;
+    free(node);
+    return 1;
+}
+
+static int redis_conn_wait(RedisConn* conn) {
+    if (!conn) return 0;
+
+    while (true) {
+        if (redis_conn_has_reply(conn)) return 1;
+        if (!redis_conn_has_owner_work(conn)) {
+            return atomic_load_explicit(&conn->closed, memory_order_acquire) == 0;
+        }
+        if (atomic_load_explicit(&conn->closed, memory_order_acquire)) return 0;
+
+        atomic_store_explicit(&conn->client_waiter, cc_sched_current(), memory_order_release);
+
+        if (redis_conn_has_reply(conn)) {
+            atomic_store_explicit(&conn->client_waiter, NULL, memory_order_release);
+            return 1;
+        }
+        if (!redis_conn_has_owner_work(conn)) {
+            atomic_store_explicit(&conn->client_waiter, NULL, memory_order_release);
+            return atomic_load_explicit(&conn->closed, memory_order_acquire) == 0;
+        }
+        if (atomic_load_explicit(&conn->closed, memory_order_acquire)) {
+            atomic_store_explicit(&conn->client_waiter, NULL, memory_order_release);
+            return 0;
+        }
+        if (atomic_exchange_explicit(&conn->client_wake_flag, 0, memory_order_acq_rel) != 0) {
+            atomic_store_explicit(&conn->client_waiter, NULL, memory_order_release);
+            continue;
+        }
+
+        cc_sched_wait_on_flag(&conn->client_wake_flag, 0, "redis_conn_wait");
+        atomic_store_explicit(&conn->client_waiter, NULL, memory_order_release);
+        atomic_store_explicit(&conn->client_wake_flag, 0, memory_order_release);
+    }
+}
+
+typedef struct RedisPerfStats {
+    _Atomic int mode;
+    _Atomic int atexit_registered;
+    _Atomic uint64_t dump_every;
+    _Atomic uint64_t next_dump_at;
+    _Atomic uint64_t client_read_block_ns;
+    _Atomic uint64_t client_read_block_count;
+    _Atomic uint64_t client_read_buffered_ns;
+    _Atomic uint64_t client_read_buffered_count;
+    _Atomic uint64_t client_req_send_ns;
+    _Atomic uint64_t client_req_send_count;
+    _Atomic uint64_t client_reply_recv_ns;
+    _Atomic uint64_t client_reply_recv_count;
+    _Atomic uint64_t client_write_reply_ns;
+    _Atomic uint64_t client_write_reply_count;
+    _Atomic uint64_t owner_req_recv_ns;
+    _Atomic uint64_t owner_req_recv_count;
+    _Atomic uint64_t owner_exec_ns;
+    _Atomic uint64_t owner_exec_count;
+    _Atomic uint64_t owner_reply_own_ns;
+    _Atomic uint64_t owner_reply_own_count;
+    _Atomic uint64_t owner_reply_send_ns;
+    _Atomic uint64_t owner_reply_send_count;
+} RedisPerfStats;
+
+static RedisPerfStats g_redis_perf = {
+    .mode = -1,
+    .atexit_registered = 0,
+};
+
+static uint64_t redis_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void redis_perf_record(_Atomic uint64_t* total_ns,
+                              _Atomic uint64_t* count,
+                              uint64_t elapsed_ns) {
+    atomic_fetch_add_explicit(total_ns, elapsed_ns, memory_order_relaxed);
+    atomic_fetch_add_explicit(count, 1, memory_order_relaxed);
+}
+
+static void redis_perf_dump_line(const char* label,
+                                 uint64_t count,
+                                 uint64_t total_ns) {
+    double total_ms = (double)total_ns / 1000000.0;
+    double avg_us = count ? ((double)total_ns / (double)count) / 1000.0 : 0.0;
+    fprintf(stderr, "  %-22s count=%-10llu total_ms=%9.3f avg_us=%8.3f\n",
+            label,
+            (unsigned long long)count,
+            total_ms,
+            avg_us);
+}
+
+static void redis_perf_dump(void) {
+    if (atomic_load_explicit(&g_redis_perf.mode, memory_order_relaxed) != 1) return;
+
+    fprintf(stderr, "redis_idiomatic timing profile:\n");
+    redis_perf_dump_line("client_read_block",
+                         atomic_load_explicit(&g_redis_perf.client_read_block_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.client_read_block_ns, memory_order_relaxed));
+    redis_perf_dump_line("client_read_buffered",
+                         atomic_load_explicit(&g_redis_perf.client_read_buffered_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.client_read_buffered_ns, memory_order_relaxed));
+    redis_perf_dump_line("client_req_send",
+                         atomic_load_explicit(&g_redis_perf.client_req_send_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.client_req_send_ns, memory_order_relaxed));
+    redis_perf_dump_line("client_reply_recv",
+                         atomic_load_explicit(&g_redis_perf.client_reply_recv_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.client_reply_recv_ns, memory_order_relaxed));
+    redis_perf_dump_line("client_write_reply",
+                         atomic_load_explicit(&g_redis_perf.client_write_reply_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.client_write_reply_ns, memory_order_relaxed));
+    redis_perf_dump_line("owner_req_recv",
+                         atomic_load_explicit(&g_redis_perf.owner_req_recv_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.owner_req_recv_ns, memory_order_relaxed));
+    redis_perf_dump_line("owner_exec",
+                         atomic_load_explicit(&g_redis_perf.owner_exec_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.owner_exec_ns, memory_order_relaxed));
+    redis_perf_dump_line("owner_reply_own",
+                         atomic_load_explicit(&g_redis_perf.owner_reply_own_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.owner_reply_own_ns, memory_order_relaxed));
+    redis_perf_dump_line("owner_reply_send",
+                         atomic_load_explicit(&g_redis_perf.owner_reply_send_count, memory_order_relaxed),
+                         atomic_load_explicit(&g_redis_perf.owner_reply_send_ns, memory_order_relaxed));
+}
+
+static void redis_perf_maybe_dump_progress(uint64_t completed_replies) {
+    uint64_t dump_every = atomic_load_explicit(&g_redis_perf.dump_every, memory_order_relaxed);
+    if (dump_every == 0 || completed_replies < dump_every) return;
+
+    uint64_t expected = atomic_load_explicit(&g_redis_perf.next_dump_at, memory_order_relaxed);
+    while (completed_replies >= expected) {
+        uint64_t desired = expected + dump_every;
+        if (atomic_compare_exchange_weak_explicit(&g_redis_perf.next_dump_at,
+                                                  &expected,
+                                                  desired,
+                                                  memory_order_acq_rel,
+                                                  memory_order_relaxed)) {
+            fprintf(stderr, "redis_idiomatic timing snapshot after %llu replies:\n",
+                    (unsigned long long)completed_replies);
+            redis_perf_dump();
+            return;
+        }
+    }
+}
+
+static int redis_perf_enabled(void) {
+    int mode = atomic_load_explicit(&g_redis_perf.mode, memory_order_acquire);
+    if (mode >= 0) return mode == 1;
+
+    const char* env = getenv("REDIS_PROFILE_TIMING");
+    mode = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
+    atomic_store_explicit(&g_redis_perf.mode, mode, memory_order_release);
+    if (mode == 1 &&
+        atomic_exchange_explicit(&g_redis_perf.atexit_registered, 1, memory_order_acq_rel) == 0) {
+        atexit(redis_perf_dump);
+        const char* dump_env = getenv("REDIS_PROFILE_TIMING_EVERY");
+        uint64_t dump_every = 0;
+        if (dump_env && dump_env[0]) {
+            dump_every = strtoull(dump_env, NULL, 10);
+        }
+        atomic_store_explicit(&g_redis_perf.dump_every, dump_every, memory_order_relaxed);
+        atomic_store_explicit(&g_redis_perf.next_dump_at,
+                              dump_every ? dump_every : UINT64_MAX,
+                              memory_order_relaxed);
+    }
+    return mode == 1;
+}
 
 static CCSlice rs_pol(CCArena* arena, CCSlice tag, CCSlice value) {
     (void)arena;
@@ -321,6 +798,208 @@ static size_t !>(CCError) rr_read_args(RespReader* r,
     return cc_ok(argc);
 }
 
+static int rr_fill_plain(RespReader* r, CCSocket* sock, CCError* err) {
+    rr_compact(r);
+    if (r->end == r->cap) {
+        if (err) *err = mkerr(CC_ERR_OVERFLOW, "request exceeds read buffer");
+        return 0;
+    }
+
+    CCNetError net_err = CC_NET_OK;
+    size_t avail = r->cap - r->end;
+    size_t max_bytes = READ_CHUNK;
+    if (max_bytes > avail) max_bytes = avail;
+    size_t n = cc_socket_read_into(sock, r->data + r->end, max_bytes, &net_err);
+    if (net_err != CC_NET_OK) {
+        if (err) *err = neterr(net_err, "socket read failed");
+        return 0;
+    }
+    if (n == 0) {
+        if (err) *err = mkerr(CC_ERR_CLOSED, "connection closed");
+        return 0;
+    }
+    r->end += n;
+    return 1;
+}
+
+static int rr_read_line_plain(RespReader* r, CCSocket* sock, CCSlice* out, CCError* err) {
+    while (true) {
+        if (rr_try_read_line(r, out)) return 1;
+        if (!rr_fill_plain(r, sock, err)) return 0;
+    }
+}
+
+static int rr_read_bulk_plain(RespReader* r, CCSocket* sock, CCSlice* out, CCError* err) {
+    CCSlice line = {0};
+    if (!rr_read_line_plain(r, sock, &line, err)) return 0;
+    if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
+        if (err) *err = mkerr(CC_ERR_PARSE, "expected bulk string");
+        return 0;
+    }
+
+    int64_t !>(CCError) len_res = parse_i64(CCSlice_sub(&line, 1, line.len));
+    if (len_res.is_err()) {
+        if (err) *err = len_res.error();
+        return 0;
+    }
+
+    int64_t n = len_res.value();
+    if (n < 0) {
+        if (err) *err = mkerr(CC_ERR_PARSE, "negative bulk length");
+        return 0;
+    }
+
+    size_t need = (size_t)n + 2;
+    while ((r->end - r->start) < need) {
+        if (!rr_fill_plain(r, sock, err)) return 0;
+    }
+    if (r->data[r->start + n] != '\r' || r->data[r->start + n + 1] != '\n') {
+        if (err) *err = mkerr(CC_ERR_PARSE, "malformed bulk string");
+        return 0;
+    }
+
+    *out = cc_slice_from_parts(r->data + r->start,
+                               (size_t)n,
+                               CC_SLICE_ID_UNTRACKED,
+                               (size_t)n);
+    r->start += need;
+    return 1;
+}
+
+static int rr_read_args_plain(RespReader* r,
+                              CCSocket* sock,
+                              CCSlice* args,
+                              size_t cap,
+                              size_t* out_argc,
+                              CCError* err) {
+    CCSlice line = {0};
+    if (!rr_read_line_plain(r, sock, &line, err)) return 0;
+
+    if (!(line.len > 0 && ((const char*)line.ptr)[0] == '*')) {
+        size_t !>(CCError) inline_res = parse_inline_args(line, args, cap);
+        if (inline_res.is_err()) {
+            if (err) *err = inline_res.error();
+            return 0;
+        }
+        if (out_argc) *out_argc = inline_res.value();
+        return 1;
+    }
+
+    int64_t !>(CCError) argc_res = parse_i64(CCSlice_sub(&line, 1, line.len));
+    if (argc_res.is_err()) {
+        if (err) *err = argc_res.error();
+        return 0;
+    }
+
+    int64_t argc_i64 = argc_res.value();
+    if (argc_i64 < 1 || argc_i64 > (int64_t)cap) {
+        if (err) *err = mkerr(CC_ERR_PARSE, "unsupported argument count");
+        return 0;
+    }
+
+    size_t argc = (size_t)argc_i64;
+    for (size_t i = 0; i < argc; ++i) {
+        if (!rr_read_bulk_plain(r, sock, &args[i], err)) return 0;
+    }
+
+    if (out_argc) *out_argc = argc;
+    return 1;
+}
+
+static int rr_try_read_bulk(RespReader* r, CCSlice* out, CCError* err) {
+    size_t start0 = r->start;
+    CCSlice line = {0};
+    if (!rr_try_read_line(r, &line)) return 0;
+    if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
+        if (err) *err = mkerr(CC_ERR_PARSE, "expected bulk string");
+        r->start = start0;
+        return -1;
+    }
+
+    int64_t !>(CCError) len_res = parse_i64(CCSlice_sub(&line, 1, line.len));
+    if (len_res.is_err()) {
+        if (err) *err = len_res.error();
+        r->start = start0;
+        return -1;
+    }
+
+    int64_t n = len_res.value();
+    if (n < 0) {
+        if (err) *err = mkerr(CC_ERR_PARSE, "negative bulk length");
+        r->start = start0;
+        return -1;
+    }
+
+    size_t need = (size_t)n + 2;
+    if ((r->end - r->start) < need) {
+        r->start = start0;
+        return 0;
+    }
+    if (r->data[r->start + n] != '\r' || r->data[r->start + n + 1] != '\n') {
+        if (err) *err = mkerr(CC_ERR_PARSE, "malformed bulk string");
+        r->start = start0;
+        return -1;
+    }
+
+    *out = cc_slice_from_parts(r->data + r->start,
+                               (size_t)n,
+                               CC_SLICE_ID_UNTRACKED,
+                               (size_t)n);
+    r->start += need;
+    return 1;
+}
+
+static int rr_try_read_args(RespReader* r, CCSlice* args, size_t cap, size_t* out_argc, CCError* err) {
+    size_t start0 = r->start;
+    CCSlice line = {0};
+    if (!rr_try_read_line(r, &line)) return 0;
+
+    if (!(line.len > 0 && ((const char*)line.ptr)[0] == '*')) {
+        size_t !>(CCError) inline_res = parse_inline_args(line, args, cap);
+        if (inline_res.is_err()) {
+            if (err) *err = inline_res.error();
+            r->start = start0;
+            return -1;
+        }
+        if (out_argc) *out_argc = inline_res.value();
+        return 1;
+    }
+
+    int64_t !>(CCError) argc_res = parse_i64(CCSlice_sub(&line, 1, line.len));
+    if (argc_res.is_err()) {
+        if (err) *err = argc_res.error();
+        r->start = start0;
+        return -1;
+    }
+
+    int64_t argc_i64 = argc_res.value();
+    if (argc_i64 < 1 || argc_i64 > (int64_t)cap) {
+        if (err) *err = mkerr(CC_ERR_PARSE, "unsupported argument count");
+        r->start = start0;
+        return -1;
+    }
+
+    size_t argc = (size_t)argc_i64;
+    for (size_t i = 0; i < argc; ++i) {
+        CCSlice bulk = {0};
+        CCError bulk_err = {0};
+        int bulk_status = rr_try_read_bulk(r, &bulk, &bulk_err);
+        if (bulk_status == 0) {
+            r->start = start0;
+            return 0;
+        }
+        if (bulk_status < 0) {
+            if (err) *err = bulk_err;
+            r->start = start0;
+            return -1;
+        }
+        args[i] = bulk;
+    }
+
+    if (out_argc) *out_argc = argc;
+    return 1;
+}
+
 static bool !>(CCError) decode_request_shape(CCSlice* args,
                                              size_t argc,
                                              RedisCommandKind* out_kind,
@@ -349,61 +1028,127 @@ static bool !>(CCError) decode_request_shape(CCSlice* args,
     return cc_ok(true);
 }
 
-static RedisRequest* !>(CCError) build_request(CCArena* req_arena,
-                                               CCSlice* args,
-                                               size_t arg_start,
-                                               size_t argc,
-                                               RedisCommandKind kind,
-                                               CCChanTx reply_tx,
-                                               uint64_t conn_id,
-                                               uint64_t request_id) {
-    RedisRequest* req = cc_arena_alloc_T(RedisRequest, req_arena);
-    if (!req) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request allocation failed"));
+typedef struct ParseAttempt {
+    int status; /* 1 ok, 0 need more, -1 error */
+    RedisCmdNode* cmd;
+    CCError err;
+} ParseAttempt;
+
+static int build_command(CCArena* req_arena,
+                         CCSlice* args,
+                         size_t arg_start,
+                         size_t argc,
+                         RedisCommandKind kind,
+                         uint64_t request_id,
+                         RedisCmdNode** out_cmd,
+                         CCError* out_err) {
+    RedisCmdNode* cmd = calloc(1, sizeof(*cmd));
+    if (!cmd) {
+        if (out_err) *out_err = mkerr(CC_ERR_OUT_OF_MEMORY, "request allocation failed");
+        return 0;
     }
 
-    memset(req, 0, sizeof(*req));
-    req->conn_id = conn_id;
-    req->request_id = request_id;
-    req->reply_tx = reply_tx;
-    req->kind = kind;
-    req->argc = argc;
+    cmd->request_id = request_id;
+    cmd->kind = kind;
+    cmd->argc = argc;
 
     for (size_t i = 0; i < argc; ++i) {
-        req->argv[i] = cc_slice_clone(req_arena, args[arg_start + i]);
-        if (args[arg_start + i].len > 0 && !req->argv[i].ptr) {
-            return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request argument clone failed"));
+        cmd->argv[i] = cc_slice_clone(req_arena, args[arg_start + i]);
+        if (args[arg_start + i].len > 0 && !cmd->argv[i].ptr) {
+            free(cmd);
+            if (out_err) *out_err = mkerr(CC_ERR_OUT_OF_MEMORY, "request argument clone failed");
+            return 0;
         }
     }
 
-    req->arena = cc_arena_detach(req_arena);
-    return cc_ok(req);
+    cmd->arena = cc_arena_detach(req_arena);
+    if (out_cmd) *out_cmd = cmd;
+    return 1;
 }
 
-static RedisRequest* !>(CCError) read_request(RespReader* r,
-                                              CCSocket* sock,
-                                              CCArena* read_arena,
-                                              CCChanTx reply_tx,
-                                              uint64_t conn_id,
-                                              uint64_t request_id) {
+static ParseAttempt read_command(RedisConn* conn,
+                                 CCSocket* sock,
+                                 uint64_t request_id) {
+    ParseAttempt out = {0};
     CCArena req_arena_storage = @create(REQUEST_ARENA_CAP) @destroy;
     if (!req_arena_storage.base) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request arena allocation failed"));
+        out.status = -1;
+        out.err = mkerr(CC_ERR_OUT_OF_MEMORY, "request arena allocation failed");
+        return out;
     }
     CCArena* req_arena = &req_arena_storage;
 
     CCSlice args[4] = {0};
-    size_t !>(CCError) argc_res = rr_read_args(r, sock, read_arena, args, 4);
-    if (argc_res.is_err()) return cc_err(argc_res.error());
-    size_t argc = argc_res.value();
+    CCError err = {0};
+    size_t argc = 0;
+    if (!rr_read_args_plain(&conn->reader, sock, args, 4, &argc, &err)) {
+        out.status = -1;
+        out.err = err;
+        return out;
+    }
 
     RedisCommandKind kind = REDIS_CMD_PING;
     size_t arg_start = 0;
     size_t req_argc = 0;
     bool !>(CCError) shape_res = decode_request_shape(args, argc, &kind, &arg_start, &req_argc);
-    if (shape_res.is_err()) return cc_err(shape_res.error());
+    if (shape_res.is_err()) {
+        out.status = -1;
+        out.err = shape_res.error();
+        return out;
+    }
 
-    return build_request(req_arena, args, arg_start, req_argc, kind, reply_tx, conn_id, request_id);
+    if (!build_command(req_arena, args, arg_start, req_argc, kind, request_id, &out.cmd, &err)) {
+        out.status = -1;
+        out.err = err;
+        return out;
+    }
+    out.status = 1;
+    return out;
+}
+
+static ParseAttempt read_command_buffered(RedisConn* conn,
+                                          uint64_t request_id) {
+    ParseAttempt out = {0};
+    CCArena req_arena_storage = @create(REQUEST_ARENA_CAP) @destroy;
+    if (!req_arena_storage.base) {
+        out.status = -1;
+        out.err = mkerr(CC_ERR_OUT_OF_MEMORY, "request arena allocation failed");
+        return out;
+    }
+    CCArena* req_arena = &req_arena_storage;
+
+    CCSlice args[4] = {0};
+    size_t argc = 0;
+    int read_status = rr_try_read_args(&conn->reader, args, 4, &argc, &out.err);
+    if (read_status <= 0) {
+        out.status = read_status;
+        return out;
+    }
+
+    RedisCommandKind kind = REDIS_CMD_PING;
+    size_t arg_start = 0;
+    size_t req_argc = 0;
+    bool !>(CCError) shape_res = decode_request_shape(args, argc, &kind, &arg_start, &req_argc);
+    if (shape_res.is_err()) {
+        out.status = -1;
+        out.err = shape_res.error();
+        return out;
+    }
+
+    if (!build_command(req_arena,
+                       args,
+                       arg_start,
+                       req_argc,
+                       kind,
+                       request_id,
+                       &out.cmd,
+                       &out.err)) {
+        out.status = -1;
+        return out;
+    }
+
+    out.status = 1;
+    return out;
 }
 
 static bool !>(CCError) db_clone_owned_string(CCString* out,
@@ -573,7 +1318,7 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     return cc_ok(reply_integer(value));
 }
 
-static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
+static RedisReply !>(CCError) execute_request(RedisDb* db, RedisCmdNode* req) {
     switch (req->kind) {
         case REDIS_CMD_PING:
             if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
@@ -712,93 +1457,198 @@ static bool write_reply(CCSocket* sock, RedisReply reply) {
     }
 }
 
-static void free_request(RedisRequest* req) {
-    if (req && req->arena.base) req->arena.free();
+static void free_command(RedisCmdNode* cmd) {
+    if (!cmd) return;
+    if (cmd->arena.base) cmd->arena.free();
+    free(cmd);
 }
 
-static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
+static void owner_loop(RedisConn*[~OWNER_READY_CAP N:1 <] owner_ready_rx) {
     RedisDb db = {0};
     if (!db_init(&db, 16384)) return;
 
-    RedisRequest* req = NULL;
-    while (cc_io_avail(req_rx.recv(&req))) {
-        if (!req) continue;
+    RedisConn* conn = NULL;
+    bool perf = redis_perf_enabled();
+    while (true) {
+        uint64_t t_req_recv = perf ? redis_now_ns() : 0;
+        bool got_conn = cc_io_avail(owner_ready_rx.recv(&conn));
+        if (perf) {
+            redis_perf_record(&g_redis_perf.owner_req_recv_ns,
+                              &g_redis_perf.owner_req_recv_count,
+                              redis_now_ns() - t_req_recv);
+        }
+        if (!got_conn) break;
+        if (!conn) continue;
 
-        RedisReply !>(CCError) exec_res = execute_request(&db, req);
-        RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error()) : exec_res.value();
-        reply.conn_id = req->conn_id;
-        reply.request_id = req->request_id;
+        (void)redis_conn_owner_begin_drain(conn);
 
-        bool !>(CCError) own_res = reply_own_payload(&reply);
-        if (own_res.is_err()) {
-            free_request(req);
-            continue;
+        RedisCmdNode* req = NULL;
+        while (redis_conn_pop_command(conn, &req)) {
+            uint64_t t_exec = perf ? redis_now_ns() : 0;
+            RedisReply !>(CCError) exec_res = execute_request(&db, req);
+            if (perf) {
+                redis_perf_record(&g_redis_perf.owner_exec_ns,
+                                  &g_redis_perf.owner_exec_count,
+                                  redis_now_ns() - t_exec);
+            }
+            RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error()) : exec_res.value();
+            reply.conn_id = conn->conn_id;
+            reply.request_id = req->request_id;
+
+            uint64_t t_own = perf ? redis_now_ns() : 0;
+            bool !>(CCError) own_res = reply_own_payload(&reply);
+            if (perf) {
+                redis_perf_record(&g_redis_perf.owner_reply_own_ns,
+                                  &g_redis_perf.owner_reply_own_count,
+                                  redis_now_ns() - t_own);
+            }
+            if (own_res.is_err()) {
+                redis_conn_close(conn);
+                free_reply(&reply);
+                free_command(req);
+                continue;
+            }
+
+            uint64_t t_reply_send = perf ? redis_now_ns() : 0;
+            int queued = redis_conn_push_reply(conn, reply);
+            if (perf) {
+                redis_perf_record(&g_redis_perf.owner_reply_send_ns,
+                                  &g_redis_perf.owner_reply_send_count,
+                                  redis_now_ns() - t_reply_send);
+            }
+            if (!queued) {
+                redis_conn_close(conn);
+                free_reply(&reply);
+                free_command(req);
+                continue;
+            }
+            free_command(req);
         }
 
-        bool !>(CCIoError) send_res = req->reply_tx.send(reply);
-        free_request(req);
-        if (!cc_io_avail(send_res)) {
-            free_reply(&reply);
-            continue;
-        }
+        redis_conn_owner_end_drain(conn);
+        redis_conn_release(conn);
     }
 
     db_free_all(&db);
 }
 
-static bool recv_reply(RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx, RedisReply* out) {
-    return cc_io_avail(reply_rx.recv(out));
-}
-
 static void handle_client(CCSocket client,
-                          RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx,
+                          RedisConn*[~OWNER_READY_CAP N:1 >] owner_ready_tx,
                           uint64_t conn_id) {
-    char read_buf[READ_BUF_CAP];
-    CCArena read_arena = @create(kilobytes(8)) @destroy;
-    if (!read_arena.base) {
+    RedisConn* conn = redis_conn_create(owner_ready_tx, conn_id);
+    if (!conn) {
         cc_socket_close(&client);
         return;
     }
 
-    RespReader reader = rr_init(read_buf, sizeof(read_buf));
-
-    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
-    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
-    CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
-    if (!reply_ch) {
-        cc_socket_close(&client);
-        return;
-    }
-    @defer reply_ch.free();
-
-    uint64_t request_id = 1;
+    bool perf = redis_perf_enabled();
     while (true) {
-        RedisRequest* !>(CCError) req_res =
-            read_request(&reader, &client, &read_arena, reply_tx, conn_id, request_id++);
-        if (req_res.is_err()) {
-            CCError err = req_res.error();
-            if (err.kind != CC_ERR_CLOSED) {
-                (void)write_reply(&client, err_reply(err));
+        while (true) {
+            RedisReply reply = {0};
+            if (!redis_conn_pop_reply(conn, &reply)) break;
+
+            uint64_t t_write_reply = perf ? redis_now_ns() : 0;
+            if (!write_reply(&client, reply)) {
+                if (perf) {
+                    redis_perf_record(&g_redis_perf.client_write_reply_ns,
+                                      &g_redis_perf.client_write_reply_count,
+                                      redis_now_ns() - t_write_reply);
+                }
+                free_reply(&reply);
+                goto conn_done;
+            }
+            if (perf) {
+                redis_perf_record(&g_redis_perf.client_write_reply_ns,
+                                  &g_redis_perf.client_write_reply_count,
+                                  redis_now_ns() - t_write_reply);
+                uint64_t completed_replies =
+                    atomic_load_explicit(&g_redis_perf.client_write_reply_count, memory_order_relaxed);
+                redis_perf_maybe_dump_progress(completed_replies);
+            }
+            free_reply(&reply);
+        }
+
+        while (redis_conn_has_command_capacity(conn)) {
+            RedisCmdNode* cmd = NULL;
+            CCError err = {0};
+            uint64_t request_id = conn->next_request_id;
+
+            if (!redis_conn_has_owner_work(conn) && !redis_conn_has_buffered_input(conn)) {
+                uint64_t t_read = perf ? redis_now_ns() : 0;
+                ParseAttempt parsed = read_command(conn, &client, request_id);
+                if (perf) {
+                    redis_perf_record(&g_redis_perf.client_read_block_ns,
+                                      &g_redis_perf.client_read_block_count,
+                                      redis_now_ns() - t_read);
+                }
+                if (parsed.status < 0) {
+                    err = parsed.err;
+                } else {
+                    cmd = parsed.cmd;
+                }
+            } else {
+                uint64_t t_read = perf ? redis_now_ns() : 0;
+                ParseAttempt parsed = read_command_buffered(conn, request_id);
+                if (perf) {
+                    redis_perf_record(&g_redis_perf.client_read_buffered_ns,
+                                      &g_redis_perf.client_read_buffered_count,
+                                      redis_now_ns() - t_read);
+                }
+                if (parsed.status == 0) break;
+                if (parsed.status < 0) {
+                    err = parsed.err;
+                } else {
+                    cmd = parsed.cmd;
+                }
+            }
+
+            if (!cmd) {
+                if (err.kind != CC_ERR_CLOSED) {
+                    (void)write_reply(&client, err_reply(err));
+                }
+                goto conn_done;
+            }
+
+            uint64_t t_req_send = perf ? redis_now_ns() : 0;
+            if (!redis_conn_push_command(conn, cmd)) {
+                if (perf) {
+                    redis_perf_record(&g_redis_perf.client_req_send_ns,
+                                      &g_redis_perf.client_req_send_count,
+                                      redis_now_ns() - t_req_send);
+                }
+                free_command(cmd);
+                goto conn_done;
+            }
+            if (perf) {
+                redis_perf_record(&g_redis_perf.client_req_send_ns,
+                                  &g_redis_perf.client_req_send_count,
+                                  redis_now_ns() - t_req_send);
+            }
+            conn->next_request_id++;
+        }
+
+        if (redis_conn_has_reply(conn)) continue;
+        if (!redis_conn_has_owner_work(conn)) continue;
+
+        uint64_t t_reply_recv = perf ? redis_now_ns() : 0;
+        if (!redis_conn_wait(conn)) {
+            if (perf) {
+                redis_perf_record(&g_redis_perf.client_reply_recv_ns,
+                                  &g_redis_perf.client_reply_recv_count,
+                                  redis_now_ns() - t_reply_recv);
             }
             break;
         }
-
-        RedisRequest* req = req_res.value();
-        if (!cc_io_avail(req_tx.send(req))) {
-            free_request(req);
-            break;
+        if (perf) {
+            redis_perf_record(&g_redis_perf.client_reply_recv_ns,
+                              &g_redis_perf.client_reply_recv_count,
+                              redis_now_ns() - t_reply_recv);
         }
-
-        RedisReply reply = {0};
-        if (!recv_reply(reply_rx, &reply)) break;
-        if (!write_reply(&client, reply)) {
-            free_reply(&reply);
-            break;
-        }
-        free_reply(&reply);
     }
 
-    reply_tx.close();
+conn_done:
+    redis_conn_close(conn);
+    redis_conn_release(conn);
     cc_socket_close(&client);
 }
 
@@ -820,39 +1670,42 @@ int main(int argc, char** argv) {
     }
     @defer cc_listener_close(&ln);
 
-    RedisRequest*[~REQUEST_CHAN_CAP N:1 >] req_tx;
-    RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx;
-    CCChan* req_ch = cc_channel_pair(&req_tx, &req_rx);
-    if (!req_ch) {
-        fprintf(stderr, "failed to create request channel\n");
+    RedisConn*[~OWNER_READY_CAP N:1 >] owner_ready_tx;
+    RedisConn*[~OWNER_READY_CAP N:1 <] owner_ready_rx;
+    CCChan* owner_ready_ch = cc_channel_pair(&owner_ready_tx, &owner_ready_rx);
+    if (!owner_ready_ch) {
+        fprintf(stderr, "failed to create owner-ready channel\n");
         return 1;
     }
-    @defer req_ch.free();
+    @defer owner_ready_ch->free();
 
     printf("redis_idiomatic listening on %s\n", addr);
 
     CCListener* ln_ptr = &ln;
+    RedisConn*[~OWNER_READY_CAP N:1 <] owner_rx = owner_ready_rx;
+    RedisConn*[~OWNER_READY_CAP N:1 >] owner_tx = owner_ready_tx;
     {
         CCNursery* server = @create(NULL) @destroy;
         if (!server) abort();
 
-        server->spawn(() => [req_rx] {
-            owner_loop(req_rx);
+        server->spawn(() => [owner_rx] {
+            owner_loop(owner_rx);
         });
 
-        server->spawn(() => [ln_ptr, req_tx, server] {
+        server->spawn(() => [ln_ptr, owner_tx, server] {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCNetError aerr = CC_NET_OK;
                 CCSocket client = cc_listener_accept(ln_ptr, &aerr);
                 if (aerr != CC_NET_OK) {
+                    owner_tx.close();
                     fprintf(stderr, "accept error: %d\n", aerr);
                     break;
                 }
 
                 uint64_t id = next_conn_id++;
-                server->spawn(() => [client, req_tx, id] {
-                    handle_client(client, req_tx, id);
+                server->spawn(() => [client, owner_tx, id] {
+                    handle_client(client, owner_tx, id);
                 });
             }
         });

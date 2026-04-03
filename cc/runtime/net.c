@@ -78,6 +78,15 @@ static void cc__net_set_cloexec_best_effort(int fd) {
     (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
+static void cc__net_disable_sigpipe_best_effort(int fd) {
+#ifdef SO_NOSIGPIPE
+    int opt = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+#else
+    (void)fd;
+#endif
+}
+
 static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
     if (!cc__fiber_in_context()) return 0;
     if (flags && (*flags & CC_NET_FLAG_NONBLOCK)) return 0;
@@ -208,6 +217,7 @@ CCSocket cc_tcp_connect(const char* addr, size_t addr_len, CCNetError* out_err) 
         return sock;
     }
 
+    cc__net_disable_sigpipe_best_effort(fd);
     sock.fd = fd;
     return sock;
 }
@@ -275,6 +285,7 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
                 return sock;
             }
             cc__net_set_cloexec_best_effort(fd);
+            cc__net_disable_sigpipe_best_effort(fd);
             sock.fd = fd;
             sock.flags |= CC_NET_FLAG_NONBLOCK;
             return sock;
