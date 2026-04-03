@@ -94,6 +94,7 @@ LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)
 
 # Lowered headers output directory
 OUT_INCLUDE := ../out/include
+OUT_RUNTIME := ../out/runtime
 LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
 all: $(WRAPPER) $(CCCN_WRAPPER) $(LOWER_HEADERS_STAMP)
@@ -102,9 +103,9 @@ all: $(WRAPPER) $(CCCN_WRAPPER) $(LOWER_HEADERS_STAMP)
 .PHONY: lower-headers
 lower-headers: $(LOWER_HEADERS_STAMP)
 
-$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS)
-	@mkdir -p $(OUT_INCLUDE)
-	@$(LOWER_HEADERS_BINARY) include $(OUT_INCLUDE)
+$(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS) $(wildcard runtime/*.c runtime/*.h)
+	@mkdir -p $(OUT_INCLUDE) $(OUT_RUNTIME)
+	@$(LOWER_HEADERS_BINARY) include $(OUT_INCLUDE) --rewrite-includes runtime $(OUT_RUNTIME)
 	@touch $@
 
 .PHONY: test-build-stub
@@ -141,6 +142,8 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(LOWER_HEADERS_OBJS) $(LDLIBS)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -150,6 +153,7 @@ clean:
 	rm -f $(WRAPPER) $(REAL_BINARY) $(CCCN_WRAPPER) $(CCCN_BINARY) $(LOWER_HEADERS_BINARY)
 	rm -rf $(OBJDIR)
 	rm -rf $(OUT_INCLUDE)
+	rm -rf $(OUT_RUNTIME)
 	# Clean legacy in-tree objects from earlier layouts.
 	@rm -f $(SRCS:.c=.o)
 	@rm -f bin/cc ../out/cc/bin/cc

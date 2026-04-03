@@ -102,6 +102,7 @@ static void print_process_output_excerpt(const CCProcessOutput* out) {
  * Returns -1 if the test should be skipped entirely (like servers). */
 static int get_expected_exit_code(const char* path) {
     if (strstr(path, "recipe_tcp_echo") != NULL) return -1;       /* Server */
+    if (strstr(path, "ping_server") != NULL) return -1;           /* Server */
     if (strstr(path, "deadlock_detect_demo") != NULL) return 1;   /* Expected deadlock abort */
     if (strstr(path, "complex_deadlock") != NULL) return 1;   /* Expected deadlock abort */
     return 0;
@@ -112,6 +113,7 @@ static int get_timeout_sec(const char* path, int default_timeout_sec) {
     /* Occasionally slower under the full "all" aggregate load. */
     if (strstr(path, "join_init_race") != NULL) return 20;
     if (strstr(path, "block_combinators_stress") != NULL) return 20;
+    if (strstr(path, "cancellation_race_storm") != NULL) return 30;
     return default_timeout_sec;
 }
 
