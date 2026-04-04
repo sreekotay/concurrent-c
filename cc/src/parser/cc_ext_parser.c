@@ -784,7 +784,7 @@ static int cc_try_cc_at_stmt(void) {
         next();
 
         if (strcmp(cc_at, "arena_init") == 0) {
-            tcc_error("async: `@arena_init(...) { ... }` is retired; use `CCArena a = @create(buf, size) @destroy` or `cc_arena_init(...)` directly");
+            tcc_error("async: `@arena_init(...) { ... }` is retired; use `CCArena a = @create(buf, size) @destroy` or `cc_arena_buffer(...)` directly");
         } else {
             tcc_error("async: `@arena(...) { ... }` is retired; use `CCArena a = @create(size) @destroy`");
         }

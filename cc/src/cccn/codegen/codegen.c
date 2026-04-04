@@ -751,17 +751,13 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
             break;
             
         case CCN_STMT_ARENA:
-            /* Lower legacy @arena { body } nodes to:
-             *   { CCArena arena; cc_arena_init(&arena);
-             *     body;
-             *     cc_arena_release(&arena); }
-             */
+            /* Lower legacy @arena { body } nodes to an inert zero-initialized
+             * arena shell. The syntax is retired and rejected by the parser,
+             * but keep this branch generating valid C if reached. */
             emit_line_directive(node, out);
             fprintf(out, "{\n");
             emit_indent(indent + 1, out);
-            fprintf(out, "CCArena __cc_arena;\n");
-            emit_indent(indent + 1, out);
-            fprintf(out, "cc_arena_init(&__cc_arena, 0);\n");
+            fprintf(out, "CCArena __cc_arena = {0};\n");
             emit_indent(indent + 1, out);
             fprintf(out, "CCArena* arena = &__cc_arena;\n");  /* Provide 'arena' variable */
             if (node->as.stmt_scope.body) {
@@ -779,7 +775,7 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                 }
             }
             emit_indent(indent + 1, out);
-            fprintf(out, "cc_arena_release(&__cc_arena);\n");
+            fprintf(out, "cc_arena_destroy(&__cc_arena);\n");
             emit_indent(indent, out);
             fprintf(out, "}");
             break;

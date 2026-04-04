@@ -51,7 +51,7 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `noblock` | After `@` (in `@noblock fn`) | Mark function as provably non-blocking |
 | `closing` | In `@closing(ch)` | Auto-close channels when producer scope completes |
 
-### Special Block Forms (11)
+### Special Block Forms (12)
 
 | Form | Purpose | Example |
 |------|---------|---------|
@@ -66,6 +66,23 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@defer stmt;` | Schedule statement to run on scope exit | `@defer file.close();` |
 | `@for await (T x : ch) { }` | Async iteration (consume channel) | `@for await (int x : ch) { process(x); }` |
 | `@comptime if (cond) { }` | Compile-time conditional | `@comptime if (FEATURE_X) { }` |
+| `@errhandler(E e) { }` | Block-scoped default handler for `@err` in this block | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
+
+### Result unwrap statements (`@err`) (5)
+
+`@err` is a **statement-level** postfix on a `T!>(E)` value: it unwraps the success payload for use by the statement, or runs error handling when the result is an error. It is **not** an expression operator (it cannot appear inside `if (...)`, function arguments, etc.).
+
+| Form | Purpose | Example |
+|------|---------|---------|
+| `expr @err;` | Unwrap for side effects; errors go to the active handler | `flush() @err;` |
+| `expr @err(e) { stmts }` | Local handler binding the error payload (**does not** chain to `@errhandler` unless you delegate) | `read(fd, buf) @err(e) { note_io(e); @errhandler(e); };` |
+| `lhs =? expr @err` | Conditional assignment or initializer: if error handling runs and falls through, `lhs` may remain **uninitialized** (like C) | `bool ok =? device.read(&n) @err(e) { return cc_err(e); };` |
+| `@errhandler(E e) { stmts }` | Default handler for any `expr @err` in the enclosed block | See §2.2 |
+| `@errhandler(e);` | **Only** inside a local `expr @err(e) { ... }` block: forward this error to the nearest enclosing `@errhandler` | `log_context(e); @errhandler(e);` |
+
+**Explicit ownership and discard:** A call that returns `T!>(E)` cannot be used as a **bare** expression statement `f();`—that discards the result silently and is ill-formed. Use `T!>(E) r = f();` to keep the value, `(void)f();` to discard explicitly, or `f() @err` / `=?` forms to unwrap with a handler.
+
+**Note:** `@errhandler` routes **error propagation** from `@err`. `@defer(err)` (§3.1) schedules **cleanup** when the function returns an error—they solve different problems.
 
 ### Type Constructors (6)
 
@@ -367,7 +384,7 @@ x = await ch.recv();           // OK: can reassign the optional
 
 **Move semantics for different types:**
 
-**Results (`T!>(E)`):** Movable as whole values. To extract inner value, use `try` or pattern matching.
+**Results (`T!>(E)`):** Movable as whole values. To extract the success payload, use `try`, statement-level `@err` / `@errhandler`, or explicit checks (`cc_is_ok` / `cc_value`, UFCS, etc.).
 ```c
 int!>(Error) r = cc_ok(42);
 int!>(Error) s = r;        // copies (int and Error are copyable)
@@ -532,6 +549,7 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@defer` | Deferred cleanup statement | `@defer cleanup();` |
 | | `@for await (T x : ch)` | Async iteration loop | `@for await (int x : ch) { ... }` |
 | | `@comptime if` | Compile-time conditional | `@comptime if (feature) { }` |
+| | `@errhandler` | Block default handler for `expr @err` | `@errhandler(CCError e) { return cc_err(e); }` |
 | **Type Constructors** | `T!>(E)` | Result type (success or error) | `int!>(IoError) read(path);` |
 | | `T?` | Optional type (value or null) | `int? find(arr, key);` |
 | | `char[:]` | Slice (variable-length view) | `void process(char[:] data);` |
@@ -544,6 +562,8 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | **Expression Forms** | `await expr` | Suspend and unwrap task result | `int result = await fetch();` |
 | | `try expr` | Unwrap Result, propagate error | `File f = try open(path);` |
 | | `spawn (expr)` | Create task (must be in `@nursery`) | `spawn (handler(request));` |
+| **Result unwrap (statements)** | `expr @err` / `expr @err(e){}` | Statement-level unwrap; optional local handler | `save(p) @err(e) { log(e); };` |
+| | `lhs =? expr @err` | Conditional assign or init; `lhs` may stay uninitialized | `bool ok =? read_slice(&buf) @err;` |
 | **Block Forms** | `cc_with_deadline(d) { }` | Apply timeout/deadline to block | `cc_with_deadline(seconds(5)) { await op(); }` |
 | | `try { } catch (E e) { }` | Multi-error handling block | `try { op1(); op2(); } catch (Err e) { }` |
 | **Library Functions** | `cc_ok(value)` | Construct T!>(E) success (inferred) | `return cc_ok(42);` |
@@ -653,6 +673,7 @@ All attributes use the `@` prefix and follow consistent spacing:
 | `@lock` | `@lock (m) as g { ... }` | Space before parentheses (statement form) |
 | `@for await` | `@for await (T x : ch) { }` | Unified statement, no confusion with `for` + `await` |
 | `@defer` | `@defer cleanup();` | Single statement after |
+| `@errhandler` | `@errhandler(CCError e) { return cc_err(e); }` | Block-scoped default for `expr @err` in this block |
 | `@match` | `@match { ... }` | Channel multiplexing |
 
 ---
@@ -662,7 +683,7 @@ All attributes use the `@` prefix and follow consistent spacing:
 This section defines the fundamental value-level building blocks:
 
 - **§2.1 Optionals (`T?`)** — presence or absence
-- **§2.2 Results (`T!>(E)`)** — success or failure
+- **§2.2 Results (`T!>(E)`)** — success or failure; statement-level `@err` / `@errhandler`
 - **§2.3 Type Precedence** — how type modifiers bind
 - **§2.4 Arrays and Slices** — fixed arrays and views
 - **§2.5 Slice ABI** — provenance metadata layout
@@ -763,7 +784,7 @@ int v = cc_unwrap_or(maybe_val, 0);
 
 ### 2.2 Results (`T!>(E)`)
 
-`T!>(E)` represents **success or failure** with an explicit error value.
+`T!>(E)` represents **success or failure** with an explicit error value. For **lexically scoped** unwrap-and-handle (analogous in placement to `@defer`), use **`expr @err`** with an optional local **`@err(e) { ... }`** and/or block-level **`@errhandler(E e) { ... }`**—see **Statement-level `@err` unwrap** below. **`try expr`** and **`if @try (...)`** remain alternative forms with different control-flow implications.
 
 * **Unified constructor syntax**:
   * **Inferred (preferred inside a function returning `T!>(E)`):**
@@ -968,6 +989,43 @@ CCRes(MyData, MyError) my_function(int arg);
 ```
 
 **Why guards?** The compiler automatically generates `CC_DECL_RESULT_SPEC` calls when you use `T !>(E)` syntax in `.ccs` source files. The `#ifndef ..._DEFINED` guards prevent redefinition errors when your header also declares the same type.
+
+#### Statement-level `@err` unwrap
+
+`@err` provides **explicit**, **lexically scoped** error handling for `T!>(E)` without treating the unwrap as a nested expression. It complements (and contrasts with) `try expr` / `if @try`, which propagate or branch using additional control flow.
+
+**Syntax (statement-level only):**
+
+```
+stmt_err ::= expr @err ";"
+          |  expr @err err_handler_opt ";"
+          |  assign_target "=?" expr @err err_handler_opt ";"
+
+err_handler_opt ::= /* empty */
+                  |  "(" identifier ")" "{" statement* "}"
+```
+
+- **Bare `expr @err`:** `expr` must have type `T!>(E)` for some `T` and `E`. On success, the success payload is supplied to the statement (e.g. passed to a function, or used as the RHS of `=?`). On error, control enters error handling (see below). Using `@err` requires an **active error handler** (this is a compile-time rule).
+
+- **Local handler `expr @err(e) { ... }`:** Binds the error payload to `e` (typed as `E` from the result) for the handler block. **By default the local handler does not chain** to an enclosing `@errhandler`. To forward the same error to the enclosing default handler, the body may contain a delegation statement **`@errhandler(e);`** (see below).
+
+- **Default handler `@errhandler(E e) { ... }`:** A block statement with the same lexical role as other block-scoped `@` forms (e.g. alongside `@defer` scheduling). Any `expr @err` in the **statements/inner blocks** of that compound statement uses the innermost enclosing `@errhandler` as its default when no local `expr @err(e) { ... }` handles the error—or when the local handler delegates with `@errhandler(e);`. Multiple `@errhandler`s may nest; delegation targets the **next** enclosing handler.
+
+- **Delegation `@errhandler(e);`:** Valid only inside a local `expr @err(e_local) { ... }` handler (same block). Forwards the error value bound to `e` (or `e_local`) to the nearest enclosing `@errhandler`, which resumes execution in its body with **that** handler’s parameter binding. This is the only chaining path between a local `@err(e)` block and an outer default handler.
+
+- **Conditional assignment `lhs =? expr @err`:** Marked assignment or declaration-with-initializer. The marker `=?` means: if error handling runs and **falls through** without assigning a success value to `lhs`, then **`lhs` is not initialized** on those paths (C-like indefinite value). The compiler treats `lhs` as potentially uninitialized after the statement unless flow analysis proves otherwise. **`=?` is a temporary spelling** reserved for migration; a future language version may replace it with a shorter token once optional-related syntax is retired.
+
+**Active handler:** Every `expr @err` must appear in a scope where error handling is well-defined: either an enclosing `@errhandler`, or a syntactically attached `expr @err(e) { ... }` on the same statement. Using `@err` with no such handler is ill-formed.
+
+**No nested expression use:** `expr @err` may not appear inside a larger expression (condition of `if`, operand of `!`, argument list, etc.). This keeps value flow obvious and avoids silent “maybe uninitialized” bindings in expression contexts.
+
+**Discarded results:** A **bare** expression statement whose top-level expression is a call (or other operation) that yields `T!>(E)` with no `try`, no `@err`, no assignment, and no explicit cast discard—e.g. `f();` where `f` returns `T!>(E)`—is **ill-formed**, because it drops a result value without saying whether the error is handled, stored, or intentionally ignored. Use one of:
+
+- `T!>(E) r = f();` — retain the full result
+- `(void)f();` — explicitly discard (**both** success and error payloads), when that is intended
+- `f() @err;` or `lhs =? f() @err` — unwrap with a handler
+
+**Lowering:** Implementation is by source-to-source rewrite (together with `@defer` / return lowering where needed); the normative semantics are as given here, not tied to a particular expansion shape.
 
 ---
 
@@ -1502,17 +1560,11 @@ Arenas own memory; slices are views into arena-owned storage.
 
 ```c
 // Creation
-CCArena cc_arena_heap(size_t bytes);                        // heap-backed, growable (unbounded)
-CCArena cc_arena_heap_budget(size_t bytes, uint16_t max);   // heap-backed with block budget
-int cc_arena_init(CCArena* a, void* buf, size_t cap);       // user buffer, fixed (no growth)
-int cc_arena_init_growable(CCArena* a, void* buf, size_t cap, uint16_t block_max);
-// user buffer first; when full, overflow slabs are malloc'd (see Growable arenas)
-CCArena cc_arena_create_init(void* buf, size_t cap);         // by-value wrapper, fixed
-CCArena cc_arena_create_init_growable(void* buf, size_t cap, uint16_t block_max);
+CCArena cc_arena_heap(size_t bytes);          // heap-backed first slab; default block_max = 0
+int cc_arena_buffer(CCArena* a, void* buf, size_t cap);  // caller-provided first slab; default block_max = 1
 
 // Stack scratch + arena in one declaration (storage is name##_cc_stack_buf[nbytes])
 #define cc_arena_stack(name, nbytes)
-#define cc_arena_stack_budget(name, nbytes, block_max)
 
 // Lifecycle
 void cc_arena_free(CCArena* a);                   // free heap overflow slabs; clear handle
@@ -1534,6 +1586,11 @@ void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);   // l
 
 int cc_arena_would_fit(const CCArena* a, size_t nbytes, size_t align);  // current slab only (no grow)
 
+// Growth policy (field on CCArena; affects future growth only)
+// a->block_max = 0;  // unbounded growth
+// a->block_max = 1;  // fixed, no growth
+// a->block_max = N;  // at most N blocks total
+
 // Transfer (moves ownership of all blocks)
 CCArena cc_arena_detach(CCArena* a);              // move ownership out
 
@@ -1546,26 +1603,26 @@ size_t megabytes(size_t n);            // n * 1024 * 1024
 
 Arenas track their ownership per slab:
 - **Heap-backed root** (created with `cc_arena_heap`) owns its initial buffer; `cc_arena_free` frees the active heap block and all heap overflow slabs.
-- **User-backed initial buffer** (`cc_arena_init`, `cc_arena_init_growable`, `cc_arena_stack`, etc.) is never freed by the arena. `cc_arena_free` frees only **heap** extent buffers (overflow from growth), then clears the arena handle (`base` becomes NULL). Call `cc_arena_init*` again before reuse after `free`.
+- **User-backed initial buffer** (`cc_arena_buffer`, `cc_arena_stack`, etc.) is never freed by the arena. `cc_arena_free` frees only **heap** extent buffers (overflow from growth), then clears the arena handle (`base` becomes NULL). Call `cc_arena_buffer` again before reuse after `free`.
 - Extents in the growth chain record heap vs user ownership; freeing never calls `free` on stack or static storage.
 
 This allows uniform cleanup for heap-first arenas:
 
 ```c
 // Works for both heap and user-backed arenas
-CCArena a = cc_arena_heap(kilobytes(64));  // or cc_arena_init(&a, buf, sz)
+CCArena a = cc_arena_heap(kilobytes(64));  // or: cc_arena_buffer(&a, buf, sz)
 // ... use arena ...
 cc_arena_free(&a);  // frees heap-backed root and overflow; user root buffer untouched
 ```
 
-**Stack-first scratch (normative):** `cc_arena_stack(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized with `cc_arena_init_growable(..., block_max = 0)`. Hot allocations use the stack slab; overflow uses the same growth rules as heap arenas. Use `cc_arena_reset` to reclaim overflow and point `name.base` back at the stack buffer for repeated scopes; use `cc_arena_free` when discarding the handle (then re-init if needed).
+**Stack-first scratch (normative):** `cc_arena_stack(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer. It is equivalent to `cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); name.block_max = 0;`. Hot allocations use the stack slab; overflow uses the same growth rules as heap arenas. Use `cc_arena_reset` to reclaim overflow and point `name.base` back at the stack buffer for repeated scopes; use `cc_arena_free` when discarding the handle (then re-init if needed).
 
 **Growable arenas (normative):**
 
-Arenas created with `cc_arena_heap` are **growable by default** (`block_max = 0`, meaning unbounded). When allocation exhausts the current block, a new block is allocated; its size is at least **max**(1.5× the previous block’s capacity, space required for the **pending** allocation, 4096 bytes). The full previous block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
+Arenas grow when `block_max` allows it. `cc_arena_heap` defaults to **growable** (`block_max = 0`, unbounded). `cc_arena_buffer` defaults to **fixed** (`block_max = 1`, no growth). When allocation exhausts the current block and growth is allowed, a new block is allocated; its size is at least **max**(1.5× the previous block’s capacity, space required for the **pending** allocation, 4096 bytes). The full previous block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
 
-- `block_max = 0`: Unbounded growth (default for `cc_arena_heap` / `cc_arena_stack` / `cc_arena_init_growable(..., 0)`).
-- `block_max = 1`: Fixed, no growth allowed (default for `cc_arena_init`). `cc_arena_stack_budget(name, nbytes, 1)` is stack-only scratch.
+- `block_max = 0`: Unbounded growth (default for `cc_arena_heap`; `cc_arena_stack` sets this after buffer initialization).
+- `block_max = 1`: Fixed, no growth allowed (default for `cc_arena_buffer`).
 - `block_max = N` (N > 1): At most N blocks total (initial user or heap block counts as block 0). Growth beyond the budget returns NULL.
 
 ```c
@@ -1576,8 +1633,9 @@ for (int i = 0; i < 10000; i++) {
 }
 cc_arena_free(&a);  // frees all blocks
 
-// Fixed arena with explicit budget
-CCArena b = cc_arena_heap_budget(kilobytes(16), 4);  // at most 4 blocks
+// Heap-backed arena with explicit budget
+CCArena b = cc_arena_heap(kilobytes(16));
+b.block_max = 4;  // at most 4 blocks total
 // ... after 4 blocks are exhausted, arena_alloc returns NULL
 
 // Stack-first growable scratch (overflows to heap when needed)
@@ -1588,7 +1646,12 @@ void *p = cc_arena_alloc(&scratch, n, align);
 // Stack-backed fixed arena (no heap overflow)
 uint8_t buf[4096];
 CCArena c;
-cc_arena_init(&c, buf, sizeof(buf));  // block_max = 1, no growth
+cc_arena_buffer(&c, buf, sizeof(buf));  // block_max = 1, no growth
+
+// Caller-provided buffer that may spill to heap
+CCArena d;
+cc_arena_buffer(&d, buf, sizeof(buf));
+d.block_max = 0;  // unbounded growth beyond the initial user buffer
 ```
 
 **Rule:** `cc_arena_reset` unwinds all grown extents, frees their buffers and extent structs, and restores the root arena to its original block. After reset, the arena is back to its initial capacity with `block_idx = 0`.
@@ -1596,6 +1659,8 @@ cc_arena_init(&c, buf, sizeof(buf));  // block_max = 1, no growth
 **Rule:** `cc_arena_checkpoint` / `cc_arena_restore` are cross-block aware. A checkpoint captures `block_idx` along with the allocation offset. Restoring a checkpoint taken in an earlier block unwinds the growth chain to that block, freeing all intervening blocks.
 
 **Rule:** `cc_arena_free` walks the extent chain and frees **heap-owned** buffers only, then frees the active root buffer if it is heap-owned. User/stack/static initial buffers are never freed.
+
+**Rule:** Changing `block_max` affects only future growth attempts. It does not rewrite existing extents or change ownership of the current block.
 
 **Rule:** `cc_arena_alloc` uses atomic compare-and-swap on the bump offset and is safe to share across threads when every allocation goes through it (or equivalent synchronization).
 
@@ -1644,6 +1709,8 @@ cc_arena_free(&a);  // BUG: thread may still be using s
 * Runs on all returns, including `try` propagation.
 * LIFO order.
 * No exceptions or unwinding.
+
+**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). **`@errhandler`** defines behavior when a statement-level **`expr @err`** observes an **error**—at the unwrap site, not deferred to exit. See §2.2.
 
 ```c
 CCArena scratch = cc_arena_heap(kilobytes(64));
