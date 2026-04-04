@@ -1158,6 +1158,18 @@ static int cc__is_template_tag_start(const char* src, size_t n, size_t pos) {
     return pos < n && (cc_is_ident_start(src[pos]) || src[pos] == '_');
 }
 
+/* Odd run of '\\' immediately before '$' => that '$' is literal (`\${` -> `${` in output). */
+static int cc__is_escaped_dollar(const char* src, size_t body_s, size_t dollar_pos) {
+    if (!src || dollar_pos < body_s || src[dollar_pos] != '$') return 0;
+    size_t k = dollar_pos;
+    int bs = 0;
+    while (k > body_s && src[k - 1] == '\\') {
+        bs++;
+        k--;
+    }
+    return (bs % 2) == 1;
+}
+
 static int cc__scan_interp_body(const char* src,
                                 size_t n,
                                 size_t brace_pos,
@@ -1254,10 +1266,6 @@ static int cc__scan_template_literal(const char* src,
     if (!src || !tick_end_out || tick_pos >= n || src[tick_pos] != '`') return -1;
     while (i < n) {
         char c = src[i];
-        if (c == '\\' && i + 1 < n) {
-            i += 2;
-            continue;
-        }
         if (c == '`') {
             *tick_end_out = i;
             return 0;
@@ -1266,12 +1274,14 @@ static int cc__scan_template_literal(const char* src,
             size_t brace_pos = (size_t)-1;
             if (src[i + 1] == '{') {
                 brace_pos = i + 1;
-            } else if (cc__is_template_tag_start(src, n, i + 1)) {
-                size_t t = i + 1;
+            } else if (i + 2 < n && src[i + 1] == '~' &&
+                       cc__is_template_tag_start(src, n, i + 2)) {
+                size_t t = i + 2;
                 while (t < n && cc_is_ident_char(src[t])) t++;
                 if (t < n && src[t] == '{') brace_pos = t;
             }
-            if (brace_pos != (size_t)-1) {
+            if (brace_pos != (size_t)-1 &&
+                !cc__is_escaped_dollar(src, tick_pos + 1, i)) {
                 size_t body_end = 0;
                 if (cc__scan_interp_body(src, n, brace_pos, &body_end) != 0) return -1;
                 i = body_end + 1;
@@ -1434,25 +1444,27 @@ static int cc__rewrite_template_body(char** out,
     size_t i = body_s;
     size_t lit_start = body_s;
     while (i < body_e) {
-        if (src[i] == '\\' && i + 1 < body_e) {
-            i += 2;
-            continue;
-        }
         if (src[i] == '$' && i + 1 < body_e) {
             size_t tag_s = 0, tag_e = 0, brace_pos = 0;
             int tagged = 0;
+            int ok = 0;
             if (src[i + 1] == '{') {
                 brace_pos = i + 1;
-            } else if (cc__is_template_tag_start(src, body_e, i + 1)) {
-                size_t t = i + 1;
+                ok = 1;
+            } else if (i + 2 < body_e && src[i + 1] == '~' &&
+                       cc__is_template_tag_start(src, body_e, i + 2)) {
+                size_t t = i + 2;
                 while (t < body_e && cc_is_ident_char(src[t])) t++;
                 if (t < body_e && src[t] == '{') {
                     tagged = 1;
-                    tag_s = i + 1;
+                    tag_s = i + 2;
                     tag_e = t;
                     brace_pos = t;
+                    ok = 1;
                 }
-            } else {
+            }
+            if (ok && cc__is_escaped_dollar(src, body_s, i)) ok = 0;
+            if (!ok) {
                 i++;
                 continue;
             }

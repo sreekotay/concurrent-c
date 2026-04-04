@@ -32,13 +32,26 @@ int main(void) {
     char[:0] via_ufcs_view = via_ufcs.as_slice();
     assert(via_ufcs_view.eq_cstr("37"));
 
+    CCString lit_dollar = @string(demo_policy, `Price: $100`, arena);
+    assert(strcmp(CCString_cstr(&lit_dollar), "Price: $100") == 0);
+
+    CCString esc_brace = @string(demo_policy, `\${not_a_slot}`, arena);
+    assert(strcmp(CCString_cstr(&esc_brace), "${not_a_slot}") == 0);
+
+    CCString esc_tilde = @string(demo_policy, `\$~meta{not_a_slot}`, arena);
+    assert(strcmp(CCString_cstr(&esc_tilde), "$~meta{not_a_slot}") == 0);
+
+    int slot = 99;
+    CCString one_bs_slot = @string(demo_policy, `\\${slot}`, arena);
+    assert(strcmp(CCString_cstr(&one_bs_slot), "\\" "99") == 0);
+
     const char *name = "Ada";
-    CCString tpl = @string(demo_policy, `name=${name}; age=$meta{age}`, arena);
+    CCString tpl = @string(demo_policy, `name=${name}; age=$~meta{age}`, arena);
     assert(strcmp(CCString_cstr(&tpl), "name=Ada; age=[meta=37]") == 0);
 
     CCString multiline = @string(demo_policy, `
 name=${name}
-age=$meta{age}`, arena);
+age=$~meta{age}`, arena);
     char[:0] multiline_view = multiline.as_slice();
     assert(multiline_view.eq_cstr("\nname=Ada\nage=[meta=37]"));
 

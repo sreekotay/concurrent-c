@@ -72,11 +72,12 @@
       "patterns": [
         {
           "name": "meta.interpolation.tagged.concurrent-c",
-          "begin": "(\\$)([A-Za-z_][A-Za-z0-9_]*)(\\{)",
+          "begin": "(\\$)(\\~)([A-Za-z_][A-Za-z0-9_]*)(\\{)",
           "beginCaptures": {
             "1": { "name": "punctuation.definition.interpolation.begin.concurrent-c" },
-            "2": { "name": "entity.name.tag.concurrent-c" },
-            "3": { "name": "punctuation.section.embedded.begin.concurrent-c" }
+            "2": { "name": "punctuation.definition.tag.tilde.concurrent-c" },
+            "3": { "name": "entity.name.tag.concurrent-c" },
+            "4": { "name": "punctuation.section.embedded.begin.concurrent-c" }
           },
           "end": "\\}",
           "endCaptures": {
