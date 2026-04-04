@@ -9,7 +9,7 @@
     char buf[256];
     int out = 0;
     CCArena arena_storage = {0};
-    if (cc_arena_init(&arena_storage, buf, sizeof(buf)) != 0) abort();
+    if (cc_arena_buffer(&arena_storage, buf, sizeof(buf)) != 0) abort();
     if (1) {
         CCArena* arena = &arena_storage;
         int* slot = cc_arena_alloc_T(int, arena);

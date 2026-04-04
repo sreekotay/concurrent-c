@@ -1,1 +1,1 @@
-error: async: `@arena_init(...) { ... }` is retired; use `CCArena a = @create(buf, size) @destroy` or `cc_arena_init(...)` directly
+error: async: `@arena_init(...) { ... }` is retired; use `CCArena a = @create(buf, size) @destroy` or `cc_arena_buffer(...)` directly

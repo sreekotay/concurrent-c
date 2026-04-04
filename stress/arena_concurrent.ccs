@@ -45,7 +45,7 @@ int test_concurrent_alloc(void) {
     printf("  concurrent_alloc: %d workers x %d allocs\n", NUM_WORKERS, ALLOCS_PER_WORKER);
 
     /* Initialize arena */
-    int err = cc_arena_init(&g_arena, g_arena_buffer, ARENA_SIZE);
+    int err = cc_arena_buffer(&g_arena, g_arena_buffer, ARENA_SIZE);
     if (err != 0) {
         printf("ERROR: arena init failed\n");
         return 1;

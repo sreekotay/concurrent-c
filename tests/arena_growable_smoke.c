@@ -77,7 +77,8 @@ int main(void) {
 
     // --- Test 4: Budget exhaustion ---
     {
-        CCArena a = cc_arena_heap_budget(64, 3);  // at most 3 blocks
+        CCArena a = cc_arena_heap(64);
+        a.block_max = 3;  // at most 3 blocks
         if (!a.base) return 4;
         if (a.block_max != 3) { printf("FAIL: expected block_max=3\n"); return 4; }
 
@@ -100,8 +101,8 @@ int main(void) {
     {
         uint8_t buf[128];
         CCArena a;
-        cc_arena_init(&a, buf, sizeof(buf));
-        if (a.block_max != 1) { printf("FAIL: init should be fixed\n"); return 5; }
+        cc_arena_buffer(&a, buf, sizeof(buf));
+        if (a.block_max != 1) { printf("FAIL: buffer should be fixed\n"); return 5; }
 
         // Fill it up
         int *p = cc_arena_alloc_T_count(int, &a, 30);  // 120 bytes
@@ -112,6 +113,54 @@ int main(void) {
         if (q != NULL) { printf("FAIL: fixed arena should not grow\n"); return 5; }
         printf("  fixed: correctly rejected overflow OK\n");
         // No cc_arena_free needed (user-backed)
+    }
+
+    // --- Test 6: Stack (user) first block, overflow to heap ---
+    {
+        uint8_t buf[64];
+        CCArena a;
+        if (cc_arena_buffer(&a, buf, sizeof(buf)) != 0) {
+            printf("FAIL: buffer init\n");
+            return 6;
+        }
+        a.block_max = 0;
+        if (a.block_max != 0) {
+            printf("FAIL: expected unbounded block_max\n");
+            return 6;
+        }
+        if (a._flags & CC_ARENA_FLAG_HEAP_OWNED) {
+            printf("FAIL: initial buffer should not be heap-owned\n");
+            return 6;
+        }
+
+        void *p = cc_arena_alloc(&a, 128, 8);
+        if (!p) {
+            printf("FAIL: stack-first arena should grow to heap\n");
+            return 6;
+        }
+        if (a.block_idx == 0) {
+            printf("FAIL: expected growth off stack block\n");
+            return 6;
+        }
+        memset(p, 0xab, 128);
+
+        cc_arena_reset(&a);
+        if (a.base != buf || a.block_idx != 0 || a.prev != NULL) {
+            printf("FAIL: reset should restore stack block\n");
+            return 6;
+        }
+
+        void *q = cc_arena_alloc(&a, 128, 8);
+        if (!q) {
+            printf("FAIL: alloc after reset\n");
+            return 6;
+        }
+        cc_arena_free(&a);
+        if (a.base != NULL) {
+            printf("FAIL: free should clear root\n");
+            return 6;
+        }
+        printf("  stack-first + heap overflow + reset/free OK\n");
     }
 
     printf("arena_growable_smoke ok\n");

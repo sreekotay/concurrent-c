@@ -64,7 +64,7 @@ int main(void) {
             __cc_nursery152->spawn(() => { 
                 CCArena local_arena;
                 void* local_buf = malloc(FIBER_ARENA_SIZE);
-                cc_arena_init(&local_arena, local_buf, FIBER_ARENA_SIZE);
+                cc_arena_buffer(&local_arena, local_buf, FIBER_ARENA_SIZE);
                 arena_worker(&local_arena); 
                 free(local_buf);
             });

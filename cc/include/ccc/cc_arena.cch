@@ -52,10 +52,12 @@ static inline size_t cc__align_up(size_t value, size_t align) {
     return (value + (a - 1)) & ~(a - 1);
 }
 
-// Initialize an arena with caller-provided backing storage.
+// Initialize an arena from caller-provided backing storage.
+// Default policy is fixed (block_max = 1); callers may set arena->block_max after
+// initialization to 0 (unbounded) or N>1 (max blocks total).
 // Returns 0 on success, non-zero on invalid parameters.
-// Note: This creates a non-owning, fixed arena (block_max=1); cc_arena_free() will be a no-op.
-static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
+// The initial buffer is never owned by the arena; only malloc'd overflow blocks are.
+static inline int cc_arena_buffer(CCArena *arena, void *buffer, size_t capacity) {
     if (!arena || !buffer || capacity == 0) {
         return -1;
     }
@@ -63,9 +65,9 @@ static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
     arena->capacity = capacity;
     CC_ATOMIC_STORE(&arena->offset, 0);
     arena->provenance = CC_ATOMIC_FETCH_ADD(&cc_arena_prov_counter, 1);
-    arena->_flags = 0;  // not heap-owned
+    arena->_flags = 0;  // caller owns initial storage
     arena->block_idx = 0;
-    arena->block_max = 1;  // fixed: no growth allowed
+    arena->block_max = 1;  // fixed by default
     arena->prev = NULL;
     return 0;
 }
@@ -73,6 +75,8 @@ static inline int cc_arena_init(CCArena *arena, void *buffer, size_t capacity) {
 // Thread-local (non-atomic) fast path for arenas owned by exactly one fiber/thread.
 // Uses plain reads/writes on the offset field — safe only when no other thread
 // touches this arena concurrently. ~2-3x faster than cc_arena_alloc for per-fiber arenas.
+// Current slab only: if this block is full, returns NULL even when block_max allows growth.
+// For the same fast path then heap spill, use cc_arena_alloc_local_grow.
 static inline void *cc_arena_alloc_local(CCArena *arena, size_t size, size_t align) {
     if (!arena || !arena->base || size == 0) return NULL;
     size_t off = *(size_t *)&arena->offset;  // non-atomic read (single-owner fast path)
@@ -104,15 +108,23 @@ static inline void *cc__arena_alloc_fast(CCArena *arena, size_t size, size_t ali
 }
 
 // Internal: grow the arena by pushing the current block into an extent
-// and allocating a new, larger buffer (1.5x). Returns 0 on success, -1 on failure.
-static inline int cc__arena_grow(CCArena *arena) {
+// and allocating a new buffer at least max(1.5× old, min_cap, 4096).
+// min_cap must fit one allocation of (size, align) in a fresh block (offset 0).
+static inline int cc__arena_grow(CCArena *arena, size_t size, size_t align) {
     // Check budget
     if (arena->block_max > 0 && arena->block_idx + 1 >= arena->block_max) {
         return -1;  // budget exhausted
     }
 
-    // Compute new capacity (1.5x, minimum 4096)
-    size_t new_cap = arena->capacity + arena->capacity / 2;
+    size_t aligned = cc__align_up(0, align);
+    if (size > SIZE_MAX - aligned) return -1;
+    size_t min_cap = aligned + size;
+
+    size_t old_cap = arena->capacity;
+    size_t bumped = old_cap + old_cap / 2;
+    if (bumped < old_cap) bumped = SIZE_MAX;
+    size_t new_cap = bumped;
+    if (new_cap < min_cap) new_cap = min_cap;
     if (new_cap < 4096) new_cap = 4096;
 
     // Allocate extent struct to hold the current block's state
@@ -164,15 +176,21 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
         return NULL;  // fixed arena, no growth
     }
 
-    // Ensure new block is large enough for this allocation
-    while (cc__arena_grow(arena) == 0) {
+    // Slow path: grow once to fit this request (retry loop for races / OOM retry)
+    while (cc__arena_grow(arena, size, align) == 0) {
         ptr = cc__arena_alloc_fast(arena, size, align);
         if (ptr) return ptr;
-        // Extremely rare: new block still too small (huge single alloc).
-        // Loop will grow again or hit budget.
     }
 
     return NULL;  // budget exhausted or OOM
+}
+
+// Same ownership rules as cc_arena_alloc_local: one exclusive thread/fiber only.
+// Tries cc_arena_alloc_local first; on exhaustion, calls cc_arena_alloc (atomics + grow).
+static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_t align) {
+    void *p = cc_arena_alloc_local(arena, size, align);
+    if (p) return p;
+    return cc_arena_alloc(arena, size, align);
 }
 
 #define cc_arena_alloc_T(T, arena) \
@@ -187,7 +205,7 @@ static inline void *cc_arena_alloc(CCArena *arena, size_t size, size_t align) {
 static inline CCArena cc_arena_heap(size_t bytes) {
     CCArena a = {0};
     void* buf = malloc(bytes);
-    if (buf && cc_arena_init(&a, buf, bytes) != 0) {
+    if (buf && cc_arena_buffer(&a, buf, bytes) != 0) {
         free(buf);
         a.base = NULL;
     } else if (buf) {
@@ -202,31 +220,37 @@ static inline CCArena cc_arena_create(size_t bytes) {
     return cc_arena_heap(bytes);
 }
 
-static inline CCArena cc_arena_create_init(void *buffer, size_t capacity) {
+static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity) {
     CCArena a = {0};
     if (!buffer || capacity == 0) return a;
-    if (cc_arena_init(&a, buffer, capacity) != 0) {
+    if (cc_arena_buffer(&a, buffer, capacity) != 0) {
         CCArena empty = {0};
         return empty;
     }
     return a;
 }
 
-// Allocate a growable arena with an explicit block budget.
-static inline CCArena cc_arena_heap_budget(size_t bytes, uint16_t budget) {
-    CCArena a = cc_arena_heap(bytes);
-    a.block_max = budget;
-    return a;
-}
+// Declare `uint8_t name##_cc_stack_buf[nbytes]`, `CCArena name`, and init with
+// cc_arena_buffer(...) so stack is used first and heap overflows later.
+#define cc_arena_stack(name, nbytes) \
+    uint8_t name##_cc_stack_buf[nbytes]; \
+    CCArena name; \
+    (void)cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); \
+    (name).block_max = 0
 
-// Free arena and all grown extents. Frees heap-backed buffers; no-op for user-backed.
+// End-of-life for the arena handle. Clears a->base to NULL; call cc_arena_buffer again
+// before reuse. For stack-first arenas (cc_arena_stack / caller-provided buffer), this frees
+// heap overflow slabs only — never the stack buffer — but you must not touch the arena
+// until re-inited. Prefer cc_arena_reset for repeated scratch use on the same stack slice.
 static inline void cc_arena_free(CCArena* a) {
     if (!a) return;
 
     CCArena *cur = a->prev;
     while (cur) {
         CCArena *next = cur->prev;
-        if (cur->base) free(cur->base);
+        if (cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
+            free(cur->base);
+        }
         free(cur);
         cur = next;
     }
@@ -275,7 +299,10 @@ static inline CCArena cc_arena_detach(CCArena* a) {
     return taken;
 }
 
-// Reset arena to empty. Frees all grown extents and restores the original block.
+// Clear allocations and reclaim heap overflow blocks; restores the initial user buffer
+// as the active slab (stack-first arenas return to their stack storage). Safe to call
+// in a loop for request-scoped scratch; provenance bumps so slices from before reset
+// are stale. Does not free the arena struct or the original stack/user buffer.
 static inline void cc_arena_reset(CCArena *arena) {
     if (!arena) return;
 
@@ -300,7 +327,7 @@ static inline void cc_arena_reset(CCArena *arena) {
         CCArena *cur = arena->prev;
         while (cur) {
             CCArena *next = cur->prev;
-            if (cur != tail && cur->base) {
+            if (cur != tail && cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
                 free(cur->base);
             }
             free(cur);
@@ -372,7 +399,9 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
             }
             // This extent is newer than checkpoint, free it
             CCArena *next = cur->prev;
-            if (cur->base) free(cur->base);
+            if (cur->base && (cur->_flags & CC_ARENA_FLAG_HEAP_OWNED)) {
+                free(cur->base);
+            }
             free(cur);
             cur = next;
         }
@@ -393,6 +422,18 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     if (off > arena->capacity) off = arena->capacity;
     CC_ATOMIC_STORE(&arena->offset, off);
     arena->provenance = checkpoint.provenance;
+}
+
+// True (non-zero) iff the current slab can satisfy this alloc without growing
+// (same condition as cc__arena_alloc_fast). Does not observe future growth; use
+// cc_arena_remaining for raw tail space ignoring alignment.
+static inline int cc_arena_would_fit(const CCArena *arena, size_t size, size_t align) {
+    if (!arena || !arena->base || size == 0) return 0;
+    size_t off = CC_ATOMIC_LOAD(&arena->offset);
+    size_t aligned = cc__align_up(off, align);
+    if (aligned > arena->capacity) return 0;
+    if (size > arena->capacity - aligned) return 0;
+    return 1;
 }
 
 // Convenience: compute how many bytes remain.
@@ -469,7 +510,7 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCArena", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_init"),
+        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_buffer"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
         .ufcs = cc_arena_lower_c,
     });
@@ -481,6 +522,11 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
     ((T*)cc_arena_alloc_local((arena), (count) * sizeof(T), _Alignof(T)))
 
 #define cc_arena_alloc_T_local(T, arena) cc_arena_alloc_T_count_local(T, arena, 1)
+
+#define cc_arena_alloc_T_count_local_grow(T, arena, count) \
+    ((T*)cc_arena_alloc_local_grow((arena), (count) * sizeof(T), _Alignof(T)))
+
+#define cc_arena_alloc_T_local_grow(T, arena) cc_arena_alloc_T_count_local_grow(T, arena, 1)
 
 #endif // CC_ARENA_H
 
