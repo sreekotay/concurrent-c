@@ -3,12 +3,12 @@
 #include <string.h>
 
 int main(void) {
-    // --- cc_arena_stack: declares storage + arena, stack-first growable ---
+    // --- CC_ARENA_STACK: declares storage + arena, stack-first growable ---
     {
-        cc_arena_stack(a, 64);
+        CC_ARENA_STACK(a, 64);
         uint8_t *stack_buf = a.base;
         if (!stack_buf) {
-            printf("FAIL: cc_arena_stack init\n");
+            printf("FAIL: CC_ARENA_STACK init\n");
             return 1;
         }
         if (a.block_max != 0) {
@@ -47,12 +47,12 @@ int main(void) {
             printf("FAIL: free clears arena handle\n");
             return 1;
         }
-        printf("  cc_arena_stack: stack slab, heap overflow, reset, free OK\n");
+        printf("  CC_ARENA_STACK: stack slab, heap overflow, reset, free OK\n");
     }
 
-    // --- cc_arena_stack + block_max=1: stack-only, no overflow) ---
+    // --- CC_ARENA_STACK + block_max=1: stack-only, no overflow) ---
     {
-        cc_arena_stack(fix, 64);
+        CC_ARENA_STACK(fix, 64);
         fix.block_max = 1;
         if (!fix.base || fix.block_max != 1) {
             printf("FAIL: stack fixed init\n");
@@ -66,12 +66,12 @@ int main(void) {
             printf("FAIL: block_max=1 must not grow to heap\n");
             return 2;
         }
-        printf("  cc_arena_stack + block_max=1 OK\n");
+        printf("  CC_ARENA_STACK + block_max=1 OK\n");
     }
 
-    // --- cc_arena_stack + block_max=2: 2 slabs then allocation fails ---
+    // --- CC_ARENA_STACK + block_max=2: 2 slabs then allocation fails ---
     {
-        cc_arena_stack(b, 32);
+        CC_ARENA_STACK(b, 32);
         b.block_max = 2;
         if (!b.base || b.block_max != 2) {
             printf("FAIL: stack two-block init\n");
@@ -99,12 +99,12 @@ int main(void) {
         }
         cc_arena_reset(&b);
         cc_arena_free(&b);
-        printf("  cc_arena_stack + block_max=2 OK\n");
+        printf("  CC_ARENA_STACK + block_max=2 OK\n");
     }
 
     // --- cc_arena_would_fit + cc_arena_alloc_local_grow on stack arena ---
     {
-        cc_arena_stack(c, 64);
+        CC_ARENA_STACK(c, 64);
         if (!cc_arena_would_fit(&c, 32, 8)) {
             printf("FAIL: would_fit empty slab\n");
             return 4;
@@ -122,7 +122,7 @@ int main(void) {
             return 4;
         }
         cc_arena_free(&c);
-        printf("  would_fit + local_grow on cc_arena_stack OK\n");
+        printf("  would_fit + local_grow on CC_ARENA_STACK OK\n");
     }
 
     printf("arena_stack_smoke ok\n");
