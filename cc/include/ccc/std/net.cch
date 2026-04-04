@@ -12,11 +12,14 @@
 #include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_ufcs.cch>
 #include "io.cch"
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 /* ============================================================================
  * Error Types
@@ -43,6 +46,17 @@ typedef enum CCNetError {
  * Socket Types
  * ============================================================================ */
 
+typedef struct CCSeqNotifier {
+    _Atomic uint64_t seq;
+    pthread_mutex_t mu;
+    void* waiter_fiber;
+    uint64_t waiter_ticket;
+    uint64_t waiter_seen_seq;
+    void* waiter_group;
+    size_t waiter_index;
+    int waiter_armed;
+} CCSeqNotifier;
+
 /* Opaque socket handle */
 typedef struct CCSocket {
     int fd;
@@ -68,6 +82,20 @@ typedef struct CCUdpPacket {
     CCSlice data;
     CCSlice from_addr;
 } CCUdpPacket;
+
+#ifdef CC_PARSER_MODE
+/* Parser-mode UFCS stubs for raw socket/listener method syntax before lowering. */
+static CCSlice read();
+static size_t read_into();
+static size_t try_read_into();
+static CCResult_bool_CCIoError readable();
+static size_t write();
+static void shutdown();
+static void close();
+static CCSlice peer_addr();
+static CCSlice local_addr();
+static CCSocket accept();
+#endif
 
 /* IP address (v4 or v6) */
 typedef struct CCIpAddr {
@@ -123,6 +151,16 @@ size_t cc_socket_try_read_into(CCSocket* sock,
                                size_t max_bytes,
                                CCNetError* out_err,
                                bool* out_would_block);
+
+void cc_seq_notifier_init(CCSeqNotifier* notifier);
+uint64_t cc_seq_notifier_current(CCSeqNotifier* notifier);
+uint64_t cc_seq_notifier_publish(CCSeqNotifier* notifier);
+
+/* Wait for connection progress.
+ * Ok(true) means the socket side won and the caller should try reading.
+ * Ok(false) means notifier-side progress won, so there is nothing new to read.
+ * Err(e) means setup/wait failed. */
+CCResult_bool_CCIoError cc_socket_readable(CCSocket* sock, CCSeqNotifier* notifier);
 
 /* Async read */
 /* @async CCSlice cc_socket_read_async(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
@@ -182,5 +220,52 @@ CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena);
 
 /* Parse string to IP address */
 CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
+
+static inline CCSlice cc_socket_lower_c(CCSlice recv_type,
+                                        CCSlice method,
+                                        CCSlice mode,
+                                        CCSliceArray argv,
+                                        CCSliceArray arg_types,
+                                        CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    return cc_ufcs_concat2(arena,
+                           cc_slice_from_buffer((void*)"cc_socket_", sizeof("cc_socket_") - 1),
+                           method);
+}
+
+static inline CCSlice cc_listener_lower_c(CCSlice recv_type,
+                                          CCSlice method,
+                                          CCSlice mode,
+                                          CCSliceArray argv,
+                                          CCSliceArray arg_types,
+                                          CCArena* arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    return cc_ufcs_concat2(arena,
+                           cc_slice_from_buffer((void*)"cc_listener_", sizeof("cc_listener_") - 1),
+                           method);
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCSocket", (CCTypeHooks){
+        .ufcs = cc_socket_lower_c,
+    });
+    (void)cc_type_register("CCSocket*", (CCTypeHooks){
+        .ufcs = cc_socket_lower_c,
+    });
+    (void)cc_type_register("CCListener", (CCTypeHooks){
+        .ufcs = cc_listener_lower_c,
+    });
+    (void)cc_type_register("CCListener*", (CCTypeHooks){
+        .ufcs = cc_listener_lower_c,
+    });
+}
+#endif
 
 #endif /* CC_STD_NET_H */

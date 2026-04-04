@@ -37,17 +37,6 @@ typedef enum CCSocketOrSeqWaitKind {
     CC_SOCKET_OR_SEQ_WAIT_SEQ = 2,
 } CCSocketOrSeqWaitKind;
 
-typedef struct CCSeqNotifier {
-    _Atomic uint64_t seq;
-    pthread_mutex_t mu;
-    void* waiter_fiber;
-    uint64_t waiter_ticket;
-    uint64_t waiter_seen_seq;
-    void* waiter_group;
-    size_t waiter_index;
-    int waiter_armed;
-} CCSeqNotifier;
-
 typedef struct cc__seq_wait_ctx {
     CCSeqNotifier* notifier;
     cc__wait_select_group* group;
@@ -103,6 +92,15 @@ static CCNetError errno_to_net_error(int err) {
     }
 }
 
+static CCIoError cc__net_progress_io_error(CCNetError err) {
+    switch (err) {
+        case CC_NET_CONNECTION_CLOSED:
+            return cc_io_error_os(CC_IO_CONNECTION_CLOSED, (int)err);
+        default:
+            return cc_io_error_os(CC_IO_OTHER, (int)err);
+    }
+}
+
 static int cc__net_set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return errno;
@@ -134,8 +132,7 @@ static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
     return err;
 }
 
-void cc_seq_notifier_init(void* notifier_ptr) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+void cc_seq_notifier_init(CCSeqNotifier* notifier) {
     if (!notifier) return;
     atomic_store_explicit(&notifier->seq, 0, memory_order_relaxed);
     pthread_mutex_init(&notifier->mu, NULL);
@@ -147,14 +144,12 @@ void cc_seq_notifier_init(void* notifier_ptr) {
     notifier->waiter_armed = 0;
 }
 
-uint64_t cc_seq_notifier_current(void* notifier_ptr) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+uint64_t cc_seq_notifier_current(CCSeqNotifier* notifier) {
     if (!notifier) return 0;
     return atomic_load_explicit(&notifier->seq, memory_order_acquire);
 }
 
-static int cc__seq_notifier_signal_waiter(void* notifier_ptr) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+static int cc__seq_notifier_signal_waiter(CCSeqNotifier* notifier) {
     if (!notifier) return 0;
     void* fiber = NULL;
     cc__wait_select_group* group = NULL;
@@ -186,21 +181,19 @@ static int cc__seq_notifier_signal_waiter(void* notifier_ptr) {
     return 0;
 }
 
-uint64_t cc_seq_notifier_publish(void* notifier_ptr) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+uint64_t cc_seq_notifier_publish(CCSeqNotifier* notifier) {
     if (!notifier) return 0;
     uint64_t seq = atomic_fetch_add_explicit(&notifier->seq, 1, memory_order_release) + 1;
     (void)cc__seq_notifier_signal_waiter(notifier);
     return seq;
 }
 
-static int cc__seq_notifier_arm(void* notifier_ptr,
+static int cc__seq_notifier_arm(CCSeqNotifier* notifier,
                                 void* fiber,
                                 uint64_t wait_ticket,
                                 uint64_t seen_seq,
                                 cc__wait_select_group* group,
                                 size_t select_index) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
     if (!notifier || !group) return 0;
 
     pthread_mutex_lock(&notifier->mu);
@@ -233,8 +226,7 @@ static int cc__seq_notifier_arm(void* notifier_ptr,
     return 0;
 }
 
-static void cc__seq_notifier_disarm(void* notifier_ptr, uint64_t wait_ticket) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+static void cc__seq_notifier_disarm(CCSeqNotifier* notifier, uint64_t wait_ticket) {
     if (!notifier) return;
     pthread_mutex_lock(&notifier->mu);
     if (notifier->waiter_armed && notifier->waiter_ticket == wait_ticket) {
@@ -306,11 +298,10 @@ static const cc_sched_waitable_ops cc__net_io_wait_ops = {
     .unpublish = cc__net_io_wait_unpublish,
 };
 
-int cc_socket_wait_readable_or_seq(CCSocket* sock,
-                                   void* notifier_ptr,
-                                   uint64_t seen_seq,
-                                   CCNetError* out_err) {
-    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+static int cc__socket_wait_readable_or_seq(CCSocket* sock,
+                                           CCSeqNotifier* notifier,
+                                           uint64_t seen_seq,
+                                           CCNetError* out_err) {
     if (out_err) *out_err = CC_NET_OK;
     if (!sock || sock->fd < 0 || !notifier) {
         if (out_err) *out_err = CC_NET_OTHER;
@@ -374,6 +365,19 @@ int cc_socket_wait_readable_or_seq(CCSocket* sock,
         return CC_SOCKET_OR_SEQ_WAIT_SEQ;
     }
     return CC_SOCKET_OR_SEQ_WAIT_SOCKET;
+}
+
+CCResult_bool_CCIoError cc_socket_readable(CCSocket* sock, CCSeqNotifier* notifier) {
+    uint64_t seen_seq = cc_seq_notifier_current(notifier);
+    CCNetError err = CC_NET_OK;
+    int wait_kind = cc__socket_wait_readable_or_seq(sock, notifier, seen_seq, &err);
+    if (wait_kind == CC_SOCKET_OR_SEQ_WAIT_SOCKET) {
+        return CCRes_ok(bool, CCIoError, true);
+    }
+    if (wait_kind == CC_SOCKET_OR_SEQ_WAIT_SEQ) {
+        return CCRes_ok(bool, CCIoError, false);
+    }
+    return CCRes_err(bool, CCIoError, cc__net_progress_io_error(err));
 }
 
 static int cc__net_trace_read_enabled(void) {
