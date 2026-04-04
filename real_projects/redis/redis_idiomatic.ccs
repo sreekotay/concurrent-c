@@ -37,31 +37,6 @@
 
 typedef struct RedisEntry RedisEntry;
 
-typedef enum CCSocketOrSeqWaitKind {
-    CC_SOCKET_OR_SEQ_WAIT_ERROR = 0,
-    CC_SOCKET_OR_SEQ_WAIT_SOCKET = 1,
-    CC_SOCKET_OR_SEQ_WAIT_SEQ = 2,
-} CCSocketOrSeqWaitKind;
-
-typedef struct CCSeqNotifier {
-    _Atomic uint64_t seq;
-    pthread_mutex_t mu;
-    void* waiter_fiber;
-    uint64_t waiter_ticket;
-    uint64_t waiter_seen_seq;
-    void* waiter_group;
-    size_t waiter_index;
-    int waiter_armed;
-} CCSeqNotifier;
-
-void cc_seq_notifier_init(void* notifier);
-uint64_t cc_seq_notifier_current(void* notifier);
-uint64_t cc_seq_notifier_publish(void* notifier);
-int cc_socket_wait_readable_or_seq(CCSocket* sock,
-                                   void* notifier,
-                                   uint64_t seen_seq,
-                                   CCNetError* out_err);
-
 typedef struct RespReader {
     char* data;
     size_t start;
@@ -272,7 +247,7 @@ static bool !>(CCError) rr_fill(RespReader* r, CCSocket* sock, CCArena* read_are
     size_t avail = r->cap - r->end;
     size_t max_bytes = READ_CHUNK;
     if (max_bytes > avail) max_bytes = avail;
-    size_t n = cc_socket_read_into(sock, r->data + r->end, max_bytes, &err);
+    size_t n = sock->read_into(r->data + r->end, max_bytes, &err);
     if (err != CC_NET_OK) return cc_err(neterr(err, "socket read failed"));
     if (n == 0) return cc_err(mkerr(CC_ERR_CLOSED, "connection closed"));
     r->end += n;
@@ -292,7 +267,7 @@ static int rr_try_fill(RespReader* r, CCSocket* sock, CCArena* read_arena, CCErr
     size_t avail = r->cap - r->end;
     size_t max_bytes = READ_CHUNK;
     if (max_bytes > avail) max_bytes = avail;
-    size_t n = cc_socket_try_read_into(sock, r->data + r->end, max_bytes, &net_err, &would_block);
+    size_t n = sock->try_read_into(r->data + r->end, max_bytes, &net_err, &would_block);
     if (would_block) return 0;
     if (net_err != CC_NET_OK) {
         *err = neterr(net_err, "socket read failed");
@@ -816,7 +791,7 @@ static bool write_all(CCSocket* sock, CCSlice data) {
     CCNetError err = CC_NET_OK;
     size_t off = 0;
     while (off < data.len) {
-        size_t n = cc_socket_write(sock, (const char*)data.ptr + off, data.len - off, &err);
+        size_t n = sock->write((const char*)data.ptr + off, data.len - off, &err);
         if (err != CC_NET_OK || n == 0) return false;
         off += n;
     }
@@ -1092,11 +1067,6 @@ static int reply_outbox_has_data(RedisReplyOutbox* outbox) {
     return head != tail;
 }
 
-static uint64_t reply_outbox_notify_seq(RedisReplyOutbox* outbox) {
-    if (!outbox) return 0;
-    return cc_seq_notifier_current(&outbox->notifier);
-}
-
 static void reply_outbox_close(RedisReplyOutbox* outbox) {
     if (!outbox) return;
     if (atomic_exchange_explicit(&outbox->closed, 1, memory_order_acq_rel)) return;
@@ -1204,13 +1174,13 @@ static void handle_client(CCSocket client,
                           uint64_t conn_id) {
     CCArena read_arena = @create(kilobytes(8)) @destroy;
     if (!read_arena.base) {
-        cc_socket_close(&client);
+        client.close();
         return;
     }
 
     RedisConn* conn = redis_conn_create(conn_id);
     if (!conn) {
-        cc_socket_close(&client);
+        client.close();
         return;
     }
     @defer redis_conn_drop(conn);
@@ -1267,28 +1237,24 @@ static void handle_client(CCSocket client,
         }
 
         if (conn->inflight > 0) {
-            uint64_t seen_notify_seq = reply_outbox_notify_seq(conn->outbox);
             if (reply_outbox_has_data(conn->outbox)) continue;
 
-            CCNetError wait_err = CC_NET_OK;
-            CCSocketOrSeqWaitKind wait_kind =
-                cc_socket_wait_readable_or_seq(&client, &conn->outbox->notifier, seen_notify_seq, &wait_err);
-            if (wait_kind == CC_SOCKET_OR_SEQ_WAIT_SEQ) {
+            bool !>(CCIoError) wait_res = client.readable(&conn->outbox->notifier);
+            if (wait_res.is_err()) {
+                break;
+            }
+            if (!wait_res.value()) {
                 continue;
             }
-            if (wait_kind == CC_SOCKET_OR_SEQ_WAIT_ERROR) {
-                break;
+
+            CCError fill_err = {0};
+            int fill_rc = rr_try_fill(&reader, &client, &read_arena, &fill_err);
+            if (fill_rc > 0) continue;
+            if (fill_rc == 0) continue;
+            if (fill_err.kind != CC_ERR_CLOSED) {
+                (void)write_reply_now(&client, conn, err_reply(fill_err));
             }
-            if (wait_kind == CC_SOCKET_OR_SEQ_WAIT_SOCKET) {
-                CCError fill_err = {0};
-                int fill_rc = rr_try_fill(&reader, &client, &read_arena, &fill_err);
-                if (fill_rc > 0) continue;
-                if (fill_rc == 0) continue;
-                if (fill_err.kind != CC_ERR_CLOSED) {
-                    (void)write_reply_now(&client, conn, err_reply(fill_err));
-                }
-                break;
-            }
+            break;
         }
 
         bool !>(CCError) fill_res = rr_fill(&reader, &client, &read_arena);
@@ -1303,7 +1269,7 @@ static void handle_client(CCSocket client,
 
 conn_done:
     reply_outbox_close(conn->outbox);
-    cc_socket_close(&client);
+    client.close();
 }
 
 int main(int argc, char** argv) {
@@ -1322,7 +1288,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "listen error: %d\n", err);
         return 1;
     }
-    @defer cc_listener_close(&ln);
+    @defer ln.close();
 
     RedisConn*[~REQUEST_CHAN_CAP N:1 >] owner_tx;
     RedisConn*[~REQUEST_CHAN_CAP N:1 <] owner_rx;
@@ -1348,7 +1314,7 @@ int main(int argc, char** argv) {
             uint64_t next_conn_id = 1;
             while (true) {
                 CCNetError aerr = CC_NET_OK;
-                CCSocket client = cc_listener_accept(ln_ptr, &aerr);
+                CCSocket client = ln_ptr->accept(&aerr);
                 if (aerr != CC_NET_OK) {
                     fprintf(stderr, "accept error: %d\n", aerr);
                     break;
