@@ -261,6 +261,7 @@ CCString* CCString_clear(CCString *str);
 CCSlice CCString_as_slice(const CCString *str);
 #define cc_string_as_slice CCString_as_slice
 const char *CCString_cstr(CCString *str);
+/* @string(policy, `...`, a): tag is empty for ${expr}; $~name{expr} passes tag "name". */
 typedef CCSlice (*CCStringPolicy)(CCArena *arena, CCSlice tag, CCSlice value);
 static inline size_t CCString_len(const CCString *str) {
     return str ? str->len : 0;
