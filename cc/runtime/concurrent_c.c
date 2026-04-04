@@ -24,6 +24,7 @@
 #include "arena_state.c"
 #include "io_wait.c"
 #include "net.c"
+#include "socket.c"
 #include "dir.c"
 #include "process.c"
 

@@ -19,7 +19,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <pthread.h>
 
 /* ============================================================================
  * Error Types
@@ -46,23 +45,20 @@ typedef enum CCNetError {
  * Socket Types
  * ============================================================================ */
 
-typedef struct CCSeqNotifier {
-    _Atomic uint64_t seq;
-    pthread_mutex_t mu;
-    void* waiter_fiber;
-    uint64_t waiter_ticket;
-    uint64_t waiter_seen_seq;
-    void* waiter_group;
-    size_t waiter_index;
-    int waiter_armed;
-} CCSeqNotifier;
-
 /* Opaque socket handle */
 typedef struct CCSocket {
     int fd;
     uint8_t flags;  /* Internal: closed, etc. */
     void* watcher;  /* Internal runtime-owned I/O watcher */
 } CCSocket;
+
+/* Socket-bound readiness signal. */
+#define CC_SOCKET_SIGNAL_STORAGE_SIZE 128
+typedef union CCSocketSignal {
+    long double __cc_align_ld;
+    void* __cc_align_ptr;
+    unsigned char __cc_storage[CC_SOCKET_SIGNAL_STORAGE_SIZE];
+} CCSocketSignal;
 
 /* TCP listener */
 typedef struct CCListener {
@@ -85,10 +81,10 @@ typedef struct CCUdpPacket {
 
 #ifdef CC_PARSER_MODE
 /* Parser-mode UFCS stubs for raw socket/listener method syntax before lowering. */
+static void create_signal();
 static CCSlice read();
 static size_t read_into();
 static size_t try_read_into();
-static CCResult_bool_CCIoError readable();
 static size_t write();
 static void shutdown();
 static void close();
@@ -152,16 +148,6 @@ size_t cc_socket_try_read_into(CCSocket* sock,
                                CCNetError* out_err,
                                bool* out_would_block);
 
-void cc_seq_notifier_init(CCSeqNotifier* notifier);
-uint64_t cc_seq_notifier_current(CCSeqNotifier* notifier);
-uint64_t cc_seq_notifier_publish(CCSeqNotifier* notifier);
-
-/* Wait for connection progress.
- * Ok(true) means the socket side won and the caller should try reading.
- * Ok(false) means notifier-side progress won, so there is nothing new to read.
- * Err(e) means setup/wait failed. */
-CCResult_bool_CCIoError cc_socket_readable(CCSocket* sock, CCSeqNotifier* notifier);
-
 /* Async read */
 /* @async CCSlice cc_socket_read_async(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err); */
 
@@ -187,6 +173,13 @@ void cc_socket_close(CCSocket* sock);
 /* Address info */
 CCSlice cc_socket_peer_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);
 CCSlice cc_socket_local_addr(CCSocket* sock, CCArena* arena, CCNetError* out_err);
+
+/* Socket-bound readiness signaling. */
+void cc_socket_create_signal(CCSocket* sock, CCSocketSignal* out_sig);
+void cc_socket_signal_init(CCSocketSignal* sig, CCSocket* sock);
+void cc_socket_signal_free(CCSocketSignal* sig);
+void cc_socket_signal_signal(CCSocketSignal* sig);
+CCResult_bool_CCIoError cc_socket_signal_wait(CCSocketSignal* sig);
 
 /* ============================================================================
  * UDP
