@@ -1564,7 +1564,7 @@ CCArena cc_arena_heap(size_t bytes);          // heap-backed first slab; default
 int cc_arena_buffer(CCArena* a, void* buf, size_t cap);  // caller-provided first slab; default block_max = 1
 
 // Stack scratch + arena in one declaration (storage is name##_cc_stack_buf[nbytes])
-#define cc_arena_stack(name, nbytes)
+#define CC_ARENA_STACK(name, nbytes)
 
 // Lifecycle
 void cc_arena_free(CCArena* a);                   // free heap overflow slabs; clear handle
@@ -1603,7 +1603,7 @@ size_t megabytes(size_t n);            // n * 1024 * 1024
 
 Arenas track their ownership per slab:
 - **Heap-backed root** (created with `cc_arena_heap`) owns its initial buffer; `cc_arena_free` frees the active heap block and all heap overflow slabs.
-- **User-backed initial buffer** (`cc_arena_buffer`, `cc_arena_stack`, etc.) is never freed by the arena. `cc_arena_free` frees only **heap** extent buffers (overflow from growth), then clears the arena handle (`base` becomes NULL). Call `cc_arena_buffer` again before reuse after `free`.
+- **User-backed initial buffer** (`cc_arena_buffer`, `CC_ARENA_STACK`, etc.) is never freed by the arena. `cc_arena_free` frees only **heap** extent buffers (overflow from growth), then clears the arena handle (`base` becomes NULL). Call `cc_arena_buffer` again before reuse after `free`.
 - Extents in the growth chain record heap vs user ownership; freeing never calls `free` on stack or static storage.
 
 This allows uniform cleanup for heap-first arenas:
@@ -1615,13 +1615,13 @@ CCArena a = cc_arena_heap(kilobytes(64));  // or: cc_arena_buffer(&a, buf, sz)
 cc_arena_free(&a);  // frees heap-backed root and overflow; user root buffer untouched
 ```
 
-**Stack-first scratch (normative):** `cc_arena_stack(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer. It is equivalent to `cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); name.block_max = 0;`. Hot allocations use the stack slab; overflow uses the same growth rules as heap arenas. Use `cc_arena_reset` to reclaim overflow and point `name.base` back at the stack buffer for repeated scopes; use `cc_arena_free` when discarding the handle (then re-init if needed).
+**Stack-first scratch (normative):** `CC_ARENA_STACK(name, nbytes)` declares `uint8_t name##_cc_stack_buf[nbytes]` and a `CCArena name` initialized from that buffer. It is equivalent to `cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); name.block_max = 0;`. Hot allocations use the stack slab; overflow uses the same growth rules as heap arenas. Use `cc_arena_reset` to reclaim overflow and point `name.base` back at the stack buffer for repeated scopes; use `cc_arena_free` when discarding the handle (then re-init if needed).
 
 **Growable arenas (normative):**
 
 Arenas grow when `block_max` allows it. `cc_arena_heap` defaults to **growable** (`block_max = 0`, unbounded). `cc_arena_buffer` defaults to **fixed** (`block_max = 1`, no growth). When allocation exhausts the current block and growth is allowed, a new block is allocated; its size is at least **max**(1.5× the previous block’s capacity, space required for the **pending** allocation, 4096 bytes). The full previous block is pushed into a linked chain of extents. The root `CCArena` struct always holds the *active* block.
 
-- `block_max = 0`: Unbounded growth (default for `cc_arena_heap`; `cc_arena_stack` sets this after buffer initialization).
+- `block_max = 0`: Unbounded growth (default for `cc_arena_heap`; `CC_ARENA_STACK` sets this after buffer initialization).
 - `block_max = 1`: Fixed, no growth allowed (default for `cc_arena_buffer`).
 - `block_max = N` (N > 1): At most N blocks total (initial user or heap block counts as block 0). Growth beyond the budget returns NULL.
 
@@ -1639,7 +1639,7 @@ b.block_max = 4;  // at most 4 blocks total
 // ... after 4 blocks are exhausted, arena_alloc returns NULL
 
 // Stack-first growable scratch (overflows to heap when needed)
-cc_arena_stack(scratch, 4096);
+CC_ARENA_STACK(scratch, 4096);
 void *p = cc_arena_alloc(&scratch, n, align);
 // ... cc_arena_reset(&scratch) to reuse stack slab, or cc_arena_free(&scratch) when done
 

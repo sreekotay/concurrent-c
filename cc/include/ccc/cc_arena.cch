@@ -232,14 +232,14 @@ static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity) {
 
 // Declare `uint8_t name##_cc_stack_buf[nbytes]`, `CCArena name`, and init with
 // cc_arena_buffer(...) so stack is used first and heap overflows later.
-#define cc_arena_stack(name, nbytes) \
+#define CC_ARENA_STACK(name, nbytes) \
     uint8_t name##_cc_stack_buf[nbytes]; \
     CCArena name; \
     (void)cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); \
     (name).block_max = 0
 
 // End-of-life for the arena handle. Clears a->base to NULL; call cc_arena_buffer again
-// before reuse. For stack-first arenas (cc_arena_stack / caller-provided buffer), this frees
+// before reuse. For stack-first arenas (CC_ARENA_STACK / caller-provided buffer), this frees
 // heap overflow slabs only — never the stack buffer — but you must not touch the arena
 // until re-inited. Prefer cc_arena_reset for repeated scratch use on the same stack slice.
 static inline void cc_arena_free(CCArena* a) {
