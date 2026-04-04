@@ -27,6 +27,18 @@ CCSchedFiber* cc_sched_worker_idle_probe(void) {
     return cc_sched_v3_idle_probe_impl();
 }
 
+static void cc_sched_wait_many_unpublish(cc_sched_wait_case* cases,
+                                         size_t count,
+                                         CCSchedFiber* fiber) {
+    if (!cases) return;
+    for (size_t i = 0; i < count; ++i) {
+        const cc_sched_waitable_ops* ops = cases[i].ops;
+        if (ops && ops->unpublish) {
+            ops->unpublish(cases[i].waitable, fiber);
+        }
+    }
+}
+
 static cc_sched_wait_result cc_sched_fiber_wait_impl(
     void* waitable,
     void* io,
@@ -103,6 +115,76 @@ cc_sched_wait_result cc_sched_fiber_wait_until(
     const struct timespec* abs_deadline
 ) {
     return cc_sched_fiber_wait_impl(waitable, io, ops, abs_deadline);
+}
+
+cc_sched_wait_result cc_sched_fiber_wait_many(
+    cc_sched_wait_case* cases,
+    size_t count,
+    _Atomic int* signaled_flag,
+    _Atomic int* selected_index,
+    size_t* out_selected_index
+) {
+    CCSchedFiber* fiber = (CCSchedFiber*)cc__fiber_current();
+    if (!cases || count == 0 || !signaled_flag || !selected_index) {
+        return CC_SCHED_WAIT_CLOSED;
+    }
+
+    if (out_selected_index) *out_selected_index = (size_t)-1;
+
+    for (size_t i = 0; i < count; ++i) {
+        const cc_sched_waitable_ops* ops = cases[i].ops;
+        if (ops && ops->try_complete && ops->try_complete(cases[i].waitable, fiber, cases[i].io)) {
+            if (out_selected_index) *out_selected_index = i;
+            return CC_SCHED_WAIT_OK;
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const cc_sched_waitable_ops* ops = cases[i].ops;
+        if (!ops || !ops->publish || !ops->publish(cases[i].waitable, fiber, cases[i].io)) {
+            cc_sched_wait_many_unpublish(cases, count, fiber);
+            return CC_SCHED_WAIT_CLOSED;
+        }
+    }
+
+    int selected = atomic_load_explicit(selected_index, memory_order_acquire);
+    if (selected >= 0 || atomic_load_explicit(signaled_flag, memory_order_acquire) != 0) {
+        cc_sched_wait_many_unpublish(cases, count, fiber);
+        if (selected >= 0 && out_selected_index) *out_selected_index = (size_t)selected;
+        return CC_SCHED_WAIT_OK;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const cc_sched_waitable_ops* ops = cases[i].ops;
+        if (ops && ops->try_complete && ops->try_complete(cases[i].waitable, fiber, cases[i].io)) {
+            cc_sched_wait_many_unpublish(cases, count, fiber);
+            if (out_selected_index) *out_selected_index = i;
+            return CC_SCHED_WAIT_OK;
+        }
+    }
+
+    if (atomic_load_explicit(signaled_flag, memory_order_acquire) == 0) {
+        cc_sched_wait_on_flag(signaled_flag, 0, "cc_sched_fiber_wait_many");
+    }
+
+    selected = atomic_load_explicit(selected_index, memory_order_acquire);
+    if (selected >= 0) {
+        cc_sched_wait_many_unpublish(cases, count, fiber);
+        if (out_selected_index) *out_selected_index = (size_t)selected;
+        return CC_SCHED_WAIT_OK;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const cc_sched_waitable_ops* ops = cases[i].ops;
+        if (ops && ops->try_complete && ops->try_complete(cases[i].waitable, fiber, cases[i].io)) {
+            cc_sched_wait_many_unpublish(cases, count, fiber);
+            if (out_selected_index) *out_selected_index = i;
+            return CC_SCHED_WAIT_OK;
+        }
+    }
+
+    cc_sched_wait_many_unpublish(cases, count, fiber);
+    return CC_SCHED_WAIT_PARKED;
 }
 
 void cc_sched_fiber_wake(CCSchedFiber* fiber) {
