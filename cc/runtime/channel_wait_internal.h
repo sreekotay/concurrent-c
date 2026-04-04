@@ -17,6 +17,7 @@ enum {
 int cc__chan_publish_recv_wait_select(CCChan* ch,
                                       cc__fiber_wait_node* node,
                                       void* out_value,
+                                      uint64_t wait_ticket,
                                       void* select_group,
                                       size_t select_index);
 

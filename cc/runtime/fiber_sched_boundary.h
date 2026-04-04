@@ -3,6 +3,7 @@
 
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <time.h>
 
 /* Opaque runtime scheduler fiber handle. */
@@ -34,6 +35,12 @@ typedef struct cc_sched_waitable_ops {
                                        const struct timespec* abs_deadline);
 } cc_sched_waitable_ops;
 
+typedef struct cc_sched_wait_case {
+    void* waitable;
+    void* io;
+    const cc_sched_waitable_ops* ops;
+} cc_sched_wait_case;
+
 /* Internal runtime boundary for scheduler/channel integration. */
 CCSchedFiber* cc_sched_current(void);
 void cc_sched_schedule(CCSchedFiber* fiber);
@@ -50,6 +57,13 @@ cc_sched_wait_result cc_sched_fiber_wait_until(
     void* io,
     const cc_sched_waitable_ops* ops,
     const struct timespec* abs_deadline
+);
+cc_sched_wait_result cc_sched_fiber_wait_many(
+    cc_sched_wait_case* cases,
+    size_t count,
+    _Atomic int* signaled_flag,
+    _Atomic int* selected_index,
+    size_t* out_selected_index
 );
 void cc_sched_fiber_wake(CCSchedFiber* fiber);
 void cc_sched_wait_on_flag(_Atomic int* flag, int expected, const char* reason);

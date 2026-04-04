@@ -139,6 +139,8 @@ static __thread wake_batch tls_wake_batch = {{NULL}, {0}, 0};
 /* Forward declaration */
 static inline void wake_batch_flush(void);
 static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch);
+static cc__fiber_wait_node* cc__chan_pop_send_waiter(CCChan* ch);
+static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_wait_node* snode, void* out_value);
 
 /* Add a fiber to the wake batch */
 static inline void wake_batch_add(cc__fiber* f) {
@@ -312,174 +314,6 @@ static inline size_t cc__chan_waiter_list_len(cc__fiber_wait_node* node) {
     return n;
 }
 
-typedef struct cc__chan_timing_stats {
-    _Atomic int mode;
-    _Atomic int atexit_registered;
-    _Atomic uint64_t dump_every;
-    _Atomic uint64_t next_dump_at;
-    _Atomic uint64_t recv_wait_count;
-    _Atomic uint64_t recv_wait_ns;
-    _Atomic uint64_t recv_wait_before_wake_count;
-    _Atomic uint64_t recv_wait_before_wake_ns;
-    _Atomic uint64_t recv_wake_to_resume_count;
-    _Atomic uint64_t recv_wake_to_resume_ns;
-    _Atomic uint64_t recv_signal_publish_count;
-    _Atomic uint64_t recv_signal_publish_ns;
-    _Atomic uint64_t recv_data_publish_count;
-    _Atomic uint64_t recv_data_publish_ns;
-    _Atomic uint64_t recv_close_publish_count;
-    _Atomic uint64_t recv_close_publish_ns;
-} cc__chan_timing_stats;
-
-static cc__chan_timing_stats g_cc_chan_timing = {
-    .mode = -1,
-    .atexit_registered = 0,
-};
-
-static inline uint64_t cc__chan_now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-static inline void cc__chan_timing_record(_Atomic uint64_t* total_ns,
-                                          _Atomic uint64_t* count,
-                                          uint64_t elapsed_ns) {
-    atomic_fetch_add_explicit(total_ns, elapsed_ns, memory_order_relaxed);
-    atomic_fetch_add_explicit(count, 1, memory_order_relaxed);
-}
-
-static void cc__chan_timing_dump_line(const char* label,
-                                      uint64_t count,
-                                      uint64_t total_ns) {
-    double total_ms = (double)total_ns / 1000000.0;
-    double avg_us = count ? ((double)total_ns / (double)count) / 1000.0 : 0.0;
-    fprintf(stderr, "  %-24s count=%-10llu total_ms=%9.3f avg_us=%8.3f\n",
-            label,
-            (unsigned long long)count,
-            total_ms,
-            avg_us);
-}
-
-static void cc__chan_timing_dump(void) {
-    if (atomic_load_explicit(&g_cc_chan_timing.mode, memory_order_relaxed) != 1) return;
-    fprintf(stderr, "cc_channel timing profile:\n");
-    cc__chan_timing_dump_line("recv_wait_total",
-                              atomic_load_explicit(&g_cc_chan_timing.recv_wait_count, memory_order_relaxed),
-                              atomic_load_explicit(&g_cc_chan_timing.recv_wait_ns, memory_order_relaxed));
-    cc__chan_timing_dump_line("recv_wait_before_wake",
-                              atomic_load_explicit(&g_cc_chan_timing.recv_wait_before_wake_count, memory_order_relaxed),
-                              atomic_load_explicit(&g_cc_chan_timing.recv_wait_before_wake_ns, memory_order_relaxed));
-    cc__chan_timing_dump_line("recv_wake_to_resume",
-                              atomic_load_explicit(&g_cc_chan_timing.recv_wake_to_resume_count, memory_order_relaxed),
-                              atomic_load_explicit(&g_cc_chan_timing.recv_wake_to_resume_ns, memory_order_relaxed));
-    cc__chan_timing_dump_line("recv_signal_publish",
-                              atomic_load_explicit(&g_cc_chan_timing.recv_signal_publish_count, memory_order_relaxed),
-                              atomic_load_explicit(&g_cc_chan_timing.recv_signal_publish_ns, memory_order_relaxed));
-    cc__chan_timing_dump_line("recv_data_publish",
-                              atomic_load_explicit(&g_cc_chan_timing.recv_data_publish_count, memory_order_relaxed),
-                              atomic_load_explicit(&g_cc_chan_timing.recv_data_publish_ns, memory_order_relaxed));
-    cc__chan_timing_dump_line("recv_close_publish",
-                              atomic_load_explicit(&g_cc_chan_timing.recv_close_publish_count, memory_order_relaxed),
-                              atomic_load_explicit(&g_cc_chan_timing.recv_close_publish_ns, memory_order_relaxed));
-}
-
-static void cc__chan_timing_maybe_dump_progress(uint64_t completed_waits) {
-    uint64_t dump_every = atomic_load_explicit(&g_cc_chan_timing.dump_every, memory_order_relaxed);
-    if (dump_every == 0 || completed_waits < dump_every) return;
-
-    uint64_t expected = atomic_load_explicit(&g_cc_chan_timing.next_dump_at, memory_order_relaxed);
-    while (completed_waits >= expected) {
-        uint64_t desired = expected + dump_every;
-        if (atomic_compare_exchange_weak_explicit(&g_cc_chan_timing.next_dump_at,
-                                                  &expected,
-                                                  desired,
-                                                  memory_order_acq_rel,
-                                                  memory_order_relaxed)) {
-            fprintf(stderr, "cc_channel timing snapshot after %llu waits:\n",
-                    (unsigned long long)completed_waits);
-            cc__chan_timing_dump();
-            return;
-        }
-    }
-}
-
-static inline int cc__chan_timing_enabled(void) {
-    int cached = atomic_load_explicit(&g_cc_chan_timing.mode, memory_order_acquire);
-    if (cached >= 0) return cached == 1;
-    const char* env = getenv("CC_CHAN_TIMING_PROFILE");
-    int enabled = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
-    atomic_store_explicit(&g_cc_chan_timing.mode, enabled, memory_order_release);
-    if (enabled) {
-        const char* dump_env = getenv("CC_CHAN_TIMING_DUMP_EVERY");
-        uint64_t dump_every = 0;
-        if (dump_env && dump_env[0]) {
-            dump_every = strtoull(dump_env, NULL, 10);
-        }
-        atomic_store_explicit(&g_cc_chan_timing.dump_every, dump_every, memory_order_relaxed);
-        atomic_store_explicit(&g_cc_chan_timing.next_dump_at,
-                              dump_every ? dump_every : UINT64_MAX,
-                              memory_order_relaxed);
-    }
-    if (enabled &&
-        atomic_exchange_explicit(&g_cc_chan_timing.atexit_registered, 1, memory_order_acq_rel) == 0) {
-        atexit(cc__chan_timing_dump);
-    }
-    return enabled == 1;
-}
-
-static inline void cc__chan_timing_recv_wait_begin(cc__fiber_wait_node* node, const char* reason) {
-    if (!node) return;
-    if (!reason || strcmp(reason, "chan_recv_wait_empty") != 0 || !cc__chan_timing_enabled()) {
-        atomic_store_explicit(&node->wait_start_ns, 0, memory_order_relaxed);
-        atomic_store_explicit(&node->wake_publish_ns, 0, memory_order_relaxed);
-        return;
-    }
-    atomic_store_explicit(&node->wait_start_ns, cc__chan_now_ns(), memory_order_relaxed);
-    atomic_store_explicit(&node->wake_publish_ns, 0, memory_order_relaxed);
-}
-
-static inline void cc__chan_timing_recv_wait_end(cc__fiber_wait_node* node, const char* reason) {
-    if (!node || !reason || strcmp(reason, "chan_recv_wait_empty") != 0 || !cc__chan_timing_enabled()) {
-        return;
-    }
-    uint64_t start_ns = atomic_exchange_explicit(&node->wait_start_ns, 0, memory_order_acq_rel);
-    if (!start_ns) return;
-    uint64_t end_ns = cc__chan_now_ns();
-    cc__chan_timing_record(&g_cc_chan_timing.recv_wait_ns,
-                           &g_cc_chan_timing.recv_wait_count,
-                           end_ns - start_ns);
-    uint64_t wake_ns = atomic_exchange_explicit(&node->wake_publish_ns, 0, memory_order_acq_rel);
-    if (wake_ns >= start_ns) {
-        cc__chan_timing_record(&g_cc_chan_timing.recv_wait_before_wake_ns,
-                               &g_cc_chan_timing.recv_wait_before_wake_count,
-                               wake_ns - start_ns);
-        if (end_ns >= wake_ns) {
-            cc__chan_timing_record(&g_cc_chan_timing.recv_wake_to_resume_ns,
-                                   &g_cc_chan_timing.recv_wake_to_resume_count,
-                                   end_ns - wake_ns);
-        }
-    }
-    uint64_t completed_waits = atomic_load_explicit(&g_cc_chan_timing.recv_wait_count, memory_order_relaxed);
-    cc__chan_timing_maybe_dump_progress(completed_waits);
-}
-
-static inline uint64_t cc__chan_timing_recv_wake_publish_begin(cc__fiber_wait_node* node) {
-    if (!node || !cc__chan_timing_enabled()) return 0;
-    uint64_t wait_start_ns = atomic_load_explicit(&node->wait_start_ns, memory_order_acquire);
-    if (!wait_start_ns) return 0;
-    uint64_t publish_ns = cc__chan_now_ns();
-    atomic_store_explicit(&node->wake_publish_ns, publish_ns, memory_order_release);
-    return publish_ns;
-}
-
-static inline void cc__chan_timing_recv_wake_publish_end(_Atomic uint64_t* total_ns,
-                                                         _Atomic uint64_t* count,
-                                                         uint64_t publish_ns) {
-    if (!publish_ns) return;
-    cc__chan_timing_record(total_ns, count, cc__chan_now_ns() - publish_ns);
-}
-
 static bool cc__chan_wait_flag_try_complete(void* waitable, CCSchedFiber* fiber, void* io) {
     (void)fiber;
     (void)io;
@@ -549,11 +383,9 @@ static inline cc_sched_wait_result cc__chan_wait_notified_deadline(cc__fiber_wai
         .park = cc__chan_wait_flag_park,
         .park_until = cc__chan_wait_flag_park_until,
     };
-    cc__chan_timing_recv_wait_begin(node, reason);
     cc_sched_wait_result rc = abs_deadline
                                   ? cc_sched_fiber_wait_until(&ctx, NULL, &ops, abs_deadline)
                                   : cc_sched_fiber_wait(&ctx, NULL, &ops);
-    cc__chan_timing_recv_wait_end(node, reason);
     return rc;
 }
 
@@ -1222,6 +1054,7 @@ static void cc__chan_remove_recv_waiter(CCChan* ch, cc__fiber_wait_node* node) {
 int cc__chan_publish_recv_wait_select(CCChan* ch,
                                       cc__fiber_wait_node* node,
                                       void* out_value,
+                                      uint64_t wait_ticket,
                                       void* select_group,
                                       size_t select_index) {
     if (!ch || !node) return CC__CHAN_WAIT_CLOSE;
@@ -1229,8 +1062,8 @@ int cc__chan_publish_recv_wait_select(CCChan* ch,
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     cc_chan_lock(ch);
 
-    if (ch->closed || ch->tx_error_closed) {
-        int closed = (ch->closed || ch->tx_error_closed);
+    if (ch->closed) {
+        int closed = ch->closed;
         pthread_mutex_unlock(&ch->mu);
         return closed ? CC__CHAN_WAIT_CLOSE : CC__CHAN_WAIT_PUBLISHED;
     }
@@ -1254,7 +1087,7 @@ int cc__chan_publish_recv_wait_select(CCChan* ch,
 
     memset(node, 0, sizeof(*node));
     node->fiber = fiber;
-    node->wait_ticket = fiber ? cc__fiber_publish_wait_ticket(fiber) : 0;
+    node->wait_ticket = wait_ticket ? wait_ticket : (fiber ? cc__fiber_publish_wait_ticket(fiber) : 0);
     node->data = out_value;
     node->select_group = select_group;
     node->select_index = select_index;
@@ -1347,7 +1180,6 @@ static int cc__chan_signal_recv_waiters(CCChan* ch, int max_wake) {
             }
             cc__chan_trace_req_wake(ch, "signal_recv_before", NULL, node);
             cc__chan_trace_recv_empty(ch, "recv_signal_before", node, notify);
-            uint64_t publish_ns = cc__chan_timing_recv_wake_publish_begin(node);
             atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_SIGNAL, memory_order_release);
             cc__chan_recv_waiter_count_dec(ch);
             cc__chan_recv_wake_inflight_inc(ch);
@@ -1359,9 +1191,6 @@ static int cc__chan_signal_recv_waiters(CCChan* ch, int max_wake) {
             cc__chan_trace_recv_empty(ch, "recv_signal_after", node,
                                       atomic_load_explicit(&node->notified, memory_order_relaxed));
             wake_batch_add_chan(ch, node->fiber);
-            cc__chan_timing_recv_wake_publish_end(&g_cc_chan_timing.recv_signal_publish_ns,
-                                                  &g_cc_chan_timing.recv_signal_publish_count,
-                                                  publish_ns);
             cc__chan_trace_req_wake(ch, "signal_recv_wake_batch_add", NULL, node);
             cc__chan_trace_recv_empty(ch, "recv_wake_batch_add", node,
                                       atomic_load_explicit(&node->notified, memory_order_relaxed));
@@ -1539,7 +1368,6 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     if (!cc__chan_waiter_ticket_valid_dbg(node, "wake_close_recv")) {
         return;
     }
-    uint64_t publish_ns = cc__chan_timing_recv_wake_publish_begin(node);
     atomic_store_explicit(&node->notified, CC_CHAN_NOTIFY_CLOSE, memory_order_release);  /* close */
     cc__chan_trace_close(ch, "wake_one_recv_close_after", node, CC_CHAN_NOTIFY_CLOSE);
     if (ch->use_lockfree) {
@@ -1549,9 +1377,6 @@ static void cc__chan_wake_one_recv_waiter_close(CCChan* ch) {
     atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
     }
     wake_batch_add_chan(ch, node->fiber);
-    cc__chan_timing_recv_wake_publish_end(&g_cc_chan_timing.recv_close_publish_ns,
-                                          &g_cc_chan_timing.recv_close_publish_count,
-                                          publish_ns);
 }
 
 /* Wake one send waiter for close (notified=3 means "woken by close") */
@@ -2663,7 +2488,6 @@ static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value, con
 /* Direct handoff rendezvous helpers (cap == 0). Expects ch->mu locked. */
 static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wait_node* rnode, const void* value) {
     channel_store_slot(rnode->data, value, ch->elem_size);
-    uint64_t publish_ns = cc__chan_timing_recv_wake_publish_begin(rnode);
     atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
     if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
     if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
@@ -2676,9 +2500,6 @@ static inline void cc__chan_finish_send_to_recv_waiter(CCChan* ch, cc__fiber_wai
     } else {
         pthread_cond_signal(&ch->not_empty);
     }
-    cc__chan_timing_recv_wake_publish_end(&g_cc_chan_timing.recv_data_publish_ns,
-                                          &g_cc_chan_timing.recv_data_publish_count,
-                                          publish_ns);
 }
 
 static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, const void* value) {
@@ -2702,7 +2523,6 @@ static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, c
     }
 
     channel_store_slot(rnode->data, value, ch->elem_size);
-    uint64_t publish_ns = cc__chan_timing_recv_wake_publish_begin(rnode);
     atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
     if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
     if (rnode->is_select && rnode->select_group) {
@@ -2714,9 +2534,6 @@ static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, c
     } else {
         pthread_cond_signal(&ch->not_empty);
     }
-    cc__chan_timing_recv_wake_publish_end(&g_cc_chan_timing.recv_data_publish_ns,
-                                          &g_cc_chan_timing.recv_data_publish_count,
-                                          publish_ns);
     pthread_mutex_unlock(&ch->mu);
     wake_batch_flush();
     cc__chan_signal_activity(ch);
@@ -3007,7 +2824,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 channel_store_slot(rnode->data, value, ch->elem_size);
                 if (ch->use_lockfree) {
                 }
-                uint64_t publish_ns = cc__chan_timing_recv_wake_publish_begin(rnode);
                 atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
                 if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
                 /* IMPORTANT: Increment signaled BEFORE waking the fiber. */
@@ -3020,9 +2836,6 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                 } else {
                     pthread_cond_signal(&ch->not_empty);
                 }
-                cc__chan_timing_recv_wake_publish_end(&g_cc_chan_timing.recv_data_publish_ns,
-                                                      &g_cc_chan_timing.recv_data_publish_count,
-                                                      publish_ns);
                 cc__chan_trace_req_wake(ch, "send_direct_handoff", value, rnode);
                 /* Do NOT signal remaining receivers here — the handoff
                  * consumed the item, so the post-enqueue bounded wake path
@@ -3688,7 +3501,6 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
             return ch->closed ? EPIPE : EAGAIN;
         }
         channel_store_slot(rnode->data, value, ch->elem_size);
-        uint64_t publish_ns = cc__chan_timing_recv_wake_publish_begin(rnode);
         atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
         if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
         if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
@@ -3702,9 +3514,6 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         } else {
             pthread_cond_signal(&ch->not_empty);
         }
-        cc__chan_timing_recv_wake_publish_end(&g_cc_chan_timing.recv_data_publish_ns,
-                                              &g_cc_chan_timing.recv_data_publish_count,
-                                              publish_ns);
         pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();
         cc__chan_signal_activity(ch);
@@ -3739,6 +3548,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     cc__chan_signal_recv_waiter(ch);
     pthread_cond_signal(&ch->not_empty);
     pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
     return 0;
 }
 

@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -23,11 +24,46 @@
 #include <netdb.h>
 
 #include "fiber_internal.h"
+#include "fiber_sched_boundary.h"
 #include "io_wait.h"
 #include "channel_wait_internal.h"
 #include "wait_select_internal.h"
 
 #define CC_NET_FLAG_NONBLOCK 0x01
+
+typedef enum CCSocketOrSeqWaitKind {
+    CC_SOCKET_OR_SEQ_WAIT_ERROR = 0,
+    CC_SOCKET_OR_SEQ_WAIT_SOCKET = 1,
+    CC_SOCKET_OR_SEQ_WAIT_SEQ = 2,
+} CCSocketOrSeqWaitKind;
+
+typedef struct CCSeqNotifier {
+    _Atomic uint64_t seq;
+    pthread_mutex_t mu;
+    void* waiter_fiber;
+    uint64_t waiter_ticket;
+    uint64_t waiter_seen_seq;
+    void* waiter_group;
+    size_t waiter_index;
+    int waiter_armed;
+} CCSeqNotifier;
+
+typedef struct cc__seq_wait_ctx {
+    CCSeqNotifier* notifier;
+    cc__wait_select_group* group;
+    uint64_t wait_ticket;
+    uint64_t seen_seq;
+    size_t select_index;
+} cc__seq_wait_ctx;
+
+typedef struct cc__net_io_wait_ctx {
+    cc__io_owned_watcher* watcher;
+    cc__wait_select_group* group;
+    uint64_t wait_ticket;
+    short events;
+    size_t select_index;
+    cc__io_wait_select_handle handle;
+} cc__net_io_wait_ctx;
 
 static cc__io_owned_watcher* cc__net_ensure_socket_watcher(CCSocket* sock) {
     if (!sock || sock->fd < 0) return NULL;
@@ -98,39 +134,203 @@ static int cc__net_prepare_fiber_fd(int fd, uint8_t* flags) {
     return err;
 }
 
-CCSocketOrRecvWaitKind cc_socket_wait_readable_or_recv(CCSocket* sock,
-                                                       CCChanRx rx,
-                                                       void* out_value,
-                                                       size_t value_size,
-                                                       CCNetError* out_err) {
+void cc_seq_notifier_init(void* notifier_ptr) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+    if (!notifier) return;
+    atomic_store_explicit(&notifier->seq, 0, memory_order_relaxed);
+    pthread_mutex_init(&notifier->mu, NULL);
+    notifier->waiter_fiber = NULL;
+    notifier->waiter_ticket = 0;
+    notifier->waiter_seen_seq = 0;
+    notifier->waiter_group = NULL;
+    notifier->waiter_index = 0;
+    notifier->waiter_armed = 0;
+}
+
+uint64_t cc_seq_notifier_current(void* notifier_ptr) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+    if (!notifier) return 0;
+    return atomic_load_explicit(&notifier->seq, memory_order_acquire);
+}
+
+static int cc__seq_notifier_signal_waiter(void* notifier_ptr) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+    if (!notifier) return 0;
+    void* fiber = NULL;
+    cc__wait_select_group* group = NULL;
+    int should_unpark = 0;
+
+    pthread_mutex_lock(&notifier->mu);
+    if (notifier->waiter_armed) {
+        uint64_t cur_seq = atomic_load_explicit(&notifier->seq, memory_order_acquire);
+        if (notifier->waiter_fiber &&
+            cur_seq != notifier->waiter_seen_seq &&
+            cc__fiber_wait_ticket_matches(notifier->waiter_fiber, notifier->waiter_ticket)) {
+            group = (cc__wait_select_group*)notifier->waiter_group;
+            if (cc__wait_select_try_win(group, notifier->waiter_index)) {
+                atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+                fiber = notifier->waiter_fiber;
+                notifier->waiter_armed = 0;
+                notifier->waiter_fiber = NULL;
+                notifier->waiter_group = NULL;
+                should_unpark = 1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&notifier->mu);
+
+    if (should_unpark) {
+        cc__fiber_unpark(fiber);
+        return 1;
+    }
+    return 0;
+}
+
+uint64_t cc_seq_notifier_publish(void* notifier_ptr) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+    if (!notifier) return 0;
+    uint64_t seq = atomic_fetch_add_explicit(&notifier->seq, 1, memory_order_release) + 1;
+    (void)cc__seq_notifier_signal_waiter(notifier);
+    return seq;
+}
+
+static int cc__seq_notifier_arm(void* notifier_ptr,
+                                void* fiber,
+                                uint64_t wait_ticket,
+                                uint64_t seen_seq,
+                                cc__wait_select_group* group,
+                                size_t select_index) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+    if (!notifier || !group) return 0;
+
+    pthread_mutex_lock(&notifier->mu);
+    uint64_t cur_seq = atomic_load_explicit(&notifier->seq, memory_order_acquire);
+    if (cur_seq != seen_seq) {
+        pthread_mutex_unlock(&notifier->mu);
+        return 1;
+    }
+
+    notifier->waiter_fiber = fiber;
+    notifier->waiter_ticket = wait_ticket;
+    notifier->waiter_seen_seq = seen_seq;
+    notifier->waiter_group = group;
+    notifier->waiter_index = select_index;
+    notifier->waiter_armed = 1;
+
+    cur_seq = atomic_load_explicit(&notifier->seq, memory_order_acquire);
+    if (cur_seq != seen_seq) {
+        if (cc__wait_select_try_win(group, select_index)) {
+            atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+        }
+        notifier->waiter_armed = 0;
+        notifier->waiter_fiber = NULL;
+        notifier->waiter_group = NULL;
+        pthread_mutex_unlock(&notifier->mu);
+        return 1;
+    }
+
+    pthread_mutex_unlock(&notifier->mu);
+    return 0;
+}
+
+static void cc__seq_notifier_disarm(void* notifier_ptr, uint64_t wait_ticket) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
+    if (!notifier) return;
+    pthread_mutex_lock(&notifier->mu);
+    if (notifier->waiter_armed && notifier->waiter_ticket == wait_ticket) {
+        notifier->waiter_armed = 0;
+        notifier->waiter_fiber = NULL;
+        notifier->waiter_group = NULL;
+    }
+    pthread_mutex_unlock(&notifier->mu);
+}
+
+static bool cc__seq_wait_try_complete(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)waitable;
+    (void)fiber;
+    cc__seq_wait_ctx* ctx = (cc__seq_wait_ctx*)io;
+    if (!ctx || !ctx->notifier) return false;
+    return cc_seq_notifier_current(ctx->notifier) != ctx->seen_seq;
+}
+
+static bool cc__seq_wait_publish(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)waitable;
+    cc__seq_wait_ctx* ctx = (cc__seq_wait_ctx*)io;
+    if (!ctx || !ctx->notifier || !ctx->group) return false;
+    (void)cc__seq_notifier_arm(ctx->notifier,
+                               fiber,
+                               ctx->wait_ticket,
+                               ctx->seen_seq,
+                               ctx->group,
+                               ctx->select_index);
+    return true;
+}
+
+static void cc__seq_wait_unpublish(void* waitable, CCSchedFiber* fiber) {
+    (void)fiber;
+    cc__seq_wait_ctx* ctx = (cc__seq_wait_ctx*)waitable;
+    if (!ctx || !ctx->notifier) return;
+    cc__seq_notifier_disarm(ctx->notifier, ctx->wait_ticket);
+}
+
+static const cc_sched_waitable_ops cc__seq_wait_ops = {
+    .try_complete = cc__seq_wait_try_complete,
+    .publish = cc__seq_wait_publish,
+    .unpublish = cc__seq_wait_unpublish,
+};
+
+static bool cc__net_io_wait_publish(void* waitable, CCSchedFiber* fiber, void* io) {
+    (void)waitable;
+    (void)fiber;
+    cc__net_io_wait_ctx* ctx = (cc__net_io_wait_ctx*)io;
+    if (!ctx || !ctx->watcher || !ctx->group) return false;
+    int rc = cc__io_wait_select_publish(ctx->watcher,
+                                        ctx->events,
+                                        ctx->wait_ticket,
+                                        ctx->group,
+                                        ctx->select_index,
+                                        &ctx->handle);
+    return rc == 0;
+}
+
+static void cc__net_io_wait_unpublish(void* waitable, CCSchedFiber* fiber) {
+    (void)waitable;
+    (void)fiber;
+    cc__net_io_wait_ctx* ctx = (cc__net_io_wait_ctx*)waitable;
+    if (!ctx) return;
+    cc__io_wait_select_finish(&ctx->handle);
+}
+
+static const cc_sched_waitable_ops cc__net_io_wait_ops = {
+    .publish = cc__net_io_wait_publish,
+    .unpublish = cc__net_io_wait_unpublish,
+};
+
+int cc_socket_wait_readable_or_seq(CCSocket* sock,
+                                   void* notifier_ptr,
+                                   uint64_t seen_seq,
+                                   CCNetError* out_err) {
+    CCSeqNotifier* notifier = (CCSeqNotifier*)notifier_ptr;
     if (out_err) *out_err = CC_NET_OK;
-    if (!sock || sock->fd < 0 || !rx.raw || !out_value || value_size == 0) {
+    if (!sock || sock->fd < 0 || !notifier) {
         if (out_err) *out_err = CC_NET_OTHER;
-        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+        return CC_SOCKET_OR_SEQ_WAIT_ERROR;
     }
 
     int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
     if (prep_err != 0) {
         if (out_err) *out_err = errno_to_net_error(prep_err);
-        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+        return CC_SOCKET_OR_SEQ_WAIT_ERROR;
     }
 
-    int rc = cc_chan_try_recv(rx.raw, out_value, value_size);
-    if (rc == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
-    if (rc == EPIPE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
-    if (rc != EAGAIN) {
-        if (out_err) *out_err = CC_NET_OTHER;
-        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+    if (cc_seq_notifier_current(notifier) != seen_seq) {
+        return CC_SOCKET_OR_SEQ_WAIT_SEQ;
     }
 
     cc__io_owned_watcher* watcher = cc__net_ensure_socket_watcher(sock);
     if (!watcher) {
-        int wait_err = cc__io_wait_fd(sock->fd, POLLIN);
-        if (wait_err != 0) {
-            if (out_err) *out_err = errno_to_net_error(wait_err);
-            return CC_SOCKET_OR_RECV_WAIT_ERROR;
-        }
-        return CC_SOCKET_OR_RECV_WAIT_SOCKET;
+        if (out_err) *out_err = CC_NET_OTHER;
+        return CC_SOCKET_OR_SEQ_WAIT_ERROR;
     }
 
     cc__wait_select_group group = {
@@ -138,45 +338,42 @@ CCSocketOrRecvWaitKind cc_socket_wait_readable_or_recv(CCSocket* sock,
         .signaled = 0,
         .selected_index = -1,
     };
-    cc__fiber_wait_node recv_node = {0};
-    int recv_pub = cc__chan_publish_recv_wait_select(rx.raw, &recv_node, out_value, &group, 0);
-    if (recv_pub == CC__CHAN_WAIT_DATA) return CC_SOCKET_OR_RECV_WAIT_RECV;
-    if (recv_pub == CC__CHAN_WAIT_CLOSE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
-    if (recv_pub == CC__CHAN_WAIT_SIGNAL) {
-        rc = cc_chan_try_recv(rx.raw, out_value, value_size);
-        if (rc == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
-        if (rc == EPIPE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
+    uint64_t wait_ticket = cc__fiber_publish_wait_ticket(cc__fiber_current());
+    cc__seq_wait_ctx seq_ctx = {
+        .notifier = notifier,
+        .group = &group,
+        .wait_ticket = wait_ticket,
+        .seen_seq = seen_seq,
+        .select_index = 0,
+    };
+    cc__net_io_wait_ctx io_ctx = {
+        .watcher = watcher,
+        .group = &group,
+        .wait_ticket = wait_ticket,
+        .events = POLLIN,
+        .select_index = 1,
+        .handle = {0},
+    };
+    cc_sched_wait_case cases[2] = {
+        {.waitable = &seq_ctx, .io = &seq_ctx, .ops = &cc__seq_wait_ops},
+        {.waitable = &io_ctx, .io = &io_ctx, .ops = &cc__net_io_wait_ops},
+    };
+    size_t selected_index = (size_t)-1;
+    cc_sched_wait_result wait_rc =
+        cc_sched_fiber_wait_many(cases,
+                                 2,
+                                 &group.signaled,
+                                 &group.selected_index,
+                                 &selected_index);
+    if (wait_rc == CC_SCHED_WAIT_CLOSED) {
+        if (out_err) *out_err = CC_NET_OTHER;
+        return CC_SOCKET_OR_SEQ_WAIT_ERROR;
     }
 
-    cc__io_wait_select_handle io_handle = {0};
-    int io_pub = cc__io_wait_select_publish(watcher, POLLIN, &group, 1, &io_handle);
-    if (io_pub != 0) {
-        (void)cc__chan_finish_recv_wait_select(rx.raw, &recv_node);
-        if (out_err) *out_err = errno_to_net_error(io_pub);
-        return CC_SOCKET_OR_RECV_WAIT_ERROR;
+    if (selected_index == 0 || cc_seq_notifier_current(notifier) != seen_seq) {
+        return CC_SOCKET_OR_SEQ_WAIT_SEQ;
     }
-
-    if (atomic_load_explicit(&group.signaled, memory_order_acquire) == 0) {
-        cc_sched_wait_on_flag(&group.signaled, 0, "socket_or_recv_wait");
-    }
-
-    int selected = atomic_load_explicit(&group.selected_index, memory_order_acquire);
-    cc__io_wait_select_finish(&io_handle);
-    int notify = cc__chan_finish_recv_wait_select(rx.raw, &recv_node);
-
-    if (selected == 0 || notify == CC_CHAN_NOTIFY_DATA || notify == CC_CHAN_NOTIFY_SIGNAL) {
-        if (notify == CC_CHAN_NOTIFY_SIGNAL) {
-            rc = cc_chan_try_recv(rx.raw, out_value, value_size);
-            if (rc == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
-            if (rc == EPIPE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
-            if (out_err) *out_err = CC_NET_OTHER;
-            return CC_SOCKET_OR_RECV_WAIT_ERROR;
-        }
-        if (notify == CC_CHAN_NOTIFY_DATA) return CC_SOCKET_OR_RECV_WAIT_RECV;
-        if (selected == 0) return CC_SOCKET_OR_RECV_WAIT_RECV;
-    }
-    if (notify == CC_CHAN_NOTIFY_CLOSE) return CC_SOCKET_OR_RECV_WAIT_RECV_CLOSED;
-    return CC_SOCKET_OR_RECV_WAIT_SOCKET;
+    return CC_SOCKET_OR_SEQ_WAIT_SOCKET;
 }
 
 static int cc__net_trace_read_enabled(void) {
@@ -447,6 +644,44 @@ size_t cc_socket_read_into(CCSocket* sock, char* buf, size_t max_bytes, CCNetErr
         *out_err = errno_to_net_error(errno);
         return 0;
     }
+}
+
+size_t cc_socket_try_read_into(CCSocket* sock,
+                               char* buf,
+                               size_t max_bytes,
+                               CCNetError* out_err,
+                               bool* out_would_block) {
+    *out_err = CC_NET_OK;
+    if (out_would_block) *out_would_block = false;
+    if (!buf && max_bytes > 0) {
+        *out_err = CC_NET_OTHER;
+        return 0;
+    }
+
+    int prep_err = cc__net_prepare_fiber_fd(sock->fd, &sock->flags);
+    if (prep_err != 0) {
+        *out_err = errno_to_net_error(prep_err);
+        return 0;
+    }
+
+    ssize_t n = read(sock->fd, buf, max_bytes);
+    if (n > 0) {
+        cc__net_trace_read("try_read_ok", sock->fd, n, 0);
+        return (size_t)n;
+    }
+    if (n == 0) {
+        cc__net_trace_read("try_read_eof", sock->fd, n, 0);
+        *out_err = CC_NET_CONNECTION_CLOSED;
+        return 0;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        cc__net_trace_read("try_read_would_block", sock->fd, n, errno);
+        if (out_would_block) *out_would_block = true;
+        return 0;
+    }
+    cc__net_trace_read("try_read_err", sock->fd, n, errno);
+    *out_err = errno_to_net_error(errno);
+    return 0;
 }
 
 CCSlice cc_socket_read(CCSocket* sock, CCArena* arena, size_t max_bytes, CCNetError* out_err) {

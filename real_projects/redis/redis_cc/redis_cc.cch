@@ -8,8 +8,14 @@
 #define REDIS_CC_SHARED_H
 
 #include <ccc/std/prelude.cch>
-#include <ccc/cc_chan_handle.cch>
 #include <stdint.h>
+
+#ifndef REDIS_REPLY_INLINE_CAP
+#define REDIS_REPLY_INLINE_CAP 128
+#endif
+
+typedef struct RedisReplyOutbox RedisReplyOutbox;
+typedef struct RedisConn RedisConn;
 
 typedef enum RedisCommandKind {
     REDIS_CMD_PING = 0,
@@ -36,7 +42,7 @@ typedef struct RedisRequest {
     uint64_t conn_id;
     uint64_t request_id;
     uint32_t shard_id;
-    void* reply_ctx;
+    RedisConn* conn;
     CCArena arena;
     RedisCommandKind kind;
     size_t argc;
@@ -49,7 +55,9 @@ typedef struct RedisReply {
     RedisReplyKind kind;
     CCSlice data;
     int64_t int_value;
+    uint8_t data_inline;
     CCArena arena;
+    char inline_buf[REDIS_REPLY_INLINE_CAP];
 } RedisReply;
 
 static inline const char* redis_command_name(RedisCommandKind kind) {

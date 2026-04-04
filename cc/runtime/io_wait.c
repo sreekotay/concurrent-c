@@ -513,6 +513,10 @@ static void* cc__io_waiter_main_kqueue(void* arg) {
                         cc__fiber_wait_ticket_matches(fiber, slot->wait_ticket) &&
                         was_ready == 0 &&
                         cc__wait_select_try_win(slot->select_group, slot->select_index)) {
+                        if (slot->select_group) {
+                            cc__wait_select_group* group = (cc__wait_select_group*)slot->select_group;
+                            atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+                        }
                         cc__fiber_unpark(fiber);
                     }
                 }
@@ -526,6 +530,10 @@ static void* cc__io_waiter_main_kqueue(void* arg) {
                 (!slot->fiber || cc__fiber_wait_ticket_matches(slot->fiber, slot->wait_ticket)) &&
                 atomic_exchange_explicit(&slot->ready, 1, memory_order_acq_rel) == 0 &&
                 cc__wait_select_try_win(slot->select_group, slot->select_index)) {
+                if (slot->select_group) {
+                    cc__wait_select_group* group = (cc__wait_select_group*)slot->select_group;
+                    atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+                }
                 cc__fiber_unpark(slot->fiber);
             }
         }
@@ -611,6 +619,10 @@ static void* cc__io_waiter_main_poll(void* arg) {
             if (w->fiber && !cc__fiber_wait_ticket_matches(w->fiber, w->wait_ticket)) continue;
             if (atomic_exchange_explicit(&w->ready, 1, memory_order_acq_rel) == 0 &&
                 cc__wait_select_try_win(w->select_group, w->select_index)) {
+                if (w->select_group) {
+                    cc__wait_select_group* group = (cc__wait_select_group*)w->select_group;
+                    atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+                }
                 cc__io_wait_trace("unpark", w, revents);
                 cc__fiber_unpark(w->fiber);
             }
@@ -805,6 +817,7 @@ int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
 
 int cc__io_wait_select_publish(cc__io_owned_watcher* watcher,
                                short events,
+                               uint64_t wait_ticket,
                                cc__wait_select_group* group,
                                size_t select_index,
                                cc__io_wait_select_handle* out_handle) {
@@ -819,7 +832,6 @@ int cc__io_wait_select_publish(cc__io_owned_watcher* watcher,
     if (cc__io_wait_use_kqueue()) {
 #if CC_IO_WAIT_HAS_KQUEUE
         void* fiber = cc__fiber_current();
-        uint64_t wait_ticket = cc__fiber_publish_wait_ticket(fiber);
         cc_io_kqueue_slot** cached_slot = NULL;
         int persistent_read = 0;
         if (events == POLLIN) cached_slot = &watcher->read_slot;
@@ -853,7 +865,7 @@ int cc__io_wait_select_publish(cc__io_owned_watcher* watcher,
     waiter->fd = watcher->fd;
     waiter->events = events;
     waiter->fiber = cc__fiber_current();
-    waiter->wait_ticket = cc__fiber_publish_wait_ticket(waiter->fiber);
+    waiter->wait_ticket = wait_ticket ? wait_ticket : cc__fiber_publish_wait_ticket(waiter->fiber);
     waiter->select_group = group;
     waiter->select_index = select_index;
     atomic_store_explicit(&waiter->ready, 0, memory_order_relaxed);

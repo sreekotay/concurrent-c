@@ -19,6 +19,7 @@ void cc__io_watcher_destroy(cc__io_owned_watcher* watcher);
 int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events);
 int cc__io_wait_select_publish(cc__io_owned_watcher* watcher,
                                short events,
+                               uint64_t wait_ticket,
                                cc__wait_select_group* group,
                                size_t select_index,
                                cc__io_wait_select_handle* out_handle);
