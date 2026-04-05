@@ -11,3 +11,6 @@
 [submodule "third_party/curl"]
 	path = third_party/curl
 	url = https://github.com/curl/curl.git
+[submodule "third_party/xjb"]
+	path = third_party/xjb
+	url = https://github.com/xjb714/xjb.git

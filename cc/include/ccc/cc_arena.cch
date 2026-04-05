@@ -11,6 +11,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct CCArena CCArena;
+typedef struct CCArenaPool CCArenaPool;
+typedef struct CCArenaCheckpoint CCArenaCheckpoint;
+
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_atomic.cch>
 
@@ -24,7 +29,7 @@
 #define CC_ARENA_FLAG_HEAP_OWNED  0x1  // Arena owns its backing memory (allocated via malloc)
 #define CC_ARENA_FLAG_IS_EXTENT   0x4  // This arena struct is a heap-allocated extent (from growth)
 
-typedef struct CCArena {
+struct CCArena {
     uint8_t *base;
     size_t capacity;
     cc_atomic_size offset;
@@ -33,14 +38,33 @@ typedef struct CCArena {
     uint16_t block_idx;       // current block index (0 = initial)
     uint16_t block_max;       // budget: 0 = unbounded, 1 = fixed, N = max blocks
     struct CCArena* prev;     // points to the previous full block (NULL if none)
-} CCArena;
+};
 
-typedef struct {
+struct CCArenaCheckpoint {
     CCArena* arena;
     size_t offset;
     uint16_t block_idx;       // which block this checkpoint was taken in
     uint64_t provenance;      // provenance for allocations that stay valid after restore
-} CCArenaCheckpoint;
+};
+
+struct CCArenaPool {
+    CCArena* arena;
+    size_t elem_size;
+    void* freelist;
+};
+
+#ifdef CC_PARSER_MODE
+/* Parser-mode UFCS method stubs so raw arena.method(...) syntax can type-check
+   before AST UFCS lowering rewrites it. */
+static void reset();
+static size_t remaining();
+static CCArena detach();
+static CCArenaCheckpoint checkpoint();
+
+/* CCArenaPool stubs */
+static void* alloc();
+static void free(void* ptr);
+#endif
 
 // Global provenance counter (defined in runtime).
 extern cc_atomic_u64 cc_arena_prov_counter;
@@ -358,15 +382,6 @@ static inline CCArenaCheckpoint cc_arena_checkpoint(CCArena* arena) {
     return cp;
 }
 
-#ifdef CC_PARSER_MODE
-/* Parser-mode UFCS method stubs so raw arena.method(...) syntax can type-check
-   before AST UFCS lowering rewrites it. */
-static void reset();
-static size_t remaining();
-static CCArena detach();
-static CCArenaCheckpoint checkpoint();
-#endif
-
 // Restore arena to a previously captured checkpoint.
 // If the arena has grown since the checkpoint, this unwinds the growth chain:
 // frees all extents newer than the checkpoint's block_idx and restores the
@@ -528,6 +543,56 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
 
 #define cc_arena_alloc_T_local_grow(T, arena) cc_arena_alloc_T_count_local_grow(T, arena, 1)
 
+// Initialize a fixed-size pool on an arena. sz is the size of one element.
+static inline void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz) {
+    p->arena = a;
+    p->elem_size = (sz > sizeof(void*)) ? sz : sizeof(void*);
+    p->freelist = NULL;
+}
+
+// Allocate one element from the pool (reuses a freed slot if available).
+static inline void* cc_arena_pool_alloc(CCArenaPool* p) {
+    if (p->freelist) {
+        void* item = p->freelist;
+        p->freelist = *(void**)item;
+        return item;
+    }
+    return cc_arena_alloc(p->arena, p->elem_size, sizeof(void*));
+}
+
+// Return an element to the pool for later reuse.
+static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
+    if (!ptr) return;
+    *(void**)ptr = p->freelist;
+    p->freelist = ptr;
+}
+
+static inline CCSlice cc_arena_pool_lower_c(CCSlice recv_type,
+                                            CCSlice method,
+                                            CCSlice mode,
+                                            CCSliceArray argv,
+                                            CCSliceArray arg_types,
+                                            void *pool) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    (void)pool;
+    if (method.len == sizeof("alloc") - 1 && memcmp(method.ptr, "alloc", sizeof("alloc") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_pool_alloc", sizeof("cc_arena_pool_alloc") - 1);
+    }
+    if (method.len == sizeof("free") - 1 && memcmp(method.ptr, "free", sizeof("free") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_pool_free", sizeof("cc_arena_pool_free") - 1);
+    }
+    return cc_slice_empty();
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCArenaPool", (CCTypeHooks){
+        .ufcs = cc_arena_pool_lower_c,
+    });
+}
+#endif
+
 #endif // CC_ARENA_H
-
-

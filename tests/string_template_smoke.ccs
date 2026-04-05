@@ -14,6 +14,24 @@ static CCSlice demo_policy(CCArena *arena, CCSlice tag, CCSlice value) {
     return out.as_slice();
 }
 
+static void assert_switch_template_as_slice(int64_t value) {
+    switch (1) {
+        case 1: {
+            CCArena tmp = @create(kilobytes(1)) @destroy;
+            CCString hdr_str = @string(`$${value}\r\n`, &tmp);
+            char[:0] hdr = hdr_str.as_slice();
+            assert(hdr.eq_cstr("$42\r\n"));
+
+            CCString s = @string(`:${value}\r\n`, &tmp);
+            char[:0] wire = s.as_slice();
+            assert(wire.eq_cstr(":42\r\n"));
+            return;
+        }
+        default:
+            abort();
+    }
+}
+
 int main(void) {
     CCArena arena_storage = @create(kilobytes(8)) @destroy;
     if (!arena_storage.base) abort();
@@ -46,14 +64,25 @@ int main(void) {
     assert(strcmp(CCString_cstr(&one_bs_slot), "\\" "99") == 0);
 
     const char *name = "Ada";
-    CCString tpl = @string(demo_policy, `name=${name}; age=$~meta{age}`, arena);
-    assert(strcmp(CCString_cstr(&tpl), "name=Ada; age=[meta=37]") == 0);
+    CCString plain_tpl = @string(`name=${name}; age=${age}`, arena);
+    assert(strcmp(CCString_cstr(&plain_tpl), "name=Ada; age=37") == 0);
+
+    CCString plain_multiline = @string(`
+name=${name}
+age=${age}`, arena);
+    char[:0] plain_multiline_view = plain_multiline.as_slice();
+    assert(plain_multiline_view.eq_cstr("\nname=Ada\nage=37"));
+
+    CCString tpl = @string(demo_policy, `name=${name}; age=$~meta{age+10}`, arena);
+    assert(strcmp(CCString_cstr(&tpl), "name=Ada; age=[meta=47]") == 0);
 
     CCString multiline = @string(demo_policy, `
 name=${name}
 age=$~meta{age}`, arena);
     char[:0] multiline_view = multiline.as_slice();
     assert(multiline_view.eq_cstr("\nname=Ada\nage=[meta=37]"));
+
+    assert_switch_template_as_slice(42);
 
     printf("string_template_smoke: PASS\n");
     return 0;

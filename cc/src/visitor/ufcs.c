@@ -82,6 +82,17 @@ static void cc__ufcs_trim_type_span(const char** start, const char** end) {
     while (*end > *start && isspace((unsigned char)(*end)[-1])) (*end)--;
 }
 
+static const char* cc__ufcs_canonicalize_string_type(const char* type_name) {
+    if (!type_name) return NULL;
+    if (strcmp(type_name, "Vec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
+        return "CCString";
+    }
+    if (strcmp(type_name, "Vec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
+        return "CCString*";
+    }
+    return type_name;
+}
+
 static void cc__ufcs_normalize_decl_type(char* out, size_t out_sz, const char* type_name) {
     const char* bang;
     const char* ok_s;
@@ -93,6 +104,7 @@ static void cc__ufcs_normalize_decl_type(char* out, size_t out_sz, const char* t
     if (!out || out_sz == 0) return;
     out[0] = '\0';
     if (!type_name || !type_name[0]) return;
+    type_name = cc__ufcs_canonicalize_string_type(type_name);
     bang = strchr(type_name, '!');
     if (!bang || bang[1] == '=') {
         strncpy(out, type_name, out_sz - 1);
@@ -152,6 +164,7 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
     int scope_depth = 1;
     int next_scope_id = 1;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int paren_depth = 0, bracket_depth = 0;
     size_t stmt_start = 0;
     size_t i = 0;
     const char* name = recv_expr;
@@ -178,13 +191,17 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
-        if (c == '{') {
+        if (c == '(') { paren_depth++; i++; continue; }
+        if (c == ')') { if (paren_depth > 0) paren_depth--; i++; continue; }
+        if (c == '[') { bracket_depth++; i++; continue; }
+        if (c == ']') { if (bracket_depth > 0) bracket_depth--; i++; continue; }
+        if (c == '{' && paren_depth == 0 && bracket_depth == 0) {
             if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
             stmt_start = i + 1;
             i++;
             continue;
         }
-        if (c == '}') {
+        if (c == '}' && paren_depth == 0 && bracket_depth == 0) {
             int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
             while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
             if (scope_depth > 1) scope_depth--;
@@ -192,7 +209,7 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
             i++;
             continue;
         }
-        if (c == ';') {
+        if (c == ';' && paren_depth == 0 && bracket_depth == 0) {
             char decl_name[128];
             char decl_type[256];
             decl_name[0] = '\0';
@@ -222,6 +239,13 @@ static const char* cc__ufcs_lookup_scoped_local_var_type(const char* src,
     if (decl_count == 0) return NULL;
     strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
+    {
+        const char* canon = cc__ufcs_canonicalize_string_type(out_type);
+        if (canon != out_type) {
+            strncpy(out_type, canon, out_type_sz - 1);
+            out_type[out_type_sz - 1] = '\0';
+        }
+    }
     return out_type;
 }
 

@@ -1474,21 +1474,32 @@ static int cc__rewrite_template_body(char** out,
             {
                 size_t expr_end = 0;
                 if (cc__scan_interp_body(src, n, brace_pos, &expr_end) != 0) return -1;
-                cc__sb_append_fmt_local(out, out_len, out_cap,
-                                        "CCString_push_policy(&%s, %s, %s, ",
-                                        builder_name, policy_name, arena_name);
-                if (tagged) {
-                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
-                    cc__append_c_string_escaped(out, out_len, out_cap, src + tag_s, tag_e - tag_s);
+                if (policy_name && policy_name[0]) {
+                    cc__sb_append_fmt_local(out, out_len, out_cap,
+                                            "CCString_push_policy(&%s, %s, %s, ",
+                                            builder_name, policy_name, arena_name);
+                    if (tagged) {
+                        cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_from_cstr(");
+                        cc__append_c_string_escaped(out, out_len, out_cap, src + tag_s, tag_e - tag_s);
+                        cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                    } else {
+                        cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_empty(), ");
+                    }
+                    cc_sb_append_cstr(out, out_len, out_cap, "cc__string_slot_arg((");
+                    cc_sb_append(out, out_len, out_cap, src + brace_pos + 1, expr_end - (brace_pos + 1));
                     cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                    cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+                    cc_sb_append_cstr(out, out_len, out_cap, ")); ");
                 } else {
-                    cc_sb_append_cstr(out, out_len, out_cap, "cc_slice_empty(), ");
+                    if (tagged) return -2;
+                    cc__sb_append_fmt_local(out, out_len, out_cap,
+                                            "cc__string_slot_push(&%s, (",
+                                            builder_name);
+                    cc_sb_append(out, out_len, out_cap, src + brace_pos + 1, expr_end - (brace_pos + 1));
+                    cc_sb_append_cstr(out, out_len, out_cap, "), ");
+                    cc_sb_append_cstr(out, out_len, out_cap, arena_name);
+                    cc_sb_append_cstr(out, out_len, out_cap, "); ");
                 }
-                cc_sb_append_cstr(out, out_len, out_cap, "cc__string_slot_arg((");
-                cc_sb_append(out, out_len, out_cap, src + brace_pos + 1, expr_end - (brace_pos + 1));
-                cc_sb_append_cstr(out, out_len, out_cap, "), ");
-                cc_sb_append_cstr(out, out_len, out_cap, arena_name);
-                cc_sb_append_cstr(out, out_len, out_cap, ")); ");
                 i = expr_end + 1;
                 lit_start = i;
                 continue;
@@ -1560,6 +1571,69 @@ static char* cc__rewrite_string_templates(const char* src, size_t n, const char*
                 return (char*)-1;
             }
             {
+                if (arg1_s < n && src[arg1_s] == '`') {
+                    size_t tick_e = 0;
+                    size_t arg2_s, arg2_e;
+                    char builder_name[64], arena_name[64];
+                    if (cc__scan_template_literal(src, n, arg1_s, &tick_e) != 0) {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "unterminated template literal in @string(...)");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    arg2_s = cc_skip_ws_and_comments(src, n, tick_e + 1);
+                    if (arg2_s >= n || src[arg2_s] != ',') {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "@string(`...`, arena) requires a trailing arena argument");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    arg2_s = cc_skip_ws_and_comments(src, n, arg2_s + 1);
+                    arg2_e = cc__scan_to_top_level_delim(src, n, arg2_s, ')', '\0');
+                    if (arg2_e >= n || src[arg2_e] != ')') {
+                        char rel[1024];
+                        cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                        line, col, "syntax", "unterminated @string(`...`, arena)");
+                        free(out);
+                        return (char*)-1;
+                    }
+                    snprintf(builder_name, sizeof(builder_name), "__cc_tpl_%d", rewrite_count);
+                    snprintf(arena_name, sizeof(arena_name), "__cc_tpl_arena_%d", rewrite_count);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "({ ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCArena* ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = (");
+                    cc_sb_append(&out, &out_len, &out_cap, src + arg2_s, arg2_e - arg2_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "CCString ");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, " = CCString_new(");
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, arena_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                    {
+                        int tpl_rc = cc__rewrite_template_body(&out, &out_len, &out_cap, src, n,
+                                                               arg1_s + 1, tick_e, builder_name,
+                                                               NULL, arena_name);
+                        if (tpl_rc != 0) {
+                            char rel[1024];
+                            const char* msg = (tpl_rc == -2)
+                                ? "tagged template slots require @string(policy, `...`, arena)"
+                                : "unterminated interpolation in @string template";
+                            cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
+                                            line, col, "syntax", msg);
+                            free(out);
+                            return (char*)-1;
+                        }
+                    }
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, builder_name);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "; })");
+                    rewrite_count++;
+                    last_emit = arg2_e + 1;
+                    i = arg2_e + 1;
+                    continue;
+                }
                 size_t arg2_s = cc_skip_ws_and_comments(src, n, arg1_e + 1);
                 if (arg2_s < n && src[arg2_s] == '`') {
                     size_t tick_e = 0;

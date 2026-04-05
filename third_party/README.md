@@ -10,8 +10,13 @@ All dependencies are Git submodules for easy version tracking and updates.
 | `liblfds/` | liblfds 7.1.1 | Unlicense | Lock-free channel queue backend | (auto) |
 | `bearssl/` | BearSSL | MIT | TLS support (`<std/tls.cch>`) | `make bearssl` |
 | `curl/` | libcurl | MIT | HTTP client (`<std/http.cch>`) | `make curl` |
+| `xjb/` | xjb | Apache-2.0 | Upstream float/double-to-string algorithm candidate | research/integration |
 
 **Note**: BearSSL and libcurl are opt-in. Only build/link what you need.
+
+## xjb
+
+Vendored upstream for evaluating fast float/double formatting, especially as a replacement candidate for the current `snprintf`-based float string path.
 
 ## TCC
 
