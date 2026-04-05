@@ -62,18 +62,21 @@ int main(void) {
     p_owned.destroy();
     
     // Test CC_ARENA_POOL_STACK
-    CC_ARENA_POOL_STACK(p_stack, sizeof(struct Point), 1024);
-    struct Point* p5 = (struct Point*)p_stack.alloc();
-    if (!p5) {
-        printf("FAIL: stack pool alloc\n");
-        return 1;
-    }
-    p5->y = 500;
-    p_stack.free(p5);
-    struct Point* p6 = (struct Point*)p_stack.alloc();
-    if (p6 != p5 || p6->y != 500) {
-        printf("FAIL: stack pool reuse\n");
-        return 1;
+    {
+        CC_ARENA_POOL_STACK(p_stack, sizeof(struct Point), 1024);
+        struct Point* p5 = (struct Point*)p_stack.alloc();
+        if (!p5) {
+            printf("FAIL: stack pool alloc\n");
+            return 1;
+        }
+        p5->y = 500;
+        p_stack.free(p5);
+        struct Point* p6 = (struct Point*)p_stack.alloc();
+        if (p6 != p5 || p6->y != 500) {
+            printf("FAIL: stack pool reuse\n");
+            return 1;
+        }
+        // p_stack and its arena should be cleaned up here via @defer
     }
     
     printf("arena_pool_ufcs_smoke ok\n");
