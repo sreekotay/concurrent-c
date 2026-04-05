@@ -1599,6 +1599,14 @@ void cc_arena_pool_destroy(CCArenaPool* p);        // UFCS: p.destroy()
 ```
 The pool is reclaimed when the underlying arena is reset or freed. If the pool owns its arena (created via `cc_arena_pool`), `cc_arena_pool_destroy` will free the arena.
 
+**Stack-backed Pool (normative):**
+`CC_ARENA_POOL_STACK(name, elem_size, nbytes)` declares a stack-backed arena and a pool initialized from it. It is equivalent to:
+```c
+CC_ARENA_STACK(name_arena, nbytes);
+CCArenaPool name;
+cc_arena_pool_init(&name, &name_arena, elem_size);
+```
+
 // Growth policy (field on CCArena; affects future growth only)
 // a->block_max = 0;  // unbounded growth
 // a->block_max = 1;  // fixed, no growth

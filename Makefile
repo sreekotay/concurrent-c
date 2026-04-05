@@ -39,6 +39,7 @@ install: cc
 	@echo "Installing Concurrent-C to $(DESTDIR)$(PREFIX)..."
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime
+	install -d $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/std
 	install -d $(DESTDIR)$(PREFIX)/include/ccc/vendor
 	install -m 755 out/cc/bin/ccc $(DESTDIR)$(PREFIX)/bin/
@@ -46,9 +47,13 @@ install: cc
 	install -m 644 cc/include/ccc/std/*.cch $(DESTDIR)$(PREFIX)/include/ccc/std/
 	install -m 644 cc/include/ccc/vendor/*.h $(DESTDIR)$(PREFIX)/include/ccc/vendor/
 	install -m 644 cc/runtime/*.c $(DESTDIR)$(PREFIX)/lib/ccc/runtime/
+	@if [ -n "$$(ls cc/runtime/*.cpp 2>/dev/null)" ]; then \
+		install -m 644 cc/runtime/*.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
+	fi
 	@if [ -n "$$(ls cc/runtime/*.h 2>/dev/null)" ]; then \
 		install -m 644 cc/runtime/*.h $(DESTDIR)$(PREFIX)/lib/ccc/runtime/; \
 	fi
+	install -m 644 third_party/xjb/src/ftoa.cpp $(DESTDIR)$(PREFIX)/lib/ccc/runtime/vendor/xjb_ftoa.cpp
 	@echo "Installed. Add $(DESTDIR)$(PREFIX)/bin to PATH if needed."
 
 uninstall:

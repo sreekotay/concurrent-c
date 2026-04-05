@@ -707,6 +707,12 @@ static const char* pick_cc_bin(const char* override) {
     return "cc";
 }
 
+static const char* pick_cxx_bin(void) {
+    const char* env = getenv("CXX");
+    if (env && *env) return env;
+    return "c++";
+}
+
 static int run_cmd(const char* cmd, int verbose) {
     if (verbose) {
         fprintf(stderr, "cc: %s\n", cmd);
@@ -2192,6 +2198,7 @@ static int cc__compile_c_to_obj(const CCBuildOptions* opt,
     // This enables the linker to dead-strip unused runtime code.
     // TCC doesn't support these flags.
     if (!is_tcc) {
+        strncat(cmd, " -DCC_ENABLE_XJB_FLOAT_FMT=1", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
     }
     // Finally append the compilation inputs/outputs.
@@ -2218,6 +2225,7 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
     const char* runtime_sources[] = {
         "concurrent_c.c", "scheduler.c", "fiber_sched.c", "nursery.c",
         "channel.c", "fiber.c", "exec.c", "closure.c", "task_intptr.c",
+        "float_format_xjb.cpp",
         NULL
     };
     char src_path[PATH_MAX];
@@ -2226,6 +2234,13 @@ static int cc__runtime_obj_is_stale(const char* runtime_obj_path) {
         struct stat src_stat;
         if (stat(src_path, &src_stat) == 0 && src_stat.st_mtime > obj_mtime) {
             return 1;  // Source is newer than object
+        }
+    }
+    snprintf(src_path, sizeof(src_path), "%s/third_party/xjb/src/ftoa.cpp", g_repo_root);
+    {
+        struct stat src_stat;
+        if (stat(src_path, &src_stat) == 0 && src_stat.st_mtime > obj_mtime) {
+            return 1;
         }
     }
     return 0;  // Object is up-to-date
@@ -2274,31 +2289,68 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
 
     // Build a runtime object under out/obj/runtime.o
     char runtime_obj[PATH_MAX];
+    char runtime_core_obj[PATH_MAX];
+    char runtime_xjb_obj[PATH_MAX];
+    char runtime_xjb_src[PATH_MAX];
     snprintf(runtime_obj, sizeof(runtime_obj), "%s/runtime.o", g_out_root);
+    snprintf(runtime_core_obj, sizeof(runtime_core_obj), "%s/runtime.core.o", g_out_root);
+    snprintf(runtime_xjb_obj, sizeof(runtime_xjb_obj), "%s/runtime.xjb.o", g_out_root);
+    snprintf(runtime_xjb_src, sizeof(runtime_xjb_src), "%s/runtime/float_format_xjb.cpp", g_cc_dir);
     const char* ccflags_env = getenv("CFLAGS");
+    const char* cxxflags_env = getenv("CXXFLAGS");
     const char* cppflags_env = getenv("CPPFLAGS");
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -DCC_ENABLE_ASYNC -I%s -I%s -I%s -I%s -c %s -o %s",
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -DCC_ENABLE_ASYNC -DCC_ENABLE_XJB_FLOAT_FMT=%d -I%s -I%s -I%s -I%s -c %s -o %s",
              cc_bin,
              ccflags_env ? ccflags_env : "",
              cppflags_env ? cppflags_env : "",
              target_part ? target_part : "",
              sysroot_part ? sysroot_part : "",
+             is_tcc ? 0 : 1,
              g_cc_lowered_include,
              g_cc_include,
              g_cc_dir,
              g_repo_root,
              g_cc_runtime_c,
-             runtime_obj);
+             is_tcc ? runtime_obj : runtime_core_obj);
     if (opt->cc_flags && *opt->cc_flags) {
         strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
     }
-    // TCC doesn't support -ffunction-sections/-fdata-sections
-    if (!cc__is_tcc(cc_bin)) {
+    if (!is_tcc) {
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
     }
     if (run_cmd(cmd, opt->verbose) != 0) return -1;
+    if (!is_tcc) {
+        const char* cxx_bin = pick_cxx_bin();
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s %s -std=c++17 -fno-exceptions -fno-rtti -DCC_ENABLE_XJB_FLOAT_FMT=1 -I%s -I%s -I%s -I%s -c %s -o %s",
+                 cxx_bin,
+                 cxxflags_env ? cxxflags_env : "",
+                 cppflags_env ? cppflags_env : "",
+                 target_part ? target_part : "",
+                 sysroot_part ? sysroot_part : "",
+                 g_cc_lowered_include,
+                 g_cc_include,
+                 g_cc_dir,
+                 g_repo_root,
+                 runtime_xjb_src,
+                 runtime_xjb_obj);
+        if (opt->cc_flags && *opt->cc_flags) {
+            strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
+            strncat(cmd, opt->cc_flags, sizeof(cmd) - strlen(cmd) - 1);
+        }
+        strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
+        if (run_cmd(cmd, opt->verbose) != 0) return -1;
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s -r %s %s -o %s",
+                 cc_bin,
+                 target_part ? target_part : "",
+                 sysroot_part ? sysroot_part : "",
+                 cppflags_env ? cppflags_env : "",
+                 runtime_core_obj,
+                 runtime_xjb_obj,
+                 runtime_obj);
+        if (run_cmd(cmd, opt->verbose) != 0) return -1;
+    }
     strncpy(out_runtime_path, runtime_obj, out_runtime_cap);
     out_runtime_path[out_runtime_cap - 1] = '\0';
     if (out_reused) *out_reused = 0;
