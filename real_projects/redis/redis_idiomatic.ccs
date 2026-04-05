@@ -1,5 +1,5 @@
 /*
- * redis_idiomatic_v2.ccs
+ * redis_idiomatic.ccs
  *
  * A cleaner Redis reference implementation:
  *   - one accept loop
@@ -27,7 +27,6 @@
 #define READ_CHUNK 4096
 #define READ_BUF_CAP (16 * 1024)
 #define WRITE_BUF_CAP (16 * 1024)
-#define REQUEST_ARENA_CAP kilobytes(4)
 #define REQ_BUF_SIZE 512
 #define ENTRY_ARENA_OVERHEAD 128
 #define REQUEST_CHAN_CAP 128
@@ -81,12 +80,6 @@ typedef struct RedisConn {
 static void free_request(RedisRequest* req);
 static void redis_conn_retain(RedisConn* conn);
 static void redis_conn_drop(RedisConn* conn);
-
-static CCSlice rs_pol(CCArena* arena, CCSlice tag, CCSlice value) {
-    (void)arena;
-    (void)tag;
-    return value;
-}
 
 static CCError mkerr(int err_kind, const char* msg) {
     CCError err = {0};
@@ -239,8 +232,7 @@ static void rr_compact(RespReader* r) {
     r->start = 0;
 }
 
-static bool !>(CCIoError) rr_fill(RespReader* r, CCSocket* sock, CCArena* read_arena) {
-    (void)read_arena;
+static bool !>(CCIoError) rr_fill(RespReader* r, CCSocket* sock) {
     rr_compact(r);
     if (r->end == r->cap) {
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
@@ -257,8 +249,7 @@ static bool !>(CCIoError) rr_fill(RespReader* r, CCSocket* sock, CCArena* read_a
     return cc_ok(true);
 }
 
-static bool !>(CCIoError) rr_try_fill(RespReader* r, CCSocket* sock, CCArena* read_arena) {
-    (void)read_arena;
+static bool !>(CCIoError) rr_try_fill(RespReader* r, CCSocket* sock) {
     rr_compact(r);
     if (r->end == r->cap) {
         return cc_err(cc_io_error(CC_IO_INVALID_ARGUMENT));
@@ -291,19 +282,6 @@ static bool rr_try_read_line(RespReader* r, CCSlice* out) {
     return false;
 }
 
-static int rr_has_buffered_input(RespReader* r) {
-    return r && r->start < r->end;
-}
-
-static CCSlice !>(CCError) rr_read_line(RespReader* r, CCSocket* sock, CCArena* read_arena) {
-    while (true) {
-        CCSlice line = {0};
-        if (rr_try_read_line(r, &line)) return cc_ok(line);
-        bool !>(CCIoError) fill_res = rr_fill(r, sock, read_arena);
-        if (fill_res.is_err()) return cc_err(mkerr(CC_ERR_IO, cc_io_error_str(fill_res.error())));
-    }
-}
-
 static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t cap) {
     size_t argc = 0;
     size_t pos = 0;
@@ -315,70 +293,6 @@ static size_t !>(CCError) parse_inline_args(CCSlice line, CCSlice* args, size_t 
         args[argc++] = CCSlice_sub(&line, start, pos);
     }
     if (argc == 0) return cc_err(mkerr(CC_ERR_PARSE, "empty inline command"));
-    return cc_ok(argc);
-}
-
-static CCSlice !>(CCError) rr_read_bulk(RespReader* r, CCSocket* sock, CCArena* read_arena) {
-    CCSlice !>(CCError) line_res = rr_read_line(r, sock, read_arena);
-    if (line_res.is_err()) return cc_err(line_res.error());
-
-    CCSlice line = line_res.value();
-    if (line.len < 2 || ((const char*)line.ptr)[0] != '$') {
-        return cc_err(mkerr(CC_ERR_PARSE, "expected bulk string"));
-    }
-
-    int64_t !>(CCError) len_res = parse_i64(CCSlice_sub(&line, 1, line.len));
-    if (len_res.is_err()) return cc_err(len_res.error());
-
-    int64_t n = len_res.value();
-    if (n < 0) return cc_err(mkerr(CC_ERR_PARSE, "negative bulk length"));
-
-    size_t need = (size_t)n + 2;
-    while ((r->end - r->start) < need) {
-        bool !>(CCIoError) fill_res = rr_fill(r, sock, read_arena);
-        if (fill_res.is_err()) return cc_err(mkerr(CC_ERR_IO, cc_io_error_str(fill_res.error())));
-    }
-
-    if (r->data[r->start + n] != '\r' || r->data[r->start + n + 1] != '\n') {
-        return cc_err(mkerr(CC_ERR_PARSE, "malformed bulk string"));
-    }
-
-    CCSlice out = cc_slice_from_parts(r->data + r->start,
-                                      (size_t)n,
-                                      CC_SLICE_ID_UNTRACKED,
-                                      (size_t)n);
-    r->start += need;
-    return cc_ok(out);
-}
-
-static size_t !>(CCError) rr_read_args(RespReader* r,
-                                       CCSocket* sock,
-                                       CCArena* read_arena,
-                                       CCSlice* args,
-                                       size_t cap) {
-    CCSlice !>(CCError) line_res = rr_read_line(r, sock, read_arena);
-    if (line_res.is_err()) return cc_err(line_res.error());
-
-    CCSlice line = line_res.value();
-    if (!(line.len > 0 && ((const char*)line.ptr)[0] == '*')) {
-        return parse_inline_args(line, args, cap);
-    }
-
-    int64_t !>(CCError) argc_res = parse_i64(CCSlice_sub(&line, 1, line.len));
-    if (argc_res.is_err()) return cc_err(argc_res.error());
-
-    int64_t argc_i64 = argc_res.value();
-    if (argc_i64 < 1 || argc_i64 > (int64_t)cap) {
-        return cc_err(mkerr(CC_ERR_PARSE, "unsupported argument count"));
-    }
-
-    size_t argc = (size_t)argc_i64;
-    for (size_t i = 0; i < argc; ++i) {
-        CCSlice !>(CCError) bulk_res = rr_read_bulk(r, sock, read_arena);
-        if (bulk_res.is_err()) return cc_err(bulk_res.error());
-        args[i] = bulk_res.value();
-    }
-
     return cc_ok(argc);
 }
 
@@ -576,26 +490,24 @@ static ParseAttempt read_request_buffered(RespReader* r,
 
 static bool !>(CCError) db_entry_store(RedisEntry* e, char[:] key, char[:] value) {
     size_t total = key.len + value.len + ENTRY_ARENA_OVERHEAD;
-    CCArena storage = cc_arena_heap(total);
+    CCArena storage = cc_arena_heap(total) @destroy;
     if (!storage.base) {
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
     }
 
     CCString k = CCString_from_slice(&storage, key);
     if (key.len > 0 && CCString_len(&k) != key.len) {
-        cc_arena_free(&storage);
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry key clone failed"));
     }
 
     CCString v = CCString_from_slice(&storage, value);
     if (value.len > 0 && CCString_len(&v) != value.len) {
-        cc_arena_free(&storage);
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry value clone failed"));
     }
 
     e->key = k;
     e->value = v;
-    e->arena = cc_arena_detach(&storage);
+    e->arena = storage.detach();
     return cc_ok(true);
 }
 
@@ -624,6 +536,7 @@ static bool !>(CCError) db_entry_replace_value(RedisEntry* e, char[:] value) {
     memcpy(key_tmp, old_key.ptr, key_len);
 
     if (e->arena.base) e->arena.free();
+    e->arena = (CCArena){0};
 
     CCSlice key_slice = { .ptr = key_tmp, .len = key_len };
     return db_entry_store(e, key_slice, value);
@@ -635,13 +548,36 @@ static void db_free_entry(RedisEntry* e) {
     free(e);
 }
 
+static void db_unlink_entry(RedisDb* db, RedisEntry* e) {
+    RedisEntry** link = &db->head;
+    while (*link && *link != e) link = &(*link)->next;
+    if (*link == e) *link = e->next;
+}
+
+static bool !>(CCError) db_replace_value(RedisDb* db, RedisEntry* e, char[:] key, char[:] value) {
+    Map<char[:], RedisEntry*> entries = db->entries;
+    entries.remove(key);
+    bool !>(CCError) replace_res = db_entry_replace_value(e, value);
+    if (replace_res.is_err()) {
+        db_unlink_entry(db, e);
+        free(e);
+        return cc_err(replace_res.error());
+    }
+    if (entries.insert(CCString_as_slice(&e->key), e) != 0) {
+        db_unlink_entry(db, e);
+        db_free_entry(e);
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db re-insert failed"));
+    }
+    return cc_ok(true);
+}
+
 static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
     if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
 
     Map<char[:], RedisEntry*> entries = db->entries;
     RedisEntry** entry_slot = entries.get_ptr(key);
     if (entry_slot && *entry_slot) {
-        bool !>(CCError) replace_res = db_entry_replace_value(*entry_slot, value);
+        bool !>(CCError) replace_res = db_replace_value(db, *entry_slot, key, value);
         if (replace_res.is_err()) return cc_err(replace_res.error());
         return cc_ok(reply_simple("OK"));
     }
@@ -683,9 +619,7 @@ static RedisReply db_del(RedisDb* db, char[:] key) {
     if (!e) return reply_integer(0);
     if (!entries.remove(key)) return reply_integer(0);
 
-    RedisEntry** link = &db->head;
-    while (*link && *link != e) link = &(*link)->next;
-    if (*link == e) *link = e->next;
+    db_unlink_entry(db, e);
     db_free_entry(e);
     return reply_integer(1);
 }
@@ -718,7 +652,7 @@ static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
     CCString s = @string(value, &a);
     char[:0] encoded = s.as_slice();
     if (e) {
-        bool !>(CCError) replace_res = db_entry_replace_value(e, encoded);
+        bool !>(CCError) replace_res = db_replace_value(db, e, key, encoded);
         if (replace_res.is_err()) return cc_err(replace_res.error());
     } else {
         RedisReply !>(CCError) set_res = db_set(db, key, encoded);
@@ -817,7 +751,6 @@ static CCSlice !>(CCError) reply_alloc_bytes(RedisReply* reply, size_t len) {
     }
 
     size_t arena_size = len + ENTRY_ARENA_OVERHEAD;
-    if (arena_size < ENTRY_ARENA_OVERHEAD) arena_size = ENTRY_ARENA_OVERHEAD;
     CCArena arena_storage = cc_arena_heap(arena_size) @destroy;
     if (!arena_storage.base) {
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
@@ -1138,6 +1071,7 @@ static void owner_loop(RedisConn*[~REQUEST_CHAN_CAP N:1 <] conn_rx) {
 
     db_free_all(&db);
 }
+
 static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
     int drained = 0;
     while (conn->inflight > 0) {
@@ -1184,17 +1118,10 @@ static bool !>(CCIoError) wait_for_reply_or_data(RedisConn* conn) {
 static void handle_client(CCSocket client,
                           RedisConn*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
                           uint64_t conn_id) {
-    CCArena read_arena = @create(kilobytes(8)) @destroy;
-    if (!read_arena.base) {
-        client.close();
-        return;
-    }
+    @defer client.close();
 
     RedisConn* conn = redis_conn_create(conn_id);
-    if (!conn) {
-        client.close();
-        return;
-    }
+    if (!conn) return;
     @defer redis_conn_drop(conn);
     client.create_signal(&conn->outbox->signal);
 
@@ -1218,14 +1145,14 @@ static void handle_client(CCSocket client,
             bool !>(CCIoError) res = wait_for_reply_or_data(conn);
             if (res.is_err()) break;
             if (res.value()) {
-                bool !>(CCIoError) fill = rr_try_fill(&reader, &client, &read_arena);
+                bool !>(CCIoError) fill = rr_try_fill(&reader, &client);
                 if (fill.is_err()) {
                     (void)write_reply_now(&client, conn, io_err_reply(fill.error()));
                     break;
                 }
             }
         } else {
-            bool !>(CCIoError) fill = rr_fill(&reader, &client, &read_arena);
+            bool !>(CCIoError) fill = rr_fill(&reader, &client);
             if (fill.is_err()) {
                 (void)write_reply_now(&client, conn, io_err_reply(fill.error()));
                 break;
@@ -1235,7 +1162,6 @@ static void handle_client(CCSocket client,
     }
 
     reply_outbox_close(conn->outbox);
-    client.close();
 }
 
 int main(int argc, char** argv) {
