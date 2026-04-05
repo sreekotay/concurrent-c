@@ -50,6 +50,23 @@ int main(void) {
     char[:0] via_ufcs_view = via_ufcs.as_slice();
     assert(via_ufcs_view.eq_cstr("37"));
 
+    float zero_f = 0.0f;
+    double thousand = 1000.0;
+    double sci = 1.2e23;
+    double neg_zero = -0.0;
+
+    CCString zero_f_str = zero_f.to_str(arena);
+    assert(strcmp(CCString_cstr(&zero_f_str), "0.0") == 0);
+
+    CCString thousand_str = thousand.to_str(arena);
+    assert(strcmp(CCString_cstr(&thousand_str), "1000.0") == 0);
+
+    CCString sci_str = sci.to_str(arena);
+    assert(strcmp(CCString_cstr(&sci_str), "1.2e+23") == 0);
+
+    CCString neg_zero_str = neg_zero.to_str(arena);
+    assert(strcmp(CCString_cstr(&neg_zero_str), "-0.0") == 0);
+
     CCString lit_dollar = @string(demo_policy, `Price: $100`, arena);
     assert(strcmp(CCString_cstr(&lit_dollar), "Price: $100") == 0);
 
@@ -66,6 +83,9 @@ int main(void) {
     const char *name = "Ada";
     CCString plain_tpl = @string(`name=${name}; age=${age}`, arena);
     assert(strcmp(CCString_cstr(&plain_tpl), "name=Ada; age=37") == 0);
+
+    CCString float_tpl = @string(`zero=${zero_f}; sci=${sci}`, arena);
+    assert(strcmp(CCString_cstr(&float_tpl), "zero=0.0; sci=1.2e+23") == 0);
 
     CCString plain_multiline = @string(`
 name=${name}
