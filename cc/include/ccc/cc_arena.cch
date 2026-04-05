@@ -29,6 +29,8 @@ typedef struct CCArenaCheckpoint CCArenaCheckpoint;
 #define CC_ARENA_FLAG_HEAP_OWNED  0x1  // Arena owns its backing memory (allocated via malloc)
 #define CC_ARENA_FLAG_IS_EXTENT   0x4  // This arena struct is a heap-allocated extent (from growth)
 
+#define CC_ARENA_POOL_FLAG_OWNED  0x1  // Pool owns its arena (should free it)
+
 struct CCArena {
     uint8_t *base;
     size_t capacity;
@@ -51,6 +53,7 @@ struct CCArenaPool {
     CCArena* arena;
     size_t elem_size;
     void* freelist;
+    uint32_t _flags;
 };
 
 #ifdef CC_PARSER_MODE
@@ -64,6 +67,8 @@ static CCArenaCheckpoint checkpoint();
 /* CCArenaPool stubs */
 static void* alloc();
 static void free(void* ptr);
+static CCArena detach_arena();
+static void destroy();
 #endif
 
 // Global provenance counter (defined in runtime).
@@ -548,6 +553,48 @@ static inline void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz) {
     p->arena = a;
     p->elem_size = (sz > sizeof(void*)) ? sz : sizeof(void*);
     p->freelist = NULL;
+    p->_flags = 0;
+}
+
+// Initialize a fixed-size pool with its own heap-backed arena.
+static inline int cc_arena_pool(CCArenaPool* p, size_t sz) {
+    CCArena* a = (CCArena*)malloc(sizeof(CCArena));
+    if (!a) return -1;
+    *a = cc_arena_heap(4096); // Default to 4k initial slab
+    if (!a->base) {
+        free(a);
+        return -1;
+    }
+    cc_arena_pool_init(p, a, sz);
+    p->_flags |= CC_ARENA_POOL_FLAG_OWNED;
+    return 0;
+}
+
+// End-of-life for the pool handle. If the pool owns its arena, the arena is freed.
+static inline void cc_arena_pool_destroy(CCArenaPool* p) {
+    if (!p) return;
+    if (p->arena && (p->_flags & CC_ARENA_POOL_FLAG_OWNED)) {
+        cc_arena_free(p->arena);
+        free(p->arena);
+    }
+    p->arena = NULL;
+    p->freelist = NULL;
+}
+
+// Detach and return the underlying arena, leaving the pool empty.
+// If the pool owned the arena, ownership is transferred to the caller.
+static inline CCArena cc_arena_pool_detach(CCArenaPool* p) {
+    CCArena a = {0};
+    if (p && p->arena) {
+        a = cc_arena_detach(p->arena);
+        if (p->_flags & CC_ARENA_POOL_FLAG_OWNED) {
+            free(p->arena);
+        }
+        p->arena = NULL;
+        p->freelist = NULL;
+        p->_flags = 0;
+    }
+    return a;
 }
 
 // Allocate one element from the pool (reuses a freed slot if available).
@@ -583,6 +630,12 @@ static inline CCSlice cc_arena_pool_lower_c(CCSlice recv_type,
     }
     if (method.len == sizeof("free") - 1 && memcmp(method.ptr, "free", sizeof("free") - 1) == 0) {
         return cc_slice_from_buffer((void*)"cc_arena_pool_free", sizeof("cc_arena_pool_free") - 1);
+    }
+    if (method.len == sizeof("detach_arena") - 1 && memcmp(method.ptr, "detach_arena", sizeof("detach_arena") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_pool_detach", sizeof("cc_arena_pool_detach") - 1);
+    }
+    if (method.len == sizeof("destroy") - 1 && memcmp(method.ptr, "destroy", sizeof("destroy") - 1) == 0) {
+        return cc_slice_from_buffer((void*)"cc_arena_pool_destroy", sizeof("cc_arena_pool_destroy") - 1);
     }
     return cc_slice_empty();
 }

@@ -1,4 +1,5 @@
 CC ?= cc
+CXX ?= c++
 TCC_BIN ?=
 TCC_EXT ?= 1
 TCC_INC ?= ../third_party/tcc
@@ -18,8 +19,10 @@ ifeq ($(CC_ENABLE_TLS),1)
 endif
 ifeq ($(BUILD),debug)
   CFLAGS := $(CFLAGS_COMMON) -O0 -g
+  CXXFLAGS := $(CFLAGS_COMMON) -O0 -g -std=c++17 -fno-exceptions -fno-rtti
 else
   CFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections
+  CXXFLAGS := $(CFLAGS_COMMON) -O2 -ffunction-sections -fdata-sections -std=c++17 -fno-exceptions -fno-rtti
 endif
 # UFCS requires the patched TCC extension (AST hooks). Enforce TCC_EXT=1.
 ifneq ($(TCC_EXT),1)
@@ -61,7 +64,9 @@ CCCN_CORE := src/cccn/ast/ast.c src/cccn/parser/parser.c src/cccn/codegen/codege
 OBJDIR ?= ../out/cc/obj
 OUT_BINDIR ?= ../out/cc/bin
 OBJS := $(SRCS:%.c=$(OBJDIR)/%.o)
-DEPS := $(OBJS:.o=.d)
+RUNTIME_CORE_OBJ := $(OBJDIR)/runtime/concurrent_c.core.o
+RUNTIME_XJB_OBJ := $(OBJDIR)/runtime/float_format_xjb.o
+DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
 REAL_BINARY := bin/ccc
 WRAPPER := $(OUT_BINDIR)/ccc
 
@@ -143,7 +148,9 @@ $(LOWER_HEADERS_BINARY): $(LOWER_HEADERS_OBJS)
 
 $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $@
+	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
+	$(CXX) $(CXXFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
+	$(CC) -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)
