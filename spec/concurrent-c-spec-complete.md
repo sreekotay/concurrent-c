@@ -9,7 +9,7 @@ The key concept: lifetime of memory and the lifetime of tasks are explicitly bou
 **Abbreviation:** CC  
 **Type:** C extension (preprocessor + minimal runtime)  
 **Draft Version:** 1.0-draft.11  
-**Last Updated:** 2026-04-03
+**Last Updated:** 2026-04-03 (added CCArenaPool)
 
 > **Status:** Complete, consolidated specification for CC-to-C translator implementation. **Spec Tests are normative.**
 
@@ -1585,6 +1585,16 @@ void* cc_arena_alloc_local_grow(CCArena* a, size_t nbytes, size_t align);   // l
 // Macros: cc_arena_alloc_T_*, cc_arena_alloc_T_*_local, cc_arena_alloc_T_*_local_grow
 
 int cc_arena_would_fit(const CCArena* a, size_t nbytes, size_t align);  // current slab only (no grow)
+
+**Fixed-size Pool API (normative):**
+A `CCArenaPool` provides O(1) `alloc` and `free` for uniform objects by managing a freelist on top of an arena.
+```c
+typedef struct CCArenaPool CCArenaPool;
+void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz);
+void* cc_arena_pool_alloc(CCArenaPool* p);  // UFCS: p.alloc()
+void cc_arena_pool_free(CCArenaPool* p, void* ptr); // UFCS: p.free(ptr)
+```
+The pool is reclaimed when the underlying arena is reset or freed.
 
 // Growth policy (field on CCArena; affects future growth only)
 // a->block_max = 0;  // unbounded growth

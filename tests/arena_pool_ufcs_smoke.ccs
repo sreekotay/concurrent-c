@@ -1,0 +1,43 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+struct Point {
+    long long x;
+    long long y;
+};
+
+int main(void) {
+    CC_ARENA_STACK(a, 1024);
+    
+    CCArenaPool p;
+    cc_arena_pool_init(&p, &a, sizeof(struct Point));
+    
+    // Test UFCS alloc
+    struct Point* p1 = (struct Point*)p.alloc();
+    struct Point* p2 = (struct Point*)p.alloc();
+    
+    if (!p1 || !p2 || p1 == p2) {
+        printf("FAIL: UFCS alloc\n");
+        return 1;
+    }
+    
+    p1->y = 200;
+    
+    // Test UFCS free
+    p.free(p1);
+    
+    // Re-alloc
+    struct Point* p3 = (struct Point*)p.alloc();
+    if (p3 != p1) {
+        printf("FAIL: UFCS reuse\n");
+        return 1;
+    }
+    
+    if (p3->y != 200) {
+        printf("FAIL: UFCS data integrity (y should be preserved if it's after the freelist pointer)\n");
+        return 1;
+    }
+    
+    printf("arena_pool_ufcs_smoke ok\n");
+    return 0;
+}

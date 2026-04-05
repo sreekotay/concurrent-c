@@ -76,7 +76,6 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
 static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, size_t n);
 static char* cc__rewrite_parser_generic_family_helpers_to_concrete(const char* src, size_t n);
 static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n);
-
 static void cc__emit_line_directive(FILE* out, int line, const char* path) {
     char rel[1024];
     const char* shown = (path && path[0]) ? cc_path_rel_to_repo(path, rel, sizeof(rel)) : "<input>";
@@ -936,6 +935,17 @@ static int cc__find_matching_brace_codegen(const char* src, size_t len, size_t l
         }
     }
     return 0;
+}
+
+static const char* cc__canonicalize_string_type_codegen(const char* type_name) {
+    if (!type_name) return NULL;
+    if (strcmp(type_name, "Vec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
+        return "CCString";
+    }
+    if (strcmp(type_name, "Vec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
+        return "CCString*";
+    }
+    return type_name;
 }
 
 static size_t cc__skip_ws_codegen(const char* src, size_t n, size_t i) {
@@ -1944,6 +1954,7 @@ static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_s
     if (!out || out_sz == 0) return;
     out[0] = '\0';
     if (!type_name || !type_name[0]) return;
+    type_name = cc__canonicalize_string_type_codegen(type_name);
     bang = strchr(type_name, '!');
     if (!bang || bang[1] == '=') {
         strncpy(out, type_name, out_sz - 1);
@@ -2001,6 +2012,7 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
     int scope_depth = 1;
     int next_scope_id = 1;
     int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    int paren_depth = 0, bracket_depth = 0;
     size_t stmt_start = 0;
     size_t i = 0;
     if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
@@ -2017,13 +2029,17 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
-        if (c == '{') {
+        if (c == '(') { paren_depth++; i++; continue; }
+        if (c == ')') { if (paren_depth > 0) paren_depth--; i++; continue; }
+        if (c == '[') { bracket_depth++; i++; continue; }
+        if (c == ']') { if (bracket_depth > 0) bracket_depth--; i++; continue; }
+        if (c == '{' && paren_depth == 0 && bracket_depth == 0) {
             if (scope_depth < MAX_SCOPES) scope_stack[scope_depth++] = next_scope_id++;
             stmt_start = i + 1;
             i++;
             continue;
         }
-        if (c == '}') {
+        if (c == '}' && paren_depth == 0 && bracket_depth == 0) {
             int closing_scope = (scope_depth > 1) ? scope_stack[scope_depth - 1] : 0;
             while (decl_count > 0 && decls[decl_count - 1].scope_id == closing_scope) decl_count--;
             if (scope_depth > 1) scope_depth--;
@@ -2031,7 +2047,7 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
             i++;
             continue;
         }
-        if (c == ';') {
+        if (c == ';' && paren_depth == 0 && bracket_depth == 0) {
             char decl_name[128];
             char decl_type[256];
             cc_parse_decl_name_and_type(src + stmt_start, src + i,
@@ -2054,6 +2070,13 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
     if (decl_count == 0) return NULL;
     strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
+    {
+        const char* canon = cc__canonicalize_string_type_codegen(out_type);
+        if (canon != out_type) {
+            strncpy(out_type, canon, out_type_sz - 1);
+            out_type[out_type_sz - 1] = '\0';
+        }
+    }
     return out_type;
 }
 

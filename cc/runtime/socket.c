@@ -242,7 +242,7 @@ static const cc_sched_waitable_ops cc__ready_socket_wait_ops = {
     .unpublish = cc__ready_socket_unpublish_wait,
 };
 
-static CCResult_bool_CCIoError cc__socket_signal_wait_inner(CCSocketSignal* sig) {
+static CCResult_bool_CCIoError cc__socket_signal_wait_with_epoch(CCSocketSignal* sig, uint64_t seen_epoch) {
     if (!sig) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));
     }
@@ -257,7 +257,6 @@ static CCResult_bool_CCIoError cc__socket_signal_wait_inner(CCSocketSignal* sig)
         return CCRes_err(bool, CCIoError, cc_io_from_errno(prep_err));
     }
 
-    uint64_t seen_epoch = cc__socket_signal_current(sig);
     if (cc__socket_signal_current(sig) != seen_epoch) {
         return CCRes_ok(bool, CCIoError, false);
     }
@@ -309,6 +308,15 @@ static CCResult_bool_CCIoError cc__socket_signal_wait_inner(CCSocketSignal* sig)
     return CCRes_ok(bool, CCIoError, true);
 }
 
+uint64_t cc_socket_signal_snapshot(CCSocketSignal* sig) {
+    return cc__socket_signal_current(sig);
+}
+
 CCResult_bool_CCIoError cc_socket_signal_wait(CCSocketSignal* sig) {
-    return cc__socket_signal_wait_inner(sig);
+    uint64_t seen_epoch = cc__socket_signal_current(sig);
+    return cc__socket_signal_wait_with_epoch(sig, seen_epoch);
+}
+
+CCResult_bool_CCIoError cc_socket_signal_wait_since(CCSocketSignal* sig, uint64_t seen_epoch) {
+    return cc__socket_signal_wait_with_epoch(sig, seen_epoch);
 }

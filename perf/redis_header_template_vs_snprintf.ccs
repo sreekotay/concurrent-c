@@ -1,0 +1,160 @@
+#include <ccc/std/prelude.cch>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define DEFAULT_ITERATIONS 1000000
+#define DEFAULT_TRIALS 7
+#define DEFAULT_VALUE_COUNT 4096
+#define STACK_ARENA_BYTES 128
+
+static volatile size_t g_len_sink = 0;
+static volatile unsigned char g_byte_sink = 0;
+
+static double time_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static int env_int_or_default(const char* name, int fallback, int min_value) {
+    const char* v = getenv(name);
+    if (!v || !v[0]) return fallback;
+    int parsed = atoi(v);
+    return parsed < min_value ? min_value : parsed;
+}
+
+static int bench_iterations(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_REDIS_HDR_ITERATIONS", DEFAULT_ITERATIONS, 1);
+    return value;
+}
+
+static int bench_trials(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_REDIS_HDR_TRIALS", DEFAULT_TRIALS, 1);
+    return value;
+}
+
+static int bench_value_count(void) {
+    static int value = -1;
+    if (value < 0) value = env_int_or_default("CC_REDIS_HDR_VALUES", DEFAULT_VALUE_COUNT, 1);
+    return value;
+}
+
+static void fill_values(size_t* values, int count) {
+    uint64_t x = 0x9e3779b97f4a7c15ULL;
+    for (int i = 0; i < count; i++) {
+        x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+        values[i] = (size_t)(x % 1000000000000ULL);
+    }
+}
+
+static void verify_same_output(const size_t* values, int count) {
+    CC_ARENA_STACK(tmp, STACK_ARENA_BYTES);
+    for (int i = 0; i < count && i < 16; i++) {
+        size_t value = values[i];
+        CCString hdr_str = @string(`$${value}\r\n`, &tmp);
+        char[:0] hdr = hdr_str.as_slice();
+        char buf[64];
+        int hdr_len = snprintf(buf, sizeof(buf), "$%zu\r\n", value);
+        if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(buf)) abort();
+        if (hdr.len != (size_t)hdr_len) abort();
+        if (memcmp(hdr.ptr, buf, hdr.len) != 0) abort();
+        cc_arena_reset(&tmp);
+    }
+    cc_arena_free(&tmp);
+}
+
+static double run_cc_template_loop(const size_t* values, int value_count, int iterations) {
+    CC_ARENA_STACK(tmp, STACK_ARENA_BYTES);
+    size_t sum = 0;
+    unsigned char mark = 0;
+    double start = time_now_ms();
+    for (int i = 0; i < iterations; i++) {
+        size_t value = values[i % value_count];
+        CCString hdr_str = @string(`$${value}\r\n`, &tmp);
+        char[:0] hdr = hdr_str.as_slice();
+        size_t hdr_len = hdr.len;
+        size_t len = hdr_len + value + 2;
+        sum += len;
+        if (hdr_len > 0) {
+            const char* p = (const char*)hdr.ptr;
+            mark ^= (unsigned char)p[0];
+            mark ^= (unsigned char)p[hdr_len - 1];
+        }
+        cc_arena_reset(&tmp);
+    }
+    double elapsed = time_now_ms() - start;
+    cc_arena_free(&tmp);
+    g_len_sink += sum;
+    g_byte_sink ^= mark;
+    return elapsed;
+}
+
+static double run_snprintf_loop(const size_t* values, int value_count, int iterations) {
+    size_t sum = 0;
+    unsigned char mark = 0;
+    double start = time_now_ms();
+    for (int i = 0; i < iterations; i++) {
+        size_t value = values[i % value_count];
+        char hdr[64];
+        int hdr_len = snprintf(hdr, sizeof(hdr), "$%zu\r\n", value);
+        if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(hdr)) abort();
+        size_t len = (size_t)hdr_len + value + 2;
+        sum += len;
+        mark ^= (unsigned char)hdr[0];
+        mark ^= (unsigned char)hdr[hdr_len - 1];
+    }
+    double elapsed = time_now_ms() - start;
+    g_len_sink += sum;
+    g_byte_sink ^= mark;
+    return elapsed;
+}
+
+int main(void) {
+    int iterations = bench_iterations();
+    int trials = bench_trials();
+    int value_count = bench_value_count();
+    size_t* values = (size_t*)malloc(sizeof(size_t) * (size_t)value_count);
+    double best_cc = 0.0;
+    double best_snprintf = 0.0;
+    if (!values) abort();
+
+    fill_values(values, value_count);
+    verify_same_output(values, value_count);
+
+    printf("=================================================================\n");
+    printf("REDIS HEADER TEMPLATE VS SNPRINTF\n");
+    printf("Iterations: %d | Trials: %d | Distinct lens: %d\n", iterations, trials, value_count);
+    printf("=================================================================\n\n");
+
+    for (int trial = 1; trial <= trials; trial++) {
+        double cc_ms = run_cc_template_loop(values, value_count, iterations);
+        double snprintf_ms = run_snprintf_loop(values, value_count, iterations);
+        if (trial == 1 || cc_ms < best_cc) best_cc = cc_ms;
+        if (trial == 1 || snprintf_ms < best_snprintf) best_snprintf = snprintf_ms;
+        printf("  Trial %d:  cc_template=%8.2f ms  snprintf=%8.2f ms\n",
+               trial, cc_ms, snprintf_ms);
+    }
+
+    printf("\n");
+    printf("  Best cc_template: %8.2f ms  (%10.0f hdr/sec)\n",
+           best_cc, (double)iterations / best_cc * 1000.0);
+    printf("  Best snprintf:    %8.2f ms  (%10.0f hdr/sec)\n",
+           best_snprintf, (double)iterations / best_snprintf * 1000.0);
+    printf("  Sink: len=%zu byte=%u\n", (size_t)g_len_sink, (unsigned)g_byte_sink);
+
+    if (best_cc <= best_snprintf) {
+        printf("RESULT: PASS - CC template loop is not slower than snprintf.\n");
+    } else {
+        double slowdown = ((best_cc - best_snprintf) / best_snprintf) * 100.0;
+        printf("RESULT: FAIL - CC template loop is %.2f%% slower than snprintf.\n", slowdown);
+    }
+    printf("=================================================================\n");
+
+    free(values);
+    return 0;
+}
