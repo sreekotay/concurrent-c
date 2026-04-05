@@ -2341,7 +2341,7 @@ static int cc__ensure_runtime_obj(const CCBuildOptions* opt,
         }
         strncat(cmd, " -ffunction-sections -fdata-sections", sizeof(cmd) - strlen(cmd) - 1);
         if (run_cmd(cmd, opt->verbose) != 0) return -1;
-        snprintf(cmd, sizeof(cmd), "%s %s %s %s -r %s %s -o %s",
+        snprintf(cmd, sizeof(cmd), "%s %s %s %s -nostdlib -r %s %s -o %s",
                  cc_bin,
                  target_part ? target_part : "",
                  sysroot_part ? sysroot_part : "",
