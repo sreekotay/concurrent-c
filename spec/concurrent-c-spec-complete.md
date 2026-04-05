@@ -1591,10 +1591,13 @@ A `CCArenaPool` provides O(1) `alloc` and `free` for uniform objects by managing
 ```c
 typedef struct CCArenaPool CCArenaPool;
 void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz);
-void* cc_arena_pool_alloc(CCArenaPool* p);  // UFCS: p.alloc()
+int cc_arena_pool(CCArenaPool* p, size_t sz);      // creates and owns its own arena
+void* cc_arena_pool_alloc(CCArenaPool* p);         // UFCS: p.alloc()
 void cc_arena_pool_free(CCArenaPool* p, void* ptr); // UFCS: p.free(ptr)
+CCArena cc_arena_pool_detach(CCArenaPool* p);      // UFCS: p.detach_arena()
+void cc_arena_pool_destroy(CCArenaPool* p);        // UFCS: p.destroy()
 ```
-The pool is reclaimed when the underlying arena is reset or freed.
+The pool is reclaimed when the underlying arena is reset or freed. If the pool owns its arena (created via `cc_arena_pool`), `cc_arena_pool_destroy` will free the arena.
 
 // Growth policy (field on CCArena; affects future growth only)
 // a->block_max = 0;  // unbounded growth

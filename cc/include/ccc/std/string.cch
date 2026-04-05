@@ -263,6 +263,19 @@ CCSlice CCString_as_slice(const CCString *str);
 const char *CCString_cstr(CCString *str);
 /* @string(policy, `...`, a): tag is empty for ${expr}; $~name{expr} passes tag "name". */
 typedef CCSlice (*CCStringPolicy)(CCArena *arena, CCSlice tag, CCSlice value);
+#ifndef CC_ENABLE_XJB_FLOAT_FMT
+#define CC_ENABLE_XJB_FLOAT_FMT 0
+#endif
+#if CC_ENABLE_XJB_FLOAT_FMT
+#ifdef __cplusplus
+extern "C" {
+#endif
+char* cc_xjb_f64_to_string(double v, char *buf);
+char* cc_xjb_f32_to_string(float v, char *buf);
+#ifdef __cplusplus
+}
+#endif
+#endif
 static inline size_t CCString_len(const CCString *str) {
     return str ? str->len : 0;
 }
@@ -308,11 +321,37 @@ static inline CCString* CCString_push_uint(CCString *str, uint64_t v) {
     return cc__string_append_u64_impl(str, v);
 }
 
-static inline CCString* CCString_push_float(CCString *str, double v) {
+static inline CCString* cc__string_push_double_fallback(CCString *str, double v) {
     char buf[64];
     int n = snprintf(buf, sizeof(buf), "%g", v);
     if (n < 0) return NULL;
     return CCString_push_slice(str, cc_slice_from_buffer(buf, (size_t)n));
+}
+
+static inline CCString* CCString_push_f32(CCString *str, float v) {
+#if CC_ENABLE_XJB_FLOAT_FMT
+    char buf[64];
+    char* end = cc_xjb_f32_to_string(v, buf);
+    if (!end || end < buf || (size_t)(end - buf) > sizeof(buf)) return NULL;
+    return CCString_push_slice(str, cc_slice_from_buffer(buf, (size_t)(end - buf)));
+#else
+    return cc__string_push_double_fallback(str, (double)v);
+#endif
+}
+
+static inline CCString* CCString_push_f64(CCString *str, double v) {
+#if CC_ENABLE_XJB_FLOAT_FMT
+    char buf[64];
+    char* end = cc_xjb_f64_to_string(v, buf);
+    if (!end || end < buf || (size_t)(end - buf) > sizeof(buf)) return NULL;
+    return CCString_push_slice(str, cc_slice_from_buffer(buf, (size_t)(end - buf)));
+#else
+    return cc__string_push_double_fallback(str, v);
+#endif
+}
+
+static inline CCString* CCString_push_float(CCString *str, double v) {
+    return CCString_push_f64(str, v);
 }
 
 static inline CCString* CCString_push_cstr(CCString *str, const char *cstr) {
@@ -346,10 +385,17 @@ static inline CCString cc__string_from_unsigned_impl(CCArena *arena, unsigned lo
     return s;
 }
 
-static inline CCString cc__string_from_float_impl(CCArena *arena, double v) {
+static inline CCString cc__string_from_float32_impl(CCArena *arena, float v) {
     CCString s = CCString_new(arena);
     if (!s.data) return s;
-    (void)CCString_push_float(&s, v);
+    (void)CCString_push_f32(&s, v);
+    return s;
+}
+
+static inline CCString cc__string_from_float64_impl(CCArena *arena, double v) {
+    CCString s = CCString_new(arena);
+    if (!s.data) return s;
+    (void)CCString_push_f64(&s, v);
     return s;
 }
 
@@ -385,8 +431,8 @@ static inline CCString int64_t_to_str(int64_t v, CCArena *arena) { return cc__st
 static inline CCString uint64_t_to_str(uint64_t v, CCArena *arena) { return cc__string_from_unsigned_impl(arena, v); }
 static inline CCString intptr_t_to_str(intptr_t v, CCArena *arena) { return cc__string_from_signed_impl(arena, v); }
 static inline CCString uintptr_t_to_str(uintptr_t v, CCArena *arena) { return cc__string_from_unsigned_impl(arena, v); }
-static inline CCString float_to_str(float v, CCArena *arena) { return cc__string_from_float_impl(arena, (double)v); }
-static inline CCString double_to_str(double v, CCArena *arena) { return cc__string_from_float_impl(arena, v); }
+static inline CCString float_to_str(float v, CCArena *arena) { return cc__string_from_float32_impl(arena, v); }
+static inline CCString double_to_str(double v, CCArena *arena) { return cc__string_from_float64_impl(arena, v); }
 static inline CCString bool_to_str(bool v, CCArena *arena) { return cc__string_from_bool_impl(arena, v); }
 
 static inline CCString cc__string_value_from_cstr(const char *cstr, CCArena *arena) {
@@ -624,12 +670,12 @@ static inline CCString* cc__string_slot_push_from_unsigned_long_long(CCString *s
 
 static inline CCString* cc__string_slot_push_from_float(CCString *str, float v, CCArena *arena) {
     (void)arena;
-    return CCString_push_float(str, v);
+    return CCString_push_f32(str, v);
 }
 
 static inline CCString* cc__string_slot_push_from_double(CCString *str, double v, CCArena *arena) {
     (void)arena;
-    return CCString_push_float(str, v);
+    return CCString_push_f64(str, v);
 }
 
 static inline CCString* cc__string_slot_push_from_bool(CCString *str, bool v, CCArena *arena) {

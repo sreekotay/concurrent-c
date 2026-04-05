@@ -38,6 +38,29 @@ int main(void) {
         return 1;
     }
     
+    // Test detach_arena
+    CCArena detached = p.detach_arena();
+    if (detached.base == NULL || p.arena != NULL) {
+        printf("FAIL: UFCS detach_arena\n");
+        return 1;
+    }
+    cc_arena_free(&detached);
+    
+    // Test owned pool
+    CCArenaPool p_owned;
+    if (cc_arena_pool(&p_owned, sizeof(struct Point)) != 0) {
+        printf("FAIL: owned pool creation\n");
+        return 1;
+    }
+    
+    struct Point* p4 = (struct Point*)p_owned.alloc();
+    if (!p4) {
+        printf("FAIL: owned pool alloc\n");
+        return 1;
+    }
+    
+    p_owned.destroy();
+    
     printf("arena_pool_ufcs_smoke ok\n");
     return 0;
 }
