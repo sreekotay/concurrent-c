@@ -150,7 +150,7 @@ $(OBJDIR)/runtime/concurrent_c.o: $(LOWER_HEADERS_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_CORE_OBJ:.o=.d) -c $(OUT_RUNTIME)/concurrent_c.c -o $(RUNTIME_CORE_OBJ)
 	$(CXX) $(CXXFLAGS) -DCC_ENABLE_XJB_FLOAT_FMT=1 -MMD -MP -MF $(RUNTIME_XJB_OBJ:.o=.d) -c runtime/float_format_xjb.cpp -o $(RUNTIME_XJB_OBJ)
-	$(CC) -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
+	$(CC) -nostdlib -r -o $@ $(RUNTIME_CORE_OBJ) $(RUNTIME_XJB_OBJ)
 
 $(OBJDIR)/%.o: %.c
 	@mkdir -p $(dir $@)

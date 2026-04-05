@@ -668,6 +668,61 @@ static inline CCString* cc__string_slot_push_from_unsigned_long_long(CCString *s
     return CCString_push_uint(str, v);
 }
 
+static inline CCString* cc__string_slot_push_from_int8_t(CCString *str, int8_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_int(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_uint8_t(CCString *str, uint8_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_uint(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_int16_t(CCString *str, int16_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_int(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_uint16_t(CCString *str, uint16_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_uint(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_int32_t(CCString *str, int32_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_int(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_uint32_t(CCString *str, uint32_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_uint(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_int64_t(CCString *str, int64_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_int(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_uint64_t(CCString *str, uint64_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_uint(str, v);
+}
+
+static inline CCString* cc__string_slot_push_from_intptr_t(CCString *str, intptr_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_int(str, (int64_t)v);
+}
+
+static inline CCString* cc__string_slot_push_from_uintptr_t(CCString *str, uintptr_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_uint(str, (uint64_t)v);
+}
+
+static inline CCString* cc__string_slot_push_from_size_t(CCString *str, size_t v, CCArena *arena) {
+    (void)arena;
+    return CCString_push_uint(str, (uint64_t)v);
+}
+
 static inline CCString* cc__string_slot_push_from_float(CCString *str, float v, CCArena *arena) {
     (void)arena;
     return CCString_push_f32(str, v);

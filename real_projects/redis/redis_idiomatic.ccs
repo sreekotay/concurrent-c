@@ -887,17 +887,16 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
             return cc_ok(true);
         }
         case REDIS_REPLY_BULK_STRING: {
-            char hdr[64];
-            int hdr_len = snprintf(hdr, sizeof(hdr), "$%zu\r\n", reply->data.len);
-            if (hdr_len <= 0 || (size_t)hdr_len >= sizeof(hdr)) {
-                return cc_err(mkerr(CC_ERR_IO, "reply bulk encode failed"));
-            }
-            size_t len = (size_t)hdr_len + reply->data.len + 2;
+            CC_ARENA_STACK(tmp, 64);
+            CCString hdr_str = @string(`$${reply->data.len}\r\n`, &tmp);
+            char[:0] hdr = hdr_str.as_slice();
+            size_t hdr_len = hdr.len;
+            size_t len = hdr_len + reply->data.len + 2;
             CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
             char* out = dst.ptr;
-            memcpy(out, hdr, (size_t)hdr_len);
+            memcpy(out, hdr.ptr, hdr_len);
             if (reply->data.len > 0) memcpy(out + hdr_len, reply->data.ptr, reply->data.len);
             out[hdr_len + reply->data.len] = '\r';
             out[hdr_len + reply->data.len + 1] = '\n';
@@ -906,15 +905,13 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
             return cc_ok(true);
         }
         case REDIS_REPLY_INTEGER: {
-            char buf[64];
-            int len = snprintf(buf, sizeof(buf), ":%lld\r\n", (long long)reply->int_value);
-            if (len <= 0 || (size_t)len >= sizeof(buf)) {
-                return cc_err(mkerr(CC_ERR_IO, "reply integer encode failed"));
-            }
-            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, (size_t)len);
+            CC_ARENA_STACK(tmp, 64);
+            CCString int_str = @string(`:${reply->int_value}\r\n`, &tmp);
+            char[:0] wire = int_str.as_slice();
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, wire.len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
-            memcpy(dst.ptr, buf, (size_t)len);
+            memcpy(dst.ptr, wire.ptr, wire.len);
             reply->kind = REDIS_REPLY_RAW;
             reply->data = dst;
             return cc_ok(true);

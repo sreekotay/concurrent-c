@@ -73,8 +73,17 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
                                                             const char* var_name,
                                                             char* out_type,
                                                             size_t out_type_sz);
+static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
+                                                           size_t limit,
+                                                           const char* var_name,
+                                                           char* out_type,
+                                                           size_t out_type_sz);
+static void cc__record_function_params_before_brace_codegen(CCTypeRegistry* reg,
+                                                            const char* src,
+                                                            size_t brace_pos);
 static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, size_t n);
 static char* cc__rewrite_parser_generic_family_helpers_to_concrete(const char* src, size_t n);
+static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, size_t n);
 static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t n);
 static void cc__emit_line_directive(FILE* out, int line, const char* path) {
     char rel[1024];
@@ -2067,7 +2076,9 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
         }
         i++;
     }
-    if (decl_count == 0) return NULL;
+    if (decl_count == 0) {
+        return cc__lookup_enclosing_param_type_codegen(src, limit, var_name, out_type, out_type_sz);
+    }
     strncpy(out_type, decls[decl_count - 1].type_name, out_type_sz - 1);
     out_type[out_type_sz - 1] = '\0';
     {
@@ -2078,6 +2089,179 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
         }
     }
     return out_type;
+}
+
+static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
+                                                           size_t limit,
+                                                           const char* var_name,
+                                                           char* out_type,
+                                                           size_t out_type_sz) {
+    size_t i = 0;
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    if (!src || !var_name || !var_name[0] || !out_type || out_type_sz == 0) return NULL;
+    out_type[0] = '\0';
+    while (i < limit) {
+        char c = src[i];
+        char c2 = (i + 1 < limit) ? src[i + 1] : 0;
+        if (in_lc) { if (c == '\n') in_lc = 0; i++; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i += 2; continue; } i++; continue; }
+        if (in_str) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '"') in_str = 0; i++; continue; }
+        if (in_chr) { if (c == '\\' && i + 1 < limit) { i += 2; continue; } if (c == '\'') in_chr = 0; i++; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i += 2; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
+        if (c == '"') { in_str = 1; i++; continue; }
+        if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '{') {
+            size_t rpar = i;
+            size_t lpar;
+            size_t name_end;
+            size_t name_start;
+            char fn_name[64];
+            size_t cursor;
+            while (rpar > 0 && isspace((unsigned char)src[rpar - 1])) rpar--;
+            if (rpar == 0 || src[rpar - 1] != ')') { i++; continue; }
+            rpar--;
+            lpar = rpar;
+            {
+                int depth = 1;
+                while (lpar > 0) {
+                    lpar--;
+                    if (src[lpar] == ')') depth++;
+                    else if (src[lpar] == '(') {
+                        depth--;
+                        if (depth == 0) break;
+                    }
+                }
+                if (src[lpar] != '(') { i++; continue; }
+            }
+            name_end = lpar;
+            while (name_end > 0 && isspace((unsigned char)src[name_end - 1])) name_end--;
+            name_start = name_end;
+            while (name_start > 0 &&
+                   (isalnum((unsigned char)src[name_start - 1]) || src[name_start - 1] == '_')) {
+                name_start--;
+            }
+            if (name_end <= name_start || name_end - name_start >= sizeof(fn_name)) { i++; continue; }
+            memcpy(fn_name, src + name_start, name_end - name_start);
+            fn_name[name_end - name_start] = '\0';
+            if (strcmp(fn_name, "if") == 0 || strcmp(fn_name, "for") == 0 ||
+                strcmp(fn_name, "while") == 0 || strcmp(fn_name, "switch") == 0) {
+                i++;
+                continue;
+            }
+            cursor = lpar + 1;
+            while (cursor < rpar) {
+                size_t param_s = cc__skip_ws_codegen(src, limit, cursor);
+                size_t param_e = param_s;
+                int par = 0, br = 0, brc = 0;
+                char decl_name[128];
+                char decl_type[256];
+                if (param_s >= rpar) break;
+                while (param_e < rpar) {
+                    char pc = src[param_e];
+                    if (pc == '(') par++;
+                    else if (pc == ')' && par > 0) par--;
+                    else if (pc == '[') br++;
+                    else if (pc == ']' && br > 0) br--;
+                    else if (pc == '{') brc++;
+                    else if (pc == '}' && brc > 0) brc--;
+                    else if (pc == ',' && par == 0 && br == 0 && brc == 0) break;
+                    param_e++;
+                }
+                while (param_e > param_s && isspace((unsigned char)src[param_e - 1])) param_e--;
+                if (param_e > param_s) {
+                    cc_parse_decl_name_and_type(src + param_s, src + param_e,
+                                                decl_name, sizeof(decl_name),
+                                                decl_type, sizeof(decl_type));
+                    if (decl_name[0] && strcmp(decl_name, var_name) == 0 &&
+                        decl_type[0] && strcmp(decl_type, "void") != 0 &&
+                        !cc_is_non_decl_stmt_type(decl_type)) {
+                        cc__normalize_decl_type_for_receiver_codegen(out_type, out_type_sz, decl_type);
+                        return out_type;
+                    }
+                }
+                cursor = param_e;
+                if (cursor < rpar && src[cursor] == ',') cursor++;
+            }
+        }
+        i++;
+    }
+    return NULL;
+}
+
+static void cc__record_function_params_before_brace_codegen(CCTypeRegistry* reg,
+                                                            const char* src,
+                                                            size_t brace_pos) {
+    size_t rpar;
+    size_t lpar;
+    size_t name_end;
+    size_t name_start;
+    char fn_name[64];
+    size_t cursor;
+    if (!reg || !src || brace_pos == 0) return;
+    rpar = brace_pos;
+    while (rpar > 0 && isspace((unsigned char)src[rpar - 1])) rpar--;
+    if (rpar == 0 || src[rpar - 1] != ')') return;
+    rpar--;
+    lpar = rpar;
+    {
+        int depth = 1;
+        while (lpar > 0) {
+            lpar--;
+            if (src[lpar] == ')') depth++;
+            else if (src[lpar] == '(') {
+                depth--;
+                if (depth == 0) break;
+            }
+        }
+        if (src[lpar] != '(') return;
+    }
+    name_end = lpar;
+    while (name_end > 0 && isspace((unsigned char)src[name_end - 1])) name_end--;
+    name_start = name_end;
+    while (name_start > 0 &&
+           (isalnum((unsigned char)src[name_start - 1]) || src[name_start - 1] == '_')) {
+        name_start--;
+    }
+    if (name_end <= name_start || name_end - name_start >= sizeof(fn_name)) return;
+    memcpy(fn_name, src + name_start, name_end - name_start);
+    fn_name[name_end - name_start] = '\0';
+    if (strcmp(fn_name, "if") == 0 || strcmp(fn_name, "for") == 0 ||
+        strcmp(fn_name, "while") == 0 || strcmp(fn_name, "switch") == 0) {
+        return;
+    }
+    cursor = lpar + 1;
+    while (cursor < rpar) {
+        size_t param_s = cc__skip_ws_codegen(src, brace_pos, cursor);
+        size_t param_e = param_s;
+        int par = 0, br = 0, brc = 0;
+        char decl_name[128];
+        char decl_type[256];
+        if (param_s >= rpar) break;
+        while (param_e < rpar) {
+            char c = src[param_e];
+            if (c == '(') par++;
+            else if (c == ')' && par > 0) par--;
+            else if (c == '[') br++;
+            else if (c == ']' && br > 0) br--;
+            else if (c == '{') brc++;
+            else if (c == '}' && brc > 0) brc--;
+            else if (c == ',' && par == 0 && br == 0 && brc == 0) break;
+            param_e++;
+        }
+        while (param_e > param_s && isspace((unsigned char)src[param_e - 1])) param_e--;
+        if (param_e > param_s) {
+            cc_parse_decl_name_and_type(src + param_s, src + param_e,
+                                        decl_name, sizeof(decl_name),
+                                        decl_type, sizeof(decl_type));
+            if (decl_name[0] && decl_type[0] && strcmp(decl_type, "void") != 0 &&
+                !cc_is_non_decl_stmt_type(decl_type)) {
+                cc_type_registry_add_var(reg, decl_name, decl_type);
+            }
+        }
+        cursor = param_e;
+        if (cursor < rpar && src[cursor] == ',') cursor++;
+    }
 }
 
 static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, size_t n) {
@@ -2159,6 +2343,472 @@ static char* cc__rewrite_result_helper_family_to_visible_type(const char* src, s
         last_emit = ident_end;
         changed = 1;
     }
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    if (last_emit < n) cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, n - last_emit);
+    return out;
+}
+
+static void cc__trim_expr_parens_codegen(const char** start, const char** end) {
+    int changed = 1;
+    if (!start || !end || !*start || !*end) return;
+    cc__trim_type_span_codegen(start, end);
+    while (changed && *start < *end) {
+        const char* s = *start;
+        const char* e = *end;
+        int par = 0, br = 0, brc = 0;
+        int changed_this_round = 0;
+        if (*s != '(' || e <= s + 1 || e[-1] != ')') break;
+        for (const char* p = s + 1; p < e - 1; ++p) {
+            char c = *p;
+            if (c == '(') par++;
+            else if (c == ')' && par > 0) par--;
+            else if (c == '[') br++;
+            else if (c == ']' && br > 0) br--;
+            else if (c == '{') brc++;
+            else if (c == '}' && brc > 0) brc--;
+            else if (c == ')' && par == 0 && br == 0 && brc == 0) {
+                changed_this_round = -1;
+                break;
+            }
+        }
+        if (changed_this_round < 0 || par != 0 || br != 0 || brc != 0) break;
+        *start = s + 1;
+        *end = e - 1;
+        cc__trim_type_span_codegen(start, end);
+        changed = 1;
+    }
+}
+
+static const char* cc__string_helper_for_type_codegen(const char* family, const char* type_name) {
+    if (!family || !type_name || !type_name[0]) return NULL;
+    type_name = cc__canonicalize_string_type_codegen(type_name);
+    if (strcmp(family, "CCString_from") == 0) {
+        if (strcmp(type_name, "char") == 0) return "char_to_str";
+        if (strcmp(type_name, "signed char") == 0) return "signed_char_to_str";
+        if (strcmp(type_name, "unsigned char") == 0) return "unsigned_char_to_str";
+        if (strcmp(type_name, "short") == 0) return "short_to_str";
+        if (strcmp(type_name, "unsigned short") == 0) return "unsigned_short_to_str";
+        if (strcmp(type_name, "int") == 0) return "int_to_str";
+        if (strcmp(type_name, "unsigned") == 0) return "unsigned_to_str";
+        if (strcmp(type_name, "long") == 0) return "long_to_str";
+        if (strcmp(type_name, "unsigned long") == 0) return "unsigned_long_to_str";
+        if (strcmp(type_name, "long long") == 0) return "long_long_to_str";
+        if (strcmp(type_name, "unsigned long long") == 0) return "unsigned_long_long_to_str";
+        if (strcmp(type_name, "int8_t") == 0) return "int8_t_to_str";
+        if (strcmp(type_name, "uint8_t") == 0) return "uint8_t_to_str";
+        if (strcmp(type_name, "int16_t") == 0) return "int16_t_to_str";
+        if (strcmp(type_name, "uint16_t") == 0) return "uint16_t_to_str";
+        if (strcmp(type_name, "int32_t") == 0) return "int32_t_to_str";
+        if (strcmp(type_name, "uint32_t") == 0) return "uint32_t_to_str";
+        if (strcmp(type_name, "int64_t") == 0) return "int64_t_to_str";
+        if (strcmp(type_name, "uint64_t") == 0) return "uint64_t_to_str";
+        if (strcmp(type_name, "intptr_t") == 0) return "intptr_t_to_str";
+        if (strcmp(type_name, "uintptr_t") == 0) return "uintptr_t_to_str";
+        if (strcmp(type_name, "size_t") == 0) return "uintptr_t_to_str";
+        if (strcmp(type_name, "float") == 0) return "float_to_str";
+        if (strcmp(type_name, "double") == 0) return "double_to_str";
+        if (strcmp(type_name, "bool") == 0) return "bool_to_str";
+        return NULL;
+    }
+    if (strcmp(family, "cc__string_slot_arg") == 0) {
+        if (strcmp(type_name, "char") == 0) return "cc__string_slot_from_char";
+        if (strcmp(type_name, "signed char") == 0) return "cc__string_slot_from_signed_char";
+        if (strcmp(type_name, "unsigned char") == 0) return "cc__string_slot_from_unsigned_char";
+        if (strcmp(type_name, "short") == 0) return "cc__string_slot_from_short";
+        if (strcmp(type_name, "unsigned short") == 0) return "cc__string_slot_from_unsigned_short";
+        if (strcmp(type_name, "int") == 0) return "cc__string_slot_from_int";
+        if (strcmp(type_name, "unsigned") == 0) return "cc__string_slot_from_unsigned";
+        if (strcmp(type_name, "long") == 0) return "cc__string_slot_from_long";
+        if (strcmp(type_name, "unsigned long") == 0) return "cc__string_slot_from_unsigned_long";
+        if (strcmp(type_name, "long long") == 0) return "cc__string_slot_from_long_long";
+        if (strcmp(type_name, "unsigned long long") == 0) return "cc__string_slot_from_unsigned_long_long";
+        if (strcmp(type_name, "int8_t") == 0) return "cc__string_slot_from_int8_t";
+        if (strcmp(type_name, "uint8_t") == 0) return "cc__string_slot_from_uint8_t";
+        if (strcmp(type_name, "int16_t") == 0) return "cc__string_slot_from_int16_t";
+        if (strcmp(type_name, "uint16_t") == 0) return "cc__string_slot_from_uint16_t";
+        if (strcmp(type_name, "int32_t") == 0) return "cc__string_slot_from_int32_t";
+        if (strcmp(type_name, "uint32_t") == 0) return "cc__string_slot_from_uint32_t";
+        if (strcmp(type_name, "int64_t") == 0) return "cc__string_slot_from_int64_t";
+        if (strcmp(type_name, "uint64_t") == 0) return "cc__string_slot_from_uint64_t";
+        if (strcmp(type_name, "intptr_t") == 0) return "cc__string_slot_from_intptr_t";
+        if (strcmp(type_name, "uintptr_t") == 0) return "cc__string_slot_from_uintptr_t";
+        if (strcmp(type_name, "size_t") == 0) return "cc__string_slot_from_uintptr_t";
+        if (strcmp(type_name, "float") == 0) return "cc__string_slot_from_float";
+        if (strcmp(type_name, "double") == 0) return "cc__string_slot_from_double";
+        if (strcmp(type_name, "bool") == 0) return "cc__string_slot_from_bool";
+        return NULL;
+    }
+    if (strcmp(family, "cc__string_slot_push") == 0) {
+        if (strcmp(type_name, "char") == 0) return "cc__string_slot_push_from_char";
+        if (strcmp(type_name, "signed char") == 0) return "cc__string_slot_push_from_signed_char";
+        if (strcmp(type_name, "unsigned char") == 0) return "cc__string_slot_push_from_unsigned_char";
+        if (strcmp(type_name, "short") == 0) return "cc__string_slot_push_from_short";
+        if (strcmp(type_name, "unsigned short") == 0) return "cc__string_slot_push_from_unsigned_short";
+        if (strcmp(type_name, "int") == 0) return "cc__string_slot_push_from_int";
+        if (strcmp(type_name, "unsigned") == 0) return "cc__string_slot_push_from_unsigned";
+        if (strcmp(type_name, "long") == 0) return "cc__string_slot_push_from_long";
+        if (strcmp(type_name, "unsigned long") == 0) return "cc__string_slot_push_from_unsigned_long";
+        if (strcmp(type_name, "long long") == 0) return "cc__string_slot_push_from_long_long";
+        if (strcmp(type_name, "unsigned long long") == 0) return "cc__string_slot_push_from_unsigned_long_long";
+        if (strcmp(type_name, "int8_t") == 0) return "cc__string_slot_push_from_int8_t";
+        if (strcmp(type_name, "uint8_t") == 0) return "cc__string_slot_push_from_uint8_t";
+        if (strcmp(type_name, "int16_t") == 0) return "cc__string_slot_push_from_int16_t";
+        if (strcmp(type_name, "uint16_t") == 0) return "cc__string_slot_push_from_uint16_t";
+        if (strcmp(type_name, "int32_t") == 0) return "cc__string_slot_push_from_int32_t";
+        if (strcmp(type_name, "uint32_t") == 0) return "cc__string_slot_push_from_uint32_t";
+        if (strcmp(type_name, "int64_t") == 0) return "cc__string_slot_push_from_int64_t";
+        if (strcmp(type_name, "uint64_t") == 0) return "cc__string_slot_push_from_uint64_t";
+        if (strcmp(type_name, "intptr_t") == 0) return "cc__string_slot_push_from_intptr_t";
+        if (strcmp(type_name, "uintptr_t") == 0) return "cc__string_slot_push_from_uintptr_t";
+        if (strcmp(type_name, "size_t") == 0) return "cc__string_slot_push_from_size_t";
+        if (strcmp(type_name, "float") == 0) return "cc__string_slot_push_from_float";
+        if (strcmp(type_name, "double") == 0) return "cc__string_slot_push_from_double";
+        if (strcmp(type_name, "bool") == 0) return "cc__string_slot_push_from_bool";
+        return NULL;
+    }
+    return NULL;
+}
+
+static int cc__is_numeric_expr_type_codegen(const char* type_name) {
+    if (!type_name || !type_name[0]) return 0;
+    return strcmp(type_name, "char") == 0 ||
+           strcmp(type_name, "signed char") == 0 ||
+           strcmp(type_name, "unsigned char") == 0 ||
+           strcmp(type_name, "short") == 0 ||
+           strcmp(type_name, "unsigned short") == 0 ||
+           strcmp(type_name, "int") == 0 ||
+           strcmp(type_name, "unsigned") == 0 ||
+           strcmp(type_name, "long") == 0 ||
+           strcmp(type_name, "unsigned long") == 0 ||
+           strcmp(type_name, "long long") == 0 ||
+           strcmp(type_name, "unsigned long long") == 0 ||
+           strcmp(type_name, "int8_t") == 0 ||
+           strcmp(type_name, "uint8_t") == 0 ||
+           strcmp(type_name, "int16_t") == 0 ||
+           strcmp(type_name, "uint16_t") == 0 ||
+           strcmp(type_name, "int32_t") == 0 ||
+           strcmp(type_name, "uint32_t") == 0 ||
+           strcmp(type_name, "int64_t") == 0 ||
+           strcmp(type_name, "uint64_t") == 0 ||
+           strcmp(type_name, "intptr_t") == 0 ||
+           strcmp(type_name, "uintptr_t") == 0 ||
+           strcmp(type_name, "size_t") == 0 ||
+           strcmp(type_name, "float") == 0 ||
+           strcmp(type_name, "double") == 0 ||
+           strcmp(type_name, "bool") == 0;
+}
+
+static int cc__copy_type_name_codegen(char* out, size_t out_sz, const char* type_name) {
+    size_t len = 0;
+    if (!out || out_sz == 0 || !type_name || !type_name[0]) return 0;
+    len = strlen(type_name);
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, type_name, len);
+    out[len] = '\0';
+    return 1;
+}
+
+static const char* cc__promote_numeric_expr_type_codegen(const char* lhs,
+                                                         const char* rhs) {
+    if (!lhs || !rhs) return NULL;
+    if (strcmp(lhs, "double") == 0 || strcmp(rhs, "double") == 0) return "double";
+    if (strcmp(lhs, "float") == 0 || strcmp(rhs, "float") == 0) return "float";
+    if (strcmp(lhs, "uintptr_t") == 0 || strcmp(rhs, "uintptr_t") == 0) return "uintptr_t";
+    if (strcmp(lhs, "intptr_t") == 0 || strcmp(rhs, "intptr_t") == 0) return "intptr_t";
+    if (strcmp(lhs, "size_t") == 0 || strcmp(rhs, "size_t") == 0) return "size_t";
+    if (strcmp(lhs, "uint64_t") == 0 || strcmp(rhs, "uint64_t") == 0) return "uint64_t";
+    if (strcmp(lhs, "int64_t") == 0 || strcmp(rhs, "int64_t") == 0) return "int64_t";
+    if (strcmp(lhs, "unsigned long long") == 0 || strcmp(rhs, "unsigned long long") == 0) return "unsigned long long";
+    if (strcmp(lhs, "long long") == 0 || strcmp(rhs, "long long") == 0) return "long long";
+    if (strcmp(lhs, "unsigned long") == 0 || strcmp(rhs, "unsigned long") == 0) return "unsigned long";
+    if (strcmp(lhs, "long") == 0 || strcmp(rhs, "long") == 0) return "long";
+    if (strcmp(lhs, "uint32_t") == 0 || strcmp(rhs, "uint32_t") == 0) return "uint32_t";
+    if (strcmp(lhs, "int32_t") == 0 || strcmp(rhs, "int32_t") == 0) return "int32_t";
+    if (strcmp(lhs, "unsigned") == 0 || strcmp(rhs, "unsigned") == 0) return "unsigned";
+    if (strcmp(lhs, "int") == 0 || strcmp(rhs, "int") == 0) return "int";
+    if (strcmp(lhs, "uint16_t") == 0 || strcmp(rhs, "uint16_t") == 0) return "uint16_t";
+    if (strcmp(lhs, "int16_t") == 0 || strcmp(rhs, "int16_t") == 0) return "int16_t";
+    if (strcmp(lhs, "uint8_t") == 0 || strcmp(rhs, "uint8_t") == 0) return "uint8_t";
+    if (strcmp(lhs, "int8_t") == 0 || strcmp(rhs, "int8_t") == 0) return "int8_t";
+    if (strcmp(lhs, "unsigned short") == 0 || strcmp(rhs, "unsigned short") == 0) return "unsigned short";
+    if (strcmp(lhs, "short") == 0 || strcmp(rhs, "short") == 0) return "short";
+    if (strcmp(lhs, "unsigned char") == 0 || strcmp(rhs, "unsigned char") == 0) return "unsigned char";
+    if (strcmp(lhs, "signed char") == 0 || strcmp(rhs, "signed char") == 0) return "signed char";
+    if (strcmp(lhs, "char") == 0 || strcmp(rhs, "char") == 0) return "char";
+    if (strcmp(lhs, "bool") == 0 && strcmp(rhs, "bool") == 0) return "bool";
+    return NULL;
+}
+
+static int cc__find_top_level_binary_op_codegen(const char* expr,
+                                                size_t len,
+                                                const char* ops,
+                                                size_t* op_idx) {
+    int par = 0, br = 0, brc = 0;
+    if (!expr || !ops || !op_idx) return 0;
+    for (size_t i = len; i > 0; --i) {
+        char c = expr[i - 1];
+        if (c == ')') par++;
+        else if (c == '(' && par > 0) par--;
+        else if (c == ']') br++;
+        else if (c == '[' && br > 0) br--;
+        else if (c == '}') brc++;
+        else if (c == '{' && brc > 0) brc--;
+        if (par != 0 || br != 0 || brc != 0) continue;
+        if (!strchr(ops, c)) continue;
+        if ((c == '+' || c == '-') &&
+            (i == 1 ||
+             strchr("([{,?:=+-*/%&|^!~<>", expr[i - 2]) != NULL ||
+             (c == '-' && i < len && expr[i] == '>'))) {
+            continue;
+        }
+        *op_idx = i - 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int cc__resolve_expr_type_codegen(const char* src,
+                                         size_t use_offset,
+                                         CCTypeRegistry* reg,
+                                         const char* expr,
+                                         char* out_type,
+                                         size_t out_type_sz) {
+    const char* resolved = NULL;
+    const char* start = expr;
+    const char* end = expr ? expr + strlen(expr) : NULL;
+    char trimmed[256];
+    char lhs_expr[256];
+    char rhs_expr[256];
+    char lhs_type[128];
+    char rhs_type[128];
+    size_t len;
+    size_t op_idx = 0;
+    const char* promoted = NULL;
+
+    if (!expr || !out_type || out_type_sz == 0) return 0;
+    out_type[0] = '\0';
+    cc__trim_expr_parens_codegen(&start, &end);
+    if (!start || !end || end <= start) return 0;
+    len = (size_t)(end - start);
+    if (len >= sizeof(trimmed)) return 0;
+    memcpy(trimmed, start, len);
+    trimmed[len] = '\0';
+
+    if (reg) {
+        resolved = cc_type_registry_resolve_receiver_expr_at(reg, trimmed, src, use_offset, NULL);
+        if (resolved && resolved[0]) return cc__copy_type_name_codegen(out_type, out_type_sz, resolved);
+        resolved = cc_type_registry_resolve_expr_type(reg, trimmed);
+        if (resolved && resolved[0]) return cc__copy_type_name_codegen(out_type, out_type_sz, resolved);
+    }
+    if (cc__lookup_scoped_local_var_type_codegen(src, use_offset, trimmed, out_type, out_type_sz)) {
+        return 1;
+    }
+
+    if (cc__find_top_level_binary_op_codegen(trimmed, len, "+-", &op_idx) ||
+        cc__find_top_level_binary_op_codegen(trimmed, len, "*/%", &op_idx) ||
+        cc__find_top_level_binary_op_codegen(trimmed, len, "&|^", &op_idx)) {
+        if (op_idx == 0 || op_idx + 1 >= len) return 0;
+        if (op_idx >= sizeof(lhs_expr) || len - op_idx - 1 >= sizeof(rhs_expr)) return 0;
+        memcpy(lhs_expr, trimmed, op_idx);
+        lhs_expr[op_idx] = '\0';
+        memcpy(rhs_expr, trimmed + op_idx + 1, len - op_idx - 1);
+        rhs_expr[len - op_idx - 1] = '\0';
+        if (!cc__resolve_expr_type_codegen(src, use_offset, reg, lhs_expr, lhs_type, sizeof(lhs_type)) ||
+            !cc__resolve_expr_type_codegen(src, use_offset, reg, rhs_expr, rhs_type, sizeof(rhs_type))) {
+            return 0;
+        }
+        if (!cc__is_numeric_expr_type_codegen(lhs_type) || !cc__is_numeric_expr_type_codegen(rhs_type)) {
+            return 0;
+        }
+        promoted = cc__promote_numeric_expr_type_codegen(lhs_type, rhs_type);
+        return promoted ? cc__copy_type_name_codegen(out_type, out_type_sz, promoted) : 0;
+    }
+
+    return 0;
+}
+
+static const char* cc__string_helper_for_literal_codegen(const char* family,
+                                                         const char* expr,
+                                                         char* type_buf,
+                                                         size_t type_buf_sz) {
+    const char* s = expr;
+    const char* e = expr ? expr + strlen(expr) : NULL;
+    size_t len;
+    if (!expr || !type_buf || type_buf_sz == 0) return NULL;
+    type_buf[0] = '\0';
+    cc__trim_expr_parens_codegen(&s, &e);
+    if (!s || !e || e <= s) return NULL;
+    len = (size_t)(e - s);
+    if ((len == 4 && memcmp(s, "true", 4) == 0) ||
+        (len == 5 && memcmp(s, "false", 5) == 0)) {
+        strncpy(type_buf, "bool", type_buf_sz - 1);
+        type_buf[type_buf_sz - 1] = '\0';
+        return cc__string_helper_for_type_codegen(family, type_buf);
+    }
+    if (*s == '"' || *s == '\'') return NULL;
+    {
+        int has_dot = 0, has_exp = 0;
+        const char* t = s;
+        while (t < e && (*t == '+' || *t == '-')) t++;
+        if (t >= e || !(isdigit((unsigned char)*t) || *t == '.')) return NULL;
+        for (const char* p = t; p < e; ++p) {
+            if (*p == '.') has_dot = 1;
+            else if (*p == 'e' || *p == 'E') has_exp = 1;
+        }
+        if (has_dot || has_exp) {
+            if (e > t && (e[-1] == 'f' || e[-1] == 'F')) {
+                strncpy(type_buf, "float", type_buf_sz - 1);
+            } else {
+                strncpy(type_buf, "double", type_buf_sz - 1);
+            }
+            type_buf[type_buf_sz - 1] = '\0';
+            return cc__string_helper_for_type_codegen(family, type_buf);
+        }
+    }
+    {
+        int has_digit = 0;
+        int has_float_marker = 0;
+        int has_operator = 0;
+        int invalid = 0;
+        for (const char* p = s; p < e; ++p) {
+            char c = *p;
+            if (isdigit((unsigned char)c)) { has_digit = 1; continue; }
+            if (isalpha((unsigned char)c) || c == '_') {
+                if (c == 'e' || c == 'E' || c == 'f' || c == 'F') has_float_marker = 1;
+                continue;
+            }
+            if (isspace((unsigned char)c) || c == '(' || c == ')') continue;
+            if (strchr("+-*/%&|^<>", c)) { has_operator = 1; continue; }
+            invalid = 1;
+            break;
+        }
+        if (!invalid && has_operator && has_digit) {
+            strncpy(type_buf, has_float_marker ? "double" : "int", type_buf_sz - 1);
+            type_buf[type_buf_sz - 1] = '\0';
+            return cc__string_helper_for_type_codegen(family, type_buf);
+        }
+    }
+    {
+        char suffix[8];
+        size_t suf_len = 0;
+        const char* p = e;
+        while (p > s && isalpha((unsigned char)p[-1]) && suf_len + 1 < sizeof(suffix)) {
+            suffix[suf_len++] = (char)tolower((unsigned char)p[-1]);
+            p--;
+        }
+        suffix[suf_len] = '\0';
+        if (strstr(suffix, "ull") || (strchr(suffix, 'u') && strstr(suffix, "ll"))) {
+            strncpy(type_buf, "unsigned long long", type_buf_sz - 1);
+        } else if (strstr(suffix, "ll")) {
+            strncpy(type_buf, "long long", type_buf_sz - 1);
+        } else if (strchr(suffix, 'u') && strchr(suffix, 'l')) {
+            strncpy(type_buf, "unsigned long", type_buf_sz - 1);
+        } else if (strchr(suffix, 'u')) {
+            strncpy(type_buf, "unsigned", type_buf_sz - 1);
+        } else if (strchr(suffix, 'l')) {
+            strncpy(type_buf, "long", type_buf_sz - 1);
+        } else {
+            strncpy(type_buf, "int", type_buf_sz - 1);
+        }
+        type_buf[type_buf_sz - 1] = '\0';
+        return cc__string_helper_for_type_codegen(family, type_buf);
+    }
+}
+
+static char* cc__rewrite_string_helper_family_to_visible_type(const char* src, size_t n) {
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t i = 0, last_emit = 0;
+    int changed = 0;
+    CCTypeRegistry* saved_reg = NULL;
+    CCTypeRegistry* temp_reg = NULL;
+    if (!src || n == 0) return NULL;
+    temp_reg = cc_type_registry_new();
+    if (temp_reg) {
+        saved_reg = cc_type_registry_get_global();
+        cc_type_registry_set_global(temp_reg);
+        cc__collect_ufcs_field_and_var_types(src, n);
+        cc_type_registry_set_global(saved_reg);
+    }
+    while (i < n) {
+        size_t ident_start = i;
+        size_t ident_end;
+        size_t paren_open;
+        size_t paren_end = 0;
+        const char* family = NULL;
+        size_t family_len = 0;
+        size_t arg_s[3] = {0}, arg_e[3] = {0};
+        int arg_count = 0;
+        char expr_buf[256];
+        char actual_type[256];
+        char literal_type[64];
+        const char* helper = NULL;
+        if (!cc_is_ident_start(src[i])) {
+            i++;
+            continue;
+        }
+        while (i < n && cc_is_ident_char(src[i])) i++;
+        ident_end = i;
+        family_len = ident_end - ident_start;
+        if (family_len == 13 && memcmp(src + ident_start, "CCString_from", 13) == 0) {
+            family = "CCString_from";
+        } else if (family_len == 19 && memcmp(src + ident_start, "cc__string_slot_arg", 19) == 0) {
+            family = "cc__string_slot_arg";
+        } else if (family_len == 20 && memcmp(src + ident_start, "cc__string_slot_push", 20) == 0) {
+            family = "cc__string_slot_push";
+        } else {
+            continue;
+        }
+        paren_open = cc_skip_ws_and_comments(src, n, ident_end);
+        if (paren_open >= n || src[paren_open] != '(') continue;
+        if (!cc_find_matching_paren(src, n, paren_open, &paren_end)) continue;
+        {
+            size_t cursor = paren_open + 1;
+            int par = 0, br = 0, brc = 0;
+            while (cursor < paren_end && arg_count < 3) {
+                arg_s[arg_count] = cc_skip_ws_and_comments(src, n, cursor);
+                cursor = arg_s[arg_count];
+                while (cursor < paren_end) {
+                    char c = src[cursor];
+                    if (c == '(') par++;
+                    else if (c == ')' && par > 0) par--;
+                    else if (c == '[') br++;
+                    else if (c == ']' && br > 0) br--;
+                    else if (c == '{') brc++;
+                    else if (c == '}' && brc > 0) brc--;
+                    else if (c == ',' && par == 0 && br == 0 && brc == 0) break;
+                    cursor++;
+                }
+                arg_e[arg_count] = cursor;
+                while (arg_e[arg_count] > arg_s[arg_count] &&
+                       isspace((unsigned char)src[arg_e[arg_count] - 1])) arg_e[arg_count]--;
+                arg_count++;
+                if (cursor < paren_end && src[cursor] == ',') cursor++;
+            }
+        }
+        {
+            int value_idx = (family && strcmp(family, "cc__string_slot_push") == 0) ? 1 : 0;
+            size_t start = arg_s[value_idx];
+            size_t end = arg_e[value_idx];
+            if (arg_count <= value_idx || end <= start || end - start >= sizeof(expr_buf)) continue;
+            memcpy(expr_buf, src + start, end - start);
+            expr_buf[end - start] = '\0';
+            if (cc__resolve_expr_type_codegen(src, ident_start, temp_reg, expr_buf,
+                                              actual_type, sizeof(actual_type))) {
+                helper = cc__string_helper_for_type_codegen(family, actual_type);
+            }
+            if (!helper) helper = cc__string_helper_for_literal_codegen(family, expr_buf, literal_type, sizeof(literal_type));
+        }
+        if (!helper) continue;
+        cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ident_start - last_emit);
+        cc__sb_append_cstr_local(&out, &out_len, &out_cap, helper);
+        last_emit = ident_end;
+        changed = 1;
+    }
+    if (temp_reg) cc_type_registry_free(temp_reg);
     if (!changed) {
         free(out);
         return NULL;
@@ -2330,6 +2980,9 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
         if (c == '/' && c2 == '*') { in_bc = 1; i += 2; continue; }
         if (c == '"') { in_str = 1; i++; continue; }
         if (c == '\'') { in_chr = 1; i++; continue; }
+        if (c == '{') {
+            cc__record_function_params_before_brace_codegen(reg, src, i);
+        }
 
         if (i + 6 <= n && memcmp(src + i, "CCChan", 6) == 0 &&
             (i == 0 || !(isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_')) &&
@@ -3661,6 +4314,14 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         {
             char* rewritten = cc__rewrite_parser_generic_family_helpers_to_concrete(src_ufcs, src_ufcs_len);
+            if (rewritten) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = rewritten;
+                src_ufcs_len = strlen(rewritten);
+            }
+        }
+        {
+            char* rewritten = cc__rewrite_string_helper_family_to_visible_type(src_ufcs, src_ufcs_len);
             if (rewritten) {
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rewritten;
