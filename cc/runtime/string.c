@@ -5,7 +5,7 @@
 #include <string.h>
 
 CCString CCString_new(CCArena *arena) {
-    CCString s = Vec_char_init(arena, 0);
+    CCString s = CCVec_char_init(arena, 0);
     if (s.data) s.data[0] = '\0';
     return s;
 }
@@ -23,7 +23,7 @@ CCString CCString_from_slice(CCArena *arena, CCSlice slice) {
 CCString* CCString_push_slice(CCString *str, CCSlice data) {
     if (!str || !str->arena) return NULL;
     size_t new_len = str->len + data.len;
-    if (Vec_char_reserve(str, new_len + 1) != 0) return NULL;
+    if (CCVec_char_reserve(str, new_len + 1) != 0) return NULL;
     if (data.ptr && data.len) {
         memcpy(str->data + str->len, data.ptr, data.len);
     }
@@ -56,7 +56,7 @@ const char *CCString_cstr(CCString *str) {
         return NULL;
     }
     if (str->len + 1 > str->cap) {
-        if (Vec_char_reserve(str, str->len + 1) != 0) return NULL;
+        if (CCVec_char_reserve(str, str->len + 1) != 0) return NULL;
     }
     str->data[str->len] = '\0';
     return str->data;

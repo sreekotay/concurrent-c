@@ -22,7 +22,7 @@
 #include <string.h>
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_slice.cch>
-#include <ccc/cc_vec_core.cch>
+#include <ccc/cc_vec.cch>
 #include <ccc/cc_optional.cch>  /* Must be before parser mode block for __CCOptionalGeneric */
 
 /* Default initial capacity - skip tiny allocations */
@@ -31,11 +31,12 @@
 #endif
 
 /*
- * TCC PARSER MODE: Vec types use a generic placeholder during parsing.
+ * TCC PARSER MODE: CCVec types use a generic placeholder during parsing.
  *
- * The CC preprocessor rewrites Vec<T> to __CC_VEC(T_mangled).
+ * The CC preprocessor rewrites CCVec<T> / CCVec::[T] to __CC_VEC(T_mangled).
+ * Legacy Vec<T> / Vec::[T] spellings are still accepted during migration.
  * In parser mode, this macro expands to __CCVecGeneric.
- * In codegen, it's rewritten to Vec_T with proper declarations emitted.
+ * In codegen, it's rewritten to CCVec_T with proper declarations emitted.
  */
 #ifdef CC_PARSER_MODE
 
@@ -55,7 +56,7 @@ typedef struct __CCVecGeneric {
 
 /* THE KEY MACRO: In parser mode, all Vec types resolve to generic.
    Usage: __CC_VEC(int) expands to __CCVecGeneric
-   Codegen rewrites this to Vec_int */
+   Codegen rewrites this to CCVec_int */
 #ifndef __CC_VEC
 #define __CC_VEC(T) __CCVecGeneric
 #endif
@@ -129,68 +130,68 @@ static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
     return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED, v->cap);
 }
 
-/* Parser-mode: common Vec types are aliases to __CCVecGeneric */
-typedef __CCVecGeneric Vec_int;
-typedef __CCVecGeneric Vec_char;
-typedef __CCVecGeneric Vec_size_t;
-typedef __CCVecGeneric Vec_float;
-typedef __CCVecGeneric Vec_double;
-typedef __CCVecGeneric Vec_voidptr;
-typedef __CCVecGeneric Vec_charptr;
-typedef __CCVecGeneric Vec_intptr;
+/* Parser-mode: common CCVec types are aliases to __CCVecGeneric */
+typedef __CCVecGeneric CCVec_int;
+typedef __CCVecGeneric CCVec_char;
+typedef __CCVecGeneric CCVec_size_t;
+typedef __CCVecGeneric CCVec_float;
+typedef __CCVecGeneric CCVec_double;
+typedef __CCVecGeneric CCVec_voidptr;
+typedef __CCVecGeneric CCVec_charptr;
+typedef __CCVecGeneric CCVec_intptr;
 
-/* Parser-mode: function aliases for common Vec types.
-   Maps Vec_T_method to generic stubs so direct function calls compile.
+/* Parser-mode: function aliases for common CCVec types.
+   Maps CCVec_T_method to generic stubs so direct function calls compile.
    Uses macros since we can't do function aliasing in C. */
-#define Vec_int_init(a, c)     __cc_vec_generic_init((void*)(a))
-#define Vec_int_push(v, x)     __cc_vec_generic_push((v), (x))
-#define Vec_int_pop(v)         __cc_vec_generic_pop((v))
-#define Vec_int_get(v, i)      __cc_vec_generic_get((v), (i))
-#define Vec_int_get_ptr(v, i)  __cc_vec_generic_get_ptr((v), (i))
-#define Vec_int_set(v, i, x)   __cc_vec_generic_set((v), (i), (x))
-#define Vec_int_at_grow(v, i)  __cc_vec_generic_at_grow((v), (i))
-#define Vec_int_push_ptr(v)    __cc_vec_generic_push_ptr((v))
-#define Vec_int_reserve(v, n)  __cc_vec_generic_reserve((v), (n))
-#define Vec_int_clear(v)       __cc_vec_generic_clear((v))
-#define Vec_int_len(v)         __cc_vec_generic_len((v))
-#define Vec_int_cap(v)         __cc_vec_generic_cap((v))
-#define Vec_int_begin(v)       __cc_vec_generic_begin((v))
-#define Vec_int_end(v)         __cc_vec_generic_end((v))
-#define Vec_int_data(v)        __cc_vec_generic_data((v))
-#define Vec_int_as_slice(v)    __cc_vec_generic_as_slice((v))
+#define CCVec_int_init(a, c)     __cc_vec_generic_init((void*)(a))
+#define CCVec_int_push(v, x)     __cc_vec_generic_push((v), (x))
+#define CCVec_int_pop(v)         __cc_vec_generic_pop((v))
+#define CCVec_int_get(v, i)      __cc_vec_generic_get((v), (i))
+#define CCVec_int_get_ptr(v, i)  __cc_vec_generic_get_ptr((v), (i))
+#define CCVec_int_set(v, i, x)   __cc_vec_generic_set((v), (i), (x))
+#define CCVec_int_at_grow(v, i)  __cc_vec_generic_at_grow((v), (i))
+#define CCVec_int_push_ptr(v)    __cc_vec_generic_push_ptr((v))
+#define CCVec_int_reserve(v, n)  __cc_vec_generic_reserve((v), (n))
+#define CCVec_int_clear(v)       __cc_vec_generic_clear((v))
+#define CCVec_int_len(v)         __cc_vec_generic_len((v))
+#define CCVec_int_cap(v)         __cc_vec_generic_cap((v))
+#define CCVec_int_begin(v)       __cc_vec_generic_begin((v))
+#define CCVec_int_end(v)         __cc_vec_generic_end((v))
+#define CCVec_int_data(v)        __cc_vec_generic_data((v))
+#define CCVec_int_as_slice(v)    __cc_vec_generic_as_slice((v))
 
-#define Vec_char_init(a, c)    __cc_vec_generic_init((void*)(a))
-#define Vec_char_push(v, x)    __cc_vec_generic_push((v), (x))
-#define Vec_char_pop(v)        __cc_vec_generic_pop((v))
-#define Vec_char_get(v, i)     __cc_vec_generic_get((v), (i))
-#define Vec_char_get_ptr(v, i) __cc_vec_generic_get_ptr((v), (i))
-#define Vec_char_set(v, i, x)  __cc_vec_generic_set((v), (i), (x))
-#define Vec_char_at_grow(v, i) __cc_vec_generic_at_grow((v), (i))
-#define Vec_char_push_ptr(v)   __cc_vec_generic_push_ptr((v))
-#define Vec_char_reserve(v, n) __cc_vec_generic_reserve((v), (n))
-#define Vec_char_clear(v)      __cc_vec_generic_clear((v))
-#define Vec_char_len(v)        __cc_vec_generic_len((v))
-#define Vec_char_cap(v)        __cc_vec_generic_cap((v))
-#define Vec_char_begin(v)      __cc_vec_generic_begin((v))
-#define Vec_char_end(v)        __cc_vec_generic_end((v))
-#define Vec_char_data(v)       __cc_vec_generic_data((v))
-#define Vec_char_as_slice(v)   __cc_vec_generic_as_slice((v))
+#define CCVec_char_init(a, c)    __cc_vec_generic_init((void*)(a))
+#define CCVec_char_push(v, x)    __cc_vec_generic_push((v), (x))
+#define CCVec_char_pop(v)        __cc_vec_generic_pop((v))
+#define CCVec_char_get(v, i)     __cc_vec_generic_get((v), (i))
+#define CCVec_char_get_ptr(v, i) __cc_vec_generic_get_ptr((v), (i))
+#define CCVec_char_set(v, i, x)  __cc_vec_generic_set((v), (i), (x))
+#define CCVec_char_at_grow(v, i) __cc_vec_generic_at_grow((v), (i))
+#define CCVec_char_push_ptr(v)   __cc_vec_generic_push_ptr((v))
+#define CCVec_char_reserve(v, n) __cc_vec_generic_reserve((v), (n))
+#define CCVec_char_clear(v)      __cc_vec_generic_clear((v))
+#define CCVec_char_len(v)        __cc_vec_generic_len((v))
+#define CCVec_char_cap(v)        __cc_vec_generic_cap((v))
+#define CCVec_char_begin(v)      __cc_vec_generic_begin((v))
+#define CCVec_char_end(v)        __cc_vec_generic_end((v))
+#define CCVec_char_data(v)       __cc_vec_generic_data((v))
+#define CCVec_char_as_slice(v)   __cc_vec_generic_as_slice((v))
 
-#define Vec_size_t_init(a, c)  __cc_vec_generic_init((void*)(a))
-#define Vec_size_t_push(v, x)  __cc_vec_generic_push((v), (x))
-#define Vec_size_t_get(v, i)   __cc_vec_generic_get((v), (i))
-#define Vec_size_t_set(v, i, x) __cc_vec_generic_set((v), (i), (x))
-#define Vec_size_t_len(v)      __cc_vec_generic_len((v))
-#define Vec_size_t_as_slice(v) __cc_vec_generic_as_slice((v))
+#define CCVec_size_t_init(a, c)  __cc_vec_generic_init((void*)(a))
+#define CCVec_size_t_push(v, x)  __cc_vec_generic_push((v), (x))
+#define CCVec_size_t_get(v, i)   __cc_vec_generic_get((v), (i))
+#define CCVec_size_t_set(v, i, x) __cc_vec_generic_set((v), (i), (x))
+#define CCVec_size_t_len(v)      __cc_vec_generic_len((v))
+#define CCVec_size_t_as_slice(v) __cc_vec_generic_as_slice((v))
 
 #else /* !CC_PARSER_MODE - real compilation */
 
 /* In real compilation, __CC_VEC expands to the actual type name.
    The codegen pass ensures CC_VEC_DECL_ARENA is emitted for each type. */
-#define __CC_VEC(T) Vec_##T
+#define __CC_VEC(T) CCVec_##T
 
 /* In real mode, init calls the generated type-specific function */
-#define __CC_VEC_INIT(T, arena) Vec_##T##_init((arena), CC_VEC_INITIAL_CAP)
+#define __CC_VEC_INIT(T, arena) CCVec_##T##_init((arena), CC_VEC_INITIAL_CAP)
 
 #endif /* CC_PARSER_MODE */
 
@@ -237,8 +238,8 @@ typedef __CCVecGeneric Vec_intptr;
                                                                                   \
     static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
         Name v = {0, 0, NULL, arena, 0};                                          \
-        if (cc_vec_core_init((CCVecCore *)&v, arena, sizeof(T), _Alignof(T),      \
-                             initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)   \
+        if (cc_vec_init((CCVec *)&v, arena, sizeof(T), _Alignof(T),                \
+                        initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)        \
             != 0) {                                                               \
             v.cap = 0;                                                            \
             v.data = NULL;                                                        \
@@ -248,12 +249,11 @@ typedef __CCVecGeneric Vec_intptr;
     }                                                                             \
                                                                                   \
     static inline int Name##_reserve(Name *v, size_t need) {                      \
-        return cc_vec_core_reserve((CCVecCore *)v, sizeof(T), _Alignof(T), need); \
+        return cc_vec_reserve((CCVec *)v, sizeof(T), _Alignof(T), need);          \
     }                                                                             \
                                                                                   \
     static inline int Name##_push(Name *v, T value) {                             \
-        T *slot = (T *)cc_vec_core_push_slot((CCVecCore *)v, sizeof(T),           \
-                                             _Alignof(T));                         \
+        T *slot = (T *)cc_vec_push_slot((CCVec *)v, sizeof(T), _Alignof(T));      \
         if (!slot) return -1;                                                     \
         *slot = value;                                                            \
         return 0;                                                                 \
@@ -261,8 +261,7 @@ typedef __CCVecGeneric Vec_intptr;
                                                                                   \
     /* Push and return pointer to new slot (kvec's kv_pushp equivalent) */        \
     static inline T* Name##_push_ptr(Name *v) {                                   \
-        return (T *)cc_vec_core_push_slot((CCVecCore *)v, sizeof(T),              \
-                                          _Alignof(T));                            \
+        return (T *)cc_vec_push_slot((CCVec *)v, sizeof(T), _Alignof(T));         \
     }                                                                             \
                                                                                   \
     /* Pop: returns optional (None if empty) */                                   \
@@ -298,20 +297,15 @@ typedef __CCVecGeneric Vec_intptr;
                                                                                   \
     /* Auto-extending indexing (kvec's kv_a equivalent) */                        \
     static inline T* Name##_at_grow(Name *v, size_t i) {                          \
-        return (T *)cc_vec_core_at_grow((CCVecCore *)v, sizeof(T),                \
-                                        _Alignof(T), i);                           \
+        return (T *)cc_vec_at_grow((CCVec *)v, sizeof(T), _Alignof(T), i);        \
     }                                                                             \
                                                                                   \
     static inline void Name##_clear(Name *v) {                                    \
-        cc_vec_core_clear((CCVecCore *)v);                                        \
+        cc_vec_clear((CCVec *)v);                                                 \
     }                                                                             \
                                                                                   \
     static inline CCSlice Name##_as_slice(const Name *v) {                        \
-        if (!v || !v->data) return cc_slice_empty();                              \
-        return cc_slice_from_parts((void *)v->data,                               \
-                                   v->len,                                        \
-                                   cc_slice_make_id(v->provenance, false, false, false), \
-                                   v->cap);                                       \
+        return cc_vec_as_slice((const CCVec *)v);                                 \
     }                                                                             \
                                                                                   \
     static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \
@@ -331,7 +325,7 @@ typedef __CCVecGeneric Vec_intptr;
 #ifndef CC_PARSER_MODE
 #ifndef CC_VEC_SIZE_T_DEFINED
 #define CC_VEC_SIZE_T_DEFINED 1
-CC_VEC_DECL_ARENA(size_t, Vec_size_t)
+CC_VEC_DECL_ARENA(size_t, CCVec_size_t)
 #endif
 #endif
 

@@ -8,7 +8,7 @@ static const char* sanitize_type_name(const char* type) {
     /* Parse stub types that should be mapped to their real equivalents */
     if (strcmp(type, "__CCOptionalGeneric") == 0) return "CCOptional_int";  /* Default */
     if (strcmp(type, "__CCResultGeneric") == 0) return "CCResult_int_CCError";  /* Default */
-    if (strcmp(type, "__CCVecGeneric") == 0) return "Vec_void";
+    if (strcmp(type, "__CCVecGeneric") == 0) return "CCVec_void";
     if (strcmp(type, "__CCMapGeneric") == 0) return "Map_void_void";
     /* Return NULL to indicate the type should be used as-is */
     return NULL;
@@ -937,8 +937,8 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
                 const char* typedef_name = lookup_struct_typedef(node);
                 if (typedef_name && (
                     strncmp(typedef_name, "__CC", 4) == 0 ||
-                    strncmp(typedef_name, "CC", 2) == 0 ||
-                    strncmp(typedef_name, "Vec_", 4) == 0 ||
+                    (strncmp(typedef_name, "CC", 2) == 0 && strncmp(typedef_name, "CCVec_", 6) != 0) ||
+                    strncmp(typedef_name, "CCVec_", 6) == 0 ||
                     strncmp(typedef_name, "Map_", 4) == 0)) {
                     break;
                 }
@@ -1004,12 +1004,13 @@ static void emit_node_ctx(const CCNNode* node, FILE* out, int indent, ClosureEmi
             }
             /* Skip typedefs starting with CC (internal types) */
             if (node->as.typedef_decl.name &&
-                strncmp(node->as.typedef_decl.name, "CC", 2) == 0) {
+                strncmp(node->as.typedef_decl.name, "CC", 2) == 0 &&
+                strncmp(node->as.typedef_decl.name, "CCVec_", 6) != 0) {
                 break;
             }
             /* Skip forward declarations of parse stub types */
             if (node->as.typedef_decl.name &&
-                (strncmp(node->as.typedef_decl.name, "Vec_", 4) == 0 ||
+                (strncmp(node->as.typedef_decl.name, "CCVec_", 6) == 0 ||
                  strncmp(node->as.typedef_decl.name, "Map_", 4) == 0)) {
                 break;
             }
@@ -1177,9 +1178,9 @@ int cc_emit_c(const CCNFile* file, FILE* out) {
                 continue;
             }
             
-            /* Skip parse stub type declarations (Vec_*, Map_*, CC*, __CC*) */
+            /* Skip parse stub type declarations (CCVec_*, Map_*, CC*, __CC*) */
             if (item->kind == CCN_VAR_DECL && item->as.var.name &&
-                (strncmp(item->as.var.name, "Vec_", 4) == 0 ||
+                (strncmp(item->as.var.name, "CCVec_", 6) == 0 ||
                  strncmp(item->as.var.name, "Map_", 4) == 0 ||
                  strncmp(item->as.var.name, "CCChan", 6) == 0 ||
                  strncmp(item->as.var.name, "CCOptional_", 11) == 0 ||

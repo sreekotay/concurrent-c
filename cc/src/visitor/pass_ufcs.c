@@ -209,7 +209,7 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         int col_start;
         int col_end;
         const char* method;
-        const char* recv_type;   /* Receiver type name from TCC (e.g., "Point", "Vec_int") */
+        const char* recv_type;   /* Receiver type name from TCC (e.g., "Point", "CCVec_int") */
         int occurrence_1based;
         int is_under_await;      /* 1 if this UFCS call is inside an `await` expression */
         int recv_type_is_ptr;    /* 1 if receiver's resolved type is a pointer (from TCC) */

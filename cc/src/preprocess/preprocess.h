@@ -69,15 +69,15 @@ char* cc_rewrite_string_templates_text(const char* src, size_t n, const char* in
 char* cc__rewrite_link_directives(const char* src, size_t n);
 
 // Rewrite generic container syntax:
-//   Vec<T> -> Vec_T, Map<K,V> -> Map_K_V
-//   vec_new<T>(&arena) -> Vec_T_init(&arena, CC_VEC_INITIAL_CAP)
+//   CCVec<T> -> CCVec_T, Map<K,V> -> Map_K_V
+//   cc_vec_new<T>(&arena) -> CCVec_T_init(&arena, CC_VEC_INITIAL_CAP)
 //   map_new<K,V>(&arena) -> Map_K_V_init(&arena)
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);
 
 // Rewrite parser-style generic family types in final lowered source to concrete
 // family calls:
-//   __CC_VEC(int) v; v.get(1) -> Vec_int_get(&v, 1)
+//   __CC_VEC(int) v; v.get(1) -> CCVec_int_get(&v, 1)
 //   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
 char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
 

@@ -71,17 +71,17 @@ typedef struct CCOptional_CCParsedArg {
 #ifndef CC_VEC_CCPARSEDARG_DEFINED
 #define CC_VEC_CCPARSEDARG_DEFINED 1
 #ifdef CC_PARSER_MODE
-typedef __CCVecGeneric Vec_CCParsedArg;
-#define Vec_CCParsedArg_init(a, c) __cc_vec_generic_init((void*)(a))
-#define Vec_CCParsedArg_push(v, x) __cc_vec_generic_push((v), (x))
-#define Vec_CCParsedArg_len(v) __cc_vec_generic_len((v))
+typedef __CCVecGeneric CCVec_CCParsedArg;
+#define CCVec_CCParsedArg_init(a, c) __cc_vec_generic_init((void*)(a))
+#define CCVec_CCParsedArg_push(v, x) __cc_vec_generic_push((v), (x))
+#define CCVec_CCParsedArg_len(v) __cc_vec_generic_len((v))
 #else
-CC_VEC_DECL_ARENA_FULL(CCParsedArg, Vec_CCParsedArg, CCOptional_CCParsedArg)
+CC_VEC_DECL_ARENA_FULL(CCParsedArg, CCVec_CCParsedArg, CCOptional_CCParsedArg)
 #endif
 #endif
 
 typedef struct CCParsedArgs {
-    Vec_CCParsedArg items;
+    CCVec_CCParsedArg items;
 } CCParsedArgs;
 
 typedef struct CCCliParse {
@@ -156,7 +156,7 @@ static inline CCSlice cc_cli_prog_slice(int argc, char** argv) {
 
 static inline CCParsedArgs cc_parsed_args(CCArena* arena) {
     CCParsedArgs args = {0};
-    args.items = Vec_CCParsedArg_init(arena, 0);
+    args.items = CCVec_CCParsedArg_init(arena, 0);
     return args;
 }
 
@@ -239,7 +239,7 @@ static inline bool cc__cli_emit(CCParsedArgs* out,
     arg.value = value;
     arg.spell = spell;
     arg.argv_index = argv_index;
-    return Vec_CCParsedArg_push((Vec_CCParsedArg*)&out->items, arg) == 0;
+    return CCVec_CCParsedArg_push((CCVec_CCParsedArg*)&out->items, arg) == 0;
 }
 
 static inline const CCArgSpec* cc__cli_find_positional_spec(const CCArgSpec* specs, size_t spec_count) {

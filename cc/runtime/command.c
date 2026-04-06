@@ -12,7 +12,7 @@ static int cc_command_push_raw(CCCommand *cmd, CCSlice arg) {
     old_len = cmd->storage.len;
     offset = old_len;
 
-    if (Vec_size_t_push(&cmd->offsets, offset) != 0) return -1;
+    if (CCVec_size_t_push(&cmd->offsets, offset) != 0) return -1;
     if (!CCString_push_slice(&cmd->storage, arg)) {
         cmd->offsets.len--;
         return -1;
@@ -30,7 +30,7 @@ CCCommand cc_command_new(CCArena *arena, const char *program) {
     CCCommand cmd = {0};
     cmd.arena = arena;
     cmd.storage = CCString_new(arena);
-    cmd.offsets = Vec_size_t_init(arena, 0);
+    cmd.offsets = CCVec_size_t_init(arena, 0);
 
     if (!arena || !cmd.storage.arena || !cmd.offsets.arena) {
         CCCommand empty = {0};

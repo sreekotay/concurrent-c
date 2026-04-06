@@ -5,7 +5,7 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    Vec::[int] v = vec_new::[int](&arena);
+    CCVec::[int] v = cc_vec_new::[int](&arena);
     v.push(10);
     v.push(20);
     v.push(30);

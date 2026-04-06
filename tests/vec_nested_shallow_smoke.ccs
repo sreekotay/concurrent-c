@@ -1,9 +1,9 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-typedef Vec::[char] CharVec;
-typedef Vec::[CCString] StringVec;
-typedef Vec::[CharVec] NestedCharVec;
+typedef CCVec::[char] CharVec;
+typedef CCVec::[CCString] StringVec;
+typedef CCVec::[CharVec] NestedCharVec;
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(8));
@@ -12,7 +12,7 @@ int main(void) {
     CCString s1 = @string("alpha", &arena);
     CCString s2 = @string("beta", &arena);
 
-    StringVec strings = vec_new::[CCString](&arena);
+    StringVec strings = cc_vec_new::[CCString](&arena);
     if (strings.push(s1) != 0) return 2;
     if (strings.push(s2) != 0) return 3;
     if (strings.len() != 2) return 4;
@@ -22,11 +22,11 @@ int main(void) {
     CCSlice got_slice = got->as_slice();
     if (!CCSlice_eq_cstr(&got_slice, "beta")) return 6;
 
-    CharVec chars = vec_new::[char](&arena);
+    CharVec chars = cc_vec_new::[char](&arena);
     chars.push('o');
     chars.push('k');
 
-    NestedCharVec nested = vec_new::[CharVec](&arena);
+    NestedCharVec nested = cc_vec_new::[CharVec](&arena);
     if (nested.push(chars) != 0) return 7;
     if (nested.len() != 1) return 8;
 

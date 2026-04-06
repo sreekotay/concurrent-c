@@ -23,7 +23,7 @@ static _Thread_local int g_ufcs_await_context = 0;
 // Used only by explicit type-driven channel dispatch.
 static _Thread_local int g_ufcs_recv_type_is_ptr = 0;
 
-// Thread-local context: receiver type name from TCC (e.g., "Point", "Vec_int").
+// Thread-local context: receiver type name from TCC (e.g., "Point", "CCVec_int").
 // When set, UFCS generates TypeName_method(&recv, ...) for struct types.
 static _Thread_local const char* g_ufcs_recv_type = NULL;
 static _Thread_local const char* g_ufcs_source_text = NULL;
@@ -84,10 +84,10 @@ static void cc__ufcs_trim_type_span(const char** start, const char** end) {
 
 static const char* cc__ufcs_canonicalize_string_type(const char* type_name) {
     if (!type_name) return NULL;
-    if (strcmp(type_name, "Vec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
+    if (strcmp(type_name, "CCVec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
         return "CCString";
     }
-    if (strcmp(type_name, "Vec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
+    if (strcmp(type_name, "CCVec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
         return "CCString*";
     }
     return type_name;
@@ -389,8 +389,8 @@ static int cc__is_string_recv_type(const char* type_name) {
     return type_name &&
            (strcmp(type_name, "CCString") == 0 ||
             strcmp(type_name, "CCString*") == 0 ||
-            strcmp(type_name, "Vec_char") == 0 ||
-            strcmp(type_name, "Vec_char*") == 0 ||
+            strcmp(type_name, "CCVec_char") == 0 ||
+            strcmp(type_name, "CCVec_char*") == 0 ||
             strcmp(type_name, "__CCVecGeneric") == 0 ||
             strcmp(type_name, "__CCVecGeneric*") == 0);
 }
@@ -434,7 +434,7 @@ static const char* cc__builtin_to_str_callee(const char* type_name) {
 
 static int cc__is_family_recv_type(const char* type_name) {
     return type_name &&
-           (strncmp(type_name, "Vec_", 4) == 0 ||
+           (strncmp(type_name, "CCVec_", 6) == 0 ||
             strncmp(type_name, "Map_", 4) == 0 ||
             strncmp(type_name, "__CC_VEC(", 9) == 0 ||
             strncmp(type_name, "__CC_MAP(", 9) == 0 ||
@@ -468,7 +468,7 @@ static const char* cc__canonicalize_parser_family_macro(const char* type_name,
     if (!is_map) {
         cc_result_spec_mangle_type(args, (size_t)(close - args), mangled_a, sizeof(mangled_a));
         if (!mangled_a[0]) return NULL;
-        snprintf(scratch, scratch_cap, "Vec_%s", mangled_a);
+        snprintf(scratch, scratch_cap, "CCVec_%s", mangled_a);
         return scratch;
     }
     {

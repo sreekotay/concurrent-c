@@ -30,14 +30,14 @@ int main(void) {
         // Case 3: Field receivers respect value vs pointer type
         Container c;
         c.items = vec_new<int>(arena);
-        c.items.push(10);  // Value receiver - must become Vec_int_push(&c.items, 10)
+        c.items.push(10);  // Value receiver - must become CCVec_int_push(&c.items, 10)
 
         typedef struct {
             Vec<int>* items;
         } PtrContainer;
         PtrContainer pc;
         pc.items = &c.items;
-        pc.items->push(20);  // Pointer receiver - must become Vec_int_push(pc.items, 20)
+        pc.items->push(20);  // Pointer receiver - must become CCVec_int_push(pc.items, 20)
         pc.items->push(30);
         
         // Verify Vec contents using UFCS .get() which returns optional
