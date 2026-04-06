@@ -1,0 +1,41 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef Vec::[char] CharVec;
+typedef Vec::[CCString] StringVec;
+typedef Vec::[CharVec] NestedCharVec;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(8));
+    if (!arena.base) return 1;
+
+    CCString s1 = @string("alpha", &arena);
+    CCString s2 = @string("beta", &arena);
+
+    StringVec strings = vec_new::[CCString](&arena);
+    if (strings.push(s1) != 0) return 2;
+    if (strings.push(s2) != 0) return 3;
+    if (strings.len() != 2) return 4;
+
+    CCString *got = strings.get_ptr(1);
+    if (!got) return 5;
+    CCSlice got_slice = got->as_slice();
+    if (!CCSlice_eq_cstr(&got_slice, "beta")) return 6;
+
+    CharVec chars = vec_new::[char](&arena);
+    chars.push('o');
+    chars.push('k');
+
+    NestedCharVec nested = vec_new::[CharVec](&arena);
+    if (nested.push(chars) != 0) return 7;
+    if (nested.len() != 1) return 8;
+
+    CharVec *inner = nested.get_ptr(0);
+    if (!inner || inner->len() != 2) return 9;
+    CCSlice inner_slice = inner->as_slice();
+    if (inner_slice.len != 2 || ((char *)inner_slice.ptr)[0] != 'o' || ((char *)inner_slice.ptr)[1] != 'k') return 10;
+
+    printf("vec_nested_shallow ok\n");
+    cc_arena_free(&arena);
+    return 0;
+}
