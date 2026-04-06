@@ -1,5 +1,5 @@
 #include <ccc/std/prelude.cch>
-#include <ccc/std/command.cch>
+#include <ccc/std/exec.cch>
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(64));

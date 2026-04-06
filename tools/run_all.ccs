@@ -12,7 +12,7 @@
 
 #include <ccc/std/prelude.cch>
 #include <ccc/std/cli.cch>
-#include <ccc/std/command.cch>
+#include <ccc/std/exec.cch>
 #include <unistd.h>
 
 /* Default timeout for stress tests (seconds) */
