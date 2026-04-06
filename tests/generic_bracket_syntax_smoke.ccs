@@ -1,0 +1,28 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    Vec::[int] v = vec_new::[int](&arena);
+    v.push(10);
+    v.push(20);
+    v.push(30);
+
+    if (v.len != 3) return 2;
+
+    int* p = v.get_ptr(1);
+    if (!p || *p != 20) return 3;
+
+    Map::[int, int] m = map_new::[int, int](&arena);
+    m.insert(1, 100);
+    m.insert(2, 200);
+
+    int* val = m.get_ptr(1);
+    if (!val || *val != 100) return 4;
+
+    printf("generic_bracket_syntax ok\n");
+    cc_arena_free(&arena);
+    return 0;
+}

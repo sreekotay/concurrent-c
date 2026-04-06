@@ -5,14 +5,6 @@
 
 #include <ccc/cc_arena.cch>
 
-#ifndef CC_CCSLICEARRAY_DEFINED
-#define CC_CCSLICEARRAY_DEFINED 1
-typedef struct {
-    CCSlice *items;
-    size_t len;
-} CCSliceArray;
-#endif
-
 #ifdef CC_PARSER_MODE
 typedef CCSlice (*CCUfcsRewriteFn)();
 #else

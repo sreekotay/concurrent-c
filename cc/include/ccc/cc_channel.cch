@@ -25,14 +25,6 @@
 #include <ccc/cc_io_error.cch>
 #include <ccc/std/task.cch>
 
-#ifndef CC_CCSLICEARRAY_DEFINED
-#define CC_CCSLICEARRAY_DEFINED 1
-typedef struct {
-    CCSlice *items;
-    size_t len;
-} CCSliceArray;
-#endif
-
 typedef struct CCAsyncHandle CCAsyncHandle;
 typedef struct CCArena CCArena;
 #include <ccc/std/future.cch>

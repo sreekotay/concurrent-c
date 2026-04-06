@@ -610,8 +610,8 @@ This section documents recommended style for Concurrent-C code.
 | Fixed-length slice | `char[n:]` | `char[:n]` |
 | Sentinel slice | `char[:0]` | `char[: 0 ]` |
 | Unique sentinel slice | `char[:0!]` | `char[: 0 !]` |
-| Generic type | `Vec<int>` | `Vec < int >` |
-| Nested generic | `Map<K, V>` | `Map < K, V >` (spaces ok inside `<>` for args) |
+| Generic type | `Vec::[int]` | `Vec :: [ int ]` |
+| Nested generic | `Map::[K, Vec::[int]]` | `Map :: [ K, Vec :: [ int ] ]` (standard bracket nesting) |
 | Function return | `fn() -> T!>(E)` | `fn ( ) -> T !> (E)` |
 
 **Examples:**
@@ -2929,8 +2929,8 @@ use(*u);                         // OK: u still owns the buffer
 
 ```c
 // Full type signatures (what the compiler sees):
-bool !>(CCIoError) send<T, N, Topo>(T[~N Topo >]* ch, T value);       // send-only
-bool !>(CCIoError) recv<T, N, Topo>(T[~N Topo <]* ch, T* out);        // recv-only
+bool !>(CCIoError) send::[T, N, Topo](T[~N Topo >]* ch, T value);       // send-only
+bool !>(CCIoError) recv::[T, N, Topo](T[~N Topo <]* ch, T* out);      // recv-only
 ```
 
 Capacity `N` and topology `Topo` are erased at runtime (all use the same implementation), but the type system enforces view restrictions at compile time.
@@ -4495,7 +4495,7 @@ Streaming uses explicit channel parameters:
 // Internal Scope (created implicitly in @async functions for batching/wrapping)
 struct Scope {
     void spawn(expr);                              // (internal) spawn async work
-    @async T!>(E) run_blocking<T, E>(() => T!>(E));  // (internal) run closure on thread pool
+    @async T!>(E) run_blocking::[T, E](() => T!>(E));  // (internal) run closure on thread pool
     void cancel();                                 // (internal) cancel all spawned work
     bool cancelled();                              // (internal) check cancellation
 }
@@ -4521,7 +4521,7 @@ Task<void> sleep(Duration d);
 Task<T!>(E)> with_timeout<T, E>(Task<T!>(E)> t, Duration d);
 
 // Sync bridge (can block)
-T block_on<T>(Task<T> t);    // run task to completion, blocking
+T block_on::[T](Task<T> t);    // run task to completion, blocking
 
 // Duration literals
 1ns, 1us, 1ms, 1s, 1m, 1h
@@ -6078,13 +6078,14 @@ if (e is IoError.Other(code)) { use(code); }
 
 **Built-in generic types:**
 
-* `Task<T>` — async task result
-* `Mutex<T>` — OS mutex-protected shared state (operations can block)
-* `LockGuard<T>` — RAII lock guard (from `Mutex<T>.lock_guard()`)
-* `AsyncMutex<T>` — suspending mutex-protected shared state
-* `AsyncGuard<T>` — RAII lock guard (from `AsyncMutex<T>.lock()`)
-* `Atomic<T>` — lock-free atomic (primitives only)
-* `Map<K, V>` — hash map
+* `Task::[T]` — async task result
+* `Mutex::[T]` — OS mutex-protected shared state (operations can block)
+* `LockGuard::[T]` — RAII lock guard (from `Mutex::[T].lock_guard()`)
+* `AsyncMutex::[T]` — suspending mutex-protected shared state
+* `AsyncGuard::[T]` — RAII lock guard (from `AsyncMutex::[T].lock()`)
+* `Atomic::[T]` — lock-free atomic (primitives only)
+* `Vec::[T]` — dynamic array
+* `Map::[K, V]` — hash map
 * `T[~... >]` / `T[~... <]` — channel handles for element type T
 
 **Built-in non-generic types:**
@@ -6104,8 +6105,9 @@ if (e is IoError.Other(code)) { use(code); }
 Concurrent-C uses **compile-time monomorphization** for generic families.
 
 **Implementation status (v1.0):**
-- **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `Vec<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
+- **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `Vec::[T]`, `Map::[K,V]`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
 - **Planned direction:** full user-defined generic functions and generic type declarations with the same monomorphization model.
+- **Deprecated:** `T?` (optional types) are deprecated; use return-type patterns instead (e.g., `T*` with `NULL` for absence, or `T!>(E)` for fallible operations).
 
 This section therefore mixes:
 - the **normative monomorphization model** used by implemented built-in families today
@@ -6124,6 +6126,8 @@ No trait system is part of v1.0.
 
 ### 10.1 Syntax
 
+Concurrent-C uses `::[T]` syntax for generic parameters, using `::` as a specialization operator and `[]` for the parameter list. This avoids all parsing ambiguity with comparison operators (`<`, `>`) and channel direction markers (`T[~N >]`), and eliminates the `>>` nesting problem.
+
 Concurrent-C supports two kinds of generic parameters:
 
 - **Type parameters:** `T`, `K`, `V`, etc.
@@ -6132,7 +6136,7 @@ Concurrent-C supports two kinds of generic parameters:
 **Generic function example:**
 
 ```c
-void swap<T>(T* a, T* b) {
+void swap::[T](T* a, T* b) {
     T tmp = *a;
     *a = *b;
     *b = tmp;
@@ -6142,15 +6146,13 @@ void swap<T>(T* a, T* b) {
 **Generic type example (struct/enum):**
 
 ```c
-enum Option<T> { None, Some(T) }
-
-struct Pair<A, B> { A a; B b; }
+struct Pair::[A, B] { A a; B b; }
 ```
 
 **Comptime value parameters (for sizes/layout):**
 
 ```c
-struct SmallVec<T, comptime int N> {
+struct SmallVec::[T, comptime int N] {
     T[N] inline_buf;
     int len;
 }
@@ -6159,20 +6161,23 @@ struct SmallVec<T, comptime int N> {
 **Parameter grammar (surface):**
 
 ```
-generic_params := '<' generic_param (',' generic_param)* '>'
+generic_params := '::' '[' generic_param (',' generic_param)* ']'
 generic_param  := ident
                | 'comptime' type ident
 ```
 
 - A type parameter is an identifier with no prefix: `T`.
 - A value parameter is introduced with `comptime <type> <name>`: `comptime int N`.
+- The `::` prefix before `[` disambiguates generic parameters from array/slice/channel syntax.
 
-Built-in generic families such as `Vec<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channels follow the monomorphization model in this chapter.
+Built-in generic families such as `Vec::[T]`, `Map::[K,V]`, `T!>(E)`, and channels follow the monomorphization model in this chapter.
 
 **Rule:** A `comptime` value parameter is always a compile-time constant and may be used in:
 - array lengths `T[N]`
 - channel capacities `T[~N ... >]` / `T[~N ... <]`
 - other constant-expression contexts (see §12)
+
+**Deprecation note (`<>` syntax):** Built-in families (`Vec`, `Map`, `vec_new`, `map_new`, `Task`, `Mutex`, `Atomic`, `AsyncMutex`) currently accept the legacy `<T>` syntax (e.g., `Vec<int>`) during a transition period. New code should use `::[T]` (e.g., `Vec::[int]`). The `<>` form will be removed in a future version. User-defined generic functions and types use `::[T]` exclusively.
 
 ---
 
@@ -6183,19 +6188,18 @@ Generic instantiation uses compile-time monomorphization.
 **Rule (instantiation):** A generic declaration produces no code by itself. Code is generated only when the program forms an instantiation by calling the function or naming the type with concrete arguments.
 
 **Rule (uniqueness):** Each distinct set of generic arguments produces a distinct instantiation:
-- `swap<int>` and `swap<u64>` are different instantiations.
-- `SmallVec<int, 8>` and `SmallVec<int, 16>` are different instantiations.
+- `swap::[int]` and `swap::[u64]` are different instantiations.
+- `SmallVec::[int, 8]` and `SmallVec::[int, 16]` are different instantiations.
 
 **Rule (identity):** Two instantiations are the "same" only if all type arguments are identical and all comptime value arguments are equal.
 
 **Lowering (conceptual):**
-- `Vec<T>` lowers to a concrete family such as `Vec_<mangled>`.
-- `Map<K,V>` lowers to a concrete family such as `Map_<mangledK>_<mangledV>`.
-- `T?` lowers to `CCOptional_<mangledT>`.
+- `Vec::[T]` lowers to a concrete family such as `Vec_<mangled>`.
+- `Map::[K,V]` lowers to a concrete family such as `Map_<mangledK>_<mangledV>`.
 - `T!>(E)` lowers to `CCResult_<mangledT>_<mangledE>`.
 - `T[~... >]` / `T[~... <]` lower to concrete channel handle families for element type `T`, with additional channel metadata (direction/mode/topology/flags) preserved separately for checking and construction.
-- `swap<T>` lowers to `swap__T_<mangled>(...)` per instantiation.
-- `Option<T>` lowers to `Option__T_<mangled>` per instantiation.
+- `swap::[T]` lowers to `swap__T_<mangled>(...)` per instantiation.
+- `Pair::[A, B]` lowers to `Pair__A_<mangledA>__B_<mangledB>` per instantiation.
 - (Exact mangling is implementation-defined; uniqueness is required.)
 
 ---
@@ -6211,16 +6215,16 @@ swap(&a, &b);     // infers T from a/b pointer types
 **Rule (explicit instantiation):** The caller may specify generic arguments explicitly:
 
 ```c
-swap<int>(&a, &b);
+swap::[int](&a, &b);
 ```
 
 **Rule (partial explicit):** If some arguments are explicit and others omitted, omitted type parameters are inferred (if possible). Comptime value parameters must be explicit unless inferable from a dependent type.
 
 ```c
-// N inferable from SmallVec<int, 8>*:
-void push<T, comptime int N>(SmallVec<T, N>* v, T x);
+// N inferable from SmallVec::[int, 8]*:
+void push::[T, comptime int N](SmallVec::[T, N]* v, T x);
 
-SmallVec<int, 8> v;
+SmallVec::[int, 8] v;
 push(&v, 3);   // infers T=int, N=8
 ```
 
@@ -6233,7 +6237,7 @@ push(&v, 3);   // infers T=int, N=8
 Generic code can branch on type/value parameters using `@comptime if` (defined in §12).
 
 ```c
-void copy<T>(T[:] dst, T[:] src) {
+void copy::[T](T[:] dst, T[:] src) {
     @comptime if (sizeof(T) <= 8) {
         for (size_t i = 0; i < src.len; i++) dst.ptr[i] = src.ptr[i];
     } else {
@@ -6253,7 +6257,7 @@ Generic code obeys the same copy/move rules as non-generic code.
 **Rule (by-value parameters):** Passing a move-only value to `fn(T x)` moves it into the function. Passing a copyable value copies.
 
 ```c
-void take<T>(T x) { use(x); }
+void take::[T](T x) { use(x); }
 
 char[:] u;
 await ch.recv(&u);             // u contains move-only slice
@@ -6270,14 +6274,15 @@ take(u);                       // moves u into take(), OK
 
 Intentionally omitted in v1.0:
 
-- Full user-defined generic function/type declarations in the main compiler pipeline
-- Trait/protocol bounds (`<T: Hashable>`)
+- Trait/protocol bounds (`::[T: Hashable]`)
 - User-defined compile-time interfaces
 - Generic impl blocks / methods parameterized on `Self`
 - Specialization by overload sets (only `@comptime if` specialization is supported)
 - Runtime reflection over type `T`
 
-**Rule:** Built-in generic families (`Task<T>`, `Mutex<T>`, `Map<K,V>`, `T?`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
+**Rule:** Built-in generic families (`Task::[T]`, `Mutex::[T]`, `Map::[K,V]`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
+
+**Deprecated:** `T?` (optional types) are deprecated as of v1.0. Use `T*` (NULL for absence) or `T!>(E)` (result types) instead. Existing code using `T?` will continue to compile during the deprecation period but should be migrated.
 
 ---
 
@@ -6285,28 +6290,28 @@ Intentionally omitted in v1.0:
 
 Standard collection types are defined in the **Standard Library Specification** (`concurrent-c-stdlib-spec.md`):
 
-- **`Vec<T>`** — arena-backed dynamic array (`<std/vec.cch>`)
-- **`Map<K,V>`** — arena-backed hash table (`<std/map.cch>`)
+- **`Vec::[T]`** — arena-backed dynamic array (`<std/vec.cch>`)
+- **`Map::[K,V]`** — arena-backed hash table (`<std/map.cch>`)
 
 Both types are generic, use UFCS methods, and require an `Arena*` at construction. See the stdlib spec for full API reference, rules, and examples.
 
 **Quick reference:**
 
 ```c
-// Vec<T>
-Vec<T> v = vec_new<T>(&arena);
+// Vec::[T]
+Vec::[T] v = vec_new::[T](&arena);
 v.push(value);
-T? x = v.get(index);
+T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
 
-// Map<K,V>
-Map<K, V> m = map_new<K, V>(&arena);
+// Map::[K,V]
+Map::[K, V] m = map_new::[K, V](&arena);
 m.insert(key, value);
-V? x = m.get(key);
+V* x = m.get_ptr(key);
 m.remove(key);
 ```
 
-**Implementation note:** The `Vec<T>` and `Map<K,V>` syntax is compile-time sugar that lowers to concrete C family types (e.g., `Vec<int>` → `Vec_int`). UFCS method calls on containers lower through that family contract; implementations may use direct concrete symbols such as `Vec_int_push(&v, x)` or thin family wrappers over shared erased-core helpers. See the stdlib spec for full lowering rules.
+**Implementation note:** The `Vec::[T]` and `Map::[K,V]` syntax is compile-time sugar that lowers to concrete C family types (e.g., `Vec::[int]` → `Vec_int`). UFCS method calls on containers lower through that family contract; implementations may use direct concrete symbols such as `Vec_int_push(&v, x)` or thin family wrappers over shared erased-core helpers. See the stdlib spec for full lowering rules.
 
 ---
 
@@ -6417,7 +6422,7 @@ int sum_n(comptime int N, int[N] xs) {
 `@comptime if (COND) { ... } else { ... }` chooses a branch at compile time.
 
 ```c
-void print_any<T>(T x) {
+void print_any::[T](T x) {
     @comptime if (is_slice(T)) {
         print_slice(x);
     } else {
@@ -6425,11 +6430,11 @@ void print_any<T>(T x) {
     }
 }
 
-void serialize<T>(T value, char[~]* out) {
+void serialize::[T](T value, char[~]* out) {
     @comptime if (is_slice(T)) {
         serialize_slice(value, out);
-    } else @comptime if (is_optional(T)) {
-        serialize_optional(value, out);
+    } else @comptime if (is_result(T)) {
+        serialize_result(value, out);
     } else {
         serialize_primitive(value, out);
     }

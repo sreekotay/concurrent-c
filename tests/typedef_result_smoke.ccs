@@ -1,0 +1,17 @@
+#include <stdio.h>
+#include <ccc/cc_runtime.cch>
+
+typedef int !>(CCError) IntResult;
+
+int !>(CCError) make_ok(void) {
+    return cc_ok(42);
+}
+
+int main(void) {
+    IntResult r = make_ok();
+    if (!r.ok) return 1;
+    if (r.u.value != 42) return 2;
+
+    printf("typedef_result ok\n");
+    return 0;
+}

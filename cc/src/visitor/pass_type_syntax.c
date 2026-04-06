@@ -29,7 +29,12 @@ static size_t cc__strip_leading_cv_qual(const char* s, size_t ty_start, char* ou
     while (s[p] == ' ' || s[p] == '\t') p++;
     for (;;) {
         int matched = 0;
-        if (strncmp(s + p, "const", 5) == 0 && !cc__is_ident_char_local(s[p + 5])) {
+        if (strncmp(s + p, "typedef", 7) == 0 && !cc__is_ident_char_local(s[p + 7])) {
+            strncat(out_qual, "typedef ", out_cap - strlen(out_qual) - 1);
+            p += 7;
+            while (s[p] == ' ' || s[p] == '\t') p++;
+            matched = 1;
+        } else if (strncmp(s + p, "const", 5) == 0 && !cc__is_ident_char_local(s[p + 5])) {
             strncat(out_qual, "const ", out_cap - strlen(out_qual) - 1);
             p += 5;
             while (s[p] == ' ' || s[p] == '\t') p++;
@@ -51,7 +56,10 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
     while (s[p] == ' ' || s[p] == '\t') p++;
     for (;;) {
         int matched = 0;
-        if (strncmp(s + p, "static", 6) == 0 && !cc__is_ident_char_local(s[p + 6])) {
+        if (strncmp(s + p, "typedef", 7) == 0 && !cc__is_ident_char_local(s[p + 7])) {
+            p += 7;
+            matched = 1;
+        } else if (strncmp(s + p, "static", 6) == 0 && !cc__is_ident_char_local(s[p + 6])) {
             p += 6;
             matched = 1;
         } else if (strncmp(s + p, "inline", 6) == 0 && !cc__is_ident_char_local(s[p + 6])) {

@@ -1,0 +1,25 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    Vec::[int] v = vec_new::[int](&arena);
+    if (v.push(10) != 0) return 2;
+    if (v.push(20) != 0) return 3;
+    if (v.push(30) != 0) return 4;
+
+    if (v.set(1, 99) != 0) return 5;
+    if (v.set(10, 77) == 0) return 6;
+
+    CCSlice s = v.as_slice();
+    if (s.len != 3 || s.alen != v.cap) return 7;
+
+    int *items = (int *)s.ptr;
+    if (!items || items[0] != 10 || items[1] != 99 || items[2] != 30) return 8;
+
+    printf("vec_set_as_slice ok\n");
+    cc_arena_free(&arena);
+    return 0;
+}

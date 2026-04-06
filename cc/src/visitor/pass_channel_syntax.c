@@ -22,6 +22,37 @@
 #define cc__is_ident_start_local2 cc_is_ident_start
 #define cc__skip_ws_local2 cc_skip_ws
 
+static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
+    size_t p = ty_start;
+    if (!s) return p;
+    while (s[p] == ' ' || s[p] == '\t') p++;
+    for (;;) {
+        int matched = 0;
+        if (strncmp(s + p, "typedef", 7) == 0 && !cc_is_ident_char(s[p + 7])) {
+            p += 7;
+            matched = 1;
+        } else if (strncmp(s + p, "static", 6) == 0 && !cc_is_ident_char(s[p + 6])) {
+            p += 6;
+            matched = 1;
+        } else if (strncmp(s + p, "inline", 6) == 0 && !cc_is_ident_char(s[p + 6])) {
+            p += 6;
+            matched = 1;
+        } else if (strncmp(s + p, "extern", 6) == 0 && !cc_is_ident_char(s[p + 6])) {
+            p += 6;
+            matched = 1;
+        } else if (strncmp(s + p, "const", 5) == 0 && !cc_is_ident_char(s[p + 5])) {
+            p += 5;
+            matched = 1;
+        } else if (strncmp(s + p, "volatile", 8) == 0 && !cc_is_ident_char(s[p + 8])) {
+            p += 8;
+            matched = 1;
+        }
+        if (!matched) break;
+        while (s[p] == ' ' || s[p] == '\t') p++;
+    }
+    return p;
+}
+
 /* Global counter for unique owned channel IDs */
 static int g_owned_channel_id = 0;
 
@@ -1361,10 +1392,11 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
                 }
                 while (ty_start < i && (src[ty_start] == ' ' || src[ty_start] == '\t')) ty_start++;
 
+                size_t type_start = cc__skip_leading_decl_specs(src, ty_start);
                 char elem_ty[256];
-                size_t elem_len = i - ty_start;
+                size_t elem_len = i - type_start;
                 if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
-                memcpy(elem_ty, src + ty_start, elem_len);
+                memcpy(elem_ty, src + type_start, elem_len);
                 elem_ty[elem_len] = 0;
                 while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) {
                     elem_ty[--elem_len] = 0;
@@ -1377,6 +1409,7 @@ char* cc__rewrite_chan_handle_types_text(const CCVisitorCtx* ctx,
 
                 if (ty_start >= last_emit) {
                     cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    cc__sb_append_local(&out, &out_len, &out_cap, src + ty_start, type_start - ty_start);
                     /* Emit CCChanTx for send, CCChanRx for recv (ordered is a flag, not a type) */
                     cc__sb_append_cstr_local(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
                     last_emit = k + 1;

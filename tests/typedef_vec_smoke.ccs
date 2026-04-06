@@ -1,0 +1,23 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef Vec<int> IntVec;
+
+int main(void) {
+    CCArena arena = cc_arena_heap(kilobytes(4));
+    if (!arena.base) return 1;
+
+    Vec<int> v = vec_new<int>(&arena);
+    v.push(10);
+    v.push(20);
+    v.push(30);
+
+    if (v.len != 3) return 2;
+
+    IntVec alias = v;
+    if (alias.len != 3) return 3;
+
+    cc_std_out_write(@slice("typedef_vec ok\n"));
+    cc_arena_free(&arena);
+    return 0;
+}
