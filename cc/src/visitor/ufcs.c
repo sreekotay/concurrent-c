@@ -965,7 +965,10 @@ static int cc__emit_type_driven_dispatch(char* out,
     }
     channel_callee = cc_ufcs_channel_callee(ctx->recv_type_name, method, g_ufcs_await_context,
                                             &channel_kind, &channel_recv_by_value);
-    if (channel_callee && channel_kind == CC_UFCS_CHANNEL_KIND_RAW) {
+    if (channel_callee &&
+        (channel_kind == CC_UFCS_CHANNEL_KIND_RAW ||
+         ((channel_kind == CC_UFCS_CHANNEL_KIND_TX || channel_kind == CC_UFCS_CHANNEL_KIND_RX) &&
+          (!ctx->typed_chan_type || !ctx->typed_chan_type[0])))) {
         if (has_args && args_rewritten &&
             (strcmp(method, "recv") == 0 || strcmp(method, "try_recv") == 0)) {
             const char* raw_fn = (strcmp(method, "recv") == 0)
