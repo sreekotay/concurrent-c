@@ -25,6 +25,8 @@
 #include <ccc/cc_compat.cch>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <ccc/cc_arena.cch>
 #include <ccc/cc_optional.cch>
 
@@ -143,25 +145,52 @@ typedef __CCMapGeneric Map_uint64_t_voidptr;
 /*
  * Arena-backed allocator hooks for khashl.
  * - Kmalloc/Kcalloc: allocate from arena
- * - Krealloc: allocate new + copy (old stays in arena until reset)
+ * - Krealloc: allocate new + copy old payload size (old stays in arena until reset)
  * - Kfree: no-op (arena bulk-frees on reset)
  */
+typedef struct cc__map_alloc_header {
+    size_t size_bytes;
+} cc__map_alloc_header;
+
+static inline void* cc__map_alloc_payload(CCArena* arena, size_t size_bytes, size_t align) {
+    if (!arena || size_bytes == 0) return NULL;
+    if (align < _Alignof(cc__map_alloc_header)) align = _Alignof(cc__map_alloc_header);
+
+    size_t total = sizeof(cc__map_alloc_header) + align - 1 + size_bytes;
+    uint8_t* raw = (uint8_t*)cc_arena_alloc(arena, total, _Alignof(max_align_t));
+    if (!raw) return NULL;
+
+    uintptr_t start = (uintptr_t)(raw + sizeof(cc__map_alloc_header));
+    uintptr_t aligned = (start + align - 1) & ~(uintptr_t)(align - 1);
+    cc__map_alloc_header* header = (cc__map_alloc_header*)(aligned - sizeof(cc__map_alloc_header));
+    header->size_bytes = size_bytes;
+    return (void*)aligned;
+}
+
+static inline void* cc__map_realloc_payload(CCArena* arena, void* ptr, size_t size_bytes, size_t align) {
+    void* out = cc__map_alloc_payload(arena, size_bytes, align);
+    if (!out || !ptr) return out;
+
+    cc__map_alloc_header* old_header =
+        (cc__map_alloc_header*)((uint8_t*)ptr - sizeof(cc__map_alloc_header));
+    size_t copy_bytes = old_header->size_bytes < size_bytes ? old_header->size_bytes : size_bytes;
+    memcpy(out, ptr, copy_bytes);
+    return out;
+}
+
 #define Kmalloc(km, type, cnt) \
-    ((type*)cc_arena_alloc((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)))
+    ((type*)cc__map_alloc_payload((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)))
 
 #define Kcalloc(km, type, cnt) \
     ((type*)({ \
-        void *__p = cc_arena_alloc((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)); \
+        void *__p = cc__map_alloc_payload((CCArena*)(km), (cnt) * sizeof(type), _Alignof(type)); \
         if (__p) memset(__p, 0, (cnt) * sizeof(type)); \
         __p; \
     }))
 
 #define Krealloc(km, type, ptr, cnt) \
     ((type*)({ \
-        size_t __sz = (cnt) * sizeof(type); \
-        type *__new = (type*)cc_arena_alloc((CCArena*)(km), __sz, _Alignof(type)); \
-        if (__new && (ptr)) memcpy(__new, (ptr), __sz); \
-        __new; \
+        cc__map_realloc_payload((CCArena*)(km), (void*)(ptr), (cnt) * sizeof(type), _Alignof(type)); \
     }))
 
 #define Kfree(km, ptr) ((void)0)  /* no-op: arena manages memory */
