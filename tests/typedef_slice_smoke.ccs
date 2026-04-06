@@ -1,0 +1,16 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef char[:] StringSlice;
+typedef const char[:] ConstStringSlice;
+
+int main(void) {
+    StringSlice s = @slice("hello typedef");
+    if (s.len != 13) return 1;
+
+    ConstStringSlice cs = @slice("const slice");
+    if (cs.len != 11) return 2;
+
+    cc_std_out_write(@slice("typedef_slice ok\n"));
+    return 0;
+}

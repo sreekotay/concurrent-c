@@ -1,0 +1,26 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <stdio.h>
+
+typedef int[~10 >] IntSender;
+typedef int[~10 <] IntReceiver;
+
+int main(void) {
+    int[~10 >] tx;
+    int[~10 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+
+    IntSender alias_tx = tx;
+    IntReceiver alias_rx = rx;
+
+    cc_channel_send(alias_tx, 42);
+    int val = 0;
+    cc_channel_recv(alias_rx, &val);
+    if (val != 42) return 2;
+
+    cc_channel_close(alias_tx);
+    cc_channel_free(ch);
+    printf("typedef_channel ok\n");
+    return 0;
+}

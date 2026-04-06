@@ -15,6 +15,7 @@
 
 #include <ccc/cc_compat.cch>
 #include <string.h>
+#include <ctype.h>
 
 // Explicit "untracked" id - signals this slice has no provenance tracking.
 // Use sparingly: passing untracked slices through channels or storing them
@@ -143,8 +144,192 @@ static inline const uint8_t* cc_slice_bytes(CCSlice* s) {
     return (const uint8_t*)s->ptr;
 }
 
-/* CCSlice_len is defined in std/string.cch for UFCS use. */
+/* ---- Aggregate slice array ---- */
+
+#ifndef CC_CCSLICEARRAY_DEFINED
+#define CC_CCSLICEARRAY_DEFINED 1
+typedef struct {
+    CCSlice *items;
+    size_t len;
+} CCSliceArray;
+#endif
+
+/* ---- Slice query helpers ---- */
+
+static inline bool cc_slice_is_ascii(CCSlice s) {
+    const unsigned char *p = (const unsigned char *)s.ptr;
+    for (size_t i = 0; i < s.len; ++i) {
+        if (p[i] > 0x7F) return false;
+    }
+    return true;
+}
+
+static inline bool cc_slice_get(CCSlice s, size_t idx, char *out) {
+    if (idx >= s.len || !s.ptr) return false;
+    if (out) *out = ((char *)s.ptr)[idx];
+    return true;
+}
+
+static inline size_t cc_slice_index_of(CCSlice s, CCSlice needle, bool *found) {
+    if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
+    const uint8_t *hay = (const uint8_t *)s.ptr;
+    for (size_t i = 0; i + needle.len <= s.len; ++i) {
+        if (memcmp(hay + i, needle.ptr, needle.len) == 0) {
+            if (found) *found = true; return i;
+        }
+    }
+    if (found) *found = false; return 0;
+}
+
+static inline size_t cc_slice_last_index_of(CCSlice s, CCSlice needle, bool *found) {
+    if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
+    const uint8_t *hay = (const uint8_t *)s.ptr;
+    for (size_t i = s.len - needle.len + 1; i-- > 0;) {
+        if (memcmp(hay + i, needle.ptr, needle.len) == 0) {
+            if (found) *found = true; return i;
+        }
+        if (i == 0) break;
+    }
+    if (found) *found = false; return 0;
+}
+
+static inline size_t cc_slice_count(CCSlice s, CCSlice needle) {
+    bool found = false;
+    size_t idx = 0, cnt = 0;
+    while (idx < s.len) {
+        size_t pos = cc_slice_index_of(cc_slice_sub(s, idx, s.len), needle, &found);
+        if (!found) break;
+        cnt++;
+        idx += pos + (needle.len ? needle.len : 1);
+        if (needle.len == 0) break;
+    }
+    return cnt;
+}
+
+/* ---- Trim helpers ---- */
+
+static inline size_t cc__trim_left_idx(CCSlice s) {
+    size_t i = 0;
+    const unsigned char *p = (const unsigned char *)s.ptr;
+    while (i < s.len && isspace(p[i])) i++;
+    return i;
+}
+
+static inline size_t cc__trim_right_idx(CCSlice s) {
+    if (s.len == 0) return 0;
+    const unsigned char *p = (const unsigned char *)s.ptr;
+    size_t i = s.len;
+    while (i > 0 && isspace(p[i-1])) i--;
+    return i;
+}
+
+static inline bool cc__in_set(char c, CCSlice set) {
+    const char *p = (const char *)set.ptr;
+    for (size_t i = 0; i < set.len; ++i) {
+        if (p[i] == c) return true;
+    }
+    return false;
+}
+
+static inline CCSlice cc_slice_trim_set(CCSlice s, CCSlice chars) {
+    size_t start = 0, end = s.len;
+    const char *p = (const char *)s.ptr;
+    while (start < end && cc__in_set(p[start], chars)) start++;
+    while (end > start && cc__in_set(p[end-1], chars)) end--;
+    return cc_slice_sub(s, start, end);
+}
+
+/* ---- Hash and equality ---- */
+
+static inline uint64_t cc_fnv1a64(const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    uint64_t hash = 14695981039346656037ULL;
+    for (size_t i = 0; i < len; ++i) {
+        hash ^= p[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static inline uint64_t cc_slice_hash64(CCSlice s) {
+    if (!s.ptr || s.len == 0) return 0xcbf29ce484222325ULL;
+    return cc_fnv1a64(s.ptr, s.len);
+}
+
+static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
+    if (a.len != b.len) return false;
+    if (a.ptr == b.ptr) return true;
+    if (!a.ptr || !b.ptr) return false;
+    return memcmp(a.ptr, b.ptr, a.len) == 0;
+}
+
+/* ---- UFCS methods (receiver is CCSlice*) ---- */
+
+#ifdef CC_PARSER_MODE
+static CCSlice trim();
+static CCSlice trim_left();
+static CCSlice trim_right();
+static CCSlice sub();
+static char at();
+static bool starts_with();
+static bool ends_with();
+static bool eq_cstr();
+#endif
+
+static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
+
+static inline CCSlice CCSlice_trim(CCSlice* s) {
+    if (!s) return cc_slice_empty();
+    size_t start = cc__trim_left_idx(*s);
+    CCSlice sub = cc_slice_sub(*s, start, s->len);
+    size_t end = cc__trim_right_idx(sub);
+    return cc_slice_sub(sub, 0, end);
+}
+
+static inline CCSlice CCSlice_trim_left(CCSlice* s) {
+    if (!s) return cc_slice_empty();
+    return cc_slice_sub(*s, cc__trim_left_idx(*s), s->len);
+}
+
+static inline CCSlice CCSlice_trim_right(CCSlice* s) {
+    if (!s) return cc_slice_empty();
+    size_t end = cc__trim_right_idx(*s);
+    return cc_slice_sub(*s, 0, end);
+}
+
+static inline char CCSlice_at(CCSlice* s, size_t idx) {
+    if (!s || idx >= s->len || !s->ptr) return 0;
+    return ((char*)s->ptr)[idx];
+}
+
+static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
+    return s ? cc_slice_sub(*s, start, end) : cc_slice_empty();
+}
+
+static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) {
+    if (!s) return false;
+    return s->len >= prefix.len && memcmp(s->ptr, prefix.ptr, prefix.len) == 0;
+}
+
+static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
+    if (!s) return false;
+    return s->len >= suffix.len &&
+        memcmp((uint8_t *)s->ptr + (s->len - suffix.len), suffix.ptr, suffix.len) == 0;
+}
+
+static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
+    if (!s) return false;
+    return cc__slice_eq(*s, other);
+}
+
+static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) {
+    if (!s) return false;
+    size_t len = cstr ? strlen(cstr) : 0;
+    if (!cstr) return false;
+    if (s->len != len) return false;
+    if (s->len == 0) return true;
+    if (!s->ptr) return false;
+    return memcmp(s->ptr, cstr, len) == 0;
+}
 
 #endif // CC_SLICE_H
-
-

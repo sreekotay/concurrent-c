@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <ccc/cc_runtime.cch>
+#include <ccc/cc_slice.cch>
+#include <ccc/cc_vec_core.cch>
 #include <ccc/cc_optional.cch>  /* Must be before parser mode block for __CCOptionalGeneric */
 
 /* Default initial capacity - skip tiny allocations */
@@ -83,6 +85,10 @@ static inline void* __cc_vec_generic_get_ptr(__CCVecGeneric *v, size_t i) {
     (void)v; (void)i; 
     return NULL; 
 }
+static inline int __cc_vec_generic_set(__CCVecGeneric *v, size_t i, ...) {
+    (void)v; (void)i;
+    return 0;
+}
 static inline __CCOptionalGeneric __cc_vec_generic_pop(__CCVecGeneric *v) { 
     (void)v; 
     __CCOptionalGeneric result = {0};
@@ -118,6 +124,10 @@ static inline void* __cc_vec_generic_end(__CCVecGeneric *v) {
 static inline void* __cc_vec_generic_data(__CCVecGeneric *v) { 
     return v ? v->data : NULL; 
 }
+static inline CCSlice __cc_vec_generic_as_slice(__CCVecGeneric *v) {
+    if (!v || !v->data) return cc_slice_empty();
+    return cc_slice_from_parts(v->data, v->len, CC_SLICE_ID_UNTRACKED, v->cap);
+}
 
 /* Parser-mode: common Vec types are aliases to __CCVecGeneric */
 typedef __CCVecGeneric Vec_int;
@@ -137,6 +147,7 @@ typedef __CCVecGeneric Vec_intptr;
 #define Vec_int_pop(v)         __cc_vec_generic_pop((v))
 #define Vec_int_get(v, i)      __cc_vec_generic_get((v), (i))
 #define Vec_int_get_ptr(v, i)  __cc_vec_generic_get_ptr((v), (i))
+#define Vec_int_set(v, i, x)   __cc_vec_generic_set((v), (i), (x))
 #define Vec_int_at_grow(v, i)  __cc_vec_generic_at_grow((v), (i))
 #define Vec_int_push_ptr(v)    __cc_vec_generic_push_ptr((v))
 #define Vec_int_reserve(v, n)  __cc_vec_generic_reserve((v), (n))
@@ -146,12 +157,14 @@ typedef __CCVecGeneric Vec_intptr;
 #define Vec_int_begin(v)       __cc_vec_generic_begin((v))
 #define Vec_int_end(v)         __cc_vec_generic_end((v))
 #define Vec_int_data(v)        __cc_vec_generic_data((v))
+#define Vec_int_as_slice(v)    __cc_vec_generic_as_slice((v))
 
 #define Vec_char_init(a, c)    __cc_vec_generic_init((void*)(a))
 #define Vec_char_push(v, x)    __cc_vec_generic_push((v), (x))
 #define Vec_char_pop(v)        __cc_vec_generic_pop((v))
 #define Vec_char_get(v, i)     __cc_vec_generic_get((v), (i))
 #define Vec_char_get_ptr(v, i) __cc_vec_generic_get_ptr((v), (i))
+#define Vec_char_set(v, i, x)  __cc_vec_generic_set((v), (i), (x))
 #define Vec_char_at_grow(v, i) __cc_vec_generic_at_grow((v), (i))
 #define Vec_char_push_ptr(v)   __cc_vec_generic_push_ptr((v))
 #define Vec_char_reserve(v, n) __cc_vec_generic_reserve((v), (n))
@@ -161,11 +174,14 @@ typedef __CCVecGeneric Vec_intptr;
 #define Vec_char_begin(v)      __cc_vec_generic_begin((v))
 #define Vec_char_end(v)        __cc_vec_generic_end((v))
 #define Vec_char_data(v)       __cc_vec_generic_data((v))
+#define Vec_char_as_slice(v)   __cc_vec_generic_as_slice((v))
 
 #define Vec_size_t_init(a, c)  __cc_vec_generic_init((void*)(a))
 #define Vec_size_t_push(v, x)  __cc_vec_generic_push((v), (x))
 #define Vec_size_t_get(v, i)   __cc_vec_generic_get((v), (i))
+#define Vec_size_t_set(v, i, x) __cc_vec_generic_set((v), (i), (x))
 #define Vec_size_t_len(v)      __cc_vec_generic_len((v))
+#define Vec_size_t_as_slice(v) __cc_vec_generic_as_slice((v))
 
 #else /* !CC_PARSER_MODE - real compilation */
 
@@ -202,8 +218,10 @@ typedef __CCVecGeneric Vec_intptr;
  * - Name_pop(v) -> OptT (None if empty)
  * - Name_get(v, i) -> OptT (None if out of bounds)
  * - Name_get_ptr(v, i) -> T* (mutable access, NULL if out of bounds)
+ * - Name_set(v, i, value) -> 0 on success, -1 on out-of-bounds
  * - Name_at_grow(v, i) -> T* (auto-extends if needed)
  * - Name_push_ptr(v) -> T* (push slot, returns pointer)
+ * - Name_as_slice(v) -> CCSlice
  * - Name_len(v), Name_cap(v)
  * - Name_begin(v), Name_end(v)
  * - Name_clear(v)
@@ -219,47 +237,32 @@ typedef __CCVecGeneric Vec_intptr;
                                                                                   \
     static inline Name Name##_init(CCArena *arena, size_t initial_cap) {          \
         Name v = {0, 0, NULL, arena, 0};                                          \
-        if (!arena) return v;                                                     \
-        size_t cap = initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP;          \
-        v.data = (T *)cc_arena_alloc(arena, cap * sizeof(T), _Alignof(T));        \
-        if (!v.data) { v.cap = 0; return v; }                                     \
-        v.cap = cap;                                                              \
-        v.provenance = arena->provenance;                                         \
+        if (cc_vec_core_init((CCVecCore *)&v, arena, sizeof(T), _Alignof(T),      \
+                             initial_cap > 0 ? initial_cap : CC_VEC_INITIAL_CAP)   \
+            != 0) {                                                               \
+            v.cap = 0;                                                            \
+            v.data = NULL;                                                        \
+            v.provenance = 0;                                                     \
+        }                                                                         \
         return v;                                                                 \
     }                                                                             \
                                                                                   \
     static inline int Name##_reserve(Name *v, size_t need) {                      \
-        if (!v || !v->arena) return -1;                                           \
-        if (need <= v->cap) return 0;                                             \
-        size_t new_cap = v->cap ? v->cap : CC_VEC_INITIAL_CAP;                    \
-        while (new_cap < need) new_cap <<= 1;                                     \
-        T *new_data = (T *)cc_arena_alloc(v->arena, new_cap * sizeof(T), _Alignof(T));\
-        if (!new_data) return -1;                                                 \
-        if (v->data && v->len) memcpy(new_data, v->data, v->len * sizeof(T));     \
-        v->data = new_data;                                                       \
-        v->cap = new_cap;                                                         \
-        v->provenance = v->arena->provenance;                                     \
-        return 0;                                                                 \
+        return cc_vec_core_reserve((CCVecCore *)v, sizeof(T), _Alignof(T), need); \
     }                                                                             \
                                                                                   \
     static inline int Name##_push(Name *v, T value) {                             \
-        if (!v) return -1;                                                        \
-        if (v->len == v->cap) {                                                   \
-            if (Name##_reserve(v, v->cap ? v->cap << 1 : CC_VEC_INITIAL_CAP) != 0)\
-                return -1;                                                        \
-        }                                                                         \
-        v->data[v->len++] = value;                                                \
+        T *slot = (T *)cc_vec_core_push_slot((CCVecCore *)v, sizeof(T),           \
+                                             _Alignof(T));                         \
+        if (!slot) return -1;                                                     \
+        *slot = value;                                                            \
         return 0;                                                                 \
     }                                                                             \
                                                                                   \
     /* Push and return pointer to new slot (kvec's kv_pushp equivalent) */        \
     static inline T* Name##_push_ptr(Name *v) {                                   \
-        if (!v) return NULL;                                                      \
-        if (v->len == v->cap) {                                                   \
-            if (Name##_reserve(v, v->cap ? v->cap << 1 : CC_VEC_INITIAL_CAP) != 0)\
-                return NULL;                                                      \
-        }                                                                         \
-        return &v->data[v->len++];                                                \
+        return (T *)cc_vec_core_push_slot((CCVecCore *)v, sizeof(T),              \
+                                          _Alignof(T));                            \
     }                                                                             \
                                                                                   \
     /* Pop: returns optional (None if empty) */                                   \
@@ -287,20 +290,28 @@ typedef __CCVecGeneric Vec_intptr;
         return &v->data[i];                                                       \
     }                                                                             \
                                                                                   \
+    static inline int Name##_set(Name *v, size_t i, T value) {                    \
+        if (!v || i >= v->len) return -1;                                         \
+        v->data[i] = value;                                                       \
+        return 0;                                                                 \
+    }                                                                             \
+                                                                                  \
     /* Auto-extending indexing (kvec's kv_a equivalent) */                        \
     static inline T* Name##_at_grow(Name *v, size_t i) {                          \
-        if (!v) return NULL;                                                      \
-        if (i >= v->cap) {                                                        \
-            size_t new_cap = v->cap ? v->cap : CC_VEC_INITIAL_CAP;                \
-            while (new_cap <= i) new_cap <<= 1;                                   \
-            if (Name##_reserve(v, new_cap) != 0) return NULL;                     \
-        }                                                                         \
-        if (i >= v->len) v->len = i + 1;                                          \
-        return &v->data[i];                                                       \
+        return (T *)cc_vec_core_at_grow((CCVecCore *)v, sizeof(T),                \
+                                        _Alignof(T), i);                           \
     }                                                                             \
                                                                                   \
     static inline void Name##_clear(Name *v) {                                    \
-        if (v) v->len = 0;                                                        \
+        cc_vec_core_clear((CCVecCore *)v);                                        \
+    }                                                                             \
+                                                                                  \
+    static inline CCSlice Name##_as_slice(const Name *v) {                        \
+        if (!v || !v->data) return cc_slice_empty();                              \
+        return cc_slice_from_parts((void *)v->data,                               \
+                                   v->len,                                        \
+                                   cc_slice_make_id(v->provenance, false, false, false), \
+                                   v->cap);                                       \
     }                                                                             \
                                                                                   \
     static inline size_t Name##_len(const Name *v) { return v ? v->len : 0; }     \

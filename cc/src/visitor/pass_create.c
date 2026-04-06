@@ -11,14 +11,6 @@
 #include "preprocess/type_registry.h"
 #include "util/text.h"
 
-#ifndef CC_CCSLICEARRAY_DEFINED
-#define CC_CCSLICEARRAY_DEFINED 1
-typedef struct {
-    CCSlice *items;
-    size_t len;
-} CCSliceArray;
-#endif
-
 typedef CCSlice (*CCTypeCreateHandler)(CCSlice type_name, CCSliceArray argv, CCSliceArray arg_types, CCArena* arena);
 
 static void cc__create_offset_to_line_col(const char* src, size_t off, int* out_line, int* out_col) {

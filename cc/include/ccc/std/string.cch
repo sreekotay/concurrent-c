@@ -1,5 +1,6 @@
 /*
- * Header-only string and slice helpers for Concurrent-C stdlib.
+ * Header-only string builder and arena-backed helpers for Concurrent-C stdlib.
+ * Pure slice operations live in cc_slice.cch.
  */
 #ifndef CC_STD_STRING_H
 #define CC_STD_STRING_H
@@ -26,7 +27,6 @@ CC_VEC_DECL_ARENA(char, Vec_char)
 
 typedef Vec_char CCString;
 
-// Forward declare string type for helpers that return CCString later.
 // ------------------------- Parse error enums ------------------------------
 typedef enum {
     CC_I64_PARSE_INVALID_CHAR = 1,
@@ -53,52 +53,12 @@ CC_DECL_RESULT_SPEC(CCResult_uint64_t_CC_U64ParseError, uint64_t, CC_U64ParseErr
 CC_DECL_RESULT_SPEC(CCResult_double_CC_F64ParseError, double, CC_F64ParseError)
 CC_DECL_RESULT_SPEC(CCResult_bool_CC_BoolParseError, bool, CC_BoolParseError)
 
-// ------------------------- Slice helpers ----------------------------------
-
-#ifndef CC_CCSLICEARRAY_DEFINED
-#define CC_CCSLICEARRAY_DEFINED 1
-typedef struct {
-    CCSlice *items;
-    size_t len;
-} CCSliceArray;
-#endif
-
-/*
- * Forward declarations for UFCS methods.
- * TCC parser mode needs these to avoid "cannot convert int to struct" errors
- * when it encounters UFCS calls like s.trim() before the UFCS pass rewrites them.
- * Using old-style function declarations (no params) to accept any arguments.
- */
 #ifdef CC_PARSER_MODE
-/* These dummy declarations tell TCC the return types for UFCS method names */
-static CCSlice trim();
-static CCSlice trim_left();
-static CCSlice trim_right();
-static CCSlice sub();
 static CCSlice as_slice();
 static CCString to_str();
-static char at();
-static bool starts_with();
-static bool ends_with();
-static bool eq_cstr();
-/* len, is_empty, eq already return int/bool which matches TCC's implicit decl */
 #endif
 
-static inline bool cc_slice_is_ascii(CCSlice s) {
-    const unsigned char *p = (const unsigned char *)s.ptr;
-    for (size_t i = 0; i < s.len; ++i) {
-        if (p[i] > 0x7F) return false;
-    }
-    return true;
-}
-
-static inline bool cc_slice_get(CCSlice s, size_t idx, char *out) {
-    if (idx >= s.len || !s.ptr) return false;
-    if (out) *out = ((char *)s.ptr)[idx];
-    return true;
-}
-
-// Use cc_slice_sub from cc_slice.cch
+// ----------------------- Arena-backed slice helpers -------------------------
 
 static inline CCSlice cc_slice_clone(CCArena *arena, CCSlice s) {
     if (!arena || s.len == 0) return s.len == 0 ? cc_slice_empty() : s;
@@ -115,73 +75,6 @@ static inline char *cc_slice_c_str(CCArena *arena, CCSlice s) {
     if (s.ptr && s.len) memcpy(buf, s.ptr, s.len);
     buf[s.len] = '\0';
     return buf;
-}
-
-static inline size_t cc_slice_index_of(CCSlice s, CCSlice needle, bool *found) {
-    if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
-    const uint8_t *hay = (const uint8_t *)s.ptr;
-    for (size_t i = 0; i + needle.len <= s.len; ++i) {
-        if (memcmp(hay + i, needle.ptr, needle.len) == 0) {
-            if (found) *found = true; return i;
-        }
-    }
-    if (found) *found = false; return 0;
-}
-
-static inline size_t cc_slice_last_index_of(CCSlice s, CCSlice needle, bool *found) {
-    if (needle.len == 0 || needle.len > s.len) { if (found) *found = false; return 0; }
-    const uint8_t *hay = (const uint8_t *)s.ptr;
-    for (size_t i = s.len - needle.len + 1; i-- > 0;) {
-        if (memcmp(hay + i, needle.ptr, needle.len) == 0) {
-            if (found) *found = true; return i;
-        }
-        if (i == 0) break;
-    }
-    if (found) *found = false; return 0;
-}
-
-static inline size_t cc_slice_count(CCSlice s, CCSlice needle) {
-    bool found = false;
-    size_t idx = 0, cnt = 0;
-    while (idx < s.len) {
-        size_t pos = cc_slice_index_of(cc_slice_sub(s, idx, s.len), needle, &found);
-        if (!found) break;
-        cnt++;
-        idx += pos + (needle.len ? needle.len : 1);
-        if (needle.len == 0) break;
-    }
-    return cnt;
-}
-
-static inline size_t cc__trim_left_idx(CCSlice s) {
-    size_t i = 0;
-    const unsigned char *p = (const unsigned char *)s.ptr;
-    while (i < s.len && isspace(p[i])) i++;
-    return i;
-}
-
-static inline size_t cc__trim_right_idx(CCSlice s) {
-    if (s.len == 0) return 0;
-    const unsigned char *p = (const unsigned char *)s.ptr;
-    size_t i = s.len;
-    while (i > 0 && isspace(p[i-1])) i--;
-    return i;
-}
-
-static inline bool cc__in_set(char c, CCSlice set) {
-    const char *p = (const char *)set.ptr;
-    for (size_t i = 0; i < set.len; ++i) {
-        if (p[i] == c) return true;
-    }
-    return false;
-}
-
-static inline CCSlice cc_slice_trim_set(CCSlice s, CCSlice chars) {
-    size_t start = 0, end = s.len;
-    const char *p = (const char *)s.ptr;
-    while (start < end && cc__in_set(p[start], chars)) start++;
-    while (end > start && cc__in_set(p[end-1], chars)) end--;
-    return cc_slice_sub(s, start, end);
 }
 
 static inline CCSliceArray cc_slice_split_all(CCArena *arena, CCSlice s, CCSlice delim) {
@@ -936,82 +829,6 @@ static inline CCResult_bool_CC_BoolParseError cc_slice_parse_bool(CCSlice s) {
         return cc_ok_CCResult_bool_CC_BoolParseError(false);
     }
     return cc_err_CCResult_bool_CC_BoolParseError(CC_BOOL_PARSE_INVALID_VALUE);
-}
-
-// ------------------------- Hash helpers ------------------------------------
-
-static inline uint64_t cc_fnv1a64(const void *data, size_t len) {
-    const uint8_t *p = (const uint8_t *)data;
-    uint64_t hash = 14695981039346656037ULL;
-    for (size_t i = 0; i < len; ++i) {
-        hash ^= p[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
-static inline uint64_t cc_slice_hash64(CCSlice s) {
-    if (!s.ptr || s.len == 0) return 0xcbf29ce484222325ULL;
-    return cc_fnv1a64(s.ptr, s.len);
-}
-
-static inline bool cc__slice_eq(CCSlice a, CCSlice b) {
-    if (a.len != b.len) return false;
-    if (a.ptr == b.ptr) return true;
-    if (!a.ptr || !b.ptr) return false;
-    return memcmp(a.ptr, b.ptr, a.len) == 0;
-}
-
-/*
- * UFCS-compatible slice methods.
- * s.len() -> CCSlice_len(&s) via generic UFCS.
- * All take CCSlice* (dot-syntax passes &receiver automatically).
- */
-static inline size_t CCSlice_len(CCSlice* s) { return s ? s->len : 0; }
-static inline CCSlice CCSlice_trim(CCSlice* s) {
-    if (!s) return cc_slice_empty();
-    size_t start = cc__trim_left_idx(*s);
-    CCSlice sub = cc_slice_sub(*s, start, s->len);
-    size_t end = cc__trim_right_idx(sub);
-    return cc_slice_sub(sub, 0, end);
-}
-static inline CCSlice CCSlice_trim_left(CCSlice* s) {
-    if (!s) return cc_slice_empty();
-    return cc_slice_sub(*s, cc__trim_left_idx(*s), s->len);
-}
-static inline CCSlice CCSlice_trim_right(CCSlice* s) {
-    if (!s) return cc_slice_empty();
-    size_t end = cc__trim_right_idx(*s);
-    return cc_slice_sub(*s, 0, end);
-}
-static inline char CCSlice_at(CCSlice* s, size_t idx) {
-    if (!s || idx >= s->len || !s->ptr) return 0;
-    return ((char*)s->ptr)[idx];
-}
-static inline CCSlice CCSlice_sub(CCSlice* s, size_t start, size_t end) {
-    return s ? cc_slice_sub(*s, start, end) : cc_slice_empty();
-}
-static inline bool CCSlice_starts_with(CCSlice* s, CCSlice prefix) {
-    if (!s) return false;
-    return s->len >= prefix.len && memcmp(s->ptr, prefix.ptr, prefix.len) == 0;
-}
-static inline bool CCSlice_ends_with(CCSlice* s, CCSlice suffix) {
-    if (!s) return false;
-    return s->len >= suffix.len &&
-        memcmp((uint8_t *)s->ptr + (s->len - suffix.len), suffix.ptr, suffix.len) == 0;
-}
-static inline bool CCSlice_eq(CCSlice* s, CCSlice other) {
-    if (!s) return false;
-    return cc__slice_eq(*s, other);
-}
-static inline bool CCSlice_eq_cstr(CCSlice* s, const char* cstr) {
-    if (!s) return false;
-    size_t len = cstr ? strlen(cstr) : 0;
-    if (!cstr) return false;
-    if (s->len != len) return false;
-    if (s->len == 0) return true;
-    if (!s->ptr) return false;
-    return memcmp(s->ptr, cstr, len) == 0;
 }
 
 #endif // CC_STD_STRING_H

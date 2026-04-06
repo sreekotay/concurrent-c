@@ -1122,6 +1122,8 @@ static char* cc__lower_with_deadline_syntax(const char* src, size_t n) {
     return out;
 }
 
+static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start);
+
 static size_t cc__scan_back_to_delim(const char* s, size_t from) {
     size_t i = from;
     int paren_depth = 0;
@@ -2224,10 +2226,11 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                 }
 
                 size_t ty_start = cc__scan_back_to_delim(src, i);
+                size_t type_start = cc__skip_leading_decl_specs(src, ty_start);
                 char elem_ty[256];
-                size_t elem_len = i - ty_start;
+                size_t elem_len = i - type_start;
                 if (elem_len >= sizeof(elem_ty)) elem_len = sizeof(elem_ty) - 1;
-                memcpy(elem_ty, src + ty_start, elem_len);
+                memcpy(elem_ty, src + type_start, elem_len);
                 elem_ty[elem_len] = 0;
                 while (elem_len > 0 && (elem_ty[elem_len - 1] == ' ' || elem_ty[elem_len - 1] == '\t')) {
                     elem_ty[--elem_len] = 0;
@@ -2242,6 +2245,7 @@ static char* cc__rewrite_chan_handle_types(const char* src, size_t n, const char
                     /* overlapping/odd context; just ignore and continue */
                 } else {
                     cc_sb_append(&out, &out_len, &out_cap, src + last_emit, ty_start - last_emit);
+                    cc_sb_append(&out, &out_len, &out_cap, src + ty_start, type_start - ty_start);
                     /* Emit CCChanTx for send, CCChanRx for recv (ordered is a flag, not a type) */
                     cc_sb_append_cstr(&out, &out_len, &out_cap, saw_gt ? "CCChanTx" : "CCChanRx");
                     last_emit = k + 1; /* skip past ']' */
@@ -3388,7 +3392,10 @@ static size_t cc__skip_leading_decl_specs(const char* s, size_t ty_start) {
     while (s[p] == ' ' || s[p] == '\t') p++;
     for (;;) {
         int matched = 0;
-        if (strncmp(s + p, "static", 6) == 0 && !cc_is_ident_char_local(s[p + 6])) {
+        if (strncmp(s + p, "typedef", 7) == 0 && !cc_is_ident_char_local(s[p + 7])) {
+            p += 7;
+            matched = 1;
+        } else if (strncmp(s + p, "static", 6) == 0 && !cc_is_ident_char_local(s[p + 6])) {
             p += 6;
             matched = 1;
         } else if (strncmp(s + p, "inline", 6) == 0 && !cc_is_ident_char_local(s[p + 6])) {
@@ -3880,11 +3887,43 @@ static int cc__find_matching_angle(const char* b, size_t bl, size_t langle, size
     return 0;
 }
 
+/* Find matching ']' for '[' at position lbracket. Returns 1 on success.
+   Handles nesting of [], (), {}, <>, strings, and comments. */
+static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, size_t* out_rbracket) {
+    if (!b || lbracket >= bl || b[lbracket] != '[') return 0;
+    int brk = 1, par = 0, ang = 0, br = 0;
+    int ins = 0; char q = 0;
+    int in_lc = 0, in_bc = 0;
+    for (size_t p = lbracket + 1; p < bl; p++) {
+        char ch = b[p];
+        char ch2 = (p + 1 < bl) ? b[p + 1] : 0;
+        if (in_lc) { if (ch == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (ch == '*' && ch2 == '/') { in_bc = 0; p++; } continue; }
+        if (ins) { if (ch == '\\' && p + 1 < bl) { p++; continue; } if (ch == q) ins = 0; continue; }
+        if (ch == '/' && ch2 == '/') { in_lc = 1; p++; continue; }
+        if (ch == '/' && ch2 == '*') { in_bc = 1; p++; continue; }
+        if (ch == '"' || ch == '\'') { ins = 1; q = ch; continue; }
+        if (ch == '(') par++;
+        else if (ch == ')') { if (par) par--; }
+        else if (ch == '[') brk++;
+        else if (ch == ']') {
+            brk--;
+            if (brk == 0 && par == 0) { if (out_rbracket) *out_rbracket = p; return 1; }
+        }
+        else if (ch == '{') br++;
+        else if (ch == '}') { if (br) br--; }
+        else if (ch == '<') ang++;
+        else if (ch == '>') { if (ang) ang--; }
+    }
+    return 0;
+}
+
 /* Rewrite generic container syntax:
-   - Vec<T> -> __CC_VEC(T_mangled)  (parser-safe macro)
-   - Map<K, V> -> __CC_MAP(K_mangled, V_mangled)*  (parser-safe macro)
-   - vec_new<T>(...) -> __CC_VEC_INIT(T_mangled, ...)
-   - map_new<K, V>(...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
+   - Vec<T> / Vec::[T] -> __CC_VEC(T_mangled)  (parser-safe macro)
+   - Map<K, V> / Map::[K, V] -> __CC_MAP(K_mangled, V_mangled)*  (parser-safe macro)
+   - vec_new<T>(...) / vec_new::[T](...) -> __CC_VEC_INIT(T_mangled, ...)
+   - map_new<K, V>(...) / map_new::[K, V](...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
+   The ::[T] syntax is preferred; <T> is accepted for backward compatibility.
    Also tracks variable declarations for UFCS resolution. */
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
@@ -3902,52 +3941,57 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
         
-        /* Look for Vec< or Map< or vec_new< or map_new< */
+        /* Look for Vec<, Vec::[, Map<, Map::[, vec_new<, vec_new::[, map_new<, map_new::[ */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
+        int use_bracket = 0;
         size_t kw_start = i;
         size_t kw_len = 0;
         
-        if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
-            /* Check word boundary before */
-            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
-                is_vec_type = 1;
-                kw_len = 3;
-            }
-        } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
-            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
-                is_map_type = 1;
-                kw_len = 3;
-            }
-        } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
-            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
-                is_vec_new = 1;
-                kw_len = 7;
-            }
-        } else if (i + 8 <= n && memcmp(src + i, "map_new<", 8) == 0) {
-            if (i == 0 || !cc_is_ident_char(src[i - 1])) {
-                is_map_new = 1;
-                kw_len = 7;
+        if (i == 0 || !cc_is_ident_char(src[i - 1])) {
+            if (i + 6 <= n && memcmp(src + i, "Vec::[", 6) == 0) {
+                is_vec_type = 1; kw_len = 3; use_bracket = 1;
+            } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
+                is_vec_type = 1; kw_len = 3;
+            } else if (i + 6 <= n && memcmp(src + i, "Map::[", 6) == 0) {
+                is_map_type = 1; kw_len = 3; use_bracket = 1;
+            } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
+                is_map_type = 1; kw_len = 3;
+            } else if (i + 10 <= n && memcmp(src + i, "vec_new::[", 10) == 0) {
+                is_vec_new = 1; kw_len = 7; use_bracket = 1;
+            } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
+                is_vec_new = 1; kw_len = 7;
+            } else if (i + 10 <= n && memcmp(src + i, "map_new::[", 10) == 0) {
+                is_map_new = 1; kw_len = 7; use_bracket = 1;
+            } else if (i + 8 <= n && memcmp(src + i, "map_new<", 8) == 0) {
+                is_map_new = 1; kw_len = 7;
             }
         }
         
         if (is_vec_type || is_map_type || is_vec_new || is_map_new) {
-            size_t angle_start = kw_start + kw_len;
-            size_t angle_end = 0;
+            size_t delim_start = use_bracket ? kw_start + kw_len + 2 : kw_start + kw_len;
+            size_t delim_end = 0;
+            int found = 0;
             
-            if (!cc__find_matching_angle(src, n, angle_start, &angle_end)) {
-                /* ERROR: unclosed generic type */
-                const char* what = is_vec_type ? "Vec<" : is_map_type ? "Map<" : is_vec_new ? "vec_new<" : "map_new<";
+            if (use_bracket) {
+                found = cc__find_matching_bracket(src, n, delim_start, &delim_end);
+            } else {
+                found = cc__find_matching_angle(src, n, delim_start, &delim_end);
+            }
+            
+            if (!found) {
+                const char* what = is_vec_type ? "Vec" : is_map_type ? "Map" : is_vec_new ? "vec_new" : "map_new";
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                        scanner.line, scanner.col, "type", "unclosed '%s' - missing '>'", what);
-                fprintf(stderr, "  hint: generic syntax is '%sType>' e.g., 'Vec<int>'\n", what);
+                        scanner.line, scanner.col, "type", "unclosed '%s' generic - missing '%c'",
+                        what, use_bracket ? ']' : '>');
+                fprintf(stderr, "  hint: generic syntax is '%s::[Type]' e.g., 'Vec::[int]'\n", what);
                 free(out);
                 return NULL;
             }
             
-            /* Extract type parameters */
-            const char* params = src + angle_start + 1;
-            size_t params_len = angle_end - angle_start - 1;
+            /* Extract type parameters (between the opening and closing delimiters) */
+            const char* params = src + delim_start + 1;
+            size_t params_len = delim_end - delim_start - 1;
             
             char mangled[256] = {0};
             char elem_type[128] = {0};
@@ -3982,8 +4026,8 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 int depth = 0;
                 for (size_t k = 0; k < params_len; k++) {
                     char pc = params[k];
-                    if (pc == '<') depth++;
-                    else if (pc == '>') depth--;
+                    if (pc == '<' || pc == '[') depth++;
+                    else if (pc == '>' || pc == ']') depth--;
                     else if (pc == ',' && depth == 0) {
                         comma = params + k;
                         break;
@@ -4055,11 +4099,11 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ")*");
                 }
-                last_emit = angle_end + 1;
+                last_emit = delim_end + 1;
                 
                 /* Try to extract variable name for type registry */
                 if (reg) {
-                    size_t j = cc_skip_ws_and_comments(src, n, angle_end + 1);
+                    size_t j = cc_skip_ws_and_comments(src, n, delim_end + 1);
                     if (j < n && (cc_is_ident_start(src[j]) || src[j] == '*')) {
                         /* Skip any * for pointer types */
                         while (j < n && src[j] == '*') j++;
@@ -4078,9 +4122,9 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     }
                 }
             } else {
-                /* vec_new<T>(...) or map_new<K,V>(...) -> __CC_VEC_INIT/__CC_MAP_INIT macro */
+                /* vec_new::[T](...) or map_new::[K,V](...) -> __CC_VEC_INIT/__CC_MAP_INIT macro */
                 /* Find the opening paren and extract args */
-                size_t j = cc_skip_ws_and_comments(src, n, angle_end + 1);
+                size_t j = cc_skip_ws_and_comments(src, n, delim_end + 1);
                 if (j < n && src[j] == '(') {
                     /* Find the closing paren */
                     size_t paren_end = 0;
@@ -4120,10 +4164,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     cc_sb_append_cstr(&out, &out_len, &out_cap, val_type);
                     cc_sb_append_cstr(&out, &out_len, &out_cap, ", NULL)");
                 }
-                last_emit = angle_end + 1;
+                last_emit = delim_end + 1;
             }
             
-            i = angle_end + 1;
+            i = delim_end + 1;
             continue;
         }
         

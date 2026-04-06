@@ -493,14 +493,6 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     return cc_slice_from_parts(ptr, count, id, count);
 }
 
-#ifndef CC_CCSLICEARRAY_DEFINED
-#define CC_CCSLICEARRAY_DEFINED 1
-typedef struct {
-    CCSlice *items;
-    size_t len;
-} CCSliceArray;
-#endif
-
 #include <ccc/cc_type.cch>
 
 static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
