@@ -177,8 +177,12 @@ static kh_inline khint_t __kh_h2b(khint_t hash, khint_t salt, khint_t bits) { re
 		memset(new_used, 0, __kh_fsize(new_n_buckets) * sizeof(khint32_t)); \
 		n_buckets = h->keys? (khint_t)1U<<h->bits : 0U; \
 		if (n_buckets < new_n_buckets) { /* expand */ \
-			khkey_t *new_keys = Krealloc(h->km, khkey_t, h->keys, new_n_buckets); \
+			khkey_t *new_keys = Kmalloc(h->km, khkey_t, new_n_buckets); \
 			if (!new_keys) { Kfree(h->km, new_used); return -1; } \
+			if (h->keys) { \
+				memcpy(new_keys, h->keys, n_buckets * sizeof(khkey_t)); \
+				Kfree(h->km, h->keys); \
+			} \
 			h->keys = new_keys; \
 		} \
 		new_mask = new_n_buckets - 1; \
@@ -202,8 +206,12 @@ static kh_inline khint_t __kh_h2b(khint_t hash, khint_t salt, khint_t bits) { re
 			} \
 		} \
 		if (n_buckets > new_n_buckets) { /* shrink the hash table */ \
-			khkey_t *new_keys = Krealloc(h->km, khkey_t, h->keys, new_n_buckets); \
+			khkey_t *new_keys = Kmalloc(h->km, khkey_t, new_n_buckets); \
 			if (!new_keys) { Kfree(h->km, new_used); return -1; } \
+			if (h->keys) { \
+				memcpy(new_keys, h->keys, new_n_buckets * sizeof(khkey_t)); \
+				Kfree(h->km, h->keys); \
+			} \
 			h->keys = new_keys; \
 		} \
 		Kfree(h->km, h->used); /* free the working space */ \
