@@ -1,8 +1,8 @@
 /*
  * Arena-backed process command builder for Concurrent-C stdlib.
  */
-#ifndef CC_STD_COMMAND_H
-#define CC_STD_COMMAND_H
+#ifndef CC_STD_EXEC_H
+#define CC_STD_EXEC_H
 
 #include <errno.h>
 #include <string.h>
@@ -26,6 +26,21 @@ typedef struct CCCommand {
     bool pipe_stderr;
     bool merge_stderr;
 } CCCommand;
+
+#ifndef CCResult_CCProcess_CCIoError_DEFINED
+#define CCResult_CCProcess_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCProcess_CCIoError, CCProcess, CCIoError)
+#endif
+
+#ifndef CCResult_CCProcessOutput_CCIoError_DEFINED
+#define CCResult_CCProcessOutput_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCProcessOutput_CCIoError, CCProcessOutput, CCIoError)
+#endif
+
+#ifndef CCResult_int_CCIoError_DEFINED
+#define CCResult_int_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_int_CCIoError, int, CCIoError)
+#endif
 
 CCCommand cc_command_new(CCArena *arena, const char *program);
 
@@ -74,9 +89,9 @@ CCProcessOutput !> (CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena)
 CCProcessOutput !> (CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
 int !> (CCIoError) cc_command_status(CCCommand *cmd);
 
-static inline char[:] cc_command_lower_c(char[:] recv_type, 
-                                         char[:] method, 
-                                         char[:] mode, 
+static inline char[:] cc_command_lower_c(char[:] recv_type,
+                                         char[:] method,
+                                         char[:] mode,
                                          CCSliceArray argv,
                                          CCSliceArray arg_types,
                                          CCArena *arena) {
@@ -94,4 +109,4 @@ static inline char[:] cc_command_lower_c(char[:] recv_type,
     });
 }
 
-#endif /* CC_STD_COMMAND_H */
+#endif /* CC_STD_EXEC_H */
