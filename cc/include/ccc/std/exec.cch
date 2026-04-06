@@ -17,7 +17,7 @@
 typedef struct CCCommand {
     CCArena *arena;
     CCString storage;
-    Vec_size_t offsets;
+    CCVec_size_t offsets;
     const char** env;
     const char* cwd_path;
     CCSlice stdin_data;

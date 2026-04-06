@@ -390,20 +390,25 @@ static void cc__normalize_registry_container_param_name(CCTypeRegistry* reg,
     }
 
     if (strcmp(work, "CCString") == 0) {
-        snprintf(work, sizeof(work), "Vec_char");
+        snprintf(work, sizeof(work), "CCVec_char");
     }
 
     if ((strncmp(work, "Vec::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
         (strncmp(work, "Vec<", 4) == 0 && work[strlen(work) - 1] == '>') ||
+        (strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
+        (strncmp(work, "CCVec<", 6) == 0 && work[strlen(work) - 1] == '>') ||
         (strncmp(work, "__CC_VEC(", 9) == 0 && work[strlen(work) - 1] == ')')) {
-        size_t prefix = (strncmp(work, "__CC_VEC(", 9) == 0) ? 9 : ((work[3] == ':') ? 6 : 4);
+        size_t prefix = (strncmp(work, "__CC_VEC(", 9) == 0) ? 9 :
+                        ((strncmp(work, "CCVec::[", 8) == 0) ? 8 :
+                         ((strncmp(work, "CCVec<", 6) == 0) ? 6 :
+                          ((work[3] == ':') ? 6 : 4)));
         size_t inner_len = strlen(work) - prefix - 1;
         if (inner_len >= sizeof(inner)) inner_len = sizeof(inner) - 1;
         memcpy(inner, work + prefix, inner_len);
         inner[inner_len] = '\0';
         cc__normalize_registry_container_param_name(reg, inner, inner, sizeof(inner));
         cc_result_spec_mangle_type(inner, strlen(inner), mangled_inner, sizeof(mangled_inner));
-        if (mangled_inner[0]) snprintf(work, sizeof(work), "Vec_%s", mangled_inner);
+        if (mangled_inner[0]) snprintf(work, sizeof(work), "CCVec_%s", mangled_inner);
     } else if ((strncmp(work, "Map::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
                (strncmp(work, "Map<", 4) == 0 && work[strlen(work) - 1] == '>') ||
                (strncmp(work, "__CC_MAP(", 9) == 0 && work[strlen(work) - 1] == ')')) {
@@ -485,15 +490,20 @@ static void cc__normalize_registry_type_name(CCTypeRegistry* reg,
 
     if ((strncmp(work, "Vec::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
         (strncmp(work, "Vec<", 4) == 0 && work[strlen(work) - 1] == '>') ||
+        (strncmp(work, "CCVec::[", 8) == 0 && work[strlen(work) - 1] == ']') ||
+        (strncmp(work, "CCVec<", 6) == 0 && work[strlen(work) - 1] == '>') ||
         (strncmp(work, "__CC_VEC(", 9) == 0 && work[strlen(work) - 1] == ')')) {
-        size_t prefix = (strncmp(work, "__CC_VEC(", 9) == 0) ? 9 : ((work[3] == ':') ? 6 : 4);
+        size_t prefix = (strncmp(work, "__CC_VEC(", 9) == 0) ? 9 :
+                        ((strncmp(work, "CCVec::[", 8) == 0) ? 8 :
+                         ((strncmp(work, "CCVec<", 6) == 0) ? 6 :
+                          ((work[3] == ':') ? 6 : 4)));
         size_t inner_len = strlen(work) - prefix - 1;
         if (inner_len >= sizeof(inner)) inner_len = sizeof(inner) - 1;
         memcpy(inner, work + prefix, inner_len);
         inner[inner_len] = '\0';
         cc__normalize_registry_container_param_name(reg, inner, inner, sizeof(inner));
         cc_result_spec_mangle_type(inner, strlen(inner), mangled_inner, sizeof(mangled_inner));
-        if (mangled_inner[0]) snprintf(work, sizeof(work), "Vec_%s", mangled_inner);
+        if (mangled_inner[0]) snprintf(work, sizeof(work), "CCVec_%s", mangled_inner);
     } else if ((strncmp(work, "Map::[", 6) == 0 && work[strlen(work) - 1] == ']') ||
                (strncmp(work, "Map<", 4) == 0 && work[strlen(work) - 1] == '>') ||
                (strncmp(work, "__CC_MAP(", 9) == 0 && work[strlen(work) - 1] == ')')) {

@@ -1,13 +1,13 @@
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
-typedef Vec<int> IntVec;
+typedef CCVec::[int] IntVec;
 
 int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    Vec<int> v = vec_new<int>(&arena);
+    CCVec::[int] v = cc_vec_new::[int](&arena);
     v.push(10);
     v.push(20);
     v.push(30);

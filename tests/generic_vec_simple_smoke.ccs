@@ -1,4 +1,4 @@
-/* Minimal test for Vec<int> generic syntax - NO UFCS VERSION */
+/* Minimal test for CCVec::[int] generic syntax - NO UFCS VERSION */
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
 
@@ -6,21 +6,21 @@ int main(void) {
     CCArena arena = cc_arena_heap(kilobytes(4));
     if (!arena.base) return 1;
 
-    /* Use Vec<int> generic syntax - triggers codegen declaration */
-    Vec<int> v = vec_new<int>(&arena);
+    /* Use CCVec::[int] generic syntax - triggers codegen declaration */
+    CCVec::[int] v = cc_vec_new::[int](&arena);
     
     /* Use explicit function calls (no UFCS) */
-    Vec_int_push(&v, 10);
-    Vec_int_push(&v, 20);
-    Vec_int_push(&v, 30);
+    CCVec_int_push(&v, 10);
+    CCVec_int_push(&v, 20);
+    CCVec_int_push(&v, 30);
     
-    if (Vec_int_len(&v) != 3) {
+    if (CCVec_int_len(&v) != 3) {
         fprintf(stderr, "FAIL: expected len=3\n");
         return 2;
     }
     
     /* Test optional-returning get with explicit call */
-    int? val = Vec_int_get(&v, 0);
+    int? val = CCVec_int_get(&v, 0);
     if (!val.has) {
         fprintf(stderr, "FAIL: get returned None\n");
         return 3;

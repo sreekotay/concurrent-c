@@ -17,7 +17,7 @@ int main(void) {
     c.items.push(20);
     c.items.push(30);
     
-    if (Vec_int_len(&c.items) != 3) {
+    if (CCVec_int_len(&c.items) != 3) {
         printf("FAIL: expected 3 elements\n");
         return 1;
     }
@@ -36,7 +36,7 @@ int main(void) {
     pc.items = &c.items;
     pc.items->push(40);
     
-    if (Vec_int_len(&c.items) != 4) {
+    if (CCVec_int_len(&c.items) != 4) {
         printf("FAIL: expected 4 elements after ptr push\n");
         return 1;
     }

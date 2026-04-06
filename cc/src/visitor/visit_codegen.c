@@ -330,7 +330,7 @@ static const char* cc__canonicalize_placeholder_family_type_codegen(const char* 
                                                                     char* scratch,
                                                                     size_t scratch_cap) {
     if (!type_name || !scratch || scratch_cap == 0) return type_name;
-    if (strncmp(type_name, "Vec_", 4) == 0 || strncmp(type_name, "Map_", 4) == 0) {
+    if (strncmp(type_name, "CCVec_", 6) == 0 || strncmp(type_name, "Map_", 4) == 0) {
         return type_name;
     }
     if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
@@ -340,7 +340,7 @@ static const char* cc__canonicalize_placeholder_family_type_codegen(const char* 
         if (!close || close <= args) return type_name;
         cc_result_spec_mangle_type(args, (size_t)(close - args), mangled, sizeof(mangled));
         if (!mangled[0]) return type_name;
-        snprintf(scratch, scratch_cap, "Vec_%s", mangled);
+        snprintf(scratch, scratch_cap, "CCVec_%s", mangled);
         return scratch;
     }
     if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
@@ -515,7 +515,7 @@ static char* cc__rewrite_parser_placeholder_ufcs_lowers(const char* src, size_t 
                                         type_name ? type_name : "<null>",
                                         family_name ? family_name : "<null>");
                             }
-                            if (family_name && strncmp(family_name, "Vec_", 4) == 0) {
+                            if (family_name && strncmp(family_name, "CCVec_", 6) == 0) {
                                 cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, i - last_emit);
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, family_name);
                                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, "_");
@@ -960,10 +960,10 @@ static int cc__find_matching_brace_codegen(const char* src, size_t len, size_t l
 
 static const char* cc__canonicalize_string_type_codegen(const char* type_name) {
     if (!type_name) return NULL;
-    if (strcmp(type_name, "Vec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
+    if (strcmp(type_name, "CCVec_char") == 0 || strcmp(type_name, "__CCVecGeneric") == 0) {
         return "CCString";
     }
-    if (strcmp(type_name, "Vec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
+    if (strcmp(type_name, "CCVec_char*") == 0 || strcmp(type_name, "__CCVecGeneric*") == 0) {
         return "CCString*";
     }
     return type_name;
@@ -2968,7 +2968,7 @@ static const char* cc__canonicalize_parser_family_macro_codegen(const char* type
     } else if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
         args = type_name + 9;
         is_map = 1;
-    } else if (strncmp(type_name, "Vec_", 4) == 0 || strncmp(type_name, "Map_", 4) == 0) {
+    } else if (strncmp(type_name, "CCVec_", 6) == 0 || strncmp(type_name, "Map_", 4) == 0) {
         strncpy(scratch, type_name, scratch_cap - 1);
         scratch[scratch_cap - 1] = '\0';
         return scratch;
@@ -2980,7 +2980,7 @@ static const char* cc__canonicalize_parser_family_macro_codegen(const char* type
     if (!is_map) {
         cc_result_spec_mangle_type(args, (size_t)(close - args), mangled_a, sizeof(mangled_a));
         if (!mangled_a[0]) return NULL;
-        snprintf(scratch, scratch_cap, "Vec_%s", mangled_a);
+        snprintf(scratch, scratch_cap, "CCVec_%s", mangled_a);
         return scratch;
     }
     {
@@ -3659,7 +3659,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
     }
 
-    /* Rewrite generic container syntax: Vec<T> -> Vec_T, vec_new<T>() -> Vec_T_init() */
+    /* Rewrite generic container syntax: CCVec<T> -> CCVec_T, cc_vec_new<T>() -> CCVec_T_init() */
     if (src_ufcs && src_ufcs_len) {
         char* rewritten = cc_rewrite_generic_containers(src_ufcs, src_ufcs_len, ctx->input_path);
         if (rewritten) {
@@ -4051,7 +4051,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (!inst || !inst->mangled_name) continue;
-                    if (strcmp(inst->mangled_name, "Vec_char") != 0) {
+                    if (strcmp(inst->mangled_name, "CCVec_char") != 0) {
                         emit_container_decls = 1;
                         break;
                     }
@@ -4074,7 +4074,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 for (size_t i = 0; i < n_vec; i++) {
                     const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                     if (inst && inst->type1 && inst->mangled_name) {
-                        const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                        const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
                         
                         if (strcmp(mangled_elem, "char") == 0) {
                             continue;
@@ -4626,7 +4626,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     continue;
                 }
                 /* Skip typedef, struct, union, enum blocks — but stop if the block
-                   references a container type (__CC_MAP, __CC_VEC, Map_, Vec_) since
+                   references a container type (__CC_MAP, __CC_VEC, Map_, CCVec_) since
                    the container macros must be emitted before that struct. */
                 if ((p + 7 <= line_end && memcmp(src_ufcs + p, "typedef", 7) == 0 && !cc_is_ident_char(src_ufcs[p + 7])) ||
                     (p + 6 <= line_end && memcmp(src_ufcs + p, "struct", 6) == 0 && !cc_is_ident_char(src_ufcs[p + 6])) ||
@@ -4659,9 +4659,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                         if (memcmp(src_ufcs + si, "__CC_MAP", 8) == 0 ||
                             memcmp(src_ufcs + si, "__CC_VEC", 8) == 0) {
                             refs_container = 1;
-                        } else if (si + 4 < block_end &&
-                                   ((memcmp(src_ufcs + si, "Map_", 4) == 0) ||
-                                    (memcmp(src_ufcs + si, "Vec_", 4) == 0))) {
+                        } else if ((si + 4 < block_end && memcmp(src_ufcs + si, "Map_", 4) == 0) ||
+                                   (si + 6 < block_end && memcmp(src_ufcs + si, "CCVec_", 6) == 0)) {
                             refs_container = 1;
                         }
                     }

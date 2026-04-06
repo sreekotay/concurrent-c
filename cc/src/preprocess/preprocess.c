@@ -2550,8 +2550,12 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         }
     }
     if (((size_t)(base_end - start) > 4 && memcmp(start, "Vec<", 4) == 0 && base_end[-1] == '>') ||
-        ((size_t)(base_end - start) > 6 && memcmp(start, "Vec::[", 6) == 0 && base_end[-1] == ']')) {
-        size_t prefix = (start[3] == ':') ? 6 : 4;
+        ((size_t)(base_end - start) > 6 && memcmp(start, "Vec::[", 6) == 0 && base_end[-1] == ']') ||
+        ((size_t)(base_end - start) > 6 && memcmp(start, "CCVec<", 6) == 0 && base_end[-1] == '>') ||
+        ((size_t)(base_end - start) > 8 && memcmp(start, "CCVec::[", 8) == 0 && base_end[-1] == ']')) {
+        size_t prefix = ((size_t)(base_end - start) > 8 && memcmp(start, "CCVec::[", 8) == 0) ? 8 :
+                        (((size_t)(base_end - start) > 6 && memcmp(start, "CCVec<", 6) == 0) ? 6 :
+                         ((start[3] == ':') ? 6 : 4));
         size_t inner_len = (size_t)(base_end - (start + prefix) - 1);
         snprintf(out, out_sz, "__CC_VEC(%.*s)%.*s",
                  (int)inner_len, start + prefix, ptr_count, "********");
@@ -2563,7 +2567,7 @@ static void cc__normalize_ufcs_type_name(char* out, size_t out_sz, const char* t
         size_t inner_len = (size_t)(base_end - inner_s - 1);
         cc__mangle_type_name(inner_s, inner_len, mangled_inner, sizeof(mangled_inner));
         if (mangled_inner[0]) {
-            snprintf(out, out_sz, "Vec_%s%.*s", mangled_inner, ptr_count, "********");
+            snprintf(out, out_sz, "CCVec_%s%.*s", mangled_inner, ptr_count, "********");
             return;
         }
     }
@@ -2672,7 +2676,7 @@ static int cc__type_is_parser_map(const char* type_name) {
 
 static int cc__type_is_known_ufcs_family_base(const char* type_name) {
     if (!type_name || !type_name[0]) return 0;
-    return strncmp(type_name, "Vec_", 4) == 0 ||
+    return strncmp(type_name, "CCVec_", 6) == 0 ||
            strncmp(type_name, "Map_", 4) == 0 ||
            strcmp(type_name, "CCString") == 0 ||
            strcmp(type_name, "CCArena") == 0 ||
@@ -3538,7 +3542,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
         chan_rx = (strncmp(recv_type_base, "CCChanRx_", 9) == 0 ||
                    strcmp(recv_type_base, "CCChanRx") == 0 ||
                    strcmp(recv_type_base, "CCChanRx*") == 0);
-        if (!(strncmp(recv_type_base, "Vec_", 4) == 0 ||
+        if (!(strncmp(recv_type_base, "CCVec_", 6) == 0 ||
               strncmp(recv_type_base, "Map_", 4) == 0 ||
               parser_vec || parser_map || command_like || file_like || arena_like || string_like || nursery_like ||
               chan_tx || chan_rx ||
@@ -3604,7 +3608,7 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                 if (parser_vec && lp && rp && rp > lp + 1) {
                     char mangled_elem[128];
                     cc__mangle_type_name(lp + 1, (size_t)(rp - (lp + 1)), mangled_elem, sizeof(mangled_elem));
-                    snprintf(concrete_type, sizeof(concrete_type), "Vec_%s", mangled_elem);
+                    snprintf(concrete_type, sizeof(concrete_type), "CCVec_%s", mangled_elem);
                 } else if (parser_map && lp && rp && rp > lp + 1) {
                     const char* comma = NULL;
                     int par = 0, br = 0, brc = 0;
@@ -4249,8 +4253,9 @@ static char* cc__rewrite_result_constructors(const char* src, size_t n) {
 }
 
 /* ============================================================================
- * Generic container syntax lowering: Vec<T> -> Vec_T, Map<K,V> -> Map_K_V
- * Also: vec_new<T>(...) -> Vec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
+ * Generic container syntax lowering: CCVec<T> -> CCVec_T, Map<K,V> -> Map_K_V
+ * Also: cc_vec_new<T>(...) -> CCVec_T_init(...), map_new<K,V>(...) -> Map_K_V_init(...)
+ * Legacy Vec/vec_new spellings remain accepted during migration.
  * ============================================================================ */
 
 /* Normalize T[:] -> CCSlice, T[:!] -> CCSliceUnique in a type string */
@@ -4278,7 +4283,7 @@ static void cc__trim_type_string(char* type) {
 static int cc__is_stdlib_container_alias(const char* type_name, char* out, size_t out_sz) {
     if (!type_name || !out || out_sz == 0) return 0;
     if (strcmp(type_name, "CCString") == 0) {
-        snprintf(out, out_sz, "Vec_char");
+        snprintf(out, out_sz, "CCVec_char");
         return 1;
     }
     return 0;
@@ -4305,15 +4310,20 @@ static void cc__canonicalize_container_param_type(char* type, size_t type_sz) {
 
     if ((strncmp(type, "Vec::[", 6) == 0 && type[strlen(type) - 1] == ']') ||
         (strncmp(type, "Vec<", 4) == 0 && type[strlen(type) - 1] == '>') ||
+        (strncmp(type, "CCVec::[", 8) == 0 && type[strlen(type) - 1] == ']') ||
+        (strncmp(type, "CCVec<", 6) == 0 && type[strlen(type) - 1] == '>') ||
         (strncmp(type, "__CC_VEC(", 9) == 0 && type[strlen(type) - 1] == ')')) {
-        size_t prefix = (strncmp(type, "__CC_VEC(", 9) == 0) ? 9 : ((type[3] == ':') ? 6 : 4);
+        size_t prefix = (strncmp(type, "__CC_VEC(", 9) == 0) ? 9 :
+                        ((strncmp(type, "CCVec::[", 8) == 0) ? 8 :
+                         ((strncmp(type, "CCVec<", 6) == 0) ? 6 :
+                          ((type[3] == ':') ? 6 : 4)));
         size_t inner_len = strlen(type) - prefix - 1;
         if (inner_len >= sizeof(inner)) inner_len = sizeof(inner) - 1;
         memcpy(inner, type + prefix, inner_len);
         inner[inner_len] = '\0';
         cc__canonicalize_container_param_type(inner, sizeof(inner));
         cc__mangle_container_type_param(inner, strlen(inner), mangled_inner, sizeof(mangled_inner));
-        snprintf(type, type_sz, "Vec_%s", mangled_inner);
+        snprintf(type, type_sz, "CCVec_%s", mangled_inner);
         return;
     }
 
@@ -4468,11 +4478,12 @@ static int cc__find_matching_bracket(const char* b, size_t bl, size_t lbracket, 
 }
 
 /* Rewrite generic container syntax:
-   - Vec<T> / Vec::[T] -> __CC_VEC(T_mangled)  (parser-safe macro)
+   - CCVec<T> / CCVec::[T] -> __CC_VEC(T_mangled)  (parser-safe macro)
    - Map<K, V> / Map::[K, V] -> __CC_MAP(K_mangled, V_mangled)*  (parser-safe macro)
-   - vec_new<T>(...) / vec_new::[T](...) -> __CC_VEC_INIT(T_mangled, ...)
+   - cc_vec_new<T>(...) / cc_vec_new::[T](...) -> __CC_VEC_INIT(T_mangled, ...)
    - map_new<K, V>(...) / map_new::[K, V](...) -> __CC_MAP_INIT(K_mangled, V_mangled, ...)
-   The ::[T] syntax is preferred; <T> is accepted for backward compatibility.
+   CCVec::[T] is the preferred syntax; legacy Vec::[T] and <T> spellings are
+   accepted for backward compatibility during migration.
    Also tracks variable declarations for UFCS resolution. */
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path) {
     if (!src || n == 0) return NULL;
@@ -4490,14 +4501,19 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
         /* Skip comments and strings using shared helper */
         if (cc_scanner_skip_non_code(&scanner, src, n, &i)) continue;
         
-        /* Look for Vec<, Vec::[, Map<, Map::[, vec_new<, vec_new::[, map_new<, map_new::[ */
+        /* Look for CCVec<, CCVec::[, legacy Vec<, Vec::[, cc_vec_new<, cc_vec_new::[,
+           legacy vec_new<, vec_new::[, and map_new variants. */
         int is_vec_type = 0, is_map_type = 0, is_vec_new = 0, is_map_new = 0;
         int use_bracket = 0;
         size_t kw_start = i;
         size_t kw_len = 0;
         
         if (i == 0 || !cc_is_ident_char(src[i - 1])) {
-            if (i + 6 <= n && memcmp(src + i, "Vec::[", 6) == 0) {
+            if (i + 8 <= n && memcmp(src + i, "CCVec::[", 8) == 0) {
+                is_vec_type = 1; kw_len = 5; use_bracket = 1;
+            } else if (i + 6 <= n && memcmp(src + i, "CCVec<", 6) == 0) {
+                is_vec_type = 1; kw_len = 5;
+            } else if (i + 6 <= n && memcmp(src + i, "Vec::[", 6) == 0) {
                 is_vec_type = 1; kw_len = 3; use_bracket = 1;
             } else if (i + 4 <= n && memcmp(src + i, "Vec<", 4) == 0) {
                 is_vec_type = 1; kw_len = 3;
@@ -4505,6 +4521,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 is_map_type = 1; kw_len = 3; use_bracket = 1;
             } else if (i + 4 <= n && memcmp(src + i, "Map<", 4) == 0) {
                 is_map_type = 1; kw_len = 3;
+            } else if (i + 13 <= n && memcmp(src + i, "cc_vec_new::[", 13) == 0) {
+                is_vec_new = 1; kw_len = 10; use_bracket = 1;
+            } else if (i + 11 <= n && memcmp(src + i, "cc_vec_new<", 11) == 0) {
+                is_vec_new = 1; kw_len = 10;
             } else if (i + 10 <= n && memcmp(src + i, "vec_new::[", 10) == 0) {
                 is_vec_new = 1; kw_len = 7; use_bracket = 1;
             } else if (i + 8 <= n && memcmp(src + i, "vec_new<", 8) == 0) {
@@ -4528,12 +4548,12 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             }
             
             if (!found) {
-                const char* what = is_vec_type ? "Vec" : is_map_type ? "Map" : is_vec_new ? "vec_new" : "map_new";
+                const char* what = is_vec_type ? "CCVec" : is_map_type ? "Map" : is_vec_new ? "cc_vec_new" : "map_new";
                 char rel[1024];
                 cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
                         scanner.line, scanner.col, "type", "unclosed '%s' generic - missing '%c'",
                         what, use_bracket ? ']' : '>');
-                fprintf(stderr, "  hint: generic syntax is '%s::[Type]' e.g., 'Vec::[int]'\n", what);
+                fprintf(stderr, "  hint: generic syntax is '%s::[Type]' e.g., 'CCVec::[int]'\n", what);
                 free(out);
                 return NULL;
             }
@@ -4565,7 +4585,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 cc__normalize_slice_in_type(orig_elem_type, sizeof(orig_elem_type));
                 
                 cc__mangle_container_type_param(orig_elem_type, strlen(orig_elem_type), elem_type, sizeof(elem_type));
-                snprintf(mangled, sizeof(mangled), "Vec_%s", elem_type);
+                snprintf(mangled, sizeof(mangled), "CCVec_%s", elem_type);
                 
                 if (reg) {
                     cc_type_registry_add_vec(reg, orig_elem_type, mangled);
@@ -4638,7 +4658,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
             if (is_vec_type || is_map_type) {
                 /* Emit parser-safe macro call instead of bare type name.
                    In parser mode: __CC_VEC(T) -> __CCVecGeneric
-                   In real mode:   __CC_VEC(T) -> Vec_T */
+                   In real mode:   __CC_VEC(T) -> CCVec_T */
                 if (is_vec_type) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "__CC_VEC(");
                     cc_sb_append_cstr(&out, &out_len, &out_cap, elem_type);
@@ -4674,7 +4694,7 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                     }
                 }
             } else {
-                /* vec_new::[T](...) or map_new::[K,V](...) -> __CC_VEC_INIT/__CC_MAP_INIT macro */
+                /* cc_vec_new::[T](...) or map_new::[K,V](...) -> __CC_VEC_INIT/__CC_MAP_INIT macro */
                 /* Find the opening paren and extract args */
                 size_t j = cc_skip_ws_and_comments(src, n, delim_end + 1);
                 if (j < n && src[j] == '(') {
@@ -6385,10 +6405,10 @@ int cc_preprocess_file(const char* input_path, char* out_path, size_t out_path_s
             for (size_t i = 0; i < n_vec; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                 if (inst && inst->type1 && inst->mangled_name) {
-                    /* Extract mangled element name from Vec_xxx */
-                    const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                    /* Extract mangled element name from CCVec_xxx */
+                    const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
                     
-                    /* Skip Vec_char - it's predeclared in string.cch */
+                    /* Skip CCVec_char - it's predeclared in string.cch */
                     if (strcmp(mangled_elem, "char") == 0) {
                         continue;
                     }
@@ -6560,7 +6580,7 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
             for (size_t i = 0; i < n_vec; i++) {
                 const CCTypeInstantiation* inst = cc_type_registry_get_vec(reg, i);
                 if (inst && inst->type1 && inst->mangled_name) {
-                    const char* mangled_elem = inst->mangled_name + 4; /* Skip "Vec_" */
+                    const char* mangled_elem = inst->mangled_name + 6; /* Skip "CCVec_" */
                     if (strcmp(mangled_elem, "char") == 0) continue;
                     int opt_predeclared = cc__vec_optional_predeclared(mangled_elem);
                     int is_complex = (!opt_predeclared ||
@@ -7212,9 +7232,9 @@ static const char* cc__parse_stubs =
     "#define __CC_VEC_INIT(T, arena) ((__CCVecGeneric){0, 0, 0, 0, 0})\n"
     "#define __CC_MAP_INIT(K, V, arena) ((__CCMapGeneric){0, 0})\n"
     /* Common Vec/Map types */
-    "typedef __CCVecGeneric Vec_int;\n"
-    "typedef __CCVecGeneric Vec_char;\n"
-    "typedef __CCVecGeneric Vec_float;\n"
+    "typedef __CCVecGeneric CCVec_int;\n"
+    "typedef __CCVecGeneric CCVec_char;\n"
+    "typedef __CCVecGeneric CCVec_float;\n"
     "typedef __CCMapGeneric Map_int_int;\n"
     "typedef __CCMapGeneric Map_charptr_int;\n"
     /* Key macros: rewritten T? -> __CC_OPTIONAL(T), T!>(E) -> __CC_RESULT(T,E) */

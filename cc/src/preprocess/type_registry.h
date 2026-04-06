@@ -2,7 +2,7 @@
  * Type Registry for Generic Container UFCS Resolution
  *
  * Tracks variable -> type mappings during preprocessing so that UFCS calls
- * like v.push(x) can be resolved to the correct concrete function (e.g., Vec_int_push).
+ * like v.push(x) can be resolved to the correct concrete function (e.g., CCVec_int_push).
  *
  * Also tracks which generic type instantiations are used so that the compiler
  * can emit the necessary macro declarations (CC_VEC_DECL_ARENA, CC_DECL_OPTIONAL, etc).
@@ -65,7 +65,7 @@ int cc_type_registry_add_channel(CCTypeRegistry* reg, const char* elem_type, con
 /* Iterate over registered types for emitting declarations */
 typedef struct {
     CCContainerKind kind;
-    const char* mangled_name;  /* e.g., "Vec_int" or "Map_int_str" */
+    const char* mangled_name;  /* e.g., "CCVec_int" or "Map_int_str" */
     const char* type1;         /* elem_type for Vec, key_type for Map */
     const char* type2;         /* NULL for Vec, val_type for Map */
 } CCTypeInstantiation;

@@ -19,13 +19,13 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/vec.cch>
 
-/* In parser mode, Vec_char is already typedef'd to __CCVecGeneric in vec.cch.
+/* In parser mode, CCVec_char is already typedef'd to __CCVecGeneric in vec.cch.
    Only emit the real declaration in non-parser (codegen) mode. */
 #ifndef CC_PARSER_MODE
-CC_VEC_DECL_ARENA(char, Vec_char)
+CC_VEC_DECL_ARENA(char, CCVec_char)
 #endif
 
-typedef Vec_char CCString;
+typedef CCVec_char CCString;
 
 // ------------------------- Parse error enums ------------------------------
 typedef enum {
@@ -193,7 +193,7 @@ static inline CCString* cc__string_append_u64_impl(CCString *str, uint64_t v) {
         v = q;
     } while (v != 0);
     out_len = sizeof(buf) - pos;
-    if (Vec_char_reserve(str, str->len + out_len + 1) != 0) return NULL;
+    if (CCVec_char_reserve(str, str->len + out_len + 1) != 0) return NULL;
     dst = (char*)str->data;
     memcpy(dst + str->len, buf + pos, out_len);
     str->len += out_len;
