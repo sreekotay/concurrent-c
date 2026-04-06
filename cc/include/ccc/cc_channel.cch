@@ -27,6 +27,7 @@
 
 typedef struct CCAsyncHandle CCAsyncHandle;
 typedef struct CCArena CCArena;
+typedef union CCSocketSignal CCSocketSignal;
 #include <ccc/std/future.cch>
 
 typedef struct CCChan CCChan;
@@ -241,6 +242,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size);
 // Non-blocking: return EAGAIN if would block.
 int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size);
 int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size);
+void cc_chan_set_recv_signal(CCChan* ch, CCSocketSignal* sig);
 
 // Timed send/recv honoring an absolute deadline.
 int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const struct timespec* abs_deadline);
@@ -285,8 +287,23 @@ typedef struct {
     CCChanAsyncStatus status;
 } CCChanAsync;
 
+typedef enum {
+    CC_CHAN_WAIT_RECV = 0,
+    CC_CHAN_WAIT_SOCKET = 1,
+    CC_CHAN_WAIT_CLOSED = 2,
+} CCChanWaitOrSocketKind;
+
+#ifndef CCResult_CCChanWaitOrSocketKind_CCIoError_DEFINED
+#define CCResult_CCChanWaitOrSocketKind_CCIoError_DEFINED 1
+CC_DECL_RESULT_SPEC(CCResult_CCChanWaitOrSocketKind_CCIoError, CCChanWaitOrSocketKind, CCIoError)
+#endif
+
 int cc_chan_send_async(CCExec* ex, CCChan* ch, const void* value, size_t value_size, CCChanAsync* out, const CCDeadline* deadline);
 int cc_chan_recv_async(CCExec* ex, CCChan* ch, void* out_value, size_t value_size, CCChanAsync* out, const CCDeadline* deadline);
+CCResult_CCChanWaitOrSocketKind_CCIoError cc_chan_wait_recv_or_socket(CCChan* ch,
+                                                                      CCSocketSignal* sig,
+                                                                      void* out_value,
+                                                                      size_t value_size);
 
 // Poll-based channel tasks returning CCTaskIntptr (cooperative async).
 // Result is errno (0=success). Caller must ensure value/out_value outlives the task.
@@ -337,6 +354,9 @@ static inline int cc_channel_raw_try_send(CCChan* ch, const void* value, size_t 
 static inline int cc_channel_raw_try_recv(CCChan* ch, void* out_value, size_t value_size) {
     return cc_chan_try_recv(ch, out_value, value_size);
 }
+static inline void cc_channel_raw_set_recv_signal(CCChan* ch, CCSocketSignal* sig) {
+    cc_chan_set_recv_signal(ch, sig);
+}
 static inline int cc_channel_raw_send_take(CCChan* ch, void* ptr) { return cc_chan_send_take(ch, ptr); }
 static inline int cc_channel_raw_send_take_slice(CCChan* ch, const CCSliceUnique* slice) {
     return cc_chan_send_take_slice(ch, slice);
@@ -347,6 +367,10 @@ static inline CCTaskIntptr cc_channel_raw_send_task(CCChan* ch, const void* valu
 static inline CCTaskIntptr cc_channel_raw_recv_task(CCChan* ch, void* out_value, size_t value_size) {
     return cc_chan_recv_task(ch, out_value, value_size);
 }
+static inline CCResult_CCChanWaitOrSocketKind_CCIoError
+cc_channel_raw_wait_recv_or_socket(CCChan* ch, CCSocketSignal* sig, void* out_value, size_t value_size) {
+    return cc_chan_wait_recv_or_socket(ch, sig, out_value, value_size);
+}
 
 /* Canonical typed/manual-C wrappers over the erased runtime core.
    The compiler should target the stable `cc_channel_*` family directly. */
@@ -354,6 +378,13 @@ static inline void cc__channel_close_tx(CCChanTx tx) { cc_channel_raw_close(tx.r
 static inline void cc__channel_close_rx(CCChanRx rx) { cc_channel_raw_close(rx.raw); }
 static inline void cc__channel_free_tx(CCChanTx tx) { cc_channel_raw_free(tx.raw); }
 static inline void cc__channel_free_rx(CCChanRx rx) { cc_channel_raw_free(rx.raw); }
+static inline void cc__channel_set_recv_signal_tx(CCChanTx tx, CCSocketSignal* sig) {
+    cc_channel_raw_set_recv_signal(tx.raw, sig);
+}
+static inline CCResult_CCChanWaitOrSocketKind_CCIoError
+cc__channel_wait_recv_or_socket_rx(CCChanRx rx, CCSocketSignal* sig, void* out_value, size_t value_size) {
+    return cc_channel_raw_wait_recv_or_socket(rx.raw, sig, out_value, value_size);
+}
 static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, void* ptr) {
     return cc_chan_result_from_errno(cc_channel_raw_send_take(tx.raw, ptr));
 }
@@ -401,6 +432,11 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
 #define cc_channel_try_recv_raw3(ch, out_value, value_size) cc_channel_raw_try_recv((ch), (out_value), (value_size))
 #define cc_channel_try_recv(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_try_recv_raw3, cc_channel_try_recv_typed)(__VA_ARGS__)
 
+#define cc_channel_wait_recv_or_socket(h, sig, out_ptr) _Generic((h), \
+    CCChan*: cc_channel_raw_wait_recv_or_socket, \
+    CCChanRx: cc__channel_wait_recv_or_socket_rx \
+)((h), (sig), (out_ptr), sizeof(*(out_ptr)))
+
 #define cc_channel_close(h) _Generic((h), \
     CCChan*: cc_channel_raw_close, \
     CCChanTx: cc__channel_close_tx, \
@@ -412,6 +448,11 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
     CCChanTx: cc__channel_free_tx, \
     CCChanRx: cc__channel_free_rx \
 )((h))
+
+#define cc_channel_set_recv_signal(h, sig) _Generic((h), \
+    CCChan*: cc_channel_raw_set_recv_signal, \
+    CCChanTx: cc__channel_set_recv_signal_tx \
+)((h), (sig))
 
 #define cc_channel_send_take(h, value) _Generic((h), \
     CCChan*: cc_channel_raw_send_take, \
@@ -456,6 +497,7 @@ static inline CCSlice cc_channel_tx_lower_c(CCSlice recv_type, CCSlice method, C
         return cc_ufcs_emit_value_cstr(arena, "cc_channel_send");
     }
     if (cc__channel_lower_c_eq(method, "try_send")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_send");
+    if (cc__channel_lower_c_eq(method, "set_recv_signal")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_set_recv_signal");
     if (cc__channel_lower_c_eq(method, "send_take")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_take");
     if (cc__channel_lower_c_eq(method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
     if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
@@ -492,6 +534,9 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
     }                                                                                   \
     static inline CCResult_bool_CCIoError CCChanRx_##Mangled##_try_recv(CCChanRx_##Mangled rx, T* out_value) { \
         return cc_chan_result_from_errno(cc_channel_raw_try_recv(rx.raw, out_value, sizeof(T))); \
+    }                                                                                   \
+    static inline void CCChanTx_##Mangled##_set_recv_signal(CCChanTx_##Mangled tx, CCSocketSignal* sig) { \
+        cc_channel_raw_set_recv_signal(tx.raw, sig);                                     \
     }                                                                                   \
     static inline void CCChanTx_##Mangled##_close(CCChanTx_##Mangled tx) { cc_channel_raw_close(tx.raw); } \
     static inline void CCChanRx_##Mangled##_close(CCChanRx_##Mangled rx) { cc_channel_raw_close(rx.raw); } \
