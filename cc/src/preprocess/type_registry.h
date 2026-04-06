@@ -32,6 +32,8 @@ void cc_type_registry_clear(CCTypeRegistry* reg);
 /* Variable type tracking */
 int cc_type_registry_add_var(CCTypeRegistry* reg, const char* var_name, const char* type_name);
 const char* cc_type_registry_lookup_var(CCTypeRegistry* reg, const char* var_name);
+int cc_type_registry_add_alias(CCTypeRegistry* reg, const char* alias_name, const char* type_name);
+const char* cc_type_registry_lookup_alias(CCTypeRegistry* reg, const char* alias_name);
 int cc_type_registry_add_field(CCTypeRegistry* reg,
                                const char* struct_name,
                                const char* field_name,
@@ -49,6 +51,10 @@ const char* cc_type_registry_resolve_receiver_expr_at(CCTypeRegistry* reg,
                                                       int* out_recv_is_ptr);
 const char* cc_type_registry_resolve_expr_type(CCTypeRegistry* reg, const char* expr);
 const char* cc_type_registry_lookup_channel_elem_type(CCTypeRegistry* reg, const char* handle_type_name);
+const char* cc_type_registry_canonicalize_type_name(CCTypeRegistry* reg,
+                                                    const char* type_name,
+                                                    char* out,
+                                                    size_t out_sz);
 
 /* Generic type instantiation tracking (for emitting macro decls) */
 int cc_type_registry_add_vec(CCTypeRegistry* reg, const char* elem_type, const char* mangled_name);

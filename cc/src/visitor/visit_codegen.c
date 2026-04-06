@@ -73,6 +73,18 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
                                                             const char* var_name,
                                                             char* out_type,
                                                             size_t out_type_sz);
+static int cc__parse_decl_name_and_type_fallback_codegen(const char* stmt_start,
+                                                         const char* stmt_end,
+                                                         char* decl_name,
+                                                         size_t decl_name_sz,
+                                                         char* decl_type,
+                                                         size_t decl_type_sz);
+static int cc__parse_typedef_alias_stmt_codegen(const char* stmt_start,
+                                                const char* stmt_end,
+                                                char* alias_name,
+                                                size_t alias_name_sz,
+                                                char* alias_type,
+                                                size_t alias_type_sz);
 static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
                                                            size_t limit,
                                                            const char* var_name,
@@ -1947,12 +1959,113 @@ static void cc__collect_registered_ufcs_var_types(CCSymbolTable* symbols, const 
 
 /* cc__is_non_decl_stmt_type_codegen — now cc_is_non_decl_stmt_type in util/text.h */
 
+static int cc__parse_decl_name_and_type_fallback_codegen(const char* stmt_start,
+                                                         const char* stmt_end,
+                                                         char* decl_name,
+                                                         size_t decl_name_sz,
+                                                         char* decl_type,
+                                                         size_t decl_type_sz) {
+    const char* s = stmt_start;
+    const char* e = stmt_end;
+    const char* scan_end;
+    const char* name_end;
+    const char* name_start;
+    const char* type_end;
+    int par = 0, br = 0, brc = 0, ang = 0;
+    if (!stmt_start || !stmt_end || stmt_end <= stmt_start) return 0;
+    if (!decl_name || decl_name_sz == 0 || !decl_type || decl_type_sz == 0) return 0;
+    decl_name[0] = '\0';
+    decl_type[0] = '\0';
+    while (s < e && isspace((unsigned char)*s)) s++;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    if (e <= s) return 0;
+    scan_end = e;
+    for (const char* p = s; p < e; ++p) {
+        char c = *p;
+        if (c == '(') par++;
+        else if (c == ')' && par > 0) par--;
+        else if (c == '[') br++;
+        else if (c == ']' && br > 0) br--;
+        else if (c == '{') brc++;
+        else if (c == '}' && brc > 0) brc--;
+        else if (c == '<') ang++;
+        else if (c == '>' && ang > 0) ang--;
+        else if (c == '=' && par == 0 && br == 0 && brc == 0 && ang == 0) {
+            scan_end = p;
+            break;
+        }
+    }
+    while (scan_end > s && isspace((unsigned char)scan_end[-1])) scan_end--;
+    name_end = scan_end;
+    while (name_end > s && !cc_is_ident_char(name_end[-1])) name_end--;
+    name_start = name_end;
+    while (name_start > s && cc_is_ident_char(name_start[-1])) name_start--;
+    if (name_start == name_end || !cc_is_ident_start(*name_start)) return 0;
+    type_end = name_start;
+    while (type_end > s && isspace((unsigned char)type_end[-1])) type_end--;
+    if (type_end <= s) return 0;
+    {
+        size_t name_len = (size_t)(name_end - name_start);
+        size_t type_len = (size_t)(type_end - s);
+        if (name_len >= decl_name_sz) name_len = decl_name_sz - 1;
+        if (type_len >= decl_type_sz) type_len = decl_type_sz - 1;
+        memcpy(decl_name, name_start, name_len);
+        decl_name[name_len] = '\0';
+        memcpy(decl_type, s, type_len);
+        decl_type[type_len] = '\0';
+    }
+    return 1;
+}
+
+static int cc__parse_typedef_alias_stmt_codegen(const char* stmt_start,
+                                                const char* stmt_end,
+                                                char* alias_name,
+                                                size_t alias_name_sz,
+                                                char* alias_type,
+                                                size_t alias_type_sz) {
+    const char* s = stmt_start;
+    const char* e = stmt_end;
+    const char* alias_end;
+    const char* alias_start;
+    const char* type_start;
+    const char* type_end;
+    if (!stmt_start || !stmt_end || stmt_end <= stmt_start) return 0;
+    if (!alias_name || alias_name_sz == 0 || !alias_type || alias_type_sz == 0) return 0;
+    alias_name[0] = '\0';
+    alias_type[0] = '\0';
+    while (s < e && isspace((unsigned char)*s)) s++;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    if (e <= s || (size_t)(e - s) < 7 || memcmp(s, "typedef", 7) != 0) return 0;
+    type_start = s + 7;
+    while (type_start < e && isspace((unsigned char)*type_start)) type_start++;
+    alias_end = e;
+    while (alias_end > type_start && isspace((unsigned char)alias_end[-1])) alias_end--;
+    alias_start = alias_end;
+    while (alias_start > type_start && cc_is_ident_char(alias_start[-1])) alias_start--;
+    if (alias_start == alias_end || !cc_is_ident_start(*alias_start)) return 0;
+    type_end = alias_start;
+    while (type_end > type_start && isspace((unsigned char)type_end[-1])) type_end--;
+    if (type_end <= type_start) return 0;
+    {
+        size_t alias_len = (size_t)(alias_end - alias_start);
+        size_t type_len = (size_t)(type_end - type_start);
+        if (alias_len >= alias_name_sz) alias_len = alias_name_sz - 1;
+        if (type_len >= alias_type_sz) type_len = alias_type_sz - 1;
+        memcpy(alias_name, alias_start, alias_len);
+        alias_name[alias_len] = '\0';
+        memcpy(alias_type, type_start, type_len);
+        alias_type[type_len] = '\0';
+    }
+    return 1;
+}
+
 static void cc__trim_type_span_codegen(const char** start, const char** end) {
     while (*start < *end && isspace((unsigned char)**start)) (*start)++;
     while (*end > *start && isspace((unsigned char)(*end)[-1])) (*end)--;
 }
 
 static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_sz, const char* type_name) {
+    CCTypeRegistry* reg = cc_type_registry_get_global();
     const char* bang;
     const char* ok_s;
     const char* ok_e;
@@ -1993,6 +2106,7 @@ static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_s
     if (ok_e <= ok_s || err_e <= err_s) {
         strncpy(out, type_name, out_sz - 1);
         out[out_sz - 1] = '\0';
+        if (reg) cc_type_registry_canonicalize_type_name(reg, out, out, out_sz);
         return;
     }
     cc_result_spec_mangle_type(ok_s, (size_t)(ok_e - ok_s), mangled_ok, sizeof(mangled_ok));
@@ -2000,9 +2114,11 @@ static void cc__normalize_decl_type_for_receiver_codegen(char* out, size_t out_s
     if (!mangled_ok[0] || !mangled_err[0]) {
         strncpy(out, type_name, out_sz - 1);
         out[out_sz - 1] = '\0';
+        if (reg) cc_type_registry_canonicalize_type_name(reg, out, out, out_sz);
         return;
     }
     snprintf(out, out_sz, "CCResult_%s_%s", mangled_ok, mangled_err);
+    if (reg) cc_type_registry_canonicalize_type_name(reg, out, out, out_sz);
 }
 
 static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
@@ -2062,6 +2178,11 @@ static const char* cc__lookup_scoped_local_var_type_codegen(const char* src,
             cc_parse_decl_name_and_type(src + stmt_start, src + i,
                                                  decl_name, sizeof(decl_name),
                                                  decl_type, sizeof(decl_type));
+            if (!decl_name[0] || strcmp(decl_name, var_name) != 0 || !decl_type[0]) {
+                (void)cc__parse_decl_name_and_type_fallback_codegen(src + stmt_start, src + i,
+                                                                    decl_name, sizeof(decl_name),
+                                                                    decl_type, sizeof(decl_type));
+            }
             if (decl_name[0] &&
                 strcmp(decl_name, var_name) == 0 &&
                 !cc_is_non_decl_stmt_type(decl_type) &&
@@ -2173,6 +2294,11 @@ static const char* cc__lookup_enclosing_param_type_codegen(const char* src,
                     cc_parse_decl_name_and_type(src + param_s, src + param_e,
                                                 decl_name, sizeof(decl_name),
                                                 decl_type, sizeof(decl_type));
+                    if (!decl_name[0]) {
+                        (void)cc__parse_decl_name_and_type_fallback_codegen(src + param_s, src + param_e,
+                                                                            decl_name, sizeof(decl_name),
+                                                                            decl_type, sizeof(decl_type));
+                    }
                     if (decl_name[0] && strcmp(decl_name, var_name) == 0 &&
                         decl_type[0] && strcmp(decl_type, "void") != 0 &&
                         !cc_is_non_decl_stmt_type(decl_type)) {
@@ -2254,9 +2380,20 @@ static void cc__record_function_params_before_brace_codegen(CCTypeRegistry* reg,
             cc_parse_decl_name_and_type(src + param_s, src + param_e,
                                         decl_name, sizeof(decl_name),
                                         decl_type, sizeof(decl_type));
+            if (!decl_name[0]) {
+                (void)cc__parse_decl_name_and_type_fallback_codegen(src + param_s, src + param_e,
+                                                                    decl_name, sizeof(decl_name),
+                                                                    decl_type, sizeof(decl_type));
+            }
             if (decl_name[0] && decl_type[0] && strcmp(decl_type, "void") != 0 &&
                 !cc_is_non_decl_stmt_type(decl_type)) {
-                cc_type_registry_add_var(reg, decl_name, decl_type);
+                char canonical_type[256];
+                if (cc_type_registry_canonicalize_type_name(reg, decl_type,
+                                                            canonical_type, sizeof(canonical_type))) {
+                    cc_type_registry_add_var(reg, decl_name, canonical_type);
+                } else {
+                    cc_type_registry_add_var(reg, decl_name, decl_type);
+                }
             }
         }
         cursor = param_e;
@@ -3015,6 +3152,25 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
         }
 
         if (i + 7 < n && memcmp(src + i, "typedef", 7) == 0 && !isalnum((unsigned char)src[i + 7]) && src[i + 7] != '_') {
+            size_t semi = i;
+            while (semi < n && src[semi] != ';') semi++;
+            if (semi < n) {
+                char alias_name[128];
+                char alias_type[256];
+                char canonical_alias_type[256];
+                if (cc__parse_typedef_alias_stmt_codegen(src + i, src + semi,
+                                                         alias_name, sizeof(alias_name),
+                                                         alias_type, sizeof(alias_type)) &&
+                    alias_name[0]) {
+                    if (cc_type_registry_canonicalize_type_name(reg, alias_type,
+                                                                canonical_alias_type,
+                                                                sizeof(canonical_alias_type))) {
+                        cc_type_registry_add_alias(reg, alias_name, canonical_alias_type);
+                    } else {
+                        cc_type_registry_add_alias(reg, alias_name, alias_type);
+                    }
+                }
+            }
             size_t j = cc__skip_ws_codegen(src, n, i + 7);
             if (j + 6 < n && memcmp(src + j, "struct", 6) == 0 && !isalnum((unsigned char)src[j + 6]) && src[j + 6] != '_') {
                 size_t body_l = cc__skip_ws_codegen(src, n, j + 6);
@@ -3042,8 +3198,20 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                                 char field_type[256];
                                 cc_parse_decl_name_and_type(stmt, semi, field_name, sizeof(field_name),
                                                                      field_type, sizeof(field_type));
+                                if (!field_name[0]) {
+                                    (void)cc__parse_decl_name_and_type_fallback_codegen(stmt, semi,
+                                                                                        field_name, sizeof(field_name),
+                                                                                        field_type, sizeof(field_type));
+                                }
                                 if (field_name[0] && field_type[0]) {
-                                    cc_type_registry_add_field(reg, struct_name, field_name, field_type);
+                                    char canonical_field_type[256];
+                                    if (cc_type_registry_canonicalize_type_name(reg, field_type,
+                                                                                canonical_field_type,
+                                                                                sizeof(canonical_field_type))) {
+                                        cc_type_registry_add_field(reg, struct_name, field_name, canonical_field_type);
+                                    } else {
+                                        cc_type_registry_add_field(reg, struct_name, field_name, field_type);
+                                    }
                                 }
                                 stmt = semi + 1;
                             }
@@ -3119,7 +3287,14 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
                     {
                         const char* existing = cc_type_registry_lookup_var(reg, var_name);
                         if (!existing || cc__is_parser_placeholder_type_codegen(existing)) {
-                        cc_type_registry_add_var(reg, var_name, type_name);
+                            char canonical_type_name[256];
+                            if (cc_type_registry_canonicalize_type_name(reg, type_name,
+                                                                        canonical_type_name,
+                                                                        sizeof(canonical_type_name))) {
+                                cc_type_registry_add_var(reg, var_name, canonical_type_name);
+                            } else {
+                                cc_type_registry_add_var(reg, var_name, type_name);
+                            }
                         }
                     }
                 }
@@ -3905,13 +4080,24 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             continue;
                         }
                         
-                        int is_complex = (strchr(inst->type1, '*') != NULL || 
+                        int opt_predeclared = (strcmp(mangled_elem, "int") == 0 ||
+                                               strcmp(mangled_elem, "bool") == 0 ||
+                                               strcmp(mangled_elem, "char") == 0 ||
+                                               strcmp(mangled_elem, "size_t") == 0 ||
+                                               strcmp(mangled_elem, "voidptr") == 0 ||
+                                               strcmp(mangled_elem, "charptr") == 0 ||
+                                               strcmp(mangled_elem, "long") == 0 ||
+                                               strcmp(mangled_elem, "short") == 0 ||
+                                               strcmp(mangled_elem, "float") == 0 ||
+                                               strcmp(mangled_elem, "double") == 0 ||
+                                               strcmp(mangled_elem, "void") == 0 ||
+                                               strcmp(mangled_elem, "CCSlice") == 0 ||
+                                               strcmp(mangled_elem, "CCSliceUnique") == 0);
+                        int is_complex = (!opt_predeclared ||
+                                          strchr(inst->type1, '*') != NULL || 
                                           strncmp(inst->type1, "struct ", 7) == 0 ||
                                           strncmp(inst->type1, "union ", 6) == 0);
                         if (is_complex) {
-                            int opt_predeclared = (strcmp(mangled_elem, "charptr") == 0 ||
-                                                   strcmp(mangled_elem, "intptr") == 0 ||
-                                                   strcmp(mangled_elem, "voidptr") == 0);
                             if (!opt_predeclared) {
                                 char line[512];
                                 snprintf(line, sizeof(line), "CC_DECL_OPTIONAL(CCOptional_%s, %s)\n", mangled_elem, inst->type1);
@@ -4446,6 +4632,8 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     (p + 6 <= line_end && memcmp(src_ufcs + p, "struct", 6) == 0 && !cc_is_ident_char(src_ufcs[p + 6])) ||
                     (p + 5 <= line_end && memcmp(src_ufcs + p, "union", 5) == 0 && !cc_is_ident_char(src_ufcs[p + 5])) ||
                     (p + 4 <= line_end && memcmp(src_ufcs + p, "enum", 4) == 0 && !cc_is_ident_char(src_ufcs[p + 4]))) {
+                    int is_typedef_block =
+                        (p + 7 <= line_end && memcmp(src_ufcs + p, "typedef", 7) == 0 && !cc_is_ident_char(src_ufcs[p + 7]));
                     size_t block_start = p;
                     size_t q = p;
                     int brace_depth = 0;
@@ -4466,6 +4654,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     /* Check if this block references container types */
                     size_t block_sz = block_end - block_start;
                     int refs_container = 0;
+                    int typedef_uses_only_predeclared_vec_char = 0;
                     for (size_t si = block_start; si + 7 < block_end && !refs_container; si++) {
                         if (memcmp(src_ufcs + si, "__CC_MAP", 8) == 0 ||
                             memcmp(src_ufcs + si, "__CC_VEC", 8) == 0) {
@@ -4476,8 +4665,20 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                             refs_container = 1;
                         }
                     }
+                    if (is_typedef_block && refs_container) {
+                        for (size_t si = block_start; si + 14 <= block_end; si++) {
+                            if (memcmp(src_ufcs + si, "__CC_VEC(char)", 14) == 0) {
+                                typedef_uses_only_predeclared_vec_char = 1;
+                                break;
+                            }
+                        }
+                    }
                     (void)block_sz;
-                    if (refs_container) {
+                    if (refs_container && !is_typedef_block) {
+                        ctnr_pos = line_start;
+                        break;
+                    }
+                    if (refs_container && is_typedef_block && !typedef_uses_only_predeclared_vec_char) {
                         ctnr_pos = line_start;
                         break;
                     }
