@@ -1488,7 +1488,11 @@ static inline void cc__chan_post_lockfree_enqueue_signal_receivers(CCChan* ch,
     int fiber_waiters = atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire);
     int thread_waiters = atomic_load_explicit(&ch->thread_recv_waiters, memory_order_acquire);
     if (fiber_waiters == 0 && thread_waiters == 0) {
-        cc__chan_signal_recv_ready(ch);
+        /* No fiber/thread receivers parked.  Still need to poke the socket
+         * signal if one is registered (used by wait_recv_or_socket consumers
+         * like handle_client) so the pipe-based waiter wakes up. */
+        if (ch->recv_signal)
+            cc_socket_signal_signal(ch->recv_signal);
         return;
     }
     cc_chan_lock(ch);
@@ -1845,10 +1849,12 @@ static int cc_chan_ensure_buf(CCChan* ch, size_t elem_size) {
             if (!ch->buf) return ENOMEM;
         }
         /* Brand the channel for the minimal fast path if all invariants hold:
-         * lockfree, buffered, small elements, not owned/ordered/sync. */
+         * lockfree, buffered, not owned/ordered/sync.
+         * Small elements (<=ptr) always qualify; large elements qualify when
+         * backed by the internal ring queue which supports by-value copies. */
         ch->fast_path_ok = (cc__chan_minimal_path_enabled() &&
                             ch->use_lockfree && ch->cap > 0 && ch->buf &&
-                            elem_size <= sizeof(void*) &&
+                            (elem_size <= sizeof(void*) || ch->use_ring_queue) &&
                             !ch->is_owned && !ch->is_ordered && !ch->is_sync);
         return 0;
     }
@@ -3667,13 +3673,18 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
         chan_inflight_dec(ch);
         if (rc == 0) {
-            /* Signal any waiters */
-            cc_chan_lock(ch);
-            cc__chan_signal_recv_waiter(ch);
-            pthread_cond_signal(&ch->not_empty);
-            pthread_mutex_unlock(&ch->mu);
-            wake_batch_flush();
-            cc__chan_signal_recv_ready(ch);
+            int fiber_waiters = atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire);
+            int thread_waiters = atomic_load_explicit(&ch->thread_recv_waiters, memory_order_acquire);
+            if (fiber_waiters || thread_waiters) {
+                cc_chan_lock(ch);
+                cc__chan_signal_recv_waiter(ch);
+                if (thread_waiters) pthread_cond_signal(&ch->not_empty);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                cc__chan_signal_recv_ready(ch);
+            } else if (ch->recv_signal) {
+                cc_socket_signal_signal(ch->recv_signal);
+            }
             return 0;
         }
         return EAGAIN;
@@ -3725,12 +3736,18 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
         chan_inflight_dec(ch);
         if (rc == 0) {
-            cc_chan_lock(ch);
-            cc__chan_signal_recv_waiter(ch);
-            pthread_cond_signal(&ch->not_empty);
-            pthread_mutex_unlock(&ch->mu);
-            wake_batch_flush();
-            cc__chan_signal_recv_ready(ch);
+            int fiber_waiters = atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire);
+            int thread_waiters = atomic_load_explicit(&ch->thread_recv_waiters, memory_order_acquire);
+            if (fiber_waiters || thread_waiters) {
+                cc_chan_lock(ch);
+                cc__chan_signal_recv_waiter(ch);
+                if (thread_waiters) pthread_cond_signal(&ch->not_empty);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                cc__chan_signal_recv_ready(ch);
+            } else if (ch->recv_signal) {
+                cc_socket_signal_signal(ch->recv_signal);
+            }
             return 0;
         }
         return EAGAIN;
@@ -3759,13 +3776,17 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
-            /* Wake any waiters */
-            cc_chan_lock(ch);
-            cc__chan_wake_one_send_waiter(ch);
-            pthread_cond_signal(&ch->not_full);
-            pthread_mutex_unlock(&ch->mu);
-            wake_batch_flush();
-            cc__chan_signal_activity(ch);
+            /* try_recv is a poll operation: caller is already active.
+             * Only wake parked senders; skip signal and broadcast. */
+            int send_waiters = atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire);
+            if (send_waiters) {
+                cc_chan_lock(ch);
+                cc__chan_wake_one_send_waiter(ch);
+                pthread_cond_signal(&ch->not_full);
+                pthread_mutex_unlock(&ch->mu);
+                wake_batch_flush();
+                cc__chan_signal_activity(ch);
+            }
             return 0;
         }
         if (ch->closed) {

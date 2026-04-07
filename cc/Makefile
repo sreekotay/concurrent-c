@@ -54,11 +54,11 @@ ifeq ($(TCC_EXT),1)
 endif
 
 # Compile runtime as a single translation unit for easy linking. concurrent_c.c pulls in channel/nursery/scheduler/fiber_sched/fiber/io/string/exec and async shards when CC_ENABLE_ASYNC.
-# Use old visitor/pass.c - cccn/pass_main.c only implements 2 of 13 passes (UFCS, closures)
-# TODO: Complete cccn passes and switch back
+# The production compiler still uses the established visitor/pass.c pipeline.
+# Experimental cccn sources stay out of SRCS and build only via an explicit target.
 # Note: src/tools/ is excluded - those are standalone utilities with their own main()
 SRCS := $(filter-out runtime/io_async.c runtime/channel.c runtime/nursery.c runtime/scheduler.c runtime/fiber_sched.c runtime/fiber.c runtime/async_chan.c runtime/async_runtime.c runtime/async_backend_poll.c runtime/exec.c src/cccn/% src/tools/%,$(wildcard src/*.c src/*/*.c)) runtime/concurrent_c.c
-# Keep cccn modules for standalone cccn binary (not pass_main - using old visitor/pass.c)
+# Keep cccn modules available for the standalone experimental binary.
 CCCN_CORE := src/cccn/ast/ast.c src/cccn/parser/parser.c src/cccn/codegen/codegen.c src/cccn/passes/pass_ufcs.c src/cccn/passes/pass_closure.c
 # Keep our local bridge even when TCC_EXT=1; it adapts libtcc hooks into CC's AST handle.
 OBJDIR ?= ../out/cc/obj
@@ -70,7 +70,7 @@ DEPS := $(OBJS:.o=.d) $(RUNTIME_CORE_OBJ:.o=.d) $(RUNTIME_XJB_OBJ:.o=.d)
 REAL_BINARY := bin/ccc
 WRAPPER := $(OUT_BINDIR)/ccc
 
-# CCCN (CCC Next) refactor - uses existing TCC bridge + preprocessor
+# Experimental CCCN (CCC Next) binary - not built by default.
 CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
     src/header/lower_header.c \
     src/parser/tcc_bridge.c \
@@ -103,7 +103,7 @@ OUT_INCLUDE := ../out/include
 OUT_RUNTIME := ../out/runtime
 LOWER_HEADERS_STAMP := $(OUT_INCLUDE)/.headers_lowered.stamp
 
-all: $(WRAPPER) $(CCCN_WRAPPER) $(LOWER_HEADERS_STAMP)
+all: $(WRAPPER) $(LOWER_HEADERS_STAMP)
 
 # Lower .cch headers to .h files (must run before examples that use generated C)
 .PHONY: lower-headers
@@ -118,6 +118,9 @@ $(LOWER_HEADERS_STAMP): $(LOWER_HEADERS_BINARY) $(LOWER_HEADERS_INPUTS) $(wildca
 test-build-stub: $(WRAPPER)
 	@echo "Running build stub test..."
 	@sh ../examples/build_stub/test-build-stub.sh
+
+.PHONY: cccn
+cccn: $(CCCN_WRAPPER)
 
 $(REAL_BINARY): $(OBJS) $(TCC_LIB_DEP)
 	@mkdir -p $(dir $@)
@@ -166,7 +169,7 @@ clean:
 	@rm -f $(SRCS:.c=.o)
 	@rm -f bin/cc ../out/cc/bin/cc
 
-.PHONY: all clean
+.PHONY: all clean cccn
 
 # Auto-generated dependency files for objects (includes runtime/concurrent_c.c -> runtime/*.c).
 -include $(DEPS)

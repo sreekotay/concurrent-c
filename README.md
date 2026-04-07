@@ -317,9 +317,13 @@ Override:
 We keep CC’s TCC modifications in a fetchable forked `third_party/tcc` history and snapshot that delta as a patch against a mirrored upstream base:
 
 - Patch file: `third_party/tcc-patches/0001-cc-ext-hooks.patch`
+- Submodule fork: `https://github.com/sreekotay/tinycc.git`
+- Push branch for CC TCC changes: `origin/mob`
 - Apply patches (idempotent): `make tcc-patch-apply`
 - Regenerate patch from current `third_party/tcc` working tree diff: `make tcc-patch-regen`
 - One-button check after upgrading TCC: `make tcc-update-check`
+
+Important: `third_party/tcc` is usually checked out in detached-HEAD state because the parent repo pins a specific submodule commit. If you make changes there, do not guess where to push them. Push the resulting commit to the fork branch `origin/mob`, or first check out a local branch that tracks `origin/mob`.
 
 Typical upgrade loop:
 
@@ -327,7 +331,8 @@ Typical upgrade loop:
 2. `make tcc-patch-apply`
 3. Fix any conflicts / adjust hooks.
 4. `make tcc-patch-regen`
-5. `make tcc-update-check`
+5. Push the submodule commit to `origin/mob`
+6. `make tcc-update-check`
 
 ---
 

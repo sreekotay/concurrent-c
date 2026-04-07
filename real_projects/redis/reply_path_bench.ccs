@@ -1,0 +1,199 @@
+#include <ccc/cc_channel.cch>
+#include <ccc/std/net.cch>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include "redis_local_ready_queue.h"
+#include "redis_cc/redis_cc.cch"
+
+#define BENCH_DEPTH 16
+#define BENCH_ITERS 500000
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void bench_abort(const char* msg) {
+    fprintf(stderr, "reply_path_bench: %s\n", msg);
+    exit(1);
+}
+
+static void reply_init_inline(RedisReply* reply, uint64_t seq) {
+    memset(reply, 0, sizeof(*reply));
+    reply->conn_id = seq;
+    reply->request_id = seq;
+    reply->kind = REDIS_REPLY_RAW;
+    reply->data_inline = 1;
+    int len = snprintf(reply->inline_buf, sizeof(reply->inline_buf),
+                       "$5\r\n%05llu\r\n",
+                       (unsigned long long)(seq % 100000ull));
+    if (len < 0 || (size_t)len >= sizeof(reply->inline_buf)) {
+        bench_abort("failed to build inline reply");
+    }
+    reply->data.ptr = reply->inline_buf;
+    reply->data.len = (size_t)len;
+}
+
+static void reply_rebase_inline_ptr(RedisReply* reply) {
+    if (!reply || !reply->data_inline) return;
+    reply->data.ptr = reply->inline_buf;
+}
+
+static int notify_signal(void* ctx_ptr) {
+    CCSocketSignal* sig = (CCSocketSignal*)ctx_ptr;
+    cc_socket_signal_signal(sig);
+    return 1;
+}
+
+static double ns_per_item(uint64_t elapsed_ns) {
+    return (double)elapsed_ns / (double)(BENCH_ITERS * BENCH_DEPTH);
+}
+
+static double million_items_per_sec(uint64_t elapsed_ns) {
+    double seconds = (double)elapsed_ns / 1000000000.0;
+    double items = (double)(BENCH_ITERS * BENCH_DEPTH);
+    return (items / seconds) / 1000000.0;
+}
+
+static uint64_t bench_local_ready_queue(void) {
+    RedisReply storage[BENCH_DEPTH + 1];
+    CCLocalReadyQueue q;
+    CCSocketSignal sig;
+    cc_local_ready_queue_init(&q, storage, BENCH_DEPTH + 1, sizeof(storage[0]));
+    cc_socket_signal_init(&sig, NULL);
+
+    uint64_t start = now_ns();
+    for (uint64_t iter = 0; iter < BENCH_ITERS; ++iter) {
+        for (size_t i = 0; i < BENCH_DEPTH; ++i) {
+            RedisReply reply;
+            reply_init_inline(&reply, iter * BENCH_DEPTH + i);
+            int submit_rc = 0;
+            RedisReply* slot =
+                (RedisReply*)cc_local_ready_queue_submit(&q,
+                                                         &reply,
+                                                         notify_signal,
+                                                         &sig,
+                                                         &submit_rc);
+            if (submit_rc <= 0 || !slot) bench_abort("local queue submit failed");
+            reply_rebase_inline_ptr(slot);
+        }
+        for (size_t i = 0; i < BENCH_DEPTH; ++i) {
+            RedisReply reply = {0};
+            if (!cc_local_ready_queue_try_pop(&q, &reply)) {
+                bench_abort("local queue pop failed");
+            }
+            reply_rebase_inline_ptr(&reply);
+            if (reply.data.ptr != reply.inline_buf) bench_abort("local queue rebase failed");
+        }
+        (void)cc_local_ready_queue_continue_drain(&q);
+    }
+    uint64_t elapsed = now_ns() - start;
+
+    cc_socket_signal_free(&sig);
+    return elapsed;
+}
+
+static uint64_t bench_chan_by_value(void) {
+    CCChan* ch = cc_chan_create(BENCH_DEPTH);
+    if (!ch) bench_abort("cc_chan_create by-value failed");
+    if (cc_chan_init_elem(ch, sizeof(RedisReply)) != 0) {
+        bench_abort("cc_chan_init_elem by-value failed");
+    }
+
+    CCSocketSignal sig;
+    cc_socket_signal_init(&sig, NULL);
+    cc_chan_set_recv_signal(ch, &sig);
+
+    uint64_t start = now_ns();
+    for (uint64_t iter = 0; iter < BENCH_ITERS; ++iter) {
+        for (size_t i = 0; i < BENCH_DEPTH; ++i) {
+            RedisReply reply;
+            reply_init_inline(&reply, iter * BENCH_DEPTH + i);
+            if (cc_chan_try_send(ch, &reply, sizeof(reply)) != 0) {
+                bench_abort("channel by-value send failed");
+            }
+        }
+        for (size_t i = 0; i < BENCH_DEPTH; ++i) {
+            RedisReply reply = {0};
+            if (cc_chan_try_recv(ch, &reply, sizeof(reply)) != 0) {
+                bench_abort("channel by-value recv failed");
+            }
+            reply_rebase_inline_ptr(&reply);
+            if (reply.data.ptr != reply.inline_buf) bench_abort("channel by-value rebase failed");
+        }
+    }
+    uint64_t elapsed = now_ns() - start;
+
+    cc_chan_free(ch);
+    cc_socket_signal_free(&sig);
+    return elapsed;
+}
+
+static uint64_t bench_chan_by_pointer(void) {
+    CCChan* ch = cc_chan_create(BENCH_DEPTH);
+    if (!ch) bench_abort("cc_chan_create by-pointer failed");
+    if (cc_chan_init_elem(ch, sizeof(RedisReply*)) != 0) {
+        bench_abort("cc_chan_init_elem by-pointer failed");
+    }
+
+    CCSocketSignal sig;
+    RedisReply replies[BENCH_DEPTH];
+    cc_socket_signal_init(&sig, NULL);
+    cc_chan_set_recv_signal(ch, &sig);
+
+    uint64_t start = now_ns();
+    for (uint64_t iter = 0; iter < BENCH_ITERS; ++iter) {
+        for (size_t i = 0; i < BENCH_DEPTH; ++i) {
+            reply_init_inline(&replies[i], iter * BENCH_DEPTH + i);
+            RedisReply* ptr = &replies[i];
+            if (cc_chan_try_send(ch, &ptr, sizeof(ptr)) != 0) {
+                bench_abort("channel by-pointer send failed");
+            }
+        }
+        for (size_t i = 0; i < BENCH_DEPTH; ++i) {
+            RedisReply* ptr = NULL;
+            if (cc_chan_try_recv(ch, &ptr, sizeof(ptr)) != 0) {
+                bench_abort("channel by-pointer recv failed");
+            }
+            if (!ptr || ptr->data.ptr != ptr->inline_buf) {
+                bench_abort("channel by-pointer recv validation failed");
+            }
+        }
+    }
+    uint64_t elapsed = now_ns() - start;
+
+    cc_chan_free(ch);
+    cc_socket_signal_free(&sig);
+    return elapsed;
+}
+
+int main(void) {
+    uint64_t local_ns = bench_local_ready_queue();
+    uint64_t chan_value_ns = bench_chan_by_value();
+    uint64_t chan_ptr_ns = bench_chan_by_pointer();
+
+    printf("# Reply Path Benchmark\n\n");
+    printf("- iterations: `%d`\n", BENCH_ITERS);
+    printf("- depth: `%d`\n", BENCH_DEPTH);
+    printf("- reply_size: `%zu`\n\n", sizeof(RedisReply));
+    printf("| Path | ns/item | M items/sec | vs local |\n");
+    printf("|---|---:|---:|---:|\n");
+    printf("| `local_ready_queue<RedisReply>` | %.2f | %.2f | %.3fx |\n",
+           ns_per_item(local_ns),
+           million_items_per_sec(local_ns),
+           1.0);
+    printf("| `cc_chan<RedisReply>` | %.2f | %.2f | %.3fx |\n",
+           ns_per_item(chan_value_ns),
+           million_items_per_sec(chan_value_ns),
+           (double)chan_value_ns / (double)local_ns);
+    printf("| `cc_chan<RedisReply*>` | %.2f | %.2f | %.3fx |\n",
+           ns_per_item(chan_ptr_ns),
+           million_items_per_sec(chan_ptr_ns),
+           (double)chan_ptr_ns / (double)local_ns);
+
+    return 0;
+}

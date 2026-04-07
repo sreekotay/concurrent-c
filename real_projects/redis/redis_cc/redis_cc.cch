@@ -60,6 +60,22 @@ typedef struct RedisReply {
     char inline_buf[REDIS_REPLY_INLINE_CAP];
 } RedisReply;
 
+typedef struct RedisWireReply {
+    size_t len;
+    uint8_t data_inline;
+    CCArena arena;
+    char* heap_ptr;
+    char inline_buf[REDIS_REPLY_INLINE_CAP];
+} RedisWireReply;
+
+static inline CCSlice redis_wire_reply_slice(const RedisWireReply* reply) {
+    if (!reply) return (CCSlice){0};
+    return (CCSlice){
+        .ptr = reply->data_inline ? (void*)reply->inline_buf : (void*)reply->heap_ptr,
+        .len = reply->len,
+    };
+}
+
 static inline const char* redis_command_name(RedisCommandKind kind) {
     switch (kind) {
         case REDIS_CMD_PING: return "PING";

@@ -72,7 +72,7 @@ incrementally adopted in `ccc` to improve code quality.
 
 1. ✅ **Copy `string_set.h`** to `util/` - Done (2026-02-01)
 2. **Adopt pass context pattern** - cleaner state management (when needed)
-3. **Keep cccn as reference** - design patterns, not code
+3. **Keep cccn as an opt-in reference** - useful for design patterns, not part of the default build path
 
 ## Status
 

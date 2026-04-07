@@ -53,3 +53,5 @@ All extensions are guarded by `#ifdef CONFIG_CC_EXT`.
 - Upstream baseline for patch regen: `origin/upstream-mob`
 - Extensions are isolated behind `CONFIG_CC_EXT`
 - Goal: keep changes minimal and easy to rebase
+- Push target for CC TCC changes: `origin/mob`
+- Note: `third_party/tcc` is often checked out in detached-HEAD state because the parent repo pins a specific submodule commit. When that happens, push with `git push origin HEAD:mob` or first create a local branch that tracks `origin/mob`.

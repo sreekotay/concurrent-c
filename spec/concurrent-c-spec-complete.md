@@ -610,8 +610,8 @@ This section documents recommended style for Concurrent-C code.
 | Fixed-length slice | `char[n:]` | `char[:n]` |
 | Sentinel slice | `char[:0]` | `char[: 0 ]` |
 | Unique sentinel slice | `char[:0!]` | `char[: 0 !]` |
-| Generic type | `Vec::[int]` | `Vec :: [ int ]` |
-| Nested generic | `Map::[K, Vec::[int]]` | `Map :: [ K, Vec :: [ int ] ]` (standard bracket nesting) |
+| Generic type | `CCVec::[int]` | `CCVec :: [ int ]` |
+| Nested generic | `Map::[K, CCVec::[int]]` | `Map :: [ K, CCVec :: [ int ] ]` (standard bracket nesting) |
 | Function return | `fn() -> T!>(E)` | `fn ( ) -> T !> (E)` |
 
 **Examples:**
@@ -6084,7 +6084,7 @@ if (e is IoError.Other(code)) { use(code); }
 * `AsyncMutex::[T]` — suspending mutex-protected shared state
 * `AsyncGuard::[T]` — RAII lock guard (from `AsyncMutex::[T].lock()`)
 * `Atomic::[T]` — lock-free atomic (primitives only)
-* `Vec::[T]` — dynamic array
+* `CCVec::[T]` — dynamic array (legacy `Vec::[T]` is accepted during migration and lowers to the same concrete family)
 * `Map::[K, V]` — hash map
 * `T[~... >]` / `T[~... <]` — channel handles for element type T
 
@@ -6105,7 +6105,7 @@ if (e is IoError.Other(code)) { use(code); }
 Concurrent-C uses **compile-time monomorphization** for generic families.
 
 **Implementation status (v1.0):**
-- **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `Vec::[T]`, `Map::[K,V]`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
+- **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
 - **Planned direction:** full user-defined generic functions and generic type declarations with the same monomorphization model.
 - **Deprecated:** `T?` (optional types) are deprecated; use return-type patterns instead (e.g., `T*` with `NULL` for absence, or `T!>(E)` for fallible operations).
 
@@ -6170,14 +6170,14 @@ generic_param  := ident
 - A value parameter is introduced with `comptime <type> <name>`: `comptime int N`.
 - The `::` prefix before `[` disambiguates generic parameters from array/slice/channel syntax.
 
-Built-in generic families such as `Vec::[T]`, `Map::[K,V]`, `T!>(E)`, and channels follow the monomorphization model in this chapter.
+Built-in generic families such as `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and channels follow the monomorphization model in this chapter.
 
 **Rule:** A `comptime` value parameter is always a compile-time constant and may be used in:
 - array lengths `T[N]`
 - channel capacities `T[~N ... >]` / `T[~N ... <]`
 - other constant-expression contexts (see §12)
 
-**Deprecation note (`<>` syntax):** Built-in families (`Vec`, `Map`, `vec_new`, `map_new`, `Task`, `Mutex`, `Atomic`, `AsyncMutex`) currently accept the legacy `<T>` syntax (e.g., `Vec<int>`) during a transition period. New code should use `::[T]` (e.g., `Vec::[int]`). The `<>` form will be removed in a future version. User-defined generic functions and types use `::[T]` exclusively.
+**Deprecation note (`<>` syntax and legacy vec spellings):** Built-in families currently accept legacy `<T>` spellings during a transition period. For vectors, legacy `Vec::[T]`, `Vec<T>`, and `vec_new<T>(...)` are accepted as aliases of `CCVec::[T]` / `cc_vec_new::[T](...)`. New code should use `::[...]` syntax, with `CCVec::[T]` as the canonical vector family spelling. User-defined generic functions and types use `::[T]` exclusively.
 
 ---
 
@@ -6193,14 +6193,17 @@ Generic instantiation uses compile-time monomorphization.
 
 **Rule (identity):** Two instantiations are the "same" only if all type arguments are identical and all comptime value arguments are equal.
 
-**Lowering (conceptual):**
-- `Vec::[T]` lowers to a concrete family such as `Vec_<mangled>`.
+**Lowering (normative for built-in generic families):**
+- `CCVec::[T]` lowers to the concrete family `CCVec_<mangledT>`.
+- Legacy `Vec::[T]` lowers to the same concrete family `CCVec_<mangledT>`.
+- `cc_vec_new::[T](arena)` lowers to `CCVec_<mangledT>_init((arena), CC_VEC_INITIAL_CAP)`.
 - `Map::[K,V]` lowers to a concrete family such as `Map_<mangledK>_<mangledV>`.
 - `T!>(E)` lowers to `CCResult_<mangledT>_<mangledE>`.
 - `T[~... >]` / `T[~... <]` lower to concrete channel handle families for element type `T`, with additional channel metadata (direction/mode/topology/flags) preserved separately for checking and construction.
 - `swap::[T]` lowers to `swap__T_<mangled>(...)` per instantiation.
 - `Pair::[A, B]` lowers to `Pair__A_<mangledA>__B_<mangledB>` per instantiation.
-- (Exact mangling is implementation-defined; uniqueness is required.)
+- For built-in generic families, the visible lowered family names at the C boundary are part of the language contract.
+- For future user-defined generic functions and types, exact mangling remains implementation-defined; uniqueness is required.
 
 ---
 
@@ -6290,7 +6293,7 @@ Intentionally omitted in v1.0:
 
 Standard collection types are defined in the **Standard Library Specification** (`concurrent-c-stdlib-spec.md`):
 
-- **`Vec::[T]`** — arena-backed dynamic array (`<std/vec.cch>`)
+- **`CCVec::[T]`** — arena-backed dynamic array (`<std/vec.cch>`)
 - **`Map::[K,V]`** — arena-backed hash table (`<std/map.cch>`)
 
 Both types are generic, use UFCS methods, and require an `Arena*` at construction. See the stdlib spec for full API reference, rules, and examples.
@@ -6298,8 +6301,8 @@ Both types are generic, use UFCS methods, and require an `Arena*` at constructio
 **Quick reference:**
 
 ```c
-// Vec::[T]
-Vec::[T] v = vec_new::[T](&arena);
+// CCVec::[T]
+CCVec::[T] v = cc_vec_new::[T](&arena);
 v.push(value);
 T* x = v.get_ptr(index);
 T[:] slice = v.as_slice();
@@ -6311,7 +6314,7 @@ V* x = m.get_ptr(key);
 m.remove(key);
 ```
 
-**Implementation note:** The `Vec::[T]` and `Map::[K,V]` syntax is compile-time sugar that lowers to concrete C family types (e.g., `Vec::[int]` → `Vec_int`). UFCS method calls on containers lower through that family contract; implementations may use direct concrete symbols such as `Vec_int_push(&v, x)` or thin family wrappers over shared erased-core helpers. See the stdlib spec for full lowering rules.
+**Implementation note:** The `CCVec::[T]` and `Map::[K,V]` syntax is compile-time sugar that lowers to concrete C family types (e.g., `CCVec::[int]` → `CCVec_int`). UFCS method calls on containers lower through that family contract; implementations may use direct concrete symbols such as `CCVec_int_push(&v, x)` or thin family wrappers over shared erased-core helpers. See the stdlib spec for full lowering rules.
 
 ---
 

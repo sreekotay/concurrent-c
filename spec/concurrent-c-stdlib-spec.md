@@ -51,7 +51,7 @@ For the standard library, UFCS lowering is part of the normative API surface:
 
 - Dispatch is chosen from the resolved receiver type and the full receiver expression to the left of `.` or `->`.
 - Stdlib families normally define custom lowering through type-owned registration such as `cc_type_register(...)`. `cc_ufcs_register(...)` remains a compatibility mechanism for UFCS-only registration.
-- Constructors and helper calls such as `string_new(...)`, `cc_string_from(...)`, `@string(...)`, `file_open(...)`, `vec_new<T>(...)`, and `map_new<K, V>(...)` are direct library calls or syntax sugar, not UFCS.
+- Constructors and helper calls such as `string_new(...)`, `cc_string_from(...)`, `@string(...)`, `file_open(...)`, `cc_vec_new::[T](...)`, and `map_new<K, V>(...)` are direct library calls or syntax sugar, not UFCS.
 - Exact generated helper names are normative where this document names them explicitly; otherwise, the family-level lowering contract is normative.
 
 ### Type Notation Precedence
@@ -833,43 +833,43 @@ char[:] ext = path_extension(config);
 
 #### 3.1 Overview
 
-CC's collections are **arena-backed**, **generic** (via `<T>` syntax), and **UFCS-enabled**. They enable safe, efficient data structures for concurrent systems: work queues, request buffers, caches, state tables.
+CC's collections are **arena-backed**, **generic** (canonically via `::[...]` syntax), and **UFCS-enabled**. They enable safe, efficient data structures for concurrent systems: work queues, request buffers, caches, state tables.
 
-#### 3.2 Vec<T> (Dynamic Array)
+#### 3.2 `CCVec::[T]` (Dynamic Array)
 
 ```c
 // Generic dynamic array type (arena-backed)
-typedef struct Vec<T> Vec<T>;
+typedef struct CCVec::[T] CCVec::[T];
 
 // Direct library-call constructors
-Vec<T> vec_new<T>(Arena* a);
-Vec<T> vec_with_capacity<T>(Arena* a, size_t capacity);
+CCVec::[T] cc_vec_new::[T](Arena* a);
+CCVec::[T] cc_vec_with_capacity::[T](Arena* a, size_t capacity);
 
 // UFCS surface methods
-void    Vec<T>.push(T value);                // Add element (grows as needed)
-T?      Vec<T>.pop();                        // Remove and return last
-T?      Vec<T>.get(size_t index);            // Bounds-safe get (None if out of bounds)
-T*      Vec<T>.get_mut(size_t index);        // Mutable access (NULL if out of bounds)
+void    CCVec::[T].push(T value);                // Add element (grows as needed)
+T?      CCVec::[T].pop();                        // Remove and return last
+T?      CCVec::[T].get(size_t index);            // Bounds-safe get (None if out of bounds)
+T*      CCVec::[T].get_mut(size_t index);        // Mutable access (NULL if out of bounds)
 
 enum BoundsError { OutOfBounds };
-void!BoundsError Vec<T>.set(size_t index, T value);   // Set with bounds check (error if out of bounds)
+void!BoundsError CCVec::[T].set(size_t index, T value);   // Set with bounds check (error if out of bounds)
 
-void    Vec<T>.clear();                      // Clear contents
-size_t  Vec<T>.len();                        // Length
-size_t  Vec<T>.cap();                        // Capacity
-T[:]    Vec<T>.as_slice();                   // View as T[:]
+void    CCVec::[T].clear();                      // Clear contents
+size_t  CCVec::[T].len();                        // Length
+size_t  CCVec::[T].cap();                        // Capacity
+T[:]    CCVec::[T].as_slice();                   // View as T[:]
 
 // Iterator
-struct VecIter<T> {
-    Vec<T>* vec;
+struct CCVecIter::[T] {
+    CCVec::[T]* vec;
     size_t index;
 };
 
-VecIter<T> Vec<T>.iter();
-T?         VecIter<T>.next();
+CCVecIter::[T] CCVec::[T].iter();
+T?             CCVecIter::[T].next();
 ```
 
-**Normative lowering:** `Vec<T>` first lowers to a concrete container family such as `Vec_int`. UFCS then lowers to that family contract. Implementations may realize the concrete family with direct symbols such as `Vec_int_push(&v, x)` or with thin wrappers/macros over a shared erased core; the family contract is normative, the erased core is an implementation detail.
+**Normative lowering:** `CCVec::[T]` first lowers to the concrete container family `CCVec_<mangledT>`. Legacy `Vec::[T]` and `Vec<T>` spellings lower to the same family during the transition period. UFCS then lowers to that family contract. The visible concrete C family names are normative for interop: `CCVec_<mangledT>`, `CCVec_<mangledT>_init`, `CCVec_<mangledT>_push`, `CCVec_<mangledT>_get`, and related family members. Shared erased-core helpers remain an implementation detail.
 
 **Examples:**
 
@@ -877,26 +877,26 @@ T?         VecIter<T>.next();
 Arena arena = arena(megabytes(1));
 
 // Work queue (UFCS method syntax)
-Vec<Task<void>> tasks = vec_new<Task<void>>(&arena);
+CCVec::[Task::[void]] tasks = cc_vec_new::[Task::[void]](&arena);
 tasks.push(async_work1());
 tasks.push(async_work2());
 tasks.push(async_work3());
 
 // Iterate and await
-VecIter<Task<void>> it = tasks.iter();
+CCVecIter::[Task::[void]] it = tasks.iter();
 while (Task<void>? task = it.next()) {
     await *task;
 }
 
 // Buffer for accumulation
-Vec<char> buffer = vec_new<char>(&arena);
+CCVec::[char] buffer = cc_vec_new::[char](&arena);
 for (size_t i = 0; i < input.len; i++) {
     buffer.push(input.ptr[i]);
 }
 char[:] result = buffer.as_slice();
 
 // Bounds-safe access
-Vec<int> data = vec_new<int>(&arena);
+CCVec::[int] data = cc_vec_new::[int](&arena);
 data.push(42);
 int? val = data.get(0);      // Some(42)
 int? oob = data.get(100);    // None (out of bounds)
@@ -1401,31 +1401,32 @@ This allows both function composition and ergonomic method chaining.
 
 ### Generic Container Syntax Lowering
 
-The `Vec<T>` and `Map<K, V>` syntax is **compile-time sugar** that lowers to concrete C family types. Those family names are stable at the C boundary even when the implementation routes the actual storage/manipulation work through shared erased-core helpers:
+The `CCVec::[T]` and `Map::[K, V]` syntax is **compile-time sugar** that lowers to concrete C family types. Those family names are stable at the C boundary and are part of the interop contract even when the implementation routes the actual storage/manipulation work through shared erased-core helpers:
 
 ```c
 // CC source code
-Vec<int> v = vec_new<int>(&arena);
+CCVec::[int] v = cc_vec_new::[int](&arena);
 v.push(42);
 v.push(100);
 int? val = v.get(0);
 
 // Lowers to (generated C)
-Vec_int v = Vec_int_init(&arena, CC_VEC_INITIAL_CAP);
-Vec_int_push(&v, 42);
-Vec_int_push(&v, 100);
-CCOptional_int val = Vec_int_get(&v, 0);
+CCVec_int v = CCVec_int_init(&arena, CC_VEC_INITIAL_CAP);
+CCVec_int_push(&v, 42);
+CCVec_int_push(&v, 100);
+CCOptional_int val = CCVec_int_get(&v, 0);
 ```
 
 **Lowering rules:**
 
 | Surface Syntax | Lowered Form |
 |----------------|--------------|
-| `Vec<T>` | `Vec_mangled` where `mangled` is `T` with non-ident chars replaced by `_` |
-| `vec_new<T>(&arena)` | `Vec_mangled_init(&arena, CC_VEC_INITIAL_CAP)` |
+| `CCVec::[T]` | `CCVec_mangled` where `mangled` is the canonical type-parameter mangling for `T` |
+| `Vec::[T]` / `Vec<T>` | Same lowered family as `CCVec::[T]` during the transition period |
+| `cc_vec_new::[T](&arena)` | `CCVec_mangled_init(&arena, CC_VEC_INITIAL_CAP)` |
 | `Map<K, V>` | `Map_mangledK_mangledV` |
 | `map_new<K, V>(&arena)` | `Map_mangledK_mangledV_init(&arena)` |
-| `v.method(args)` | `Vec_mangled_method(&v, args)` (UFCS on containers) |
+| `v.method(args)` | `CCVec_mangled_method(&v, args)` for vectors; `Map_mangledK_mangledV_method(&m, args)` for maps |
 
 **Type mangling examples:**
 
@@ -1440,8 +1441,8 @@ CCOptional_int val = Vec_int_get(&v, 0);
 **Container declarations** are automatically emitted based on types used:
 
 ```c
-// Automatically generated for Vec<int> usage
-CC_VEC_DECL_ARENA(int, Vec_int)
+// Automatically generated for CCVec::[int] usage
+CC_VEC_DECL_ARENA(int, CCVec_int)
 
 // Automatically generated for Map<int, char*> usage
 CC_MAP_DECL_ARENA(int, char_ptr, Map_int_char_ptr, cc_kh_hash_i32, cc_kh_eq_i32)
@@ -2826,11 +2827,11 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | `.sync()` | Flush |
 | `.close()` | Close |
 
-### Vec<T> Methods
+### `CCVec::[T]` Methods
 
 | Method | Purpose |
 |--------|---------|
-| `vec_new<T>(a)` | Create |
+| `cc_vec_new::[T](a)` | Create |
 | `.push()`, `.pop()` | Add/remove |
 | `.get()`, `.set()` | Access |
 | `.len()`, `.cap()` | Info |

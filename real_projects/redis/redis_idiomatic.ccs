@@ -33,7 +33,6 @@
 #define PIPELINE_LIMIT 16
 #define CMDQ_SLOTS (PIPELINE_LIMIT + 1)
 #define REPLY_CHAN_CAP PIPELINE_LIMIT
-#define REPLY_OUTBOX_SLOTS (REPLY_CHAN_CAP + 1)
 typedef struct RedisEntry RedisEntry;
 
 struct RedisEntry {
@@ -50,14 +49,6 @@ typedef struct RedisDb {
     RedisEntry* head;
 } RedisDb;
 
-struct RedisReplyOutbox {
-    _Atomic size_t refs;
-    _Atomic int closed;
-    CCSocketSignal signal;
-    CCLocalReadyQueue replies;
-    RedisReply replies_storage[REPLY_OUTBOX_SLOTS];
-};
-
 typedef struct RedisConn {
     _Atomic size_t refs;
     uint64_t conn_id;
@@ -65,7 +56,9 @@ typedef struct RedisConn {
     size_t inflight;
     CCLocalReadyQueue cmdq;
     RedisRequest* cmdq_storage[CMDQ_SLOTS];
-    RedisReplyOutbox* outbox;
+    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
+    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
+    CCSocketSignal signal;
     char req_bufs[PIPELINE_LIMIT][REQ_BUF_SIZE];
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
@@ -337,7 +330,7 @@ typedef struct ParseAttempt {
 static ParseAttempt read_request_buffered(RespReader* r,
                                           RedisConn* conn,
                                           uint64_t request_id,
-                                         char* req_buf,
+                                          char* req_buf,
                                           size_t req_buf_size) {
     ParseAttempt out = {0};
     CCArena req_arena_storage = cc_arena_create_buffer(req_buf, req_buf_size);
@@ -346,7 +339,7 @@ static ParseAttempt read_request_buffered(RespReader* r,
     CCSlice args[4] = {0};
     size_t argc = 0;
     CCError err = {0};
-    int argc_status = rr_try_read_args_buffered(r, args, 4, &argc, &err);
+    RespParseStatus argc_status = rr_try_read_args_buffered(r, args, 4, &argc, &err);
     if (argc_status <= 0) {
         out.status = argc_status;
         out.err = err;
@@ -753,48 +746,18 @@ static void release_reply(RedisReply* reply) {
     *reply = (RedisReply){0};
 }
 
-static RedisReplyOutbox* reply_outbox_create(void) {
-    RedisReplyOutbox* outbox = calloc(1, sizeof(*outbox));
-    if (!outbox) return NULL;
-
-    atomic_store_explicit(&outbox->refs, 1, memory_order_relaxed);
-    atomic_store_explicit(&outbox->closed, 0, memory_order_relaxed);
-    cc_local_ready_queue_init(&outbox->replies,
-                              outbox->replies_storage,
-                              REPLY_OUTBOX_SLOTS,
-                              sizeof(outbox->replies_storage[0]));
-    return outbox;
-}
-
-static void reply_outbox_destroy(RedisReplyOutbox* outbox) {
-    if (!outbox) return;
-
-    RedisReply reply = {0};
-    while (cc_local_ready_queue_try_pop(&outbox->replies, &reply)) {
-        free_reply(&reply);
-    }
-
-    cc_socket_signal_free(&outbox->signal);
-    free(outbox);
-}
-
-static void reply_outbox_drop(RedisReplyOutbox* outbox) {
-    if (!outbox) return;
-    if (atomic_fetch_sub_explicit(&outbox->refs, 1, memory_order_acq_rel) == 1) {
-        reply_outbox_destroy(outbox);
-    }
-}
-
 static RedisConn* redis_conn_create(uint64_t conn_id) {
     RedisConn* conn = calloc(1, sizeof(*conn));
     if (!conn) return NULL;
-
-    conn->outbox = reply_outbox_create();
-    if (!conn->outbox) {
+    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
+    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
+    CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
+    if (!reply_ch) {
         free(conn);
         return NULL;
     }
-
+    conn->reply_tx = reply_tx;
+    conn->reply_rx = reply_rx;
     atomic_store_explicit(&conn->refs, 1, memory_order_relaxed);
     conn->conn_id = conn_id;
     conn->next_request_id = 1;
@@ -812,7 +775,13 @@ static void redis_conn_destroy(RedisConn* conn) {
     while (cc_local_ready_queue_try_pop(&conn->cmdq, &req)) {
         if (req) free_request(req);
     }
-    reply_outbox_drop(conn->outbox);
+    RedisReply reply = {0};
+    while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply))) {
+        reply_rebase_inline_ptr(&reply);
+        free_reply(&reply);
+    }
+    cc_channel_free(conn->reply_tx);
+    cc_socket_signal_free(&conn->signal);
     free(conn);
 }
 
@@ -834,13 +803,6 @@ static int redis_conn_notify_owner(void* ctx_ptr) {
         redis_conn_drop(ctx->conn);
         return 0;
     }
-    return 1;
-}
-
-static int redis_outbox_notify_ready(void* ctx_ptr) {
-    RedisReplyOutbox* outbox = (RedisReplyOutbox*)ctx_ptr;
-    if (!outbox) return 0;
-    cc_socket_signal_signal(&outbox->signal);
     return 1;
 }
 
@@ -873,42 +835,8 @@ static void free_request(RedisRequest* req) {
     if (conn) redis_conn_drop(conn);
 }
 
-static int reply_outbox_is_closed(RedisReplyOutbox* outbox) {
-    return outbox &&
-           atomic_load_explicit(&outbox->closed, memory_order_acquire) != 0;
-}
-
-static int reply_outbox_has_data(RedisReplyOutbox* outbox) {
-    return outbox && cc_local_ready_queue_has_data(&outbox->replies);
-}
-
-static void reply_outbox_close(RedisReplyOutbox* outbox) {
-    if (!outbox) return;
-    if (atomic_exchange_explicit(&outbox->closed, 1, memory_order_acq_rel)) return;
-}
-
-static int reply_outbox_publish(RedisReplyOutbox* outbox, RedisReply reply) {
-    if (!outbox || reply_outbox_is_closed(outbox)) return 0;
-    int submit_rc = 0;
-    RedisReply* slot = (RedisReply*)cc_local_ready_queue_submit(&outbox->replies,
-                                                                &reply,
-                                                                redis_outbox_notify_ready,
-                                                                outbox,
-                                                                &submit_rc);
-    if (submit_rc <= 0 || !slot) return 0;
-    reply_rebase_inline_ptr(slot);
-    return 1;
-}
-
-static int reply_outbox_try_pop(RedisReplyOutbox* outbox, RedisReply* out) {
-    if (!outbox || !out) return 0;
-    if (!cc_local_ready_queue_try_pop(&outbox->replies, out)) return 0;
-    reply_rebase_inline_ptr(out);
-    return 1;
-}
-
 static void close_reply_stream(RedisConn* conn) {
-    if (conn) reply_outbox_close(conn->outbox);
+    if (conn) cc_channel_close(conn->reply_tx);
 }
 
 static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
@@ -919,7 +847,7 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
         close_reply_stream(conn);
         return false;
     }
-    if (!reply_outbox_publish(conn->outbox, *reply)) {
+    if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
         close_reply_stream(conn);
         return false;
     }
@@ -994,19 +922,12 @@ static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
     int drained = 0;
     while (conn->inflight > 0) {
         RedisReply reply = {0};
-        if (!reply_outbox_try_pop(conn->outbox, &reply)) break;
+        if (!cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply))) break;
         if (!write_received_reply(sock, conn, &reply)) return -1;
         drained++;
     }
-    (void)cc_local_ready_queue_continue_drain(&conn->outbox->replies);
     if (drained > 0 && !flush_output_buffer(sock, conn)) return -1;
     return drained;
-}
-
-static bool !>(CCIoError) wait_for_reply_or_data(RedisConn* conn) {
-    uint64_t epoch = cc_socket_signal_snapshot(&conn->outbox->signal);
-    if (reply_outbox_has_data(conn->outbox)) return cc_ok(false);
-    return cc_socket_signal_wait_since(&conn->outbox->signal, epoch);
 }
 
 static int !>(CCError) parse_and_submit_requests(RespReader* reader,
@@ -1019,10 +940,9 @@ static int !>(CCError) parse_and_submit_requests(RespReader* reader,
         if (parsed.status == 0) break;
         if (parsed.status < 0) return cc_err(parsed.err);
 
-        bool !>(CCError) submit_res = redis_conn_mailbox_submit(conn, owner_tx, parsed.req);
-        if (submit_res.is_err()) return cc_err(submit_res.error());
-        if (!submit_res.value()) break;
-
+        CCResult_bool_CCError submit_res = redis_conn_mailbox_submit(conn, owner_tx, parsed.req);
+        if (cc_is_err(submit_res)) return cc_err(cc_error(submit_res));
+        if (!cc_value(submit_res)) break;
         conn->next_request_id++;
         conn->inflight++;
         submitted++;
@@ -1038,7 +958,8 @@ static void handle_client(CCSocket client,
     RedisConn* conn = redis_conn_create(conn_id);
     if (!conn) return;
     @defer redis_conn_drop(conn);
-    client.create_signal(&conn->outbox->signal);
+    client.create_signal(&conn->signal);
+    cc_channel_set_recv_signal(conn->reply_tx, &conn->signal);
 
     char read_buf[READ_BUF_CAP];
     RespReader reader = rr_init(read_buf, sizeof(read_buf));
@@ -1047,35 +968,41 @@ static void handle_client(CCSocket client,
         int drained = drain_and_flush_replies(&client, conn);
         if (drained < 0) break;
 
-        int !>(CCError) parse_res = parse_and_submit_requests(&reader, conn, owner_tx);
-        if (parse_res.is_err()) {
-            (void)write_reply_now(&client, conn, err_reply(parse_res.error()));
+        CCResult_int_CCError parse_res = parse_and_submit_requests(&reader, conn, owner_tx);
+        if (cc_is_err(parse_res)) {
+            (void)write_reply_now(&client, conn, err_reply(cc_error(parse_res)));
             break;
         }
 
-        if (drained > 0 || parse_res.value() > 0) continue;
+        if (drained > 0 || cc_value(parse_res) > 0) continue;
 
         if (conn->inflight > 0) {
-            bool !>(CCIoError) wait_res = wait_for_reply_or_data(conn);
-            if (wait_res.is_err()) break;
-            if (wait_res.value()) {
-                bool !>(CCIoError) fill = rr_try_fill(&reader, &client);
-                if (fill.is_err()) {
-                    (void)write_reply_now(&client, conn, io_err_reply(fill.error()));
+            RedisReply reply = {0};
+            CCResult_CCChanWaitOrSocketKind_CCIoError wait_res =
+                cc_channel_wait_recv_or_socket(conn->reply_rx, &conn->signal, &reply);
+            if (cc_is_err(wait_res)) break;
+            if (cc_value(wait_res) == CC_CHAN_WAIT_RECV) {
+                if (!write_received_reply(&client, conn, &reply) || !flush_output_buffer(&client, conn)) break;
+            } else if (cc_value(wait_res) == CC_CHAN_WAIT_SOCKET) {
+                CCResult_bool_CCIoError fill = rr_try_fill(&reader, &client);
+                if (cc_is_err(fill)) {
+                    (void)write_reply_now(&client, conn, io_err_reply(cc_unwrap_err_as(fill, CCIoError)));
                     break;
                 }
-            }
-        } else {
-            bool !>(CCIoError) fill = rr_fill(&reader, &client);
-            if (fill.is_err()) {
-                (void)write_reply_now(&client, conn, io_err_reply(fill.error()));
+            } else {
                 break;
             }
-            if (!fill.value()) break;
+        } else {
+            CCResult_bool_CCIoError fill = rr_fill(&reader, &client);
+            if (cc_is_err(fill)) {
+                (void)write_reply_now(&client, conn, io_err_reply(cc_unwrap_err_as(fill, CCIoError)));
+                break;
+            }
+            if (!cc_value(fill)) break;
         }
     }
 
-    reply_outbox_close(conn->outbox);
+    cc_channel_close(conn->reply_tx);
 }
 
 int main(int argc, char** argv) {

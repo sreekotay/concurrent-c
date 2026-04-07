@@ -46,16 +46,20 @@ This checks out the TCC submodule at the pinned fork commit.
 
 1. Edit files directly in `third_party/tcc/`
 2. Test your changes
-3. Regenerate the patch:
+3. Confirm the push target before committing:
+   - Canonical fork remote: `origin` -> `https://github.com/sreekotay/tinycc.git`
+   - Canonical CC branch: `mob`
+   - The submodule is usually on detached HEAD because the parent repo pins a commit. That is expected. In that state, push with `git push origin HEAD:mob`, or first check out a local branch that tracks `origin/mob`.
+4. Regenerate the patch:
    ```bash
    make tcc-patch-regen
    ```
-4. Push the submodule branch to the fork:
+-5. Push the submodule branch to the fork:
    ```bash
    cd third_party/tcc
-   git push origin mob
+   git push origin HEAD:mob
    ```
-5. Commit the updated patch file and submodule pointer in the parent repo.
+6. Commit the updated patch file and submodule pointer in the parent repo.
 
 ### Upgrading TCC Upstream
 
@@ -94,6 +98,7 @@ The CC compiler (`cc/`) links against `libtcc.a` and needs these defines:
 
 1. **DON'T leave the parent repo pointing at an unpushable submodule commit**
    - Keep `third_party/tcc/` on a commit reachable from `https://github.com/sreekotay/tinycc.git`
+   - Push CC hook commits to `origin/mob` before committing the parent repo's submodule pointer
    - Regenerate `third_party/tcc-patches/0001-cc-ext-hooks.patch` after rebases
 
 2. **DON'T run `git submodule update` without `--init`**
