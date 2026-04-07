@@ -10,6 +10,8 @@ IDIOMATIC_BIN="$SCRIPT_DIR/out/redis_idiomatic"
 
 REQUESTS="${REQUESTS:-50000}"
 CLIENTS="${CLIENTS:-50}"
+PIPELINE="${PIPELINE:-1}"
+REPEATS="${REPEATS:-3}"
 RANDOM_KEYS="${RANDOM_KEYS:-50000}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-6391}"
 IDIOMATIC_PORT="${IDIOMATIC_PORT:-6392}"
@@ -56,36 +58,47 @@ run_suite() {
     local label="$1"
     local port="$2"
     local line_set line_get line_incr
+    local bench_args=(
+        -h 127.0.0.1
+        -p "$port"
+        -n "$REQUESTS"
+        -c "$CLIENTS"
+        -P "$PIPELINE"
+        -q
+        -r "$RANDOM_KEYS"
+    )
 
-    echo
-    echo "== $label =="
+    echo >&2
+    echo "== $label ==" >&2
 
-    line_set="$("$BENCH_BIN" -h 127.0.0.1 -p "$port" -n "$REQUESTS" -c "$CLIENTS" -q -r "$RANDOM_KEYS" \
-        SET bench:key:__rand_int__ value | tail -n 1)"
-    line_get="$("$BENCH_BIN" -h 127.0.0.1 -p "$port" -n "$REQUESTS" -c "$CLIENTS" -q -r "$RANDOM_KEYS" \
-        GET bench:key:__rand_int__ | tail -n 1)"
-    line_incr="$("$BENCH_BIN" -h 127.0.0.1 -p "$port" -n "$REQUESTS" -c "$CLIENTS" -q -r "$RANDOM_KEYS" \
-        INCR bench:ctr:__rand_int__ | tail -n 1)"
+    for repeat in $(seq 1 "$REPEATS"); do
+        echo "repeat $repeat/$REPEATS" >&2
 
-    echo "$line_set"
-    echo "$line_get"
-    echo "$line_incr"
+        line_set="$("$BENCH_BIN" "${bench_args[@]}" SET bench:key:__rand_int__ value | tail -n 1)"
+        line_get="$("$BENCH_BIN" "${bench_args[@]}" GET bench:key:__rand_int__ | tail -n 1)"
+        line_incr="$("$BENCH_BIN" "${bench_args[@]}" INCR bench:ctr:__rand_int__ | tail -n 1)"
 
-    python3 - "$label" "$line_set" "$line_get" "$line_incr" <<'PY'
+        echo "$line_set" >&2
+        echo "$line_get" >&2
+        echo "$line_incr" >&2
+
+        python3 - "$label" "$repeat" "$line_set" "$line_get" "$line_incr" <<'PY'
 import re
 import sys
 
 label = sys.argv[1]
-lines = sys.argv[2:]
+repeat = sys.argv[2]
+lines = sys.argv[3:]
 for line in lines:
     m = re.match(r"(.+?):\s+([0-9.]+) requests per second, p50=([0-9.]+) msec", line.strip())
     if not m:
-        print(f"{label}\tparse_error\t{line}")
+        print(f"{label}\t{repeat}\tparse_error\t{line}")
         continue
     cmd, rps, p50 = m.groups()
     cmd = cmd.split()[0]
-    print(f"{label}\t{cmd}\t{rps}\t{p50}")
+    print(f"{label}\t{repeat}\t{cmd}\t{rps}\t{p50}")
 PY
+    done
 }
 
 need_bin "$BENCH_BIN" "redis-benchmark"
@@ -105,8 +118,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Redis simple benchmark comparison"
-echo "requests=$REQUESTS clients=$CLIENTS random_keys=$RANDOM_KEYS"
+echo "Redis benchmark comparison"
+echo "requests=$REQUESTS clients=$CLIENTS pipeline=$PIPELINE repeats=$REPEATS random_keys=$RANDOM_KEYS"
 
 "$UPSTREAM_BIN" --save "" --appendonly no --port "$UPSTREAM_PORT" >"$upstream_log" 2>&1 &
 upstream_pid="$!"
@@ -116,35 +129,46 @@ env CC_DEADLOCK_ABORT=0 "$IDIOMATIC_BIN" "$IDIOMATIC_PORT" >"$idiomatic_log" 2>&
 idiomatic_pid="$!"
 wait_for_port "$IDIOMATIC_PORT"
 
-upstream_tsv="$(run_suite "upstream" "$UPSTREAM_PORT" | tee /dev/stderr | tail -n 3)"
-idiomatic_tsv="$(run_suite "redis_idiomatic" "$IDIOMATIC_PORT" | tee /dev/stderr | tail -n 3)"
+upstream_tsv="$(run_suite "upstream" "$UPSTREAM_PORT")"
+idiomatic_tsv="$(run_suite "redis_idiomatic" "$IDIOMATIC_PORT")"
 
 echo
-echo "== Summary =="
+echo "== Median Summary (clients=$CLIENTS pipeline=$PIPELINE repeats=$REPEATS) =="
 python3 - "$upstream_tsv" "$idiomatic_tsv" <<'PY'
+import statistics
 import sys
 
 def parse_block(block):
     rows = {}
     for line in block.splitlines():
         parts = line.split("\t")
-        if len(parts) != 4:
+        if len(parts) != 5:
             continue
-        _, cmd, rps, p50 = parts
-        rows[cmd] = (float(rps), float(p50))
+        _, _, cmd, rps, p50 = parts
+        rows.setdefault(cmd, []).append((float(rps), float(p50)))
     return rows
+
+def summarize(samples):
+    rps = [sample[0] for sample in samples]
+    p50 = [sample[1] for sample in samples]
+    return (
+        statistics.median(rps),
+        statistics.median(p50),
+        min(rps),
+        max(rps),
+    )
 
 upstream = parse_block(sys.argv[1])
 idiomatic = parse_block(sys.argv[2])
 cmds = ["SET", "GET", "INCR"]
 
-print("command\tupstream_rps\tidiomatic_rps\tidiomatic/upstream\tupstream_p50_ms\tidiomatic_p50_ms")
+print("command\tupstream_median_rps\tidiomatic_median_rps\tidiomatic/upstream\tupstream_median_p50_ms\tidiomatic_median_p50_ms\tupstream_rps_range\tidiomatic_rps_range")
 for cmd in cmds:
     if cmd not in upstream or cmd not in idiomatic:
-        print(f"{cmd}\tmissing\tmissing\tmissing\tmissing\tmissing")
+        print(f"{cmd}\tmissing\tmissing\tmissing\tmissing\tmissing\tmissing\tmissing")
         continue
-    urps, up50 = upstream[cmd]
-    irps, ip50 = idiomatic[cmd]
+    urps, up50, umin, umax = summarize(upstream[cmd])
+    irps, ip50, imin, imax = summarize(idiomatic[cmd])
     ratio = irps / urps if urps else 0.0
-    print(f"{cmd}\t{urps:.2f}\t{irps:.2f}\t{ratio:.3f}x\t{up50:.3f}\t{ip50:.3f}")
+    print(f"{cmd}\t{urps:.2f}\t{irps:.2f}\t{ratio:.3f}x\t{up50:.3f}\t{ip50:.3f}\t{umin:.0f}-{umax:.0f}\t{imin:.0f}-{imax:.0f}")
 PY
