@@ -16,6 +16,7 @@
 
 #include "preprocess/preprocess.h"
 #include "util/text.h"
+#include "visitor/pass_type_syntax.h"
 
 /* Built-in optional types that are already declared in cc_optional.cch */
 static const char* cc__builtin_optional_types[] = {
@@ -48,6 +49,38 @@ static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
     return i;
 }
 
+static int cc__keyword_eq(const char* s, size_t len, const char* kw) {
+    return strlen(kw) == len && strncmp(s, kw, len) == 0;
+}
+
+static int cc__is_leading_type_prefix_keyword(const char* s, size_t len) {
+    return cc__keyword_eq(s, len, "static") ||
+           cc__keyword_eq(s, len, "extern") ||
+           cc__keyword_eq(s, len, "inline") ||
+           cc__keyword_eq(s, len, "__inline") ||
+           cc__keyword_eq(s, len, "__inline__") ||
+           cc__keyword_eq(s, len, "register") ||
+           cc__keyword_eq(s, len, "auto") ||
+           cc__keyword_eq(s, len, "const") ||
+           cc__keyword_eq(s, len, "volatile");
+}
+
+static size_t cc__skip_leading_type_prefix_keywords(const char* s, size_t start, size_t end) {
+    size_t i = start;
+    while (i < end) {
+        size_t kw_start = i;
+        size_t kw_end;
+        while (kw_start < end && (s[kw_start] == ' ' || s[kw_start] == '\t')) kw_start++;
+        kw_end = kw_start;
+        while (kw_end < end && (isalnum((unsigned char)s[kw_end]) || s[kw_end] == '_')) kw_end++;
+        if (kw_end == kw_start) break;
+        if (!cc__is_leading_type_prefix_keyword(s + kw_start, kw_end - kw_start)) break;
+        i = kw_end;
+        while (i < end && (s[i] == ' ' || s[i] == '\t')) i++;
+    }
+    return i;
+}
+
 void cc_lower_state_init(CCLowerState* state) {
     if (state) {
         memset(state, 0, sizeof(*state));
@@ -61,7 +94,8 @@ void cc_lower_state_add_result(CCLowerState* state,
                                 const char* mangled_ok,
                                 const char* mangled_err) {
     if (!state || !ok_type || !err_type || !mangled_ok || !mangled_err) return;
-    if (cc_result_spec_is_core_builtin(mangled_ok, mangled_err)) return;
+    if (cc_result_spec_is_core_builtin(mangled_ok, mangled_err) ||
+        cc_result_spec_is_stdlib_predeclared(mangled_ok, mangled_err)) return;
     (void)cc_result_spec_table_add(&state->result_specs,
                                    ok_type, ok_len, err_type, err_len,
                                    mangled_ok, mangled_err);
@@ -135,7 +169,8 @@ static char* cc_lower_state_emit_parser_result_aliases(const CCLowerState* state
     for (size_t i = 0; i < state->result_specs.count; i++) {
         const CCResultSpec* p = cc_result_spec_table_get(&state->result_specs, i);
         if (!p || !p->mangled_ok[0] || !p->mangled_err[0]) continue;
-        if (cc_result_spec_is_core_builtin(p->mangled_ok, p->mangled_err)) continue;
+        if (cc_result_spec_is_core_builtin(p->mangled_ok, p->mangled_err) ||
+            cc_result_spec_is_stdlib_predeclared(p->mangled_ok, p->mangled_err)) continue;
 
         char decl[512];
         snprintf(decl, sizeof(decl),
@@ -235,6 +270,7 @@ static char* cc__lower_result_types(const char* src, size_t n, CCLowerState* sta
                     size_t ty_start = cc__scan_back_to_type_start(src, ty_end);
                     
                     if (ty_start < ty_end && err_start < err_end) {
+                        ty_start = cc__skip_leading_type_prefix_keywords(src, ty_start, ty_end);
                         size_t ty_len = ty_end - ty_start;
                         size_t err_len = err_end - err_start;
                         
@@ -438,8 +474,11 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     char* buf0 = NULL;
     char* buf_inc = NULL;
     char* buf_types = NULL;
+    char* buf_result_ctors = NULL;
     char* buf2 = NULL;
+    char* buf_result_fields = NULL;
     char* buf3 = NULL;
+    char* buf_unwrap = NULL;
     
     /* Pass 0: Strip raw @comptime blocks so lowered headers are valid C. */
     buf0 = cc__strip_comptime_blocks_header(cur, cur_len);
@@ -470,12 +509,34 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         cur = buf2;
         cur_len = strlen(buf2);
     }
+
+    /* Pass 1a: Once result types are concrete, infer bare constructors using
+       the same shared source-lowering pass used for normal source files. */
+    buf_result_ctors = cc__rewrite_inferred_result_constructors(cur, cur_len);
+    if (buf_result_ctors) {
+        cur = buf_result_ctors;
+        cur_len = strlen(buf_result_ctors);
+    }
+
+    /* Pass 1b: Lower result field sugar using the same shared rewrite as
+       source files so `res.value` / `res.error` survive in header bodies. */
+    buf_result_fields = cc__rewrite_result_field_sugar_text(NULL, cur, cur_len);
+    if (buf_result_fields) {
+        cur = buf_result_fields;
+        cur_len = strlen(buf_result_fields);
+    }
     
     /* Pass 2: Rewrite T? -> CCOptional_T */
     buf3 = cc__lower_optional_types(cur, cur_len, &state);
     if (buf3) {
         cur = buf3;
         cur_len = strlen(buf3);
+    }
+
+    buf_unwrap = cc__rewrite_optional_unwrap_text(NULL, cur, cur_len);
+    if (buf_unwrap) {
+        cur = buf_unwrap;
+        cur_len = strlen(buf_unwrap);
     }
     
     /* Build final output */
@@ -543,8 +604,11 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf0);
     free(buf_inc);
     free(buf_types);
+    free(buf_result_ctors);
     free(buf2);
+    free(buf_result_fields);
     free(buf3);
+    free(buf_unwrap);
     free(parser_result_aliases);
     cc_result_spec_table_free(&state.result_specs);
     

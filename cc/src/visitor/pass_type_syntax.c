@@ -859,17 +859,48 @@ char* cc__rewrite_result_field_sugar_text(const CCVisitorCtx* ctx, const char* s
                 size_t mlen = mem_end - mem_start;
                 int is_value = (mlen == 5 && memcmp(src + mem_start, "value", 5) == 0);
                 int is_error = (mlen == 5 && memcmp(src + mem_start, "error", 5) == 0);
-                if (!is_value && !is_error) continue;
+                int is_is_ok = (mlen == 5 && memcmp(src + mem_start, "is_ok", 5) == 0);
+                int is_is_err = (mlen == 6 && memcmp(src + mem_start, "is_err", 6) == 0);
+                int is_unwrap = (mlen == 6 && memcmp(src + mem_start, "unwrap", 6) == 0);
+                int is_unwrap_err = (mlen == 10 && memcmp(src + mem_start, "unwrap_err", 10) == 0);
+                if (!is_value && !is_error && !is_is_ok && !is_is_err &&
+                    !is_unwrap && !is_unwrap_err) continue;
 
-                /* Preserve UFCS method calls like r.value() / r.error().
-                   This pass only owns field sugar (`r.value` / `r.error`). */
                 size_t after_mem = mem_end;
                 while (after_mem < n &&
                        (src[after_mem] == ' ' || src[after_mem] == '\t' ||
                         src[after_mem] == '\n' || src[after_mem] == '\r')) {
                     after_mem++;
                 }
-                if (after_mem < n && src[after_mem] == '(') continue;
+                if (after_mem < n && src[after_mem] == '(') {
+                    size_t args_start = after_mem + 1;
+                    size_t args_end = args_start;
+                    while (args_end < n &&
+                           (src[args_end] == ' ' || src[args_end] == '\t' ||
+                            src[args_end] == '\n' || src[args_end] == '\r')) {
+                        args_end++;
+                    }
+                    if (args_end < n && src[args_end] == ')') {
+                        const char* repl = NULL;
+                        if (is_value || is_unwrap) repl = "cc_value";
+                        else if (is_error || is_unwrap_err) repl = "cc_error";
+                        else if (is_is_ok) repl = "cc_is_ok";
+                        else if (is_is_err) repl = "cc_is_err";
+                        if (repl) {
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, id_start - last_emit);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, repl);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, "(");
+                            cc__sb_append_local(&out, &out_len, &out_cap, src + id_start, id_end - id_start);
+                            cc__sb_append_cstr_local(&out, &out_len, &out_cap, ")");
+                            last_emit = args_end + 1;
+                            changed = 1;
+                            i = args_end + 1;
+                            (void)dot;
+                            continue;
+                        }
+                    }
+                    continue;
+                }
 
                 cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, mem_start - last_emit);
                 cc__sb_append_cstr_local(&out, &out_len, &out_cap, "u.");
@@ -951,7 +982,6 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
             
             /* Check for __CC_RESULT(T, E) pattern */
             if (c == '_' && i + 12 < n && memcmp(src + i, "__CC_RESULT(", 12) == 0) {
-                fprintf(stderr, "[DEBUG] Found __CC_RESULT at pos %zu\n", i);
                 j = i + 12;
                 while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
                 size_t t_start = j;
