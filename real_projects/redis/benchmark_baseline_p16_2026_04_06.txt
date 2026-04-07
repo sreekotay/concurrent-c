@@ -1,0 +1,65 @@
+=== Benchmark Baseline (P=16) ===
+Date: Mon Apr  6 21:07:16 EDT 2026
+Commit: 3bbf4b9 Check in the channel wait and signaling runtime updates.
+Command: REPEATS=5 PIPELINE=16 ./bench_simple.sh
+
+Redis benchmark comparison
+requests=50000 clients=50 pipeline=16 repeats=5 random_keys=50000
+
+== upstream ==
+repeat 1/5
+SET bench:key:__rand_int__ value: 1515151.50 requests per second, p50=0.407 msec
+GET bench:key:__rand_int__: 2272727.25 requests per second, p50=0.263 msec
+INCR bench:ctr:__rand_int__: 2272727.25 requests per second, p50=0.303 msec
+
+repeat 2/5
+SET bench:key:__rand_int__ value: 1851851.75 requests per second, p50=0.383 msec
+GET bench:key:__rand_int__: 2500000.00 requests per second, p50=0.255 msec
+INCR bench:ctr:__rand_int__: 2380952.50 requests per second, p50=0.271 msec
+
+repeat 3/5
+SET bench:key:__rand_int__ value: 2083333.38 requests per second, p50=0.319 msec
+GET bench:key:__rand_int__: 2631579.00 requests per second, p50=0.263 msec
+INCR bench:ctr:__rand_int__: 2500000.00 requests per second, p50=0.271 msec
+
+repeat 4/5
+SET bench:key:__rand_int__ value: 2083333.38 requests per second, p50=0.327 msec
+GET bench:key:__rand_int__: 2631579.00 requests per second, p50=0.255 msec
+INCR bench:ctr:__rand_int__: 2380952.50 requests per second, p50=0.279 msec
+
+repeat 5/5
+SET bench:key:__rand_int__ value: 1923076.88 requests per second, p50=0.335 msec
+GET bench:key:__rand_int__: 2631579.00 requests per second, p50=0.255 msec
+INCR bench:ctr:__rand_int__: 2500000.00 requests per second, p50=0.271 msec
+
+== redis_idiomatic ==
+repeat 1/5
+SET bench:key:__rand_int__ value: 2272727.25 requests per second, p50=0.231 msec
+GET bench:key:__rand_int__: 2631579.00 requests per second, p50=0.231 msec
+INCR bench:ctr:__rand_int__: 2173913.00 requests per second, p50=0.191 msec
+
+repeat 2/5
+SET bench:key:__rand_int__ value: 2380952.50 requests per second, p50=0.199 msec
+GET bench:key:__rand_int__: 2500000.00 requests per second, p50=0.199 msec
+INCR bench:ctr:__rand_int__: 2631579.00 requests per second, p50=0.143 msec
+
+repeat 3/5
+SET bench:key:__rand_int__ value: 2173913.00 requests per second, p50=0.263 msec
+GET bench:key:__rand_int__: 2380952.50 requests per second, p50=0.287 msec
+INCR bench:ctr:__rand_int__: 2173913.00 requests per second, p50=0.207 msec
+
+repeat 4/5
+SET bench:key:__rand_int__ value: 2173913.00 requests per second, p50=0.231 msec
+GET bench:key:__rand_int__: 2500000.00 requests per second, p50=0.295 msec
+INCR bench:ctr:__rand_int__: 2380952.50 requests per second, p50=0.199 msec
+
+repeat 5/5
+SET bench:key:__rand_int__ value: 1666666.75 requests per second, p50=0.295 msec
+GET bench:key:__rand_int__: 2631579.00 requests per second, p50=0.199 msec
+INCR bench:ctr:__rand_int__: 2380952.50 requests per second, p50=0.223 msec
+
+== Median Summary (clients=50 pipeline=16 repeats=5) ==
+command	upstream_median_rps	idiomatic_median_rps	idiomatic/upstream	upstream_median_p50_ms	idiomatic_median_p50_ms	upstream_rps_range	idiomatic_rps_range
+SET	1923076.88	2173913.00	1.130x	0.335	0.231	1515152-2083333	1666667-2380952
+GET	2631579.00	2500000.00	0.950x	0.255	0.231	2272727-2631579	2380952-2631579
+INCR	2380952.50	2380952.50	1.000x	0.271	0.199	2272727-2500000	2173913-2631579

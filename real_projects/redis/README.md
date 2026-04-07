@@ -16,7 +16,8 @@ covering fewer features.
 - `redis_tutorial.ccs` is the smallest faithful version of the final model
 - `redis_idiomatic.ccs` is the compact reference implementation
 - `redis_cc/redis_cc.ccs` is the multi-file production port
-- `bench_simple.sh` and `bench_redis.sh` will hold phased benchmark harnesses
+- `bench_simple.sh` is the current side-by-side harness for upstream vs `redis_idiomatic`
+- `bench_redis.sh` is reserved for a broader phased suite
 
 ## Upstream Redis Policy
 
@@ -53,6 +54,20 @@ The main scaling knob is shard count, not a different programming model.
 make upstream
 make redis_tutorial redis_idiomatic redis_cc
 ```
+
+Quick comparison runs:
+
+```bash
+cd real_projects/redis
+./bench_simple.sh
+PIPELINE=16 ./bench_simple.sh
+CLIENTS=1 PIPELINE=1 ./bench_simple.sh
+REPEATS=5 PIPELINE=16 ./bench_simple.sh
+```
+
+`CLIENTS` controls connection concurrency (`redis-benchmark -c`).
+`PIPELINE` controls pipeline depth (`redis-benchmark -P`).
+`REPEATS` runs the suite multiple times and reports median/range summaries.
 
 For now, the `.ccs` files are scaffolds that pin down the architectural model
 and build shape. The first real implementation step is `redis_tutorial.ccs`.
