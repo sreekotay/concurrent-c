@@ -126,6 +126,42 @@ char* cc_lower_state_emit_decls(const CCLowerState* state) {
     return out;
 }
 
+static char* cc_lower_state_emit_parser_result_aliases(const CCLowerState* state) {
+    if (!state || state->result_specs.count == 0) return NULL;
+
+    char* out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    for (size_t i = 0; i < state->result_specs.count; i++) {
+        const CCResultSpec* p = cc_result_spec_table_get(&state->result_specs, i);
+        if (!p || !p->mangled_ok[0] || !p->mangled_err[0]) continue;
+        if (cc_result_spec_is_core_builtin(p->mangled_ok, p->mangled_err)) continue;
+
+        char decl[512];
+        snprintf(decl, sizeof(decl),
+                 "#ifndef CCResult_%s_%s_DEFINED\n"
+                 "#define CCResult_%s_%s_DEFINED 1\n"
+                 "typedef __CCResultGeneric CCResult_%s_%s;\n"
+                 "#ifndef cc_ok_CCResult_%s_%s\n"
+                 "#define cc_ok_CCResult_%s_%s(...) __cc_result_generic_ok()\n"
+                 "#endif\n"
+                 "#ifndef cc_err_CCResult_%s_%s\n"
+                 "#define cc_err_CCResult_%s_%s(...) __cc_result_generic_err()\n"
+                 "#endif\n"
+                 "#endif\n",
+                 p->mangled_ok, p->mangled_err,
+                 p->mangled_ok, p->mangled_err,
+                 p->mangled_ok, p->mangled_err,
+                 p->mangled_ok, p->mangled_err,
+                 p->mangled_ok, p->mangled_err,
+                 p->mangled_ok, p->mangled_err,
+                 p->mangled_ok, p->mangled_err);
+        cc_sb_append_cstr(&out, &out_len, &out_cap, decl);
+    }
+
+    return out;
+}
+
 /*
  * Rewrite T!>(E) syntax to CCResult_T_E and collect type pairs.
  */
@@ -445,6 +481,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     /* Build final output */
     char* out = NULL;
     size_t out_len = 0, out_cap = 0;
+    char* parser_result_aliases = cc_lower_state_emit_parser_result_aliases(&state);
     
     /* Emit auto-generated type declarations at the end of the file 
        (before any closing #endif for the include guard) */
@@ -458,10 +495,15 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
             last_endif = p;
             p++;
         }
-        
+
         if (last_endif) {
             /* Insert declarations before the final #endif */
             size_t insert_pos = (size_t)(last_endif - cur);
+            if (parser_result_aliases && parser_result_aliases[0]) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "#ifdef CC_PARSER_MODE\n");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, parser_result_aliases);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "#endif\n");
+            }
             cc_sb_append(&out, &out_len, &out_cap, cur, insert_pos);
             cc_sb_append_cstr(&out, &out_len, &out_cap, "\n/* --- CC auto-generated type declarations --- */\n");
             cc_sb_append_cstr(&out, &out_len, &out_cap, "#ifndef CC_PARSER_MODE\n");
@@ -471,6 +513,11 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
             cc_sb_append(&out, &out_len, &out_cap, last_endif, cur_len - insert_pos);
         } else {
             /* No include guard found - append at end */
+            if (parser_result_aliases && parser_result_aliases[0]) {
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "#ifdef CC_PARSER_MODE\n");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, parser_result_aliases);
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "#endif\n");
+            }
             cc_sb_append(&out, &out_len, &out_cap, cur, cur_len);
             cc_sb_append_cstr(&out, &out_len, &out_cap, "\n/* --- CC auto-generated type declarations --- */\n");
             cc_sb_append_cstr(&out, &out_len, &out_cap, "#ifndef CC_PARSER_MODE\n");
@@ -481,8 +528,15 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
         free(decls);
     } else if (cur != input) {
         /* No declarations to add, but we did rewrites */
-        out = strdup(cur);
-        out_len = cur_len;
+        if (parser_result_aliases && parser_result_aliases[0]) {
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "#ifdef CC_PARSER_MODE\n");
+            cc_sb_append_cstr(&out, &out_len, &out_cap, parser_result_aliases);
+            cc_sb_append_cstr(&out, &out_len, &out_cap, "#endif\n");
+            cc_sb_append(&out, &out_len, &out_cap, cur, cur_len);
+        } else {
+            out = strdup(cur);
+            out_len = cur_len;
+        }
     }
     
     /* Cleanup */
@@ -491,6 +545,7 @@ char* cc_lower_header_string(const char* input, size_t input_len, const char* in
     free(buf_types);
     free(buf2);
     free(buf3);
+    free(parser_result_aliases);
     cc_result_spec_table_free(&state.result_specs);
     
     return out;
