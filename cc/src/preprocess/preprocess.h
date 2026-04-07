@@ -38,10 +38,10 @@ char* cc_preprocess_include_expanded(const char* input_path);
 // Returns malloc'd string on success, NULL on error. Caller must free().
 char* cc_preprocess_comptime_source(const char* input_path);
 
-// Rewrite quoted local .cch includes to ephemeral lowered .h files so parser
-// and final host C compilation do not see raw project headers with CC-only
-// syntax such as @comptime blocks. Returns malloc'd string on success or NULL
-// when no rewrite was needed. Caller must free().
+// Rewrite quoted local .cch includes to stable lowered .h files under
+// out/include/ so parser and final host C compilation do not see raw project
+// headers with CC-only syntax such as @comptime blocks. Returns malloc'd
+// string on success or NULL when no rewrite was needed. Caller must free().
 char* cc_rewrite_local_cch_includes_to_lowered_headers(const char* src,
                                                        size_t input_len,
                                                        const char* input_path);
@@ -55,7 +55,7 @@ char* cc_rewrite_header_type_syntax_shared(const char* src,
                                            size_t input_len,
                                            const char* input_path);
 
-// Simple preprocessing for cccn: only adds #line directive, no CC syntax rewrites.
+// Simple preprocessing for the experimental AST/codegen path: only adds #line directive, no CC syntax rewrites.
 // All CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.
 // Returns malloc'd string on success, NULL on error. Caller must free().
 char* cc_preprocess_simple(const char* input, size_t input_len, const char* input_path);

@@ -1,10 +1,12 @@
 #include "preprocess.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdarg.h>
 
@@ -6797,7 +6799,6 @@ typedef struct {
 static CCLoweredLocalHeader* g_lowered_local_headers = NULL;
 static size_t g_lowered_local_header_count = 0;
 static size_t g_lowered_local_header_cap = 0;
-static char g_lowered_local_header_root[PATH_MAX];
 
 static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     if (g_lowered_local_header_cap >= needed) return 0;
@@ -6811,10 +6812,27 @@ static int cc__ensure_lowered_local_header_capacity(size_t needed) {
     return 0;
 }
 
-static int cc__ensure_lowered_local_header_root(void) {
-    if (g_lowered_local_header_root[0]) return 0;
-    strcpy(g_lowered_local_header_root, "/tmp/cc_local_headers_XXXXXX");
-    return mkdtemp(g_lowered_local_header_root) ? 0 : -1;
+static int cc__mkpath_local(const char* path) {
+    char* p = NULL;
+    char* sep = NULL;
+    if (!path || !path[0]) return -1;
+    p = strdup(path);
+    if (!p) return -1;
+    sep = p;
+    while ((sep = strchr(sep + 1, '/')) != NULL) {
+        *sep = '\0';
+        if (mkdir(p, 0755) < 0 && errno != EEXIST) {
+            free(p);
+            return -1;
+        }
+        *sep = '/';
+    }
+    if (mkdir(p, 0755) < 0 && errno != EEXIST) {
+        free(p);
+        return -1;
+    }
+    free(p);
+    return 0;
 }
 
 static int cc__dirname_local(const char* path, char* out, size_t out_sz) {
@@ -6869,6 +6887,30 @@ static int cc__write_file_text(const char* path, const char* buf, size_t len) {
     return 0;
 }
 
+static int cc__build_stable_lowered_header_path(const char* abs_src,
+                                                char* out_path,
+                                                size_t out_path_sz) {
+    char repo_root[PATH_MAX];
+    size_t repo_len;
+    const char* rel = NULL;
+    size_t rel_len;
+    if (!abs_src || !out_path || out_path_sz == 0) return -1;
+    repo_root[0] = '\0';
+    if (!cc_path_find_repo_root(abs_src, repo_root, sizeof(repo_root))) return -1;
+    repo_len = strlen(repo_root);
+    if (strncmp(abs_src, repo_root, repo_len) != 0) return -1;
+    rel = abs_src + repo_len;
+    if (*rel == '/') rel++;
+    if (!*rel) return -1;
+    rel_len = strlen(rel);
+    if (snprintf(out_path, out_path_sz, "%s/out/include/%s", repo_root, rel) >= (int)out_path_sz) {
+        return -1;
+    }
+    if (rel_len < 4 || strcmp(rel + rel_len - 4, ".cch") != 0) return -1;
+    strcpy(out_path + strlen(out_path) - 4, ".h");
+    return 0;
+}
+
 static int cc__match_local_include_line(const char* line,
                                         size_t len,
                                         size_t* out_path_s,
@@ -6893,7 +6935,8 @@ static int cc__match_local_include_line(const char* line,
 static char* cc__rewrite_local_cch_includes_impl(const char* src, size_t n, const char* current_path);
 static const char* cc__lower_local_cch_header(const char* source_path) {
     char abs_src[PATH_MAX];
-    char tmp_path[PATH_MAX];
+    char lowered_path[PATH_MAX];
+    char lowered_dir[PATH_MAX];
     char* input = NULL;
     char* rewritten = NULL;
     char* lowered = NULL;
@@ -6902,18 +6945,14 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
     if (!source_path || !source_path[0]) return NULL;
     if (!realpath(source_path, abs_src)) return NULL;
     for (size_t i = 0; i < g_lowered_local_header_count; ++i) {
-        if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0) {
+        if (strcmp(g_lowered_local_headers[i].source_path, abs_src) == 0 &&
+            access(g_lowered_local_headers[i].lowered_path, F_OK) == 0) {
             return g_lowered_local_headers[i].lowered_path;
         }
     }
-    if (cc__ensure_lowered_local_header_root() != 0) return NULL;
-    if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0) return NULL;
-    lowered_idx = g_lowered_local_header_count++;
-    memset(&g_lowered_local_headers[lowered_idx], 0, sizeof(g_lowered_local_headers[lowered_idx]));
-    g_lowered_local_headers[lowered_idx].source_path = strdup(abs_src);
-    snprintf(tmp_path, sizeof(tmp_path), "%s/h_%zu.h", g_lowered_local_header_root, lowered_idx);
-    g_lowered_local_headers[lowered_idx].lowered_path = strdup(tmp_path);
-    if (!g_lowered_local_headers[lowered_idx].source_path || !g_lowered_local_headers[lowered_idx].lowered_path) return NULL;
+    if (cc__build_stable_lowered_header_path(abs_src, lowered_path, sizeof(lowered_path)) != 0) return NULL;
+    if (cc__dirname_local(lowered_path, lowered_dir, sizeof(lowered_dir)) != 0) return NULL;
+    if (cc__mkpath_local(lowered_dir) != 0) return NULL;
     if (cc__read_file_text(abs_src, &input, &input_len) != 0) return NULL;
     rewritten = cc__rewrite_local_cch_includes_impl(input, input_len, abs_src);
     lowered = cc_lower_header_string(rewritten ? rewritten : input,
@@ -6921,7 +6960,13 @@ static const char* cc__lower_local_cch_header(const char* source_path) {
                                      abs_src);
     if (!lowered) lowered = strdup(rewritten ? rewritten : input);
     if (!lowered) return NULL;
-    if (cc__write_file_text(tmp_path, lowered, strlen(lowered)) != 0) return NULL;
+    if (cc__write_file_text(lowered_path, lowered, strlen(lowered)) != 0) return NULL;
+    if (cc__ensure_lowered_local_header_capacity(g_lowered_local_header_count + 1) != 0) return NULL;
+    lowered_idx = g_lowered_local_header_count++;
+    memset(&g_lowered_local_headers[lowered_idx], 0, sizeof(g_lowered_local_headers[lowered_idx]));
+    g_lowered_local_headers[lowered_idx].source_path = strdup(abs_src);
+    g_lowered_local_headers[lowered_idx].lowered_path = strdup(lowered_path);
+    if (!g_lowered_local_headers[lowered_idx].source_path || !g_lowered_local_headers[lowered_idx].lowered_path) return NULL;
     free(input);
     free(rewritten);
     free(lowered);
@@ -7276,7 +7321,7 @@ static const char* cc__parse_stubs =
     "#endif\n"
     /* Result constructors - variadic macros to accept any type.
        We use a comma expression to evaluate the arg (so it appears in AST) then return generic.
-       cccn handles the real types in codegen. */
+      the experimental AST/codegen path handles the real types later. */
     "#ifndef __CC_RESULT_CTORS_DEFINED\n"
     "#define __CC_RESULT_CTORS_DEFINED\n"
     "#define cc_ok(v) __cc_result_generic_ok()\n"
@@ -7300,7 +7345,7 @@ static const char* cc__parse_stubs =
     "#define cc_unwrap_opt(opt) ((opt).u.value)\n"
     "#endif\n";
 
-// Simple preprocessing for cccn: rewrites type syntax and adds parse-time stubs.
+// Simple preprocessing for the experimental AST/codegen path: rewrites type syntax and adds parse-time stubs.
 // Type syntax (T?, T!>(E), T[~N>], Vec<T>) is rewritten to C-compatible names.
 // Parse-time stubs provide placeholder definitions.
 // Other CC syntax (try, await, closures, etc.) is handled by TCC hooks and AST passes.

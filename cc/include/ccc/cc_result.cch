@@ -286,11 +286,11 @@ typedef struct __CCResultGeneric {
 #undef CC_DECL_RESULT_SPEC
 #define CC_DECL_RESULT_SPEC(name, OkType, ErrType)                     \
     typedef __CCResultGeneric name;                                    \
-    static inline name cc_ok_##name(OkType v) {                        \
+    static inline name (cc_ok_##name)(OkType v) {                      \
         (void)v;                                                       \
         return __cc_result_generic_ok();                               \
     }                                                                  \
-    static inline name cc_err_##name(ErrType e) {                      \
+    static inline name (cc_err_##name)(ErrType e) {                    \
         (void)e;                                                       \
         return __cc_result_generic_err();                              \
     }                                                                  \
@@ -402,8 +402,24 @@ typedef __CCResultGeneric CCResult_CCDirEntry_CCIoError;
 #define cc_err_CCResult_int_CCError(e) __cc_result_generic_err()
 #define cc_ok_CCResult_bool_CCError(v) __cc_result_generic_ok()
 #define cc_err_CCResult_bool_CCError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_size_t_CCError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_size_t_CCError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_voidptr_CCError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_voidptr_CCError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_charptr_CCError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_charptr_CCError(e) __cc_result_generic_err()
 #define cc_ok_CCResult_void_CCError() __cc_result_generic_ok()
 #define cc_err_CCResult_void_CCError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_int_CCIoError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_int_CCIoError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_bool_CCIoError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_bool_CCIoError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_size_t_CCIoError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_size_t_CCIoError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_CCDirIterptr_CCIoError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_CCDirIterptr_CCIoError(e) __cc_result_generic_err()
+#define cc_ok_CCResult_CCDirEntry_CCIoError(v) __cc_result_generic_ok()
+#define cc_err_CCResult_CCDirEntry_CCIoError(e) __cc_result_generic_err()
 
 #else /* !CC_PARSER_MODE - real compilation */
 
