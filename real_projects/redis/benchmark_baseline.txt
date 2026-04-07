@@ -1,0 +1,70 @@
+=== Benchmark Baseline ===
+Date: Mon Apr  6 11:22:28 EDT 2026
+Commit: b459783 Rename the std command module to exec and keep command UFCS calls parseable.
+
+--- Run 1 ---
+
+redis_idiomatic (port 6381):
+  P=1:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=205932.0 (overall: 205932.0) avg_msec=0.147 (overall: 0.147)                                                                      SET: 213219.61 requests per second, p50=0.127 msec
+ GET: rps=26872.0 (overall: 223933.3) avg_msec=0.130 (overall: 0.130)                                                                     GET: rps=220852.0 (overall: 221182.1) avg_msec=0.124 (overall: 0.125)                                                                      GET: 220750.55 requests per second, p50=0.127 msec
+  P=16:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=2896448.0 (overall: 2896448.0) avg_msec=0.223 (overall: 0.223)                                                                        SET: 2898550.75 requests per second, p50=0.223 msec
+ GET: rps=1890560.0 (overall: 3069091.0) avg_msec=0.151 (overall: 0.151)                                                                        GET: 2777777.75 requests per second, p50=0.151 msec
+  INCR P=16:
+ INCR: rps=0.0 (overall: inf) avg_msec=0.116 (overall: 0.116)                                                             INCR: rps=2600512.0 (overall: 2601024.0) avg_msec=0.266 (overall: 0.266)                                                                         INCR: 2617801.00 requests per second, p50=0.271 msec
+
+upstream Redis (port 6382):
+  P=1:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=209900.4 (overall: 209900.4) avg_msec=0.126 (overall: 0.126)                                                                      SET: 210084.03 requests per second, p50=0.127 msec
+ GET: rps=20876.0 (overall: 217458.3) avg_msec=0.128 (overall: 0.128)                                                                     GET: rps=216368.0 (overall: 216463.5) avg_msec=0.122 (overall: 0.122)                                                                      GET: 216919.73 requests per second, p50=0.127 msec
+  P=16:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=2380224.0 (overall: 2380224.0) avg_msec=0.282 (overall: 0.282)                                                                        SET: 2380952.50 requests per second, p50=0.279 msec
+ GET: rps=912768.0 (overall: 2852400.0) avg_msec=0.227 (overall: 0.227)                                                                       GET: rps=2841984.0 (overall: 2844509.0) avg_msec=0.229 (overall: 0.228)                                                                        GET: 2840909.00 requests per second, p50=0.223 msec
+  INCR P=16:
+ INCR: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                         INCR: rps=2692928.0 (overall: 2692928.0) avg_msec=0.247 (overall: 0.247)                                                                         INCR: 2695417.75 requests per second, p50=0.247 msec
+
+--- Run 2 ---
+
+redis_idiomatic (port 6381):
+  P=1:
+ SET: rps=0.0 (overall: 20000.0) avg_msec=0.134 (overall: 0.134)                                                                SET: rps=221756.0 (overall: 220952.2) avg_msec=0.124 (overall: 0.124)                                                                      SET: 221238.94 requests per second, p50=0.127 msec
+ GET: rps=42756.0 (overall: 218142.9) avg_msec=0.131 (overall: 0.131)                                                                     GET: rps=221332.0 (overall: 220809.4) avg_msec=0.124 (overall: 0.125)                                                                      GET: 221238.94 requests per second, p50=0.127 msec
+  P=16:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=2861120.0 (overall: 2861120.0) avg_msec=0.231 (overall: 0.231)                                                                        SET: 2865329.50 requests per second, p50=0.223 msec
+ GET: rps=1860800.0 (overall: 3101333.2) avg_msec=0.150 (overall: 0.150)                                                                        GET: 3086419.75 requests per second, p50=0.151 msec
+  INCR P=16:
+ INCR: rps=0.0 (overall: inf) avg_msec=0.124 (overall: 0.124)                                                             INCR: rps=2638656.0 (overall: 2638784.0) avg_msec=0.261 (overall: 0.261)                                                                         INCR: 2624671.75 requests per second, p50=0.279 msec
+
+upstream Redis (port 6382):
+  P=1:
+ SET: rps=0.0 (overall: 0.0) avg_msec=nan (overall: nan)                                                        SET: rps=216584.0 (overall: 215721.1) avg_msec=0.122 (overall: 0.122)                                                                      SET: 215517.25 requests per second, p50=0.127 msec
+ GET: rps=32356.0 (overall: 218621.6) avg_msec=0.122 (overall: 0.122)                                                                     GET: rps=218124.0 (overall: 218188.2) avg_msec=0.120 (overall: 0.121)                                                                      GET: 217864.92 requests per second, p50=0.119 msec
+  P=16:
+ SET: rps=0.0 (overall: inf) avg_msec=0.129 (overall: 0.129)                                                            SET: rps=2385152.0 (overall: 2385472.0) avg_msec=0.281 (overall: 0.281)                                                                        SET: 2375297.00 requests per second, p50=0.279 msec
+ GET: rps=898880.0 (overall: 2881025.5) avg_msec=0.229 (overall: 0.229)                                                                       GET: rps=2836608.0 (overall: 2847170.8) avg_msec=0.229 (overall: 0.229)                                                                        GET: 2840909.00 requests per second, p50=0.223 msec
+  INCR P=16:
+ INCR: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                         INCR: rps=2704832.0 (overall: 2704832.0) avg_msec=0.243 (overall: 0.243)                                                                         INCR: 2702702.75 requests per second, p50=0.239 msec
+
+--- Run 3 ---
+
+redis_idiomatic (port 6381):
+  P=1:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=220520.0 (overall: 220520.0) avg_msec=0.125 (overall: 0.125)                                                                      SET: 220264.31 requests per second, p50=0.127 msec
+ GET: rps=39972.0 (overall: 222066.7) avg_msec=0.127 (overall: 0.127)                                                                     GET: rps=219139.5 (overall: 219584.5) avg_msec=0.125 (overall: 0.125)                                                                      GET: 219780.22 requests per second, p50=0.127 msec
+  P=16:
+ SET: rps=0.0 (overall: inf) avg_msec=0.097 (overall: 0.097)                                                            SET: rps=2864684.0 (overall: 2865132.0) avg_msec=0.230 (overall: 0.230)                                                                        SET: 2857143.00 requests per second, p50=0.231 msec
+ GET: rps=1800064.0 (overall: 3000106.5) avg_msec=0.154 (overall: 0.154)                                                                        GET: 3012048.25 requests per second, p50=0.151 msec
+  INCR P=16:
+ INCR: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                         INCR: rps=2621184.0 (overall: 2621184.0) avg_msec=0.256 (overall: 0.256)                                                                         INCR: rps=1373259.0 (overall: 1995976.1) avg_msec=0.257 (overall: 0.256)                                                                         INCR: rps=0.0 (overall: 1331536.6) avg_msec=nan (overall: 0.256)                                                                 INCR: rps=0.0 (overall: 998984.9) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 799347.7) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 666211.8) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 571093.1) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 499742.2) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 444239.9) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 399833.7) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 363498.4) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 333216.9) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 307592.8) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 285628.1) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 266591.3) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 249933.5) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 235235.0) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 222169.3) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 210478.6) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 199956.8) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 190400.6) avg_msec=nan (overall: 0.256)                                                                INCR: rps=0.0 (overall: 181749.2) avg_msec=nan (overall: 0.256)                                                                INCR: 174125.02 requests per second, p50=0.263 msec
+
+upstream Redis (port 6382):
+  P=1:
+ SET: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                        SET: rps=203596.0 (overall: 203596.0) avg_msec=0.142 (overall: 0.142)                                                                      SET: 210084.03 requests per second, p50=0.127 msec
+ GET: rps=20968.1 (overall: 219291.7) avg_msec=0.125 (overall: 0.125)                                                                     GET: rps=218688.0 (overall: 218740.9) avg_msec=0.120 (overall: 0.121)                                                                      GET: 218818.39 requests per second, p50=0.119 msec
+  P=16:
+ SET: rps=0.0 (overall: 0.0) avg_msec=nan (overall: nan)                                                        SET: rps=2370048.0 (overall: 2360605.8) avg_msec=0.283 (overall: 0.283)                                                                        SET: 2364066.25 requests per second, p50=0.287 msec
+ GET: rps=876416.0 (overall: 2845506.5) avg_msec=0.228 (overall: 0.228)                                                                       GET: rps=2841984.0 (overall: 2842813.5) avg_msec=0.229 (overall: 0.229)                                                                        GET: 2849002.75 requests per second, p50=0.223 msec
+  INCR P=16:
+ INCR: rps=0.0 (overall: nan) avg_msec=nan (overall: nan)                                                         INCR: rps=2710464.0 (overall: 2710464.0) avg_msec=0.245 (overall: 0.245)                                                                         INCR: 2702702.75 requests per second, p50=0.247 msec
+

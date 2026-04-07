@@ -216,7 +216,7 @@ cc/src/cccn/
 
 ### Phase 1: Foundation ✓
 - [x] Directory structure (`cc/src/cccn/`)
-- [x] Makefile builds both `ccc` and `cccn`
+- [x] Makefile can build both `ccc` and `cccn`
 - [x] Define CCNNode AST structures (`ast/ast.h`, `ast/ast.c`)
 - [x] Basic codegen skeleton (`codegen/codegen.c`)
 

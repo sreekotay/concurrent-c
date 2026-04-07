@@ -1,0 +1,173 @@
+#include <ccc/cc_channel.cch>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include "redis_local_ready_queue.h"
+#include "redis_cc/redis_cc.cch"
+
+#define BENCH_DEPTH 16
+#define BENCH_ITEMS 4000000
+
+typedef struct {
+    CCLocalReadyQueue* q;
+    RedisReply* storage;
+    _Atomic uint64_t produced;
+    _Atomic uint64_t consumed;
+} LocalCtx;
+
+typedef struct {
+    CCChan* ch;
+    RedisReply* replies;
+    _Atomic uint64_t produced;
+    _Atomic uint64_t consumed;
+} ChanCtx;
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void bench_abort(const char* msg) {
+    fprintf(stderr, "reply_path_threaded_bench: %s\n", msg);
+    exit(1);
+}
+
+static void reply_init_inline(RedisReply* reply, uint64_t seq) {
+    memset(reply, 0, sizeof(*reply));
+    reply->conn_id = seq;
+    reply->request_id = seq;
+    reply->kind = REDIS_REPLY_RAW;
+    reply->data_inline = 1;
+    int len = snprintf(reply->inline_buf, sizeof(reply->inline_buf),
+                       "$5\r\n%05llu\r\n",
+                       (unsigned long long)(seq % 100000ull));
+    if (len < 0 || (size_t)len >= sizeof(reply->inline_buf)) {
+        bench_abort("failed to build inline reply");
+    }
+    reply->data.ptr = reply->inline_buf;
+    reply->data.len = (size_t)len;
+}
+
+static void reply_rebase_inline_ptr(RedisReply* reply) {
+    if (!reply || !reply->data_inline) return;
+    reply->data.ptr = reply->inline_buf;
+}
+
+static void* local_producer(void* arg) {
+    LocalCtx* ctx = (LocalCtx*)arg;
+    for (uint64_t i = 0; i < BENCH_ITEMS; ++i) {
+        reply_init_inline(&ctx->storage[i % BENCH_DEPTH], i);
+        int became_ready = 0;
+        while (!cc__local_ready_queue_push(ctx->q, &ctx->storage[i % BENCH_DEPTH], &became_ready)) {
+        }
+        atomic_store_explicit(&ctx->produced, i + 1, memory_order_release);
+    }
+    return NULL;
+}
+
+static void* local_consumer(void* arg) {
+    LocalCtx* ctx = (LocalCtx*)arg;
+    RedisReply reply = {0};
+    uint64_t seen = 0;
+    while (seen < BENCH_ITEMS) {
+        if (!cc_local_ready_queue_try_pop(ctx->q, &reply)) {
+            continue;
+        }
+        reply_rebase_inline_ptr(&reply);
+        if (reply.data.ptr != reply.inline_buf) bench_abort("local threaded rebase failed");
+        seen++;
+        atomic_store_explicit(&ctx->consumed, seen, memory_order_release);
+        if (seen == atomic_load_explicit(&ctx->produced, memory_order_acquire)) {
+            (void)cc_local_ready_queue_continue_drain(ctx->q);
+        }
+    }
+    return NULL;
+}
+
+static void* chan_producer(void* arg) {
+    ChanCtx* ctx = (ChanCtx*)arg;
+    for (uint64_t i = 0; i < BENCH_ITEMS; ++i) {
+        reply_init_inline(&ctx->replies[i % BENCH_DEPTH], i);
+        while (cc_chan_try_send(ctx->ch, &ctx->replies[i % BENCH_DEPTH], sizeof(RedisReply)) != 0) {
+        }
+        atomic_store_explicit(&ctx->produced, i + 1, memory_order_release);
+    }
+    return NULL;
+}
+
+static void* chan_consumer(void* arg) {
+    ChanCtx* ctx = (ChanCtx*)arg;
+    uint64_t seen = 0;
+    while (seen < BENCH_ITEMS) {
+        RedisReply reply = {0};
+        if (cc_chan_try_recv(ctx->ch, &reply, sizeof(reply)) != 0) continue;
+        reply_rebase_inline_ptr(&reply);
+        if (reply.data.ptr != reply.inline_buf) bench_abort("chan threaded value rebase failed");
+        seen++;
+        atomic_store_explicit(&ctx->consumed, seen, memory_order_release);
+    }
+    return NULL;
+}
+
+static double ns_per_item(uint64_t elapsed_ns) {
+    return (double)elapsed_ns / (double)BENCH_ITEMS;
+}
+
+static double million_items_per_sec(uint64_t elapsed_ns) {
+    double seconds = (double)elapsed_ns / 1000000000.0;
+    return ((double)BENCH_ITEMS / seconds) / 1000000.0;
+}
+
+static uint64_t run_local_threaded(void) {
+    RedisReply storage[BENCH_DEPTH + 1];
+    RedisReply replies[BENCH_DEPTH];
+    CCLocalReadyQueue q;
+    LocalCtx ctx = { .q = &q, .storage = replies };
+    cc_local_ready_queue_init(&q, storage, BENCH_DEPTH + 1, sizeof(storage[0]));
+    pthread_t prod, cons;
+    uint64_t start = now_ns();
+    pthread_create(&prod, NULL, local_producer, &ctx);
+    pthread_create(&cons, NULL, local_consumer, &ctx);
+    pthread_join(prod, NULL);
+    pthread_join(cons, NULL);
+    return now_ns() - start;
+}
+
+static uint64_t run_chan_threaded(void) {
+    CCChan* ch = cc_chan_create(BENCH_DEPTH);
+    RedisReply replies[BENCH_DEPTH];
+    if (!ch) bench_abort("threaded chan create failed");
+    if (cc_chan_init_elem(ch, sizeof(RedisReply)) != 0) {
+        bench_abort("threaded chan init failed");
+    }
+    ChanCtx ctx = { .ch = ch, .replies = replies };
+    pthread_t prod, cons;
+    uint64_t start = now_ns();
+    pthread_create(&prod, NULL, chan_producer, &ctx);
+    pthread_create(&cons, NULL, chan_consumer, &ctx);
+    pthread_join(prod, NULL);
+    pthread_join(cons, NULL);
+    cc_chan_free(ch);
+    return now_ns() - start;
+}
+
+int main(void) {
+    uint64_t local_ns = run_local_threaded();
+    uint64_t chan_value_ns = run_chan_threaded();
+
+    printf("# Reply Path Threaded Benchmark\n\n");
+    printf("- items: `%d`\n", BENCH_ITEMS);
+    printf("- depth: `%d`\n", BENCH_DEPTH);
+    printf("- reply_size: `%zu`\n\n", sizeof(RedisReply));
+    printf("| Path | ns/item | M items/sec | vs local |\n");
+    printf("|---|---:|---:|---:|\n");
+    printf("| `local_ready_queue<RedisReply>` | %.2f | %.2f | %.3fx |\n",
+           ns_per_item(local_ns), million_items_per_sec(local_ns), 1.0);
+    printf("| `cc_chan<RedisReply>` | %.2f | %.2f | %.3fx |\n",
+           ns_per_item(chan_value_ns), million_items_per_sec(chan_value_ns), (double)chan_value_ns / (double)local_ns);
+    return 0;
+}
