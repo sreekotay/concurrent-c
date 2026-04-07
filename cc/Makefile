@@ -91,6 +91,7 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/preprocess/type_registry.c \
 	src/result_spec.c \
 	src/comptime/symbols.c \
+	src/visitor/pass_type_syntax.c \
 	src/util/io.c \
 	src/util/path.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
