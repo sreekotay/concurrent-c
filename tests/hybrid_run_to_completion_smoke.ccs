@@ -1,0 +1,40 @@
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <ccc/cc_nursery.cch>
+
+static cc_atomic_int g_sum = 0;
+
+static void* add_value(void* arg) {
+    int v = (int)(intptr_t)arg;
+    cc_atomic_fetch_add(&g_sum, v);
+    return (void*)(intptr_t)(v * 2);
+}
+
+int main(void) {
+    cc_sched_set_num_workers(4);
+    cc_atomic_store(&g_sum, 0);
+
+    CCTask t1 = cc_fiber_spawn_task_v2(add_value, (void*)(intptr_t)7);
+    CCTask t2 = cc_fiber_spawn_task_v2(add_value, (void*)(intptr_t)11);
+
+    int r1 = (int)cc_block_on_intptr(t1);
+    int r2 = (int)cc_block_on_intptr(t2);
+    if (r1 != 14 || r2 != 22) return 10;
+    if (cc_atomic_load(&g_sum) != 18) return 11;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 20;
+        if (n->spawnhybrid(() => {
+                cc_atomic_fetch_add(&g_sum, 1);
+            }) != 0) return 21;
+        if (n->spawnhybrid(() => {
+                cc_atomic_fetch_add(&g_sum, 2);
+            }) != 0) return 22;
+        if (n->spawnhybrid(() => {
+                cc_atomic_fetch_add(&g_sum, 3);
+            }) != 0) return 23;
+    }
+
+    return cc_atomic_load(&g_sum) == 24 ? 0 : 24;
+}

@@ -20,6 +20,7 @@
 
 #define MINICORO_IMPL
 #include "minicoro.h"
+#include "fiber_internal.h"
 
 #ifndef CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL
 #define CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL (1u << 0)
@@ -141,6 +142,7 @@ static inline uint64_t rdtsc(void) {
 static int g_timing_enabled = -1;  /* -1 = not checked, 0 = disabled, 1 = enabled */
 static _Atomic uint64_t g_cc_fiber_unpark_calls = 0;
 static _Atomic uint64_t g_cc_fiber_unpark_enqueues = 0;
+static _Atomic uint64_t g_cc_fiber_unpark_by_reason[CC_FIBER_UNPARK_REASON_COUNT] = {0};
 static _Atomic uint64_t g_cc_join_park_joins = 0;
 static _Atomic uint64_t g_cc_join_park_loops = 0;
 static _Atomic uint64_t g_cc_join_help_attempts = 0;  /* help-first steal attempts */
@@ -148,6 +150,23 @@ static _Atomic uint64_t g_cc_join_help_hits = 0;      /* help-first steal succes
 static _Atomic size_t g_total_timed_parked = 0;
 static _Atomic size_t g_deadlock_suppressed_timed_parked = 0;
 static _Atomic int g_cc_join_help_mode = -1;          /* -1 unknown, 0 off, 1 on */
+
+static const char* cc__fiber_unpark_reason_name(cc__fiber_unpark_reason reason) {
+    switch (reason) {
+        case CC_FIBER_UNPARK_REASON_GENERIC: return "generic";
+        case CC_FIBER_UNPARK_REASON_SCHED_API: return "sched_api";
+        case CC_FIBER_UNPARK_REASON_SOCKET_SIGNAL: return "socket_signal";
+        case CC_FIBER_UNPARK_REASON_IO_KQUEUE_PERSISTENT: return "io_kq_persist";
+        case CC_FIBER_UNPARK_REASON_IO_KQUEUE_ONESHOT: return "io_kq_oneshot";
+        case CC_FIBER_UNPARK_REASON_IO_POLL: return "io_poll";
+        case CC_FIBER_UNPARK_REASON_TASK_DONE: return "task_done";
+        case CC_FIBER_UNPARK_REASON_TIMER: return "timer";
+        case CC_FIBER_UNPARK_REASON_JOIN: return "join";
+        case CC_FIBER_UNPARK_REASON_ENQUEUE: return "enqueue";
+        case CC_FIBER_UNPARK_REASON_COUNT: break;
+    }
+    return "unknown";
+}
 
 void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
     if (out_calls) {
@@ -164,6 +183,17 @@ void cc__fiber_unpark_stats(uint64_t* out_calls, uint64_t* out_enqueues) {
         *out_enqueues = 0;
 #endif
     }
+}
+
+void cc__fiber_dump_unpark_reason_stats(void) {
+    fprintf(stderr, "  wake sources:");
+    for (int i = 0; i < CC_FIBER_UNPARK_REASON_COUNT; ++i) {
+        uint64_t count = atomic_load_explicit(&g_cc_fiber_unpark_by_reason[i], memory_order_relaxed);
+        fprintf(stderr, " %s=%llu",
+                cc__fiber_unpark_reason_name((cc__fiber_unpark_reason)i),
+                (unsigned long long)count);
+    }
+    fprintf(stderr, "\n");
 }
 
 void cc__fiber_join_park_stats(uint64_t* out_joins, uint64_t* out_loops) {
@@ -207,6 +237,25 @@ void cc_fiber_dump_timing(void) {
 /* Forward declarations - defined in nursery.c */
 void cc_nursery_dump_timing(void);
 typedef struct CCNursery CCNursery;
+
+/* Forward declarations - defined in sched_v2.c */
+typedef struct fiber_v2 fiber_v2;
+#define CC_FIBER_V2_TAG_LOCAL ((uintptr_t)1)
+static inline int cc__is_v2_fiber_local(cc__fiber* f) {
+    return ((uintptr_t)f & CC_FIBER_V2_TAG_LOCAL) != 0;
+}
+static inline fiber_v2* cc__untag_v2_fiber_local(cc__fiber* f) {
+    return (fiber_v2*)((uintptr_t)f & ~CC_FIBER_V2_TAG_LOCAL);
+}
+int    sched_v2_in_context(void);
+fiber_v2* sched_v2_current_fiber(void);
+void   sched_v2_park(void);
+void   sched_v2_yield(void);
+void   sched_v2_set_park_reason(const char* reason);
+void   sched_v2_signal(fiber_v2* f);
+uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
+int      sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);
+void*  sched_v2_current_result_buf(size_t size);
 bool cc_nursery_is_cancelled(const CCNursery* n);
 /* cc__tls_current_nursery is the per-OS-thread nursery context pointer.
 * Fibers must restore it on migration; see worker_run_fiber(). */
@@ -1107,6 +1156,7 @@ typedef struct {
 
 static timed_park_queue g_timed_park_queue;
 void cc__fiber_unpark(void* fiber_ptr);
+void cc__fiber_unpark_tagged(void* fiber_ptr, cc__fiber_unpark_reason reason);
 
 static void sq_init(void) {
     pthread_mutex_init(&g_sleep_queue.mu, NULL);
@@ -1238,7 +1288,7 @@ static size_t tpq_drain(void) {
         expired = expired->timer_next;
         f->timer_next = NULL;
         if (atomic_load_explicit(&f->timed_park_fired, memory_order_acquire)) {
-            cc__fiber_unpark(f);
+            cc__fiber_unpark_tagged(f, CC_FIBER_UNPARK_REASON_TIMER);
         }
     }
     return woken;
@@ -3455,7 +3505,7 @@ static inline int worker_run_fiber(runnable_ref ref) {
                 atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
             join_spinlock_unlock(&f->join_lock);
             if (waiter) {
-                cc__fiber_unpark(waiter);
+                cc__fiber_unpark_tagged(waiter, CC_FIBER_UNPARK_REASON_JOIN);
             }
         }
         /* If CAS failed: fiber was already recycled — another incarnation owns it.
@@ -4996,11 +5046,14 @@ void* cc_fiber_get_result_buf(fiber_task* f) {
 * ============================================================================ */
 
 int cc__fiber_in_context(void) {
-    return tls_current_fiber != NULL;
+    return tls_current_fiber != NULL || sched_v2_in_context();
 }
 
 void* cc__fiber_current(void) {
-    return tls_current_fiber;
+    if (tls_current_fiber) return tls_current_fiber;
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) return (void*)((uintptr_t)v2f | 1); /* tagged v2 pointer */
+    return NULL;
 }
 
 /* Get pointer to fiber-local result buffer (48 bytes).
@@ -5013,10 +5066,13 @@ void* cc_task_result_ptr(size_t size) {
         if (size > 48) return NULL;
         return pool_buf;
     }
-    if (!tls_current_fiber || size > sizeof(tls_current_fiber->result_buf)) {
-        return NULL;
+    if (tls_current_fiber && size <= sizeof(tls_current_fiber->result_buf)) {
+        return tls_current_fiber->result_buf;
     }
-    return tls_current_fiber->result_buf;
+    /* V2 hybrid scheduler fiber */
+    void* v2_buf = sched_v2_current_result_buf(size);
+    if (v2_buf) return v2_buf;
+    return NULL;
 }
 
 /* Internal: add fiber to parked list for debugging */
@@ -5169,6 +5225,28 @@ static void worker_commit_park(fiber_task* f, int wid) {
 
 static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
                                 const char* reason, const char* file, int line) {
+    if (sched_v2_in_context()) {
+        (void)reason; (void)file; (void)line;
+        if (flag && atomic_load_explicit(flag, memory_order_acquire) != expected) return 0;
+        if (abs_deadline) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (now.tv_sec > abs_deadline->tv_sec ||
+                (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                return 1; /* timed out */
+            }
+        }
+        sched_v2_park();
+        if (abs_deadline) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (now.tv_sec > abs_deadline->tv_sec ||
+                (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec)) {
+                return 1; /* timed out */
+            }
+        }
+        return 0;
+    }
     fiber_task* f = tls_current_fiber;
     if (!f || !f->coro) return 0;
 
@@ -5257,6 +5335,16 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 
 void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
                                    const char* reason, const char* file, int line) {
+    if (sched_v2_in_context()) {
+        /* V2 path: spin-check then park */
+        (void)file; (void)line;
+        sched_v2_set_park_reason(reason);
+        while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
+            sched_v2_park();
+        }
+        sched_v2_set_park_reason(NULL);
+        return;
+    }
     fiber_task* f = tls_current_fiber;
     if (!f || !f->coro) return;
     f->external_wait = 1;
@@ -5271,10 +5359,18 @@ int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timesp
 }
 
 void cc__fiber_park(void) {
+    if (sched_v2_in_context()) { sched_v2_park(); return; }
     cc__fiber_park_if(NULL, 0, "unknown", NULL, 0);
 }
 
 void cc__fiber_park_reason(const char* reason, const char* file, int line) {
+    if (sched_v2_in_context()) {
+        (void)file; (void)line;
+        sched_v2_set_park_reason(reason);
+        sched_v2_park();
+        sched_v2_set_park_reason(NULL);
+        return;
+    }
     cc__fiber_park_if(NULL, 0, reason, file, line);
 }
 
@@ -5285,6 +5381,7 @@ void cc__fiber_set_park_obj(void* obj) {
 }
 
 void cc__fiber_clear_pending_unpark(void) {
+    if (sched_v2_in_context()) return; /* V2 fibers: CAS-based, no pending_unpark */
     fiber_task* f = tls_current_fiber;
     if (!f) return;
     int old = atomic_exchange_explicit(&f->pending_unpark, 0, memory_order_acq_rel);
@@ -5297,19 +5394,30 @@ void cc__fiber_clear_pending_unpark(void) {
 }
 
 uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr) {
+    if (!fiber_ptr) return 0;
+    if (cc__is_v2_fiber_local((cc__fiber*)fiber_ptr)) {
+        return sched_v2_fiber_publish_wait_ticket(cc__untag_v2_fiber_local((cc__fiber*)fiber_ptr));
+    }
     fiber_task* f = (fiber_task*)fiber_ptr;
-    if (!f) return 0;
     return atomic_fetch_add_explicit(&f->wait_ticket, 1, memory_order_acq_rel) + 1;
 }
 
 int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket) {
+    if (!fiber_ptr) return 0;
+    if (cc__is_v2_fiber_local((cc__fiber*)fiber_ptr)) {
+        return sched_v2_fiber_wait_ticket_matches(cc__untag_v2_fiber_local((cc__fiber*)fiber_ptr), ticket);
+    }
     fiber_task* f = (fiber_task*)fiber_ptr;
-    if (!f) return 0;
     uint64_t cur = atomic_load_explicit(&f->wait_ticket, memory_order_acquire);
     return cur == ticket;
 }
 
-void cc__fiber_unpark(void* fiber_ptr) {
+static void cc__fiber_unpark_impl(void* fiber_ptr) {
+    if (!fiber_ptr) return;
+    if ((uintptr_t)fiber_ptr & 1) {
+        sched_v2_signal((fiber_v2*)((uintptr_t)fiber_ptr & ~(uintptr_t)1));
+        return;
+    }
     fiber_task* f = (fiber_task*)fiber_ptr;
     if (!f) return;
 #if CC_V3_DIAGNOSTICS
@@ -5716,6 +5824,18 @@ queued:
     }
 }
 
+void cc__fiber_unpark_tagged(void* fiber_ptr, cc__fiber_unpark_reason reason) {
+    if ((unsigned)reason >= CC_FIBER_UNPARK_REASON_COUNT) {
+        reason = CC_FIBER_UNPARK_REASON_GENERIC;
+    }
+    atomic_fetch_add_explicit(&g_cc_fiber_unpark_by_reason[reason], 1, memory_order_relaxed);
+    cc__fiber_unpark_impl(fiber_ptr);
+}
+
+void cc__fiber_unpark(void* fiber_ptr) {
+    cc__fiber_unpark_tagged(fiber_ptr, CC_FIBER_UNPARK_REASON_GENERIC);
+}
+
 
 void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags) {
     tls_chan_attr_calls_batch++;
@@ -5736,13 +5856,17 @@ void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags) {
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {
-    cc__fiber_unpark(fiber_ptr);
+    cc__fiber_unpark_tagged(fiber_ptr, CC_FIBER_UNPARK_REASON_ENQUEUE);
 }
 
 /* Cooperative yield: give other fibers a chance to run.
 * Re-enqueues current fiber and switches to scheduler.
 * Used for fairness in producer-consumer patterns. */
 void cc__fiber_yield(void) {
+    if (sched_v2_in_context()) {
+        sched_v2_yield();
+        return;
+    }
     fiber_task* current = tls_current_fiber;
     if (!current || !current->coro) {
         /* Not in fiber context - OS yield */
@@ -5772,6 +5896,10 @@ void cc_yield(void) {
 * Other workers can steal it, and fibers already in the global queue
 * (e.g. a closer fiber) get a fair turn. */
 void cc__fiber_yield_global(void) {
+    if (sched_v2_in_context()) {
+        sched_v2_yield();
+        return;
+    }
     fiber_task* current = tls_current_fiber;
     if (!current || !current->coro) {
         sched_yield();

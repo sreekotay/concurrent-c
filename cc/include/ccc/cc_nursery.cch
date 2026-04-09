@@ -55,6 +55,11 @@ void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeou
 
 // Spawn a task owned by the nursery. Returns 0 on success.
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg);
+// Spawn a task on the V2 hybrid scheduler. This currently means a stackless
+// run-to-completion work item; it may not block, park, or yield mid-execution.
+// Returns 0 on success.
+int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg);
+int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c);
 // Spawn a CCClosure0 (env freed via drop, if provided). Returns 0 on success.
 int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c);
 // Spawn an existing async task under nursery ownership without blocking a worker.
@@ -97,6 +102,9 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
     (void)arg_types;
     if (cc_ufcs_slice_eq_cstr(method, "spawn")) {
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_spawn_closure0");
+    }
+    if (cc_ufcs_slice_eq_cstr(method, "spawnhybrid")) {
+        return cc_ufcs_emit_value_cstr(arena, "cc_nursery_spawnhybrid_closure0");
     }
     if (cc_ufcs_slice_eq_cstr(method, "wait")) {
         return cc_ufcs_emit_value_cstr(arena, "cc_nursery_wait");

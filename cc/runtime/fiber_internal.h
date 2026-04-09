@@ -44,6 +44,21 @@ int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timesp
 void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
                                    const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
+typedef enum {
+    CC_FIBER_UNPARK_REASON_GENERIC = 0,
+    CC_FIBER_UNPARK_REASON_SCHED_API,
+    CC_FIBER_UNPARK_REASON_SOCKET_SIGNAL,
+    CC_FIBER_UNPARK_REASON_IO_KQUEUE_PERSISTENT,
+    CC_FIBER_UNPARK_REASON_IO_KQUEUE_ONESHOT,
+    CC_FIBER_UNPARK_REASON_IO_POLL,
+    CC_FIBER_UNPARK_REASON_TASK_DONE,
+    CC_FIBER_UNPARK_REASON_TIMER,
+    CC_FIBER_UNPARK_REASON_JOIN,
+    CC_FIBER_UNPARK_REASON_ENQUEUE,
+    CC_FIBER_UNPARK_REASON_COUNT
+} cc__fiber_unpark_reason;
+void cc__fiber_unpark_tagged(void* fiber, cc__fiber_unpark_reason reason);
+void cc__fiber_dump_unpark_reason_stats(void);
 enum {
     CC_FIBER_UNPARK_ATTR_NONE = 0u,
     CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL = 1u << 0,

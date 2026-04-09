@@ -9,6 +9,8 @@
 #include <ccc/cc_channel.cch>
 #include <ccc/cc_nursery.cch>
 #include <ccc/cc_atomic.cch>
+#include "fiber_internal.h"
+#include "sched_v2.h"
 
 /* Unified deadlock tracking (defined in fiber_sched.c) */
 void cc__deadlock_thread_block(void);
@@ -64,12 +66,19 @@ typedef struct {
     int slot_idx;
 } CCTaskPoolInternal;
 
+/* Internal representation for V2 hybrid scheduler fiber tasks */
+typedef struct fiber_v2 fiber_v2;
+typedef struct {
+    fiber_v2* fiber;
+} CCTaskFiberV2Internal;
+
 /* Accessor macros to get internal data from CCTask */
 #define TASK_FUTURE(t) ((CCTaskFutureInternal*)((t)->_data))
 #define TASK_POLL(t) ((CCTaskPollInternal*)((t)->_data))
 #define TASK_SPAWN(t) ((CCTaskSpawnInternal*)((t)->_data))
 #define TASK_FIBER(t) ((CCTaskFiberInternal*)((t)->_data))
 #define TASK_POOL(t)  ((CCTaskPoolInternal*)((t)->_data))
+#define TASK_FIBER_V2(t) ((CCTaskFiberV2Internal*)((t)->_data))
 #endif /* CC_TASK_INTERNAL_TYPES_DEFINED */
 
 /* Fiber functions (defined in fiber_sched.c) */
@@ -94,7 +103,6 @@ extern void cc__fiber_set_pool_slot_buf(char* buf);
 /* Fiber park/unpark for pool task wait (defined in fiber_sched.c) */
 void cc__fiber_park_if(_Atomic int* flag, int expected,
                        const char* reason, const char* file, int line);
-void cc__fiber_unpark(void* fiber_ptr);
 /* Cooperative yield to global queue (defined in fiber_sched.c) */
 void cc__fiber_yield_global(void);
 /* Sysmon heartbeat touch: prevents orphan-threshold detection during
@@ -374,7 +382,7 @@ static void* cc_pool_runner_fn(void* arg) {
         atomic_store_explicit(&slot->done, 1, memory_order_release);
         void* waiter = atomic_exchange_explicit(&slot->waiter, NULL, memory_order_acq_rel);
         if (waiter) {
-            cc__fiber_unpark(waiter);
+            cc__fiber_unpark_tagged(waiter, CC_FIBER_UNPARK_REASON_TASK_DONE);
         }
     }
     return NULL;
@@ -541,6 +549,16 @@ CCFutureStatus cc_task_poll(CCTask* t, intptr_t* out_val, int* out_err) {
         }
         return CC_FUTURE_PENDING;
     }
+    if (t->kind == CC_TASK_KIND_FIBER_V2) {
+        CCTaskFiberV2Internal* fv = TASK_FIBER_V2(t);
+        if (!fv->fiber) return CC_FUTURE_ERR;
+        if (sched_v2_fiber_done(fv->fiber)) {
+            if (out_val) *out_val = (intptr_t)sched_v2_fiber_result(fv->fiber);
+            if (out_err) *out_err = 0;
+            return CC_FUTURE_READY;
+        }
+        return CC_FUTURE_PENDING;
+    }
     if (t->kind == CC_TASK_KIND_POOL) {
         CCTaskPoolInternal* pi = TASK_POOL(t);
         if (atomic_load_explicit(&g_fpool.slots[pi->slot_idx].done, memory_order_acquire)) {
@@ -607,6 +625,8 @@ void cc_task_free(CCTask* t) {
         if (fi->fiber) {
             cc_fiber_task_free(fi->fiber);
         }
+    } else if (t->kind == CC_TASK_KIND_FIBER_V2) {
+        /* V2 fibers are pool-recycled automatically on completion — nothing to free */
     } else if (t->kind == CC_TASK_KIND_POOL) {
         /* Pool slot is freed in cc_block_on_intptr after collecting result.
          * If cc_task_free is called on an un-joined pool task (leak path),
@@ -679,6 +699,18 @@ static void* cc__fiber_closure0_wrapper(void* arg) {
     return result;
 }
 
+static intptr_t cc__task_take_v2_result(fiber_v2* fiber, void* result) {
+    static __thread char tls_v2_result[48] __attribute__((aligned(8)));
+    if (!fiber || !result) return 0;
+
+    char* buf = sched_v2_fiber_result_buf(fiber);
+    if (buf && (char*)result >= buf && (char*)result < buf + 48) {
+        memcpy(tls_v2_result, result, sizeof(tls_v2_result));
+        return (intptr_t)tls_v2_result;
+    }
+    return (intptr_t)result;
+}
+
 /* Spawn a fiber from a 0-arg closure. */
 CCTask cc_fiber_spawn_closure0(CCClosure0 c) {
     CCTask out;
@@ -691,6 +723,31 @@ CCTask cc_fiber_spawn_closure0(CCClosure0 c) {
     *heap_c = c;
     
     return cc_fiber_spawn_task(cc__fiber_closure0_wrapper, heap_c);
+}
+
+CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg) {
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!fn) return out;
+
+    fiber_v2* f = sched_v2_spawn(fn, arg);
+    if (!f) return out;
+
+    out.kind = CC_TASK_KIND_FIBER_V2;
+    TASK_FIBER_V2(&out)->fiber = f;
+    return out;
+}
+
+CCTask cc_fiber_spawn_closure0_v2(CCClosure0 c) {
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!c.fn) return out;
+
+    CCClosure0* heap_c = (CCClosure0*)malloc(sizeof(CCClosure0));
+    if (!heap_c) return out;
+    *heap_c = c;
+
+    return cc_fiber_spawn_task_v2(cc__fiber_closure0_wrapper, heap_c);
 }
 
 /* Cancel a task and wake up anyone blocked on it.
@@ -857,6 +914,18 @@ intptr_t cc_block_on_intptr(CCTask t) {
         cc__deadlock_thread_unblock();
         return r;
     }
+
+    if (t.kind == CC_TASK_KIND_FIBER_V2) {
+        CCTaskFiberV2Internal* fv = TASK_FIBER_V2(&t);
+        if (fv->fiber) {
+            void* result = NULL;
+            sched_v2_join(fv->fiber, &result);
+            r = cc__task_take_v2_result(fv->fiber, result);
+            sched_v2_fiber_release(fv->fiber);
+        }
+        cc__deadlock_thread_unblock();
+        return r;
+    }
     
     for (;;) {
         CCFutureStatus st = cc_task_poll(&t, &r, &err);
@@ -909,6 +978,7 @@ static int cc__task_kind_inline_block_safe(CCTask t) {
         case CC_TASK_KIND_SPAWN:
         case CC_TASK_KIND_FIBER:
         case CC_TASK_KIND_POOL:
+        case CC_TASK_KIND_FIBER_V2:
             return 1;
         case CC_TASK_KIND_FUTURE:
         case CC_TASK_KIND_POLL:
