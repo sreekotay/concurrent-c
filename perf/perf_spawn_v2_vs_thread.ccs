@@ -1,0 +1,151 @@
+/*
+ * Raw spawn/join substrate benchmark.
+ *
+ * Compares:
+ *   - cc_thread_spawn()        (pthread-backed task path)
+ *   - cc_fiber_spawn_task_v2() (stackless hybrid V2 task path)
+ *
+ * The workload is intentionally tiny so the measurement is dominated by
+ * spawn/scheduling/join/result overhead rather than user work.
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
+
+#define DEFAULT_TASKS 4096
+#define DEFAULT_RUNS 9
+
+static int env_int_or(const char* name, int fallback) {
+    const char* v = getenv(name);
+    if (!v || !*v) return fallback;
+    char* end = NULL;
+    long n = strtol(v, &end, 10);
+    if (!end || end == v || *end != 0 || n <= 0) return fallback;
+    return (int)n;
+}
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void sort_doubles(double* arr, int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[i]) {
+                double tmp = arr[i];
+                arr[i] = arr[j];
+                arr[j] = tmp;
+            }
+        }
+    }
+}
+
+static void* tiny_work(void* arg) {
+    uintptr_t x = (uintptr_t)arg;
+    x = (x * 1103515245u + 12345u) & 0x7fffffffu;
+    x ^= x >> 7;
+    return (void*)(intptr_t)x;
+}
+
+static double run_thread_once(int tasks, uintptr_t* checksum_out) {
+    CCTask* spawned = (CCTask*)malloc(sizeof(CCTask) * (size_t)tasks);
+    if (!spawned) abort();
+
+    uint64_t t0 = now_ns();
+    for (int i = 0; i < tasks; i++) {
+        spawned[i] = cc_thread_spawn(tiny_work, (void*)(uintptr_t)(i + 1));
+    }
+
+    uintptr_t checksum = 0;
+    for (int i = 0; i < tasks; i++) {
+        checksum ^= (uintptr_t)cc_block_on_intptr(spawned[i]);
+    }
+    uint64_t t1 = now_ns();
+
+    free(spawned);
+    *checksum_out = checksum;
+    return (double)(t1 - t0) / 1000000.0;
+}
+
+static double run_v2_once(int tasks, uintptr_t* checksum_out) {
+    CCTask* spawned = (CCTask*)malloc(sizeof(CCTask) * (size_t)tasks);
+    if (!spawned) abort();
+
+    uint64_t t0 = now_ns();
+    for (int i = 0; i < tasks; i++) {
+        spawned[i] = cc_fiber_spawn_task_v2(tiny_work, (void*)(uintptr_t)(i + 1));
+    }
+
+    uintptr_t checksum = 0;
+    for (int i = 0; i < tasks; i++) {
+        checksum ^= (uintptr_t)cc_block_on_intptr(spawned[i]);
+    }
+    uint64_t t1 = now_ns();
+
+    free(spawned);
+    *checksum_out = checksum;
+    return (double)(t1 - t0) / 1000000.0;
+}
+
+int main(void) {
+    int tasks = env_int_or("CC_SUBSTRATE_TASKS", DEFAULT_TASKS);
+    int runs = env_int_or("CC_SUBSTRATE_RUNS", DEFAULT_RUNS);
+    if (tasks <= 0 || runs <= 0) return 2;
+
+    double* thread_ms = (double*)malloc(sizeof(double) * (size_t)runs);
+    double* v2_ms = (double*)malloc(sizeof(double) * (size_t)runs);
+    if (!thread_ms || !v2_ms) abort();
+
+    uintptr_t expected = 0;
+    for (int i = 0; i < tasks; i++) {
+        expected ^= (uintptr_t)tiny_work((void*)(uintptr_t)(i + 1));
+    }
+
+    printf("perf_spawn_v2_vs_thread: tasks=%d runs=%d\n", tasks, runs);
+
+    for (int i = 0; i < runs; i++) {
+        uintptr_t checksum = 0;
+        thread_ms[i] = run_thread_once(tasks, &checksum);
+        if (checksum != expected) {
+            fprintf(stderr, "thread checksum mismatch: got=%llu expected=%llu\n",
+                    (unsigned long long)checksum, (unsigned long long)expected);
+            return 3;
+        }
+    }
+
+    for (int i = 0; i < runs; i++) {
+        uintptr_t checksum = 0;
+        v2_ms[i] = run_v2_once(tasks, &checksum);
+        if (checksum != expected) {
+            fprintf(stderr, "v2 checksum mismatch: got=%llu expected=%llu\n",
+                    (unsigned long long)checksum, (unsigned long long)expected);
+            return 4;
+        }
+    }
+
+    sort_doubles(thread_ms, runs);
+    sort_doubles(v2_ms, runs);
+
+    double thread_median_ms = thread_ms[runs / 2];
+    double v2_median_ms = v2_ms[runs / 2];
+    double thread_us = thread_median_ms * 1000.0 / (double)tasks;
+    double v2_us = v2_median_ms * 1000.0 / (double)tasks;
+    double thread_tps = (double)tasks / (thread_median_ms / 1000.0);
+    double v2_tps = (double)tasks / (v2_median_ms / 1000.0);
+
+    printf("  cc_thread_spawn median:        %.3f ms  %.2f us/task  %.0f tasks/sec\n",
+           thread_median_ms, thread_us, thread_tps);
+    printf("  cc_fiber_spawn_task_v2 median: %.3f ms  %.2f us/task  %.0f tasks/sec\n",
+           v2_median_ms, v2_us, v2_tps);
+    printf("  v2 / thread throughput:        %.1f%%\n",
+           thread_tps > 0.0 ? (v2_tps / thread_tps) * 100.0 : 0.0);
+    printf("  v2 delta:                      %.2f us/task\n", v2_us - thread_us);
+
+    free(thread_ms);
+    free(v2_ms);
+    return 0;
+}

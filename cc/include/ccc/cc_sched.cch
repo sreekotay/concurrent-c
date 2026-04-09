@@ -46,6 +46,7 @@ typedef int CCTaskIntptrKind;
 #define CC_TASK_KIND_POLL    3
 #define CC_TASK_KIND_FIBER   4
 #define CC_TASK_KIND_POOL    5
+#define CC_TASK_KIND_FIBER_V2 6
 #define CC_TASK_INTPTR_KIND_INVALID 0
 #define CC_TASK_INTPTR_KIND_FUTURE  2
 #define CC_TASK_INTPTR_KIND_POLL    3
@@ -58,6 +59,7 @@ typedef enum {
     CC_TASK_KIND_POLL = 3,    /* State machine (from @async) */
     CC_TASK_KIND_FIBER = 4,   /* M:N fiber (from cc_fiber_spawn_task) */
     CC_TASK_KIND_POOL  = 5,   /* M:N pool task (transparent runtime pooling) */
+    CC_TASK_KIND_FIBER_V2 = 6, /* V2 hybrid scheduler fiber */
 } CCTaskKind;
 
 /* Opaque CCTask struct - the actual layout is implementation detail.
@@ -105,6 +107,12 @@ CCTask cc_thread_spawn_closure0(CCClosure0 c);
 CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg);
 /* Spawn a fiber from a 0-arg closure. */
 CCTask cc_fiber_spawn_closure0(CCClosure0 c);
+
+/* V2 hybrid scheduler: spawn a run-to-completion task on the signal-based
+   worker/queue scheduler. This path is currently stackless and does not
+   support parking or yielding mid-execution. */
+CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg);
+CCTask cc_fiber_spawn_closure0_v2(CCClosure0 c);
 
 /* Get pointer to fiber-local result buffer (48 bytes max).
    Use this to store struct results without malloc - the buffer is valid
