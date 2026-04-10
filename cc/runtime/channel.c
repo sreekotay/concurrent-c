@@ -2970,13 +2970,8 @@ static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct 
 int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     /* Minimal fast path: branded channel, just enqueue and return.
      * Skips guards, debug, timing, signal_activity.
-     * Checks recv_waiters_head to wake parked receivers (pipeline correctness). */
+     * Uses the post-enqueue wake path to notify parked receivers. */
     if (ch->fast_path_ok && value_size == ch->elem_size) {
-        if (__builtin_expect(atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire) != 0, 0)) {
-            int handoff_rc = cc__chan_try_direct_handoff_recv_waiter_buffered(ch, value);
-            if (handoff_rc > 0) return 0;
-            if (handoff_rc < 0) return -handoff_rc;
-        }
         if (cc__chan_mutex_minimal_enabled()) {
             int rc = cc__chan_enqueue_mutex_minimal(ch, value);
             if (rc == 0) return 0;
