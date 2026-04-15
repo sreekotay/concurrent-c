@@ -242,6 +242,11 @@ static const cc_sched_waitable_ops cc__ready_socket_wait_ops = {
     .unpublish = cc__ready_socket_unpublish_wait,
 };
 
+void cc__socket_wait_dump_diag(void) {
+    /* Diagnostic hook used by sched_v2 sysmon. No-op until socket wait
+     * diagnostics are reintroduced on the current wait path. */
+}
+
 static CCResult_bool_CCIoError cc__socket_signal_wait_with_epoch(CCSocketSignal* sig, uint64_t seen_epoch) {
     if (!sig) {
         return CCRes_err(bool, CCIoError, cc_io_from_errno(EINVAL));

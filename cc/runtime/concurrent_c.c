@@ -11,6 +11,7 @@
  */
 
 #include "channel.c"
+#include "sched_v2.c"
 #include "fiber_sched_v3.c"
 #include "scheduler.c"
 #include "nursery.c"

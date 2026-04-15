@@ -1043,3 +1043,8 @@ int cc__io_wait_fd(int fd, short events) {
     cc__io_waiter_release(waiter);
     return 0;
 }
+
+void cc__io_wait_dump_kq_diag(void) {
+    /* Diagnostic hook used by sched_v2 sysmon. No-op until kqueue-specific
+     * wait-state dumping is restored. */
+}

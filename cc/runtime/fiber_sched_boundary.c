@@ -199,3 +199,8 @@ void cc_sched_wait_on_flag(_Atomic int* flag, int expected, const char* reason) 
                                   __FILE__,
                                   __LINE__);
 }
+
+void cc_sched_wait_many_dump_diag(void) {
+    /* Diagnostic hook used by sched_v2 sysmon. No-op until wait-many state
+     * dumping is wired through the current boundary implementation. */
+}
