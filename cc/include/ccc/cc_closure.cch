@@ -14,6 +14,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if !defined(CC_PARSER_MODE) && !defined(CC_TASK_DEFINED)
+typedef struct CCTask CCTask;
+#endif
+
 /* TSan annotations for closure make functions */
 #if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
 extern void __tsan_write8(void* addr);
@@ -38,6 +42,7 @@ typedef struct CCNursery CCNursery;
 typedef intptr_t CCClosure0;
 #define CCClosure1 CCClosure0
 #define CCClosure2 CCClosure0
+#define CCAsyncClosure0 CCClosure0
 #else
 typedef struct {
     void* (*fn)(void* env);
@@ -56,6 +61,12 @@ typedef struct {
     void* env;
     void (*drop)(void* env); /* optional; can be NULL */
 } CCClosure2;
+
+typedef struct {
+    void (*start)(void* env, void* out_task); /* writes a CCTask into out_task */
+    void* env;
+    void (*drop)(void* env); /* optional; can be NULL */
+} CCAsyncClosure0;
 #endif
 
 #if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
@@ -128,6 +139,20 @@ static inline CCClosure2 cc_closure2_make(void* (*fn)(void*, intptr_t, intptr_t)
     /* TSan: Mark writes to local struct as benign (thread-local stack memory) */
     TSAN_IGNORE_LOCAL_WRITE(&c);
     c.fn = fn;
+    c.env = env;
+    c.drop = drop;
+    return c;
+#endif
+}
+
+static inline CCAsyncClosure0 cc_async_closure0_make(void (*start)(void*, void*), void* env, void (*drop)(void*)) CC_TSAN_NOSAN_FN {
+#if defined(CC_PARSER_MODE)
+    (void)start; (void)env; (void)drop;
+    return 0;
+#else
+    CCAsyncClosure0 c;
+    TSAN_IGNORE_LOCAL_WRITE(&c);
+    c.start = start;
     c.env = env;
     c.drop = drop;
     return c;

@@ -22,6 +22,7 @@
    In particular, allow `cc_block_on_intptr(f())` where `f` is still seen as `void` by TCC. */
 typedef CCFutureStatus (*cc_task_poll_fn)(void* frame, intptr_t* out_val, int* out_err);
 #define cc_run_blocking_task(c) ((void)(c), (CCTask){0})
+#define cc_task_yield_once() ((CCTask){0})
 #define cc_task_make_poll(poll, frame, drop) ((CCTask){0})
 #define cc_block_on_intptr(t) (0)
 #define cc_block_on(T, task_expr) ((T)0)
@@ -59,6 +60,9 @@ typedef struct {
    The closure must return a value encoded as (void*)(intptr_t)result or a pointer cast.
    On failure returns an invalid task with kind == CC_TASK_KIND_INVALID. */
 CCTask cc_run_blocking_task(CCClosure0 c);
+
+/* Construct a task that yields once before becoming ready. */
+CCTask cc_task_yield_once(void);
 
 /* Construct a task backed by a poll-based state machine. */
 CCTask cc_task_make_poll(cc_task_poll_fn poll, void* frame, void (*drop)(void* frame));

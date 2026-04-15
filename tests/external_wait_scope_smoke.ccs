@@ -1,0 +1,118 @@
+#include <ccc/cc_runtime.cch>
+
+#include <signal.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+enum {
+    MODE_ALL_INTERNAL = 0,
+    MODE_ONE_EXTERNAL = 1,
+    MODE_LEAVE_RESTORES = 2,
+};
+
+static int g_mode = MODE_ALL_INTERNAL;
+
+static void child_deadlock_case(void) {
+    setenv("CC_WORKERS", "1", 1);
+    setenv("CC_DEADLOCK_ABORT", "1", 1);
+
+    int[~ >] ext_tx;
+    int[~ <] ext_rx;
+    CCChan* ext_ch = cc_channel_pair(&ext_tx, &ext_rx);
+    if (!ext_ch) _exit(20);
+
+    int[~ >] int_tx;
+    int[~ <] int_rx;
+    CCChan* int_ch = cc_channel_pair(&int_tx, &int_rx);
+    if (!int_ch) _exit(21);
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) _exit(22);
+
+        n->spawn(() => {
+            int v = 0;
+            if (g_mode == MODE_ONE_EXTERNAL) {
+                cc_external_wait_enter();
+                (void)chan_recv(ext_rx, &v);
+                cc_external_wait_leave();
+            } else {
+                if (g_mode == MODE_LEAVE_RESTORES) {
+                    cc_external_wait_enter();
+                    cc_external_wait_leave();
+                }
+                (void)chan_recv(ext_rx, &v);
+            }
+        });
+
+        n->spawn(() => {
+            int v = 0;
+            (void)chan_recv(int_rx, &v);
+        });
+    }
+
+    chan_free(ext_ch);
+    chan_free(int_ch);
+    _exit(30);
+}
+
+static int run_child_expect_exit124(int mode, int timeout_ms) {
+    g_mode = mode;
+    pid_t pid = fork();
+    if (pid < 0) return 10;
+    if (pid == 0) child_deadlock_case();
+
+    int status = 0;
+    int waited_ms = 0;
+    while (waited_ms < timeout_ms) {
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 124) return 0;
+            return 11;
+        }
+        if (rc < 0) return 12;
+        usleep(100 * 1000);
+        waited_ms += 100;
+    }
+
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    return 13;
+}
+
+static int run_child_expect_external_wait_hang(int mode, int timeout_ms) {
+    g_mode = mode;
+    pid_t pid = fork();
+    if (pid < 0) return 20;
+    if (pid == 0) child_deadlock_case();
+
+    int status = 0;
+    int waited_ms = 0;
+    while (waited_ms < timeout_ms) {
+        pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            return 21;
+        }
+        if (rc < 0) return 22;
+        usleep(100 * 1000);
+        waited_ms += 100;
+    }
+
+    kill(pid, SIGKILL);
+    (void)waitpid(pid, &status, 0);
+    return 0;
+}
+
+int main(void) {
+    int rc = run_child_expect_exit124(MODE_ALL_INTERNAL, 3000);
+    if (rc != 0) return rc;
+
+    rc = run_child_expect_external_wait_hang(MODE_ONE_EXTERNAL, 1800);
+    if (rc != 0) return rc;
+
+    rc = run_child_expect_exit124(MODE_LEAVE_RESTORES, 3000);
+    if (rc != 0) return rc;
+
+    return 0;
+}

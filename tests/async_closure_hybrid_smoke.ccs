@@ -1,0 +1,31 @@
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+static int g_value = 0;
+
+@async int add1(int v) {
+    return v + 1;
+}
+
+int main(void) {
+    int ok = 1;
+
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) abort();
+        if (n->spawnhybrid(() => {
+                int v = cc_block_on(int, add1(41));
+                g_value = v;
+            }) != 0) {
+            ok = 0;
+        }
+    }
+
+    if (g_value != 42) ok = 0;
+    if (!ok) {
+        printf("async_closure_hybrid_smoke: FAIL\n");
+        return 1;
+    }
+    printf("async_closure_hybrid_smoke: PASS\n");
+    return 0;
+}

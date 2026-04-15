@@ -20,6 +20,7 @@ void cc__fiber_set_worker_affinity(int worker_id);
 #include <errno.h>
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +72,10 @@ typedef struct fiber_v2 fiber_v2;
 typedef struct {
     fiber_v2* fiber;
 } CCTaskFiberV2Internal;
+
+typedef struct {
+    CCTask task;
+} CCAsyncTaskV2Bridge;
 
 /* Accessor macros to get internal data from CCTask */
 #define TASK_FUTURE(t) ((CCTaskFutureInternal*)((t)->_data))
@@ -726,28 +731,87 @@ CCTask cc_fiber_spawn_closure0(CCClosure0 c) {
 }
 
 CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg) {
-    CCTask out;
-    memset(&out, 0, sizeof(out));
-    if (!fn) return out;
-
-    fiber_v2* f = sched_v2_spawn(fn, arg);
-    if (!f) return out;
-
-    out.kind = CC_TASK_KIND_FIBER_V2;
-    TASK_FIBER_V2(&out)->fiber = f;
-    return out;
+    /* Route legacy hybrid spawns onto the stackful fiber scheduler. */
+    return cc_fiber_spawn_task(fn, arg);
 }
 
 CCTask cc_fiber_spawn_closure0_v2(CCClosure0 c) {
+    return cc_fiber_spawn_closure0(c);
+}
+
+static void* cc__async_task_v2_bridge_runner(void* arg) {
+    CCAsyncTaskV2Bridge* bridge = (CCAsyncTaskV2Bridge*)arg;
+    CCTask task;
+    intptr_t r = 0;
+
+    if (!bridge) return NULL;
+    task = bridge->task;
+    free(bridge);
+    r = cc_block_on_intptr(task);
+    return (void*)r;
+}
+
+typedef struct {
+    int yielded;
+} CCTaskYieldFrame;
+
+static CCFutureStatus cc__task_yield_poll(void* frame, intptr_t* out_val, int* out_err) {
+    CCTaskYieldFrame* f = (CCTaskYieldFrame*)frame;
+    if (out_err) *out_err = 0;
+    if (!f) return CC_FUTURE_ERR;
+    if (!f->yielded) {
+        f->yielded = 1;
+        return CC_FUTURE_PENDING;
+    }
+    if (out_val) *out_val = 0;
+    return CC_FUTURE_READY;
+}
+
+static int cc__task_yield_wait(void* frame) {
+    (void)frame;
+    if (cc__fiber_in_context()) {
+        cc__fiber_yield_global();
+        return 0;
+    }
+    sched_yield();
+    return 0;
+}
+
+static void cc__task_yield_drop(void* frame) {
+    free(frame);
+}
+
+CCTask cc_task_yield_once(void) {
+    CCTaskYieldFrame* frame = (CCTaskYieldFrame*)calloc(1, sizeof(*frame));
+    if (!frame) {
+        CCTask t;
+        memset(&t, 0, sizeof(t));
+        return t;
+    }
+    return cc_task_make_poll_ex(cc__task_yield_poll, cc__task_yield_wait, frame, cc__task_yield_drop);
+}
+
+CCTask cc_async_closure0_start_v2(CCAsyncClosure0 c) {
+    CCTask task = cc_async_closure0_start(c);
+    CCAsyncTaskV2Bridge* bridge;
     CCTask out;
-    memset(&out, 0, sizeof(out));
-    if (!c.fn) return out;
 
-    CCClosure0* heap_c = (CCClosure0*)malloc(sizeof(CCClosure0));
-    if (!heap_c) return out;
-    *heap_c = c;
+    if (task.kind == CC_TASK_KIND_INVALID) return task;
+    if (task.kind == CC_TASK_KIND_FIBER || task.kind == CC_TASK_KIND_FIBER_V2) return task;
 
-    return cc_fiber_spawn_task_v2(cc__fiber_closure0_wrapper, heap_c);
+    bridge = (CCAsyncTaskV2Bridge*)malloc(sizeof(*bridge));
+    if (!bridge) {
+        cc_task_free(&task);
+        memset(&out, 0, sizeof(out));
+        return out;
+    }
+    bridge->task = task;
+    out = cc_fiber_spawn_task_v2(cc__async_task_v2_bridge_runner, bridge);
+    if (out.kind == CC_TASK_KIND_INVALID) {
+        cc_task_free(&task);
+        free(bridge);
+    }
+    return out;
 }
 
 /* Cancel a task and wake up anyone blocked on it.
