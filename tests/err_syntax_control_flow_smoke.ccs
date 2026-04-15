@@ -1,0 +1,44 @@
+// Smoke: @errhandler break/continue run at the @err site
+#include <stdio.h>
+
+static int g_break_kind;
+static int g_break_after;
+static int g_continue_hits;
+static int g_continue_steps;
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int main(void) {
+    {
+        @errhandler(CCError e) {
+            g_break_kind = 100 + e.kind;
+            break;
+        }
+
+        for (int i = 0; i < 3; i++) {
+            g_break_after++;
+            always_err() @err;
+            g_break_after += 1000;
+        }
+    }
+
+    {
+        @errhandler(CCError e) {
+            (void)e;
+            g_continue_hits++;
+            continue;
+        }
+
+        for (int i = 0; i < 3; i++) {
+            g_continue_steps++;
+            always_err() @err;
+            g_continue_steps += 1000;
+        }
+    }
+
+    printf("break_kind=%d break_after=%d continue_hits=%d continue_steps=%d\n",
+           g_break_kind, g_break_after, g_continue_hits, g_continue_steps);
+    return 0;
+}

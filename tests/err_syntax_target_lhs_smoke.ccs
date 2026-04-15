@@ -1,0 +1,37 @@
+// Smoke: non-trivial =<! lhs targets (field + array index)
+#include <stdio.h>
+
+typedef struct {
+    int !> (CCError) field;
+} Box;
+
+static int g_field_ok;
+static int g_index_ok;
+static int g_handler;
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        g_handler = 100 + e.kind;
+    }
+
+    Box box;
+    int !> (CCError) items[2];
+    int idx = 1;
+
+    box.field =<! always_ok() @err;
+    items[idx] =<! always_err() : always_ok() @err;
+
+    if (cc_is_ok(box.field) && cc_value(box.field) == 99) g_field_ok = 1;
+    if (cc_is_ok(items[idx]) && cc_value(items[idx]) == 99) g_index_ok = 1;
+
+    printf("field=%d index=%d handler=%d\n", g_field_ok, g_index_ok, g_handler);
+    return 0;
+}

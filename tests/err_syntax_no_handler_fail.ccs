@@ -1,0 +1,8 @@
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int main(void) {
+    always_err() @err;
+    return 0;
+}

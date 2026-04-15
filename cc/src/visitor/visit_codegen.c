@@ -18,6 +18,7 @@
 #include "visitor/pass_autoblock.h"
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
+#include "visitor/pass_err_syntax.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_type_syntax.h"
@@ -4363,6 +4364,27 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 if (src_ufcs != src_all) free(src_ufcs);
                 src_ufcs = rew_infer;
                 src_ufcs_len = strlen(src_ufcs);
+            }
+        }
+        /* Lower @err / @errhandler / <? / =<! ... @err for host C emission (parse already
+           preprocesses these; src_ufcs is still the on-disk-shaped TU until here). */
+        if (src_ufcs && src_ufcs_len &&
+            (strstr(src_ufcs, "@errhandler") != NULL || strstr(src_ufcs, "@err") != NULL ||
+             strstr(src_ufcs, "=<!") != NULL || strstr(src_ufcs, "<?") != NULL)) {
+            char* err_out = NULL;
+            size_t err_out_len = 0;
+            int err_r = cc__rewrite_err_syntax(ctx, src_ufcs, src_ufcs_len, &err_out, &err_out_len);
+            if (err_r < 0) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            if (err_r > 0 && err_out) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = err_out;
+                src_ufcs_len = err_out_len;
             }
         }
         /* Rewrite try expr -> cc_try(expr) */

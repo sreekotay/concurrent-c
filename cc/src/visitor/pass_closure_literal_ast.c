@@ -11,6 +11,7 @@
 #include "preprocess/preprocess.h"
 #include "visitor/pass_common.h"
 #include "visitor/pass_defer_syntax.h"
+#include "visitor/pass_err_syntax.h"
 #include "visitor/pass_type_syntax.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -3328,11 +3329,20 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             const char* src_for_templates = lowered_tpl ? lowered_tpl : lowered2;
             /* Rewrite T!E result types in closure body */
             char* lowered3 = cc__rewrite_result_types_text(ctx, src_for_templates, strlen(src_for_templates));
+            char* lowered_err = NULL;
+            size_t lowered_err_len = 0;
+            const char* src_after_err = lowered3 ? lowered3 : src_for_templates;
+            size_t src_after_err_n = strlen(src_after_err);
+            if (cc__rewrite_err_syntax(ctx, src_after_err, src_after_err_n, &lowered_err, &lowered_err_len) > 0 &&
+                lowered_err) {
+                src_after_err = lowered_err;
+                src_after_err_n = lowered_err_len;
+            }
             /* Rewrite @defer in closure body */
             char* lowered4 = NULL;
             size_t lowered4_len = 0;
-            const char* src_for_defer = lowered3 ? lowered3 : src_for_templates;
-            if (cc__rewrite_defer_syntax(ctx, src_for_defer, strlen(src_for_defer), &lowered4, &lowered4_len) > 0 && lowered4) {
+            const char* src_for_defer = src_after_err;
+            if (cc__rewrite_defer_syntax(ctx, src_for_defer, src_after_err_n, &lowered4, &lowered4_len) > 0 && lowered4) {
                 /* Rewrite captured closure calls in the body */
                 char* lowered5 = cc__rewrite_captured_closure_calls_in_body(lowered4, d);
                 if (lowered5) {
@@ -3352,6 +3362,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                     cc__append_fmt(&defs, &defs_len, &defs_cap, "  %s\n", src_for_defer);
                 }
             }
+            free(lowered_err);
             free(lowered_tpl);
             free(lowered3);
             free(lowered2);

@@ -1,0 +1,33 @@
+// Smoke: err syntax (default handler, =<! , colon default)
+#include <stdio.h>
+
+static int g_handler;
+static int g_ok_assign;
+static int g_colon_default;
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        g_handler = 100 + e.kind;
+        printf("handler ran\n");
+    }
+
+    int !> (CCError) a =<! always_err() @err;
+    (void)a;
+
+    int !> (CCError) b =<! always_ok() @err;
+    if (cc_is_ok(b) && cc_value(b) == 99) g_ok_assign = 1;
+
+    int !> (CCError) c =<! always_err() : always_ok() @err;
+    if (cc_is_ok(c) && cc_value(c) == 99) g_colon_default = 1;
+
+    printf("g_handler=%d g_ok=%d g_colon=%d\n", g_handler, g_ok_assign, g_colon_default);
+    return 0;
+}

@@ -19,6 +19,8 @@
 #include "util/path.h"
 #include "util/text.h"
 #include "visitor/ufcs.h"
+#include "visitor/visitor.h"
+#include "visitor/pass_err_syntax.h"
 
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
@@ -7182,6 +7184,17 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     /* Shared phase-3 bucket: parser/host-C survival and lowering after
        canonical CC has been established and phase 2 comptime effects are
        conceptually available. */
+    if (chain->src && chain->len > 0 &&
+        (strstr(chain->src, "@errhandler") != NULL || strstr(chain->src, "@err") != NULL ||
+         strstr(chain->src, "=<!") != NULL || strstr(chain->src, "<?") != NULL)) {
+        char* err_out = NULL;
+        size_t err_out_len = 0;
+        CCVisitorCtx err_ctx = {.symbols = NULL, .input_path = input_path};
+        int err_r = cc__rewrite_err_syntax(&err_ctx, chain->src, chain->len, &err_out, &err_out_len);
+        (void)err_out_len;
+        if (err_r < 0) return -1;
+        if (err_r > 0 && err_out && cc_pass_chain_apply(chain, err_out) < 0) return -1;
+    }
     if (cc_pass_chain_apply(chain, cc__lower_with_deadline_syntax(chain->src, chain->len)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_match_syntax(chain->src, chain->len, input_path)) < 0) return -1;
     if (cc_pass_chain_apply(chain, cc__rewrite_optional_constructors(chain->src, chain->len)) < 0) return -1;
