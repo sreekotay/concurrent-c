@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <string.h>
 
 /* TSan annotations for closure capture synchronization */
 #include "tsan_helpers.h"
@@ -40,6 +41,19 @@ int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
     /* TSan release: sync with acquire in trampoline to make captures visible */
     TSAN_RELEASE(c.env);
     int err = cc_nursery_spawn(n, cc__closure0_trampoline, h);
+    if (err != 0) free(h);
+    return err;
+}
+
+int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg);
+
+int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c) {
+    if (!n || !c.fn) return EINVAL;
+    CCClosure0Heap* h = (CCClosure0Heap*)malloc(sizeof(CCClosure0Heap));
+    if (!h) return ENOMEM;
+    h->c = c;
+    TSAN_RELEASE(c.env);
+    int err = cc_nursery_spawnhybrid(n, cc__closure0_trampoline, h);
     if (err != 0) free(h);
     return err;
 }
@@ -159,6 +173,27 @@ void* cc_run_blocking_closure0_ptr(CCClosure0 c) {
     CCTask t = cc_thread_spawn_closure0(c);
     if (t.kind == CC_TASK_KIND_INVALID) return NULL;
     return (void*)cc_block_on_intptr(t);  /* blocks until done and frees task */
+}
+
+CCTask cc_async_closure0_start(CCAsyncClosure0 c) {
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!c.start) return out;
+    atomic_thread_fence(memory_order_acquire);
+    TSAN_ACQUIRE(c.env);
+    c.start(c.env, &out);
+    if (out.kind == CC_TASK_KIND_INVALID && c.drop) c.drop(c.env);
+    return out;
+}
+
+int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
+    if (!n || !c.start) return EINVAL;
+    return cc_nursery_spawn_async(n, cc_async_closure0_start(c));
+}
+
+int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
+    if (!n || !c.start) return EINVAL;
+    return cc_nursery_spawn_async(n, cc_async_closure0_start(c));
 }
 
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0) {

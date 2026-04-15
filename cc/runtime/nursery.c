@@ -392,6 +392,11 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
     return 0;
 }
 
+int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg) {
+    /* "Hybrid" is the legacy spelling; keep the stackful fiber semantics. */
+    return cc_nursery_spawn(n, fn, arg);
+}
+
 int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
     cc_nursery_async_spawn* a;
     int err;

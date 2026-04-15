@@ -937,7 +937,12 @@ int cc__io_wait_ready(int fd, short events) {
 
 int cc__io_wait_fd(int fd, short events) {
     if (!cc__fiber_in_context()) {
-        return cc__io_wait_ready(fd, events);
+        /* Direct thread waits here are driven by kernel I/O readiness, so mark
+         * this call site as external to the scheduler dependency graph. */
+        cc_external_wait_enter();
+        int rc = cc__io_wait_ready(fd, events);
+        cc_external_wait_leave();
+        return rc;
     }
     if (cc__io_wait_force_direct()) {
         return cc__io_wait_ready(fd, events);

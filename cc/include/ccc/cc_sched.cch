@@ -108,11 +108,14 @@ CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg);
 /* Spawn a fiber from a 0-arg closure. */
 CCTask cc_fiber_spawn_closure0(CCClosure0 c);
 
-/* V2 hybrid scheduler: spawn a run-to-completion task on the signal-based
-   worker/queue scheduler. This path is currently stackless and does not
-   support parking or yielding mid-execution. */
+/* Legacy hybrid entrypoints. These now route onto the fiber scheduler so
+   hybrid-spawned tasks preserve a suspendable stack and can park/yield. */
 CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg);
 CCTask cc_fiber_spawn_closure0_v2(CCClosure0 c);
+/* Materialize an async closure into a task. */
+CCTask cc_async_closure0_start(CCAsyncClosure0 c);
+/* Materialize an async closure and run it on the hybrid fiber path. */
+CCTask cc_async_closure0_start_v2(CCAsyncClosure0 c);
 
 /* Get pointer to fiber-local result buffer (48 bytes max).
    Use this to store struct results without malloc - the buffer is valid

@@ -271,6 +271,7 @@ CCListener cc_tcp_listen(const char* addr, size_t addr_len, CCNetError* out_err)
 CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
     CCSocket sock = {.fd = -1, .flags = 0, .watcher = NULL};
     *out_err = CC_NET_OK;
+    int fiber_ctx = cc__fiber_in_context();
 
     struct sockaddr_storage client_addr;
     socklen_t client_len = sizeof(client_addr);
@@ -281,7 +282,11 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
     }
 
     while (1) {
+        /* A blocking accept outside fiber context is still waiting on
+         * outside-world progress, so classify just this wait site as external. */
+        if (!fiber_ctx) cc_external_wait_enter();
         int fd = accept(ln->fd, (struct sockaddr*)&client_addr, &client_len);
+        if (!fiber_ctx) cc_external_wait_leave();
         if (fd >= 0) {
             int fd_err = cc__net_set_nonblocking(fd);
             if (fd_err != 0) {

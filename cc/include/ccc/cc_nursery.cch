@@ -55,13 +55,16 @@ void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeou
 
 // Spawn a task owned by the nursery. Returns 0 on success.
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg);
-// Spawn a task on the V2 hybrid scheduler. This currently means a stackless
-// run-to-completion work item; it may not block, park, or yield mid-execution.
+// Spawn on the "hybrid" path: same stackful minicoro backend as spawn().
 // Returns 0 on success.
 int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg);
 int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c);
 // Spawn a CCClosure0 (env freed via drop, if provided). Returns 0 on success.
 int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c);
+// Spawn an async closure under nursery ownership.
+int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c);
+// Spawn an async closure on the hybrid path (same backend as spawn_async).
+int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c);
 // Spawn an existing async task under nursery ownership without blocking a worker.
 #if defined(CC_PARSER_MODE)
 #define cc_nursery_spawn_async(n, task_expr) (0)

@@ -53,6 +53,14 @@ void cc_deadlock_suppress_enter(void);
 void cc_deadlock_suppress_leave(void);
 int cc_deadlock_suppressed(void);
 
+/* Mark the current dynamic scope as waiting on external progress.
+   Deadlock detection excludes waits in this scope from the internal graph while
+   the scope is active. This is primarily for runtime wait sites like accept()
+   or direct thread-side I/O waits that depend on outside-world activity. */
+void cc_external_wait_enter(void);
+void cc_external_wait_leave(void);
+int cc_external_wait_active(void);
+
 // Forward declarations for runtime handles.
 typedef struct CCChan CCChan;
 /* CCTask is now defined in <ccc/std/task.cch> as a value type */
