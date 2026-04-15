@@ -1,0 +1,11 @@
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int main(void) {
+    @errhandler(CCError outer) {
+        (void)outer;
+    }
+    always_err() @err { @errhandler(e); };
+    return 0;
+}

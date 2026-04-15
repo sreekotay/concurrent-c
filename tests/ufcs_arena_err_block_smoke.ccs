@@ -1,0 +1,25 @@
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+static bool !>(CCError) always_ok_bool(void) {
+    return cc_ok(true);
+}
+
+int main(void) {
+    int ran = 0;
+    while (true) {
+        CCArena blk_arena = @create(kilobytes(4)) @destroy;
+        bool avail =<! always_ok_bool() @err break;
+        if (!avail) break;
+
+        CCArena detached = blk_arena.detach();
+        assert(detached.base);
+        detached.free();
+        ran++;
+        break;
+    }
+
+    assert(ran == 1);
+    printf("ufcs_arena_err_block_smoke: OK\n");
+    return 0;
+}

@@ -1,0 +1,2 @@
+literal @errhandler(e); survives
+assign=1 local=207 outer=107

@@ -1,0 +1,34 @@
+// Smoke: no-binding @err shorthand block and single-statement forms
+#include <stdio.h>
+
+static int g_block_break;
+static int g_single_continue_steps;
+static int g_scalar_break_steps;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err_bool");
+}
+
+int main(void) {
+    for (int i = 0; i < 3; i++) {
+        g_block_break++;
+        always_err_bool() @err { break; };
+        g_block_break += 1000;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        g_single_continue_steps++;
+        always_err_bool() @err continue;
+        g_single_continue_steps += 1000;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        g_scalar_break_steps++;
+        bool avail =<! always_err_bool() @err break;
+        if (!avail) g_scalar_break_steps += 1000;
+    }
+
+    printf("block_break=%d single_steps=%d scalar_break=%d\n",
+           g_block_break, g_single_continue_steps, g_scalar_break_steps);
+    return 0;
+}

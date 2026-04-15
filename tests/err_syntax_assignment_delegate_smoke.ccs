@@ -1,0 +1,35 @@
+// Smoke: assign to existing result variable and delegate through local @err handler
+#include <stdio.h>
+
+static int g_assign_ok;
+static int g_local_kind;
+static int g_outer_kind;
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+int main(void) {
+    int !> (CCError) r = always_err();
+
+    @errhandler(CCError outer) {
+        g_outer_kind = 100 + outer.kind;
+    }
+
+    r =<! always_ok() @err;
+    if (cc_is_ok(r) && cc_value(r) == 99) g_assign_ok = 1;
+
+    always_err() @err(CCError e) {
+        g_local_kind = 200 + e.kind;
+        printf("literal @errhandler(e); survives\n");
+        // @errhandler(e);
+        @errhandler(e);
+    };
+
+    printf("assign=%d local=%d outer=%d\n", g_assign_ok, g_local_kind, g_outer_kind);
+    return 0;
+}
