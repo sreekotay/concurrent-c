@@ -2,12 +2,14 @@
 # run_neckbeard_challenges.sh - Run all robustness and fairness comparisons
 #
 # This script executes all the "Neckbeard" comparison tests and summarizes the results.
-# Now includes Go benchmarks for the ultimate M:N showdown.
+# Now includes Go and Zig benchmarks for the ultimate M:N showdown.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CCC="$REPO_ROOT/out/cc/bin/ccc"
+
+mkdir -p "$SCRIPT_DIR/out"
 
 echo "================================================================="
 echo "CONCURRENT-C: THE NECKBEARD CHALLENGES"
@@ -17,6 +19,7 @@ echo ""
 
 SKIP_CC=0
 SKIP_GO=0
+SKIP_ZIG=0
 
 if ! command -v "$CCC" &>/dev/null && [ ! -x "$CCC" ]; then
     echo "WARNING: CCC compiler not found at $CCC"
@@ -33,12 +36,25 @@ if ! command -v go &>/dev/null; then
     SKIP_GO=1
 fi
 
+if ! command -v zig &>/dev/null; then
+    echo "WARNING: Zig not found on PATH"
+    echo "         Zig tests will be skipped."
+    echo ""
+    SKIP_ZIG=1
+fi
+
 val_or_na() {
     if [ -n "$1" ]; then echo "$1"; else echo "N/A"; fi
 }
 
 extract() {
     grep "$1" "$2" 2>/dev/null | tail -n 1 | awk '{print $2}'
+}
+
+build_zig() {
+    local src=$1
+    local out=$2
+    zig build-exe "$src" -O ReleaseFast -lc -femit-bin="$out" >/dev/null
 }
 
 # 1. Syscall Kidnapping
@@ -58,12 +74,21 @@ if [ "$SKIP_GO" -eq 0 ]; then
         echo "  [WARN] Go syscall_kidnap failed (exit $?)."
     fi
 fi
+if [ "$SKIP_ZIG" -eq 0 ]; then
+    if build_zig "$SCRIPT_DIR/zig/syscall_kidnap.zig" "$SCRIPT_DIR/out/zig_syscall_kidnap" &&
+       "$SCRIPT_DIR/out/zig_syscall_kidnap" > zig_syscall_out.txt 2>&1; then
+        ZIG_SYSCALL_BEATS=$(grep "Total Heartbeats" zig_syscall_out.txt | awk '{print $3}')
+    else
+        echo "  [WARN] Zig syscall_kidnap failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-15s\n" "Implementation" "Heartbeats"
 printf "%-20s %-15s\n" "Pthread" "$(val_or_na "$PTHREAD_SYSCALL_BEATS")"
 printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "$CC_SYSCALL_BEATS")"
 printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_SYSCALL_BEATS")"
+printf "%-20s %-15s\n" "Zig" "$(val_or_na "$ZIG_SYSCALL_BEATS")"
 echo "-----------------------------------------------------------------"
 echo ""
 
@@ -84,12 +109,21 @@ if [ "$SKIP_GO" -eq 0 ]; then
         echo "  [WARN] Go thundering_herd failed (exit $?)."
     fi
 fi
+if [ "$SKIP_ZIG" -eq 0 ]; then
+    if build_zig "$SCRIPT_DIR/zig/thundering_herd.zig" "$SCRIPT_DIR/out/zig_thundering_herd" &&
+       "$SCRIPT_DIR/out/zig_thundering_herd" > zig_herd_out.txt 2>&1; then
+        ZIG_HERD_LATENCY=$(grep "Sample" zig_herd_out.txt | awk '{sum+=$8} END {if (NR>0) printf "%.4f", sum/NR; else print "0"}')
+    else
+        echo "  [WARN] Zig thundering_herd failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-15s\n" "Implementation" "Avg Latency (ms)"
 printf "%-20s %-15s\n" "Pthread" "$(val_or_na "$PTHREAD_HERD_LATENCY")"
 printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "$CC_HERD_LATENCY")"
 printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_HERD_LATENCY")"
+printf "%-20s %-15s\n" "Zig" "$(val_or_na "$ZIG_HERD_LATENCY")"
 echo "-----------------------------------------------------------------"
 echo ""
 
@@ -110,6 +144,17 @@ else
     echo "Channel isolation stability output unavailable."
     echo "-----------------------------------------------------------------"
 fi
+if [ "$SKIP_ZIG" -eq 0 ]; then
+    if build_zig "$SCRIPT_DIR/zig/channel_contention.zig" "$SCRIPT_DIR/out/zig_channel_contention" &&
+       "$SCRIPT_DIR/out/zig_channel_contention" > zig_contention_out.txt 2>&1; then
+        echo "-----------------------------------------------------------------"
+        echo "Zig channel isolation summary:"
+        grep -E "Best baseline:|Best contention:|Interference:" zig_contention_out.txt || true
+        echo "-----------------------------------------------------------------"
+    else
+        echo "  [WARN] Zig channel_contention failed (exit $?)."
+    fi
+fi
 echo ""
 
 # 4. Noisy Neighbor
@@ -129,12 +174,21 @@ if [ "$SKIP_GO" -eq 0 ]; then
         echo "  [WARN] Go noisy_neighbor failed (exit $?)."
     fi
 fi
+if [ "$SKIP_ZIG" -eq 0 ]; then
+    if build_zig "$SCRIPT_DIR/zig/noisy_neighbor.zig" "$SCRIPT_DIR/out/zig_noisy_neighbor" &&
+       "$SCRIPT_DIR/out/zig_noisy_neighbor" > zig_preemption_out.txt 2>&1; then
+        ZIG_PRE_BEATS=$(grep "Total Heartbeats" zig_preemption_out.txt | awk '{print $3}')
+    else
+        echo "  [WARN] Zig noisy_neighbor failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-15s\n" "Implementation" "Heartbeats"
 printf "%-20s %-15s\n" "Pthread" "$(val_or_na "$PTHREAD_PRE_BEATS")"
 printf "%-20s %-15s\n" "Concurrent-C" "$(val_or_na "$CC_PRE_BEATS")"
 printf "%-20s %-15s\n" "Go" "$(val_or_na "$GO_PRE_BEATS")"
+printf "%-20s %-15s\n" "Zig" "$(val_or_na "$ZIG_PRE_BEATS")"
 echo "-----------------------------------------------------------------"
 echo ""
 
@@ -155,12 +209,21 @@ if [ "$SKIP_GO" -eq 0 ]; then
         echo "  [WARN] Go arena_contention failed (exit $?)."
     fi
 fi
+if [ "$SKIP_ZIG" -eq 0 ]; then
+    if build_zig "$SCRIPT_DIR/zig/arena_contention.zig" "$SCRIPT_DIR/out/zig_arena_contention" &&
+       "$SCRIPT_DIR/out/zig_arena_contention" > zig_arena_out.txt 2>&1; then
+        ZIG_ARENA_TP=$(grep "Throughput" zig_arena_out.txt | awk '{print $2}')
+    else
+        echo "  [WARN] Zig arena_contention failed (exit $?)."
+    fi
+fi
 
 echo "-----------------------------------------------------------------"
 printf "%-20s %-20s\n" "Implementation" "Throughput (M/sec)"
 printf "%-20s %-20s\n" "Pthread (Arena)" "$(val_or_na "$PTHREAD_ARENA_TP")"
 printf "%-20s %-20s\n" "Concurrent-C (Arena)" "$(val_or_na "$CC_ARENA_TP")"
 printf "%-20s %-20s\n" "Go (mcache)" "$(val_or_na "$GO_ARENA_TP")"
+printf "%-20s %-20s\n" "Zig" "$(val_or_na "$ZIG_ARENA_TP")"
 echo "-----------------------------------------------------------------"
 echo ""
 
@@ -175,5 +238,6 @@ fi
 echo "================================================================="
 
 rm -f cc_syscall_out.txt go_syscall_out.txt cc_herd_out.txt go_herd_out.txt \
-      cc_contention_out.txt cc_preemption_out.txt \
-      go_preemption_out.txt cc_arena_out.txt go_arena_out.txt
+      cc_contention_out.txt zig_contention_out.txt cc_preemption_out.txt \
+      go_preemption_out.txt zig_preemption_out.txt cc_arena_out.txt go_arena_out.txt \
+      zig_syscall_out.txt zig_herd_out.txt zig_arena_out.txt

@@ -7,6 +7,8 @@ DATA_DIR="$SCRIPT_DIR/testdata"
 
 SIZE_MB=${1:-100}
 RUNS=${2:-10}
+ZIG_SOURCE="$SCRIPT_DIR/pigz_zig.zig"
+ZIG_BIN="$OUT_DIR/pigz_zig"
 
 # Validate SIZE_MB is a number; reject non-numeric arguments
 if ! [[ "$SIZE_MB" =~ ^[0-9]+$ ]]; then
@@ -22,6 +24,14 @@ make -C "$SCRIPT_DIR/../../cc" lower-headers > /dev/null
 # Ensure binaries are built
 make pigz pigz_cc pigz_idiomatic pigz_pthread > /dev/null
 go build -ldflags="-s -w" -o out/pigz_go pigz_go.go > /dev/null
+ZIG_AVAILABLE=0
+if command -v zig >/dev/null 2>&1 && [ -f "$ZIG_SOURCE" ]; then
+    if zig build-exe "$ZIG_SOURCE" -O ReleaseFast -lc \
+        -I /opt/homebrew/include -L /opt/homebrew/lib -lz \
+        -femit-bin="$ZIG_BIN" > /dev/null; then
+        ZIG_AVAILABLE=1
+    fi
+fi
 
 # Ensure test data exists
 mkdir -p "$DATA_DIR"
@@ -47,9 +57,17 @@ if [ ! -f "$INPUT_FILE" ]; then
 fi
 
 # --- benchmark definitions: name, cmd, flags ---
-BENCH_NAMES=("CC (Idiomatic)" "CC (Full)"   "CC (Pthread)" "Go (CGO+zlib)" "Original pigz")
-BENCH_CMDS=(  "$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go" "$OUT_DIR/pigz")
-BENCH_FLAGS=( ""                         "-k -f"            ""                      ""                 "-k -f")
+BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Pthread)" "Go (CGO+zlib)")
+BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
+BENCH_FLAGS=("" "-k -f" "" "")
+if [ "$ZIG_AVAILABLE" -eq 1 ]; then
+    BENCH_NAMES+=("Zig")
+    BENCH_CMDS+=("$ZIG_BIN")
+    BENCH_FLAGS+=("")
+fi
+BENCH_NAMES+=("Original pigz")
+BENCH_CMDS+=("$OUT_DIR/pigz")
+BENCH_FLAGS+=("-k -f")
 
 N=${#BENCH_NAMES[@]}
 
@@ -67,11 +85,14 @@ for ((b=0; b<N; b++)); do
 done
 
 echo "=========================================================="
-echo "pigz Full Comparison: CC vs Go vs Original"
+echo "pigz Full Comparison: CC vs Go vs Zig vs Original"
 echo "=========================================================="
 echo "Input:  $INPUT_FILE ($(wc -c < "$INPUT_FILE" | awk '{printf "%.0f MB", $1/1000000}'))"
 echo "Runs:   $RUNS  (interleaved, best reported)"
 echo "OS:     $(uname -s) $(uname -r)"
+if [ "$ZIG_AVAILABLE" -eq 0 ]; then
+    echo "Zig:    unavailable (skipping Zig benchmark)"
+fi
 echo "=========================================================="
 echo ""
 
