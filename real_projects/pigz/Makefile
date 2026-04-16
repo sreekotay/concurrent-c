@@ -34,6 +34,10 @@ $(OUT_DIR)/pigz_idiomatic: pigz_idiomatic.ccs | $(OUT_DIR)
 $(OUT_DIR)/pigz_pthread: pigz_pthread.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_pthread.ccs --ld-flags "-lz" --release
 
+# Legacy hybrid-named variant, ported to main task-channel APIs
+$(OUT_DIR)/pigz_hybrid: pigz_hybrid.ccs | $(OUT_DIR)
+	$(CCC) -O -o $@ pigz_hybrid.ccs --ld-flags "-lz" --release
+
 # Profiling version (fiber tasks + per-block timing)
 $(OUT_DIR)/pigz_profile: pigz_profile.ccs | $(OUT_DIR)
 	$(CCC) -O -o $@ pigz_profile.ccs --ld-flags "-lz" --release
@@ -50,12 +54,13 @@ $(OUT_DIR)/pigz_unordered: pigz_unordered.ccs | $(OUT_DIR)
 pigz: $(OUT_DIR)/pigz
 pigz_cc: $(OUT_DIR)/pigz_cc
 pigz_idiomatic: $(OUT_DIR)/pigz_idiomatic
+pigz_hybrid: $(OUT_DIR)/pigz_hybrid
 pigz_pthread: $(OUT_DIR)/pigz_pthread
 pigz_profile: $(OUT_DIR)/pigz_profile
 pigz_pthread_profile: $(OUT_DIR)/pigz_pthread_profile
 pigz_unordered: $(OUT_DIR)/pigz_unordered
 
-all: pigz pigz_cc pigz_idiomatic pigz_pthread
+all: pigz pigz_cc pigz_idiomatic pigz_hybrid pigz_pthread
 
 # Download source files if not present
 setup:

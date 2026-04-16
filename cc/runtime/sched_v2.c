@@ -1,27 +1,19 @@
 /*
- * Hybrid Scheduler V2 — signal-based fiber/thread scheduler.
+ * Hybrid Scheduler V2 — global-queue fiber/thread scheduler.
  *
- * Design:
- *   - Hybrid V2 work items are pooled and reused.
- *   - Threads are OS threads, pooled and elastic (sysmon expands).
- *   - Single global ready queue. No per-thread inboxes.
- *   - Central wake(worker_hint) drain loop pairs idle workers with ready fibers.
- *   - Invariant: runnable_work > 0 && idle_workers > 0 never persists.
+ * Fibers:
+ *   - QUEUED  -> on the global runnable queue
+ *   - RUNNING -> owned by one BUSY worker
+ *   - PARKED  -> blocked until an external signal re-enqueues it
+ *   - DEAD    -> completed
  *
- * Current semantics:
- *   - spawnhybrid is a run-to-completion scheduler.
- *   - V2 work items do not preserve a suspendable C stack.
- *   - Any attempt to park/yield from V2 is a runtime bug and fails fast.
+ * Workers:
+ *   - BUSY -> draining/running fibers from the global queue
+ *   - IDLE -> available for work or sleeping on the worker wake primitive
  *
- * wake(worker_hint):
- *   If hint==self: drain ready queue inline (pop, run, repeat).
- *   If hint<0:     wake idle workers while ready queue non-empty.
- *
- * Call sites:
- *   signal(fiber): enqueue to ready_queue, wake(-1)
- *   spawn(fiber):  enqueue to ready_queue, wake(-1)
- *   fiber_park:    move fiber, wake(self)  — this worker is now free
- *   fiber_finish:  wake(self)              — this worker is now free
+ * A RUNNING fiber may carry an internal "signal pending" bit so the
+ * post-resume commit path requeues it instead of parking. That bit is an
+ * implementation detail, not a separate fiber state.
  */
 
 #include "sched_v2.h"
@@ -44,7 +36,12 @@
 
 #define V2_MAX_THREADS     64
 #define V2_GLOBAL_QUEUE_SIZE 4096
+#if defined(__OPTIMIZE__)
 #define V2_FIBER_STACK_SIZE (2 * 1024 * 1024)
+#else
+/* Unoptimized builds grow frame size substantially; keep debug binaries usable. */
+#define V2_FIBER_STACK_SIZE (8 * 1024 * 1024)
+#endif
 #define V2_SYSMON_INTERVAL_MS 100
 
 /* ============================================================================
@@ -56,9 +53,23 @@ enum {
     V2_YIELD_YIELD = 1, /* Fiber wants to re-enqueue (voluntary yield) */
 };
 
+enum {
+    FIBER_V2_STATE_MASK = 0x0f,
+    FIBER_V2_FLAG_SIGNAL_PENDING = 0x10,
+    FIBER_V2_STATE_COUNT = 5,
+};
+
+static inline int fiber_v2_state_base(int raw_state) {
+    return raw_state & FIBER_V2_STATE_MASK;
+}
+
+static inline int fiber_v2_state_has_signal_pending(int raw_state) {
+    return (raw_state & FIBER_V2_FLAG_SIGNAL_PENDING) != 0;
+}
+
 struct fiber_v2 {
     mco_coro*  coro;
-    _Atomic int state;
+    _Atomic int state;    /* Base state plus FIBER_V2_FLAG_SIGNAL_PENDING. */
     int        last_thread_id;
     uint64_t   generation;
 
@@ -134,7 +145,7 @@ typedef struct {
     pthread_t    handle;
     int          id;
     int          alive;
-    _Atomic int  idle;   /* 1 = sleeping/available for work */
+    _Atomic int  is_idle;   /* 1 = IDLE worker, 0 = BUSY worker */
     wake_primitive wake;
 } thread_v2;
 
@@ -146,7 +157,7 @@ struct sched_v2_state {
     thread_v2    threads[V2_MAX_THREADS];
     _Atomic int  num_threads;
     _Atomic int  running;
-    _Atomic int  idle_threads;
+    _Atomic int  idle_workers;
     int          allow_expand;
 
     /* Single global ready queue */
@@ -181,33 +192,34 @@ extern void cc__socket_wait_dump_diag(void);
 static _Atomic uint64_t g_v2_fibers_alive = 0;
 static _Atomic uint64_t g_v2_signal_ok = 0;
 static _Atomic uint64_t g_v2_signal_pending = 0;
-static _Atomic uint64_t g_v2_signal_running_set = 0;
-static _Atomic uint64_t g_v2_signal_running_already_set = 0;
+static _Atomic uint64_t g_v2_signal_running_pending_set = 0;
+static _Atomic uint64_t g_v2_signal_running_pending_already_set = 0;
 static _Atomic uint64_t g_v2_signal_dropped = 0;
-static _Atomic uint64_t g_v2_signal_dropped_state[6] = {0};
+static _Atomic uint64_t g_v2_signal_dropped_state[FIBER_V2_STATE_COUNT] = {0};
 static _Atomic uint64_t g_v2_parks = 0;
-static _Atomic uint64_t g_v2_park_consumed_pending = 0;
-static _Atomic uint64_t g_v2_park_yield_no_pending = 0;
 static _Atomic uint64_t g_v2_run_yield_requeue = 0;
-static _Atomic uint64_t g_v2_run_yield_requeue_with_pending = 0;
 static _Atomic uint64_t g_v2_run_dead = 0;
-static _Atomic uint64_t g_v2_run_dead_with_pending = 0;
-static _Atomic uint64_t g_v2_run_prepark_pending = 0;
 static _Atomic uint64_t g_v2_run_commit_parked = 0;
-static _Atomic uint64_t g_v2_run_postpark_pending = 0;
-static _Atomic uint64_t g_v2_run_postpark_requeue = 0;
-static _Atomic uint64_t g_v2_run_postpark_cas_fail_state[6] = {0};
+static _Atomic uint64_t g_v2_run_pending_requeue = 0;
+static _Atomic uint64_t g_v2_run_commit_park_fail_state[FIBER_V2_STATE_COUNT] = {0};
+static _Atomic uint64_t g_v2_worker_idle_entries = 0;
+static _Atomic uint64_t g_v2_worker_busy_from_recheck = 0;
+static _Atomic uint64_t g_v2_worker_busy_from_wake = 0;
 static _Atomic uint64_t g_v2_mco_resume_fail = 0;
 static _Atomic uint64_t g_v2_mco_yield_fail = 0;
 static _Atomic uint64_t g_v2_mco_stack_overflow = 0;
 static _Atomic uint64_t g_v2_mco_fail_logs = 0;
+/* Fiber-pool effectiveness: how often a spawn reused an existing coroutine
+ * (and its ~2 MB stack) vs. had to allocate a fresh one. */
+static _Atomic uint64_t g_v2_coro_reuse = 0;
+static _Atomic uint64_t g_v2_coro_fresh = 0;
 
-static void sched_v2_diag_scan_fibers(uint64_t state_counts[6],
+static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT],
                                       uint64_t* parked_wait_many,
                                       uint64_t* parked_wait,
                                       uint64_t* parked_other,
                                       uint64_t* parked_unknown) {
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < FIBER_V2_STATE_COUNT; ++i) {
         state_counts[i] = 0;
     }
     *parked_wait_many = 0;
@@ -217,8 +229,8 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[6],
 
     pthread_mutex_lock(&g_v2.all_fibers_mu);
     for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
-        int state = atomic_load_explicit(&f->state, memory_order_acquire);
-        if (state >= 0 && state <= 5) {
+        int state = fiber_v2_state_base(atomic_load_explicit(&f->state, memory_order_acquire));
+        if (state >= 0 && state < FIBER_V2_STATE_COUNT) {
             state_counts[state]++;
             if (state == FIBER_V2_PARKED) {
                 if (!f->park_reason) {
@@ -275,7 +287,10 @@ static fiber_v2* fiber_v2_alloc(void) {
                 memory_order_release, memory_order_acquire)) {
             f->generation++;
             f->next = NULL;
-            f->coro = NULL;
+            /* Keep f->coro as-is: fiber_v2_free left the minicoro allocation
+             * (coro struct + ~2 MB stack) alive so spawn can mco_init in
+             * place. Setting it NULL here would force a fresh alloc every
+             * time and defeat the pool. */
             f->result = NULL;
             f->entry_fn = NULL;
             f->entry_arg = NULL;
@@ -320,9 +335,12 @@ static void fiber_v2_free(fiber_v2* f) {
     f->result = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
+    /* Pool the coroutine memory (including its stack): mco_uninit just marks
+     * the coro DEAD and runs platform teardown (a no-op on ucontext), while
+     * preserving the allocation so the next spawn can re-init in place
+     * instead of paying another ~2 MB alloc/free. */
     if (f->coro) {
-        (void)mco_destroy(f->coro);
-        f->coro = NULL;
+        (void)mco_uninit(f->coro);
     }
     fiber_v2* head;
     do {
@@ -337,6 +355,7 @@ static void fiber_v2_free(fiber_v2* f) {
  * ============================================================================ */
 
 static void* thread_v2_main(void* arg);
+static void sched_v2_wake(int worker_hint);
 
 static inline int sched_v2_finish_join(fiber_v2* f, void** out_result) {
     if (out_result) *out_result = f->result;
@@ -345,15 +364,15 @@ static inline int sched_v2_finish_join(fiber_v2* f, void** out_result) {
 
 /* Claim one idle worker thread and wake it. Returns 1 on success. */
 static int sched_v2_try_wake_one(void) {
-    if (atomic_load_explicit(&g_v2.idle_threads, memory_order_acquire) <= 0) {
+    if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
         return 0;
     }
     int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
     for (int i = 0; i < n; i++) {
         int exp = 1;
-        if (atomic_compare_exchange_strong_explicit(&g_v2.threads[i].idle, &exp, 0,
+        if (atomic_compare_exchange_strong_explicit(&g_v2.threads[i].is_idle, &exp, 0,
                 memory_order_acq_rel, memory_order_relaxed)) {
-            atomic_fetch_sub_explicit(&g_v2.idle_threads, 1, memory_order_acq_rel);
+            atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
             wake_primitive_wake_one(&g_v2.threads[i].wake);
             return 1;
         }
@@ -372,7 +391,7 @@ static int sched_v2_try_expand_pool(void) {
         return 0;
     }
     g_v2.threads[new_id].id = new_id;
-    atomic_store_explicit(&g_v2.threads[new_id].idle, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[new_id].is_idle, 0, memory_order_relaxed);
     wake_primitive_init(&g_v2.threads[new_id].wake);
     g_v2.threads[new_id].alive = 0;
     pthread_create(&g_v2.threads[new_id].handle, NULL,
@@ -381,6 +400,11 @@ static int sched_v2_try_expand_pool(void) {
 }
 
 static void thread_v2_run_fiber(int tid, fiber_v2* f);
+
+static void sched_v2_enqueue_runnable(fiber_v2* f) {
+    v2_queue_push(&g_v2.ready_queue, f);
+    sched_v2_wake(-1);
+}
 
 /*
  * Central wake primitive.
@@ -403,12 +427,12 @@ static void sched_v2_wake(int worker_hint) {
         return;
     }
 
-    /* External: wake idle workers while there's work in the queue. */
-    if (atomic_load_explicit(&g_v2.idle_threads, memory_order_acquire) <= 0) {
+    /* External: wake IDLE workers while there's work in the queue. */
+    if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
         return;
     }
     while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
-           atomic_load_explicit(&g_v2.idle_threads, memory_order_acquire) > 0) {
+           atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) > 0) {
         if (!sched_v2_try_wake_one()) {
             sched_v2_try_expand_pool();
             break;
@@ -421,7 +445,7 @@ static void sched_v2_wake(int worker_hint) {
  * ============================================================================ */
 
 static void thread_v2_run_fiber(int tid, fiber_v2* f) {
-    int expected = atomic_load_explicit(&f->state, memory_order_acquire);
+    int expected = fiber_v2_state_base(atomic_load_explicit(&f->state, memory_order_acquire));
     if (expected != FIBER_V2_QUEUED) {
         fprintf(stderr, "[sched_v2] BUG: thread %d got fiber in state %d\n", tid, expected);
         return;
@@ -431,6 +455,39 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     tls_v2_current_fiber = f;
     f->park_reason = NULL;
     f->yield_kind = V2_YIELD_PARK;
+
+    /* Just-in-time coroutine binding.
+     *   coro == NULL          -> freshly-allocated fiber_v2, no stack yet.
+     *   status == MCO_DEAD    -> pooled fiber whose stack survived via
+     *                             mco_uninit in fiber_v2_free; reset it to
+     *                             the entry trampoline in place.
+     *   status == MCO_SUSPENDED -> fiber that previously parked and is now
+     *                             being resumed; nothing to do. */
+    if (!f->coro) {
+        mco_desc desc = mco_desc_init(fiber_v2_entry, V2_FIBER_STACK_SIZE);
+        desc.user_data = f;
+        if (mco_create(&f->coro, &desc) != MCO_SUCCESS) {
+            fprintf(stderr, "[sched_v2] mco_create failed on worker pickup\n");
+            abort();
+        }
+        atomic_fetch_add_explicit(&g_v2_coro_fresh, 1, memory_order_relaxed);
+    } else if (mco_status(f->coro) == MCO_DEAD) {
+        mco_desc desc = mco_desc_init(fiber_v2_entry, V2_FIBER_STACK_SIZE);
+        desc.user_data = f;
+        if (mco_init(f->coro, &desc) != MCO_SUCCESS) {
+            /* Pooled memory lost; drop it and alloc fresh. */
+            (void)mco_destroy(f->coro);
+            f->coro = NULL;
+            if (mco_create(&f->coro, &desc) != MCO_SUCCESS) {
+                fprintf(stderr, "[sched_v2] mco_create fallback failed on worker pickup\n");
+                abort();
+            }
+            atomic_fetch_add_explicit(&g_v2_coro_fresh, 1, memory_order_relaxed);
+        } else {
+            atomic_fetch_add_explicit(&g_v2_coro_reuse, 1, memory_order_relaxed);
+        }
+    }
+
     mco_result res = mco_resume(f->coro);
 
     tls_v2_current_fiber = NULL;
@@ -454,15 +511,14 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         return;
     }
 
-    expected = atomic_load_explicit(&f->state, memory_order_acquire);
-    if (f->yield_kind == V2_YIELD_YIELD || expected == FIBER_V2_RUNNING_WAKE) {
+    int raw_state = atomic_load_explicit(&f->state, memory_order_acquire);
+    if (f->yield_kind == V2_YIELD_YIELD || fiber_v2_state_has_signal_pending(raw_state)) {
         atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
-        v2_queue_push(&g_v2.ready_queue, f);
-        sched_v2_wake(-1);
+        sched_v2_enqueue_runnable(f);
         if (f->yield_kind == V2_YIELD_YIELD) {
             atomic_fetch_add_explicit(&g_v2_run_yield_requeue, 1, memory_order_relaxed);
         } else {
-            atomic_fetch_add_explicit(&g_v2_run_postpark_requeue, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_v2_run_pending_requeue, 1, memory_order_relaxed);
         }
         return;
     }
@@ -470,10 +526,14 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     expected = FIBER_V2_RUNNING;
     if (!atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_V2_PARKED,
             memory_order_acq_rel, memory_order_relaxed)) {
+        int fail_state = fiber_v2_state_base(expected);
+        if (fail_state >= 0 && fail_state < FIBER_V2_STATE_COUNT) {
+            atomic_fetch_add_explicit(&g_v2_run_commit_park_fail_state[fail_state], 1,
+                                      memory_order_relaxed);
+        }
         atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
-        v2_queue_push(&g_v2.ready_queue, f);
-        sched_v2_wake(-1);
-        atomic_fetch_add_explicit(&g_v2_run_postpark_requeue, 1, memory_order_relaxed);
+        sched_v2_enqueue_runnable(f);
+        atomic_fetch_add_explicit(&g_v2_run_pending_requeue, 1, memory_order_relaxed);
         return;
     }
     atomic_fetch_add_explicit(&g_v2_run_commit_parked, 1, memory_order_relaxed);
@@ -486,39 +546,42 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
 void sched_v2_signal(fiber_v2* f) {
     while (1) {
         int expected = atomic_load_explicit(&f->state, memory_order_acquire);
-        if (expected == FIBER_V2_QUEUED) {
+        int base_state = fiber_v2_state_base(expected);
+        if (base_state == FIBER_V2_QUEUED) {
             atomic_fetch_add_explicit(&g_v2_signal_ok, 1, memory_order_relaxed);
             return;
         }
-        if (expected == FIBER_V2_RUNNING || expected == FIBER_V2_RUNNING_WAKE) {
-            if (expected == FIBER_V2_RUNNING_WAKE) {
-                atomic_fetch_add_explicit(&g_v2_signal_running_already_set, 1, memory_order_relaxed);
+        if (base_state == FIBER_V2_RUNNING) {
+            if (fiber_v2_state_has_signal_pending(expected)) {
+                atomic_fetch_add_explicit(&g_v2_signal_running_pending_already_set, 1,
+                                          memory_order_relaxed);
                 atomic_fetch_add_explicit(&g_v2_signal_pending, 1, memory_order_relaxed);
                 return;
             }
-            int desired = FIBER_V2_RUNNING_WAKE;
+            int desired = expected | FIBER_V2_FLAG_SIGNAL_PENDING;
             if (!atomic_compare_exchange_weak_explicit(&f->state, &expected, desired,
                     memory_order_acq_rel, memory_order_relaxed)) {
                 continue;
             }
-            atomic_fetch_add_explicit(&g_v2_signal_running_set, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_v2_signal_running_pending_set, 1, memory_order_relaxed);
             atomic_fetch_add_explicit(&g_v2_signal_pending, 1, memory_order_relaxed);
             return;
         }
-        if (expected == FIBER_V2_PARKED) {
+        if (base_state == FIBER_V2_PARKED) {
             int desired = FIBER_V2_QUEUED;
             if (!atomic_compare_exchange_weak_explicit(&f->state, &expected, desired,
                     memory_order_acq_rel, memory_order_relaxed)) {
                 continue;
             }
             atomic_fetch_add_explicit(&g_v2_signal_ok, 1, memory_order_relaxed);
-            v2_queue_push(&g_v2.ready_queue, f);
-            sched_v2_wake(-1);
+            sched_v2_enqueue_runnable(f);
             return;
         }
         atomic_fetch_add_explicit(&g_v2_signal_dropped, 1, memory_order_relaxed);
-        if (expected >= 0 && expected <= 5)
-            atomic_fetch_add_explicit(&g_v2_signal_dropped_state[expected], 1, memory_order_relaxed);
+        if (base_state >= 0 && base_state < FIBER_V2_STATE_COUNT) {
+            atomic_fetch_add_explicit(&g_v2_signal_dropped_state[base_state], 1,
+                                      memory_order_relaxed);
+        }
         return;
     }
 }
@@ -586,24 +649,29 @@ static void* thread_v2_main(void* arg) {
 
         if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
 
-        /* No work — park this worker.
+        /* No work — let this BUSY worker become IDLE.
          * Dekker protocol: mark idle, read wake counter, recheck, sleep. */
-        atomic_store_explicit(&g_v2.threads[tid].idle, 1, memory_order_release);
-        atomic_fetch_add_explicit(&g_v2.idle_threads, 1, memory_order_acq_rel);
+        atomic_store_explicit(&g_v2.threads[tid].is_idle, 1, memory_order_release);
+        atomic_fetch_add_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
+        atomic_fetch_add_explicit(&g_v2_worker_idle_entries, 1, memory_order_relaxed);
         uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
                                             memory_order_acquire);
 
         /* Recheck: work appeared after we marked ourselves idle. */
         if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0) {
-            if (atomic_exchange_explicit(&g_v2.threads[tid].idle, 0, memory_order_acq_rel)) {
-                atomic_fetch_sub_explicit(&g_v2.idle_threads, 1, memory_order_acq_rel);
+            if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0, memory_order_acq_rel)) {
+                atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
             }
+            atomic_fetch_add_explicit(&g_v2_worker_busy_from_recheck, 1, memory_order_relaxed);
             continue;
         }
 
-        wake_primitive_wait_timeout(&g_v2.threads[tid].wake, val, 500);
-        if (atomic_exchange_explicit(&g_v2.threads[tid].idle, 0, memory_order_acq_rel)) {
-            atomic_fetch_sub_explicit(&g_v2.idle_threads, 1, memory_order_acq_rel);
+        wake_primitive_wait(&g_v2.threads[tid].wake, val);
+        if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0, memory_order_acq_rel)) {
+            atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
+        }
+        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0) {
+            atomic_fetch_add_explicit(&g_v2_worker_busy_from_wake, 1, memory_order_relaxed);
         }
     }
 
@@ -623,20 +691,19 @@ static int sched_v2_detect_num_threads(void) {
     }
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 4;
+    /* Start with a smaller pool by default and let the scheduler expand
+     * lazily under sustained pressure. This avoids the heavy BUSY<->IDLE
+     * churn we see on lighter I/O-driven workloads like Redis GET. */
+    if (n > 8) n = 8;
     if (n > V2_MAX_THREADS) n = V2_MAX_THREADS;
     return (int)n;
 }
 
-static int sched_v2_threads_explicitly_configured(void) {
-    const char* env = getenv("CC_V2_THREADS");
-    return env && env[0];
-}
-
-static int sched_v2_count_idle(void) {
+static int sched_v2_count_idle_workers(void) {
     int n = atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed);
     int idle = 0;
     for (int i = 0; i < n; i++) {
-        if (atomic_load_explicit(&g_v2.threads[i].idle, memory_order_relaxed))
+        if (atomic_load_explicit(&g_v2.threads[i].is_idle, memory_order_relaxed))
             idle++;
     }
     return idle;
@@ -663,22 +730,23 @@ static void* sched_v2_sysmon_main(void* arg) {
 
             if (stall_ticks >= 20 && (stall_ticks % 20) == 0) {
                 int n = atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed);
-                int idle_n = sched_v2_count_idle();
+                int idle_n = sched_v2_count_idle_workers();
                 size_t gq = atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed);
                 uint64_t alive = atomic_load_explicit(&g_v2_fibers_alive, memory_order_relaxed);
                 uint64_t sig_ok = atomic_load_explicit(&g_v2_signal_ok, memory_order_relaxed);
                 uint64_t sig_pend = atomic_load_explicit(&g_v2_signal_pending, memory_order_relaxed);
-                uint64_t sig_run_set = atomic_load_explicit(&g_v2_signal_running_set, memory_order_relaxed);
-                uint64_t sig_run_already = atomic_load_explicit(&g_v2_signal_running_already_set, memory_order_relaxed);
+                uint64_t sig_run_set = atomic_load_explicit(&g_v2_signal_running_pending_set, memory_order_relaxed);
+                uint64_t sig_run_already = atomic_load_explicit(&g_v2_signal_running_pending_already_set, memory_order_relaxed);
                 uint64_t sig_drop = atomic_load_explicit(&g_v2_signal_dropped, memory_order_relaxed);
                 uint64_t parks = atomic_load_explicit(&g_v2_parks, memory_order_relaxed);
-                uint64_t park_cp = atomic_load_explicit(&g_v2_park_consumed_pending, memory_order_relaxed);
-                uint64_t park_yield = atomic_load_explicit(&g_v2_park_yield_no_pending, memory_order_relaxed);
                 uint64_t run_yield = atomic_load_explicit(&g_v2_run_yield_requeue, memory_order_relaxed);
                 uint64_t run_dead = atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed);
-                uint64_t run_pre = atomic_load_explicit(&g_v2_run_prepark_pending, memory_order_relaxed);
                 uint64_t run_parked = atomic_load_explicit(&g_v2_run_commit_parked, memory_order_relaxed);
-                uint64_t state_counts[6];
+                uint64_t run_pending = atomic_load_explicit(&g_v2_run_pending_requeue, memory_order_relaxed);
+                uint64_t worker_idle_entries = atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed);
+                uint64_t worker_busy_recheck = atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed);
+                uint64_t worker_busy_wake = atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed);
+                uint64_t state_counts[FIBER_V2_STATE_COUNT];
                 uint64_t parked_wait_many = 0;
                 uint64_t parked_wait = 0;
                 uint64_t parked_other = 0;
@@ -690,42 +758,44 @@ static void* sched_v2_sysmon_main(void* arg) {
                                           &parked_unknown);
                 fprintf(stderr, "[sched_v2 sysmon] STALL #%d: threads=%d idle=%d global_q=%zu fibers_alive=%llu\n",
                         stall_ticks / 20, n, idle_n, gq, (unsigned long long)alive);
-                fprintf(stderr, "  signals: ok=%llu pending=%llu dropped=%llu  parks: total=%llu consumed_pending=%llu\n",
+                fprintf(stderr, "  signals: ok=%llu pending=%llu dropped=%llu  parks: total=%llu\n",
                         (unsigned long long)sig_ok, (unsigned long long)sig_pend, (unsigned long long)sig_drop,
-                        (unsigned long long)parks, (unsigned long long)park_cp);
-                fprintf(stderr, "  wake path: run_to_wake=%llu already_wake=%llu  park(yield=%llu wake_to_run=%llu commit_parked=%llu runwake_to_queue=%llu) exits(dead=%llu yield=%llu) park_fail: IDLE=%llu QUEUED=%llu RUNNING=%llu PARKED=%llu RUN_WAKE=%llu DEAD=%llu\n",
+                        (unsigned long long)parks);
+                fprintf(stderr, "  workers: idle_entries=%llu busy_from_recheck=%llu busy_from_wake=%llu\n",
+                        (unsigned long long)worker_idle_entries,
+                        (unsigned long long)worker_busy_recheck,
+                        (unsigned long long)worker_busy_wake);
+                fprintf(stderr, "  wake path: mark_pending=%llu already_pending=%llu  park(commit=%llu pending_to_queue=%llu) exits(dead=%llu yield=%llu) park_fail: IDLE=%llu QUEUED=%llu RUNNING=%llu PARKED=%llu DEAD=%llu\n",
                         (unsigned long long)sig_run_set,
                         (unsigned long long)sig_run_already,
-                        (unsigned long long)park_yield,
-                        (unsigned long long)park_cp,
                         (unsigned long long)run_parked,
-                        (unsigned long long)run_pre,
+                        (unsigned long long)run_pending,
                         (unsigned long long)run_dead,
                         (unsigned long long)run_yield,
-                        (unsigned long long)atomic_load_explicit(&g_v2_run_postpark_cas_fail_state[0], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_run_postpark_cas_fail_state[1], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_run_postpark_cas_fail_state[2], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_run_postpark_cas_fail_state[3], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_run_postpark_cas_fail_state[4], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_run_postpark_cas_fail_state[5], memory_order_relaxed));
+                        (unsigned long long)atomic_load_explicit(&g_v2_run_commit_park_fail_state[0], memory_order_relaxed),
+                        (unsigned long long)atomic_load_explicit(&g_v2_run_commit_park_fail_state[1], memory_order_relaxed),
+                        (unsigned long long)atomic_load_explicit(&g_v2_run_commit_park_fail_state[2], memory_order_relaxed),
+                        (unsigned long long)atomic_load_explicit(&g_v2_run_commit_park_fail_state[3], memory_order_relaxed),
+                        (unsigned long long)atomic_load_explicit(&g_v2_run_commit_park_fail_state[4], memory_order_relaxed));
                 fprintf(stderr, "  minicoro: resume_fail=%llu yield_fail=%llu stack_overflow=%llu\n",
                         (unsigned long long)atomic_load_explicit(&g_v2_mco_resume_fail, memory_order_relaxed),
                         (unsigned long long)atomic_load_explicit(&g_v2_mco_yield_fail, memory_order_relaxed),
                         (unsigned long long)atomic_load_explicit(&g_v2_mco_stack_overflow, memory_order_relaxed));
-                fprintf(stderr, "  drop by state: IDLE=%llu QUEUED=%llu RUNNING=%llu PARKED=%llu RUN_WAKE=%llu DEAD=%llu\n",
+                fprintf(stderr, "  coro pool: reuse=%llu fresh=%llu\n",
+                        (unsigned long long)atomic_load_explicit(&g_v2_coro_reuse, memory_order_relaxed),
+                        (unsigned long long)atomic_load_explicit(&g_v2_coro_fresh, memory_order_relaxed));
+                fprintf(stderr, "  drop by state: IDLE=%llu QUEUED=%llu RUNNING=%llu PARKED=%llu DEAD=%llu\n",
                         (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[0], memory_order_relaxed),
                         (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[1], memory_order_relaxed),
                         (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[2], memory_order_relaxed),
                         (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[3], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[4], memory_order_relaxed),
-                        (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[5], memory_order_relaxed));
-                fprintf(stderr, "  fiber scan: state(IDLE=%llu QUEUED=%llu RUNNING=%llu PARKED=%llu RUN_WAKE=%llu DEAD=%llu)\n",
+                        (unsigned long long)atomic_load_explicit(&g_v2_signal_dropped_state[4], memory_order_relaxed));
+                fprintf(stderr, "  fiber scan: state(IDLE=%llu QUEUED=%llu RUNNING=%llu PARKED=%llu DEAD=%llu)\n",
                         (unsigned long long)state_counts[0],
                         (unsigned long long)state_counts[1],
                         (unsigned long long)state_counts[2],
                         (unsigned long long)state_counts[3],
-                        (unsigned long long)state_counts[4],
-                        (unsigned long long)state_counts[5]);
+                        (unsigned long long)state_counts[4]);
                 fprintf(stderr, "  parked reasons: wait_many=%llu wait=%llu other=%llu unknown=%llu\n",
                         (unsigned long long)parked_wait_many,
                         (unsigned long long)parked_wait,
@@ -748,21 +818,38 @@ static void* sched_v2_sysmon_main(void* arg) {
  * Init / shutdown
  * ============================================================================ */
 
+static void sched_v2_atexit_dump_stats(void) {
+    fprintf(stderr, "[sched_v2 stats] coro_pool: reuse=%llu fresh=%llu  "
+                    "spawns: parks=%llu dead=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_v2_coro_reuse, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_coro_fresh, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_parks, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed));
+}
+
 static void sched_v2_init_impl(void) {
     atomic_store_explicit(&g_v2.running, 1, memory_order_release);
-    atomic_store_explicit(&g_v2.idle_threads, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.idle_workers, 0, memory_order_relaxed);
     v2_queue_init(&g_v2.ready_queue);
     pthread_mutex_init(&g_v2.all_fibers_mu, NULL);
     g_v2.all_fibers = NULL;
     wake_primitive_init(&g_v2.sysmon_wake);
 
+    const char* stats_env = getenv("CC_V2_STATS");
+    if (stats_env && stats_env[0] && stats_env[0] != '0') {
+        atexit(sched_v2_atexit_dump_stats);
+    }
+
     int n = sched_v2_detect_num_threads();
     atomic_store_explicit(&g_v2.num_threads, n, memory_order_release);
-    g_v2.allow_expand = sched_v2_threads_explicitly_configured() ? 0 : 1;
+    /* Keep the default pool fixed for now. The current expansion heuristic
+     * overreacts on I/O-heavy workloads and recreates the worker-thrash we are
+     * trying to avoid. */
+    g_v2.allow_expand = 0;
 
     for (int i = 0; i < n; i++) {
         g_v2.threads[i].id = i;
-        atomic_store_explicit(&g_v2.threads[i].idle, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_v2.threads[i].is_idle, 0, memory_order_relaxed);
         wake_primitive_init(&g_v2.threads[i].wake);
         pthread_create(&g_v2.threads[i].handle, NULL,
                        thread_v2_main, (void*)(intptr_t)i);
@@ -893,16 +980,19 @@ fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNursery* nu
     f->entry_arg = arg;
     f->saved_nursery = nursery;
     f->admission_nursery = nursery;
-    mco_desc desc = mco_desc_init(fiber_v2_entry, V2_FIBER_STACK_SIZE);
-    desc.user_data = f;
-    if (mco_create(&f->coro, &desc) != MCO_SUCCESS) {
-        fiber_v2_free(f);
-        return NULL;
-    }
+    /* Do NOT create/init the coroutine here.
+     *
+     * We park the task on the global run queue with only fn/arg attached;
+     * the worker that picks it up binds a coroutine on first resume
+     * (allocating fresh only if the pool is empty). This keeps the producer
+     * path to "alloc task record + enqueue + wake" and moves the stack
+     * setup cost onto the worker that will actually execute the closure —
+     * so the number of fresh mco_create calls is bounded by the number of
+     * workers that can ever be running concurrently, not by the shape of
+     * the producer. */
     atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
 
-    v2_queue_push(&g_v2.ready_queue, f);
-    sched_v2_wake(-1);
+    sched_v2_enqueue_runnable(f);
 
     return f;
 }

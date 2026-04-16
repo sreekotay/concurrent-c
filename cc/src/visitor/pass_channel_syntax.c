@@ -1667,8 +1667,51 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
         size_t closure_start = 0;
         size_t closure_end = 0;
         const char* p = NULL;
+        /* Hybrid variant (*_hybrid) lowers to cc_fiber_spawn_closure0_v2 so the
+         * child fiber is scheduled on the V2 hybrid scheduler rather than the
+         * classic fiber scheduler. Ordered channel semantics are unchanged. */
+        int is_hybrid = 0;
 
-        if (i + 20 < len &&
+        /* Try the longer hybrid name first so the shorter prefix does not
+         * accidentally match "cc_channel_send_task_hybrid". */
+        if (i + 27 < len &&
+            memcmp(src + i, "cc_channel_send_task_hybrid", 27) == 0 &&
+            !(i > 0 && cc__is_ident_char_local2(src[i - 1])) &&
+            !cc__is_ident_char_local2(src[i + 27])) {
+            is_hybrid = 1;
+            call_start = i;
+            p = src + i + 27;
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+            if (*p != '(') continue;
+
+            paren_start = (size_t)(p - src);
+            paren_end = cc__find_matching_delim(src, len, paren_start, '(', ')');
+            if (paren_end == 0) continue;
+
+            p++;
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+            size_t comma = 0;
+            int depth = 0;
+            for (size_t j = (size_t)(p - src); j < paren_end; j++) {
+                char c = src[j];
+                if (c == '(' || c == '[' || c == '{') depth++;
+                else if (c == ')' || c == ']' || c == '}') depth--;
+                else if (c == ',' && depth == 0) { comma = j; break; }
+            }
+            if (comma == 0) continue;
+
+            ch_start = (size_t)(p - src);
+            ch_end = comma;
+            while (ch_end > ch_start && (src[ch_end - 1] == ' ' || src[ch_end - 1] == '\t')) ch_end--;
+
+            closure_start = comma + 1;
+            while (closure_start < paren_end && (src[closure_start] == ' ' || src[closure_start] == '\t' ||
+                   src[closure_start] == '\n' || src[closure_start] == '\r')) closure_start++;
+            closure_end = paren_end;
+            while (closure_end > closure_start && (src[closure_end - 1] == ' ' || src[closure_end - 1] == '\t' ||
+                   src[closure_end - 1] == '\n' || src[closure_end - 1] == '\r')) closure_end--;
+        } else if (i + 20 < len &&
             memcmp(src + i, "cc_channel_send_task", 20) == 0 &&
             !(i > 0 && cc__is_ident_char_local2(src[i - 1])) &&
             !(i + 20 < len && cc__is_ident_char_local2(src[i + 20]))) {
@@ -1717,9 +1760,18 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
             method_end = method_start;
             if (method_start >= len || !cc__is_ident_start_local2(src[method_start])) continue;
             while (method_end < len && cc__is_ident_char_local2(src[method_end])) method_end++;
-            if ((method_end - method_start) != sizeof("send_task") - 1 ||
-                memcmp(src + method_start, "send_task", sizeof("send_task") - 1) != 0) {
-                continue;
+            {
+                size_t mlen = method_end - method_start;
+                const char* m = src + method_start;
+                if (mlen == sizeof("send_task") - 1 &&
+                    memcmp(m, "send_task", sizeof("send_task") - 1) == 0) {
+                    /* classic */
+                } else if (mlen == sizeof("send_task_hybrid") - 1 &&
+                    memcmp(m, "send_task_hybrid", sizeof("send_task_hybrid") - 1) == 0) {
+                    is_hybrid = 1;
+                } else {
+                    continue;
+                }
             }
 
             paren_start = method_end;
@@ -1877,7 +1929,10 @@ char* cc__rewrite_chan_send_task_text(const CCVisitorCtx* ctx,
             cc__sb_append_cstr_local(&out, &o_len, &o_cap, "    return __cc_st_r;\n  };\n  CCTask __cc_st_t");
         }
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
-        cc__sb_append_cstr_local(&out, &o_len, &o_cap, " = cc_fiber_spawn_closure0(__cc_st_c");
+        cc__sb_append_cstr_local(&out, &o_len, &o_cap,
+            is_hybrid
+                ? " = cc_fiber_spawn_closure0_v2(__cc_st_c"
+                : " = cc_fiber_spawn_closure0(__cc_st_c");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, id_buf);
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, ");\n");
         cc__sb_append_cstr_local(&out, &o_len, &o_cap, "  int __cc_st_e");

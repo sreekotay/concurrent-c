@@ -317,13 +317,14 @@ CCSocket cc_listener_accept(CCListener* ln, CCNetError* out_err) {
 }
 
 void cc_listener_close(CCListener* ln) {
+    if (!ln) return;
+    if (ln->watcher) {
+        cc__io_watcher_destroy((cc__io_owned_watcher*)ln->watcher);
+        ln->watcher = NULL;
+    } else if (ln->fd >= 0) {
+        cc__io_wait_forget_fd(ln->fd);
+    }
     if (ln->fd >= 0) {
-        if (ln->watcher) {
-            cc__io_watcher_destroy((cc__io_owned_watcher*)ln->watcher);
-            ln->watcher = NULL;
-        } else {
-            cc__io_wait_forget_fd(ln->fd);
-        }
         close(ln->fd);
         ln->fd = -1;
     }

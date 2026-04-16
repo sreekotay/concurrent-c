@@ -706,15 +706,32 @@ cc__io_owned_watcher* cc__io_watcher_create(int fd) {
     return watcher;
 }
 
+#if CC_IO_WAIT_HAS_KQUEUE
+static void cc__io_watcher_cancel_slot(cc_io_kqueue_slot* slot) {
+    if (!slot) return;
+    if (atomic_load_explicit(&slot->armed, memory_order_acquire)) {
+        cc__io_wait_kqueue_disarm(slot);
+    }
+    void* fiber = slot->fiber;
+    if (atomic_load_explicit(&slot->active, memory_order_acquire) &&
+        fiber &&
+        cc__fiber_wait_ticket_matches(fiber, slot->wait_ticket) &&
+        atomic_exchange_explicit(&slot->ready, 1, memory_order_acq_rel) == 0 &&
+        cc__wait_select_try_win(slot->select_group, slot->select_index)) {
+        if (slot->select_group) {
+            cc__wait_select_group* group = (cc__wait_select_group*)slot->select_group;
+            atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
+        }
+        cc__fiber_unpark(fiber);
+    }
+}
+#endif
+
 void cc__io_watcher_destroy(cc__io_owned_watcher* watcher) {
     if (!watcher) return;
 #if CC_IO_WAIT_HAS_KQUEUE
-    if (watcher->read_slot && atomic_load_explicit(&watcher->read_slot->armed, memory_order_acquire)) {
-        cc__io_wait_kqueue_disarm(watcher->read_slot);
-    }
-    if (watcher->write_slot && atomic_load_explicit(&watcher->write_slot->armed, memory_order_acquire)) {
-        cc__io_wait_kqueue_disarm(watcher->write_slot);
-    }
+    cc__io_watcher_cancel_slot(watcher->read_slot);
+    cc__io_watcher_cancel_slot(watcher->write_slot);
 #endif
     if (watcher->fd >= 0) {
         cc__io_wait_forget_fd(watcher->fd);
@@ -794,7 +811,7 @@ int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
             }
         }
         cc__fiber_set_park_obj(slot);
-        CC_FIBER_SUSPEND_UNTIL_READY(&slot->ready, 0, "io_ready");
+        int wait_err = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
         cc__fiber_set_park_obj(NULL);
         if (persistent_read) {
             (void)atomic_exchange_explicit(&slot->ready, 0, memory_order_acq_rel);
@@ -808,7 +825,7 @@ int cc__io_watcher_wait(cc__io_owned_watcher* watcher, short events) {
         if (!persistent_read && atomic_load_explicit(&slot->armed, memory_order_acquire)) {
             cc__io_wait_kqueue_disarm(slot);
         }
-        return 0;
+        return wait_err;
 #endif
     }
 
@@ -984,7 +1001,7 @@ int cc__io_wait_fd(int fd, short events) {
             }
         }
         cc__fiber_set_park_obj(slot);
-        CC_FIBER_SUSPEND_UNTIL_READY(&slot->ready, 0, "io_ready");
+        int wait_err = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&slot->ready, 0, "io_ready");
         cc__fiber_set_park_obj(NULL);
         atomic_store_explicit(&slot->active, 0, memory_order_release);
         slot->fiber = NULL;
@@ -995,7 +1012,7 @@ int cc__io_wait_fd(int fd, short events) {
         if (atomic_load_explicit(&slot->armed, memory_order_acquire)) {
             cc__io_wait_kqueue_disarm(slot);
         }
-        return 0;
+        return wait_err;
 #endif
     }
 
@@ -1025,7 +1042,7 @@ int cc__io_wait_fd(int fd, short events) {
     cc__io_waiter_notify();
 
     cc__fiber_set_park_obj(waiter);
-    CC_FIBER_SUSPEND_UNTIL_READY(&waiter->ready, 0, "io_ready");
+    int wait_err = CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(&waiter->ready, 0, "io_ready");
     cc__fiber_set_park_obj(NULL);
 
     atomic_store_explicit(&waiter->cancelled, 1, memory_order_release);
@@ -1046,7 +1063,7 @@ int cc__io_wait_fd(int fd, short events) {
         cc__io_waiter_notify();
     }
     cc__io_waiter_release(waiter);
-    return 0;
+    return wait_err;
 }
 
 void cc__io_wait_dump_kq_diag(void) {

@@ -1,0 +1,1175 @@
+/*
+ * redis_hybrid.ccs — v2: idiomatic mailbox + reply channels; hybrid accept + client fibers.
+ *
+ * Debug / profile (quick ref):
+ *   make redis_hybrid_debug → out/redis_hybrid_debug (-g -O0)
+ *   make redis_hybrid_profile   → out/redis_hybrid_profile (--release -g, for sample/Instruments)
+ *   REDIS_HYBRID_STATS=1        → enable counters; kill -USR1 <pid> dumps metrics to stderr
+ *   lldb -- out/redis_hybrid_debug 6390
+ *   sample <pid> 10 -file /tmp/redis_hybrid.sample (macOS; run under load)
+ */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/std/net.cch>
+#include <ccc/std/string.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+#include <string.h>
+#include <time.h>
+#include <signal.h>
+#include <pthread.h>
+#include "redis_cc/redis_cc.cch"
+#include <ccc/std/task.cch>
+
+#define DEFAULT_PORT 6380
+#define READ_CHUNK 4096
+#define READ_BUF_CAP (16 * 1024)
+#define WRITE_BUF_CAP (16 * 1024)
+#define REQ_BUF_SIZE 512
+#define ENTRY_ARENA_OVERHEAD 128
+#define REQUEST_CHAN_CAP 512
+#define PIPELINE_LIMIT 16
+#define REPLY_CHAN_CAP PIPELINE_LIMIT
+typedef struct RedisEntry RedisEntry;
+
+struct RedisEntry {
+    struct RedisEntry* next;
+    CCString key;
+    CCString value;
+    CCArena key_arena;
+    CCArena value_arena;
+};
+
+typedef struct RedisDb {
+    CCArena arena;
+    Map<char[:], RedisEntry*> entries;
+    RedisEntry* head;
+} RedisDb;
+
+typedef struct RedisConn {
+    _Atomic size_t refs;
+    uint64_t conn_id;
+    uint64_t next_request_id;
+    size_t inflight;
+    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
+    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
+    CCSocketSignal signal;
+    char req_bufs[PIPELINE_LIMIT][REQ_BUF_SIZE];
+    size_t out_len;
+    char out_buf[WRITE_BUF_CAP];
+    uint64_t dbg_submit_count;
+    uint64_t dbg_reply_recv_count;
+    uint64_t dbg_reply_send_slow_count;
+    uint64_t dbg_reply_send_slow_ns;
+    uint64_t dbg_reply_send_slow_max_ns;
+    uint64_t dbg_wait_recv_count;
+    uint64_t dbg_wait_socket_count;
+    uint64_t dbg_wait_socket_empty_count;
+    _Atomic uint64_t dbg_owner_exec_count;
+    _Atomic uint64_t dbg_owner_last_req_id;
+    _Atomic uint64_t dbg_owner_last_service_ns;
+    _Atomic uint64_t dbg_owner_max_gap_ns;
+} RedisConn;
+
+/* Set from main when getenv("REDIS_HYBRID_STATS") is "1"; avoids hot-path work when unset. */
+static int g_hybrid_metrics = 0;
+static _Atomic uint64_t g_hybrid_stat_owner_cmds;
+static _Atomic uint64_t g_hybrid_stat_reply_send_ns;
+static _Atomic uint64_t g_hybrid_stat_reply_send_slow_ge_1ms;
+static _Atomic uint64_t g_hybrid_stat_mailbox_handoff_fail;
+static CCNursery* g_redis_shutdown_server = NULL;
+static sigset_t g_redis_shutdown_set;
+
+static void redis_hybrid_stats_dump(int sig) {
+    (void)sig;
+    fprintf(stderr,
+            "[redis_hybrid] metrics: owner_cmds=%llu reply_chan_send_ns_total=%llu "
+            "reply_chan_slow_ge_1ms=%llu mailbox_handoff_fail=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_owner_cmds, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_reply_send_ns, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms,
+                                                    memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_mailbox_handoff_fail,
+                                                    memory_order_relaxed));
+    fflush(stderr);
+}
+
+static void* redis_hybrid_shutdown_thread(void* arg) {
+    (void)arg;
+    int sig = 0;
+    if (sigwait(&g_redis_shutdown_set, &sig) == 0 && g_redis_shutdown_server) {
+        cc_nursery_cancel(g_redis_shutdown_server);
+    }
+    return NULL;
+}
+
+static void free_request(RedisRequest* req);
+static void redis_conn_retain(RedisConn* conn);
+static void redis_conn_drop(RedisConn* conn);
+
+static CCError mkerr(int err_kind, const char* msg) {
+    CCError err = {0};
+    err.kind = err_kind;
+    err.message = msg;
+    return err;
+}
+
+static CCIoError net_to_io_error(CCNetError err) {
+    switch (err) {
+        case CC_NET_CONNECTION_CLOSED:
+        case CC_NET_CONNECTION_RESET:
+            return cc_io_error(CC_IO_CONNECTION_CLOSED);
+        case CC_NET_TIMED_OUT:
+            return cc_io_error(CC_IO_BUSY);
+        default:
+            return cc_io_error(CC_IO_OTHER);
+    }
+}
+
+static uint64_t redis_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
+    size_t len = strlen(cstr);
+    if (s.len != len) return false;
+    for (size_t i = 0; i < len; ++i) {
+        char a = ((const char*)s.ptr)[i];
+        char b = cstr[i];
+        if (a >= 'a' && a <= 'z') a = (char)(a - 'a' + 'A');
+        if (b >= 'a' && b <= 'z') b = (char)(b - 'a' + 'A');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+static int64_t !>(CCError) parse_i64(char[:] s) {
+    if (s.len == 0) return cc_err(mkerr(CC_ERR_PARSE, "empty integer"));
+    int sign = 1;
+    size_t i = 0;
+    if (((const char*)s.ptr)[0] == '-') {
+        sign = -1;
+        i = 1;
+        if (s.len == 1) return cc_err(mkerr(CC_ERR_PARSE, "bad integer"));
+    }
+
+    uint64_t value = 0;
+    uint64_t limit = (uint64_t)INT64_MAX;
+    if (sign < 0) limit += 1;
+    for (; i < s.len; ++i) {
+        char ch = ((const char*)s.ptr)[i];
+        if (ch < '0' || ch > '9') {
+            return cc_err(mkerr(CC_ERR_PARSE, "bad integer"));
+        }
+        uint64_t digit = (uint64_t)(ch - '0');
+        if (value > limit / 10 ||
+            (value == limit / 10 && digit > (limit % 10))) {
+            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+        }
+        value = value * 10 + digit;
+    }
+    if (sign < 0) {
+        if (value == (uint64_t)INT64_MAX + 1) return cc_ok(INT64_MIN);
+        return cc_ok(-(int64_t)value);
+    }
+    return cc_ok((int64_t)value);
+}
+
+static size_t u64_decimal_len(uint64_t value) {
+    size_t len = 1;
+    while (value >= 10) {
+        value /= 10;
+        len++;
+    }
+    return len;
+}
+
+static size_t resp_integer_encoded_len(int64_t value) {
+    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
+    return 1 + (value < 0 ? 1 : 0) + u64_decimal_len(mag) + 2;
+}
+
+static size_t resp_bulk_header_len(size_t value_len) {
+    return 1 + u64_decimal_len((uint64_t)value_len) + 2;
+}
+
+static size_t i64_decimal_len(int64_t value) {
+    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
+    return (value < 0 ? 1 : 0) + u64_decimal_len(mag);
+}
+
+static void encode_i64_decimal_into(char* dst, int64_t value) {
+    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
+    size_t pos = i64_decimal_len(value);
+    if (value < 0) dst[0] = '-';
+    do {
+        dst[--pos] = (char)('0' + (mag % 10));
+        mag /= 10;
+    } while (mag != 0);
+}
+
+static void resp_encode_integer_into(char* dst, int64_t value) {
+    uint64_t mag = (value < 0) ? ((uint64_t)(-(value + 1)) + 1) : (uint64_t)value;
+    size_t digit_len = u64_decimal_len(mag);
+    size_t pos = 1 + (value < 0 ? 1 : 0) + digit_len;
+    dst[0] = ':';
+    if (value < 0) dst[1] = '-';
+    dst[pos] = '\r';
+    dst[pos + 1] = '\n';
+    do {
+        dst[--pos] = (char)('0' + (mag % 10));
+        mag /= 10;
+    } while (mag != 0);
+}
+
+static void resp_encode_bulk_header_into(char* dst, size_t value_len) {
+    uint64_t mag = (uint64_t)value_len;
+    size_t digit_len = u64_decimal_len(mag);
+    size_t pos = 1 + digit_len;
+    dst[0] = '$';
+    dst[1 + digit_len] = '\r';
+    dst[2 + digit_len] = '\n';
+    do {
+        dst[--pos] = (char)('0' + (mag % 10));
+        mag /= 10;
+    } while (mag != 0);
+}
+
+#include "redis_resp.cch"
+
+static RedisCommandKind cmd_kind(char[:] cmd, size_t argc) {
+    if (slice_eq_ignore_case(cmd, "PING") && argc <= 1) return REDIS_CMD_PING;
+    if (slice_eq_ignore_case(cmd, "GET") && argc == 1) return REDIS_CMD_GET;
+    if (slice_eq_ignore_case(cmd, "SET") && argc == 2) return REDIS_CMD_SET;
+    if (slice_eq_ignore_case(cmd, "DEL") && argc == 1) return REDIS_CMD_DEL;
+    if (slice_eq_ignore_case(cmd, "INCR") && argc == 1) return REDIS_CMD_INCR;
+    return (RedisCommandKind)-1;
+}
+
+static RedisReply reply_simple(const char* s) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_SIMPLE_STRING;
+    r.data = cc_slice_from_cstr(s);
+    return r;
+}
+
+static RedisReply reply_error(const char* s) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_ERROR;
+    r.data = cc_slice_from_cstr(s);
+    return r;
+}
+
+static RedisReply err_reply(CCError err) {
+    return reply_error(err.message ? err.message : "ERR internal error");
+}
+
+static RedisReply io_err_reply(CCIoError err) {
+    return reply_error(cc_io_error_str(err));
+}
+
+static RedisReply reply_bulk(CCSlice s) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_BULK_STRING;
+    r.data = s;
+    return r;
+}
+
+static RedisReply reply_null(void) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_NULL_BULK;
+    return r;
+}
+
+static RedisReply reply_integer(int64_t v) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_INTEGER;
+    r.int_value = v;
+    return r;
+}
+
+static RedisReply reply_raw(char[:0] s) {
+    RedisReply r = {0};
+    r.kind = REDIS_REPLY_RAW;
+    r.data = s;
+    return r;
+}
+
+static char[:0] config_get_reply(char[:] key) {
+    if (slice_eq_ignore_case(key, "save")) {
+        return @slice("*2\r\n$4\r\nsave\r\n$0\r\n\r\n");
+    }
+    if (slice_eq_ignore_case(key, "appendonly")) {
+        return @slice("*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n");
+    }
+    return @slice("*0\r\n");
+}
+
+static bool !>(CCError) decode_request_shape(CCSlice* args,
+                                             size_t argc,
+                                             RedisCommandKind* out_kind,
+                                             size_t* out_arg_start,
+                                             size_t* out_argc) {
+    if (argc < 1) return cc_err(mkerr(CC_ERR_PARSE, "empty command"));
+
+    if (slice_eq_ignore_case(args[0], "CONFIG")) {
+        if (argc != 3 || !slice_eq_ignore_case(args[1], "GET")) {
+            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command"));
+        }
+        *out_kind = REDIS_CMD_CONFIG_GET;
+        *out_arg_start = 2;
+        *out_argc = 1;
+        return cc_ok(true);
+    }
+
+    RedisCommandKind kind = cmd_kind(args[0], argc - 1);
+    if ((int)kind < 0) {
+        return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command"));
+    }
+
+    *out_kind = kind;
+    *out_arg_start = 1;
+    *out_argc = argc - 1;
+    return cc_ok(true);
+}
+
+static RedisRequest* !>(CCError) build_request(CCArena* req_arena,
+                                               CCSlice* args,
+                                               size_t arg_start,
+                                               size_t argc,
+                                               RedisCommandKind kind,
+                                               RedisConn* conn,
+                                               uint64_t conn_id,
+                                               uint64_t request_id) {
+    RedisRequest* req = cc_arena_alloc_T(RedisRequest, req_arena);
+    if (!req) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request allocation failed"));
+    }
+
+    memset(req, 0, sizeof(*req));
+    req->conn_id = conn_id;
+    req->request_id = request_id;
+    req->kind = kind;
+    req->argc = argc;
+
+    for (size_t i = 0; i < argc; ++i) {
+        req->argv[i] = cc_slice_clone(req_arena, args[arg_start + i]);
+        if (args[arg_start + i].len > 0 && !req->argv[i].ptr) {
+            return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request argument clone failed"));
+        }
+    }
+
+    req->conn = conn;
+    redis_conn_retain(conn);
+    req->arena = cc_arena_detach(req_arena);
+    return cc_ok(req);
+}
+typedef struct ParseAttempt {
+    int status;
+    RedisRequest* req;
+    CCError err;
+} ParseAttempt;
+
+static ParseAttempt read_request_buffered(RespReader* r,
+                                          RedisConn* conn,
+                                          uint64_t request_id,
+                                          char* req_buf,
+                                          size_t req_buf_size) {
+    ParseAttempt out = {0};
+    CCArena req_arena_storage = cc_arena_create_buffer(req_buf, req_buf_size);
+    if (!req_arena_storage.base) return out;
+
+    CCSlice args[4] = {0};
+    size_t argc = 0;
+    CCError err = {0};
+    RespParseStatus argc_status = rr_try_read_args_buffered(r, args, 4, &argc, &err);
+    if (argc_status <= 0) {
+        out.status = argc_status;
+        out.err = err;
+        return out;
+    }
+
+    RedisCommandKind kind = REDIS_CMD_PING;
+    size_t arg_start = 0;
+    size_t req_argc = 0;
+    bool !>(CCError) shape_res = decode_request_shape(args, argc, &kind, &arg_start, &req_argc);
+    if (shape_res.is_err()) {
+        out.status = -1;
+        out.err = shape_res.error();
+        return out;
+    }
+
+    RedisRequest* !>(CCError) req_res =
+        build_request(&req_arena_storage, args, arg_start, req_argc, kind, conn, conn->conn_id, request_id);
+    if (req_res.is_err()) {
+        out.status = -1;
+        out.err = req_res.error();
+        return out;
+    }
+
+    out.status = 1;
+    out.req = req_res.value();
+    return out;
+}
+
+static bool !>(CCError) db_clone_owned_string(CCString* out,
+                                              CCArena* out_arena,
+                                              char[:] src,
+                                              const char* err_msg) {
+    size_t arena_size = src.len + ENTRY_ARENA_OVERHEAD;
+    if (arena_size < ENTRY_ARENA_OVERHEAD) arena_size = ENTRY_ARENA_OVERHEAD;
+
+    CCArena arena_storage = cc_arena_heap(arena_size) @destroy;
+    if (!arena_storage.base) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, err_msg));
+    }
+
+    CCString cloned = CCString_from_slice(&arena_storage, src);
+    if (src.len > 0 && CCString_len(&cloned) != src.len) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, err_msg));
+    }
+
+    *out = cloned;
+    *out_arena = arena_storage.detach();
+    return cc_ok(true);
+}
+
+static bool db_init(RedisDb* db, size_t bucket_count) {
+    if (!db || bucket_count == 0) return false;
+    size_t arena_size = bucket_count * (sizeof(CCSlice) + sizeof(RedisEntry*) + 8);
+    if (arena_size < megabytes(96)) arena_size = megabytes(96);
+    db->arena = cc_arena_heap(arena_size);
+    if (!db->arena.base) return false;
+    db->entries = map_new<char[:], RedisEntry*>(&db->arena);
+    db->head = NULL;
+    return db->entries != NULL;
+}
+
+static bool !>(CCError) db_entry_init(RedisEntry* e, char[:] key, char[:] value) {
+    CCString key_owned = {0};
+    CCString value_owned = {0};
+    CCArena key_arena = {0};
+    CCArena value_arena = {0};
+
+    bool !>(CCError) key_res = db_clone_owned_string(&key_owned, &key_arena, key, "entry key clone failed");
+    if (key_res.is_err()) return cc_err(key_res.error());
+    bool !>(CCError) value_res = db_clone_owned_string(&value_owned, &value_arena, value, "entry value clone failed");
+    if (value_res.is_err()) {
+        if (key_arena.base) key_arena.free();
+        return cc_err(value_res.error());
+    }
+
+    e->key = key_owned;
+    e->value = value_owned;
+    e->key_arena = key_arena;
+    e->value_arena = value_arena;
+    return cc_ok(true);
+}
+
+static bool !>(CCError) db_entry_replace_value(RedisEntry* e, char[:] value) {
+    if (!e) return cc_err(mkerr(CC_ERR_INVALID_ARG, "db replace without entry"));
+    if (e->value.data && value.len <= e->value.cap) {
+        if (value.len > 0) memcpy(e->value.data, value.ptr, value.len);
+        e->value.len = value.len;
+        return cc_ok(true);
+    }
+    CCString value_owned = {0};
+    CCArena value_arena = {0};
+    bool !>(CCError) value_res = db_clone_owned_string(&value_owned, &value_arena, value, "entry value clone failed");
+    if (value_res.is_err()) return cc_err(value_res.error());
+
+    if (e->value_arena.base) e->value_arena.free();
+    e->value = value_owned;
+    e->value_arena = value_arena;
+    return cc_ok(true);
+}
+
+static void db_free_entry(RedisEntry* e) {
+    if (!e) return;
+    if (e->key_arena.base) e->key_arena.free();
+    if (e->value_arena.base) e->value_arena.free();
+    free(e);
+}
+
+static void db_unlink_entry(RedisDb* db, RedisEntry* e) {
+    RedisEntry** link = &db->head;
+    while (*link && *link != e) link = &(*link)->next;
+    if (*link == e) *link = e->next;
+}
+
+static RedisEntry* db_find_entry(RedisDb* db, char[:] key) {
+    if (!db || !db->entries) return NULL;
+    Map<char[:], RedisEntry*> entries = db->entries;
+    RedisEntry** entry_slot = entries.get_ptr(key);
+    return (entry_slot && *entry_slot) ? *entry_slot : NULL;
+}
+
+static bool !>(CCError) db_insert_entry(RedisDb* db, RedisEntry* e) {
+    if (!db || !db->entries || !e) {
+        return cc_err(mkerr(CC_ERR_INVALID_ARG, "db insert without entry"));
+    }
+
+    Map<char[:], RedisEntry*> entries = db->entries;
+    if (entries.insert(CCString_as_slice(&e->key), e) != 0) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db insert failed"));
+    }
+
+    e->next = db->head;
+    db->head = e;
+    return cc_ok(true);
+}
+
+static RedisReply !>(CCError) db_set(RedisDb* db, char[:] key, char[:] value) {
+    if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+
+    RedisEntry* e = db_find_entry(db, key);
+    if (e) {
+        bool !>(CCError) replace_res = db_entry_replace_value(e, value);
+        if (replace_res.is_err()) return cc_err(replace_res.error());
+        return cc_ok(reply_simple("OK"));
+    }
+
+    RedisEntry* new_entry = calloc(1, sizeof(*new_entry));
+    if (!new_entry) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "entry allocation failed"));
+
+    bool !>(CCError) init_res = db_entry_init(new_entry, key, value);
+    if (init_res.is_err()) {
+        free(new_entry);
+        return cc_err(init_res.error());
+    }
+
+    bool !>(CCError) insert_res = db_insert_entry(db, new_entry);
+    if (insert_res.is_err()) {
+        db_free_entry(new_entry);
+        return cc_err(insert_res.error());
+    }
+    return cc_ok(reply_simple("OK"));
+}
+
+static RedisReply db_get(RedisDb* db, char[:] key) {
+    RedisEntry* e = db_find_entry(db, key);
+    if (!e) return reply_null();
+    return reply_bulk(CCString_as_slice(&e->value));
+}
+
+static RedisReply db_del(RedisDb* db, char[:] key) {
+    if (!db || !db->entries) return reply_integer(0);
+
+    Map<char[:], RedisEntry*> entries = db->entries;
+    RedisEntry* e = db_find_entry(db, key);
+    if (!e) return reply_integer(0);
+    if (!entries.remove(key)) return reply_integer(0);
+
+    db_unlink_entry(db, e);
+    db_free_entry(e);
+    return reply_integer(1);
+}
+
+static RedisReply !>(CCError) db_incr(RedisDb* db, char[:] key) {
+    if (!db || !db->entries) return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "db lookup failed"));
+
+    RedisEntry* e = db_find_entry(db, key);
+
+    int64_t value = 1;
+    if (e) {
+        int64_t !>(CCError) parsed = parse_i64(CCString_as_slice(&e->value));
+        if (parsed.is_err()) {
+            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+        }
+        if (parsed.value() == INT64_MAX) {
+            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR value is not an integer or out of range"));
+        }
+        value = parsed.value() + 1;
+    }
+
+    char buf[32];
+    size_t encoded_len = i64_decimal_len(value);
+    encode_i64_decimal_into(buf, value);
+    char[:] encoded = cc_slice_from_buffer(buf, encoded_len);
+    if (e) {
+        bool !>(CCError) replace_res = db_entry_replace_value(e, encoded);
+        if (replace_res.is_err()) return cc_err(replace_res.error());
+    } else {
+        RedisReply !>(CCError) set_res = db_set(db, key, encoded);
+        if (set_res.is_err()) return cc_err(set_res.error());
+    }
+
+    return cc_ok(reply_integer(value));
+}
+
+static RedisReply !>(CCError) execute_request(RedisDb* db, RedisRequest* req) {
+    switch (req->kind) {
+        case REDIS_CMD_PING:
+            if (req->argc == 1) return cc_ok(reply_bulk(req->argv[0]));
+            return cc_ok(reply_simple("PONG"));
+        case REDIS_CMD_CONFIG_GET:
+            return cc_ok(reply_raw(config_get_reply(req->argv[0])));
+        case REDIS_CMD_GET:
+            return cc_ok(db_get(db, req->argv[0]));
+        case REDIS_CMD_SET:
+            return db_set(db, req->argv[0], req->argv[1]);
+        case REDIS_CMD_DEL:
+            return cc_ok(db_del(db, req->argv[0]));
+        case REDIS_CMD_INCR:
+            return db_incr(db, req->argv[0]);
+        default:
+            return cc_err(mkerr(CC_ERR_INVALID_ARG, "ERR unsupported command"));
+    }
+}
+
+static void db_free_all(RedisDb* db) {
+    if (!db || !db->entries) return;
+
+    RedisEntry* entry = db->head;
+    while (entry) {
+        RedisEntry* next = entry->next;
+        db_free_entry(entry);
+        entry = next;
+    }
+
+    Map<char[:], RedisEntry*> entries = db->entries;
+    entries.destroy();
+    db->entries = NULL;
+    db->head = NULL;
+    if (db->arena.base) db->arena.free();
+    db->arena = (CCArena){0};
+}
+
+static bool write_all(CCSocket* sock, CCSlice data) {
+    CCNetError err = CC_NET_OK;
+    size_t off = 0;
+    while (off < data.len) {
+        size_t n = sock->write((const char*)data.ptr + off, data.len - off, &err);
+        if (err != CC_NET_OK || n == 0) return false;
+        off += n;
+    }
+    return true;
+}
+
+static bool flush_output_buffer(CCSocket* sock, RedisConn* conn) {
+    if (!conn || conn->out_len == 0) return true;
+    CCSlice data = {
+        .ptr = conn->out_buf,
+        .len = conn->out_len,
+    };
+    conn->out_len = 0;
+    return write_all(sock, data);
+}
+
+static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
+    if (!conn || data.len == 0) return true;
+    if (data.len > WRITE_BUF_CAP) {
+        return flush_output_buffer(sock, conn) && write_all(sock, data);
+    }
+    if (conn->out_len + data.len > WRITE_BUF_CAP) {
+        if (!flush_output_buffer(sock, conn)) return false;
+    }
+    memcpy(conn->out_buf + conn->out_len, data.ptr, data.len);
+    conn->out_len += data.len;
+    return true;
+}
+
+static void reply_rebase_inline_ptr(RedisReply* reply) {
+    if (!reply || !reply->data_inline) return;
+    reply->data.ptr = reply->inline_buf;
+}
+
+static CCSlice !>(CCError) reply_alloc_bytes(RedisReply* reply, size_t len) {
+    if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply alloc without reply"));
+    if (len <= sizeof(reply->inline_buf)) {
+        reply->data_inline = 1;
+        CCSlice slice = {
+            .ptr = reply->inline_buf,
+            .len = len,
+        };
+        return cc_ok(slice);
+    }
+
+    size_t arena_size = len + ENTRY_ARENA_OVERHEAD;
+    CCArena arena_storage = cc_arena_heap(arena_size) @destroy;
+    if (!arena_storage.base) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
+    }
+
+    char* dst = cc_arena_alloc(&arena_storage, len, 1);
+    if (len > 0 && !dst) {
+        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
+    }
+
+    reply->data_inline = 0;
+    reply->arena = arena_storage.detach();
+    CCSlice slice = {
+        .ptr = dst,
+        .len = len,
+    };
+    return cc_ok(slice);
+}
+
+static bool !>(CCError) reply_materialize(RedisReply* reply) {
+    if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize without reply"));
+    if (reply->arena.base) {
+        return cc_ok(true);
+    }
+
+    switch (reply->kind) {
+        case REDIS_REPLY_RAW: {
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, reply->data.len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            if (reply->data.len > 0) memcpy(dst.ptr, reply->data.ptr, reply->data.len);
+            reply->data = dst;
+            return cc_ok(true);
+        }
+        case REDIS_REPLY_SIMPLE_STRING:
+        case REDIS_REPLY_ERROR: {
+            size_t len = reply->data.len + 3;
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            char* out = dst.ptr;
+            out[0] = (reply->kind == REDIS_REPLY_SIMPLE_STRING) ? '+' : '-';
+            if (reply->data.len > 0) memcpy(out + 1, reply->data.ptr, reply->data.len);
+            out[1 + reply->data.len] = '\r';
+            out[2 + reply->data.len] = '\n';
+            reply->kind = REDIS_REPLY_RAW;
+            reply->data = dst;
+            return cc_ok(true);
+        }
+        case REDIS_REPLY_BULK_STRING: {
+            size_t hdr_len = resp_bulk_header_len(reply->data.len);
+            size_t len = hdr_len + reply->data.len + 2;
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            char* out = dst.ptr;
+            resp_encode_bulk_header_into(out, reply->data.len);
+            if (reply->data.len > 0) memcpy(out + hdr_len, reply->data.ptr, reply->data.len);
+            out[hdr_len + reply->data.len] = '\r';
+            out[hdr_len + reply->data.len + 1] = '\n';
+            reply->kind = REDIS_REPLY_RAW;
+            reply->data = dst;
+            return cc_ok(true);
+        }
+        case REDIS_REPLY_INTEGER: {
+            size_t len = resp_integer_encoded_len(reply->int_value);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            resp_encode_integer_into(dst.ptr, reply->int_value);
+            reply->kind = REDIS_REPLY_RAW;
+            reply->data = dst;
+            return cc_ok(true);
+        }
+        case REDIS_REPLY_NULL_BULK: {
+            CCSlice data = cc_slice_from_cstr("$-1\r\n");
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, data.len);
+            if (dst_res.is_err()) return cc_err(dst_res.error());
+            CCSlice dst = dst_res.value();
+            memcpy(dst.ptr, data.ptr, data.len);
+            reply->kind = REDIS_REPLY_RAW;
+            reply->data = dst;
+            return cc_ok(true);
+        }
+        default:
+            return cc_err(mkerr(CC_ERR_INVALID_ARG, "unknown reply kind"));
+    }
+}
+
+static void free_reply(RedisReply* reply) {
+    if (!reply) return;
+    if (reply->arena.base) {
+        reply->arena.free();
+        reply->arena = (CCArena){0};
+    }
+    reply->data_inline = 0;
+}
+
+static void release_reply(RedisReply* reply) {
+    if (!reply) return;
+    *reply = (RedisReply){0};
+}
+
+static RedisConn* redis_conn_create(uint64_t conn_id) {
+    RedisConn* conn = calloc(1, sizeof(*conn));
+    if (!conn) return NULL;
+    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
+    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
+    CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
+    if (!reply_ch) {
+        free(conn);
+        return NULL;
+    }
+    conn->reply_tx = reply_tx;
+    conn->reply_rx = reply_rx;
+    atomic_store_explicit(&conn->refs, 1, memory_order_relaxed);
+    conn->conn_id = conn_id;
+    conn->next_request_id = 1;
+    conn->inflight = 0;
+    return conn;
+}
+
+static void redis_conn_destroy(RedisConn* conn) {
+    if (!conn) return;
+    RedisReply reply = {0};
+    while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply))) {
+        reply_rebase_inline_ptr(&reply);
+        free_reply(&reply);
+    }
+    cc_channel_free(conn->reply_tx);
+    cc_socket_signal_free(&conn->signal);
+    free(conn);
+}
+
+static void redis_conn_retain(RedisConn* conn) {
+    if (!conn) return;
+    atomic_fetch_add_explicit(&conn->refs, 1, memory_order_relaxed);
+}
+
+static void redis_conn_drop(RedisConn* conn) {
+    if (!conn) return;
+    if (atomic_fetch_sub_explicit(&conn->refs, 1, memory_order_acq_rel) == 1) {
+        redis_conn_destroy(conn);
+    }
+}
+
+static bool write_reply(CCSocket* sock, RedisConn* conn, RedisReply reply) {
+    reply_rebase_inline_ptr(&reply);
+    if (reply.kind != REDIS_REPLY_RAW) return false;
+    return buffer_write_bytes(sock, conn, reply.data);
+}
+
+static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
+    @defer free_reply(&reply);
+    bool !>(CCError) mat_res = reply_materialize(&reply);
+    bool ok = mat_res.is_ok() &&
+              write_reply(sock, conn, reply) &&
+              flush_output_buffer(sock, conn);
+    return ok;
+}
+
+static void free_request(RedisRequest* req) {
+    if (!req) return;
+    RedisConn* conn = req->conn;
+    if (req->arena.base) req->arena.free();
+    if (conn) redis_conn_drop(conn);
+}
+
+static void close_reply_stream(RedisConn* conn) {
+    if (conn) cc_channel_close(conn->reply_tx);
+}
+
+static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
+    if (!conn || !reply) return false;
+    @defer free_reply(reply);
+    bool !>(CCError) mat_res = reply_materialize(reply);
+    if (mat_res.is_err()) {
+        close_reply_stream(conn);
+        return false;
+    }
+    uint64_t t0 = redis_now_ns();
+    if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
+        close_reply_stream(conn);
+        return false;
+    }
+    uint64_t dt = redis_now_ns() - t0;
+    if (dt >= 1000000ull) {
+        conn->dbg_reply_send_slow_count++;
+        conn->dbg_reply_send_slow_ns += dt;
+        if (dt > conn->dbg_reply_send_slow_max_ns) conn->dbg_reply_send_slow_max_ns = dt;
+    }
+    if (g_hybrid_metrics) {
+        atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_ns, dt, memory_order_relaxed);
+        if (dt >= 1000000ull) {
+            atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms, 1, memory_order_relaxed);
+        }
+    }
+    release_reply(reply);
+    return true;
+}
+
+static bool write_received_reply(CCSocket* sock, RedisConn* conn, RedisReply* reply) {
+    if (!reply) return false;
+    @defer free_reply(reply);
+    if (!sock || !conn || conn->inflight == 0) return false;
+    conn->inflight--;
+    conn->dbg_reply_recv_count++;
+    bool ok = write_reply(sock, conn, *reply);
+    return ok;
+}
+
+static bool !>(CCError) redis_conn_mailbox_submit(RedisConn* conn,
+                                                  RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
+                                                  RedisRequest* req) {
+    if (!conn || !req) return cc_err(mkerr(CC_ERR_INVALID_ARG, "owner submit without request"));
+    CCResult_bool_CCIoError send_res = cc_channel_try_send(owner_tx, req);
+    if (cc_is_err(send_res)) {
+        if (cc_error(send_res).kind == CC_IO_BUSY) {
+            free_request(req);
+            return cc_ok(false);
+        }
+        if (g_hybrid_metrics) {
+            atomic_fetch_add_explicit(&g_hybrid_stat_mailbox_handoff_fail, 1, memory_order_relaxed);
+        }
+        free_request(req);
+        return cc_err(mkerr(CC_ERR_IO, "owner handoff failed"));
+    }
+    if (!cc_value(send_res)) {
+        free_request(req);
+        return cc_ok(false);
+    }
+    return cc_ok(true);
+}
+
+static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
+    RedisDb db = {0};
+    if (!db_init(&db, 131072)) {
+        fprintf(stderr, "redis_hybrid: db_init failed (out of memory?)\n");
+        return;
+    }
+
+    RedisRequest* req = NULL;
+    while (cc_io_avail(req_rx.recv(&req))) {
+        if (!req || !req->conn) continue;
+
+        RedisConn* conn = req->conn;
+        uint64_t now_ns = redis_now_ns();
+        uint64_t prev_ns = atomic_load_explicit(&conn->dbg_owner_last_service_ns, memory_order_relaxed);
+        if (prev_ns != 0 && now_ns > prev_ns) {
+            uint64_t gap_ns = now_ns - prev_ns;
+            uint64_t cur_max = atomic_load_explicit(&conn->dbg_owner_max_gap_ns, memory_order_relaxed);
+            while (gap_ns > cur_max &&
+                   !atomic_compare_exchange_weak_explicit(&conn->dbg_owner_max_gap_ns,
+                                                          &cur_max,
+                                                          gap_ns,
+                                                          memory_order_relaxed,
+                                                          memory_order_relaxed)) {
+            }
+        }
+        atomic_store_explicit(&conn->dbg_owner_last_service_ns, now_ns, memory_order_relaxed);
+        atomic_store_explicit(&conn->dbg_owner_last_req_id, req->request_id, memory_order_relaxed);
+        atomic_fetch_add_explicit(&conn->dbg_owner_exec_count, 1, memory_order_relaxed);
+        if (g_hybrid_metrics) {
+            atomic_fetch_add_explicit(&g_hybrid_stat_owner_cmds, 1, memory_order_relaxed);
+        }
+        @defer free_request(req);
+        RedisReply !>(CCError) exec_res = execute_request(&db, req);
+        RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error()) : exec_res.value();
+        @defer free_reply(&reply);
+        (void)owner_queue_reply(conn, &reply);
+    }
+
+    db_free_all(&db);
+}
+
+static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
+    int drained = 0;
+    while (conn->inflight > 0) {
+        RedisReply reply = {0};
+        if (!cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply))) break;
+        if (!write_received_reply(sock, conn, &reply)) return -1;
+        drained++;
+    }
+    if (drained > 0 && !flush_output_buffer(sock, conn)) return -1;
+    return drained;
+}
+
+static int !>(CCError) parse_and_submit_requests(RespReader* reader,
+                                                 RedisConn* conn,
+                                                 RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx) {
+    int submitted = 0;
+    while (conn->inflight < PIPELINE_LIMIT) {
+        char* req_buf = conn->req_bufs[conn->next_request_id % PIPELINE_LIMIT];
+        ParseAttempt parsed = read_request_buffered(reader, conn, conn->next_request_id, req_buf, REQ_BUF_SIZE);
+        if (parsed.status == 0) break;
+        if (parsed.status < 0) return cc_err(parsed.err);
+
+        CCResult_bool_CCError submit_res = redis_conn_mailbox_submit(conn, owner_tx, parsed.req);
+        if (cc_is_err(submit_res)) return cc_err(cc_error(submit_res));
+        if (!cc_value(submit_res)) break;
+        conn->next_request_id++;
+        conn->inflight++;
+        conn->dbg_submit_count++;
+        submitted++;
+    }
+    return cc_ok(submitted);
+}
+
+static void handle_client(CCSocket client,
+                          RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
+                          uint64_t conn_id) {
+    @defer client.close();
+    CCIoError exit_io_err = {0};
+
+    RedisConn* conn = redis_conn_create(conn_id);
+    if (!conn) return;
+    @defer redis_conn_drop(conn);
+    client.create_signal(&conn->signal);
+    cc_channel_set_recv_signal(conn->reply_tx, &conn->signal);
+
+    char read_buf[READ_BUF_CAP];
+    RespReader reader = rr_init(read_buf, sizeof(read_buf));
+
+    while (true) {
+        int drained = drain_and_flush_replies(&client, conn);
+        if (drained < 0) {
+            break;
+        }
+
+        CCResult_int_CCError parse_res = parse_and_submit_requests(&reader, conn, owner_tx);
+        if (cc_is_err(parse_res)) {
+            (void)write_reply_now(&client, conn, err_reply(cc_error(parse_res)));
+            break;
+        }
+
+        if (drained > 0 || cc_value(parse_res) > 0) continue;
+
+        if (conn->inflight > 0) {
+            RedisReply reply = {0};
+            CCResult_CCChanWaitOrSocketKind_CCIoError wait_res =
+                cc_channel_wait_recv_or_socket(conn->reply_rx, &conn->signal, &reply);
+            if (cc_is_err(wait_res)) {
+                exit_io_err = cc_unwrap_err_as(wait_res, CCIoError);
+                break;
+            }
+            if (cc_value(wait_res) == CC_CHAN_WAIT_RECV) {
+                conn->dbg_wait_recv_count++;
+                if (!write_received_reply(&client, conn, &reply) || !flush_output_buffer(&client, conn)) {
+                    break;
+                }
+            } else if (cc_value(wait_res) == CC_CHAN_WAIT_SOCKET) {
+                conn->dbg_wait_socket_count++;
+                int raced_drained = drain_and_flush_replies(&client, conn);
+                if (raced_drained < 0) {
+                    break;
+                }
+                if (raced_drained > 0) {
+                    continue;
+                }
+                CCResult_bool_CCIoError fill = rr_try_fill(&reader, &client);
+                if (cc_is_err(fill)) {
+                    exit_io_err = cc_unwrap_err_as(fill, CCIoError);
+                    (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
+                    break;
+                }
+                if (!cc_value(fill)) {
+                    conn->dbg_wait_socket_empty_count++;
+                }
+            } else {
+                break;
+            }
+        } else {
+            CCResult_bool_CCIoError fill = rr_fill(&reader, &client);
+            if (cc_is_err(fill)) {
+                exit_io_err = cc_unwrap_err_as(fill, CCIoError);
+                (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
+                break;
+            }
+            if (!cc_value(fill)) {
+                break;
+            }
+        }
+    }
+
+    cc_channel_close(conn->reply_tx);
+}
+
+int main(int argc, char** argv) {
+    int port = DEFAULT_PORT;
+    if (argc > 1) {
+        port = atoi(argv[1]);
+        if (port <= 0) port = DEFAULT_PORT;
+    }
+
+    char addr[64];
+    snprintf(addr, sizeof(addr), "127.0.0.1:%d", port);
+
+    CCNetError err = CC_NET_OK;
+    CCListener ln = cc_tcp_listen(addr, strlen(addr), &err);
+    if (err != CC_NET_OK) {
+        fprintf(stderr, "listen error: %d\n", err);
+        return 1;
+    }
+    @defer ln.close();
+
+    RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx;
+    RedisRequest*[~REQUEST_CHAN_CAP N:1 <] owner_rx;
+    CCChan* owner_ch = cc_channel_pair(&owner_tx, &owner_rx);
+    if (!owner_ch) {
+        fprintf(stderr, "failed to create request channel\n");
+        return 1;
+    }
+    @defer owner_ch.free();
+
+    printf("redis_hybrid listening on %s\n", addr);
+    fflush(stdout);
+
+    {
+        const char* m = getenv("REDIS_HYBRID_STATS");
+        if (m && m[0] == '1' && m[1] == '\0') {
+            g_hybrid_metrics = 1;
+            struct sigaction sa_st = {0};
+            sa_st.sa_handler = redis_hybrid_stats_dump;
+            sigemptyset(&sa_st.sa_mask);
+            sa_st.sa_flags = 0;
+            if (sigaction(SIGUSR1, &sa_st, NULL) != 0) {
+                fprintf(stderr, "redis_hybrid: sigaction(SIGUSR1) failed\n");
+            } else {
+                fprintf(stderr,
+                        "redis_hybrid: REDIS_HYBRID_STATS=1 (kill -USR1 <pid> for metrics; "
+                        "see `ps` / Activity Monitor)\n");
+            }
+        }
+    }
+
+    sigemptyset(&g_redis_shutdown_set);
+    sigaddset(&g_redis_shutdown_set, SIGINT);
+    sigaddset(&g_redis_shutdown_set, SIGTERM);
+    if (pthread_sigmask(SIG_BLOCK, &g_redis_shutdown_set, NULL) != 0) {
+        fprintf(stderr, "redis_hybrid: pthread_sigmask failed\n");
+        return 1;
+    }
+
+    CCListener* ln_ptr = &ln;
+    {
+        CCNursery* server = @create(NULL) @destroy;
+        if (!server) abort();
+        (void)server->close_on(owner_tx);
+        g_redis_shutdown_server = server;
+        pthread_t shutdown_tid;
+        if (pthread_create(&shutdown_tid, NULL, redis_hybrid_shutdown_thread, NULL) != 0) {
+            fprintf(stderr, "redis_hybrid: failed to start shutdown thread\n");
+            return 1;
+        }
+        pthread_detach(shutdown_tid);
+
+        server->spawnhybrid(() => [ln_ptr, owner_tx, owner_ch, server] {
+            uint64_t next_conn_id = 1;
+            while (true) {
+                CCNetError aerr = CC_NET_OK;
+                CCSocket client = cc_listener_accept(ln_ptr, &aerr);
+                if (aerr != CC_NET_OK) {
+                    if (!cc_nursery_is_cancelled(server)) {
+                        fprintf(stderr, "accept error: %d\n", aerr);
+                    }
+                    break;
+                }
+
+                uint64_t id = next_conn_id++;
+                server->spawnhybrid(() => [client, owner_tx, id] {
+                    handle_client(client, owner_tx, id);
+                });
+            }
+            cc_chan_close(owner_ch);
+        });
+
+        server->spawn(() => [owner_rx] {
+            owner_loop(owner_rx);
+        });
+    }
+    g_redis_shutdown_server = NULL;
+
+    return 0;
+}

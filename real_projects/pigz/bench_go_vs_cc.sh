@@ -22,7 +22,7 @@ make -C "$SCRIPT_DIR/../../cc" > /dev/null
 make -C "$SCRIPT_DIR/../../cc" lower-headers > /dev/null
 
 # Ensure binaries are built
-make pigz pigz_cc pigz_idiomatic pigz_pthread > /dev/null
+make pigz pigz_cc pigz_idiomatic pigz_pthread pigz_hybrid > /dev/null
 go build -ldflags="-s -w" -o out/pigz_go pigz_go.go > /dev/null
 ZIG_AVAILABLE=0
 if command -v zig >/dev/null 2>&1 && [ -f "$ZIG_SOURCE" ]; then
@@ -57,9 +57,12 @@ if [ ! -f "$INPUT_FILE" ]; then
 fi
 
 # --- benchmark definitions: name, cmd, flags ---
-BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Pthread)" "Go (CGO+zlib)")
-BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_go")
-BENCH_FLAGS=("" "-k -f" "" "")
+# Note: CC (Pthread) is held at index 2 because the ratio summary below uses it
+# as the baseline. CC (Hybrid) follows immediately after so the v2 hybrid
+# scheduler is compared apples-to-apples with its pthread sibling.
+BENCH_NAMES=("CC (Idiomatic)" "CC (Full)" "CC (Pthread)" "CC (Hybrid)" "Go (CGO+zlib)")
+BENCH_CMDS=("$OUT_DIR/pigz_idiomatic" "$OUT_DIR/pigz_cc" "$OUT_DIR/pigz_pthread" "$OUT_DIR/pigz_hybrid" "$OUT_DIR/pigz_go")
+BENCH_FLAGS=("" "-k -f" "" "" "")
 if [ "$ZIG_AVAILABLE" -eq 1 ]; then
     BENCH_NAMES+=("Zig")
     BENCH_CMDS+=("$ZIG_BIN")
