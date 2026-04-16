@@ -441,7 +441,21 @@ static void sched_v2_wake(int worker_hint) {
         return;
     }
 
-    /* External: wake IDLE workers while there's work in the queue. */
+    /* External: wake IDLE workers while there's work in the queue.
+     *
+     * We're on the "producer" side of a Dekker-style store-load pair:
+     *   producer: push task (count++)     ; load idle_workers
+     *   worker:   mark idle (is_idle=1)   ; load queue.count
+     *
+     * On weakly-ordered architectures (arm64), release-store + acquire-load
+     * does NOT forbid the load from being reordered before the store. Without
+     * a full barrier between them, both sides can observe the pre-publish
+     * state of the other and both go to sleep, leaving tasks stranded.
+     *
+     * The push already happened under a mutex above; insert a seq_cst fence
+     * here before the idle_workers check so the pairing is airtight. */
+    atomic_thread_fence(memory_order_seq_cst);
+
     if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
         return;
     }
@@ -664,10 +678,18 @@ static void* thread_v2_main(void* arg) {
         if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
 
         /* No work — let this BUSY worker become IDLE.
-         * Dekker protocol: mark idle, read wake counter, recheck, sleep. */
+         * Dekker protocol: mark idle, read wake counter, recheck, sleep.
+         *
+         * The store-load pair (mark is_idle=1 ; load queue.count) needs a
+         * full seq_cst fence on arm64 — release-store + acquire-load alone
+         * allows the architecture to reorder the load before the store,
+         * which would race with the producer's symmetric "push count ; load
+         * idle_workers" and leave a task stranded while the worker sleeps.
+         * See sched_v2_wake for the matching fence on the producer side. */
         atomic_store_explicit(&g_v2.threads[tid].is_idle, 1, memory_order_release);
         atomic_fetch_add_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
         atomic_fetch_add_explicit(&g_v2_worker_idle_entries, 1, memory_order_relaxed);
+        atomic_thread_fence(memory_order_seq_cst);
         uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
                                             memory_order_acquire);
 
