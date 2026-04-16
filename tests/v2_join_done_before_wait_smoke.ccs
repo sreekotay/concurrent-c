@@ -1,0 +1,51 @@
+/*
+ * Smoke test: V2 join after child already completed.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <stdio.h>
+
+#define ITERATIONS 500
+#define TASKS 16
+
+static cc_atomic_int completed = 0;
+
+static void* quick_task(void* arg) {
+    int v = (int)(intptr_t)arg;
+    cc_atomic_fetch_add(&completed, 1);
+    return (void*)(intptr_t)(v + 1);
+}
+
+int main(void) {
+    printf("v2_join_done_before_wait_smoke: iterations=%d tasks=%d\n", ITERATIONS, TASKS);
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        CCTask tasks[TASKS];
+        intptr_t sum = 0;
+        cc_atomic_store(&completed, 0);
+
+        for (int i = 0; i < TASKS; i++) {
+            tasks[i] = cc_fiber_spawn_task_v2(quick_task, (void*)(intptr_t)i);
+        }
+
+        cc_sleep_ms(1);
+
+        for (int i = 0; i < TASKS; i++) {
+            sum += cc_block_on_intptr(tasks[i]);
+        }
+
+        if (cc_atomic_load(&completed) != TASKS) {
+            fprintf(stderr, "FAIL: iter %d completed=%d expected=%d\n",
+                    iter, cc_atomic_load(&completed), TASKS);
+            return 2;
+        }
+
+        if (sum != ((TASKS * (TASKS - 1)) / 2 + TASKS)) {
+            fprintf(stderr, "FAIL: iter %d sum=%ld\n", iter, (long)sum);
+            return 3;
+        }
+    }
+
+    printf("v2_join_done_before_wait_smoke: PASS\n");
+    return 0;
+}

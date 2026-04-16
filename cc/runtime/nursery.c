@@ -14,11 +14,13 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "fiber_sched_boundary.h"
+#include "sched_v2.h"
 
 /* ============================================================================
  * Nursery spawn timing instrumentation
@@ -122,6 +124,13 @@ __attribute__((used)) void cc_nursery_dump_timing(void) {
 
 /* Forward declaration for fiber_task */
 typedef struct fiber_task fiber_task;
+typedef struct {
+    unsigned char kind;
+    union {
+        fiber_task* classic;
+        fiber_v2* hybrid;
+    } u;
+} cc_nursery_child;
 
 /* Fiber scheduler functions */
 fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg);
@@ -134,7 +143,7 @@ void cc_fiber_set_spawn_nursery_override(CCNursery* nursery);
 __thread CCNursery* cc__tls_current_nursery = NULL;
 
 struct CCNursery {
-    fiber_task** tasks;     /* Tasks spawned in this nursery */
+    cc_nursery_child* tasks; /* Tasks spawned in this nursery */
     size_t count;
     size_t cap;
     int cancelled;
@@ -159,7 +168,7 @@ static CCNursery* cc__nursery_alloc(void) {
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
     n->cap = 1024;
-    n->tasks = (fiber_task**)calloc(n->cap, sizeof(fiber_task*));
+    n->tasks = (cc_nursery_child*)calloc(n->cap, sizeof(cc_nursery_child));
     if (!n->tasks) {
         free(n);
         return NULL;
@@ -223,9 +232,9 @@ void cc_nursery_cancel(CCNursery* n) {
     n->cancelled = 1;
     /* Snapshot tasks while holding lock */
     size_t task_count = n->count;
-    fiber_task** tasks_snapshot = NULL;
+    cc_nursery_child* tasks_snapshot = NULL;
     if (task_count > 0) {
-        tasks_snapshot = (fiber_task**)malloc(task_count * sizeof(fiber_task*));
+        tasks_snapshot = (cc_nursery_child*)malloc(task_count * sizeof(cc_nursery_child));
         if (tasks_snapshot) {
             for (size_t i = 0; i < task_count; i++) {
                 tasks_snapshot[i] = n->tasks[i];
@@ -241,8 +250,10 @@ void cc_nursery_cancel(CCNursery* n) {
      * This is O(n) but ensures no fiber stays parked after cancel. */
     if (tasks_snapshot) {
         for (size_t i = 0; i < task_count; i++) {
-            if (tasks_snapshot[i]) {
-                cc_sched_fiber_wake((CCSchedFiber*)tasks_snapshot[i]);
+            if (tasks_snapshot[i].kind == 1 && tasks_snapshot[i].u.classic) {
+                cc_sched_fiber_wake((CCSchedFiber*)tasks_snapshot[i].u.classic);
+            } else if (tasks_snapshot[i].kind == 2 && tasks_snapshot[i].u.hybrid) {
+                sched_v2_signal(tasks_snapshot[i].u.hybrid);
             }
         }
         free(tasks_snapshot);
@@ -302,11 +313,29 @@ void cc_nursery_cancel_wait(CCNursery* n, uint32_t expected_gen, uint32_t timeou
 
 static int cc_nursery_grow(CCNursery* n) {
     size_t new_cap = n->cap ? n->cap * 2 : 8;
-    fiber_task** nt = (fiber_task**)realloc(n->tasks, new_cap * sizeof(fiber_task*));
+    cc_nursery_child* nt = (cc_nursery_child*)realloc(n->tasks, new_cap * sizeof(cc_nursery_child));
     if (!nt) return ENOMEM;
-    memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(fiber_task*));
+    memset(nt + n->cap, 0, (new_cap - n->cap) * sizeof(cc_nursery_child));
     n->tasks = nt;
     n->cap = new_cap;
+    return 0;
+}
+
+static int cc_nursery_append_child(CCNursery* n, cc_nursery_child child) {
+    if (n->count < n->cap) {
+        n->tasks[n->count++] = child;
+        return 0;
+    }
+    pthread_mutex_lock(&n->mu);
+    if (n->count == n->cap) {
+        int grow_err = cc_nursery_grow(n);
+        if (grow_err != 0) {
+            pthread_mutex_unlock(&n->mu);
+            return grow_err;
+        }
+    }
+    n->tasks[n->count++] = child;
+    pthread_mutex_unlock(&n->mu);
     return 0;
 }
 
@@ -362,22 +391,11 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 
     if (timing) t2 = nursery_rdtsc();
 
-    /* Fast path: single-producer append without mutex when capacity allows.
-     * The common case is one thread spawning into its own nursery. */
-    if (n->count < n->cap) {
-        n->tasks[n->count++] = t;
-    } else {
-        pthread_mutex_lock(&n->mu);
-        if (n->count == n->cap) {
-            int grow_err = cc_nursery_grow(n);
-            if (grow_err != 0) {
-                pthread_mutex_unlock(&n->mu);
-                cc_fiber_task_free(t);
-                return grow_err;
-            }
-        }
-        n->tasks[n->count++] = t;
-        pthread_mutex_unlock(&n->mu);
+    cc_nursery_child child = { .kind = 1, .u.classic = t };
+    int append_err = cc_nursery_append_child(n, child);
+    if (append_err != 0) {
+        cc_fiber_task_free(t);
+        return append_err;
     }
     
     if (timing) {
@@ -393,8 +411,33 @@ int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
 }
 
 int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg) {
-    /* "Hybrid" is the legacy spelling; keep the stackful fiber semantics. */
-    return cc_nursery_spawn(n, fn, arg);
+    if (!n || !fn) return EINVAL;
+
+    int timing = nursery_timing_enabled();
+    uint64_t t0 = 0, t1, t2, t3;
+    if (timing) t0 = nursery_rdtsc();
+    if (timing) t1 = t0;
+
+    fiber_v2* t = sched_v2_spawn_in_nursery(fn, arg, n);
+    if (!t) return ENOMEM;
+
+    if (timing) t2 = nursery_rdtsc();
+    cc_nursery_child child = { .kind = 2, .u.hybrid = t };
+    int append_err = cc_nursery_append_child(n, child);
+    if (append_err != 0) {
+        sched_v2_fiber_release(t);
+        return append_err;
+    }
+
+    if (timing) {
+        t3 = nursery_rdtsc();
+        atomic_fetch_add_explicit(&g_nursery_timing.setup_cycles, t1 - t0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.fiber_spawn_cycles, t2 - t1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.mutex_cycles, t3 - t2, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.spawn_total_cycles, t3 - t0, memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_nursery_timing.spawn_count, 1, memory_order_relaxed);
+    }
+    return 0;
 }
 
 int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
@@ -418,6 +461,27 @@ int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
     return err;
 }
 
+int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task) {
+    cc_nursery_async_spawn* a;
+    int err;
+    if (!n || task.kind == CC_TASK_KIND_INVALID) {
+        cc_task_free(&task);
+        return EINVAL;
+    }
+    a = (cc_nursery_async_spawn*)malloc(sizeof(*a));
+    if (!a) {
+        cc_task_free(&task);
+        return ENOMEM;
+    }
+    a->task = task;
+    err = cc_nursery_spawnhybrid(n, cc__nursery_async_runner, a);
+    if (err != 0) {
+        cc_task_free(&a->task);
+        free(a);
+    }
+    return err;
+}
+
 int cc_nursery_wait(CCNursery* n) {
     if (!n) return EINVAL;
     int first_err = 0;
@@ -434,20 +498,29 @@ int cc_nursery_wait(CCNursery* n) {
      * If cancelled, fibers should exit promptly when they check cc_cancelled()
      * or when channel operations return ECANCELED. */
     for (size_t i = 0; i < n->count; ++i) {
-        if (!n->tasks[i]) continue;
+        if (n->tasks[i].kind == 0) continue;
         uint64_t step0 = timing ? nursery_rdtsc() : 0;
-        int err = cc_fiber_join(n->tasks[i], NULL);
+        int err = 0;
+        if (n->tasks[i].kind == 1 && n->tasks[i].u.classic) {
+            err = cc_fiber_join(n->tasks[i].u.classic, NULL);
+        } else if (n->tasks[i].kind == 2 && n->tasks[i].u.hybrid) {
+            err = sched_v2_join(n->tasks[i].u.hybrid, NULL);
+        }
         uint64_t step1 = timing ? nursery_rdtsc() : 0;
         if (first_err == 0 && err != 0) {
             first_err = err;
         }
-        cc_fiber_task_free(n->tasks[i]);
+        if (n->tasks[i].kind == 1 && n->tasks[i].u.classic) {
+            cc_fiber_task_free(n->tasks[i].u.classic);
+        } else if (n->tasks[i].kind == 2 && n->tasks[i].u.hybrid) {
+            sched_v2_fiber_release(n->tasks[i].u.hybrid);
+        }
         uint64_t step2 = timing ? nursery_rdtsc() : 0;
         if (timing) {
             join_cycles += step1 - step0;
             free_cycles += step2 - step1;
         }
-        n->tasks[i] = NULL;
+        memset(&n->tasks[i], 0, sizeof(n->tasks[i]));
         joined++;
     }
     
@@ -480,8 +553,10 @@ int cc_nursery_wait(CCNursery* n) {
 void cc_nursery_free(CCNursery* n) {
     if (!n) return;
     for (size_t i = 0; i < n->count; ++i) {
-        if (n->tasks[i]) {
-            cc_fiber_task_free(n->tasks[i]);
+        if (n->tasks[i].kind == 1 && n->tasks[i].u.classic) {
+            cc_fiber_task_free(n->tasks[i].u.classic);
+        } else if (n->tasks[i].kind == 2 && n->tasks[i].u.hybrid) {
+            sched_v2_fiber_release(n->tasks[i].u.hybrid);
         }
     }
     /* Close registered channels as a last step */
