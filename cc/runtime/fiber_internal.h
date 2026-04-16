@@ -43,6 +43,8 @@ int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timesp
                             const char* reason, const char* file, int line);
 void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
                                    const char* reason, const char* file, int line);
+int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
+                                            const char* reason, const char* file, int line);
 void cc__fiber_unpark(void* fiber);
 typedef enum {
     CC_FIBER_UNPARK_REASON_GENERIC = 0,
@@ -77,6 +79,8 @@ void cc__fiber_pool_task_begin(void);       /* Notify sysmon: entering long CPU-
 void cc__fiber_pool_task_end(void);         /* Notify sysmon: leaving long CPU-bound pool task */
 uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr);
 int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
+void cc_external_wait_enter(void);
+void cc_external_wait_leave(void);
 
 /* Channel direct-handoff helpers — implemented in fiber_sched.c */
 int  cc__sched_current_worker_id(void);
@@ -93,5 +97,7 @@ void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
     cc__fiber_park_if_until(flag, expected, deadline, reason, __FILE__, __LINE__)
 #define CC_FIBER_SUSPEND_UNTIL_READY(flag, expected, reason) \
     cc__fiber_suspend_until_ready(flag, expected, reason, __FILE__, __LINE__)
+#define CC_FIBER_SUSPEND_UNTIL_READY_OR_CANCEL(flag, expected, reason) \
+    cc__fiber_suspend_until_ready_or_cancel(flag, expected, reason, __FILE__, __LINE__)
 
 #endif /* CC_FIBER_INTERNAL_H */

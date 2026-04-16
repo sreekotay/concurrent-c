@@ -992,7 +992,8 @@ static int cc__emit_type_driven_dispatch(char* out,
     }
     if (ctx->typed_chan_type && ctx->typed_chan_type[0]) {
         if (strcmp(method, "send") == 0 || strcmp(method, "try_send") == 0 ||
-            strcmp(method, "send_task") == 0 || strcmp(method, "recv") == 0 ||
+            strcmp(method, "send_task") == 0 || strcmp(method, "send_task_hybrid") == 0 ||
+            strcmp(method, "recv") == 0 ||
             strcmp(method, "try_recv") == 0 || strcmp(method, "close") == 0 ||
             strcmp(method, "free") == 0) {
             if (has_args) {

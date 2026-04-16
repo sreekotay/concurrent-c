@@ -79,6 +79,7 @@ static inline const char* cc_ufcs_channel_callee(const char* recv_type_name,
         if (strcmp(method, "try_send") == 0) return "cc_channel_try_send";
         if (strcmp(method, "send_take") == 0) return "cc_channel_send_take";
         if (strcmp(method, "send_task") == 0) return "cc_channel_send_task";
+        if (strcmp(method, "send_task_hybrid") == 0) return "cc_channel_send_task_hybrid";
         if (strcmp(method, "close") == 0) return "cc_channel_close";
         if (strcmp(method, "free") == 0) return "cc_channel_free";
         return NULL;

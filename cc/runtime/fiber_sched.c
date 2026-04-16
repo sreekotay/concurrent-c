@@ -5422,6 +5422,42 @@ void cc__fiber_suspend_until_ready(_Atomic int* flag, int expected,
     cc_external_wait_leave();
 }
 
+int cc__fiber_suspend_until_ready_or_cancel(_Atomic int* flag, int expected,
+                                            const char* reason, const char* file, int line) {
+    cc_external_wait_enter();
+    CCNursery* cur_nursery = cc__tls_current_nursery;
+    if (sched_v2_in_context()) {
+        (void)file; (void)line;
+        sched_v2_set_park_reason(reason);
+        while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
+            if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+                sched_v2_set_park_reason(NULL);
+                cc_external_wait_leave();
+                return ECANCELED;
+            }
+            sched_v2_park();
+        }
+        sched_v2_set_park_reason(NULL);
+        cc_external_wait_leave();
+        return 0;
+    }
+    fiber_task* f = tls_current_fiber;
+    if (!f || !f->coro) {
+        cc_external_wait_leave();
+        return 0;
+    }
+    f->external_wait_parked = 0;
+    while (atomic_load_explicit(flag, memory_order_acquire) == expected) {
+        if (cur_nursery && cc_nursery_is_cancelled(cur_nursery)) {
+            cc_external_wait_leave();
+            return ECANCELED;
+        }
+        cc__fiber_park_if(flag, expected, reason, file, line);
+    }
+    cc_external_wait_leave();
+    return 0;
+}
+
 int cc__fiber_park_if_until(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
                             const char* reason, const char* file, int line) {
     return cc__fiber_park_if_impl(flag, expected, abs_deadline, reason, file, line);

@@ -500,6 +500,7 @@ static inline CCSlice cc_channel_tx_lower_c(CCSlice recv_type, CCSlice method, C
     if (cc__channel_lower_c_eq(method, "set_recv_signal")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_set_recv_signal");
     if (cc__channel_lower_c_eq(method, "send_take")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_take");
     if (cc__channel_lower_c_eq(method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
+    if (cc__channel_lower_c_eq(method, "send_task_hybrid")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task_hybrid");
     if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
     if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();

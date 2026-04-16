@@ -1,19 +1,11 @@
 /*
- * pigz_hybrid.ccs -- Parallel gzip compression using V2 hybrid scheduler
+ * pigz_hybrid.ccs -- Parallel gzip on the V2 hybrid scheduler.
  *
- * Demonstrates the ordered channel + cc_channel_send_task pattern:
- *   CompressedResult* !>(CCIoError)[~N >] tx;
- *   CompressedResult* !>(CCIoError)[~N ordered <] rx;
- *   CCChan* ch = cc_channel_pair(&tx, &rx);
- *   cc_channel_send_task(tx, () => [blk] { auto r = compress_block(blk, 6); ...; return r; });
- *   CompressedResult* !>(CCIoError) r;
- *   while (cc_io_avail(rx.recv(&r))) { use(r); }
- *
- * The 'ordered' flag on the channel ensures results are delivered in
- * submission order (FIFO) even though tasks execute concurrently.
- * recv on an ordered channel awaits the next queued task and
- * extracts the typed result automatically, including rich `T !>(E)` payloads
- * stored in the task result buffer (no manual ordered_recv or glue helper).
+ * Identical in shape to pigz_idiomatic.ccs, but each compression task is
+ * spawned through send_task_hybrid (see call site below), which lowers to
+ * cc_fiber_spawn_closure0_v2 so the child fiber runs on the V2 hybrid
+ * scheduler. Ordered channel semantics (FIFO task delivery via ordered recv)
+ * are preserved.
  */
 
 #include <ccc/std/prelude.cch>
@@ -130,9 +122,12 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     CCChan* ch = cc_channel_pair(&results_tx, &results_rx);
     @defer ch.free();
 
+    CCFile* in_ptr = &in_file;
+    CCFile* out_ptr = &out_file;
+
     /* Keep the consumer outside the producer scope so results_tx closes when the
      * producer task exits, not later during nursery teardown. */
-    CCNursery* consumer = @create(NULL, () => [out_file, results_rx] {
+    CCNursery* consumer = @create(NULL, () => [out_ptr, results_rx] {
         CompressedResult* !>(CCIoError) r;
         long expect_seq = 0;
         while (cc_io_avail(results_rx.recv(&r))) {
@@ -146,7 +141,7 @@ int compress_file(const char* in_path, const char* out_path, int level) {
                 fprintf(stderr, "ORDER: expected=%ld got=%ld\n", expect_seq, item->seq);
             }
             expect_seq++;
-            (void)out_filewrite(item->data);
+            (void)out_ptr->write(item->data);
             item->arena.free();
         }
     }) @destroy;
@@ -162,12 +157,12 @@ int compress_file(const char* in_path, const char* out_path, int level) {
         fprintf(stderr, "Failed to create producer nursery\n");
         return 1;
     }
-    producer->spawn(() => [in_file, results_tx] {
+    producer->spawn(() => [in_ptr, results_tx] {
         long seq = 0;
         while (true) {
             CCArena blk_arena = @create(BLOCK_SIZE + BLOCK_ARENA_OVERHEAD) @destroy;
             CCSlice data;
-            bool !>(CCIoError) read_res = in_file.read(&blk_arena, BLOCK_SIZE, &data);
+            bool !>(CCIoError) read_res = in_ptr->read(&blk_arena, BLOCK_SIZE, &data);
 
             if (read_res.is_err() || !cc_io_avail(read_res)) {
                 break;
@@ -184,8 +179,10 @@ int compress_file(const char* in_path, const char* out_path, int level) {
             blk->arena = blk_arena.detach();
 
             bool is_last = blk->is_last;
-            /* The producer may block on channel backpressure; only the per-block
-             * compression jobs need to stay on the stackless hybrid scheduler. */
+            /* send_task_hybrid lowers to cc_fiber_spawn_closure0_v2, so the
+             * compression fiber is scheduled on the V2 hybrid scheduler while
+             * the resulting CCTask handle still flows through the ordered
+             * results channel. */
             results_tx.send_task_hybrid(() => [blk] {
                 CompressedResult* !>(CCIoError) res = compress_block(blk, 6);
                 blk->arena.free();

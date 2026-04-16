@@ -1,0 +1,149 @@
+/* Smoke test for send_task_hybrid.
+ *
+ * send_task_hybrid has the same semantics as send_task — closures are
+ * spawned and their CCTask handles flow through an ordered channel in
+ * submission order — but the child fiber runs on the V2 hybrid
+ * scheduler via cc_fiber_spawn_closure0_v2.
+ *
+ * This test exercises:
+ *   1. Primitive ordered delivery (CCTask channel + ordered_recv)
+ *   2. Typed ordered channel with rich `T !>(E)` payload
+ *   3. UFCS method form `tx.send_task_hybrid(() => [...] ...)`
+ */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+intptr_t compute(intptr_t x) {
+    return x * 2;
+}
+
+int !>(CCIoError) compute_result(int x) {
+    if (x < 0) return cc_err(cc_io_error(CC_IO_OTHER));
+    return cc_ok(x * 3);
+}
+
+static int test_legacy_form(void) {
+    CCTask[~8 >] tx;
+    CCTask[~8 <] rx;
+    cc_channel_pair(&tx, &rx);
+
+    intptr_t values[] = {1, 2, 3, 4, 5};
+    int n = sizeof(values) / sizeof(values[0]);
+
+    {
+        CCNursery* __cc_n = @create(NULL) @destroy;
+        if (!__cc_n) abort();
+        (void)__cc_n->close_on(tx);
+        for (int i = 0; i < n; i++) {
+            intptr_t v = values[i];
+            cc_channel_send_task_hybrid(tx, () => [v] compute(v));
+        }
+    }
+
+    void* result;
+    int idx = 0;
+    while (ordered_recv(rx, &result) == 1 && idx < n) {
+        intptr_t got = (intptr_t)result;
+        intptr_t expected = values[idx] * 2;
+        if (got != expected) {
+            printf("FAIL legacy-form: pos %d expected %lld got %lld\n",
+                   idx, (long long)expected, (long long)got);
+            chan_free(rx);
+            return 0;
+        }
+        idx++;
+    }
+    chan_free(rx);
+    if (idx != n) { printf("FAIL legacy-form: got %d values\n", idx); return 0; }
+    return 1;
+}
+
+static int test_ufcs_method_form(void) {
+    intptr_t[~8 >] tx;
+    intptr_t[~8 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    intptr_t values[] = {7, 14, 21, 28};
+    int n = sizeof(values) / sizeof(values[0]);
+
+    {
+        CCNursery* __cc_n = @create(NULL) @destroy;
+        if (!__cc_n) abort();
+        (void)__cc_n->close_on(tx);
+        for (int i = 0; i < n; i++) {
+            intptr_t v = values[i];
+            tx.send_task_hybrid(() => [v] compute(v));
+        }
+    }
+
+    intptr_t result;
+    int idx = 0;
+    while (cc_io_avail(chan_recv(rx, &result)) && idx < n) {
+        intptr_t expected = values[idx] * 2;
+        if (result != expected) {
+            printf("FAIL ufcs-form: pos %d expected %lld got %lld\n",
+                   idx, (long long)expected, (long long)result);
+            cc_chan_free(ch);
+            return 0;
+        }
+        idx++;
+    }
+    cc_chan_free(ch);
+    if (idx != n) { printf("FAIL ufcs-form: got %d values\n", idx); return 0; }
+    return 1;
+}
+
+static int test_rich_payload(void) {
+    int !>(CCIoError)[~8 >] result_tx;
+    int !>(CCIoError)[~8 ordered <] result_rx;
+    CCChan* ch = cc_channel_pair(&result_tx, &result_rx);
+
+    int values[] = {2, -1, 5};
+    int expected_ok[] = {6, 0, 15};
+    int expected_is_err[] = {0, 1, 0};
+    int n = sizeof(values) / sizeof(values[0]);
+
+    {
+        CCNursery* __cc_n = @create(NULL) @destroy;
+        if (!__cc_n) abort();
+        (void)__cc_n->close_on(result_tx);
+        for (int i = 0; i < n; i++) {
+            int v = values[i];
+            result_tx.send_task_hybrid(() => [v] compute_result(v));
+        }
+    }
+
+    int !>(CCIoError) result;
+    int idx = 0;
+    while (cc_io_avail(chan_recv(result_rx, &result)) && idx < n) {
+        if (expected_is_err[idx]) {
+            if (!cc_is_err(result)) {
+                printf("FAIL rich-payload: pos %d expected error\n", idx);
+                cc_chan_free(ch);
+                return 0;
+            }
+        } else {
+            if (cc_is_err(result) || cc_unwrap(result) != expected_ok[idx]) {
+                printf("FAIL rich-payload: pos %d expected %d\n", idx, expected_ok[idx]);
+                cc_chan_free(ch);
+                return 0;
+            }
+        }
+        idx++;
+    }
+    cc_chan_free(ch);
+    if (idx != n) { printf("FAIL rich-payload: got %d values\n", idx); return 0; }
+    return 1;
+}
+
+int main(void) {
+    int ok = 1;
+    if (!test_legacy_form())     { ok = 0; }
+    if (!test_ufcs_method_form()) { ok = 0; }
+    if (!test_rich_payload())    { ok = 0; }
+
+    if (ok) {
+        printf("send_task_hybrid_smoke: PASS\n");
+    }
+    return ok ? 0 : 1;
+}

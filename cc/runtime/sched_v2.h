@@ -1,11 +1,15 @@
 /*
- * Hybrid Scheduler V2 — signal-based fiber/thread scheduler.
+ * Hybrid Scheduler V2 — global-queue fiber/thread scheduler.
  *
- * Runnable work lives in one global ready queue.
- * Wake routing is state-driven:
- *   PARKED       -> QUEUED       + enqueue + wake worker
- *   RUNNING      -> RUNNING_WAKE
- *   RUNNING_WAKE -> remains runnable until the yielding worker requeues it
+ * Fiber lifecycle:
+ *   QUEUED  -> on the global runnable queue
+ *   RUNNING -> owned by a BUSY worker
+ *   PARKED  -> blocked until an external signal re-enqueues it
+ *   DEAD    -> completed
+ *
+ * A RUNNING fiber may also carry an internal "signal pending" bit so the
+ * post-resume commit path can requeue it instead of parking. That bit is an
+ * implementation detail, not a separate fiber state.
  */
 #ifndef CC_SCHED_V2_H
 #define CC_SCHED_V2_H
@@ -23,8 +27,7 @@ enum {
     FIBER_V2_QUEUED  = 1,
     FIBER_V2_RUNNING = 2,
     FIBER_V2_PARKED  = 3,
-    FIBER_V2_RUNNING_WAKE = 4,
-    FIBER_V2_DEAD    = 5,
+    FIBER_V2_DEAD    = 4,
 };
 
 /* Public API */
