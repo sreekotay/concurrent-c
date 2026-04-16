@@ -214,6 +214,20 @@ static _Atomic uint64_t g_v2_mco_fail_logs = 0;
 static _Atomic uint64_t g_v2_coro_reuse = 0;
 static _Atomic uint64_t g_v2_coro_fresh = 0;
 
+/* sched_v2_join outcome distribution: how often the joiner found the task
+ * already done at entry, caught it during the spin, or had to fully park. */
+static _Atomic uint64_t g_v2_join_fast = 0;
+static _Atomic uint64_t g_v2_join_spin_hit = 0;
+static _Atomic uint64_t g_v2_join_park_fiber = 0;
+static _Atomic uint64_t g_v2_join_park_thread = 0;
+
+/* Tunable via CC_V2_JOIN_SPIN env var. Default 0: measurement on pigz (and
+ * any workload where the joinee runs much longer than the spin budget)
+ * showed the spin never catches a ready task — all joins either hit the
+ * fast path at entry or have to park anyway. A non-zero value is retained
+ * as an env-var knob for low-latency workloads that might benefit. */
+static int g_v2_join_spin = 0;
+
 static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT],
                                       uint64_t* parked_wait_many,
                                       uint64_t* parked_wait,
@@ -825,6 +839,13 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_coro_fresh, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_parks, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] join (spin=%d): fast=%llu spin_hit=%llu "
+                    "park_fiber=%llu park_thread=%llu\n",
+            g_v2_join_spin,
+            (unsigned long long)atomic_load_explicit(&g_v2_join_fast, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_join_spin_hit, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_join_park_fiber, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_join_park_thread, memory_order_relaxed));
 }
 
 static void sched_v2_init_impl(void) {
@@ -838,6 +859,14 @@ static void sched_v2_init_impl(void) {
     const char* stats_env = getenv("CC_V2_STATS");
     if (stats_env && stats_env[0] && stats_env[0] != '0') {
         atexit(sched_v2_atexit_dump_stats);
+    }
+    const char* spin_env = getenv("CC_V2_JOIN_SPIN");
+    if (spin_env) {
+        char* end = NULL;
+        long v = strtol(spin_env, &end, 10);
+        if (end != spin_env && v >= 0 && v <= 65536) {
+            g_v2_join_spin = (int)v;
+        }
     }
 
     int n = sched_v2_detect_num_threads();
@@ -928,11 +957,14 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
     if (!f) return -1;
 
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&g_v2_join_fast, 1, memory_order_relaxed);
         return sched_v2_finish_join(f, out_result);
     }
 
-    for (int i = 0; i < 256; i++) {
+    int spin = g_v2_join_spin;
+    for (int i = 0; i < spin; i++) {
         if (atomic_load_explicit(&f->done, memory_order_acquire)) {
+            atomic_fetch_add_explicit(&g_v2_join_spin_hit, 1, memory_order_relaxed);
             return sched_v2_finish_join(f, out_result);
         }
         #if defined(__aarch64__) || defined(__arm64__)
@@ -946,6 +978,7 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
         atomic_store_explicit(&f->join_waiter_fiber,
                               (cc__fiber*)cc__fiber_current(),
                               memory_order_release);
+        atomic_fetch_add_explicit(&g_v2_join_park_fiber, 1, memory_order_relaxed);
         while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
             cc__fiber_clear_pending_unpark();
             CC_FIBER_PARK_IF(&f->done, 0, "sched_v2_join");
@@ -953,6 +986,7 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
         atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
         return sched_v2_finish_join(f, out_result);
     }
+    atomic_fetch_add_explicit(&g_v2_join_park_thread, 1, memory_order_relaxed);
     while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
         uint32_t wait_val = atomic_load_explicit(&f->done_wake.value, memory_order_acquire);
         if (atomic_load_explicit(&f->done, memory_order_acquire)) break;
