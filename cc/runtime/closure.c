@@ -46,6 +46,7 @@ int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
 }
 
 int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg);
+int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task);
 
 int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c) {
     if (!n || !c.fn) return EINVAL;
@@ -193,7 +194,7 @@ int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
 
 int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
     if (!n || !c.start) return EINVAL;
-    return cc_nursery_spawn_async(n, cc_async_closure0_start(c));
+    return cc_nursery_spawnhybrid_async(n, cc_async_closure0_start_v2(c));
 }
 
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0) {

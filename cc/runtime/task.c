@@ -651,6 +651,11 @@ static void cc__set_fiber_task(CCTask* t, fiber_task* f) {
     fi->fiber = f;
 }
 
+static void cc__set_fiber_v2_task(CCTask* t, fiber_v2* f) {
+    CCTaskFiberV2Internal* fv = TASK_FIBER_V2(t);
+    fv->fiber = f;
+}
+
 /* Spawn an M:N fiber task. Returns CCTask with kind=CC_TASK_KIND_FIBER (or POOL).
  *
  * When the fiber pool is ready (CC_FIBER_POOL != 0) and a slot is free, the
@@ -731,12 +736,30 @@ CCTask cc_fiber_spawn_closure0(CCClosure0 c) {
 }
 
 CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg) {
-    /* Route legacy hybrid spawns onto the stackful fiber scheduler. */
-    return cc_fiber_spawn_task(fn, arg);
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!fn) return out;
+    fiber_v2* f = sched_v2_spawn(fn, arg);
+    if (!f) return out;
+    out.kind = CC_TASK_KIND_FIBER_V2;
+    cc__set_fiber_v2_task(&out, f);
+    return out;
 }
 
 CCTask cc_fiber_spawn_closure0_v2(CCClosure0 c) {
-    return cc_fiber_spawn_closure0(c);
+    CCTask out;
+    memset(&out, 0, sizeof(out));
+    if (!c.fn) return out;
+
+    CCClosure0* heap_c = (CCClosure0*)malloc(sizeof(CCClosure0));
+    if (!heap_c) return out;
+    *heap_c = c;
+
+    out = cc_fiber_spawn_task_v2(cc__fiber_closure0_wrapper, heap_c);
+    if (out.kind == CC_TASK_KIND_INVALID) {
+        free(heap_c);
+    }
+    return out;
 }
 
 static void* cc__async_task_v2_bridge_runner(void* arg) {

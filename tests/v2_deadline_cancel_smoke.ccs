@@ -1,0 +1,53 @@
+/*
+ * Smoke test: cancellation/deadline wake from a V2 hybrid fiber.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_channel.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <errno.h>
+#include <stdio.h>
+
+static cc_atomic_int g_rc = 0;
+static cc_atomic_int g_seen_cancelled = 0;
+
+int main(void) {
+    {
+        CCNursery* n = @create(NULL) @destroy;
+        if (!n) return 2;
+
+        if (n->spawnhybrid(() => {
+                CCChan* ch = cc_chan_create(1);
+                if (!ch) {
+                    cc_atomic_store(&g_rc, -100);
+                    return NULL;
+                }
+                (void)cc_chan_init_elem(ch, sizeof(int));
+
+                int v = 0;
+                int rc = 0;
+                @with_deadline(seconds(1)) {
+                    cc_cancel();
+                    if (cc_is_cancelled()) cc_atomic_store(&g_seen_cancelled, 1);
+                    rc = cc_chan_recv(ch, &v, sizeof(v));
+                }
+
+                cc_atomic_store(&g_rc, rc);
+                cc_chan_free(ch);
+            }) != 0) {
+            return 3;
+        }
+    }
+
+    if (!cc_atomic_load(&g_seen_cancelled)) {
+        fprintf(stderr, "FAIL: cc_is_cancelled() was false in V2 task\n");
+        return 10;
+    }
+    if (cc_atomic_load(&g_rc) != ECANCELED) {
+        fprintf(stderr, "FAIL: expected ECANCELED, got %d\n", cc_atomic_load(&g_rc));
+        return 11;
+    }
+
+    printf("v2_deadline_cancel_smoke: PASS\n");
+    return 0;
+}

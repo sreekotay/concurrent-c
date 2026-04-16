@@ -1,0 +1,51 @@
+/*
+ * Smoke test: V2 yield under contention.
+ */
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+
+#include <stdio.h>
+
+#define TASKS 32
+#define YIELDS 200
+
+static cc_atomic_int g_steps = 0;
+static cc_atomic_int g_done = 0;
+
+static void* yield_task(void* arg) {
+    int iters = (int)(intptr_t)arg;
+    for (int i = 0; i < iters; i++) {
+        cc_atomic_fetch_add(&g_steps, 1);
+        cc_yield();
+    }
+    cc_atomic_fetch_add(&g_done, 1);
+    return NULL;
+}
+
+int main(void) {
+    CCTask tasks[TASKS];
+    cc_sched_set_num_workers(4);
+    cc_atomic_store(&g_steps, 0);
+    cc_atomic_store(&g_done, 0);
+
+    for (int i = 0; i < TASKS; i++) {
+        tasks[i] = cc_fiber_spawn_task_v2(yield_task, (void*)(intptr_t)YIELDS);
+    }
+
+    for (int i = 0; i < TASKS; i++) {
+        (void)cc_block_on_intptr(tasks[i]);
+    }
+
+    if (cc_atomic_load(&g_done) != TASKS) {
+        fprintf(stderr, "FAIL: done=%d expected=%d\n", cc_atomic_load(&g_done), TASKS);
+        return 1;
+    }
+    if (cc_atomic_load(&g_steps) != TASKS * YIELDS) {
+        fprintf(stderr, "FAIL: steps=%d expected=%d\n",
+                cc_atomic_load(&g_steps), TASKS * YIELDS);
+        return 2;
+    }
+
+    printf("v2_yield_contention_smoke: PASS\n");
+    return 0;
+}

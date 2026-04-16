@@ -27,12 +27,14 @@
 #include "sched_v2.h"
 #include "wake_primitive.h"
 #include "fiber_internal.h"
+#include "minicoro.h"
 
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <sched.h>
 
@@ -55,7 +57,7 @@ enum {
 };
 
 struct fiber_v2 {
-    void*      coro; /* Unused in the current run-to-completion prototype. */
+    mco_coro*  coro;
     _Atomic int state;
     int        last_thread_id;
     uint64_t   generation;
@@ -70,6 +72,8 @@ struct fiber_v2 {
     const char* park_reason;
     wake_primitive done_wake;
     cc__fiber* _Atomic join_waiter_fiber;
+    CCNursery* saved_nursery;
+    CCNursery* admission_nursery;
 
     /* Intrusive linked list for free list */
     fiber_v2*  next;
@@ -236,14 +240,26 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[6],
 static __thread int tls_v2_thread_id = -1;
 static __thread fiber_v2* tls_v2_current_fiber = NULL;
 static __thread const char* tls_v2_park_reason = NULL;
+extern __thread CCNursery* cc__tls_current_nursery;
+bool cc_nursery_is_cancelled(const CCNursery* n);
 
-__attribute__((noreturn))
-static void sched_v2_fail_stackless_suspend(const char* op) {
-    fprintf(stderr,
-            "[sched_v2] stackless spawnhybrid does not support %s; "
-            "use explicit async/state-machine suspension instead\n",
-            op ? op : "suspension");
-    abort();
+static void fiber_v2_entry(mco_coro* co) {
+    fiber_v2* f = (fiber_v2*)mco_get_user_data(co);
+    if (!f) return;
+    atomic_thread_fence(memory_order_acquire);
+    CCNursery* prev_nursery = cc__tls_current_nursery;
+    cc__tls_current_nursery = f->saved_nursery;
+    if (f->entry_fn) {
+        if (f->admission_nursery && cc_nursery_is_cancelled(f->admission_nursery)) {
+            f->result = NULL;
+        } else {
+            f->result = f->entry_fn(f->entry_arg);
+        }
+    } else {
+        f->result = NULL;
+    }
+    f->admission_nursery = NULL;
+    cc__tls_current_nursery = prev_nursery;
 }
 
 /* ============================================================================
@@ -264,6 +280,8 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->entry_fn = NULL;
             f->entry_arg = NULL;
             f->last_thread_id = -1;
+            f->saved_nursery = NULL;
+            f->admission_nursery = NULL;
             atomic_store_explicit(&f->done, 0, memory_order_relaxed);
             atomic_store_explicit(&f->wait_ticket, 0, memory_order_relaxed);
             atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
@@ -280,6 +298,8 @@ static fiber_v2* fiber_v2_alloc(void) {
     f->coro = NULL;
     f->last_thread_id = -1;
     f->park_reason = NULL;
+    f->saved_nursery = NULL;
+    f->admission_nursery = NULL;
     atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
     wake_primitive_init(&f->done_wake);
 
@@ -298,6 +318,12 @@ static void fiber_v2_free(fiber_v2* f) {
     f->entry_fn = NULL;
     f->entry_arg = NULL;
     f->result = NULL;
+    f->saved_nursery = NULL;
+    f->admission_nursery = NULL;
+    if (f->coro) {
+        (void)mco_destroy(f->coro);
+        f->coro = NULL;
+    }
     fiber_v2* head;
     do {
         head = atomic_load_explicit(&g_v2.free_list, memory_order_relaxed);
@@ -405,19 +431,52 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     tls_v2_current_fiber = f;
     f->park_reason = NULL;
     f->yield_kind = V2_YIELD_PARK;
-    f->result = f->entry_fn ? f->entry_fn(f->entry_arg) : NULL;
+    mco_result res = mco_resume(f->coro);
 
     tls_v2_current_fiber = NULL;
     atomic_fetch_add_explicit(&g_v2_sysmon_stall_detect, 1, memory_order_relaxed);
-    atomic_store_explicit(&f->state, FIBER_V2_DEAD, memory_order_release);
-    atomic_store_explicit(&f->done, 1, memory_order_release);
-    cc__fiber* waiter =
-        atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
-    if (waiter) {
-        cc__fiber_unpark_tagged(waiter, CC_FIBER_UNPARK_REASON_TASK_DONE);
+    if (res != MCO_SUCCESS) {
+        atomic_fetch_add_explicit(&g_v2_mco_resume_fail, 1, memory_order_relaxed);
+        fprintf(stderr, "[sched_v2] mco_resume failed rc=%d\n", (int)res);
+        abort();
     }
-    wake_primitive_wake_all(&f->done_wake);
-    atomic_fetch_add_explicit(&g_v2_run_dead, 1, memory_order_relaxed);
+
+    if (mco_status(f->coro) == MCO_DEAD) {
+        atomic_store_explicit(&f->state, FIBER_V2_DEAD, memory_order_release);
+        atomic_store_explicit(&f->done, 1, memory_order_release);
+        cc__fiber* waiter =
+            atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
+        if (waiter) {
+            cc__fiber_unpark_tagged(waiter, CC_FIBER_UNPARK_REASON_TASK_DONE);
+        }
+        wake_primitive_wake_all(&f->done_wake);
+        atomic_fetch_add_explicit(&g_v2_run_dead, 1, memory_order_relaxed);
+        return;
+    }
+
+    expected = atomic_load_explicit(&f->state, memory_order_acquire);
+    if (f->yield_kind == V2_YIELD_YIELD || expected == FIBER_V2_RUNNING_WAKE) {
+        atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
+        v2_queue_push(&g_v2.ready_queue, f);
+        sched_v2_wake(-1);
+        if (f->yield_kind == V2_YIELD_YIELD) {
+            atomic_fetch_add_explicit(&g_v2_run_yield_requeue, 1, memory_order_relaxed);
+        } else {
+            atomic_fetch_add_explicit(&g_v2_run_postpark_requeue, 1, memory_order_relaxed);
+        }
+        return;
+    }
+
+    expected = FIBER_V2_RUNNING;
+    if (!atomic_compare_exchange_strong_explicit(&f->state, &expected, FIBER_V2_PARKED,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
+        v2_queue_push(&g_v2.ready_queue, f);
+        sched_v2_wake(-1);
+        atomic_fetch_add_explicit(&g_v2_run_postpark_requeue, 1, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_add_explicit(&g_v2_run_commit_parked, 1, memory_order_relaxed);
 }
 
 /* ============================================================================
@@ -427,13 +486,23 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
 void sched_v2_signal(fiber_v2* f) {
     while (1) {
         int expected = atomic_load_explicit(&f->state, memory_order_acquire);
-        if (expected == FIBER_V2_QUEUED || expected == FIBER_V2_RUNNING) {
-            if (expected == FIBER_V2_RUNNING) {
+        if (expected == FIBER_V2_QUEUED) {
+            atomic_fetch_add_explicit(&g_v2_signal_ok, 1, memory_order_relaxed);
+            return;
+        }
+        if (expected == FIBER_V2_RUNNING || expected == FIBER_V2_RUNNING_WAKE) {
+            if (expected == FIBER_V2_RUNNING_WAKE) {
                 atomic_fetch_add_explicit(&g_v2_signal_running_already_set, 1, memory_order_relaxed);
                 atomic_fetch_add_explicit(&g_v2_signal_pending, 1, memory_order_relaxed);
-            } else {
-                atomic_fetch_add_explicit(&g_v2_signal_ok, 1, memory_order_relaxed);
+                return;
             }
+            int desired = FIBER_V2_RUNNING_WAKE;
+            if (!atomic_compare_exchange_weak_explicit(&f->state, &expected, desired,
+                    memory_order_acq_rel, memory_order_relaxed)) {
+                continue;
+            }
+            atomic_fetch_add_explicit(&g_v2_signal_running_set, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&g_v2_signal_pending, 1, memory_order_relaxed);
             return;
         }
         if (expected == FIBER_V2_PARKED) {
@@ -464,7 +533,13 @@ void sched_v2_park(void) {
 
     atomic_fetch_add_explicit(&g_v2_parks, 1, memory_order_relaxed);
     f->park_reason = tls_v2_park_reason;
-    sched_v2_fail_stackless_suspend(f->park_reason ? f->park_reason : "park");
+    f->yield_kind = V2_YIELD_PARK;
+    mco_result res = mco_yield(f->coro);
+    if (res != MCO_SUCCESS) {
+        atomic_fetch_add_explicit(&g_v2_mco_yield_fail, 1, memory_order_relaxed);
+        fprintf(stderr, "[sched_v2] mco_yield(park) failed rc=%d\n", (int)res);
+        abort();
+    }
 }
 
 void sched_v2_yield(void) {
@@ -472,7 +547,12 @@ void sched_v2_yield(void) {
     if (!f) return;
 
     f->yield_kind = V2_YIELD_YIELD;
-    sched_v2_fail_stackless_suspend("yield");
+    mco_result res = mco_yield(f->coro);
+    if (res != MCO_SUCCESS) {
+        atomic_fetch_add_explicit(&g_v2_mco_yield_fail, 1, memory_order_relaxed);
+        fprintf(stderr, "[sched_v2] mco_yield(yield) failed rc=%d\n", (int)res);
+        abort();
+    }
 }
 
 void sched_v2_set_park_reason(const char* reason) {
@@ -715,6 +795,10 @@ void sched_v2_shutdown(void) {
     while (f) {
         fiber_v2* next = f->all_next;
         wake_primitive_destroy(&f->done_wake);
+        if (f->coro) {
+            (void)mco_destroy(f->coro);
+            f->coro = NULL;
+        }
         free(f);
         f = next;
     }
@@ -771,9 +855,6 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
         #endif
     }
 
-    if (tls_v2_current_fiber) {
-        sched_v2_fail_stackless_suspend("join");
-    }
     if (cc__fiber_in_context()) {
         atomic_store_explicit(&f->join_waiter_fiber,
                               (cc__fiber*)cc__fiber_current(),
@@ -799,6 +880,10 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
  * ============================================================================ */
 
 fiber_v2* sched_v2_spawn(void* (*fn)(void*), void* arg) {
+    return sched_v2_spawn_in_nursery(fn, arg, NULL);
+}
+
+fiber_v2* sched_v2_spawn_in_nursery(void* (*fn)(void*), void* arg, CCNursery* nursery) {
     sched_v2_ensure_init();
 
     fiber_v2* f = fiber_v2_alloc();
@@ -806,6 +891,14 @@ fiber_v2* sched_v2_spawn(void* (*fn)(void*), void* arg) {
 
     f->entry_fn = fn;
     f->entry_arg = arg;
+    f->saved_nursery = nursery;
+    f->admission_nursery = nursery;
+    mco_desc desc = mco_desc_init(fiber_v2_entry, V2_FIBER_STACK_SIZE);
+    desc.user_data = f;
+    if (mco_create(&f->coro, &desc) != MCO_SUCCESS) {
+        fiber_v2_free(f);
+        return NULL;
+    }
     atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
 
     v2_queue_push(&g_v2.ready_queue, f);

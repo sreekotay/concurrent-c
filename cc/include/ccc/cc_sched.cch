@@ -108,8 +108,8 @@ CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg);
 /* Spawn a fiber from a 0-arg closure. */
 CCTask cc_fiber_spawn_closure0(CCClosure0 c);
 
-/* Legacy hybrid entrypoints. These now route onto the fiber scheduler so
-   hybrid-spawned tasks preserve a suspendable stack and can park/yield. */
+/* Legacy hybrid entrypoints. These run on the distinct V2 scheduler backend
+   while preserving a suspendable stack, so hybrid-spawned tasks can park/yield. */
 CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg);
 CCTask cc_fiber_spawn_closure0_v2(CCClosure0 c);
 /* Materialize an async closure into a task. */
