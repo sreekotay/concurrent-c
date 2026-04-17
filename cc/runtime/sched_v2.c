@@ -205,6 +205,21 @@ static _Atomic uint64_t g_v2_run_commit_park_fail_state[FIBER_V2_STATE_COUNT] = 
 static _Atomic uint64_t g_v2_worker_idle_entries = 0;
 static _Atomic uint64_t g_v2_worker_busy_from_recheck = 0;
 static _Atomic uint64_t g_v2_worker_busy_from_wake = 0;
+/* Wake path instrumentation (producer side of sched_v2_wake(-1)).
+ *   wake_calls_ext:       every external wake invocation (after fence).
+ *   wake_no_idle:          returned without scanning — idle_workers==0 fast path
+ *                          (no CAS, no syscall, pure fence cost).
+ *   wake_issued:           we CAS-claimed an idle worker and issued
+ *                          wake_primitive_wake_one (= ulock syscall).
+ *   wake_scan_miss:        scanned threads but lost every CAS race (another
+ *                          producer or the worker itself already claimed it).
+ *   worker_self_drain:     fibers run through the tid==worker_hint path
+ *                          without any syscall. */
+static _Atomic uint64_t g_v2_wake_calls_ext = 0;
+static _Atomic uint64_t g_v2_wake_no_idle = 0;
+static _Atomic uint64_t g_v2_wake_issued = 0;
+static _Atomic uint64_t g_v2_wake_scan_miss = 0;
+static _Atomic uint64_t g_v2_worker_self_drain = 0;
 static _Atomic uint64_t g_v2_mco_resume_fail = 0;
 static _Atomic uint64_t g_v2_mco_yield_fail = 0;
 static _Atomic uint64_t g_v2_mco_stack_overflow = 0;
@@ -228,11 +243,23 @@ static _Atomic uint64_t g_v2_join_park_thread = 0;
  * as an env-var knob for low-latency workloads that might benefit. */
 static int g_v2_join_spin = 0;
 
+/* Histogram bucket for park-reason diagnostics. We dedupe by pointer because
+ * park reasons are static strings; falling back to strcmp keeps the table
+ * small without missing accidental copies. */
+typedef struct {
+    const char* reason;
+    uint64_t count;
+} park_reason_bucket;
+
+#define V2_DIAG_REASON_BUCKETS 16
+
 static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT],
                                       uint64_t* parked_wait_many,
                                       uint64_t* parked_wait,
                                       uint64_t* parked_other,
-                                      uint64_t* parked_unknown) {
+                                      uint64_t* parked_unknown,
+                                      park_reason_bucket reason_buckets[V2_DIAG_REASON_BUCKETS],
+                                      size_t* reason_bucket_count) {
     for (int i = 0; i < FIBER_V2_STATE_COUNT; ++i) {
         state_counts[i] = 0;
     }
@@ -240,6 +267,13 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
     *parked_wait = 0;
     *parked_other = 0;
     *parked_unknown = 0;
+    if (reason_buckets) {
+        for (size_t i = 0; i < V2_DIAG_REASON_BUCKETS; ++i) {
+            reason_buckets[i].reason = NULL;
+            reason_buckets[i].count = 0;
+        }
+    }
+    if (reason_bucket_count) *reason_bucket_count = 0;
 
     pthread_mutex_lock(&g_v2.all_fibers_mu);
     for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
@@ -247,14 +281,33 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
         if (state >= 0 && state < FIBER_V2_STATE_COUNT) {
             state_counts[state]++;
             if (state == FIBER_V2_PARKED) {
-                if (!f->park_reason) {
+                const char* r = f->park_reason;
+                if (!r) {
                     (*parked_unknown)++;
-                } else if (strcmp(f->park_reason, "cc_sched_fiber_wait_many") == 0) {
+                } else if (strcmp(r, "cc_sched_fiber_wait_many") == 0) {
                     (*parked_wait_many)++;
-                } else if (strcmp(f->park_reason, "cc_sched_fiber_wait") == 0) {
+                } else if (strcmp(r, "cc_sched_fiber_wait") == 0) {
                     (*parked_wait)++;
                 } else {
                     (*parked_other)++;
+                }
+                if (reason_buckets && reason_bucket_count) {
+                    const char* key = r ? r : "(null)";
+                    int found = 0;
+                    for (size_t i = 0; i < *reason_bucket_count; ++i) {
+                        if (reason_buckets[i].reason == key ||
+                            (reason_buckets[i].reason && key &&
+                             strcmp(reason_buckets[i].reason, key) == 0)) {
+                            reason_buckets[i].count++;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found && *reason_bucket_count < V2_DIAG_REASON_BUCKETS) {
+                        reason_buckets[*reason_bucket_count].reason = key;
+                        reason_buckets[*reason_bucket_count].count = 1;
+                        (*reason_bucket_count)++;
+                    }
                 }
             }
         }
@@ -387,10 +440,12 @@ static int sched_v2_try_wake_one(void) {
         if (atomic_compare_exchange_strong_explicit(&g_v2.threads[i].is_idle, &exp, 0,
                 memory_order_acq_rel, memory_order_relaxed)) {
             atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
+            atomic_fetch_add_explicit(&g_v2_wake_issued, 1, memory_order_relaxed);
             wake_primitive_wake_one(&g_v2.threads[i].wake);
             return 1;
         }
     }
+    atomic_fetch_add_explicit(&g_v2_wake_scan_miss, 1, memory_order_relaxed);
     return 0;
 }
 
@@ -436,10 +491,12 @@ static void sched_v2_wake(int worker_hint) {
         while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
             fiber_v2* f = v2_queue_pop(&g_v2.ready_queue);
             if (!f) return;
+            atomic_fetch_add_explicit(&g_v2_worker_self_drain, 1, memory_order_relaxed);
             thread_v2_run_fiber(worker_hint, f);
         }
         return;
     }
+    atomic_fetch_add_explicit(&g_v2_wake_calls_ext, 1, memory_order_relaxed);
 
     /* External: wake IDLE workers while there's work in the queue.
      *
@@ -457,6 +514,7 @@ static void sched_v2_wake(int worker_hint) {
     atomic_thread_fence(memory_order_seq_cst);
 
     if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
+        atomic_fetch_add_explicit(&g_v2_wake_no_idle, 1, memory_order_relaxed);
         return;
     }
     while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
@@ -800,11 +858,15 @@ static void* sched_v2_sysmon_main(void* arg) {
                 uint64_t parked_wait = 0;
                 uint64_t parked_other = 0;
                 uint64_t parked_unknown = 0;
+                park_reason_bucket reason_buckets[V2_DIAG_REASON_BUCKETS];
+                size_t reason_bucket_count = 0;
                 sched_v2_diag_scan_fibers(state_counts,
                                           &parked_wait_many,
                                           &parked_wait,
                                           &parked_other,
-                                          &parked_unknown);
+                                          &parked_unknown,
+                                          reason_buckets,
+                                          &reason_bucket_count);
                 fprintf(stderr, "[sched_v2 sysmon] STALL #%d: threads=%d idle=%d global_q=%zu fibers_alive=%llu\n",
                         stall_ticks / 20, n, idle_n, gq, (unsigned long long)alive);
                 fprintf(stderr, "  signals: ok=%llu pending=%llu dropped=%llu  parks: total=%llu\n",
@@ -850,6 +912,15 @@ static void* sched_v2_sysmon_main(void* arg) {
                         (unsigned long long)parked_wait,
                         (unsigned long long)parked_other,
                         (unsigned long long)parked_unknown);
+                if (reason_bucket_count > 0) {
+                    fprintf(stderr, "  park reason histogram:");
+                    for (size_t i = 0; i < reason_bucket_count; ++i) {
+                        fprintf(stderr, " [%s]=%llu",
+                                reason_buckets[i].reason,
+                                (unsigned long long)reason_buckets[i].count);
+                    }
+                    fprintf(stderr, "\n");
+                }
                 cc__socket_wait_dump_diag();
                 cc__fiber_dump_unpark_reason_stats();
                 cc_sched_wait_many_dump_diag();
@@ -881,6 +952,16 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_join_spin_hit, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_join_park_fiber, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_join_park_thread, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] wake: ext_calls=%llu no_idle=%llu issued=%llu scan_miss=%llu  "
+                    "worker_self_drain=%llu  worker_idle_entries=%llu (recheck=%llu from_wake=%llu)\n",
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_calls_ext, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_no_idle, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_issued, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_scan_miss, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_self_drain, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
 }
 
 static void sched_v2_init_impl(void) {
