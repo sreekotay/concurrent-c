@@ -1,0 +1,23 @@
+#include <stdio.h>
+
+static int g_cleanup_runs = 0;
+
+static int run_case(void) {
+    int guard = 1;
+
+    @defer {
+        g_cleanup_runs++;
+        guard = 0;
+    };
+
+    if (guard == 0) return 10;
+    guard = 2;
+    return guard;
+}
+
+int main(void) {
+    g_cleanup_runs = 0;
+    int value = run_case();
+    printf("value=%d cleanup_runs=%d\n", value, g_cleanup_runs);
+    return 0;
+}

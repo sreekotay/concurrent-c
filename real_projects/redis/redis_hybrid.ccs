@@ -58,10 +58,22 @@ typedef struct RedisConn {
     uint64_t conn_id;
     uint64_t next_request_id;
     size_t inflight;
-    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
-    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
+    /* Reply channel is pointer-based: the owner loop picks the next slot
+     * from reply_slots[] (cyclic, stride PIPELINE_LIMIT), fills it in place,
+     * and sends just the pointer.  This avoids a ~240B struct copy per
+     * reply on both producer (into the ring) and consumer (out of the ring)
+     * sides.  The invariant `inflight <= PIPELINE_LIMIT` combined with the
+     * handle_client / owner FIFO ordering guarantees the owner only
+     * overwrites a slot after the consumer has fully read and freed its
+     * previous occupant (the channel send of the pointer is the handoff
+     * edge, and free_reply + slot zero happens before the handle_client
+     * fiber allows more requests to be submitted for that slot index). */
+    RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
+    RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     CCSocketSignal signal;
     char req_bufs[PIPELINE_LIMIT][REQ_BUF_SIZE];
+    RedisReply reply_slots[PIPELINE_LIMIT];
+    size_t next_reply_slot;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
     uint64_t dbg_submit_count;
@@ -793,16 +805,59 @@ static void free_reply(RedisReply* reply) {
     reply->data_inline = 0;
 }
 
-static void release_reply(RedisReply* reply) {
-    if (!reply) return;
-    *reply = (RedisReply){0};
+/* `slot` is a pointer into its owning conn's reply_slots[].  After the
+ * consumer has read the encoded bytes out via write_reply, free any arena
+ * the producer attached and zero the slot so (a) the next producer
+ * wrap-around sees a clean slot, and (b) redis_conn_destroy's per-slot
+ * sweep doesn't double-free the arena.
+ *
+ * NOTE: this exists as a helper (instead of inlining both statements into
+ * `@defer { ... }` at the call site) specifically to sidestep a ccc
+ * transpiler bug with the multi-line @defer block form.  When a function
+ * contains
+ *
+ *     @defer {
+ *         stmt_a;
+ *         stmt_b;
+ *     }
+ *     if (cond) return X;         // early-return immediately after the block
+ *     ...rest of body...
+ *     return Y;
+ *
+ * the transpiler correctly parks { stmt_a; stmt_b; } at __cc_cleanup_N:
+ * but, instead of lowering the `if (cond) return X;` in source order
+ * (i.e. before any __cc_ret(N, Y)), it *moves that statement past the
+ * cleanup label*, where it executes AFTER the deferred cleanup has run
+ * on the normal return path.  The emitted C ends up shaped like:
+ *
+ *     ...rest of body...
+ *     __cc_ret(N, Y);             // body's intended return
+ *   __cc_cleanup_N:
+ *     { stmt_a; stmt_b; }         // deferred cleanup
+ *     if (cond) return X;         // misplaced: executes after cleanup!
+ *     if (__cc_ret_set_N) return __cc_retval_N;
+ *
+ * In our case the misplaced check was `if (conn->inflight == 0) return
+ * false;`, and the body decremented inflight from 1 to 0 before __cc_ret.
+ * After cleanup ran on the normal path the check flipped true and
+ * clobbered the intended `true` return, so every single reply looked
+ * like a failed write to handle_client, which then broke out of its loop
+ * and closed the connection after the first command.
+ *
+ * Rewriting as `@defer slot_release(reply);` (single-statement form)
+ * lowers correctly — the transpiler emits `if (cond) { __cc_ret(N,
+ * false); }` in source order before the body's success path. */
+static void slot_release(RedisReply* slot) {
+    if (!slot) return;
+    free_reply(slot);
+    *slot = (RedisReply){0};
 }
 
 static RedisConn* redis_conn_create(uint64_t conn_id) {
     RedisConn* conn = calloc(1, sizeof(*conn));
     if (!conn) return NULL;
-    RedisReply[~REPLY_CHAN_CAP 1:1 >] reply_tx;
-    RedisReply[~REPLY_CHAN_CAP 1:1 <] reply_rx;
+    RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
+    RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
     if (!reply_ch) {
         free(conn);
@@ -819,10 +874,15 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
 
 static void redis_conn_destroy(RedisConn* conn) {
     if (!conn) return;
-    RedisReply reply = {0};
-    while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply))) {
-        reply_rebase_inline_ptr(&reply);
-        free_reply(&reply);
+    RedisReply* reply_ptr = NULL;
+    while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply_ptr))) {
+        slot_release(reply_ptr);
+    }
+    /* Any remaining slots still hold arenas because they were populated by
+     * the owner loop but never made it into the channel (e.g. we hit a send
+     * failure / close_reply_stream mid-reply).  Free those too. */
+    for (size_t i = 0; i < PIPELINE_LIMIT; ++i) {
+        free_reply(&conn->reply_slots[i]);
     }
     cc_channel_free(conn->reply_tx);
     cc_socket_signal_free(&conn->signal);
@@ -841,17 +901,23 @@ static void redis_conn_drop(RedisConn* conn) {
     }
 }
 
-static bool write_reply(CCSocket* sock, RedisConn* conn, RedisReply reply) {
-    reply_rebase_inline_ptr(&reply);
-    if (reply.kind != REDIS_REPLY_RAW) return false;
-    return buffer_write_bytes(sock, conn, reply.data);
+static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
+    /* Reply structs reaching the write path via the channel always live in
+     * their owning conn's reply_slots[] (the producer rebases the inline
+     * buffer pointer when copying into the slot), so no runtime rebase is
+     * needed here.  Callers that pass a stack reply (write_reply_now)
+     * either materialize inline (data_inline=1 → data.ptr = stack
+     * inline_buf which is valid for the duration of the call) or use a
+     * heap arena (data.ptr stable regardless of struct location). */
+    if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
+    return buffer_write_bytes(sock, conn, reply->data);
 }
 
 static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
     @defer free_reply(&reply);
     bool !>(CCError) mat_res = reply_materialize(&reply);
     bool ok = mat_res.is_ok() &&
-              write_reply(sock, conn, reply) &&
+              write_reply(sock, conn, &reply) &&
               flush_output_buffer(sock, conn);
     return ok;
 }
@@ -875,46 +941,65 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
         close_reply_stream(conn);
         return false;
     }
+    /* Move the materialized reply into the next preallocated slot; the
+     * channel only carries the pointer.  The cyclic slot assignment matches
+     * the handle_client FIFO: slot[k % PIPELINE_LIMIT] is safe to reuse
+     * because handle_client only submits new requests for that slot index
+     * after it has fully drained the previous reply (free_reply + zero),
+     * and the channel send here acquires the happens-before edge for that
+     * drain. */
+    RedisReply* slot = &conn->reply_slots[conn->next_reply_slot % PIPELINE_LIMIT];
+    conn->next_reply_slot++;
+    *slot = *reply;
+    reply_rebase_inline_ptr(slot);
+    *reply = (RedisReply){0};
+
     /* The per-command clock_gettime pair around cc_channel_send is strictly
      * diagnostic (per-conn dbg_reply_send_slow_* are never read; only the
      * g_hybrid_stat_reply_send_ns aggregate is printed on SIGUSR1 when
      * REDIS_HYBRID_STATS=1). At 2M cmd/s the three clock_gettime calls per
      * command in the owner loop show up as ~7% of active CPU in `sample`, so
      * skip them entirely unless metrics are on. */
+    bool sent = false;
     if (g_hybrid_metrics) {
         uint64_t t0 = redis_now_ns();
-        if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
-            close_reply_stream(conn);
-            return false;
-        }
+        sent = cc_io_avail(cc_channel_send(conn->reply_tx, slot));
         uint64_t dt = redis_now_ns() - t0;
-        if (dt >= 1000000ull) {
-            conn->dbg_reply_send_slow_count++;
-            conn->dbg_reply_send_slow_ns += dt;
-            if (dt > conn->dbg_reply_send_slow_max_ns) conn->dbg_reply_send_slow_max_ns = dt;
-        }
-        atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_ns, dt, memory_order_relaxed);
-        if (dt >= 1000000ull) {
-            atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms, 1, memory_order_relaxed);
+        if (sent) {
+            if (dt >= 1000000ull) {
+                conn->dbg_reply_send_slow_count++;
+                conn->dbg_reply_send_slow_ns += dt;
+                if (dt > conn->dbg_reply_send_slow_max_ns) conn->dbg_reply_send_slow_max_ns = dt;
+            }
+            atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_ns, dt, memory_order_relaxed);
+            if (dt >= 1000000ull) {
+                atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms, 1, memory_order_relaxed);
+            }
         }
     } else {
-        if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
-            close_reply_stream(conn);
-            return false;
-        }
+        sent = cc_io_avail(cc_channel_send(conn->reply_tx, slot));
     }
-    release_reply(reply);
+    if (!sent) {
+        /* Send failed (channel closed): free the slot's arena so it doesn't
+         * leak in redis_conn_destroy. */
+        free_reply(slot);
+        *slot = (RedisReply){0};
+        close_reply_stream(conn);
+        return false;
+    }
     return true;
 }
 
 static bool write_received_reply(CCSocket* sock, RedisConn* conn, RedisReply* reply) {
     if (!reply) return false;
-    @defer free_reply(reply);
+    @defer {
+        free_reply(reply);
+        *reply = (RedisReply){0};
+    };
     if (!sock || !conn || conn->inflight == 0) return false;
     conn->inflight--;
     conn->dbg_reply_recv_count++;
-    bool ok = write_reply(sock, conn, *reply);
-    return ok;
+    return write_reply(sock, conn, reply);
 }
 
 static bool !>(CCError) redis_conn_mailbox_submit(RedisConn* conn,
@@ -989,9 +1074,9 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
 static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
     int drained = 0;
     while (conn->inflight > 0) {
-        RedisReply reply = {0};
-        if (!cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply))) break;
-        if (!write_received_reply(sock, conn, &reply)) return -1;
+        RedisReply* reply_ptr = NULL;
+        if (!cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply_ptr))) break;
+        if (!write_received_reply(sock, conn, reply_ptr)) return -1;
         drained++;
     }
     if (drained > 0 && !flush_output_buffer(sock, conn)) return -1;
@@ -1049,16 +1134,16 @@ static void handle_client(CCSocket client,
         if (drained > 0 || cc_value(parse_res) > 0) continue;
 
         if (conn->inflight > 0) {
-            RedisReply reply = {0};
+            RedisReply* reply_ptr = NULL;
             CCResult_CCChanWaitOrSocketKind_CCIoError wait_res =
-                cc_channel_wait_recv_or_socket(conn->reply_rx, &conn->signal, &reply);
+                cc_channel_wait_recv_or_socket(conn->reply_rx, &conn->signal, &reply_ptr);
             if (cc_is_err(wait_res)) {
                 exit_io_err = cc_unwrap_err_as(wait_res, CCIoError);
                 break;
             }
             if (cc_value(wait_res) == CC_CHAN_WAIT_RECV) {
                 conn->dbg_wait_recv_count++;
-                if (!write_received_reply(&client, conn, &reply) || !flush_output_buffer(&client, conn)) {
+                if (!write_received_reply(&client, conn, reply_ptr) || !flush_output_buffer(&client, conn)) {
                     break;
                 }
             } else if (cc_value(wait_res) == CC_CHAN_WAIT_SOCKET) {
