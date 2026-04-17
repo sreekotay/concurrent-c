@@ -555,6 +555,14 @@ struct CCChan {
     int tx_error_code;         /* Error code when tx closed with error (downstream propagation) */
     int rx_error_closed;       /* Flag: rx side was error-closed */
     int rx_error_code;         /* Error code from rx side (upstream propagation to senders) */
+    /* Structured CCIoError preserved across close-with-error / cancel.
+     * When set, the typed-result helper cc_chan_result_with(ch, err, is_recv)
+     * returns Err(tx_io_error|rx_io_error) verbatim instead of mapping via
+     * cc_io_from_errno. Both kind and os_code survive the channel handoff. */
+    CCIoError tx_io_error;
+    CCIoError rx_io_error;
+    uint8_t tx_io_error_set;
+    uint8_t rx_io_error_set;
     CCChanMode mode;
     int allow_take;
     int is_sync;               /* 1 = sync (blocks OS thread), 0 = async (cooperative) */
@@ -1779,6 +1787,74 @@ void cc_chan_rx_close_err(CCChan* ch, int err) {
     pthread_mutex_unlock(&ch->mu);
     wake_batch_flush();  /* Flush fiber wakes immediately */
     cc__chan_signal_recv_ready(ch);
+}
+
+/* cc_chan_close_with: bilateral close with a structured CCIoError.
+ *
+ * Mechanically identical to cc_chan_close (wake all waiters on both ends, mark
+ * the channel closed, stop further ops) but peers observe Err(e) instead of
+ * Ok(false). Both the kind AND os_code from `e` are preserved across the
+ * channel handoff; the int-returning low-level send/recv still return an
+ * errno (e.os_code if nonzero, else ECANCELED) for compatibility, while the
+ * typed result macros route through cc__chan_result_with() which reads the
+ * stored CCIoError verbatim. */
+void cc_chan_close_with(CCChan* ch, CCIoError e) {
+    if (!ch) return;
+    int errno_code = e.os_code;
+    if (errno_code == 0) {
+        /* Pick a sentinel errno so int-returning paths still signal a non-EOF
+         * error. ECANCELED is the closest POSIX match for an application-level
+         * cancellation and already maps back to CC_IO_CANCELLED in
+         * cc_io_from_errno; mismatches on kind are caught by the typed-result
+         * layer which returns the stored CCIoError directly. */
+        errno_code = ECANCELED;
+    }
+    ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
+    pthread_mutex_lock(&ch->mu);
+    ch->closed = 1;
+    ch->tx_error_code = errno_code;
+    ch->rx_error_closed = 1;
+    ch->rx_error_code = errno_code;
+    ch->tx_io_error = e;
+    ch->rx_io_error = e;
+    ch->tx_io_error_set = 1;
+    ch->rx_io_error_set = 1;
+    cc__chan_trace_close(ch, "close_with_begin", NULL, CC_CHAN_NOTIFY_NONE);
+    pthread_cond_broadcast(&ch->not_empty);
+    pthread_cond_broadcast(&ch->not_full);
+    cc__chan_wake_all_waiters(ch);
+    while (ch->send_waiters_head) {
+        cc__chan_wake_one_send_waiter_close(ch);
+    }
+    cc__chan_trace_close(ch, "close_with_after_wake_all", NULL, CC_CHAN_NOTIFY_CLOSE);
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
+    cc__chan_signal_recv_ready(ch);
+}
+
+/* cc_chan_cancel: shorthand for cc_chan_close_with(ch, {CC_IO_CANCELLED, 0}).
+ * Semantically identical to cc_chan_close() — fully tears down the channel for
+ * both senders and receivers — but the signal is an error rather than a
+ * graceful EOF. Typical use: a task is giving up and wants peers to propagate
+ * the cancellation rather than treat it as normal completion. */
+void cc_chan_cancel(CCChan* ch) {
+    CCIoError e = cc_io_error(CC_IO_CANCELLED);
+    cc_chan_close_with(ch, e);
+}
+
+/* Accessors used by the typed-result helper in cc_channel.cch. Defined here so
+ * the struct layout stays private to channel.c. */
+CCIoError cc__chan_get_close_error(CCChan* ch, bool is_recv) {
+    if (!ch) return cc_io_error(CC_IO_OTHER);
+    if (is_recv) {
+        return ch->tx_io_error_set ? ch->tx_io_error : cc_io_error(CC_IO_OTHER);
+    }
+    return ch->rx_io_error_set ? ch->rx_io_error : cc_io_error(CC_IO_OTHER);
+}
+
+int cc__chan_has_close_error(CCChan* ch, bool is_recv) {
+    if (!ch) return 0;
+    return is_recv ? (int)ch->tx_io_error_set : (int)ch->rx_io_error_set;
 }
 
 void cc_chan_free(CCChan* ch) {

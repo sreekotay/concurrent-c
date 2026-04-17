@@ -995,6 +995,7 @@ static int cc__emit_type_driven_dispatch(char* out,
             strcmp(method, "send_task") == 0 || strcmp(method, "send_task_hybrid") == 0 ||
             strcmp(method, "recv") == 0 ||
             strcmp(method, "try_recv") == 0 || strcmp(method, "close") == 0 ||
+            strcmp(method, "cancel") == 0 ||
             strcmp(method, "free") == 0) {
             if (has_args) {
                 return snprintf(out, cap, "%s_%s(%s, ", ctx->typed_chan_type, method, recv);
