@@ -1732,114 +1732,125 @@ CCResult_CCChanWaitOrSocketKind_CCIoError cc_chan_wait_recv_or_socket(CCChan* ch
     }
 }
 
-void cc_chan_close(CCChan* ch) {
+/* Unified close primitive shared by cc_chan_close / cc_chan_close_err /
+ * cc_chan_rx_close_err / cc_chan_close_with / cc_chan_cancel.
+ *
+ * Behavior depends on which sides are being closed:
+ *   - close_tx: sets ch->closed, wakes ALL fiber waiters (recv + send) via
+ *     cc__chan_wake_all_waiters, broadcasts both condvars.
+ *   - close_rx (without close_tx): sets ch->rx_error_closed, drains ONLY the
+ *     send-waiter list (receivers may still drain queued values), broadcasts
+ *     not_full only.
+ *   - bilateral (close_tx && close_rx): same as close_tx path; the tx-side
+ *     wake already catches both waiter classes. The rx-side bits are stamped
+ *     too so senders see the structured error.
+ *
+ * tx_errno / rx_errno are stored on the respective side when nonzero (used by
+ * legacy int-returning paths); io_err is additionally stamped on each side
+ * being closed (used by the typed-result promotion in cc_chan_result_with).
+ *
+ * trace_tag is a short string like "close" / "close_err" / "rx_close_err" /
+ * "close_with" - emitted as "<tag>_begin" / "<tag>_after_wake" around the
+ * wake, preserving the pre-factoring diagnostic breadcrumbs. */
+static void cc__chan_close_common(CCChan* ch,
+                                  bool close_tx,
+                                  bool close_rx,
+                                  int tx_errno,
+                                  int rx_errno,
+                                  const CCIoError* io_err,
+                                  const char* trace_begin,
+                                  const char* trace_end) {
     if (!ch) return;
-    if (ch->use_lockfree) {
-    }
     ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
     pthread_mutex_lock(&ch->mu);
     /* LP (§10 Close LP): OPEN -> CLOSED under channel mutex. */
-    ch->closed = 1;
-    cc__chan_trace_close(ch, "close_begin", NULL, CC_CHAN_NOTIFY_NONE);
-    pthread_cond_broadcast(&ch->not_empty);
+    if (close_tx) {
+        ch->closed = 1;
+        if (tx_errno) ch->tx_error_code = tx_errno;
+        if (io_err) {
+            ch->tx_io_error = *io_err;
+            ch->tx_io_error_set = 1;
+        }
+    }
+    if (close_rx) {
+        ch->rx_error_closed = 1;
+        if (rx_errno) ch->rx_error_code = rx_errno;
+        if (io_err) {
+            ch->rx_io_error = *io_err;
+            ch->rx_io_error_set = 1;
+        }
+    }
+    cc__chan_trace_close(ch, trace_begin, NULL, CC_CHAN_NOTIFY_NONE);
+    /* not_empty only matters when receivers need waking (tx side is closing).
+     * not_full always matters when any side is closing since senders block
+     * on capacity. */
+    if (close_tx) pthread_cond_broadcast(&ch->not_empty);
     pthread_cond_broadcast(&ch->not_full);
-    /* Wake all waiting fibers */
-    cc__chan_wake_all_waiters(ch);
-    cc__chan_trace_close(ch, "close_after_wake_all", NULL, CC_CHAN_NOTIFY_CLOSE);
+    if (close_tx) {
+        /* Wake everyone: recv waiters are cancelled (channel is closed), and
+         * send waiters are already covered by wake_all_waiters. */
+        cc__chan_wake_all_waiters(ch);
+    } else {
+        /* rx-only error close: drain ONLY the send-waiter list. Recv waiters
+         * are left alone because the channel is not flagged closed and may
+         * still be carrying queued values they should observe. */
+        while (ch->send_waiters_head) {
+            cc__chan_wake_one_send_waiter_close(ch);
+        }
+    }
+    cc__chan_trace_close(ch, trace_end, NULL, CC_CHAN_NOTIFY_CLOSE);
     pthread_mutex_unlock(&ch->mu);
     wake_batch_flush();  /* Flush fiber wakes immediately */
     cc__chan_signal_recv_ready(ch);
+}
+
+void cc_chan_close(CCChan* ch) {
+    cc__chan_close_common(ch, /*close_tx=*/true, /*close_rx=*/false,
+                          0, 0, NULL,
+                          "close_begin", "close_after_wake_all");
 }
 
 void cc_chan_close_err(CCChan* ch, int err) {
-    if (!ch) return;
-    if (ch->use_lockfree) {
-    }
-    ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
-    pthread_mutex_lock(&ch->mu);
-    /* LP (§10 Close LP): OPEN -> CLOSED under channel mutex. */
-    ch->closed = 1;
-    ch->tx_error_code = err;
-    cc__chan_trace_close(ch, "close_err_begin", NULL, CC_CHAN_NOTIFY_NONE);
-    pthread_cond_broadcast(&ch->not_empty);
-    pthread_cond_broadcast(&ch->not_full);
-    /* Wake all waiting fibers */
-    cc__chan_wake_all_waiters(ch);
-    cc__chan_trace_close(ch, "close_err_after_wake_all", NULL, CC_CHAN_NOTIFY_CLOSE);
-    pthread_mutex_unlock(&ch->mu);
-    wake_batch_flush();  /* Flush fiber wakes immediately */
-    cc__chan_signal_recv_ready(ch);
+    cc__chan_close_common(ch, /*close_tx=*/true, /*close_rx=*/false,
+                          err, 0, NULL,
+                          "close_err_begin", "close_err_after_wake_all");
 }
 
 void cc_chan_rx_close_err(CCChan* ch, int err) {
-    if (!ch) return;
-    ch->fast_path_ok = 0;  /* Disable minimal fast path */
-    pthread_mutex_lock(&ch->mu);
-    ch->rx_error_closed = 1;
-    ch->rx_error_code = err;
-    cc__chan_trace_close(ch, "rx_close_err_begin", NULL, CC_CHAN_NOTIFY_NONE);
-    pthread_cond_broadcast(&ch->not_full);  /* Wake senders */
-    /* Wake fiber send waiters too */
-    while (ch->send_waiters_head) {
-        cc__chan_wake_one_send_waiter_close(ch);
-    }
-    cc__chan_trace_close(ch, "rx_close_err_after_wake", NULL, CC_CHAN_NOTIFY_CLOSE);
-    pthread_mutex_unlock(&ch->mu);
-    wake_batch_flush();  /* Flush fiber wakes immediately */
-    cc__chan_signal_recv_ready(ch);
+    cc__chan_close_common(ch, /*close_tx=*/false, /*close_rx=*/true,
+                          0, err, NULL,
+                          "rx_close_err_begin", "rx_close_err_after_wake");
 }
 
 /* cc_chan_close_with: bilateral close with a structured CCIoError.
  *
- * Mechanically identical to cc_chan_close (wake all waiters on both ends, mark
- * the channel closed, stop further ops) but peers observe Err(e) instead of
- * Ok(false). Both the kind AND os_code from `e` are preserved across the
- * channel handoff; the int-returning low-level send/recv still return an
- * errno (e.os_code if nonzero, else ECANCELED) for compatibility, while the
- * typed result macros route through cc__chan_result_with() which reads the
- * stored CCIoError verbatim. */
+ * Mechanically identical to cc_chan_close (same wake path, same closed flag,
+ * same fiber wake-batch flush) but peers observe Err(e) instead of Ok(false).
+ * Both the kind AND os_code from `e` are preserved across the channel handoff;
+ * the int-returning low-level send/recv still return an errno (e.os_code if
+ * nonzero, else ECANCELED) for backward compatibility, while the typed result
+ * macros route through cc_chan_result_with() which reads the stored CCIoError
+ * verbatim. */
 void cc_chan_close_with(CCChan* ch, CCIoError e) {
     if (!ch) return;
-    int errno_code = e.os_code;
-    if (errno_code == 0) {
-        /* Pick a sentinel errno so int-returning paths still signal a non-EOF
-         * error. ECANCELED is the closest POSIX match for an application-level
-         * cancellation and already maps back to CC_IO_CANCELLED in
-         * cc_io_from_errno; mismatches on kind are caught by the typed-result
-         * layer which returns the stored CCIoError directly. */
-        errno_code = ECANCELED;
-    }
-    ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
-    pthread_mutex_lock(&ch->mu);
-    ch->closed = 1;
-    ch->tx_error_code = errno_code;
-    ch->rx_error_closed = 1;
-    ch->rx_error_code = errno_code;
-    ch->tx_io_error = e;
-    ch->rx_io_error = e;
-    ch->tx_io_error_set = 1;
-    ch->rx_io_error_set = 1;
-    cc__chan_trace_close(ch, "close_with_begin", NULL, CC_CHAN_NOTIFY_NONE);
-    pthread_cond_broadcast(&ch->not_empty);
-    pthread_cond_broadcast(&ch->not_full);
-    cc__chan_wake_all_waiters(ch);
-    while (ch->send_waiters_head) {
-        cc__chan_wake_one_send_waiter_close(ch);
-    }
-    cc__chan_trace_close(ch, "close_with_after_wake_all", NULL, CC_CHAN_NOTIFY_CLOSE);
-    pthread_mutex_unlock(&ch->mu);
-    wake_batch_flush();
-    cc__chan_signal_recv_ready(ch);
+    /* Pick a sentinel errno so int-returning paths still signal a non-EOF
+     * error. ECANCELED is the closest POSIX match for an application-level
+     * cancellation and maps back to CC_IO_CANCELLED in cc_io_from_errno;
+     * mismatches on kind are caught by the typed-result layer which returns
+     * the stored CCIoError directly. */
+    int errno_code = e.os_code ? e.os_code : ECANCELED;
+    cc__chan_close_common(ch, /*close_tx=*/true, /*close_rx=*/true,
+                          errno_code, errno_code, &e,
+                          "close_with_begin", "close_with_after_wake_all");
 }
 
 /* cc_chan_cancel: shorthand for cc_chan_close_with(ch, {CC_IO_CANCELLED, 0}).
- * Semantically identical to cc_chan_close() — fully tears down the channel for
- * both senders and receivers — but the signal is an error rather than a
+ * Semantically identical to cc_chan_close() — fully tears down the channel
+ * for both senders and receivers — but the signal is an error rather than a
  * graceful EOF. Typical use: a task is giving up and wants peers to propagate
  * the cancellation rather than treat it as normal completion. */
 void cc_chan_cancel(CCChan* ch) {
-    CCIoError e = cc_io_error(CC_IO_CANCELLED);
-    cc_chan_close_with(ch, e);
+    cc_chan_close_with(ch, cc_io_error(CC_IO_CANCELLED));
 }
 
 /* Accessors used by the typed-result helper in cc_channel.cch. Defined here so
