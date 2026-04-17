@@ -50,11 +50,25 @@ typedef struct RedisDb {
     RedisEntry* head;
 } RedisDb;
 
+/* Pipeline: tracks how many requests this connection has submitted to the
+ * owner but not yet flushed replies for.  Counter semantics — not a queue,
+ * not a channel — intentionally kept small so the pipeline_full() invariant
+ * that gates the read path is a one-liner instead of an ad-hoc
+ * `conn->inflight < PIPELINE_LIMIT` peppered across the file. */
+typedef struct {
+    size_t inflight;
+} Pipeline;
+
+static inline void pipeline_submit(Pipeline* p) { p->inflight++; }
+static inline void pipeline_complete(Pipeline* p) { if (p->inflight > 0) p->inflight--; }
+static inline bool pipeline_full(const Pipeline* p) { return p->inflight >= PIPELINE_LIMIT; }
+static inline bool pipeline_active(const Pipeline* p) { return p->inflight > 0; }
+
 typedef struct RedisConn {
     _Atomic size_t refs;
     uint64_t conn_id;
     uint64_t next_request_id;
-    size_t inflight;
+    Pipeline pipeline;
     /* Reply channel carries RedisReply* pointers whose backing memory is owned
      * by `reply_pool`.  The producer pops a slot from the pool, materializes
      * the reply in place (the slot's inline_buf backs its arena's initial
@@ -66,7 +80,13 @@ typedef struct RedisConn {
     RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     CCSocketSignal signal;
-    char req_bufs[PIPELINE_LIMIT][REQ_BUF_SIZE];
+    /* Per-slot storage for in-flight requests: each slot is REQ_BUF_SIZE
+     * bytes and backs a RedisRequest's arena (the RedisRequest struct plus
+     * its cloned argv strings live inside the slot).  Sizing matches the
+     * channel cap so back-pressure is real: if all PIPELINE_LIMIT slots are
+     * in flight, alloc returns NULL and parse_and_submit_requests stops
+     * reading from the socket until the owner drains one reply. */
+    CCArenaPool req_pool;
     CCArenaPool reply_pool;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
@@ -335,13 +355,17 @@ typedef struct ParseAttempt {
     CCError err;
 } ParseAttempt;
 
+/* Parse one pipelined request into `slot` (a REQ_BUF_SIZE buffer popped from
+ * conn->req_pool).  On success (status=1) the caller loses ownership of the
+ * slot: it becomes the backing storage for the returned request's arena, and
+ * will be returned to the pool by free_request.  On any other status the
+ * caller is responsible for returning the slot to the pool. */
 static ParseAttempt read_request_buffered(RespReader* r,
                                           RedisConn* conn,
                                           uint64_t request_id,
-                                          char* req_buf,
-                                          size_t req_buf_size) {
+                                          void* slot) {
     ParseAttempt out = {0};
-    CCArena req_arena_storage = cc_arena_create_buffer(req_buf, req_buf_size);
+    CCArena req_arena_storage = cc_arena_create_buffer(slot, REQ_BUF_SIZE);
     if (!req_arena_storage.base) return out;
 
     CCSlice args[4] = {0};
@@ -745,12 +769,18 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
         free(conn);
         return NULL;
     }
+    if (cc_arena_pool(&conn->req_pool, REQ_BUF_SIZE) != 0) {
+        cc_arena_pool_destroy(&conn->reply_pool);
+        cc_channel_free(reply_tx);
+        free(conn);
+        return NULL;
+    }
     conn->reply_tx = reply_tx;
     conn->reply_rx = reply_rx;
     atomic_store_explicit(&conn->refs, 1, memory_order_relaxed);
     conn->conn_id = conn_id;
     conn->next_request_id = 1;
-    conn->inflight = 0;
+    conn->pipeline.inflight = 0;
     return conn;
 }
 
@@ -768,6 +798,11 @@ static void redis_conn_destroy(RedisConn* conn) {
      * Those slots' arenas were freed on the error path before return-to-pool,
      * so destroying the backing arena here reclaims only the slot structs. */
     cc_arena_pool_destroy(&conn->reply_pool);
+    /* Requests still held by the owner fiber keep the conn alive via the
+     * refcount (build_request retain / free_request drop), so by the time we
+     * reach this destroy every request-slot has already been returned to the
+     * pool via free_request. */
+    cc_arena_pool_destroy(&conn->req_pool);
     cc_channel_free(conn->reply_tx);
     cc_socket_signal_free(&conn->signal);
     free(conn);
@@ -807,8 +842,17 @@ static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
 static void free_request(RedisRequest* req) {
     if (!req) return;
     RedisConn* conn = req->conn;
+    /* Snapshot the slot pointer before the arena.free() call: the request
+     * struct itself lives inside the slot, so after cc_arena_pool_free writes
+     * the freelist link into the slot head, any further read of req->* is
+     * undefined.  arena.free() only releases heap overflow blocks for
+     * buffer-backed arenas; it leaves the slot buffer untouched. */
+    void* slot = req->arena.base;
     if (req->arena.base) req->arena.free();
-    if (conn) redis_conn_drop(conn);
+    if (conn) {
+        if (slot) cc_arena_pool_free(&conn->req_pool, slot);
+        redis_conn_drop(conn);
+    }
 }
 
 /* Fail the reply stream with a structured error.  Peers (the per-conn writer
@@ -874,30 +918,9 @@ static bool write_received_reply(CCSocket* sock, RedisConn* conn, RedisReply* re
         free_reply(reply);
         cc_arena_pool_free(&conn->reply_pool, reply);
     };
-    if (!sock || !conn || conn->inflight == 0) return false;
-    conn->inflight--;
+    if (!sock || !conn || !pipeline_active(&conn->pipeline)) return false;
+    pipeline_complete(&conn->pipeline);
     return write_reply(sock, conn, reply);
-}
-
-static bool !>(CCError) redis_conn_mailbox_submit(RedisConn* conn,
-                                                  RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
-                                                  RedisRequest* req) {
-    if (!conn || !req) return cc_err(mkerr(CC_ERR_INVALID_ARG, "owner submit without request"));
-    /* Blocking send: under heavy pipelining 50 conns * PIPELINE_LIMIT 16 can
-     * transiently exceed REQUEST_CHAN_CAP (512); try_send would return BUSY
-     * and the caller previously dropped the request silently, leaving the
-     * client waiting forever for a reply. A blocking send applies natural
-     * backpressure from owner_loop without losing work. */
-    CCResult_bool_CCIoError send_res = cc_channel_send(owner_tx, req);
-    if (cc_is_err(send_res)) {
-        free_request(req);
-        return cc_err(mkerr(CC_ERR_IO, "owner handoff failed"));
-    }
-    if (!cc_value(send_res)) {
-        free_request(req);
-        return cc_err(mkerr(CC_ERR_IO, "owner channel closed"));
-    }
-    return cc_ok(true);
 }
 
 static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
@@ -924,7 +947,7 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
 
 static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
     int drained = 0;
-    while (conn->inflight > 0) {
+    while (pipeline_active(&conn->pipeline)) {
         RedisReply* reply_ptr = NULL;
         if (!cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply_ptr))) break;
         if (!write_received_reply(sock, conn, reply_ptr)) return -1;
@@ -938,17 +961,46 @@ static int !>(CCError) parse_and_submit_requests(RespReader* reader,
                                                  RedisConn* conn,
                                                  RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx) {
     int submitted = 0;
-    while (conn->inflight < PIPELINE_LIMIT) {
-        char* req_buf = conn->req_bufs[conn->next_request_id % PIPELINE_LIMIT];
-        ParseAttempt parsed = read_request_buffered(reader, conn, conn->next_request_id, req_buf, REQ_BUF_SIZE);
-        if (parsed.status == 0) break;
-        if (parsed.status < 0) return cc_err(parsed.err);
+    while (!pipeline_full(&conn->pipeline)) {
+        void* slot = cc_arena_pool_alloc(&conn->req_pool);
+        if (!slot) {
+            /* Out of request slots shouldn't happen while inflight <
+             * PIPELINE_LIMIT (slot count matches pipeline cap), but be
+             * explicit rather than silently stalling the read path. */
+            return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "request slot pool exhausted"));
+        }
 
-        CCResult_bool_CCError submit_res = redis_conn_mailbox_submit(conn, owner_tx, parsed.req);
-        if (cc_is_err(submit_res)) return cc_err(cc_error(submit_res));
-        if (!cc_value(submit_res)) break;
+        ParseAttempt parsed = read_request_buffered(reader, conn, conn->next_request_id, slot);
+        if (parsed.status == 0) {
+            cc_arena_pool_free(&conn->req_pool, slot);
+            break;
+        }
+        if (parsed.status < 0) {
+            cc_arena_pool_free(&conn->req_pool, slot);
+            return cc_err(parsed.err);
+        }
+        /* parsed.req now owns `slot` via its detached arena; free_request
+         * will return it to the pool. */
+
+        /* Blocking send: under heavy pipelining 50 conns * PIPELINE_LIMIT can
+         * transiently exceed REQUEST_CHAN_CAP; try_send would return BUSY and
+         * we'd drop the request silently, leaving the client waiting forever
+         * for a reply.  A blocking send applies natural backpressure from
+         * owner_loop without losing work. */
+        bool !>(CCIoError) send_res = owner_tx.send(parsed.req);
+        if (send_res.is_err()) {
+            free_request(parsed.req);
+            return cc_err(mkerr(CC_ERR_IO, "owner handoff failed"));
+        }
+        if (!send_res.value()) {
+            /* Owner channel closed gracefully — server is shutting down.
+             * Stop reading; caller will exit the client loop cleanly. */
+            free_request(parsed.req);
+            break;
+        }
+
         conn->next_request_id++;
-        conn->inflight++;
+        pipeline_submit(&conn->pipeline);
         submitted++;
     }
     return cc_ok(submitted);
@@ -975,27 +1027,27 @@ static void handle_client(CCSocket client,
             break;
         }
 
-        CCResult_int_CCError parse_res = parse_and_submit_requests(&reader, conn, owner_tx);
-        if (cc_is_err(parse_res)) {
-            (void)write_reply_now(&client, conn, err_reply(cc_error(parse_res)));
+        int !>(CCError) parse_res = parse_and_submit_requests(&reader, conn, owner_tx);
+        if (parse_res.is_err()) {
+            (void)write_reply_now(&client, conn, err_reply(parse_res.error()));
             break;
         }
 
-        if (drained > 0 || cc_value(parse_res) > 0) continue;
+        if (drained > 0 || parse_res.value() > 0) continue;
 
-        if (conn->inflight > 0) {
+        if (pipeline_active(&conn->pipeline)) {
             RedisReply* reply_ptr = NULL;
-            CCResult_CCChanWaitOrSocketKind_CCIoError wait_res =
+            CCChanWaitOrSocketKind !>(CCIoError) wait_res =
                 cc_channel_wait_recv_or_socket(conn->reply_rx, &conn->signal, &reply_ptr);
-            if (cc_is_err(wait_res)) {
-                exit_io_err = cc_unwrap_err_as(wait_res, CCIoError);
+            if (wait_res.is_err()) {
+                exit_io_err = wait_res.error();
                 break;
             }
-            if (cc_value(wait_res) == CC_CHAN_WAIT_RECV) {
+            if (wait_res.value() == CC_CHAN_WAIT_RECV) {
                 if (!write_received_reply(&client, conn, reply_ptr) || !flush_output_buffer(&client, conn)) {
                     break;
                 }
-            } else if (cc_value(wait_res) == CC_CHAN_WAIT_SOCKET) {
+            } else if (wait_res.value() == CC_CHAN_WAIT_SOCKET) {
                 int raced_drained = drain_and_flush_replies(&client, conn);
                 if (raced_drained < 0) {
                     break;
@@ -1003,9 +1055,9 @@ static void handle_client(CCSocket client,
                 if (raced_drained > 0) {
                     continue;
                 }
-                CCResult_bool_CCIoError fill = rr_try_fill(&reader, &client);
-                if (cc_is_err(fill)) {
-                    exit_io_err = cc_unwrap_err_as(fill, CCIoError);
+                bool !>(CCIoError) fill = rr_try_fill(&reader, &client);
+                if (fill.is_err()) {
+                    exit_io_err = fill.error();
                     (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
                     break;
                 }
@@ -1013,13 +1065,13 @@ static void handle_client(CCSocket client,
                 break;
             }
         } else {
-            CCResult_bool_CCIoError fill = rr_fill(&reader, &client);
-            if (cc_is_err(fill)) {
-                exit_io_err = cc_unwrap_err_as(fill, CCIoError);
+            bool !>(CCIoError) fill = rr_fill(&reader, &client);
+            if (fill.is_err()) {
+                exit_io_err = fill.error();
                 (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
                 break;
             }
-            if (!cc_value(fill)) {
+            if (!fill.value()) {
                 break;
             }
         }
