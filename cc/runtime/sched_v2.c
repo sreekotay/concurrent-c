@@ -735,10 +735,15 @@ static int sched_v2_detect_num_threads(void) {
     }
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     if (n < 1) n = 4;
-    /* Start with a smaller pool by default and let the scheduler expand
-     * lazily under sustained pressure. This avoids the heavy BUSY<->IDLE
-     * churn we see on lighter I/O-driven workloads like Redis GET. */
-    if (n > 8) n = 8;
+    /* Default to 1x CPU count, matching the cc_thread_spawn executor pool
+     * (scheduler.c: cc__default_workers). CPU-bound workloads (pigz level 6
+     * deflate) are fully saturated at one worker per core; pushing to 2x
+     * adds context-switch pressure from oversubscription with the classic
+     * scheduler's own workers and measurably hurts throughput (~5% on
+     * pigz 100MB silesia). For I/O-bound or mixed workloads where parked
+     * V2 workers can hide latency, raise via CC_V2_THREADS.
+     *
+     * Hard-capped at V2_MAX_THREADS. */
     if (n > V2_MAX_THREADS) n = V2_MAX_THREADS;
     return (int)n;
 }
