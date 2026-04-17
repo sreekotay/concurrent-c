@@ -1,0 +1,200 @@
+/* Smoke test for the cancel() and close(CCIoError) channel primitives.
+ *
+ * Semantics under test:
+ *   - tx.close()            -> recv returns Ok(false) (graceful EOF).
+ *   - tx.close(some_error)  -> recv returns Err(some_error) with EXACT kind+os_code.
+ *   - tx.cancel()           -> recv returns Err(CC_IO_CANCELLED).
+ *   - Same mirror behavior when the rx side initiates:
+ *     rx.close(e)/rx.cancel() unblocks senders with the structured error.
+ *
+ * This exercises the runtime paths in cc_chan_close_with / cc_chan_cancel and
+ * the typed-result routing via cc_chan_result_with() which preserves the
+ * CCIoError struct end-to-end across the channel handoff.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <pthread.h>
+#include <time.h>
+#include <stdio.h>
+
+static void sleep_ms(int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+/* ----- recv-side observers: block on recv, then report what they saw. ----- */
+
+typedef struct {
+    int[~ <] rx;
+    CCResult_bool_CCIoError result;
+    int out_value;
+} RecvObserver;
+
+static void* recv_observer(void* p) {
+    RecvObserver* o = (RecvObserver*)p;
+    o->result = cc_channel_recv(o->rx, &o->out_value);
+    return NULL;
+}
+
+/* ----- send-side observers: block on send into a full channel. ----- */
+
+typedef struct {
+    int[~ >] tx;
+    CCResult_bool_CCIoError result;
+} SendObserver;
+
+static void* send_observer(void* p) {
+    SendObserver* o = (SendObserver*)p;
+    o->result = cc_channel_send(o->tx, 42);
+    return NULL;
+}
+
+/* ---- 1. Graceful close: recv returns Ok(false). ---- */
+static int test_graceful_close(void) {
+    int[~ 1 >] tx;
+    int[~ 1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    RecvObserver obs = { .rx = rx };
+    pthread_t th;
+    pthread_create(&th, NULL, recv_observer, &obs);
+    sleep_ms(20);
+
+    cc_channel_close(tx);
+    pthread_join(th, NULL);
+
+    int ok = obs.result.ok && obs.result.u.value == false;
+    cc_chan_free(ch);
+    if (!ok) {
+        fprintf(stderr, "graceful close: expected Ok(false), got ok=%d value=%d\n",
+                (int)obs.result.ok, (int)obs.result.u.value);
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- 2. close(err): recv returns Err with the exact struct. ---- */
+static int test_close_with_error(void) {
+    int[~ 1 >] tx;
+    int[~ 1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    RecvObserver obs = { .rx = rx };
+    pthread_t th;
+    pthread_create(&th, NULL, recv_observer, &obs);
+    sleep_ms(20);
+
+    CCIoError e = cc_io_error_os(CC_IO_PERMISSION_DENIED, 13);
+    cc_channel_close(tx, e);
+    pthread_join(th, NULL);
+
+    int ok = !obs.result.ok
+          && obs.result.u.error.kind == CC_IO_PERMISSION_DENIED
+          && obs.result.u.error.os_code == 13;
+    cc_chan_free(ch);
+    if (!ok) {
+        fprintf(stderr, "close(e): expected Err(PERMISSION_DENIED,13), got ok=%d kind=%d os=%d\n",
+                (int)obs.result.ok, (int)obs.result.u.error.kind, (int)obs.result.u.error.os_code);
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- 3. cancel(): recv returns Err(CC_IO_CANCELLED). ---- */
+static int test_cancel_tx(void) {
+    int[~ 1 >] tx;
+    int[~ 1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    RecvObserver obs = { .rx = rx };
+    pthread_t th;
+    pthread_create(&th, NULL, recv_observer, &obs);
+    sleep_ms(20);
+
+    cc_channel_cancel(tx);
+    pthread_join(th, NULL);
+
+    int ok = !obs.result.ok && obs.result.u.error.kind == CC_IO_CANCELLED;
+    cc_chan_free(ch);
+    if (!ok) {
+        fprintf(stderr, "tx.cancel: expected Err(CANCELLED), got ok=%d kind=%d\n",
+                (int)obs.result.ok, (int)obs.result.u.error.kind);
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- 4. rx.cancel() unblocks a blocked sender with Err(CANCELLED). ---- */
+static int test_cancel_rx_unblocks_sender(void) {
+    /* Capacity 1, fill it so send blocks, then rx.cancel() should unblock. */
+    int[~ 1 >] tx;
+    int[~ 1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    /* Fill buffer so the observer's send will block. */
+    CCResult_bool_CCIoError fill = cc_channel_send(tx, 1);
+    if (!cc_io_avail(fill)) {
+        fprintf(stderr, "rx.cancel: prefill failed\n");
+        cc_chan_free(ch);
+        return 1;
+    }
+
+    SendObserver obs = { .tx = tx };
+    pthread_t th;
+    pthread_create(&th, NULL, send_observer, &obs);
+    sleep_ms(20);
+
+    cc_channel_cancel(rx);
+    pthread_join(th, NULL);
+
+    int ok = !obs.result.ok && obs.result.u.error.kind == CC_IO_CANCELLED;
+    cc_chan_free(ch);
+    if (!ok) {
+        fprintf(stderr, "rx.cancel->send: expected Err(CANCELLED), got ok=%d kind=%d\n",
+                (int)obs.result.ok, (int)obs.result.u.error.kind);
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- 5. rx.close(e) unblocks a blocked sender with the exact error. ---- */
+static int test_rx_close_with_error_unblocks_sender(void) {
+    int[~ 1 >] tx;
+    int[~ 1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+
+    CCResult_bool_CCIoError fill = cc_channel_send(tx, 1);
+    if (!cc_io_avail(fill)) { cc_chan_free(ch); return 1; }
+
+    SendObserver obs = { .tx = tx };
+    pthread_t th;
+    pthread_create(&th, NULL, send_observer, &obs);
+    sleep_ms(20);
+
+    CCIoError e = cc_io_error_os(CC_IO_OUT_OF_MEMORY, 12);
+    cc_channel_close(rx, e);
+    pthread_join(th, NULL);
+
+    int ok = !obs.result.ok
+          && obs.result.u.error.kind == CC_IO_OUT_OF_MEMORY
+          && obs.result.u.error.os_code == 12;
+    cc_chan_free(ch);
+    if (!ok) {
+        fprintf(stderr, "rx.close(e)->send: expected Err(OOM,12), got ok=%d kind=%d os=%d\n",
+                (int)obs.result.ok, (int)obs.result.u.error.kind, (int)obs.result.u.error.os_code);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    if (test_graceful_close()) return 1;
+    if (test_close_with_error()) return 2;
+    if (test_cancel_tx()) return 3;
+    if (test_cancel_rx_unblocks_sender()) return 4;
+    if (test_rx_close_with_error_unblocks_sender()) return 5;
+    printf("channel_cancel_and_close_err_smoke ok\n");
+    return 0;
+}

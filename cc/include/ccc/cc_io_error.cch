@@ -17,6 +17,7 @@ typedef enum {
     CC_IO_OUT_OF_MEMORY,
     CC_IO_BUSY,
     CC_IO_CONNECTION_CLOSED,
+    CC_IO_CANCELLED,
     CC_IO_OTHER
 } CCIoErrorKind;
 
@@ -48,6 +49,7 @@ static inline CCIoError cc_io_from_errno(int err) {
         case EBUSY:  e.kind = CC_IO_BUSY; break;
         case EPIPE:  e.kind = CC_IO_CONNECTION_CLOSED; break;
         case EAGAIN: e.kind = CC_IO_BUSY; break;
+        case ECANCELED: e.kind = CC_IO_CANCELLED; break;
         case 0:      e.kind = CC_IO_OTHER; break;
         default:     e.kind = CC_IO_OTHER; break;
     }
@@ -64,6 +66,7 @@ static inline const char* cc_io_error_str(CCIoError e) {
         case CC_IO_OUT_OF_MEMORY:     return "out of memory";
         case CC_IO_BUSY:              return "resource busy";
         case CC_IO_CONNECTION_CLOSED: return "connection closed";
+        case CC_IO_CANCELLED:         return "cancelled";
         case CC_IO_OTHER:             return "I/O error";
         default:                      return "unknown error";
     }

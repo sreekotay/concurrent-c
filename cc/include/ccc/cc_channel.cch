@@ -54,6 +54,33 @@ static inline CCRes(bool, CCIoError) cc_chan_result_from_errno(int err) {
     }
 }
 
+/* Accessors implemented in channel.c. Expose the structured CCIoError stored
+ * by cc_chan_close_with / cc_chan_cancel so the typed result helper below can
+ * return the exact error the producer set, preserving both kind and os_code
+ * across the channel handoff. */
+int cc__chan_has_close_error(CCChan* ch, bool is_recv);
+CCIoError cc__chan_get_close_error(CCChan* ch, bool is_recv);
+
+/*
+ * Typed result helper with channel context. Behaves like
+ * cc_chan_result_from_errno for legacy int-returning close_err paths, but
+ * additionally promotes a stored structured CCIoError to the Err arm when
+ * cc_chan_close_with() / cc_chan_cancel() set one. is_recv selects which side
+ * of the close to read (tx-side error on recv, rx-side error on send).
+ */
+static inline CCRes(bool, CCIoError) cc_chan_result_with(CCChan* ch, int err, bool is_recv) {
+    if (err == 0) {
+        return CCRes_ok(bool, CCIoError, true);
+    }
+    if (err == EPIPE) {
+        return CCRes_ok(bool, CCIoError, false);
+    }
+    if (ch && cc__chan_has_close_error(ch, is_recv)) {
+        return CCRes_err(bool, CCIoError, cc__chan_get_close_error(ch, is_recv));
+    }
+    return CCRes_err(bool, CCIoError, cc_io_from_errno(err));
+}
+
 /*
  * Unified I/O helper for bool !>(CCIoError) results.
  * 
@@ -122,9 +149,9 @@ static inline CCResult_bool_CCIoError cc__chan_recv_ordered(CCChanRx rx, void* o
             if (cap) memcpy(out, cap, out_sz);
             else memset(out, 0, out_sz);
         }
-        return cc_chan_result_from_errno(rc);
+        return cc_chan_result_with(rx.raw, rc, /*is_recv=*/true);
     }
-    return cc_chan_result_from_errno(cc_chan_recv(rx.raw, out, out_sz));
+    return cc_chan_result_with(rx.raw, cc_chan_recv(rx.raw, out, out_sz), /*is_recv=*/true);
 }
 #endif /* !CC_PARSER_MODE */
 
@@ -227,6 +254,17 @@ void cc_chan_close_err(CCChan* ch, int err);
 // Enables upstream error propagation in pipelines (consumer -> producer).
 // Does not set the channel closed flag, only signals senders.
 void cc_chan_rx_close_err(CCChan* ch, int err);
+
+// Bilateral close with a structured CCIoError.
+// Same wake/tear-down semantics as cc_chan_close (both senders and receivers
+// observe the channel as finished), but pending and future send/recv
+// operations return Err(e) instead of Ok(false). Preserves both kind and
+// os_code end-to-end; use this to propagate specific failure reasons.
+void cc_chan_close_with(CCChan* ch, CCIoError e);
+
+// Cancel: shorthand for cc_chan_close_with(ch, {CC_IO_CANCELLED, 0}).
+// Same mechanics as cc_chan_close; peers see Err(CC_IO_CANCELLED).
+void cc_chan_cancel(CCChan* ch);
 
 // Free channel resources. Safe to call on NULL. Undefined if called while
 // other threads are still using the channel.
@@ -341,6 +379,8 @@ static inline int cc_channel_is_ordered(CCChan* ch) { return cc_chan_is_ordered(
 static inline void cc_channel_raw_close(CCChan* ch) { cc_chan_close(ch); }
 static inline void cc_channel_close_err(CCChan* ch, int err) { cc_chan_close_err(ch, err); }
 static inline void cc_channel_rx_close_err(CCChan* ch, int err) { cc_chan_rx_close_err(ch, err); }
+static inline void cc_channel_raw_close_with(CCChan* ch, CCIoError e) { cc_chan_close_with(ch, e); }
+static inline void cc_channel_raw_cancel(CCChan* ch) { cc_chan_cancel(ch); }
 static inline void cc_channel_raw_free(CCChan* ch) { cc_chan_free(ch); }
 static inline int cc_channel_raw_send(CCChan* ch, const void* value, size_t value_size) {
     return cc_chan_send(ch, value, value_size);
@@ -376,6 +416,10 @@ cc_channel_raw_wait_recv_or_socket(CCChan* ch, CCSocketSignal* sig, void* out_va
    The compiler should target the stable `cc_channel_*` family directly. */
 static inline void cc__channel_close_tx(CCChanTx tx) { cc_channel_raw_close(tx.raw); }
 static inline void cc__channel_close_rx(CCChanRx rx) { cc_channel_raw_close(rx.raw); }
+static inline void cc__channel_close_with_tx(CCChanTx tx, CCIoError e) { cc_channel_raw_close_with(tx.raw, e); }
+static inline void cc__channel_close_with_rx(CCChanRx rx, CCIoError e) { cc_channel_raw_close_with(rx.raw, e); }
+static inline void cc__channel_cancel_tx(CCChanTx tx) { cc_channel_raw_cancel(tx.raw); }
+static inline void cc__channel_cancel_rx(CCChanRx rx) { cc_channel_raw_cancel(rx.raw); }
 static inline void cc__channel_free_tx(CCChanTx tx) { cc_channel_raw_free(tx.raw); }
 static inline void cc__channel_free_rx(CCChanRx rx) { cc_channel_raw_free(rx.raw); }
 static inline void cc__channel_set_recv_signal_tx(CCChanTx tx, CCSocketSignal* sig) {
@@ -386,7 +430,7 @@ cc__channel_wait_recv_or_socket_rx(CCChanRx rx, CCSocketSignal* sig, void* out_v
     return cc_channel_raw_wait_recv_or_socket(rx.raw, sig, out_value, value_size);
 }
 static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, void* ptr) {
-    return cc_chan_result_from_errno(cc_channel_raw_send_take(tx.raw, ptr));
+    return cc_chan_result_with(tx.raw, cc_channel_raw_send_take(tx.raw, ptr), /*is_recv=*/false);
 }
 
 #define CC__CHANNEL_SELECT_2_OR_3(_1, _2, _3, NAME, ...) NAME
@@ -396,10 +440,10 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
 #elif (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
 #define cc_channel_send_typed(tx, value) ({ \
     __typeof__(value) __cc_tmp = (value); \
-    cc_chan_result_from_errno(cc_channel_raw_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
+    cc_chan_result_with((tx).raw, cc_channel_raw_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp)), /*is_recv=*/false); \
 })
 #else
-#define cc_channel_send_typed(tx, value) (cc_chan_result_from_errno(cc_channel_raw_send((tx).raw, &(value), sizeof(value))))
+#define cc_channel_send_typed(tx, value) (cc_chan_result_with((tx).raw, cc_channel_raw_send((tx).raw, &(value), sizeof(value)), /*is_recv=*/false))
 #endif
 #define cc_channel_send(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_send_raw3, cc_channel_send_typed)(__VA_ARGS__)
 
@@ -417,17 +461,17 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
 #elif (defined(__clang__) || defined(__GNUC__)) && !defined(__TINYC__)
 #define cc_channel_try_send_typed(tx, value) ({ \
     __typeof__(value) __cc_tmp = (value); \
-    cc_chan_result_from_errno(cc_channel_raw_try_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp))); \
+    cc_chan_result_with((tx).raw, cc_channel_raw_try_send((tx).raw, &__cc_tmp, sizeof(__cc_tmp)), /*is_recv=*/false); \
 })
 #else
-#define cc_channel_try_send_typed(tx, value) (cc_chan_result_from_errno(cc_channel_raw_try_send((tx).raw, &(value), sizeof(value))))
+#define cc_channel_try_send_typed(tx, value) (cc_chan_result_with((tx).raw, cc_channel_raw_try_send((tx).raw, &(value), sizeof(value)), /*is_recv=*/false))
 #endif
 #define cc_channel_try_send(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_try_send_raw3, cc_channel_try_send_typed)(__VA_ARGS__)
 
 #ifdef CC_PARSER_MODE
 #define cc_channel_try_recv_typed(rx, out_ptr) (cc_ok_CCResult_bool_CCIoError(true))
 #else
-#define cc_channel_try_recv_typed(rx, out_ptr) (cc_chan_result_from_errno(cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr)))))
+#define cc_channel_try_recv_typed(rx, out_ptr) (cc_chan_result_with((rx).raw, cc_channel_raw_try_recv((rx).raw, (out_ptr), sizeof(*(out_ptr))), /*is_recv=*/true))
 #endif
 #define cc_channel_try_recv_raw3(ch, out_value, value_size) cc_channel_raw_try_recv((ch), (out_value), (value_size))
 #define cc_channel_try_recv(...) CC__CHANNEL_SELECT_2_OR_3(__VA_ARGS__, cc_channel_try_recv_raw3, cc_channel_try_recv_typed)(__VA_ARGS__)
@@ -437,10 +481,27 @@ static inline CCResult_bool_CCIoError cc__channel_send_take_typed(CCChanTx tx, v
     CCChanRx: cc__channel_wait_recv_or_socket_rx \
 )((h), (sig), (out_ptr), sizeof(*(out_ptr)))
 
-#define cc_channel_close(h) _Generic((h), \
+/* cc_channel_close is arity-overloaded:
+ *   cc_channel_close(h)       -> graceful close; peers observe Ok(false) (EOF).
+ *   cc_channel_close(h, e)    -> structured close; peers observe Err(e).
+ * Handle dispatch (CCChan* / CCChanTx / CCChanRx) is handled per arm below. */
+#define cc__channel_close_1(h) _Generic((h), \
     CCChan*: cc_channel_raw_close, \
     CCChanTx: cc__channel_close_tx, \
     CCChanRx: cc__channel_close_rx \
+)((h))
+#define cc__channel_close_2(h, e) _Generic((h), \
+    CCChan*: cc_channel_raw_close_with, \
+    CCChanTx: cc__channel_close_with_tx, \
+    CCChanRx: cc__channel_close_with_rx \
+)((h), (e))
+#define cc__channel_close_dispatch(_1, _2, NAME, ...) NAME
+#define cc_channel_close(...) cc__channel_close_dispatch(__VA_ARGS__, cc__channel_close_2, cc__channel_close_1)(__VA_ARGS__)
+
+#define cc_channel_cancel(h) _Generic((h), \
+    CCChan*: cc_channel_raw_cancel, \
+    CCChanTx: cc__channel_cancel_tx, \
+    CCChanRx: cc__channel_cancel_rx \
 )((h))
 
 #define cc_channel_free(h) _Generic((h), \
@@ -502,6 +563,7 @@ static inline CCSlice cc_channel_tx_lower_c(CCSlice recv_type, CCSlice method, C
     if (cc__channel_lower_c_eq(method, "send_task")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task");
     if (cc__channel_lower_c_eq(method, "send_task_hybrid")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_send_task_hybrid");
     if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
+    if (cc__channel_lower_c_eq(method, "cancel")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_cancel");
     if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();
 }
@@ -516,6 +578,7 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
     }
     if (cc__channel_lower_c_eq(method, "try_recv")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_try_recv");
     if (cc__channel_lower_c_eq(method, "close")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_close");
+    if (cc__channel_lower_c_eq(method, "cancel")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_cancel");
     if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();
 }
@@ -525,22 +588,26 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
     typedef CCChanTx CCChanTx_##Mangled;                                                \
     typedef CCChanRx CCChanRx_##Mangled;                                                \
     static inline CCResult_bool_CCIoError CCChanTx_##Mangled##_send(CCChanTx_##Mangled tx, T value) { \
-        return cc_chan_result_from_errno(cc_channel_raw_send(tx.raw, &value, sizeof(T)));   \
+        return cc_chan_result_with(tx.raw, cc_channel_raw_send(tx.raw, &value, sizeof(T)), /*is_recv=*/false);   \
     }                                                                                   \
     static inline CCResult_bool_CCIoError CCChanRx_##Mangled##_recv(CCChanRx_##Mangled rx, T* out_value) { \
         return cc__chan_recv_ordered(rx, (void*)out_value, sizeof(T));                  \
     }                                                                                   \
     static inline CCResult_bool_CCIoError CCChanTx_##Mangled##_try_send(CCChanTx_##Mangled tx, T value) { \
-        return cc_chan_result_from_errno(cc_channel_raw_try_send(tx.raw, &value, sizeof(T))); \
+        return cc_chan_result_with(tx.raw, cc_channel_raw_try_send(tx.raw, &value, sizeof(T)), /*is_recv=*/false); \
     }                                                                                   \
     static inline CCResult_bool_CCIoError CCChanRx_##Mangled##_try_recv(CCChanRx_##Mangled rx, T* out_value) { \
-        return cc_chan_result_from_errno(cc_channel_raw_try_recv(rx.raw, out_value, sizeof(T))); \
+        return cc_chan_result_with(rx.raw, cc_channel_raw_try_recv(rx.raw, out_value, sizeof(T)), /*is_recv=*/true); \
     }                                                                                   \
     static inline void CCChanTx_##Mangled##_set_recv_signal(CCChanTx_##Mangled tx, CCSocketSignal* sig) { \
         cc_channel_raw_set_recv_signal(tx.raw, sig);                                     \
     }                                                                                   \
     static inline void CCChanTx_##Mangled##_close(CCChanTx_##Mangled tx) { cc_channel_raw_close(tx.raw); } \
     static inline void CCChanRx_##Mangled##_close(CCChanRx_##Mangled rx) { cc_channel_raw_close(rx.raw); } \
+    static inline void CCChanTx_##Mangled##_close_with(CCChanTx_##Mangled tx, CCIoError e) { cc_channel_raw_close_with(tx.raw, e); } \
+    static inline void CCChanRx_##Mangled##_close_with(CCChanRx_##Mangled rx, CCIoError e) { cc_channel_raw_close_with(rx.raw, e); } \
+    static inline void CCChanTx_##Mangled##_cancel(CCChanTx_##Mangled tx) { cc_channel_raw_cancel(tx.raw); } \
+    static inline void CCChanRx_##Mangled##_cancel(CCChanRx_##Mangled rx) { cc_channel_raw_cancel(rx.raw); } \
     static inline void CCChanTx_##Mangled##_free(CCChanTx_##Mangled tx) { cc_channel_raw_free(tx.raw); } \
     static inline void CCChanRx_##Mangled##_free(CCChanRx_##Mangled rx) { cc_channel_raw_free(rx.raw); }
 
