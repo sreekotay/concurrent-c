@@ -529,6 +529,14 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     if (mco_status(f->coro) == MCO_DEAD) {
         atomic_store_explicit(&f->state, FIBER_V2_DEAD, memory_order_release);
         atomic_store_explicit(&f->done, 1, memory_order_release);
+        /* Dekker pair with sched_v2_join waiter: completer stores done then
+         * loads join_waiter_fiber; waiter stores join_waiter_fiber then loads
+         * done. A release store + acq_rel RMW on a different object is
+         * insufficient on ARM64: the store buffer can hide our done=1 from
+         * the waiter's load while also hiding the waiter's publish from our
+         * RMW, yielding a lost wake. Full fence on both sides forces at
+         * least one side to observe the other. */
+        atomic_thread_fence(memory_order_seq_cst);
         cc__fiber* waiter =
             atomic_exchange_explicit(&f->join_waiter_fiber, NULL, memory_order_acq_rel);
         if (waiter) {
@@ -971,6 +979,97 @@ void* sched_v2_current_result_buf(size_t size) {
     return f->result_buf;
 }
 
+static const char* fiber_v2_state_name(int base) {
+    switch (base) {
+        case FIBER_V2_IDLE:    return "IDLE";
+        case FIBER_V2_QUEUED:  return "QUEUED";
+        case FIBER_V2_RUNNING: return "RUNNING";
+        case FIBER_V2_PARKED:  return "PARKED";
+        case FIBER_V2_DEAD:    return "DEAD";
+        default:               return "?";
+    }
+}
+
+void sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix) {
+    if (!prefix) prefix = "    ";
+    if (!f) {
+        fprintf(stderr, "%sv2_fiber=NULL\n", prefix);
+        return;
+    }
+    int raw = atomic_load_explicit(&f->state, memory_order_acquire);
+    int done = atomic_load_explicit(&f->done, memory_order_acquire);
+    cc__fiber* waiter = atomic_load_explicit(&f->join_waiter_fiber, memory_order_acquire);
+    int base = fiber_v2_state_base(raw);
+    const char* reason = f->park_reason ? f->park_reason : "-";
+    fprintf(stderr,
+            "%sv2_fiber=%p state=%s(0x%x) done=%d waiter=%p last_thread=%d reason=%s\n",
+            prefix, (void*)f, fiber_v2_state_name(base), (unsigned)raw, done,
+            (void*)waiter, f->last_thread_id, reason);
+}
+
+void sched_v2_debug_dump_state(const char* prefix) {
+    if (!prefix) prefix = "  ";
+    if (!g_v2.initialized) {
+        fprintf(stderr, "%sv2 sched: uninitialized\n", prefix);
+        return;
+    }
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    int idle = atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire);
+    size_t rq = atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed);
+    size_t alive = atomic_load_explicit(&g_v2.fiber_count, memory_order_relaxed);
+    uint64_t stall_before = atomic_load_explicit(&g_v2_sysmon_stall_detect, memory_order_relaxed);
+    uint64_t ready_ok = atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed);
+    fprintf(stderr,
+            "%sv2 sched: threads=%d idle=%d ready_queue=%zu alive_fibers=%zu stall_detect=%llu dead_total=%llu\n",
+            prefix, n, idle, rq, alive,
+            (unsigned long long)stall_before,
+            (unsigned long long)ready_ok);
+    fflush(stderr);
+    struct timespec ts = {0, 200 * 1000 * 1000}; /* 200 ms */
+    nanosleep(&ts, NULL);
+    uint64_t stall_after = atomic_load_explicit(&g_v2_sysmon_stall_detect, memory_order_relaxed);
+    uint64_t ready_ok2 = atomic_load_explicit(&g_v2_run_dead, memory_order_relaxed);
+    fprintf(stderr,
+            "%sv2 sched (after 200ms): stall_detect=%llu (delta=%llu) dead_total=%llu (delta=%llu)\n",
+            prefix,
+            (unsigned long long)stall_after,
+            (unsigned long long)(stall_after - stall_before),
+            (unsigned long long)ready_ok2,
+            (unsigned long long)(ready_ok2 - ready_ok));
+    fflush(stderr);
+    pthread_mutex_lock(&g_v2.all_fibers_mu);
+    size_t count_by_state[FIBER_V2_STATE_COUNT] = {0};
+    size_t total = 0;
+    for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
+        int base = fiber_v2_state_base(atomic_load_explicit(&f->state, memory_order_acquire));
+        if (base >= 0 && base < FIBER_V2_STATE_COUNT) count_by_state[base]++;
+        total++;
+    }
+    fprintf(stderr,
+            "%sv2 fibers: total=%zu idle=%zu queued=%zu running=%zu parked=%zu dead=%zu\n",
+            prefix, total,
+            count_by_state[FIBER_V2_IDLE],
+            count_by_state[FIBER_V2_QUEUED],
+            count_by_state[FIBER_V2_RUNNING],
+            count_by_state[FIBER_V2_PARKED],
+            count_by_state[FIBER_V2_DEAD]);
+    size_t shown = 0;
+    for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
+        int raw = atomic_load_explicit(&f->state, memory_order_acquire);
+        int base = fiber_v2_state_base(raw);
+        if (base == FIBER_V2_DEAD || base == FIBER_V2_IDLE) continue;
+        if (shown++ >= 24) break;
+        int done = atomic_load_explicit(&f->done, memory_order_acquire);
+        cc__fiber* waiter = atomic_load_explicit(&f->join_waiter_fiber, memory_order_acquire);
+        fprintf(stderr,
+                "%s  v2_fiber=%p state=%s(0x%x) done=%d waiter=%p last_thread=%d reason=%s\n",
+                prefix, (void*)f, fiber_v2_state_name(base), (unsigned)raw, done,
+                (void*)waiter, f->last_thread_id, f->park_reason ? f->park_reason : "-");
+    }
+    pthread_mutex_unlock(&g_v2.all_fibers_mu);
+    fflush(stderr);
+}
+
 /* ============================================================================
  * Join: block until fiber completes
  * ============================================================================ */
@@ -1000,7 +1099,16 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
         atomic_store_explicit(&f->join_waiter_fiber,
                               (cc__fiber*)cc__fiber_current(),
                               memory_order_release);
+        /* Dekker pair with thread_v2_run_fiber completer: waiter publishes
+         * itself then loads done; completer stores done then loads the
+         * waiter pointer. Without a full fence on ARM64 the store-load can
+         * reorder on both sides, so the completer may read NULL while the
+         * waiter still observes done==0 -- a lost wake. */
+        atomic_thread_fence(memory_order_seq_cst);
         atomic_fetch_add_explicit(&g_v2_join_park_fiber, 1, memory_order_relaxed);
+        /* Expose the awaited V2 fiber via park_obj so the deadlock dump can
+         * correlate the parked waiter with its target task. */
+        cc__fiber_set_park_obj(f);
         while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
             cc__fiber_clear_pending_unpark();
             CC_FIBER_PARK_IF(&f->done, 0, "sched_v2_join");

@@ -50,6 +50,13 @@ char*  sched_v2_fiber_result_buf(fiber_v2* f);
 void   sched_v2_fiber_release(fiber_v2* f);
 void*  sched_v2_current_result_buf(size_t size);
 
+/* Debug: dump a V2 fiber's state (for deadlock reports). Safe to call with
+ * an arbitrary pointer; callers are expected to provide a live fiber_v2. */
+void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
+
+/* Debug: dump scheduler-wide V2 state for deadlock reports. */
+void   sched_v2_debug_dump_state(const char* prefix);
+
 /* Wait-ticket support (for kqueue / multi-wait integration) */
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);

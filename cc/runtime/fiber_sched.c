@@ -256,6 +256,8 @@ void   sched_v2_signal(fiber_v2* f);
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int      sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);
 void*  sched_v2_current_result_buf(size_t size);
+void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
+void   sched_v2_debug_dump_state(const char* prefix);
 bool cc_nursery_is_cancelled(const CCNursery* n);
 /* cc__tls_current_nursery is the per-OS-thread nursery context pointer.
 * Fibers must restore it on migration; see worker_run_fiber(). */
@@ -1047,7 +1049,18 @@ static int fq_peek(fiber_queue* q) {
     if (head < tail) return 1;
     int has_overflow = atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0;
     if (!has_overflow) {
+        /* Same race as fq_pop: a concurrent push between our tail load and
+         * this clear would set hint=1 and we'd flip it back to 0, losing the
+         * publish.  After clearing, re-check tail/overflow with a seq_cst
+         * fence and republish if work appeared. */
         atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
+        atomic_thread_fence(memory_order_seq_cst);
+        size_t recheck_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+        if (recheck_tail > head ||
+            atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0) {
+            atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
+            return 1;
+        }
     }
     return has_overflow;
 }
@@ -1113,7 +1126,18 @@ static runnable_ref fq_pop(fiber_queue* q) {
             size_t cur_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
             if (new_head >= cur_tail &&
                 atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
+                /* Hint clear is racy with concurrent pushers: a push that
+                 * publishes tail+1 and stores hint=1 between our tail load
+                 * and the clear below would be reverted to 0 by us, hiding
+                 * the new fiber from peek/pop.  After clearing, re-check
+                 * tail/overflow and republish the hint if work appeared. */
                 atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
+                atomic_thread_fence(memory_order_seq_cst);
+                size_t recheck_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+                if (recheck_tail > new_head ||
+                    atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0) {
+                    atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
+                }
             }
             ref = runnable_ref_validate(ref);
             if (!ref.fiber) continue;
@@ -1128,6 +1152,12 @@ static runnable_ref fq_pop(fiber_queue* q) {
         if (head >= tail &&
             atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
             atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
+            atomic_thread_fence(memory_order_seq_cst);
+            size_t recheck_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
+            if (recheck_tail > head ||
+                atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0) {
+                atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
+            }
         }
         return runnable_ref_null();
     }
@@ -1807,57 +1837,74 @@ static inline size_t get_total_deadlock_suppressed_timed_parked(void) {
 }
 
 static void cc__fiber_dump_parked_channel_state(const fiber_task* f) {
-    if (!f || !f->park_reason || !f->park_obj) return;
-    if (strncmp(f->park_reason, "chan_", 5) != 0) return;
+    if (!f || !f->park_reason) return;
 
-    int control = (int)atomic_load_explicit(&f->control, memory_order_acquire);
-    int pending_unpark = atomic_load_explicit(&f->pending_unpark, memory_order_relaxed);
+    if (strncmp(f->park_reason, "chan_", 5) == 0 && f->park_obj) {
+        int control = (int)atomic_load_explicit(&f->control, memory_order_acquire);
+        int pending_unpark = atomic_load_explicit(&f->pending_unpark, memory_order_relaxed);
 
-    fprintf(stderr,
-            "    fiber state: control=%d pending_unpark=%d\n",
-            control,
-            pending_unpark);
-    cc__chan_debug_dump_state(f->park_obj, "    chan state: ");
+        fprintf(stderr,
+                "    fiber state: control=%d pending_unpark=%d\n",
+                control,
+                pending_unpark);
+        cc__chan_debug_dump_state(f->park_obj, "    chan state: ");
+        return;
+    }
+
+    if (strcmp(f->park_reason, "sched_v2_join") == 0 && f->park_obj) {
+        sched_v2_debug_dump_fiber((fiber_v2*)f->park_obj, "    join target: ");
+    }
+}
+
+static const char* cc__fiber_control_name(int64_t control) {
+    switch ((int)control) {
+        case CTRL_PARKED:    return "PARKED";
+        case CTRL_QUEUED:    return "QUEUED";
+        default:             return control >= 0 ? "OWNED" : "OTHER";
+    }
 }
 
 static void cc__fiber_dump_parked_fibers(void) {
     size_t shown = 0;
+    size_t total = 0;
     size_t parked_total = 0;
     size_t internal_total = 0;
+    size_t skipped_total = 0;
     pthread_mutex_lock(&g_all_fibers_mu);
     for (fiber_task* f = g_all_fibers_head; f; f = f->debug_next) {
+        total++;
         int64_t control = atomic_load_explicit(&f->control, memory_order_acquire);
-        if (control != CTRL_PARKED) continue;
-        parked_total++;
-        if (f->external_wait_parked || cc__fiber_external_wait_scoped(f) || cc__fiber_deadlock_suppressed(f)) continue;
-        internal_total++;
-        if (shown < 8) {
+        int is_parked = (control == CTRL_PARKED);
+        if (is_parked) parked_total++;
+        int skipped = f->external_wait_parked || cc__fiber_external_wait_scoped(f) || cc__fiber_deadlock_suppressed(f);
+        if (is_parked) {
+            if (!skipped) internal_total++;
+            else skipped_total++;
+        }
+        if (shown < 32) {
             fprintf(stderr,
-                    "  parked fiber id=%llu reason=%s where=%s:%d obj=%p external=%u suppressed=%u pending_unpark=%d control=%lld\n",
+                    "  %sfiber id=%llu ctrl=%s(%lld) reason=%s where=%s:%d obj=%p external=%u ext_scoped=%u suppressed=%u pending_unpark=%d\n",
+                    is_parked ? (skipped ? "(skipped parked) " : "(parked) ") : "(not parked) ",
                     (unsigned long long)f->fiber_id,
-                    f->park_reason ? f->park_reason : "unknown",
+                    cc__fiber_control_name(control),
+                    (long long)control,
+                    f->park_reason ? f->park_reason : "-",
                     f->park_file ? f->park_file : "?",
                     f->park_line,
                     f->park_obj,
                     (unsigned)f->external_wait_parked,
+                    (unsigned)cc__fiber_external_wait_scoped(f),
                     (unsigned)cc__fiber_deadlock_suppressed(f),
-                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed),
-                    (long long)control);
-            cc__fiber_dump_parked_channel_state(f);
+                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
+            if (is_parked) cc__fiber_dump_parked_channel_state(f);
             shown++;
         }
     }
     pthread_mutex_unlock(&g_all_fibers_mu);
-    if (parked_total == 0) {
-        fprintf(stderr, "  parked fibers: none visible in debug list\n");
-        return;
-    }
-    if (internal_total == 0) {
-        fprintf(stderr, "  parked fibers: no internal parked fibers visible\n");
-        return;
-    }
-    if (internal_total > shown) {
-        fprintf(stderr, "  ... %zu more internal parked fibers not shown\n", internal_total - shown);
+    fprintf(stderr, "  fiber totals: total=%zu parked=%zu internal_parked=%zu skipped_parked=%zu\n",
+            total, parked_total, internal_total, skipped_total);
+    if (total > shown) {
+        fprintf(stderr, "  ... %zu more fibers not shown\n", total - shown);
     }
 }
 
@@ -1983,6 +2030,8 @@ static void cc__fiber_check_deadlock(void) {
             }
             fprintf(stderr, "  Internal parked fibers:\n");
             cc__fiber_dump_parked_fibers();
+            fprintf(stderr, "\n");
+            sched_v2_debug_dump_state("  ");
             fprintf(stderr, "\n");
             cc__fiber_dump_queue_state();
             fprintf(stderr, "\n");
@@ -2303,6 +2352,12 @@ static inline runnable_ref lq_pop(local_queue* q) {
 
 static inline void wake_one_if_sleeping(cc_wake_reason reason) {
     cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_calls);
+    /* Dekker pair with worker sleep path: we just pushed to the global queue
+     * (release) and must observe any concurrent lifecycle/sleeping transition.
+     * Without a full fence, the relaxed loads of spinning/sleeping below can
+     * be satisfied from a stale store buffer while the worker's queue peek
+     * misses our push -- yielding a lost wake on ARM64. */
+    atomic_thread_fence(memory_order_seq_cst);
     size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
     int allow_with_spinners = (reason == CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
     if (spinning > 0 && !allow_with_spinners) return;
@@ -2326,6 +2381,10 @@ static inline void wake_one_if_sleeping(cc_wake_reason reason) {
 
 static inline void wake_one_if_sleeping_unconditional(void) {
     cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_calls);
+    /* Match Dekker fence in wake_one_if_sleeping: pair with the worker sleep
+     * fence so newly-sleeping workers observe our prior queue publish and we
+     * observe their lifecycle transition. */
+    atomic_thread_fence(memory_order_seq_cst);
     size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
     if (sleeping > 0) {
         int woke = 0;
@@ -2374,6 +2433,14 @@ static inline void wake_target_worker_if_sleeping(int target_worker) {
         cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_delivered);
         return;
     }
+    /* Dekker pair with worker sleep path: producer stores into inbox (CAS tail
+     * with release) then loads worker lifecycle; worker stores lifecycle=SLEEP
+     * then loads inbox tail.  Release/acquire on distinct atomics is NOT
+     * enough to prevent this reordering on ARM64 (C11 does not give a total
+     * order to acq_rel on different objects).  Without a full fence the
+     * producer can observe stale ACTIVE while the worker observes an empty
+     * inbox, leaving a fiber parked in the inbox with the worker asleep. */
+    atomic_thread_fence(memory_order_seq_cst);
     cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
         &g_sched.worker_lifecycle[target_worker], memory_order_relaxed);
     if (lc == CC_WL_SLEEP) {
@@ -2442,9 +2509,8 @@ static inline int pool_ready_for_nonworker_inbox_publish(void) {
 /* Safe to publish directly to worker inboxes once at least one worker has
 * clearly entered the scheduler loop (active/spinning/sleeping). */
 static void cc__fiber_dump_queue_state(void) {
-    return;
     if (!g_sched.run_queue) return;
-    fprintf(stderr, "\n[cc] Queue state dump:\n");
+    fprintf(stderr, "[cc] Classic sched queue state:\n");
     fprintf(stderr, "  pending=%zu active=%zu sleeping=%zu spinning=%zu parked=%zu\n",
             (size_t)atomic_load(&g_sched.pending),
             (size_t)atomic_load(&g_sched.active),
@@ -2459,22 +2525,39 @@ static void cc__fiber_dump_queue_state(void) {
         rq_head += atomic_load(&g_sched.run_queue[s].head);
         rq_tail += atomic_load(&g_sched.run_queue[s].tail);
     }
-    fprintf(stderr, "  run_queue[%zu]: head=%zu tail=%zu\n",
-            sched_global_queue_count(), rq_head, rq_tail);
+    fprintf(stderr, "  run_queue[%zu shards]: head=%zu tail=%zu depth=%zu\n",
+            sched_global_queue_count(), rq_head, rq_tail,
+            rq_tail >= rq_head ? rq_tail - rq_head : 0);
     fprintf(stderr, "  inbox_overflow=%zu\n",
             (size_t)atomic_load(&g_inbox_overflow));
-    for (size_t i = 0; i < g_sched.num_workers; i++) {
-        local_queue* lq = &g_sched.local_queues[i];
-        inbox_queue* iq = &g_sched.inbox_queues[i];
-        size_t lq_head = atomic_load_explicit(&lq->head, memory_order_relaxed);
-        size_t lq_tail = atomic_load_explicit(&lq->tail, memory_order_relaxed);
-        size_t iq_head = atomic_load_explicit(&iq->head, memory_order_relaxed);
-        size_t iq_tail = atomic_load_explicit(&iq->tail, memory_order_relaxed);
-        if (lq_tail > lq_head || iq_tail > iq_head) {
-            fprintf(stderr, "  worker[%zu]: local=%zu inbox=%zu\n",
-                    i, lq_tail - lq_head, iq_tail - iq_head);
+    if (g_sched.worker_lifecycle) {
+        for (size_t i = 0; i < g_sched.num_workers; i++) {
+            local_queue* lq = &g_sched.local_queues[i];
+            inbox_queue* iq = &g_sched.inbox_queues[i];
+            size_t lq_head = atomic_load_explicit(&lq->head, memory_order_relaxed);
+            size_t lq_tail = atomic_load_explicit(&lq->tail, memory_order_relaxed);
+            size_t iq_head = atomic_load_explicit(&iq->head, memory_order_relaxed);
+            size_t iq_tail = atomic_load_explicit(&iq->tail, memory_order_relaxed);
+            cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
+                &g_sched.worker_lifecycle[i], memory_order_relaxed);
+            const char* ls = "?";
+            switch ((int)lc) {
+                case CC_WL_ACTIVE: ls = "ACTIVE"; break;
+                case CC_WL_IDLE_SPIN: ls = "SPIN"; break;
+                case CC_WL_SLEEP: ls = "SLEEP"; break;
+                default: break;
+            }
+            uint32_t wakev = g_sched.worker_wake_prims
+                ? atomic_load_explicit(&g_sched.worker_wake_prims[i].value, memory_order_relaxed)
+                : 0;
+            fprintf(stderr, "  worker[%zu] lc=%s local=%zu inbox=%zu wake_prim=%u\n",
+                    i, ls,
+                    lq_tail >= lq_head ? lq_tail - lq_head : 0,
+                    iq_tail >= iq_head ? iq_tail - iq_head : 0,
+                    (unsigned)wakev);
         }
     }
+    fflush(stderr);
 }
 
 static inline int cc__restore_inbox_task(size_t victim, fiber_task* f);
@@ -3995,6 +4078,14 @@ static void* worker_main(void* arg) {
         atomic_fetch_add_explicit(&g_sched.sleeping, 1, memory_order_release);
         atomic_fetch_sub_explicit(&g_sched.spinning, 1, memory_order_relaxed);
         cc_v3_worker_lifecycle_set(worker_id, CC_WL_SLEEP, "enter_sleep");
+        /* Dekker pair with wake_target_worker_if_sleeping: we just stored
+         * lifecycle=SLEEP and must see any inbox/local pushes that happened
+         * before the producer observed our lifecycle.  Acq_rel on the
+         * lifecycle slot is insufficient because the subsequent queue peeks
+         * are loads on different atomics; without a full fence on ARM64 the
+         * producer can see stale ACTIVE and skip the wake while we observe
+         * an empty inbox. */
+        atomic_thread_fence(memory_order_seq_cst);
         cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.sleep_entries);
         
         /* Sleep using fast wake primitive (futex/ulock instead of condvar) */
@@ -5880,16 +5971,26 @@ queued:
     * fiber on its next loop iteration without any kernel transition). */
     if (!pushed_to_current_local) {
         if (pushed_global) {
-            if (global_edge && pool_strict_idle_for_nonglobal_wake()) {
-                if (divert_stale) {
-                    /* Stale-divert is advisory; avoid extra wakes here. */
-                } else {
-                    wake_one_if_sleeping(CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
-                }
-            } else if (nonworker_publish && pool_strict_idle_for_nonglobal_wake()) {
+            /* For non-worker publishes (e.g. V2 completer waking a classic
+             * join waiter), we must wake whenever any worker is sleeping.
+             * The strict-idle gate is too conservative here: if ANY worker
+             * is active/spinning it defers the wake to that worker's next
+             * queue probe, but on ARM64 with a saturated V2 scheduler the
+             * remaining classic workers may have already transitioned to
+             * SLEEP while we were publishing, leaving the fiber stranded
+             * until a 500ms timeout fires -- long enough for the deadlock
+             * detector to abort. wake_one_if_sleeping has its own seq_cst
+             * fence to close the Dekker race. */
+            if (nonworker_publish) {
                 size_t sleepers = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
                 if (sleepers > 0) {
                     cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.nonworker_global_wake_one);
+                    wake_one_if_sleeping(CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
+                }
+            } else if (global_edge && pool_strict_idle_for_nonglobal_wake()) {
+                if (divert_stale) {
+                    /* Stale-divert is advisory; avoid extra wakes here. */
+                } else {
                     wake_one_if_sleeping(CC_WAKE_REASON_UNPARK_GLOBAL_EDGE);
                 }
             }
