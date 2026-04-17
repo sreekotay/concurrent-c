@@ -1,0 +1,17 @@
+// Smoke: !> bare form dispatches to registered default handler
+#include <stdio.h>
+
+static int g_handler;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err_bool");
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        g_handler = 100 + e.kind;
+    }
+    always_err_bool() !>;
+    printf("g_handler=%d\n", g_handler);
+    return 0;
+}

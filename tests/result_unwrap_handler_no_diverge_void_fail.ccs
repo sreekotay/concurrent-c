@@ -1,0 +1,15 @@
+// Fail: same rule applies in a `void` function — the handler being
+// forwarded to via `@err(e);` must visibly diverge even though a
+// plain `return;` would also be accepted as the function's last act.
+#include <stdio.h>
+bool !> (CCError) f(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+static void go(void) {
+    @errhandler(CCError e) {
+        printf("got err=%d\n", (int)e.kind);
+    }
+    f() !> (e) { @err(e); };
+}
+int main(void) {
+    go();
+    return 0;
+}

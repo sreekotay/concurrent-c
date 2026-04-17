@@ -1,0 +1,24 @@
+// Smoke: !> STMT; single-statement body (break, continue)
+#include <stdio.h>
+
+static int g_break;
+static int g_continue_steps;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err_bool");
+}
+
+int main(void) {
+    for (int i = 0; i < 5; i++) {
+        g_break++;
+        always_err_bool() !> break;
+        g_break += 100;
+    }
+    for (int i = 0; i < 3; i++) {
+        g_continue_steps++;
+        always_err_bool() !> continue;
+        g_continue_steps += 100;
+    }
+    printf("break=%d continue=%d\n", g_break, g_continue_steps);
+    return 0;
+}

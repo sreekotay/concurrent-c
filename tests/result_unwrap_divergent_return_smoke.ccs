@@ -1,0 +1,25 @@
+// Smoke: ?>(e) with `return cc_err(...)` as a propagation statement.
+#include <stdio.h>
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+int !> (CCError) propagator(int fail) {
+    int a = always_ok() ?>(e) return cc_err(CC_ERROR(e.kind, "prop_a"));
+    int b = (fail ? always_err() : always_ok()) ?>(e) return cc_err(CC_ERROR(e.kind, "prop_b"));
+    return cc_ok(a + b);
+}
+
+int main(void) {
+    int !> (CCError) r1 = propagator(0);
+    int !> (CCError) r2 = propagator(1);
+    printf("r1_ok=%d r1_val=%d r2_ok=%d r2_err=%d\n",
+           cc_is_ok(r1), cc_is_ok(r1) ? cc_value(r1) : -1,
+           cc_is_ok(r2), cc_is_err(r2) ? (int)cc_error(r2).kind : -1);
+    return 0;
+}

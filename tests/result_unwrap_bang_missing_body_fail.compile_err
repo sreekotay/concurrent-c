@@ -1,0 +1,2 @@
+result_unwrap_bang_missing_body_fail.ccs:5:
+expected body after '!> (e)'

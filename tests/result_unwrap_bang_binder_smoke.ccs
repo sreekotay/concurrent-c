@@ -1,0 +1,24 @@
+// Smoke: !> (e) binder form, block and single-stmt
+#include <stdio.h>
+
+static int g_block_kind;
+static int g_single_kind;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err_bool");
+}
+
+int main(void) {
+    for (int i = 0; i < 5; i++) {
+        always_err_bool() !> (e) { g_block_kind = 100 + e.kind; break; };
+        g_block_kind += 1000;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        always_err_bool() !> (e) g_single_kind = 200 + e.kind;
+        break;  // not part of the !> body; runs once
+    }
+
+    printf("block=%d single=%d\n", g_block_kind, g_single_kind);
+    return 0;
+}

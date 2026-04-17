@@ -1,0 +1,12 @@
+// Fail: the `@errhandler` being forwarded to via `@err(e);` does not
+// visibly diverge (its last statement is a call that may return), so
+// the forwarding rule is violated.
+#include <stdio.h>
+bool !> (CCError) f(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+int main(void) {
+    @errhandler(CCError e) {
+        printf("got err=%d\n", (int)e.kind);
+    }
+    f() !> (e) { @err(e); };
+    return 0;
+}

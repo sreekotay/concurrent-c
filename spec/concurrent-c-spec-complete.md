@@ -30,8 +30,6 @@ Concurrent-C adds ~40 new language constructs. Here's a quick overview:
 | Keyword | Purpose | Example |
 |---------|---------|---------|
 | `await` | Suspend and wait for async operation to complete | `data = await read_file(path);` |
-| `try` | Unwrap Result type or propagate error up the call stack | `int x = try parse_int(s);` |
-| `catch` | Handle errors from try blocks or catch expressions | `try { op(); } catch (Error e) { }` |
 | `spawn` | Create a new task (only valid inside `@nursery`) | `spawn (worker_task());` |
 | `defer` | Schedule cleanup code to run when scope exits (with `@defer` statement) | `@defer cleanup();` |
 | `defer(err)` | Cleanup only if returning error (with `@defer(err)`) | `@defer(err) free(ptr);` |
@@ -68,28 +66,34 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@comptime if (cond) { }` | Compile-time conditional | `@comptime if (FEATURE_X) { }` |
 | `@errhandler(E e) { }` | Block-scoped default handler for `@err` in this block | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
 
-### Result unwrap statements (`@err`) (5)
+### Result unwrap operators (4)
 
-`@err` is a **statement-level** postfix on a `T!>(E)` value: it unwraps the success payload for use by the statement, or runs error handling when the result is an error. It is **not** an expression operator (it cannot appear inside `if (...)`, function arguments, etc.).
+Result-typed calls (`T!>(E)`) must be explicitly consumed. Four surface forms cover every consumption path:
 
-| Form | Purpose | Example |
-|------|---------|---------|
-| `expr @err;` | Unwrap for side effects; errors go to the active handler | `flush() @err;` |
-| `expr @err(e) { stmts }` | Local handler binding the error payload (**does not** chain to `@errhandler` unless you delegate) | `read(fd, buf) @err(e) { note_io(e); @errhandler(e); };` |
-| `lhs =? expr @err` | Conditional assignment or initializer: if error handling runs and falls through, `lhs` may remain **uninitialized** (like C) | `bool ok =? device.read(&n) @err(e) { return cc_err(e); };` |
-| `@errhandler(E e) { stmts }` | Default handler for any `expr @err` in the enclosed block | See §2.2 |
-| `@errhandler(e);` | **Only** inside a local `expr @err(e) { ... }` block: forward this error to the nearest enclosing `@errhandler` | `log_context(e); @errhandler(e);` |
+| Form | Context | Purpose | Example |
+|------|---------|---------|---------|
+| `expr ?> default` | expression | Unwrap value or use default expression | `int x = parse(s) ?> 0;` |
+| `expr ?>(e) rhs` | expression | Unwrap value, or evaluate `rhs` with `e` bound to the error | `int x = parse(s) ?>(e) return cc_err(e);` |
+| `call !> body` | statement | Unwrap, or execute `body` on error | `flush() !> { log("bad"); break; };` |
+| `call !>;` | statement | Unwrap, or invoke the registered default handler | `flush() !>;` |
 
-**Explicit ownership and discard:** A call that returns `T!>(E)` cannot be used as a **bare** expression statement `f();`—that discards the result silently and is ill-formed. Use `T!>(E) r = f();` to keep the value, `(void)f();` to discard explicitly, or `f() @err` / `=?` forms to unwrap with a handler.
+The `?>` RHS may be a C expression, or one of the "never-typed" divergent statements `return EXPR;`, `break;`, `continue;`. The `!>` body may be a single statement, a `{ ... }` block, or a `(e) BODY` binder form. Inside a `!> (e) BODY`, the call `@err(e);` forwards the bound error to the surrounding `@errhandler` — a non-returning control-flow transfer.
 
-**Note:** `@errhandler` routes **error propagation** from `@err`. `@defer(err)` (§3.1) schedules **cleanup** when the function returns an error—they solve different problems.
+| Registration form | Purpose |
+|-------------------|---------|
+| `@errhandler(E e) { ... }` | Block-scoped default handler. Non-divergent bodies are fine for handlers reached only via `call() !>;` (control returns to the call site). Handlers reached via an `@err(e);` forward must visibly diverge — end in `return`/`break`/`continue`/`goto`, `@err(e);` (nested forward), or a call to `exit`/`abort`/`_Exit`/`longjmp`/`siglongjmp`/`pthread_exit`/`__builtin_unreachable`/`__builtin_trap`. |
+| `@err(e);` | Inside a `!> (e) BODY` only. Forwards to the registered `@errhandler`. Never returns; any statement following it in the same block is a compile error (unreachable). |
+
+A result-typed call appearing as a bare statement (`f();` where `f` returns `T!>(E)`) without being consumed by one of the above is a compile error, gated by `CC_STRICT_RESULT_UNWRAP=1` during phase 1. To discard explicitly, write `(void)f();`.
+
+**See §2.2** for full semantics, grammar, and lowering.
 
 ### Type Constructors (6)
 
 | Constructor | Meaning | Example |
 |-------------|---------|---------|
 | `T!>(E)` | Result type: success (T) or error (E) | `int!>(IoError) read(path);` |
-| `T?` | Optional type: value (T) or absent (null) | `int? find(arr, key);` |
+| `T?` | Optional type (DEPRECATED — see §2.1). Value (T) or absent (null) | `int? find(arr, key);` |
 | `char[:]` | Slice (variable-length view with provenance metadata) | `void process(char[:] data);` |
 | `char[4:]` | Fixed-length slice refinement | `void hash(char[32:] digest);` |
 | `char[:0]` | Sentinel slice refinement | `char[:0] name = s.as_slice();` |
@@ -100,8 +104,6 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | Form | Purpose | Example |
 |------|---------|---------|
 | `await expr` | Suspend until task completes, unwrap result | `int result = await fetch();` |
-| `try expr` | Unwrap Result, propagate error if present | `File f = try open(path);` |
-| `if @try (T x = expr)` | Bind and unwrap result in conditional | `if @try (int x = parse(s)) { use(x); }` |
 | `spawn (expr)` | Create new task (only valid in `@nursery`) | `spawn (handler(req));` |
 | `@slice("...")` | Build-time canonical sentinel slice | `char[:0] mode = @slice("recv");` |
 | `@string(expr, arena)` / `@string(policy, \`...\`, arena)` | Direct or templated string construction (`${e}` and `$~tag{e}` slots) | `CCString msg = @string(user_id, arena);` |
@@ -111,7 +113,6 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | Form | Purpose | Example |
 |------|---------|---------|
 | `with_deadline(d) { }` | Apply timeout/deadline to block | `with_deadline(seconds(5)) { await op(); }` |
-| `try { } catch (E e) { }` | Multi-error handling in block | `try { op1(); op2(); } catch (SqlErr e) { }` |
 
 ### Library Functions (6)
 
@@ -532,8 +533,6 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | Category | Construct | Purpose | Example |
 |----------|-----------|---------|---------|
 | **Core Keywords** | `await` | Suspend until async operation completes | `char[:] data = await read_file(path);` |
-| | `try` | Unwrap Result or propagate error | `int x = try parse_int(s);` |
-| | `catch` | Handle errors from try blocks | `try { op(); } catch (Error e) { }` |
 | | `spawn` | Create new task in nursery | `spawn (worker());` |
 | | `defer` | Cleanup on scope exit (with `@defer`) | `@defer free(ptr);` |
 | | `unsafe` | Disable safety checks in block | `unsafe { *ptr = value; }` |
@@ -549,9 +548,9 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@defer` | Deferred cleanup statement | `@defer cleanup();` |
 | | `@for await (T x : ch)` | Async iteration loop | `@for await (int x : ch) { ... }` |
 | | `@comptime if` | Compile-time conditional | `@comptime if (feature) { }` |
-| | `@errhandler` | Block default handler for `expr @err` | `@errhandler(CCError e) { return cc_err(e); }` |
+| | `@errhandler` | Block default handler for `call() !>;` and `@err(e);` forwards | `@errhandler(CCError e) { return cc_err(e); }` |
 | **Type Constructors** | `T!>(E)` | Result type (success or error) | `int!>(IoError) read(path);` |
-| | `T?` | Optional type (value or null) | `int? find(arr, key);` |
+| | `T?` | Optional type — DEPRECATED, see §2.1 (value or null) | `int? find(arr, key);` |
 | | `char[:]` | Slice (variable-length view) | `void process(char[:] data);` |
 | | `char[n:]` | Fixed-length slice refinement | `void hash(char[32:] digest);` |
 | | `char[:k]` | Sentinel slice refinement | `char[:0] name = s.as_slice();` |
@@ -560,12 +559,13 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@string(expr, arena)` | Direct string construction | `CCString msg = @string(42, arena);` |
 | | `@string(policy, \`...\`, arena)` | Policy-driven template (`${...}`, `$~tag{...}`) | `CCString html = @string(html_policy, \`<h1>${name}</h1>\`, arena);` |
 | **Expression Forms** | `await expr` | Suspend and unwrap task result | `int result = await fetch();` |
-| | `try expr` | Unwrap Result, propagate error | `File f = try open(path);` |
 | | `spawn (expr)` | Create task (must be in `@nursery`) | `spawn (handler(request));` |
-| **Result unwrap (statements)** | `expr @err` / `expr @err(e){}` | Statement-level unwrap; optional local handler | `save(p) @err(e) { log(e); };` |
-| | `lhs =? expr @err` | Conditional assign or init; `lhs` may stay uninitialized | `bool ok =? read_slice(&buf) @err;` |
+| **Result unwrap** | `expr ?> default` | Expression unwrap: value or default expression | `int x = parse(s) ?> 0;` |
+| | `expr ?>(e) rhs` | Expression unwrap with error binder | `int x = parse(s) ?>(e) return cc_err(e);` |
+| | `call !> body` | Statement unwrap: value or run body on error | `flush() !> { log("bad"); break; };` |
+| | `call !>;` | Statement unwrap: value or registered default handler | `flush() !>;` |
+| | `@err(e);` | Forward bound error to enclosing `@errhandler` (inside `!> (e) BODY`); never returns | `@err(e);` |
 | **Block Forms** | `cc_with_deadline(d) { }` | Apply timeout/deadline to block | `cc_with_deadline(seconds(5)) { await op(); }` |
-| | `try { } catch (E e) { }` | Multi-error handling block | `try { op1(); op2(); } catch (Err e) { }` |
 | **Library Functions** | `cc_ok(value)` | Construct T!>(E) success (inferred) | `return cc_ok(42);` |
 | | `cc_ok(void)` | Construct void!>(E) success (inferred) | `return cc_ok(void);` |
 | | `cc_err(error)` | Construct T!>(E) error (inferred) | `return cc_err(MyError_NotFound);` |
@@ -673,7 +673,7 @@ All attributes use the `@` prefix and follow consistent spacing:
 | `@lock` | `@lock (m) as g { ... }` | Space before parentheses (statement form) |
 | `@for await` | `@for await (T x : ch) { }` | Unified statement, no confusion with `for` + `await` |
 | `@defer` | `@defer cleanup();` | Single statement after |
-| `@errhandler` | `@errhandler(CCError e) { return cc_err(e); }` | Block-scoped default for `expr @err` in this block |
+| `@errhandler` | `@errhandler(CCError e) { return cc_err(e); }` | Block-scoped default for `call() !>;` and `@err(e);` forwards in this block |
 | `@match` | `@match { ... }` | Channel multiplexing |
 
 ---
@@ -691,6 +691,8 @@ This section defines the fundamental value-level building blocks:
 ---
 
 ### 2.1 Optionals (`T?`)
+
+> **DEPRECATED (retired in this revision).** Optional types (`T?`) are scheduled for removal. Use `T!>(E)` with a sentinel error variant, or a plain pointer with `NULL`. New code MUST NOT use `T?`. The text below is kept for reference; it will be deleted once all in-tree users are migrated.
 
 `T?` represents **presence or absence** of a value.
 
@@ -784,7 +786,7 @@ int v = cc_unwrap_or(maybe_val, 0);
 
 ### 2.2 Results (`T!>(E)`)
 
-`T!>(E)` represents **success or failure** with an explicit error value. For **lexically scoped** unwrap-and-handle (analogous in placement to `@defer`), use **`expr @err`** with an optional local **`@err(e) { ... }`** and/or block-level **`@errhandler(E e) { ... }`**—see **Statement-level `@err` unwrap** below. **`try expr`** and **`if @try (...)`** remain alternative forms with different control-flow implications.
+`T!>(E)` represents **success or failure** with an explicit error value. Unwrapping is strictly explicit: every result-typed call is consumed by one of four operators (`?>` expression, `!>` statement, `@err(e);` forward inside a `!>` body, or the registered `@errhandler` via bare `call !>;`). Bare result-typed statements are ill-formed. See **Unwrapping Results** below.
 
 * **Unified constructor syntax**:
   * **Inferred (preferred inside a function returning `T!>(E)`):**
@@ -894,6 +896,8 @@ if @try (int n = parse_count(s)) {
 }
 ```
 
+> This is a deprecated shape. New code uses `?>` or `!>` per **Unwrapping Results** below.
+
 **Rule (active field):** Only the active union member is initialized and valid, as determined by `ok`. When `ok == true`, `u.value` is active; when `ok == false`, `u.error` is active. Reading the inactive member is undefined behavior (and is a compile-time error where statically provable).
 
 **Rule (drop for T!>(E)):** On scope exit, the destructor for the **active arm** runs if it has destructor semantics:
@@ -990,42 +994,106 @@ CCRes(MyData, MyError) my_function(int arg);
 
 **Why guards?** The compiler automatically generates `CC_DECL_RESULT_SPEC` calls when you use `T !>(E)` syntax in `.ccs` source files. The `#ifndef ..._DEFINED` guards prevent redefinition errors when your header also declares the same type.
 
-#### Statement-level `@err` unwrap
+#### Unwrapping Results
 
-`@err` provides **explicit**, **lexically scoped** error handling for `T!>(E)` without treating the unwrap as a nested expression. It complements (and contrasts with) `try expr` / `if @try`, which propagate or branch using additional control flow.
+**Invariants (normative).**
 
-**Syntax (statement-level only):**
+1. `!>` is a statement-level operator. `int x = call() !> { ... };` is a syntax error.
+2. `?>` is an expression operator. Its RHS is either a C expression or one of the divergent never-typed statements `return EXPR;`, `break;`, `continue;`. Any other RHS is ill-formed.
+3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding.
+4. `call() !>;` (no body) runs the registered default `@errhandler` on error, or the success path if the call succeeded.
+5. `@err(e);` inside a `!>` body forwards the bound error to the enclosing `@errhandler`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
+6. `@errhandler(e) { ... }` is the unchanged registration spelling. When reached via `call() !>;`, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, control never returns (invariant 5), so the handler body **must visibly diverge**. Concretely: if any `@err(e);` in the enclosing lexical scope targets a handler, that handler's body must end in one of:
+    - `return EXPR;` / `return;`
+    - `break;` / `continue;`
+    - `goto LABEL;`
+    - `@err(e);` (forwarding to an outer handler)
+    - A call to one of the hardcoded noreturn functions: `exit`, `_Exit`, `_exit`, `abort`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`
+    - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
+
+   A forward-reached handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
+7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch. (Enforced behind the `CC_STRICT_RESULT_UNWRAP=1` transition flag during phase 1; enabled unconditionally in phase 3.)
+8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, `try` / `catch` / `if @try`, and optional types (`T?`). During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths.
+
+**Grammar (normative, minus whitespace).**
 
 ```
-stmt_err ::= expr @err ";"
-          |  expr @err err_handler_opt ";"
-          |  assign_target "=?" expr @err err_handler_opt ";"
+qmark_expr    ::= expr '?>' qmark_rhs
+               |  expr '?>' '(' ident ')' qmark_rhs
 
-err_handler_opt ::= /* empty */
-                  |  "(" identifier ")" "{" statement* "}"
+qmark_rhs     ::= expr                        // pure C expression
+               |  'return' expr? ';'          // never-typed: propagation
+               |  'break' ';'                 // never-typed: loop exit
+               |  'continue' ';'              // never-typed: loop skip
+
+bang_stmt     ::= call '!>' ';'                            // use registered handler
+               |  call '!>' stmt                            // single-statement body
+               |  call '!>' '{' stmt* '}' ';'?              // block body
+               |  call '!>' '(' ident ')' stmt              // binder + single stmt
+               |  call '!>' '(' ident ')' '{' stmt* '}' ';'?  // binder + block
+
+err_forward   ::= '@err' '(' ident ')' ';'                 // only inside bang_stmt body
+
+err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
 ```
 
-- **Bare `expr @err`:** `expr` must have type `T!>(E)` for some `T` and `E`. On success, the success payload is supplied to the statement (e.g. passed to a function, or used as the RHS of `=?`). On error, control enters error handling (see below). Using `@err` requires an **active error handler** (this is a compile-time rule).
+**Semantics (normative, by form).**
 
-- **Local handler `expr @err(e) { ... }`:** Binds the error payload to `e` (typed as `E` from the result) for the handler block. **By default the local handler does not chain** to an enclosing `@errhandler`. To forward the same error to the enclosing default handler, the body may contain a delegation statement **`@errhandler(e);`** (see below).
+- `EXPR ?> DEFAULT` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT`. `EXPR ?>(e) RHS` binds the error to `e`, scoped to `RHS`.
+- `EXPR ?> DIVERGENT_STMT` — Evaluate `EXPR` exactly once. On success, the expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` runs in the error branch; because it cannot fall through, the surrounding expression has no observable value on that path. Combines with `?>(e)` binder.
+- `CALL !> ;` — Evaluate `CALL` exactly once. On success, the success payload is discarded (the statement yields nothing). On error, the enclosing lexical `@errhandler(E e) { BODY }` runs with `e` bound to the error.
+- `CALL !> BODY` — Same, with `BODY` in place of the default handler. Any `@err(e);` inside `BODY` is ill-formed without a binder.
+- `CALL !> (e) BODY` — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the enclosing `@errhandler` (see invariant 5).
+- `@err(X);` — Inside a `!> (X) BODY` only. Transfers control to the enclosing `@errhandler(E e) { HANDLER_BODY }` with the error value forwarded. Does not return.
+- `@errhandler(E e) { BODY }` — Registers a block-local default handler. All `call() !>;` and all `@err(e);` forwards within the enclosing lexical block dispatch through this handler. Subject to the divergence rule of invariant 6.
 
-- **Default handler `@errhandler(E e) { ... }`:** A block statement with the same lexical role as other block-scoped `@` forms (e.g. alongside `@defer` scheduling). Any `expr @err` in the **statements/inner blocks** of that compound statement uses the innermost enclosing `@errhandler` as its default when no local `expr @err(e) { ... }` handles the error—or when the local handler delegates with `@errhandler(e);`. Multiple `@errhandler`s may nest; delegation targets the **next** enclosing handler.
+**Single-evaluation (normative).** Every operator listed above evaluates its LHS call expression exactly once. Lowerings MUST preserve this.
 
-- **Delegation `@errhandler(e);`:** Valid only inside a local `expr @err(e_local) { ... }` handler (same block). Forwards the error value bound to `e` (or `e_local`) to the nearest enclosing `@errhandler`, which resumes execution in its body with **that** handler’s parameter binding. This is the only chaining path between a local `@err(e)` block and an outer default handler.
+**Lowering (informative).** All five forms lower to straight-line C using `cc_is_ok` / `cc_is_err` / `cc_value` / `cc_error`. For example `EXPR ?> DEFAULT` lowers to a statement-expression that stores `EXPR` in a temporary and yields `cc_is_ok(tmp) ? cc_value(tmp) : (DEFAULT)`. `CALL !> (e) BODY` lowers to a block that stores the call in a temporary, tests `cc_is_err`, and on error introduces `e` bound to `cc_error(tmp)` before entering `BODY`. `@err(e);` lowers to a jump into the registered handler body with the error value threaded through. Implementations are free to vary the exact shape; the normative semantics are above.
 
-- **Conditional assignment `lhs =? expr @err`:** Marked assignment or declaration-with-initializer. The marker `=?` means: if error handling runs and **falls through** without assigning a success value to `lhs`, then **`lhs` is not initialized** on those paths (C-like indefinite value). The compiler treats `lhs` as potentially uninitialized after the statement unless flow analysis proves otherwise. **`=?` is a temporary spelling** reserved for migration; a future language version may replace it with a shorter token once optional-related syntax is retired.
+**Examples.**
 
-**Active handler:** Every `expr @err` must appear in a scope where error handling is well-defined: either an enclosing `@errhandler`, or a syntactically attached `expr @err(e) { ... }` on the same statement. Using `@err` with no such handler is ill-formed.
+```c
+// Default value on error.
+int x = parse_int(s) ?> 0;
 
-**No nested expression use:** `expr @err` may not appear inside a larger expression (condition of `if`, operand of `!`, argument list, etc.). This keeps value flow obvious and avoids silent “maybe uninitialized” bindings in expression contexts.
+// Propagate the error, binding explicitly.
+int!>(CCError) propagate(char[:] s) {
+    int a = parse_int(s)  ?>(e) return cc_err(e.kind, "prop_a");
+    int b = parse_int(s)  ?>(e) return cc_err(e.kind, "prop_b");
+    return cc_ok(a + b);
+}
 
-**Discarded results:** A **bare** expression statement whose top-level expression is a call (or other operation) that yields `T!>(E)` with no `try`, no `@err`, no assignment, and no explicit cast discard—e.g. `f();` where `f` returns `T!>(E)`—is **ill-formed**, because it drops a result value without saying whether the error is handled, stored, or intentionally ignored. Use one of:
+// Loop exit on error.
+for (int i = 0; i < n; i++) {
+    int v = maybe(i) ?> break;
+    total += v;
+}
 
-- `T!>(E) r = f();` — retain the full result
-- `(void)f();` — explicitly discard (**both** success and error payloads), when that is intended
-- `f() @err;` or `lhs =? f() @err` — unwrap with a handler
+// Statement form, block body.
+for (;;) {
+    flush() !> { log("flush failed"); break; };
+    ...
+}
 
-**Lowering:** Implementation is by source-to-source rewrite (together with `@defer` / return lowering where needed); the normative semantics are as given here, not tied to a particular expansion shape.
+// Statement form, binder + forwarding.
+int main(void) {
+    @errhandler(CCError e) {
+        log(e);
+        return 1;
+    }
+    flush() !> (e) {
+        metrics.record(e);
+        @err(e);   // divergent: no code after this in the same block
+    };
+    return 0;
+}
+
+// Explicit discard when intentional.
+(void)cleanup();
+```
+
+**Composition with `@defer` and `@create(...) @destroy`.** `?>` and `!>` participate in deferred cleanup like any other C statement: `@defer` scheduled entries run on scope exit regardless of which branch of `?>` / `!>` fired. Divergent RHS (`return`, `break`, `continue`) respect the scope boundary they cross; the surrounding `@defer` runs as usual.
 
 ---
 
@@ -1731,7 +1799,7 @@ cc_arena_free(&a);  // BUG: thread may still be using s
 * LIFO order.
 * No exceptions or unwinding.
 
-**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). **`@errhandler`** defines behavior when a statement-level **`expr @err`** observes an **error**—at the unwrap site, not deferred to exit. See §2.2.
+**Note (vs `@errhandler`):** `@defer` / `@defer(err)` schedule work at **scope exit** (or only when the function returns error/success). **`@errhandler`** defines behavior when a `call() !>;` statement or an `@err(e);` forward observes an **error**—at the unwrap site, not deferred to exit. See §2.2.
 
 ```c
 CCArena scratch = cc_arena_heap(kilobytes(64));
@@ -3132,7 +3200,7 @@ This section specifies:
 - **§7.6 Streaming** — channel-based producers with @for await
 - **§7.7 Runtime API** — function signatures for tasks, timing, and sync bridging
 - **§7.8 Blocking, Stalling, and Execution Contexts** — execution model for blocking operations, stalling classification, and cancellation guarantees
-- **§7.9–7.13 Error Handling** — Result types, try/catch, async errors, multiple error types
+- **§7.9 Error handling in async and nurseries** — composition of result unwrap operators (`?>`, `!>`, `@err`, `@errhandler`) defined in §2.2 with async/nursery forms
 
 ---
 
@@ -5498,259 +5566,53 @@ Primitive numeric types get UFCS methods for common operations:
 
 ####
 
-This section defines the error model:
-
-- **§7.1 Returning errors** — constructing results
-- **§7.2 `try` propagation** — early return on error
-- **§7.3 `catch` handling** — local error handling
-- **§7.4 Async + errors** — `try await` composition
-- **§7.5 Multiple error types** — explicit conversion
+Errors in Concurrent-C are **value-based**, not exceptions. `T!>(E)` is the return type for functions that can fail; unwrap and handling syntax is defined normatively in §2.2 (`?>`, `!>`, `@err(e);`, `@errhandler`). `@defer` always runs; there is no unwinding.
 
 ---
 
-Errors in Concurrent-C are **value-based**, not exceptions.
+### 7.9 Error handling in async and nurseries
 
-* `T!>(E)` is the return type for functions that can fail.
-* `try` unwraps success or propagates error.
-* `catch` handles errors locally.
-* No unwinding — `defer` always runs.
+Error handling in `@async` functions and `@nursery` blocks uses the operators defined in **§2.2** (`?>` expression, `!>` statement, `@err(e);` forward, `@errhandler` registration). No `await`- or `nursery`-specific error construct exists; everything composes through the same surface.
 
----
-
-### 7.9 Returning errors
+**Async call with default.**
 
 ```c
-int!>(IoError) read_value(char[:] path) {
-    File f = try open(path);
-    return try f.read_int();
-}
+@async int!>(IoError) fetch(char[:] url);
 
-// Inferred construction (recommended)
-int!>(IoError) x = cc_ok(42);
-int!>(IoError) y = cc_err(IoError.FileNotFound);
-
-// Explicit construction (still supported)
-int!>(IoError) x2 = cc_ok(int, IoError, 42);
-int!>(IoError) y2 = cc_err(int, IoError, IoError.FileNotFound);
-```
-
----
-
-### 7.10 `try` propagation
-
-`try expr` unwraps `T!>(E)` on success, or returns `err(e)` from the enclosing function on failure.
-
-```c
-int!>(IoError) parse_file(char[:] path) {
-    char[:] content = try read_file(path);
-    return try parse_int(content);
-}
-```
-
-**Rule:** `try` is valid when the enclosing function returns `U!>(E)` with a compatible error type.
-
-**Try-binding in conditionals:**
-
-`if @try (T x = expr)` unwraps a result and binds the value in the then-branch:
-
-```c
-int!>(CCError) res = parse_int(s);
-if @try (int x = res) {
-    // x is the unwrapped value (int)
-    printf("parsed: %d\n", x);
-} else {
-    // res was an error - can access res.u.error here
-    printf("parse failed\n");
-}
-```
-
-This is syntactic sugar for:
-
-```c
-{
-    __typeof__(res) __tmp = (res);
-    if (__tmp.ok) {
-        int x = __tmp.u.value;
-        { /* then-branch */ }
-    } else {
-        { /* else-branch */ }
-    }
-}
-```
-
-**Rule:** `if @try (T x = expr)` is distinct from `try expr` in a condition. The latter is disallowed because `try expr` either succeeds (yielding a value that may not be boolean-testable) or returns from the function (making the else-branch unreachable).
-
-**Rule:** The variable `x` is only in scope within the then-branch. In the else-branch, the original result expression can be accessed if it was bound to a variable.
-
-**Use case:** Handling results inline without separate declaration and check:
-
-```c
-// Instead of:
-Result*!>(IoError) res_val = compress_block(blk, level);
-if (res_val.is_ok()) {
-    Result* res = res_val.value();
-    results_tx.send(res);
-} else {
-    fprintf(stderr, "error\n");
-}
-
-// Write:
-Result*!>(IoError) res_val = compress_block(blk, level);
-if @try (Result* res = res_val) {
-    results_tx.send(res);
-} else {
-    fprintf(stderr, "error\n");
-}
-```
-
----
-
-### 7.11 `catch` handling
-
-`catch` converts a `T!>(E)` to `T` by providing a fallback value or handler.
-
-```c
-// Default value on error
-int x = parse_int(s) catch 0;
-
-// Handle error explicitly (handler must yield T)
-int y = parse_int(s) catch(e) {
-    log(e);
-    -1   // yields -1 (last expression is the value)
-};
-```
-
-**Rule:** A `catch` handler must yield a value of type `T`. It cannot propagate errors. To selectively propagate, use `try` instead:
-
-```c
-// To re-propagate certain errors, use try + catch in caller
-int!>(IoError) read_or_default(char[:] path) {
-    File f = try open(path);           // propagates IoError
-    return f.read_int() catch 0;       // catch ParseError, yield 0
-}
-
-// Or handle everything explicitly
-int z = read_int(path) catch(e) {
-    if (e == IoError.FileNotFound) 0       // yield 0 for not-found
-    else panic("unexpected error")     // or crash
-};
-```
-
-**Rule:** The `catch` expression has type `T`, not `T!>(E)`. After `catch`, the error has been handled.
-
----
-
-#### 7.11.1 Try/Catch Blocks (Multiple Error Handling)
-
-`try { block }` with multiple `catch` clauses handles errors within a block and dispatches to specific handlers based on error type.
-
-```c
-// Single catch clause
-try {
-    result = try db.query(sql);
-    process(result);
-} catch (SqlError e) {
-    log("SQL error: %s", e.msg);
-    return cc_err(T, e);  // or handle and return cc_ok(T, ...)
-}
-
-// Multiple catch clauses (dispatched by type)
-try {
-    row = try db.query_row(sql);
-    value = row.column_i64(0);  // may throw ParseError
-} catch (SqlError e) {
-    log("Database error");
-    return cc_err(DatabaseError.QueryFailed);
-} catch (ParseError e) {
-    log("Parse error in column");
-    return cc_err(DatabaseError.InvalidColumn);
-}
-
-// Catch and continue
-try {
-    process_item(item);
-    return cc_ok(void);
-} catch (SkippableError e) {
-    log("Skipped: %s", e.reason);
-    return cc_ok(void);  // Error handled; continue
-} catch (FatalError e) {
-    log("Fatal: %s", e.reason);
-    return cc_err(void, e);  // Propagate fatal errors
-}
-
-// Nested try/catch for layered handling (returns Data!>(NetworkError))
-try {
-    try {
-        data = try fetch_from_cache(key);
-    } catch (CacheError e) {
-        log("Cache miss");
-        data = try fetch_from_network(key);  // Fallback: try network
-    }
-    return cc_ok(Data, data);
-} catch (NetworkError e) {
-    log("All sources failed");
-    return cc_err(Data, e);
-}
-```
-
-**Semantics:**
-- `try { block }` executes the block
-- If any `try expr` inside propagates an error, control transfers to the first matching `catch (Type var)` handler
-- Error type matching is compile-time: only matching catch clauses are tried
-- First matching catch clause executes; others are skipped (not fall-through)
-- The catch handler can return `ok(...)`, `err(...)`, or propagate via `try`
-- Multiple catch clauses are evaluated in order; first match wins
-
-**Type safety:** If an error cannot be caught (no matching clause), it propagates to the enclosing function per `try` rules.
-
----
-
-### 7.12 Async + errors
-
-Async functions can return `T!>(E)`:
-
-```c
-@async int!>(IoError) fetch(char[:] url) {
-    return try await http_get(url);
-}
-
-@async void!>(IoError) process() {
-    int len = try await fetch("http://...");
+@async void handler(char[:] url) {
+    int len = (await fetch(url)) ?> 0;   // default on error
     use(len);
 }
 ```
 
-`try await` unwraps the task result, propagating errors.
-
----
-
-### 7.13 Multiple error types
-
-When composing functions with different error types, use explicit conversion with wrapper functions or inline error mapping:
+**Propagation from a nursery child.**
 
 ```c
-enum AppError { Io(IoError), Parse(ParseError) }
+@async int!>(IoError) process(char[:] url) {
+    @nursery {
+        spawn (subtask_a(url));
+        int v = (await subtask_b(url)) ?>(e) return cc_err(e);  // unwinds nursery
+    }
+    return cc_ok(0);
+}
+```
 
-// Helper to convert error types
+**Mapping between error types.**
+
+```c
 int!>(AppError) parse_with_app_error(char[:] s) {
     int!>(ParseError) r = parse_int(s);
-    if (cc_is_ok(r)) return cc_ok(cc_value(r));
-    return cc_err(AppError.Parse(cc_error(r)));
+    return cc_is_ok(r) ? cc_ok(cc_value(r))
+                       : cc_err(AppError.Parse(cc_error(r)));
 }
 
-int!>(AppError) read_with_app_error(char[:] path) {
-    char[:]!>(IoError) r = read_file(path);
-    if (cc_is_ok(r)) return cc_ok(cc_value(r));
-    return cc_err(AppError.Io(cc_error(r)));
-}
-
-int!>(AppError) process(char[:] path) {
-    char[:] s = try read_with_app_error(path);
+int!>(AppError) pipeline(char[:] path) {
+    char[:] s = read_with_app_error(path) ?>(e) return cc_err(e);
     return parse_with_app_error(s);
 }
 ```
 
-**Rule:** Error type conversion is explicit. There is no implicit coercion from `T!>(E1)` to `T!>(E2)` even if `E1` can be embedded in `E2`.
+The `?>(e) return cc_err(e);` idiom is the new propagation equivalent of the retired `try` keyword. For bail-out without a value (statement context), use `!>` with an `@errhandler` or a local `!> (e) BODY`. See §2.2 for the full grammar and semantics.
 
 ---
 
@@ -6771,6 +6633,13 @@ The following must be diagnosed at compile time:
 | Use after move | Accessing move-only value after transfer | § 1.1 |
 | Guard across suspension | Guard held across `await` or `run_blocking` | § 7.9 |
 | Unsafe adoption | `adopt()` outside `unsafe {}` | § G.2 |
+| Result unwrap — missing default | `expr ?> ;` with nothing on RHS | § 2.2 |
+| Result unwrap — bad binder | `expr ?>() RHS`, `expr ?>(123) RHS`, `call() !> () BODY` | § 2.2 |
+| Result unwrap — missing body | `call() !> (e) ;` | § 2.2 |
+| Result forward — unbound binder | `@err(X);` where `X` is not the enclosing `!>` binder | § 2.2 |
+| Result forward — dead code | statement following `@err(e);` in the same block | § 2.2 |
+| Handler non-divergent | Forward-reached `@errhandler` body last statement is not one of the approved divergent forms | § 2.2 |
+| Unhandled result call | bare `f();` where `f` returns `T!>(E)` (phase-1: gated on `CC_STRICT_RESULT_UNWRAP=1`) | § 2.2 |
 
 ### B.2 Runtime Errors (Debug Builds)
 

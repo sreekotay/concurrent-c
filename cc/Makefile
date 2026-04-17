@@ -81,7 +81,9 @@ CCCN_SRCS := $(wildcard src/cccn/*/*.c) \
     src/comptime/symbols.c \
     src/util/io.c \
     src/util/path.c \
+    src/util/result_fn_registry.c \
     src/visitor/pass_err_syntax.c \
+    src/visitor/pass_result_unwrap.c \
     src/visitor/visitor_fileutil.c
 CCCN_OBJS := $(CCCN_SRCS:%.c=$(OBJDIR)/%.o)
 CCCN_BINARY := bin/cccn
@@ -94,8 +96,10 @@ LOWER_HEADERS_SRCS := src/tools/lower_headers.c \
 	src/comptime/symbols.c \
 	src/visitor/pass_type_syntax.c \
 	src/visitor/pass_err_syntax.c \
+	src/visitor/pass_result_unwrap.c \
 	src/util/io.c \
-	src/util/path.c
+	src/util/path.c \
+	src/util/result_fn_registry.c
 LOWER_HEADERS_OBJS := $(LOWER_HEADERS_SRCS:%.c=$(OBJDIR)/%.o)
 LOWER_HEADERS_BINARY := $(OUT_BINDIR)/lower_headers
 LOWER_HEADERS_INPUTS := $(shell find include -name '*.cch' -type f)

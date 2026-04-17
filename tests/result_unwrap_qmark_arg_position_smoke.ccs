@@ -1,0 +1,22 @@
+// Smoke: ?> used in various expression-argument positions
+#include <stdio.h>
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "e");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+static int sink(int v) { return v + 1; }
+
+int main(void) {
+    int a = sink(always_err() ?> 41);
+    int b = sink(always_ok() ?> 0);
+    int c = (always_err() ?> 5) + (always_ok() ?> 0);
+    int taken = 0;
+    if (always_ok() ?> 0 > 10) taken = 1;
+    printf("a=%d b=%d c=%d taken=%d\n", a, b, c, taken);
+    return 0;
+}

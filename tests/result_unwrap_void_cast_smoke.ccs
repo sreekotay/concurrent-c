@@ -1,0 +1,14 @@
+// Slice 8: `(void)f()` is the explicit-discard escape hatch for a
+// result-returning call.  With CC_STRICT_RESULT_UNWRAP=1 enabled it
+// still compiles cleanly.
+#include <stdio.h>
+
+int !> (CCError) f(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "x");
+}
+
+int main(void) {
+    (void)f();
+    printf("done\n");
+    return 0;
+}

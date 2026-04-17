@@ -1,0 +1,17 @@
+// Smoke: !> (e) { ... } binder-form block body (slice 5)
+#include <stdio.h>
+
+static int g_kind;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "x");
+}
+
+int main(void) {
+    for (int i = 0; i < 4; i++) {
+        always_err_bool() !> (e) { g_kind = 100 + e.kind; break; };
+        g_kind += 1000;
+    }
+    printf("kind=%d\n", g_kind);
+    return 0;
+}

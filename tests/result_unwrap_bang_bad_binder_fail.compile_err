@@ -1,0 +1,2 @@
+result_unwrap_bang_bad_binder_fail.ccs:5:
+expected identifier in '!> (...)'

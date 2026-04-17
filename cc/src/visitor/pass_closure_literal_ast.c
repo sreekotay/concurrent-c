@@ -12,6 +12,7 @@
 #include "visitor/pass_common.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_err_syntax.h"
+#include "visitor/pass_result_unwrap.h"
 #include "visitor/pass_type_syntax.h"
 
 #ifndef CC_TCC_EXT_AVAILABLE
@@ -3333,6 +3334,13 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
             size_t lowered_err_len = 0;
             const char* src_after_err = lowered3 ? lowered3 : src_for_templates;
             size_t src_after_err_n = strlen(src_after_err);
+            char* lowered_ru = NULL;
+            size_t lowered_ru_len = 0;
+            if (cc__rewrite_result_unwrap(ctx, src_after_err, src_after_err_n, &lowered_ru, &lowered_ru_len) > 0 &&
+                lowered_ru) {
+                src_after_err = lowered_ru;
+                src_after_err_n = lowered_ru_len;
+            }
             if (cc__rewrite_err_syntax(ctx, src_after_err, src_after_err_n, &lowered_err, &lowered_err_len) > 0 &&
                 lowered_err) {
                 src_after_err = lowered_err;
@@ -3363,6 +3371,7 @@ int cc__rewrite_closure_literals_with_nodes(const CCASTRoot* root,
                 }
             }
             free(lowered_err);
+            free(lowered_ru);
             free(lowered_tpl);
             free(lowered3);
             free(lowered2);

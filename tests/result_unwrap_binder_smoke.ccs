@@ -1,0 +1,18 @@
+// Smoke: ?>(e) binder form with pure-expression RHS.
+#include <stdio.h>
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+int main(void) {
+    int a = always_err() ?>(e) (int)(100 + e.kind);
+    int b = always_ok()  ?>(e) (int)(100 + e.kind);
+    int c = always_err() ?> (e) 0;
+    printf("a=%d b=%d c=%d\n", a, b, c);
+    return 0;
+}

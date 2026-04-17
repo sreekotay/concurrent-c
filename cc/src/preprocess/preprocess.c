@@ -17,10 +17,12 @@
 #include "preprocess/type_registry.h"
 #include "result_spec.h"
 #include "util/path.h"
+#include "util/result_fn_registry.h"
 #include "util/text.h"
 #include "visitor/ufcs.h"
 #include "visitor/visitor.h"
 #include "visitor/pass_err_syntax.h"
+#include "visitor/pass_result_unwrap.h"
 
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
@@ -4797,16 +4799,29 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
             /* Skip whitespace */
             while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
             
-            /* Must find '(' - VALIDATE */
+            /* If '!>' is not followed by '(' it is not a result-type
+             * annotation; it is the statement operator `func() !>;` /
+             * `func() !> STMT;` / `func() !> { ... }` handled by
+             * pass_result_unwrap in phase 3.  Skip past the sigil and
+             * keep scanning. */
             if (j >= n || src[j] != '(') {
-                /* ERROR: !> without error type */
-                char rel[1024];
-                cc_pp_error_cat(cc_path_rel_to_repo(input_path ? input_path : "<input>", rel, sizeof(rel)),
-                        scan.line, scan.col, "type", "'!>' requires error type in parentheses");
-                fprintf(stderr, "  hint: use 'T !> (ErrorType)' syntax, e.g., 'int !> (Error)'\n");
-                fprintf(stderr, "  hint: for simple error results, use 'int !> (int)' for error codes\n");
-                free(out);
-                return NULL;
+                i = sigil_pos + 2;
+                scan.col += 2;
+                continue;
+            }
+            /* If the non-ws char immediately before `!>` is `)` (a closing
+             * paren of a call or expression), this is the binder form
+             * `CALL !> (e) BODY` of the `!>` statement operator — not a
+             * type annotation.  Let pass_result_unwrap handle it later. */
+            {
+                size_t bk = sigil_pos;
+                while (bk > 0 && (src[bk - 1] == ' ' || src[bk - 1] == '\t' ||
+                                  src[bk - 1] == '\r' || src[bk - 1] == '\n')) bk--;
+                if (bk > 0 && src[bk - 1] == ')') {
+                    i = sigil_pos + 2;
+                    scan.col += 2;
+                    continue;
+                }
             }
             if (j < n && src[j] == '(') {
                 j++;  /* skip '(' */
@@ -4907,7 +4922,7 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                             /* Register result-typed variable for UFCS.
                                Look for variable name after the type (skip ws and *). */
                             CCTypeRegistry* reg = cc_type_registry_get_global();
-                            if (reg) {
+                            {
                                 size_t v = cc_skip_ws_and_comments(src, n, j);
                                 /* Skip pointer modifiers */
                                 while (v < n && src[v] == '*') v++;
@@ -4924,7 +4939,18 @@ static char* cc__rewrite_result_types(const char* src, size_t n, const char* inp
                                         /* Type name is CCResult_T_E */
                                         snprintf(type_name, sizeof(type_name), "CCResult_%s_%s",
                                                  mangled_ok, mangled_err);
-                                        cc_type_registry_add_var(reg, var_name, type_name);
+                                        if (reg) cc_type_registry_add_var(reg, var_name, type_name);
+                                        /* If the name is immediately followed by '(' this
+                                         * is a function declaration/definition returning a
+                                         * result type.  Register the name for the slice-7
+                                         * unhandled-result diagnostic.  We gate on a real
+                                         * identifier start so array/pointer-to-function
+                                         * declarators like `int !> (E) (*fp)(void)` are
+                                         * not treated as functions. */
+                                        size_t q = cc_skip_ws_and_comments(src, n, v);
+                                        if (q < n && src[q] == '(') {
+                                            cc_result_fn_registry_add(var_name, vn_len);
+                                        }
                                     }
                                 }
                             }
@@ -7184,6 +7210,29 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
     /* Shared phase-3 bucket: parser/host-C survival and lowering after
        canonical CC has been established and phase 2 comptime effects are
        conceptually available. */
+    /* Phase-1 result-unwrap operators `?>` (expression) and `!>`
+     * (statement) run before the legacy err-syntax rewrite. The `!>`
+     * statement form lowers to the existing `@err` shorthands which the
+     * legacy pass then processes, so order matters here. */
+    {
+        /* Invoke pass_result_unwrap whenever the source still contains `?>`
+         * or `!>` operator sigils, OR whenever strict-mode is enabled (in
+         * which case the final unhandled-result scan must run even if the
+         * operators are absent). */
+        const char* strict_env = getenv("CC_STRICT_RESULT_UNWRAP");
+        int strict_on = (strict_env && strict_env[0] == '1' && strict_env[1] == 0);
+        int has_ops = chain->src && chain->len > 0 &&
+            (strstr(chain->src, "?>") != NULL || strstr(chain->src, "!>") != NULL);
+        if ((has_ops || strict_on) && chain->src && chain->len > 0) {
+            char* ru_out = NULL;
+            size_t ru_out_len = 0;
+            CCVisitorCtx ru_ctx = {.symbols = NULL, .input_path = input_path};
+            int ru_r = cc__rewrite_result_unwrap(&ru_ctx, chain->src, chain->len, &ru_out, &ru_out_len);
+            (void)ru_out_len;
+            if (ru_r < 0) return -1;
+            if (ru_r > 0 && ru_out && cc_pass_chain_apply(chain, ru_out) < 0) return -1;
+        }
+    }
     if (chain->src && chain->len > 0 &&
         (strstr(chain->src, "@errhandler") != NULL || strstr(chain->src, "@err") != NULL ||
          strstr(chain->src, "=<!") != NULL || strstr(chain->src, "<?") != NULL)) {

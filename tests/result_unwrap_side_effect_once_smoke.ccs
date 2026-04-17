@@ -1,0 +1,38 @@
+// Verify ?> and !> evaluate their LHS call exactly once, even when a binder
+// or divergent RHS is present. The lowering uses a temp; this locks that in.
+#include <stdio.h>
+
+static int g_ok_calls;
+static int g_err_calls;
+
+int !> (CCError) ticked_ok(int delta) {
+    g_ok_calls++;
+    return cc_ok(delta);
+}
+
+int !> (CCError) ticked_err(int delta) {
+    g_err_calls++;
+    return cc_err(CC_ERR_NOT_FOUND, "ticked_err");
+}
+
+bool !> (CCError) ticked_err_bool(void) {
+    g_err_calls++;
+    return cc_err(CC_ERR_NOT_FOUND, "ticked_err_bool");
+}
+
+int main(void) {
+    int a = ticked_ok(3) ?> 0;                 // +1 ok, result 3
+    int b = ticked_err(5) ?> 99;               // +1 err, result 99
+    int c = ticked_ok(7) ?>(e) (int)(e.kind);  // +1 ok, result 7
+    int d = ticked_err(9) ?>(e) (int)(200 + e.kind); // +1 err, result 207
+
+    int loop_err = 0;
+    for (int i = 0; i < 4; i++) {
+        ticked_err_bool() !> (e) { loop_err = 300 + (int)e.kind; break; };
+        loop_err = -1;
+    }
+
+    printf("a=%d b=%d c=%d d=%d loop_err=%d ok_calls=%d err_calls=%d\n",
+           a, b, c, d, loop_err, g_ok_calls, g_err_calls);
+    return 0;
+}
