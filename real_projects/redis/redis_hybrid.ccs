@@ -2,9 +2,8 @@
  * redis_hybrid.ccs — v2: idiomatic mailbox + reply channels; hybrid accept + client fibers.
  *
  * Debug / profile (quick ref):
- *   make redis_hybrid_debug → out/redis_hybrid_debug (-g -O0)
+ *   make redis_hybrid_debug     → out/redis_hybrid_debug (-g -O0)
  *   make redis_hybrid_profile   → out/redis_hybrid_profile (--release -g, for sample/Instruments)
- *   REDIS_HYBRID_STATS=1        → enable counters; kill -USR1 <pid> dumps metrics to stderr
  *   lldb -- out/redis_hybrid_debug 6390
  *   sample <pid> 10 -file /tmp/redis_hybrid.sample (macOS; run under load)
  */
@@ -16,9 +15,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <string.h>
-#include <time.h>
 #include <signal.h>
-#include <pthread.h>
 #include "redis_cc/redis_cc.cch"
 #include <ccc/std/task.cch>
 
@@ -76,51 +73,7 @@ typedef struct RedisConn {
     size_t next_reply_slot;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
-    uint64_t dbg_submit_count;
-    uint64_t dbg_reply_recv_count;
-    uint64_t dbg_reply_send_slow_count;
-    uint64_t dbg_reply_send_slow_ns;
-    uint64_t dbg_reply_send_slow_max_ns;
-    uint64_t dbg_wait_recv_count;
-    uint64_t dbg_wait_socket_count;
-    uint64_t dbg_wait_socket_empty_count;
-    _Atomic uint64_t dbg_owner_exec_count;
-    _Atomic uint64_t dbg_owner_last_req_id;
-    _Atomic uint64_t dbg_owner_last_service_ns;
-    _Atomic uint64_t dbg_owner_max_gap_ns;
 } RedisConn;
-
-/* Set from main when getenv("REDIS_HYBRID_STATS") is "1"; avoids hot-path work when unset. */
-static int g_hybrid_metrics = 0;
-static _Atomic uint64_t g_hybrid_stat_owner_cmds;
-static _Atomic uint64_t g_hybrid_stat_reply_send_ns;
-static _Atomic uint64_t g_hybrid_stat_reply_send_slow_ge_1ms;
-static _Atomic uint64_t g_hybrid_stat_mailbox_handoff_fail;
-static CCNursery* g_redis_shutdown_server = NULL;
-static sigset_t g_redis_shutdown_set;
-
-static void redis_hybrid_stats_dump(int sig) {
-    (void)sig;
-    fprintf(stderr,
-            "[redis_hybrid] metrics: owner_cmds=%llu reply_chan_send_ns_total=%llu "
-            "reply_chan_slow_ge_1ms=%llu mailbox_handoff_fail=%llu\n",
-            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_owner_cmds, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_reply_send_ns, memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms,
-                                                    memory_order_relaxed),
-            (unsigned long long)atomic_load_explicit(&g_hybrid_stat_mailbox_handoff_fail,
-                                                    memory_order_relaxed));
-    fflush(stderr);
-}
-
-static void* redis_hybrid_shutdown_thread(void* arg) {
-    (void)arg;
-    int sig = 0;
-    if (sigwait(&g_redis_shutdown_set, &sig) == 0 && g_redis_shutdown_server) {
-        cc_nursery_cancel(g_redis_shutdown_server);
-    }
-    return NULL;
-}
 
 static void free_request(RedisRequest* req);
 static void redis_conn_retain(RedisConn* conn);
@@ -143,12 +96,6 @@ static CCIoError net_to_io_error(CCNetError err) {
         default:
             return cc_io_error(CC_IO_OTHER);
     }
-}
-
-static uint64_t redis_now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
 static bool slice_eq_ignore_case(char[:] s, const char* cstr) {
@@ -907,32 +854,7 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     reply_rebase_inline_ptr(slot);
     *reply = (RedisReply){0};
 
-    /* The per-command clock_gettime pair around cc_channel_send is strictly
-     * diagnostic (per-conn dbg_reply_send_slow_* are never read; only the
-     * g_hybrid_stat_reply_send_ns aggregate is printed on SIGUSR1 when
-     * REDIS_HYBRID_STATS=1). At 2M cmd/s the three clock_gettime calls per
-     * command in the owner loop show up as ~7% of active CPU in `sample`, so
-     * skip them entirely unless metrics are on. */
-    bool sent = false;
-    if (g_hybrid_metrics) {
-        uint64_t t0 = redis_now_ns();
-        sent = cc_io_avail(cc_channel_send(conn->reply_tx, slot));
-        uint64_t dt = redis_now_ns() - t0;
-        if (sent) {
-            if (dt >= 1000000ull) {
-                conn->dbg_reply_send_slow_count++;
-                conn->dbg_reply_send_slow_ns += dt;
-                if (dt > conn->dbg_reply_send_slow_max_ns) conn->dbg_reply_send_slow_max_ns = dt;
-            }
-            atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_ns, dt, memory_order_relaxed);
-            if (dt >= 1000000ull) {
-                atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms, 1, memory_order_relaxed);
-            }
-        }
-    } else {
-        sent = cc_io_avail(cc_channel_send(conn->reply_tx, slot));
-    }
-    if (!sent) {
+    if (!cc_io_avail(cc_channel_send(conn->reply_tx, slot))) {
         /* Send failed (channel closed): free the slot's arena so it doesn't
          * leak in redis_conn_destroy. */
         free_reply(slot);
@@ -951,7 +873,6 @@ static bool write_received_reply(CCSocket* sock, RedisConn* conn, RedisReply* re
     };
     if (!sock || !conn || conn->inflight == 0) return false;
     conn->inflight--;
-    conn->dbg_reply_recv_count++;
     return write_reply(sock, conn, reply);
 }
 
@@ -966,9 +887,6 @@ static bool !>(CCError) redis_conn_mailbox_submit(RedisConn* conn,
      * backpressure from owner_loop without losing work. */
     CCResult_bool_CCIoError send_res = cc_channel_send(owner_tx, req);
     if (cc_is_err(send_res)) {
-        if (g_hybrid_metrics) {
-            atomic_fetch_add_explicit(&g_hybrid_stat_mailbox_handoff_fail, 1, memory_order_relaxed);
-        }
         free_request(req);
         return cc_err(mkerr(CC_ERR_IO, "owner handoff failed"));
     }
@@ -991,29 +909,6 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
         if (!req || !req->conn) continue;
 
         RedisConn* conn = req->conn;
-        /* The dbg_owner_* fields (service_ns, max_gap_ns, last_req_id,
-         * exec_count) are never read anywhere; they were scaffolding for the
-         * deadlock investigation. The clock_gettime + atomic stores show up
-         * hot in `sample` at 2M cmd/s. Only pay the cost when metrics are on. */
-        if (g_hybrid_metrics) {
-            uint64_t now_ns = redis_now_ns();
-            uint64_t prev_ns = atomic_load_explicit(&conn->dbg_owner_last_service_ns, memory_order_relaxed);
-            if (prev_ns != 0 && now_ns > prev_ns) {
-                uint64_t gap_ns = now_ns - prev_ns;
-                uint64_t cur_max = atomic_load_explicit(&conn->dbg_owner_max_gap_ns, memory_order_relaxed);
-                while (gap_ns > cur_max &&
-                       !atomic_compare_exchange_weak_explicit(&conn->dbg_owner_max_gap_ns,
-                                                              &cur_max,
-                                                              gap_ns,
-                                                              memory_order_relaxed,
-                                                              memory_order_relaxed)) {
-                }
-            }
-            atomic_store_explicit(&conn->dbg_owner_last_service_ns, now_ns, memory_order_relaxed);
-            atomic_store_explicit(&conn->dbg_owner_last_req_id, req->request_id, memory_order_relaxed);
-            atomic_fetch_add_explicit(&conn->dbg_owner_exec_count, 1, memory_order_relaxed);
-            atomic_fetch_add_explicit(&g_hybrid_stat_owner_cmds, 1, memory_order_relaxed);
-        }
         @defer free_request(req);
         RedisReply !>(CCError) exec_res = execute_request(&db, req);
         RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error()) : exec_res.value();
@@ -1051,7 +946,6 @@ static int !>(CCError) parse_and_submit_requests(RespReader* reader,
         if (!cc_value(submit_res)) break;
         conn->next_request_id++;
         conn->inflight++;
-        conn->dbg_submit_count++;
         submitted++;
     }
     return cc_ok(submitted);
@@ -1095,12 +989,10 @@ static void handle_client(CCSocket client,
                 break;
             }
             if (cc_value(wait_res) == CC_CHAN_WAIT_RECV) {
-                conn->dbg_wait_recv_count++;
                 if (!write_received_reply(&client, conn, reply_ptr) || !flush_output_buffer(&client, conn)) {
                     break;
                 }
             } else if (cc_value(wait_res) == CC_CHAN_WAIT_SOCKET) {
-                conn->dbg_wait_socket_count++;
                 int raced_drained = drain_and_flush_replies(&client, conn);
                 if (raced_drained < 0) {
                     break;
@@ -1113,9 +1005,6 @@ static void handle_client(CCSocket client,
                     exit_io_err = cc_unwrap_err_as(fill, CCIoError);
                     (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
                     break;
-                }
-                if (!cc_value(fill)) {
-                    conn->dbg_wait_socket_empty_count++;
                 }
             } else {
                 break;
@@ -1166,44 +1055,18 @@ int main(int argc, char** argv) {
     printf("redis_hybrid listening on %s\n", addr);
     fflush(stdout);
 
-    {
-        const char* m = getenv("REDIS_HYBRID_STATS");
-        if (m && m[0] == '1' && m[1] == '\0') {
-            g_hybrid_metrics = 1;
-            struct sigaction sa_st = {0};
-            sa_st.sa_handler = redis_hybrid_stats_dump;
-            sigemptyset(&sa_st.sa_mask);
-            sa_st.sa_flags = 0;
-            if (sigaction(SIGUSR1, &sa_st, NULL) != 0) {
-                fprintf(stderr, "redis_hybrid: sigaction(SIGUSR1) failed\n");
-            } else {
-                fprintf(stderr,
-                        "redis_hybrid: REDIS_HYBRID_STATS=1 (kill -USR1 <pid> for metrics; "
-                        "see `ps` / Activity Monitor)\n");
-            }
-        }
-    }
-
-    sigemptyset(&g_redis_shutdown_set);
-    sigaddset(&g_redis_shutdown_set, SIGINT);
-    sigaddset(&g_redis_shutdown_set, SIGTERM);
-    if (pthread_sigmask(SIG_BLOCK, &g_redis_shutdown_set, NULL) != 0) {
-        fprintf(stderr, "redis_hybrid: pthread_sigmask failed\n");
-        return 1;
-    }
-
     CCListener* ln_ptr = &ln;
     {
         CCNursery* server = @create(NULL) @destroy;
         if (!server) abort();
         (void)server->close_on(owner_tx);
-        g_redis_shutdown_server = server;
-        pthread_t shutdown_tid;
-        if (pthread_create(&shutdown_tid, NULL, redis_hybrid_shutdown_thread, NULL) != 0) {
-            fprintf(stderr, "redis_hybrid: failed to start shutdown thread\n");
+
+        static const int shutdown_sigs[] = { SIGINT, SIGTERM };
+        if (cc_nursery_cancel_on_signals(server, shutdown_sigs,
+                                         sizeof(shutdown_sigs) / sizeof(shutdown_sigs[0])) != 0) {
+            fprintf(stderr, "redis_hybrid: failed to install shutdown handler\n");
             return 1;
         }
-        pthread_detach(shutdown_tid);
 
         server->spawnhybrid(() => [ln_ptr, owner_tx, owner_ch, server] {
             uint64_t next_conn_id = 1;
@@ -1241,7 +1104,6 @@ int main(int argc, char** argv) {
             owner_loop(owner_rx);
         });
     }
-    g_redis_shutdown_server = NULL;
 
     return 0;
 }
