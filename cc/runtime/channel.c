@@ -3129,18 +3129,29 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             }
             cc_chan_lock(ch);
             
-            /* Wait for space */
-            if (fiber) {
-                cc__fiber_wait_node node = {0};
-                node.fiber = fiber;
-                atomic_store(&node.notified, 0);
-                cc__chan_add_send_waiter(ch, &node);
-                pthread_mutex_unlock(&ch->mu);
-                /* Re-check enqueue before parking to avoid missed wakeups.
-                 * This authoritative queue op replaces the old count heuristic. */
-                chan_inflight_inc(ch);
-                int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
-                chan_inflight_dec(ch);
+        /* Wait for space */
+        if (fiber) {
+            cc__fiber_wait_node node = {0};
+            node.fiber = fiber;
+            atomic_store(&node.notified, 0);
+            cc__chan_add_send_waiter(ch, &node);
+            pthread_mutex_unlock(&ch->mu);
+            /* Dekker pair with cc_chan_recv consumer:
+             *   producer:  publish has_send_waiters=1  ; load cell->seq
+             *   consumer:  store cell->seq+=cap        ; load has_send_waiters
+             * On arm64 the unlock above is a release op on the mutex but does
+             * NOT order our subsequent acquire-load of cell->seq inside
+             * try_enqueue against another core's load of has_send_waiters.
+             * Without this fence both sides can observe the pre-publish state
+             * of the other and the sender parks on a queue that just became
+             * writable. See the matching fence on the consumer side in the
+             * lock-free dequeue paths in cc_chan_recv. */
+            atomic_thread_fence(memory_order_seq_cst);
+            /* Re-check enqueue before parking to avoid missed wakeups.
+             * This authoritative queue op replaces the old count heuristic. */
+            chan_inflight_inc(ch);
+            int rc = cc__chan_try_enqueue_lockfree_impl(ch, value);
+            chan_inflight_dec(ch);
                 if (rc == 0) {
                     cc_chan_lock(ch);
                     cc__chan_remove_send_waiter(ch, &node);
@@ -3302,6 +3313,17 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             }
         } else {
             if (cc__chan_dequeue_lockfree_minimal(ch, out_value, NULL) == 0) {
+                /* Dekker pair with cc_chan_send producer: after the lock-free
+                 * dequeue, force the load of has_send_waiters to be ordered
+                 * AFTER the dequeue's effects on cell->seq. Without this fence
+                 * arm64 may reorder the load before the dequeue is visible to
+                 * the producer, while the producer (after publishing the
+                 * waiter flag) may load cell->seq before our store of
+                 * cell->seq is visible. Both sides observe the pre-publish
+                 * state of the other and the sender parks on a queue that has
+                 * just become writable. See cc_chan_send for the matching
+                 * fence on the producer side. */
+                atomic_thread_fence(memory_order_seq_cst);
                 if (__builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire) != 0, 0)) {
                     cc_chan_lock(ch);
                     cc__chan_wake_one_send_waiter(ch);
@@ -3334,7 +3356,10 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         if (rc == 0) {
             /* Signal send waiters — use atomic Dekker flag, not the
-             * mutex-protected send_waiters_head. */
+             * mutex-protected send_waiters_head.  See the note at the
+             * minimal-path equivalent above: this fence is the receiver's
+             * half of the Dekker pair with cc_chan_send. */
+            atomic_thread_fence(memory_order_seq_cst);
             if (atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire)) {
                 cc_chan_lock(ch);
                 cc__chan_wake_one_send_waiter(ch);
@@ -3929,6 +3954,11 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 atomic_store(&node.notified, 0);
                 cc__chan_add_send_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
+                /* Dekker pair with cc_chan_recv consumer (see the
+                 * non-deadline path above for full rationale). Force the
+                 * publish of has_send_waiters=1 to be globally ordered
+                 * before the subsequent queue state load on arm64. */
+                atomic_thread_fence(memory_order_seq_cst);
                 /* Re-check count — a recv may have freed space since our
                  * enqueue attempt above. */
                 if (cc__chan_lf_count(ch) < (int)ch->cap) {
