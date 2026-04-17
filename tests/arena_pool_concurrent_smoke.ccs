@@ -1,0 +1,102 @@
+/* Hammer CCArenaPool from multiple threads to exercise the lock-free CAS
+ * alloc/free paths. Each thread repeatedly pops an element, stamps it with a
+ * thread-unique tag, spins briefly, re-reads the tag to verify no other thread
+ * clobbered it, then pushes back.
+ *
+ * A CAS bug or ABA hazard would let two threads own the same slot at once, at
+ * which point the second thread's stamp overwrites the first's and the
+ * read-back mismatches.
+ *
+ * NOTE: freshly popped slots contain either uninitialized bump memory or the
+ * freelist's next-pointer in their first word, so the test may not assume any
+ * pre-existing state. The whole contract is: "while I own this slot, the bytes
+ * I wrote stay put". */
+
+#include <ccc/std/prelude.cch>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+
+#define NUM_THREADS 8
+#define OPS_PER_THREAD 200000
+#define SEED_SLOTS 64
+
+typedef struct {
+    /* First word is used by the pool's freelist as a next-pointer when the
+     * slot is on the freelist. Once we pop it, we overwrite it with our tag;
+     * once we push it back, the pool will overwrite it again. So we only care
+     * about its value during our ownership window. */
+    _Atomic long tag;
+    int padding[14];
+} Slot;
+
+static CCArenaPool g_pool;
+static _Atomic long g_violations = 0;
+
+static void* hammer(void* arg) {
+    long tid = (long)(intptr_t)arg;
+    /* Encode tid in the low 8 bits and iteration in the rest to make repeated
+     * ownership by the same tid still distinguishable. */
+    for (long i = 0; i < OPS_PER_THREAD; i++) {
+        Slot* s = (Slot*)cc_arena_pool_alloc(&g_pool);
+        if (!s) {
+            atomic_fetch_add(&g_violations, 1);
+            return NULL;
+        }
+        long my_tag = (i << 8) | tid;
+        atomic_store_explicit(&s->tag, my_tag, memory_order_relaxed);
+        /* Window during which a broken CAS could hand the slot to another thread. */
+        for (volatile int spin = 0; spin < 16; spin++) {}
+        long observed = atomic_load_explicit(&s->tag, memory_order_relaxed);
+        if (observed != my_tag) {
+            atomic_fetch_add(&g_violations, 1);
+        }
+        cc_arena_pool_free(&g_pool, s);
+    }
+    return NULL;
+}
+
+int main(void) {
+    if (cc_arena_pool(&g_pool, sizeof(Slot)) != 0) {
+        fprintf(stderr, "pool init failed\n");
+        return 1;
+    }
+
+    /* Seed the freelist so the working set is small (SEED_SLOTS entries) and
+     * threads will actually contend on the same slots. */
+    Slot* seed[SEED_SLOTS];
+    for (int i = 0; i < SEED_SLOTS; i++) {
+        seed[i] = (Slot*)cc_arena_pool_alloc(&g_pool);
+        if (!seed[i]) {
+            fprintf(stderr, "seed alloc failed at %d\n", i);
+            return 1;
+        }
+    }
+    for (int i = 0; i < SEED_SLOTS; i++) {
+        cc_arena_pool_free(&g_pool, seed[i]);
+    }
+
+    pthread_t tids[NUM_THREADS];
+    for (long i = 0; i < NUM_THREADS; i++) {
+        if (pthread_create(&tids[i], NULL, hammer, (void*)(intptr_t)i) != 0) {
+            fprintf(stderr, "pthread_create failed\n");
+            return 1;
+        }
+    }
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pthread_join(tids[i], NULL);
+    }
+
+    long violations = atomic_load(&g_violations);
+    if (violations != 0) {
+        printf("FAIL: %ld ownership violations across %d threads * %d ops\n",
+               violations, NUM_THREADS, OPS_PER_THREAD);
+        return 1;
+    }
+
+    cc_arena_pool_destroy(&g_pool);
+    printf("arena_pool_concurrent_smoke ok (%d threads * %d ops, seed=%d slots)\n",
+           NUM_THREADS, OPS_PER_THREAD, SEED_SLOTS);
+    return 0;
+}

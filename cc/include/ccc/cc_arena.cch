@@ -49,10 +49,34 @@ struct CCArenaCheckpoint {
     uint64_t provenance;      // provenance for allocations that stay valid after restore
 };
 
+/* Thread-safe freelist head: lock-free Treiber stack with an ABA counter packed
+ * into the upper bits of a 64-bit word. The pointer occupies the lower bits and
+ * the counter occupies the upper bits; every push/pop bumps the counter so that
+ * a stale pointer-value observed concurrently (the classic A->B->A race) is
+ * caught by the CAS. Pool memory is never returned to the allocator while the
+ * pool is live, so dereferencing a popped head to read the next pointer is
+ * always a valid memory access even if the observed value is stale. */
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFull
+#define CC__POOL_PTR_MASK ((uint64_t)0x0000FFFFFFFFFFFFull)
+#define CC__POOL_TAG_SHIFT 48
+#else
+#define CC__POOL_PTR_MASK ((uint64_t)0xFFFFFFFFull)
+#define CC__POOL_TAG_SHIFT 32
+#endif
+
+static inline void* cc__pool_head_ptr(uint64_t packed) {
+    return (void*)(uintptr_t)(packed & CC__POOL_PTR_MASK);
+}
+
+static inline uint64_t cc__pool_head_pack(void* ptr, uint64_t tag) {
+    return ((uint64_t)(uintptr_t)ptr & CC__POOL_PTR_MASK) |
+           ((tag + 1) << CC__POOL_TAG_SHIFT);
+}
+
 struct CCArenaPool {
     CCArena* arena;
     size_t elem_size;
-    void* freelist;
+    cc_atomic_u64 freelist;  /* packed (tag:16|ptr:48) on 64-bit; (tag:32|ptr:32) on 32-bit */
     uint32_t _flags;
 };
 
@@ -549,7 +573,7 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
 static inline void cc_arena_pool_init(CCArenaPool* p, CCArena* a, size_t sz) {
     p->arena = a;
     p->elem_size = (sz > sizeof(void*)) ? sz : sizeof(void*);
-    p->freelist = NULL;
+    cc_atomic_store(&p->freelist, 0);
     p->_flags = 0;
 }
 
@@ -575,7 +599,7 @@ static inline void cc_arena_pool_destroy(CCArenaPool* p) {
         free(p->arena);
     }
     p->arena = NULL;
-    p->freelist = NULL;
+    cc_atomic_store(&p->freelist, 0);
 }
 
 // Detach and return the underlying arena, leaving the pool empty.
@@ -588,27 +612,41 @@ static inline CCArena cc_arena_pool_detach(CCArenaPool* p) {
             free(p->arena);
         }
         p->arena = NULL;
-        p->freelist = NULL;
+        cc_atomic_store(&p->freelist, 0);
         p->_flags = 0;
     }
     return a;
 }
 
 // Allocate one element from the pool (reuses a freed slot if available).
+// Lock-free: Treiber-stack pop with ABA-safe tagged head.
 static inline void* cc_arena_pool_alloc(CCArenaPool* p) {
-    if (p->freelist) {
-        void* item = p->freelist;
-        p->freelist = *(void**)item;
-        return item;
+    uint64_t head = cc_atomic_load(&p->freelist);
+    for (;;) {
+        void* item = cc__pool_head_ptr(head);
+        if (!item) break;
+        /* item's memory is kept alive by the arena for the pool's lifetime,
+         * so reading the next-pointer here is always safe (value may be stale,
+         * but the tagged CAS will reject it). */
+        uint64_t next = cc__pool_head_pack(*(void**)item, head >> CC__POOL_TAG_SHIFT);
+        if (cc_atomic_cas(&p->freelist, &head, next)) {
+            return item;
+        }
+        /* head was reloaded by cc_atomic_cas on failure; retry. */
     }
     return cc_arena_alloc(p->arena, p->elem_size, sizeof(void*));
 }
 
 // Return an element to the pool for later reuse.
+// Lock-free: Treiber-stack push with ABA-safe tagged head.
 static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
     if (!ptr) return;
-    *(void**)ptr = p->freelist;
-    p->freelist = ptr;
+    uint64_t head = cc_atomic_load(&p->freelist);
+    for (;;) {
+        *(void**)ptr = cc__pool_head_ptr(head);
+        uint64_t new_head = cc__pool_head_pack(ptr, head >> CC__POOL_TAG_SHIFT);
+        if (cc_atomic_cas(&p->freelist, &head, new_head)) return;
+    }
 }
 
 static inline CCSlice cc_arena_pool_lower_c(CCSlice recv_type,
