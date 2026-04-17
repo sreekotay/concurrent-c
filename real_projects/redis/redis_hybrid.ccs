@@ -55,22 +55,19 @@ typedef struct RedisConn {
     uint64_t conn_id;
     uint64_t next_request_id;
     size_t inflight;
-    /* Reply channel is pointer-based: the owner loop picks the next slot
-     * from reply_slots[] (cyclic, stride PIPELINE_LIMIT), fills it in place,
-     * and sends just the pointer.  This avoids a ~240B struct copy per
-     * reply on both producer (into the ring) and consumer (out of the ring)
-     * sides.  The invariant `inflight <= PIPELINE_LIMIT` combined with the
-     * handle_client / owner FIFO ordering guarantees the owner only
-     * overwrites a slot after the consumer has fully read and freed its
-     * previous occupant (the channel send of the pointer is the handoff
-     * edge, and free_reply + slot zero happens before the handle_client
-     * fiber allows more requests to be submitted for that slot index). */
+    /* Reply channel carries RedisReply* pointers whose backing memory is owned
+     * by `reply_pool`.  The producer pops a slot from the pool, materializes
+     * the reply in place (the slot's inline_buf backs its arena's initial
+     * slab, overflowing to heap only for oversize replies), and sends just
+     * the pointer.  The consumer frees the arena and returns the slot to the
+     * pool.  Pool slot addresses are stable for the pool's lifetime, so
+     * `data.ptr` pointers into the inline_buf survive the channel handoff
+     * without any rebase. */
     RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     CCSocketSignal signal;
     char req_bufs[PIPELINE_LIMIT][REQ_BUF_SIZE];
-    RedisReply reply_slots[PIPELINE_LIMIT];
-    size_t next_reply_slot;
+    CCArenaPool reply_pool;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
 } RedisConn;
@@ -637,47 +634,30 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     return true;
 }
 
-static void reply_rebase_inline_ptr(RedisReply* reply) {
-    if (!reply || !reply->data_inline) return;
-    reply->data.ptr = reply->inline_buf;
+/* Initialize a reply's arena to use its own inline_buf as the initial slab,
+ * auto-overflowing to heap for oversize replies. Callers (owner_queue_reply
+ * and write_reply_now) invoke this exactly once per reply before materialize.
+ * block_max=0 permits unbounded growth via heap extents. */
+static void reply_init_arena(RedisReply* reply) {
+    cc_arena_buffer(&reply->arena, reply->inline_buf, sizeof(reply->inline_buf));
+    reply->arena.block_max = 0;
 }
 
 static CCSlice !>(CCError) reply_alloc_bytes(RedisReply* reply, size_t len) {
     if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply alloc without reply"));
-    if (len <= sizeof(reply->inline_buf)) {
-        reply->data_inline = 1;
-        CCSlice slice = {
-            .ptr = reply->inline_buf,
-            .len = len,
-        };
-        return cc_ok(slice);
-    }
-
-    size_t arena_size = len + ENTRY_ARENA_OVERHEAD;
-    CCArena arena_storage = cc_arena_heap(arena_size) @destroy;
-    if (!arena_storage.base) {
-        return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
-    }
-
-    char* dst = cc_arena_alloc(&arena_storage, len, 1);
+    char* dst = cc_arena_alloc(&reply->arena, len, 1);
     if (len > 0 && !dst) {
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
     }
-
-    reply->data_inline = 0;
-    reply->arena = arena_storage.detach();
-    CCSlice slice = {
-        .ptr = dst,
-        .len = len,
-    };
+    CCSlice slice = { .ptr = dst, .len = len };
     return cc_ok(slice);
 }
 
+/* Encode the reply into reply->arena (which must be initialized by the caller
+ * via reply_init_arena). On return, reply->kind == REDIS_REPLY_RAW and
+ * reply->data points into the arena. Must be called exactly once per reply. */
 static bool !>(CCError) reply_materialize(RedisReply* reply) {
     if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize without reply"));
-    if (reply->arena.base) {
-        return cc_ok(true);
-    }
 
     switch (reply->kind) {
         case REDIS_REPLY_RAW: {
@@ -745,11 +725,9 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
 
 static void free_reply(RedisReply* reply) {
     if (!reply) return;
-    if (reply->arena.base) {
-        reply->arena.free();
-        reply->arena = (CCArena){0};
-    }
-    reply->data_inline = 0;
+    /* cc_arena_free is a no-op when base is NULL and also clears base to NULL,
+     * so it is safe to call repeatedly or on an uninitialized arena. */
+    cc_arena_free(&reply->arena);
 }
 
 static RedisConn* redis_conn_create(uint64_t conn_id) {
@@ -759,6 +737,11 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
     CCChan* reply_ch = cc_channel_pair(&reply_tx, &reply_rx);
     if (!reply_ch) {
+        free(conn);
+        return NULL;
+    }
+    if (cc_arena_pool(&conn->reply_pool, sizeof(RedisReply)) != 0) {
+        cc_channel_free(reply_tx);
         free(conn);
         return NULL;
     }
@@ -773,17 +756,18 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
 
 static void redis_conn_destroy(RedisConn* conn) {
     if (!conn) return;
+    /* Drain any in-flight replies: free each reply's arena (which may hold
+     * heap overflow blocks) before destroying the pool. Slot structs
+     * themselves live in the pool's backing arena and are reclaimed below. */
     RedisReply* reply_ptr = NULL;
     while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply_ptr))) {
         free_reply(reply_ptr);
-        *reply_ptr = (RedisReply){0};
     }
-    /* Any remaining slots still hold arenas because they were populated by
-     * the owner loop but never made it into the channel (e.g. we hit a send
-     * failure / close_reply_stream mid-reply).  Free those too. */
-    for (size_t i = 0; i < PIPELINE_LIMIT; ++i) {
-        free_reply(&conn->reply_slots[i]);
-    }
+    /* The pool's backing arena also holds any slots that were allocated but
+     * never made it into the channel (e.g. materialize or send failure).
+     * Those slots' arenas were freed on the error path before return-to-pool,
+     * so destroying the backing arena here reclaims only the slot structs. */
+    cc_arena_pool_destroy(&conn->reply_pool);
     cc_channel_free(conn->reply_tx);
     cc_socket_signal_free(&conn->signal);
     free(conn);
@@ -802,19 +786,17 @@ static void redis_conn_drop(RedisConn* conn) {
 }
 
 static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
-    /* Reply structs reaching the write path via the channel always live in
-     * their owning conn's reply_slots[] (the producer rebases the inline
-     * buffer pointer when copying into the slot), so no runtime rebase is
-     * needed here.  Callers that pass a stack reply (write_reply_now)
-     * either materialize inline (data_inline=1 → data.ptr = stack
-     * inline_buf which is valid for the duration of the call) or use a
-     * heap arena (data.ptr stable regardless of struct location). */
+    /* After reply_materialize, reply->data always points into reply->arena,
+     * whose storage is either the stable inline_buf (for replies from the
+     * pool or a by-value stack reply) or heap overflow blocks owned by the
+     * arena.  Either way the pointer is valid for the lifetime of the arena. */
     if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
     return buffer_write_bytes(sock, conn, reply->data);
 }
 
 static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
     @defer free_reply(&reply);
+    reply_init_arena(&reply);
     bool !>(CCError) mat_res = reply_materialize(&reply);
     bool ok = mat_res.is_ok() &&
               write_reply(sock, conn, &reply) &&
@@ -835,30 +817,33 @@ static void close_reply_stream(RedisConn* conn) {
 
 static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     if (!conn || !reply) return false;
-    @defer free_reply(reply);
-    bool !>(CCError) mat_res = reply_materialize(reply);
-    if (mat_res.is_err()) {
+    /* Pop a fresh slot from the pool, move the caller's reply into it, and
+     * materialize in place so reply->data ends up pointing into the slot's
+     * own inline_buf (or heap overflow owned by the slot's arena).  The
+     * channel then carries just the slot pointer; the consumer frees the
+     * arena and returns the slot to the pool. */
+    RedisReply* slot = (RedisReply*)cc_arena_pool_alloc(&conn->reply_pool);
+    if (!slot) {
+        free_reply(reply);
+        *reply = (RedisReply){0};
         close_reply_stream(conn);
         return false;
     }
-    /* Move the materialized reply into the next preallocated slot; the
-     * channel only carries the pointer.  The cyclic slot assignment matches
-     * the handle_client FIFO: slot[k % PIPELINE_LIMIT] is safe to reuse
-     * because handle_client only submits new requests for that slot index
-     * after it has fully drained the previous reply (free_reply + zero),
-     * and the channel send here acquires the happens-before edge for that
-     * drain. */
-    RedisReply* slot = &conn->reply_slots[conn->next_reply_slot % PIPELINE_LIMIT];
-    conn->next_reply_slot++;
     *slot = *reply;
-    reply_rebase_inline_ptr(slot);
-    *reply = (RedisReply){0};
+    *reply = (RedisReply){0};  /* ownership transferred; caller's defer is a no-op */
+
+    reply_init_arena(slot);
+    bool !>(CCError) mat_res = reply_materialize(slot);
+    if (mat_res.is_err()) {
+        free_reply(slot);
+        cc_arena_pool_free(&conn->reply_pool, slot);
+        close_reply_stream(conn);
+        return false;
+    }
 
     if (!cc_io_avail(cc_channel_send(conn->reply_tx, slot))) {
-        /* Send failed (channel closed): free the slot's arena so it doesn't
-         * leak in redis_conn_destroy. */
         free_reply(slot);
-        *slot = (RedisReply){0};
+        cc_arena_pool_free(&conn->reply_pool, slot);
         close_reply_stream(conn);
         return false;
     }
@@ -869,7 +854,7 @@ static bool write_received_reply(CCSocket* sock, RedisConn* conn, RedisReply* re
     if (!reply) return false;
     @defer {
         free_reply(reply);
-        *reply = (RedisReply){0};
+        cc_arena_pool_free(&conn->reply_pool, reply);
     };
     if (!sock || !conn || conn->inflight == 0) return false;
     conn->inflight--;
