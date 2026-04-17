@@ -1,0 +1,11 @@
+// Fail: `@err(IDENT);` inside a `!> (BINDER) { ... }` body must
+// reference the immediate BINDER; any other name is unbound.
+#include <stdio.h>
+bool !> (CCError) f(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+int main(void) {
+    @errhandler(CCError e) { (void)e; return 0; }
+    f() !> (myerr) {
+        @err(other);
+    };
+    return 0;
+}

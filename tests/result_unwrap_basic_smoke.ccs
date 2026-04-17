@@ -1,0 +1,19 @@
+// Smoke: ?> expression operator, no binder, pure-expression RHS.
+#include <stdio.h>
+
+int !> (CCError) always_err(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err");
+}
+
+int !> (CCError) always_ok(void) {
+    return cc_ok(99);
+}
+
+int main(void) {
+    int a = always_err() ?> 42;
+    int b = always_ok()  ?> 42;
+    int c = always_ok()  ?> 0;
+    int d = always_err() ?> (7 + 8);
+    printf("a=%d b=%d c=%d d=%d\n", a, b, c, d);
+    return 0;
+}

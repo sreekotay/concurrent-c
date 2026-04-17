@@ -1,0 +1,17 @@
+// Smoke: @errhandler body ends in `exit(...)` — a recognized noreturn
+// call — so it visibly diverges and may be forwarded to by `@err(e);`.
+#include <stdio.h>
+#include <stdlib.h>
+
+bool !> (CCError) f(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+
+int main(void) {
+    @errhandler(CCError e) {
+        fprintf(stdout, "bye=%d\n", (int)e.kind);
+        fflush(stdout);
+        exit(0);
+    }
+    f() !> (e) { @err(e); };
+    printf("unreachable\n");
+    return 0;
+}

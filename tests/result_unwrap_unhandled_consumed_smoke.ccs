@@ -1,0 +1,19 @@
+// Slice 7: with CC_STRICT_RESULT_UNWRAP=1, every legitimate
+// consumption form still compiles cleanly.  Covers `?>`, `!>`, result
+// assignment, `return`, and the `(void)` escape (Slice 8).
+#include <stdio.h>
+
+int !> (CCError) f(int x) {
+    return cc_ok(x + 1);
+}
+
+int main(void) {
+    int a = f(10) ?> 0;
+    @errhandler(CCError e) { (void)e; return 0; }
+    f(20) !>;
+    int !> (CCError) r = f(30);
+    int v = cc_is_ok(r) ? cc_value(r) : 0;
+    (void)f(40);
+    printf("a=%d v=%d\n", a, v);
+    return 0;
+}

@@ -1,0 +1,19 @@
+// Smoke: `!> (e) { @err(e); }` forwards to the registered @errhandler,
+// whose divergent body ends with `return`.  Because the forward never
+// comes back to the call site, any `printf` goes inside the handler.
+#include <stdio.h>
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "x");
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        printf("kind=%d\n", 500 + (int)e.kind);
+        return 0;
+    }
+    always_err_bool() !> (e) {
+        @err(e);
+    };
+    return 0;
+}

@@ -1,0 +1,2 @@
+result_unwrap_handler_no_diverge_fail.ccs:7:
+@errhandler body must visibly diverge

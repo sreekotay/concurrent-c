@@ -1,0 +1,14 @@
+// Smoke: !> (e) STMT; single-statement binder body (slice 5)
+#include <stdio.h>
+
+static int g_kind;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "x");
+}
+
+int main(void) {
+    always_err_bool() !> (e) g_kind = 200 + e.kind;
+    printf("kind=%d\n", g_kind);
+    return 0;
+}

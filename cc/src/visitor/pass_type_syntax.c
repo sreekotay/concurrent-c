@@ -637,7 +637,21 @@ char* cc__rewrite_result_types_text(const CCVisitorCtx* ctx, const char* src, si
             /* Found '!>' sigil - now find the error type in parentheses */
             size_t sigil_pos = i;
             size_t j = i + 2;  /* skip '!>' */
-            
+
+            /* If the non-ws char immediately before `!>` is `)` (a closing
+             * paren of a call or expression), this is the binder form
+             * `CALL !> (e) BODY` of the `!>` statement operator, not a
+             * type annotation.  Let pass_result_unwrap handle it later. */
+            {
+                size_t bk = sigil_pos;
+                while (bk > 0 && (src[bk - 1] == ' ' || src[bk - 1] == '\t' ||
+                                  src[bk - 1] == '\r' || src[bk - 1] == '\n')) bk--;
+                if (bk > 0 && src[bk - 1] == ')') {
+                    i = sigil_pos + 2;
+                    continue;
+                }
+            }
+
             /* Skip whitespace */
             while (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\r')) j++;
             

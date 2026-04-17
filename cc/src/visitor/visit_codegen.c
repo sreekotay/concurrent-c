@@ -19,6 +19,7 @@
 #include "visitor/pass_closure_literal_ast.h"
 #include "visitor/pass_defer_syntax.h"
 #include "visitor/pass_err_syntax.h"
+#include "visitor/pass_result_unwrap.h"
 #include "visitor/pass_channel_syntax.h"
 #include "visitor/pass_create.h"
 #include "visitor/pass_type_syntax.h"
@@ -4368,6 +4369,24 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
         }
         /* Lower @err / @errhandler / <? / =<! ... @err for host C emission (parse already
            preprocesses these; src_ufcs is still the on-disk-shaped TU until here). */
+        if (src_ufcs && src_ufcs_len &&
+            (strstr(src_ufcs, "?>") != NULL || strstr(src_ufcs, "!>") != NULL)) {
+            char* ru_out = NULL;
+            size_t ru_out_len = 0;
+            int ru_r = cc__rewrite_result_unwrap(ctx, src_ufcs, src_ufcs_len, &ru_out, &ru_out_len);
+            if (ru_r < 0) {
+                fclose(out);
+                if (src_ufcs != src_all) free(src_ufcs);
+                free(closure_protos);
+                free(closure_defs);
+                return EINVAL;
+            }
+            if (ru_r > 0 && ru_out) {
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = ru_out;
+                src_ufcs_len = ru_out_len;
+            }
+        }
         if (src_ufcs && src_ufcs_len &&
             (strstr(src_ufcs, "@errhandler") != NULL || strstr(src_ufcs, "@err") != NULL ||
              strstr(src_ufcs, "=<!") != NULL || strstr(src_ufcs, "<?") != NULL)) {

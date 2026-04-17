@@ -1,0 +1,3 @@
+result_unwrap_unhandled_bare_fail.ccs:6:
+unhandled-result
+call to 'f'

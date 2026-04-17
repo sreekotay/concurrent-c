@@ -115,8 +115,8 @@ Example:
 Typical rule-oriented entry points may include:
 
 ```c
-char[:][:] tokens = @collect(src, arena, CssRules.tokenize) @err;
-bool ok = @match(src, CssRules.ident) @err;
+char[:][:] tokens = @collect(src, arena, CssRules.tokenize) ?>(e) return cc_err(e);
+bool ok = @match(src, CssRules.ident) ?>(e) return cc_err(e);
 ```
 
 **Rule:** `@rules Name { ... }` introduces a named rule namespace. Individual
@@ -162,7 +162,7 @@ typedef struct {
     char[:] text;
 } CssToken;
 
-CssToken[:] toks = @collect(src, arena, CssRules.tokenize, CssToken) @err;
+CssToken[:] toks = @collect(src, arena, CssRules.tokenize, CssToken) ?>(e) return cc_err(e);
 ```
 
 This future direction is intended for typed token streams. Recursive structural
@@ -201,7 +201,7 @@ Example:
 Optional parse options may be supplied at the call site. For example:
 
 ```c
-RespBulkString s = @parse(src, arena, RespBulkString, .zero_copy) @err;
+RespBulkString s = @parse(src, arena, RespBulkString, .zero_copy) ?>(e) return cc_err(e);
 ```
 
 ### `@format`
@@ -212,7 +212,7 @@ returning a string-like output object chosen by the language/library contract.
 Example:
 
 ```c
-CCString out = @format(v, arena, RespValue) @err;
+CCString out = @format(v, arena, RespValue) ?>(e) return cc_err(e);
 ```
 
 ### `@string`

@@ -1,0 +1,19 @@
+// Smoke: !> { ... } block body form
+#include <stdio.h>
+
+static int g_loop_steps;
+static int g_block_ran;
+
+bool !> (CCError) always_err_bool(void) {
+    return cc_err(CC_ERR_NOT_FOUND, "always_err_bool");
+}
+
+int main(void) {
+    for (int i = 0; i < 5; i++) {
+        g_loop_steps++;
+        always_err_bool() !> { g_block_ran++; break; };
+        g_loop_steps += 100;
+    }
+    printf("steps=%d block_ran=%d\n", g_loop_steps, g_block_ran);
+    return 0;
+}

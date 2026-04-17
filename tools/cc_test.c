@@ -319,6 +319,100 @@ static int test_requires_async(const char* stem) {
     return file_exists(p);
 }
 
+/* Per-test environment sidecar support.
+ *
+ * A `tests/STEM.env` file is read line-by-line.  Each non-empty,
+ * non-`#`-prefixed line is treated as `KEY=VALUE` and applied with
+ * `setenv` before invoking the build step.  A snapshot of the previous
+ * value is captured so we can restore the original environment after
+ * the test completes, preventing cross-test pollution.
+ *
+ * The number of keys a test can set is capped; any reasonable test uses
+ * one or two. */
+#define CC_TEST_ENV_MAX 8
+
+typedef struct {
+    int   count;
+    char* keys[CC_TEST_ENV_MAX];
+    char* prev_values[CC_TEST_ENV_MAX]; /* NULL means unset */
+    int   had_prev[CC_TEST_ENV_MAX];
+} EnvSidecar;
+
+static void env_sidecar_clear(EnvSidecar* e) {
+    if (!e) return;
+    for (int i = 0; i < e->count; i++) {
+        free(e->keys[i]);
+        free(e->prev_values[i]);
+        e->keys[i] = NULL;
+        e->prev_values[i] = NULL;
+        e->had_prev[i] = 0;
+    }
+    e->count = 0;
+}
+
+static void env_sidecar_apply(const char* stem, EnvSidecar* e) {
+    if (!e) return;
+    e->count = 0;
+    if (!stem || !stem[0]) return;
+    char path[512];
+    snprintf(path, sizeof(path), "tests/%s.env", stem);
+    unsigned char* buf = NULL;
+    size_t len = 0;
+    if (read_entire_file_alloc(path, &buf, &len) != 0 || !buf) {
+        free(buf);
+        return;
+    }
+    size_t i = 0;
+    while (i < len && e->count < CC_TEST_ENV_MAX) {
+        size_t ls = i;
+        while (i < len && buf[i] != '\n') i++;
+        size_t le = i;
+        if (i < len && buf[i] == '\n') i++;
+        if (le > ls && buf[le - 1] == '\r') le--;
+        size_t p = ls;
+        while (p < le && (buf[p] == ' ' || buf[p] == '\t')) p++;
+        if (p >= le) continue;
+        if (buf[p] == '#') continue;
+        size_t eq = p;
+        while (eq < le && buf[eq] != '=') eq++;
+        if (eq >= le) continue;
+        size_t ke = eq;
+        while (ke > p && (buf[ke - 1] == ' ' || buf[ke - 1] == '\t')) ke--;
+        if (ke <= p) continue;
+        size_t vs = eq + 1;
+        while (vs < le && (buf[vs] == ' ' || buf[vs] == '\t')) vs++;
+        size_t ve = le;
+        while (ve > vs && (buf[ve - 1] == ' ' || buf[ve - 1] == '\t')) ve--;
+        char key[128];
+        char val[1024];
+        size_t kl = ke - p;
+        size_t vl = ve - vs;
+        if (kl >= sizeof(key)) kl = sizeof(key) - 1;
+        if (vl >= sizeof(val)) vl = sizeof(val) - 1;
+        memcpy(key, buf + p, kl); key[kl] = 0;
+        memcpy(val, buf + vs, vl); val[vl] = 0;
+        const char* cur = getenv(key);
+        e->keys[e->count] = strdup(key);
+        e->had_prev[e->count] = cur ? 1 : 0;
+        e->prev_values[e->count] = cur ? strdup(cur) : NULL;
+        setenv(key, val, 1);
+        e->count++;
+    }
+    free(buf);
+}
+
+static void env_sidecar_restore(EnvSidecar* e) {
+    if (!e) return;
+    for (int i = 0; i < e->count; i++) {
+        if (e->had_prev[i] && e->prev_values[i]) {
+            setenv(e->keys[i], e->prev_values[i], 1);
+        } else {
+            unsetenv(e->keys[i]);
+        }
+    }
+    env_sidecar_clear(e);
+}
+
 static int get_run_timeout_for_test(const char* stem, int default_timeout_sec) {
     if (!stem) return default_timeout_sec;
     if (strcmp(stem, "chan_park_wake_lostwake_stress_smoke") == 0) return 20;
@@ -386,7 +480,16 @@ static int run_one_test(const char* stem,
                  input_path, bin_out);
     }
 
+    EnvSidecar envsc = {0};
+    env_sidecar_apply(stem, &envsc);
+
     int build_rc = run_cmd_redirect_timeout(build_cmd, NULL, build_err_txt, verbose, build_timeout_sec);
+
+    /* Restore process env now — the build subprocess has completed and
+     * already observed the sidecar values.  Running the compiled binary
+     * below should not inherit CC_*-style sidecar knobs. */
+    env_sidecar_restore(&envsc);
+
     if (compile_fail) {
         if (build_rc == 0) {
             fprintf(stderr, "[FAIL] %s: expected build to fail\n", stem);
