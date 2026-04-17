@@ -18,6 +18,8 @@
 #include <signal.h>
 #include "redis_cc/redis_cc.cch"
 #include <ccc/std/task.cch>
+#include <ccc/cc_select.cch>
+#include <ccc/cc_closure.cch>
 
 /* TCP_NODELAY/IPPROTO_TCP constants for setsockopt below.  Including
  * <netinet/tcp.h>/<sys/socket.h> here conflicts with the prelude's `accept`
@@ -79,7 +81,6 @@ typedef struct RedisConn {
      * without any rebase. */
     RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
-    CCSocketSignal signal;
     /* Per-slot storage for in-flight requests: each slot is REQ_BUF_SIZE
      * bytes and backs a RedisRequest's arena (the RedisRequest struct plus
      * its cloned argv strings live inside the slot).  Sizing matches the
@@ -804,7 +805,6 @@ static void redis_conn_destroy(RedisConn* conn) {
      * pool via free_request. */
     cc_arena_pool_destroy(&conn->req_pool);
     cc_channel_free(conn->reply_tx);
-    cc_socket_signal_free(&conn->signal);
     free(conn);
 }
 
@@ -1006,26 +1006,82 @@ static int !>(CCError) parse_and_submit_requests(RespReader* reader,
     return cc_ok(submitted);
 }
 
+/* Best-effort: deliver an I/O error back to the client before we tear down.
+ * Failure is ignored because we're already on the exit path. */
+static void report_io_err(CCSocket* sock, RedisConn* conn, CCIoError err) {
+    (void)write_reply_now(sock, conn, io_err_reply(err));
+}
+
+/* Environment threaded through the CCSelect handlers below. The runtime
+ * populates `reply_ptr` before firing `on_reply_recv`, and `close_err` before
+ * firing `on_reply_close`. Handler return-value convention: non-NULL means
+ * "keep the outer loop running"; NULL means "exit the client loop". */
+typedef struct HandleClientEnv {
+    CCSocket* sock;
+    RedisConn* conn;
+    RespReader* reader;
+    RedisReply* reply_ptr;
+    CCIoError close_err;
+} HandleClientEnv;
+
+static void* on_reply_recv(void* env_) {
+    HandleClientEnv* e = (HandleClientEnv*)env_;
+    bool ok = write_received_reply(e->sock, e->conn, e->reply_ptr)
+           && flush_output_buffer(e->sock, e->conn);
+    return ok ? env_ : NULL;
+}
+
+static void* on_reply_close(void* env_) {
+    (void)env_; /* reply side closed — exit the client loop */
+    return NULL;
+}
+
+static void* on_socket_readable(void* env_) {
+    HandleClientEnv* e = (HandleClientEnv*)env_;
+    /* Race: a reply may have landed between the last drain and the wake.
+     * Drain first; only touch the socket if we truly made no progress. */
+    int raced_drained = drain_and_flush_replies(e->sock, e->conn);
+    if (raced_drained < 0) return NULL;
+    if (raced_drained > 0) return env_;
+    bool !>(CCIoError) fill = rr_try_fill(e->reader, e->sock);
+    if (fill.is_err()) {
+        report_io_err(e->sock, e->conn, fill.error());
+        return NULL;
+    }
+    return env_;
+}
+
 static void handle_client(CCSocket client,
                           RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
                           uint64_t conn_id) {
     @defer client.close();
-    CCIoError exit_io_err = {0};
 
     RedisConn* conn = redis_conn_create(conn_id);
     if (!conn) return;
     @defer redis_conn_drop(conn);
-    client.create_signal(&conn->signal);
-    cc_channel_set_recv_signal(conn->reply_tx, &conn->signal);
 
     char read_buf[READ_BUF_CAP];
     RespReader reader = rr_init(read_buf, sizeof(read_buf));
 
+    HandleClientEnv env = {0};
+    env.sock = &client;
+    env.conn = conn;
+    env.reader = &reader;
+
+    /* Compose the select once; reuse on every blocking wait below. */
+    CCSelect sel;
+    cc_select_init(&sel);
+    @defer cc_select_dispose(&sel);
+    (void)cc_select_add_recv(&sel, conn->reply_rx.raw, (void**)&env.reply_ptr,
+                             cc_closure0_make(on_reply_recv, &env, NULL));
+    (void)cc_select_add_close(&sel, conn->reply_rx.raw, &env.close_err,
+                              cc_closure0_make(on_reply_close, &env, NULL));
+    (void)cc_select_add_readable(&sel, &client,
+                                 cc_closure0_make(on_socket_readable, &env, NULL));
+
     while (true) {
         int drained = drain_and_flush_replies(&client, conn);
-        if (drained < 0) {
-            break;
-        }
+        if (drained < 0) break;
 
         int !>(CCError) parse_res = parse_and_submit_requests(&reader, conn, owner_tx);
         if (parse_res.is_err()) {
@@ -1036,44 +1092,19 @@ static void handle_client(CCSocket client,
         if (drained > 0 || parse_res.value() > 0) continue;
 
         if (pipeline_active(&conn->pipeline)) {
-            RedisReply* reply_ptr = NULL;
-            CCChanWaitOrSocketKind !>(CCIoError) wait_res =
-                cc_channel_wait_recv_or_socket(conn->reply_rx, &conn->signal, &reply_ptr);
-            if (wait_res.is_err()) {
-                exit_io_err = wait_res.error();
-                break;
-            }
-            if (wait_res.value() == CC_CHAN_WAIT_RECV) {
-                if (!write_received_reply(&client, conn, reply_ptr) || !flush_output_buffer(&client, conn)) {
-                    break;
-                }
-            } else if (wait_res.value() == CC_CHAN_WAIT_SOCKET) {
-                int raced_drained = drain_and_flush_replies(&client, conn);
-                if (raced_drained < 0) {
-                    break;
-                }
-                if (raced_drained > 0) {
-                    continue;
-                }
-                bool !>(CCIoError) fill = rr_try_fill(&reader, &client);
-                if (fill.is_err()) {
-                    exit_io_err = fill.error();
-                    (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
-                    break;
-                }
-            } else {
-                break;
-            }
+            /* Reply channel is live — wait on both it and the socket. */
+            CCResult_bool_CCIoError r = cc_select_wait(&sel);
+            if (!r.ok) break;
+            if (!r.u.value) break;
         } else {
+            /* No in-flight requests — just block on the socket. rr_fill
+             * distinguishes EOF (ok=false) from transient short reads. */
             bool !>(CCIoError) fill = rr_fill(&reader, &client);
             if (fill.is_err()) {
-                exit_io_err = fill.error();
-                (void)write_reply_now(&client, conn, io_err_reply(exit_io_err));
+                report_io_err(&client, conn, fill.error());
                 break;
             }
-            if (!fill.value()) {
-                break;
-            }
+            if (!fill.value()) break;
         }
     }
 

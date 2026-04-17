@@ -26,6 +26,7 @@
 #include "io_wait.c"
 #include "net.c"
 #include "socket.c"
+#include "select.c"
 #include "dir.c"
 #include "process.c"
 
