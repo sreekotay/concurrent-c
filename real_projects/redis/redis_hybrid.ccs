@@ -805,54 +805,6 @@ static void free_reply(RedisReply* reply) {
     reply->data_inline = 0;
 }
 
-/* `slot` is a pointer into its owning conn's reply_slots[].  After the
- * consumer has read the encoded bytes out via write_reply, free any arena
- * the producer attached and zero the slot so (a) the next producer
- * wrap-around sees a clean slot, and (b) redis_conn_destroy's per-slot
- * sweep doesn't double-free the arena.
- *
- * NOTE: this exists as a helper (instead of inlining both statements into
- * `@defer { ... }` at the call site) specifically to sidestep a ccc
- * transpiler bug with the multi-line @defer block form.  When a function
- * contains
- *
- *     @defer {
- *         stmt_a;
- *         stmt_b;
- *     }
- *     if (cond) return X;         // early-return immediately after the block
- *     ...rest of body...
- *     return Y;
- *
- * the transpiler correctly parks { stmt_a; stmt_b; } at __cc_cleanup_N:
- * but, instead of lowering the `if (cond) return X;` in source order
- * (i.e. before any __cc_ret(N, Y)), it *moves that statement past the
- * cleanup label*, where it executes AFTER the deferred cleanup has run
- * on the normal return path.  The emitted C ends up shaped like:
- *
- *     ...rest of body...
- *     __cc_ret(N, Y);             // body's intended return
- *   __cc_cleanup_N:
- *     { stmt_a; stmt_b; }         // deferred cleanup
- *     if (cond) return X;         // misplaced: executes after cleanup!
- *     if (__cc_ret_set_N) return __cc_retval_N;
- *
- * In our case the misplaced check was `if (conn->inflight == 0) return
- * false;`, and the body decremented inflight from 1 to 0 before __cc_ret.
- * After cleanup ran on the normal path the check flipped true and
- * clobbered the intended `true` return, so every single reply looked
- * like a failed write to handle_client, which then broke out of its loop
- * and closed the connection after the first command.
- *
- * Rewriting as `@defer slot_release(reply);` (single-statement form)
- * lowers correctly — the transpiler emits `if (cond) { __cc_ret(N,
- * false); }` in source order before the body's success path. */
-static void slot_release(RedisReply* slot) {
-    if (!slot) return;
-    free_reply(slot);
-    *slot = (RedisReply){0};
-}
-
 static RedisConn* redis_conn_create(uint64_t conn_id) {
     RedisConn* conn = calloc(1, sizeof(*conn));
     if (!conn) return NULL;
@@ -876,7 +828,8 @@ static void redis_conn_destroy(RedisConn* conn) {
     if (!conn) return;
     RedisReply* reply_ptr = NULL;
     while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply_ptr))) {
-        slot_release(reply_ptr);
+        free_reply(reply_ptr);
+        *reply_ptr = (RedisReply){0};
     }
     /* Any remaining slots still hold arenas because they were populated by
      * the owner loop but never made it into the channel (e.g. we hit a send
