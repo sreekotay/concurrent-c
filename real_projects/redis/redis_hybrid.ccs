@@ -811,8 +811,15 @@ static void free_request(RedisRequest* req) {
     if (conn) redis_conn_drop(conn);
 }
 
-static void close_reply_stream(RedisConn* conn) {
-    if (conn) cc_channel_close(conn->reply_tx);
+/* Fail the reply stream with a structured error.  Peers (the per-conn writer
+ * fiber) observe Err(e) on their next recv, which carries exact intent:
+ *   - OOM when we couldn't allocate / materialize a reply slot
+ *   - CANCELLED when the send itself raced a consumer-side teardown
+ * A graceful close() would erase that distinction by surfacing as Ok(false)
+ * (normal EOF), causing the writer to treat the connection as having
+ * completed cleanly.  Idempotent on an already-closed channel. */
+static void fail_reply_stream(RedisConn* conn, CCIoError e) {
+    if (conn) cc_channel_close(conn->reply_tx, e);
 }
 
 static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
@@ -826,7 +833,7 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     if (!slot) {
         free_reply(reply);
         *reply = (RedisReply){0};
-        close_reply_stream(conn);
+        fail_reply_stream(conn, cc_io_error(CC_IO_OUT_OF_MEMORY));
         return false;
     }
     *slot = *reply;
@@ -837,14 +844,25 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     if (mat_res.is_err()) {
         free_reply(slot);
         cc_arena_pool_free(&conn->reply_pool, slot);
-        close_reply_stream(conn);
+        fail_reply_stream(conn, cc_io_error(CC_IO_OUT_OF_MEMORY));
         return false;
     }
 
-    if (!cc_io_avail(cc_channel_send(conn->reply_tx, slot))) {
+    bool !>(CCIoError) send_res = cc_channel_send(conn->reply_tx, slot);
+    if (!cc_io_avail(send_res)) {
         free_reply(slot);
         cc_arena_pool_free(&conn->reply_pool, slot);
-        close_reply_stream(conn);
+        /* Two failure shapes here:
+         *   Err(e)   -> rx side closed with a structured error; propagate e
+         *               verbatim so any queued-but-unread replies still
+         *               surface the same kind/os_code on their final read.
+         *   Ok(false)-> rx side closed gracefully (EOF on our peer) while we
+         *               were blocked; our stream is effectively terminated,
+         *               so stamp CONNECTION_CLOSED rather than silently
+         *               erase the failure. */
+        CCIoError e = send_res.ok ? cc_io_error(CC_IO_CONNECTION_CLOSED)
+                                   : send_res.error();
+        fail_reply_stream(conn, e);
         return false;
     }
     return true;
