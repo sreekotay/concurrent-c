@@ -26,6 +26,16 @@ CCNursery* cc_nursery_create_child(CCNursery* parent);
 // Cancel all tasks (sets flag; tasks must poll cooperatively).
 void cc_nursery_cancel(CCNursery* n);
 
+// Cancel the nursery when any of the listed process signals (e.g. SIGINT,
+// SIGTERM) arrives. Blocks the signals on the calling thread via
+// pthread_sigmask so they propagate to spawned worker threads, then runs a
+// detached handler that sigwait()s on the set and calls cc_nursery_cancel(n).
+//
+// Call once, BEFORE spawning tasks into `n`, so worker threads inherit the
+// blocked mask. The nursery pointer must remain valid until a signal fires
+// or the process exits. Returns 0 on success, otherwise an errno-style value.
+int cc_nursery_cancel_on_signals(CCNursery* n, const int* signos, size_t count);
+
 // Set an absolute deadline for the nursery (CLOCK_REALTIME). Zeroed timespec clears.
 void cc_nursery_set_deadline(CCNursery* n, struct timespec abs_deadline);
 

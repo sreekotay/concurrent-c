@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -258,6 +259,45 @@ void cc_nursery_cancel(CCNursery* n) {
         }
         free(tasks_snapshot);
     }
+}
+
+typedef struct {
+    CCNursery* nursery;
+    sigset_t set;
+} cc_nursery_signal_ctx;
+
+static void* cc__nursery_signal_thread(void* arg) {
+    cc_nursery_signal_ctx* ctx = (cc_nursery_signal_ctx*)arg;
+    int sig = 0;
+    if (sigwait(&ctx->set, &sig) == 0 && ctx->nursery) {
+        cc_nursery_cancel(ctx->nursery);
+    }
+    free(ctx);
+    return NULL;
+}
+
+int cc_nursery_cancel_on_signals(CCNursery* n, const int* signos, size_t count) {
+    if (!n || !signos || count == 0) return EINVAL;
+    cc_nursery_signal_ctx* ctx = (cc_nursery_signal_ctx*)malloc(sizeof(*ctx));
+    if (!ctx) return ENOMEM;
+    ctx->nursery = n;
+    sigemptyset(&ctx->set);
+    for (size_t i = 0; i < count; ++i) {
+        sigaddset(&ctx->set, signos[i]);
+    }
+    int rc = pthread_sigmask(SIG_BLOCK, &ctx->set, NULL);
+    if (rc != 0) {
+        free(ctx);
+        return rc;
+    }
+    pthread_t tid;
+    rc = pthread_create(&tid, NULL, cc__nursery_signal_thread, ctx);
+    if (rc != 0) {
+        free(ctx);
+        return rc;
+    }
+    pthread_detach(tid);
+    return 0;
 }
 
 void cc_nursery_set_deadline(CCNursery* n, struct timespec abs_deadline) {
