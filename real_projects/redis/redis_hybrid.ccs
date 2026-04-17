@@ -875,21 +875,32 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
         close_reply_stream(conn);
         return false;
     }
-    uint64_t t0 = redis_now_ns();
-    if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
-        close_reply_stream(conn);
-        return false;
-    }
-    uint64_t dt = redis_now_ns() - t0;
-    if (dt >= 1000000ull) {
-        conn->dbg_reply_send_slow_count++;
-        conn->dbg_reply_send_slow_ns += dt;
-        if (dt > conn->dbg_reply_send_slow_max_ns) conn->dbg_reply_send_slow_max_ns = dt;
-    }
+    /* The per-command clock_gettime pair around cc_channel_send is strictly
+     * diagnostic (per-conn dbg_reply_send_slow_* are never read; only the
+     * g_hybrid_stat_reply_send_ns aggregate is printed on SIGUSR1 when
+     * REDIS_HYBRID_STATS=1). At 2M cmd/s the three clock_gettime calls per
+     * command in the owner loop show up as ~7% of active CPU in `sample`, so
+     * skip them entirely unless metrics are on. */
     if (g_hybrid_metrics) {
+        uint64_t t0 = redis_now_ns();
+        if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
+            close_reply_stream(conn);
+            return false;
+        }
+        uint64_t dt = redis_now_ns() - t0;
+        if (dt >= 1000000ull) {
+            conn->dbg_reply_send_slow_count++;
+            conn->dbg_reply_send_slow_ns += dt;
+            if (dt > conn->dbg_reply_send_slow_max_ns) conn->dbg_reply_send_slow_max_ns = dt;
+        }
         atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_ns, dt, memory_order_relaxed);
         if (dt >= 1000000ull) {
             atomic_fetch_add_explicit(&g_hybrid_stat_reply_send_slow_ge_1ms, 1, memory_order_relaxed);
+        }
+    } else {
+        if (!cc_io_avail(cc_channel_send(conn->reply_tx, *reply))) {
+            close_reply_stream(conn);
+            return false;
         }
     }
     release_reply(reply);
@@ -942,23 +953,27 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
         if (!req || !req->conn) continue;
 
         RedisConn* conn = req->conn;
-        uint64_t now_ns = redis_now_ns();
-        uint64_t prev_ns = atomic_load_explicit(&conn->dbg_owner_last_service_ns, memory_order_relaxed);
-        if (prev_ns != 0 && now_ns > prev_ns) {
-            uint64_t gap_ns = now_ns - prev_ns;
-            uint64_t cur_max = atomic_load_explicit(&conn->dbg_owner_max_gap_ns, memory_order_relaxed);
-            while (gap_ns > cur_max &&
-                   !atomic_compare_exchange_weak_explicit(&conn->dbg_owner_max_gap_ns,
-                                                          &cur_max,
-                                                          gap_ns,
-                                                          memory_order_relaxed,
-                                                          memory_order_relaxed)) {
-            }
-        }
-        atomic_store_explicit(&conn->dbg_owner_last_service_ns, now_ns, memory_order_relaxed);
-        atomic_store_explicit(&conn->dbg_owner_last_req_id, req->request_id, memory_order_relaxed);
-        atomic_fetch_add_explicit(&conn->dbg_owner_exec_count, 1, memory_order_relaxed);
+        /* The dbg_owner_* fields (service_ns, max_gap_ns, last_req_id,
+         * exec_count) are never read anywhere; they were scaffolding for the
+         * deadlock investigation. The clock_gettime + atomic stores show up
+         * hot in `sample` at 2M cmd/s. Only pay the cost when metrics are on. */
         if (g_hybrid_metrics) {
+            uint64_t now_ns = redis_now_ns();
+            uint64_t prev_ns = atomic_load_explicit(&conn->dbg_owner_last_service_ns, memory_order_relaxed);
+            if (prev_ns != 0 && now_ns > prev_ns) {
+                uint64_t gap_ns = now_ns - prev_ns;
+                uint64_t cur_max = atomic_load_explicit(&conn->dbg_owner_max_gap_ns, memory_order_relaxed);
+                while (gap_ns > cur_max &&
+                       !atomic_compare_exchange_weak_explicit(&conn->dbg_owner_max_gap_ns,
+                                                              &cur_max,
+                                                              gap_ns,
+                                                              memory_order_relaxed,
+                                                              memory_order_relaxed)) {
+                }
+            }
+            atomic_store_explicit(&conn->dbg_owner_last_service_ns, now_ns, memory_order_relaxed);
+            atomic_store_explicit(&conn->dbg_owner_last_req_id, req->request_id, memory_order_relaxed);
+            atomic_fetch_add_explicit(&conn->dbg_owner_exec_count, 1, memory_order_relaxed);
             atomic_fetch_add_explicit(&g_hybrid_stat_owner_cmds, 1, memory_order_relaxed);
         }
         @defer free_request(req);
