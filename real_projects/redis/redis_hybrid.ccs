@@ -22,6 +22,12 @@
 #include "redis_cc/redis_cc.cch"
 #include <ccc/std/task.cch>
 
+/* TCP_NODELAY/IPPROTO_TCP constants for setsockopt below.  Including
+ * <netinet/tcp.h>/<sys/socket.h> here conflicts with the prelude's `accept`
+ * declaration, so inline the POSIX-defined values. */
+#define CC_IPPROTO_TCP 6
+#define CC_TCP_NODELAY 1
+
 #define DEFAULT_PORT 6380
 #define READ_CHUNK 4096
 #define READ_BUF_CAP (16 * 1024)
@@ -904,12 +910,13 @@ static bool !>(CCError) redis_conn_mailbox_submit(RedisConn* conn,
                                                   RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
                                                   RedisRequest* req) {
     if (!conn || !req) return cc_err(mkerr(CC_ERR_INVALID_ARG, "owner submit without request"));
-    CCResult_bool_CCIoError send_res = cc_channel_try_send(owner_tx, req);
+    /* Blocking send: under heavy pipelining 50 conns * PIPELINE_LIMIT 16 can
+     * transiently exceed REQUEST_CHAN_CAP (512); try_send would return BUSY
+     * and the caller previously dropped the request silently, leaving the
+     * client waiting forever for a reply. A blocking send applies natural
+     * backpressure from owner_loop without losing work. */
+    CCResult_bool_CCIoError send_res = cc_channel_send(owner_tx, req);
     if (cc_is_err(send_res)) {
-        if (cc_error(send_res).kind == CC_IO_BUSY) {
-            free_request(req);
-            return cc_ok(false);
-        }
         if (g_hybrid_metrics) {
             atomic_fetch_add_explicit(&g_hybrid_stat_mailbox_handoff_fail, 1, memory_order_relaxed);
         }
@@ -918,7 +925,7 @@ static bool !>(CCError) redis_conn_mailbox_submit(RedisConn* conn,
     }
     if (!cc_value(send_res)) {
         free_request(req);
-        return cc_ok(false);
+        return cc_err(mkerr(CC_ERR_IO, "owner channel closed"));
     }
     return cc_ok(true);
 }
@@ -1156,6 +1163,18 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
+
+                /* Disable Nagle's algorithm on accepted sockets. Without this,
+                 * redis-benchmark's pipelined pattern (write 16 requests, wait
+                 * for 16 replies, repeat) interacts badly with Nagle + delayed
+                 * ACKs and produces intermittent multi-second stalls where the
+                 * server has replies to send but TCP coalesces them waiting
+                 * for an ACK that the client delays. Upstream redis-server
+                 * always sets TCP_NODELAY on client sockets for the same
+                 * reason. */
+                extern int setsockopt(int, int, int, const void*, unsigned int);
+                int one = 1;
+                (void)setsockopt(client.fd, CC_IPPROTO_TCP, CC_TCP_NODELAY, &one, sizeof(one));
 
                 uint64_t id = next_conn_id++;
                 server->spawnhybrid(() => [client, owner_tx, id] {
