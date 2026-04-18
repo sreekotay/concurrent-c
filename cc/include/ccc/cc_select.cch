@@ -1,38 +1,39 @@
 /*
  * CCSelect: compose-once / reuse-many multi-source select primitive.
  *
- * Usage (C-level, no method sugar yet):
+ * Scope-attached usage (preferred):
  *
- *   RedisReply* reply_slot = NULL;
- *   bool keep_going = true;
- *   CCSelect sel;
- *   cc_select_init(&sel);
- *   cc_select_add_recv(&sel, conn->reply_rx.raw, &reply_slot,
- *                      cc_closure1_make(on_reply, &env, NULL));
- *   cc_select_add_close(&sel, conn->reply_rx.raw,
- *                       cc_closure1_make(on_close, &env, NULL));
+ *   CCSelect sel = @create() @destroy;
+ *   cc_select_add_recv(&sel, conn->reply_rx, &reply_slot,
+ *                      () => [&env] { ... handler body ... });
+ *   cc_select_add_close(&sel, conn->reply_rx, &close_err,
+ *                       () => [&env] { ... handler body ... });
  *   cc_select_add_readable(&sel, &client,
- *                          cc_closure0_make(on_readable, &env, NULL));
- *
+ *                          () => [&env] { ... handler body ... });
  *   while (keep_going) {
  *       CCResult_bool_CCIoError r = cc_select_wait(&sel);
  *       if (!r.ok) break;
  *       keep_going = r.u.value;
  *   }
- *   cc_select_dispose(&sel);
  *
  * Semantics:
- *   - Handlers are closure-like callbacks invoked from inside cc_select_wait().
- *     They return a bool (nonzero/zero) via CCClosure{0,1}.fn returning void*.
- *   - Exactly one handler fires per wait() call. The handler's bool return is
- *     propagated back as the Ok value.
+ *   - Handlers are CCClosure0 callbacks invoked from inside cc_select_wait().
+ *     Per-case data (received pointer, close error) is written to caller-
+ *     supplied slots BEFORE the handler runs, so the closure can capture the
+ *     slot and read the value.
+ *   - Handler return (void* cast to bool): nonzero = continue, zero = stop.
+ *   - Exactly one handler fires per wait() call. Handler's bool is propagated
+ *     back as the Ok value.
  *   - If the runtime encounters a real I/O error (EINVAL, cancelled, etc.)
- *     the wait returns Err(CCIoError) without invoking any handler.
+ *     wait returns Err(CCIoError) without invoking any handler.
  *   - v1 requires at least one readable-socket case. Pure-channel selects
  *     will be supported in v2 once a socket-independent signal lands.
  *   - v1 supports recv / close / readable. send / writable / deadline are
- *     deferred; calling cc_select_add_{send,writable} or passing a deadline
- *     returns EINVAL.
+ *     deferred; the corresponding add_* returns EINVAL.
+ *
+ * Channel handles: the add_recv / add_close callers may pass either CCChan*
+ * or CCChanRx. _Generic dispatches to the right arm; no .raw unwrap needed
+ * at the call site.
  */
 #ifndef CC_SELECT_H
 #define CC_SELECT_H
@@ -40,11 +41,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <ccc/cc_compat.cch>
 #include <ccc/cc_closure.cch>
 #include <ccc/cc_io_error.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_chan_handle.cch>
+#include <ccc/cc_type.cch>
 
 typedef struct CCChan CCChan;
 typedef struct CCSocket CCSocket;
@@ -86,23 +90,53 @@ typedef struct CCSelect {
     uint8_t _wired;            /* 1 once signals are attached */
 } CCSelect;
 
-/* Initialize an empty select. Caller-allocated (typically stack). */
+/* Initialize an empty select in place (rarely needed directly; prefer
+ * `CCSelect sel = @create() @destroy;`). */
 void cc_select_init(CCSelect* sel);
 
-/* Release resources (shared signal, unwire channel signals). */
+/* Release resources (shared signal, unwire channel signals, drop handler
+ * closure envs). Matches @destroy. */
 void cc_select_dispose(CCSelect* sel);
 
-/* Builders. All return 0 on success, errno-style on failure (e.g. ENOSPC if
- * the fixed case array is full; EINVAL on NULL args).
+/* @create hook: returns a zeroed CCSelect by value. Paired with
+ * cc_select_dispose via cc_type_register below. */
+static inline CCSelect cc_select_create(void) {
+    CCSelect s;
+    memset(&s, 0, sizeof(s));
+    return s;
+}
+
+/* Raw builders (take CCChan*). All return 0 on success, errno-style on
+ * failure (e.g. ENOSPC if the fixed case array is full; EINVAL on NULL args).
  *
- * For recv: the runtime writes the received pointer to *out_ptr_slot BEFORE
- *           invoking the handler; the closure reads the slot via capture.
- * For close: the runtime writes the close error to *out_err_slot (may be
- *            NULL if the caller doesn't care) BEFORE invoking the handler.
- * For readable: no per-case data is exchanged. */
-int cc_select_add_recv(CCSelect* sel, CCChan* ch, void** out_ptr_slot, CCClosure0 handler);
-int cc_select_add_close(CCSelect* sel, CCChan* ch, CCIoError* out_err_slot, CCClosure0 handler);
+ * Prefer the `cc_select_add_recv` / `cc_select_add_close` macros below which
+ * also accept CCChanRx. */
+int cc_select_add_recv_raw(CCSelect* sel, CCChan* ch, void** out_ptr_slot, CCClosure0 handler);
+int cc_select_add_close_raw(CCSelect* sel, CCChan* ch, CCIoError* out_err_slot, CCClosure0 handler);
 int cc_select_add_readable(CCSelect* sel, CCSocket* sock, CCClosure0 handler);
+
+/* Typed wrappers: accept CCChanRx and unwrap the raw handle. */
+static inline int cc__select_add_recv_rx(CCSelect* sel, CCChanRx rx, void** out_ptr_slot, CCClosure0 handler) {
+    return cc_select_add_recv_raw(sel, rx.raw, out_ptr_slot, handler);
+}
+static inline int cc__select_add_close_rx(CCSelect* sel, CCChanRx rx, CCIoError* out_err_slot, CCClosure0 handler) {
+    return cc_select_add_close_raw(sel, rx.raw, out_err_slot, handler);
+}
+
+/* _Generic dispatch: call with either CCChan* or CCChanRx as the 2nd arg.
+ *
+ * Variadic on the handler so closure literals with internal commas
+ * (captures `[a, b, c]` and body `{ stmt; stmt; }`) pass through the
+ * preprocessor unsplit — the preprocessor only protects `()`, not `[]`/`{}`. */
+#define cc_select_add_recv(sel, h, slot, ...) _Generic((h), \
+    CCChan*: cc_select_add_recv_raw, \
+    CCChanRx: cc__select_add_recv_rx \
+)((sel), (h), (slot), __VA_ARGS__)
+
+#define cc_select_add_close(sel, h, slot, ...) _Generic((h), \
+    CCChan*: cc_select_add_close_raw, \
+    CCChanRx: cc__select_add_close_rx \
+)((sel), (h), (slot), __VA_ARGS__)
 
 /* Wait until exactly one case fires. Invokes the handler and returns:
  *   - Ok(true)  if handler returned nonzero
@@ -110,5 +144,14 @@ int cc_select_add_readable(CCSelect* sel, CCSocket* sock, CCClosure0 handler);
  *   - Err(e)    on runtime-level failure (no handler invoked)
  * Re-entrant: may be called many times on the same sel. */
 CCResult_bool_CCIoError cc_select_wait(CCSelect* sel);
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCSelect", (CCTypeHooks){
+        .create = cc_type_create_call("cc_select_create"),
+        .destroy = cc_type_destroy_call("cc_select_dispose"),
+    });
+}
+#endif
 
 #endif /* CC_SELECT_H */
