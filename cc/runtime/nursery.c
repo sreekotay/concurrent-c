@@ -408,49 +408,9 @@ static void* cc__nursery_async_runner(void* arg) {
     return NULL;
 }
 
+/* V2 is the default scheduler. spawn() routes through sched_v2; spawnhybrid()
+ * is kept as an alias for source compatibility during the V1 retirement. */
 int cc_nursery_spawn(CCNursery* n, void* (*fn)(void*), void* arg) {
-    if (!n || !fn) return EINVAL;
-    
-    int timing = nursery_timing_enabled();
-    uint64_t t0 = 0, t1, t2, t3;
-    
-    if (timing) t0 = nursery_rdtsc();
-
-    if (timing) t1 = t0;
-
-    /* Spawn task on fiber scheduler.
-     * Non-worker sibling grouping is runtime-gated because it can help some
-     * startup locality cases but regress broader workloads like pigz. */
-    cc_sched_nonworker_spawn_group_hint((const void*)n, 2);
-    cc_fiber_set_spawn_nursery_override(n);
-    fiber_task* t = cc_fiber_spawn(fn, arg);
-    cc_fiber_set_spawn_nursery_override(NULL);
-    if (!t) {
-        return ENOMEM;
-    }
-
-    if (timing) t2 = nursery_rdtsc();
-
-    cc_nursery_child child = { .kind = 1, .u.classic = t };
-    int append_err = cc_nursery_append_child(n, child);
-    if (append_err != 0) {
-        cc_fiber_task_free(t);
-        return append_err;
-    }
-    
-    if (timing) {
-        t3 = nursery_rdtsc();
-        atomic_fetch_add_explicit(&g_nursery_timing.setup_cycles, t1 - t0, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_nursery_timing.fiber_spawn_cycles, t2 - t1, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_nursery_timing.mutex_cycles, t3 - t2, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_nursery_timing.spawn_total_cycles, t3 - t0, memory_order_relaxed);
-        atomic_fetch_add_explicit(&g_nursery_timing.spawn_count, 1, memory_order_relaxed);
-    }
-    
-    return 0;
-}
-
-int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg) {
     if (!n || !fn) return EINVAL;
 
     int timing = nursery_timing_enabled();
@@ -480,6 +440,10 @@ int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg) {
     return 0;
 }
 
+int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg) {
+    return cc_nursery_spawn(n, fn, arg);
+}
+
 int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
     cc_nursery_async_spawn* a;
     int err;
@@ -502,24 +466,7 @@ int cc_nursery_spawn_async(CCNursery* n, CCTask task) {
 }
 
 int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task) {
-    cc_nursery_async_spawn* a;
-    int err;
-    if (!n || task.kind == CC_TASK_KIND_INVALID) {
-        cc_task_free(&task);
-        return EINVAL;
-    }
-    a = (cc_nursery_async_spawn*)malloc(sizeof(*a));
-    if (!a) {
-        cc_task_free(&task);
-        return ENOMEM;
-    }
-    a->task = task;
-    err = cc_nursery_spawnhybrid(n, cc__nursery_async_runner, a);
-    if (err != 0) {
-        cc_task_free(&a->task);
-        free(a);
-    }
-    return err;
+    return cc_nursery_spawn_async(n, task);
 }
 
 int cc_nursery_wait(CCNursery* n) {
