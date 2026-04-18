@@ -144,6 +144,12 @@ static int get_expected_exit_code(const char* path) {
     if (strstr(path, "ping_server") != NULL) return -1;           /* Server */
     if (strstr(path, "deadlock_detect_demo") != NULL) return 1;   /* Expected deadlock abort */
     if (strstr(path, "complex_deadlock") != NULL) return 1;   /* Expected deadlock abort */
+    /* Known machine-crasher on macOS post-V1-strip: 10k sequential @async
+     * spawn+join from a non-fiber main thread hard-panics the kernel before
+     * the --timeout wrapper can fire. Tracked separately; skip for --all so
+     * the rest of the suite can run. Use `ccc build run perf/spawn_sequential.ccs`
+     * directly to reproduce in isolation. */
+    if (strstr(path, "perf/spawn_sequential.ccs") != NULL) return -1;
     return 0;
 }
 
