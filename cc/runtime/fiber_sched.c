@@ -994,10 +994,17 @@ void cc_fiber_set_spawn_nursery_override(CCNursery* nursery) {
 }
 
 void cc_fiber_task_free(fiber_task* f) {
-    /* V1 retired: cc_fiber_spawn returns V2-tagged handles and sched_v2
-     * owns the fiber lifetime (freed inside sched_v2_join). The legacy
-     * perf harness still calls this, so keep the symbol as a no-op. */
-    (void)f;
+    /* V1 retired: cc_fiber_spawn returns a V2-tagged fiber_v2*. Canonical V2
+     * ownership is join() + fiber_release(); sched_v2_join drops the join
+     * reference but does NOT free the fiber_v2 / stack — that is explicitly
+     * what fiber_release exists for. The legacy V1 contract was
+     * "join then free", so this shim has to call release here or we leak
+     * the entire fiber allocation (including its mmap'd stack) on every
+     * call, which is what hard-panicked the Mac in perf_spawn_ladder. */
+    if (!f) return;
+    if (cc__is_v2_fiber_local((cc__fiber*)f)) {
+        sched_v2_fiber_release(cc__untag_v2_fiber_local((cc__fiber*)f));
+    }
 }
 
 
