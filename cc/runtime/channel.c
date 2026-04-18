@@ -692,10 +692,71 @@ int cc__chan_debug_req_wake_match(void* ch_obj) {
     return ch->cap > 1;
 }
 
+/* Adaptive-spin wrapper around ch->mu.
+ *
+ * Darwin's pthread_mutex_firstfit does NOT spin in userspace before parking
+ * in __psynch_mutexwait. Under fan-in (N fibers contending during a wake-one
+ * storm) that pushes every contender through a syscall + a kernel handoff
+ * on unlock, producing catastrophic tail latency (39ms p99 observed on the
+ * 1000-waiter herd test). The chan critical sections here are tiny
+ * (pop waiter, mark notified, unlock), so a short userspace spin almost
+ * always wins the race without ever parking. Falls through to pthread_mutex
+ * for genuine contention (preserves fairness / prio-inversion behavior of
+ * the underlying mutex).
+ *
+ * Tunable via env var CC_CHAN_LOCK_SPIN (int, default 64). Set to 0 to
+ * disable the spin and match the old behavior. */
+#ifndef CC_CHAN_LOCK_SPIN_DEFAULT
+#define CC_CHAN_LOCK_SPIN_DEFAULT 64
+#endif
+
+static _Atomic int g_cc_chan_lock_spin = -1;
+
+static inline int cc__chan_lock_spin_count(void) {
+    int cached = atomic_load_explicit(&g_cc_chan_lock_spin, memory_order_relaxed);
+    if (cached < 0) {
+        const char* env = getenv("CC_CHAN_LOCK_SPIN");
+        int v = CC_CHAN_LOCK_SPIN_DEFAULT;
+        if (env && env[0]) {
+            char* end = NULL;
+            long parsed = strtol(env, &end, 10);
+            if (end != env && parsed >= 0 && parsed <= 1024) v = (int)parsed;
+        }
+        int expected = -1;
+        (void)atomic_compare_exchange_strong_explicit(&g_cc_chan_lock_spin,
+                                                      &expected, v,
+                                                      memory_order_relaxed,
+                                                      memory_order_relaxed);
+        cached = atomic_load_explicit(&g_cc_chan_lock_spin, memory_order_relaxed);
+    }
+    return cached;
+}
+
+static inline void cc__chan_spin_hint(void) {
+#if defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause" ::: "memory");
+#else
+    /* No-op spin hint on other architectures. */
+#endif
+}
+
+static inline void cc_chan_lock(CCChan* ch) {
+    if (__builtin_expect(pthread_mutex_trylock(&ch->mu) == 0, 1)) return;
+    int spin = cc__chan_lock_spin_count();
+    for (int i = 0; i < spin; i++) {
+        cc__chan_spin_hint();
+        if (pthread_mutex_trylock(&ch->mu) == 0) return;
+    }
+    pthread_mutex_lock(&ch->mu);
+}
+static inline void cc_chan_unlock(CCChan* ch) { pthread_mutex_unlock(&ch->mu); }
+
 int cc__chan_debug_is_open(void* ch_obj) {
     CCChan* ch = (CCChan*)ch_obj;
     if (!ch) return 0;
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     int is_open = !ch->closed;
     pthread_mutex_unlock(&ch->mu);
     return is_open;
@@ -816,9 +877,6 @@ void cc__chan_debug_dump_state(void* ch_obj, const char* prefix) {
             (void*)ch->send_waiters_head);
 }
 
-
-static inline void cc_chan_lock(CCChan* ch) { pthread_mutex_lock(&ch->mu); }
-static inline void cc_chan_unlock(CCChan* ch) { pthread_mutex_unlock(&ch->mu); }
 
 int cc_chan_pair_create(size_t capacity,
                         CCChanMode mode,
@@ -1733,7 +1791,7 @@ int cc_chan_is_ordered(CCChan* ch) {
 
 void cc_chan_set_recv_signal(CCChan* ch, CCSocketSignal* sig) {
     if (!ch) return;
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     ch->recv_signal = sig;
     pthread_mutex_unlock(&ch->mu);
 }
@@ -1810,7 +1868,7 @@ static void cc__chan_close_common(CCChan* ch,
                                   const char* trace_end) {
     if (!ch) return;
     ch->fast_path_ok = 0;  /* Disable minimal fast path before taking lock */
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     /* LP (§10 Close LP): OPEN -> CLOSED under channel mutex. */
     if (close_tx) {
         ch->closed = 1;
@@ -1922,7 +1980,7 @@ void cc_chan_free(CCChan* ch) {
     
     /* For owned channels, destroy remaining items in the buffer */
     if (ch->is_owned && ch->on_destroy.fn && ch->buf && ch->elem_size > 0) {
-        pthread_mutex_lock(&ch->mu);
+        cc_chan_lock(ch);
         if (ch->use_lockfree) {
             unsigned char item_buf[sizeof(intptr_t)] = {0};
             while (cc__queue_dequeue_value(ch, item_buf) == 1) {
@@ -2021,7 +2079,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
 
                 pthread_mutex_unlock(&ch->mu);
                 cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_send_wait_rendezvous", ch);
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                     cc__chan_remove_send_waiter(ch, &node);
                     return ETIMEDOUT;
@@ -2086,7 +2144,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 break;
             }
             cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_send_wait_full", ch);
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
             if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                 cc__chan_remove_send_waiter(ch, &node);
                 return ETIMEDOUT;
@@ -2160,7 +2218,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 /* Return-aware boundary wait (first migrated call site). */
                 cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_recv_wait_rendezvous", ch);
 
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
                     cc__chan_remove_recv_waiter(ch, &node);
                     ch->rv_recv_waiters--;
@@ -2257,7 +2315,7 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
                 break;
             }
             cc_sched_wait_result wait_rc = cc__chan_wait_notified_mark_close(&node, deadline, "chan_recv_wait_empty", ch);
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
             cc__chan_trace_recv_empty(ch, "recv_post_wait", &node,
                                       atomic_load_explicit(&node.notified, memory_order_relaxed));
             if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
@@ -2872,18 +2930,9 @@ static inline int cc__chan_try_direct_handoff_recv_waiter_buffered(CCChan* ch, c
         return 0;
     }
 
-    channel_store_slot(rnode->data, value, ch->elem_size);
-    atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
-    if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
-    if (rnode->is_select && rnode->select_group) {
-        cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
-        atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-    }
-    if (rnode->fiber) {
-        wake_batch_add_chan(ch, rnode->fiber);
-    } else {
-        pthread_cond_signal(&ch->not_empty);
-    }
+    /* Helper stores slot, marks DATA, decrements rv_recv_waiters, schedules wake.
+     * The receiver's fast-path returns without re-locking mu. */
+    cc__chan_finish_send_to_recv_waiter(ch, rnode, value);
     pthread_mutex_unlock(&ch->mu);
     wake_batch_flush();
     cc__chan_signal_recv_ready(ch);
@@ -2905,6 +2954,10 @@ static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_w
     }
 }
 
+/* CONTRACT: enters with ch->mu held, ALWAYS exits with ch->mu unlocked.
+ * Mirror of cc_chan_recv_unbuffered. On direct receiver handoff
+ * (NOTIFY_DATA), the receiver has already popped this node and copied the
+ * value out; the sender has no post-wake work that needs ch->mu. */
 static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct timespec* deadline) {
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     int err = 0;
@@ -2914,6 +2967,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         cc__fiber_wait_node* rnode = ch->recv_waiters_head ? cc__chan_pop_recv_waiter(ch) : NULL;
         if (rnode) {
             cc__chan_finish_send_to_recv_waiter(ch, rnode, value);
+            pthread_mutex_unlock(&ch->mu);
             cc__chan_signal_recv_ready(ch);
             return 0;
         }
@@ -2941,6 +2995,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                     /* Found a receiver! Remove ourselves from send wait list and do handoff. */
                     cc__chan_remove_send_waiter(ch, &node);
                     cc__chan_finish_send_to_recv_waiter(ch, rnode2, value);
+                    pthread_mutex_unlock(&ch->mu);
                     cc__chan_signal_recv_ready(ch);
                     return 0;
                 }
@@ -2948,7 +3003,13 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_rendezvous", ch);
                 }
-                pthread_mutex_lock(&ch->mu);
+                /* FAST PATH: receiver's direct handoff already popped us and
+                 * consumed the data. No post-wake work needs mu -- return
+                 * immediately and skip the re-lock cascade under fan-in. */
+                if (atomic_load_explicit(&node.notified, memory_order_acquire) == CC_CHAN_NOTIFY_DATA) {
+                    return 0;
+                }
+                cc_chan_lock(ch);
             } else {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_full, &ch->mu, deadline);
@@ -2967,14 +3028,17 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 continue;
             }
             if (notify_val == CC_CHAN_NOTIFY_DATA) {
-                /* notified=1 means a receiver actually took our data.
-                 * The receiver already popped us from the list. */
+                /* Thread path (cond_wait) reached here: receiver popped us
+                 * and consumed the data. */
+                pthread_mutex_unlock(&ch->mu);
                 return 0;
             }
             if (notify_val == CC_CHAN_NOTIFY_CLOSE) {
                 /* notified=3 means woken by close or rx_error_close */
                 cc__chan_remove_send_waiter(ch, &node);
-                return ch->rx_error_closed ? ch->rx_error_code : EPIPE;
+                int rc = ch->rx_error_closed ? ch->rx_error_code : EPIPE;
+                pthread_mutex_unlock(&ch->mu);
+                return rc;
             }
             /* notified == 0: spurious wakeup (pending_unpark consumed but no
              * actual notification).  Remove ourselves from the wait list before
@@ -2986,20 +3050,39 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
 
         if (ch->rx_error_closed) {
             /* node already removed above */
-            return ch->rx_error_code;
+            int rc = ch->rx_error_code;
+            pthread_mutex_unlock(&ch->mu);
+            return rc;
         }
         if (ch->closed) {
             /* node already removed above */
+            pthread_mutex_unlock(&ch->mu);
             return EPIPE;
         }
         if (deadline && err == ETIMEDOUT) {
             /* node already removed above */
+            pthread_mutex_unlock(&ch->mu);
             return ETIMEDOUT;
         }
     }
-    return ch->rx_error_closed ? ch->rx_error_code : EPIPE;
+    int rc = ch->rx_error_closed ? ch->rx_error_code : EPIPE;
+    pthread_mutex_unlock(&ch->mu);
+    return rc;
 }
 
+/* CONTRACT: enters with ch->mu held, ALWAYS exits with ch->mu unlocked.
+ *
+ * Hot-path invariant: on direct sender handoff (NOTIFY_DATA), the sender
+ * has already:
+ *   - popped this node from recv_waiters (cc__chan_pop_recv_waiter)
+ *   - copied the value into node.data
+ *   - decremented rv_recv_waiters and has_recv_waiters
+ *   - issued the wake
+ * The wakee therefore has no post-wake work that needs ch->mu and returns
+ * directly from the park loop without re-acquiring it. This collapses the
+ * "wake -> mutex contention cascade" under fan-out (N senders, N receivers).
+ * Cold paths (SIGNAL, CLOSE, timeout, close-while-parked) still re-lock for
+ * list cleanup and exit via the unified unlock-then-return epilogue. */
 static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct timespec* deadline) {
     cc__fiber* fiber = cc__fiber_in_context() ? cc__fiber_current() : NULL;
     int err = 0;
@@ -3009,6 +3092,7 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
         cc__fiber_wait_node* snode = ch->send_waiters_head ? cc__chan_pop_send_waiter(ch) : NULL;
         if (snode) {
             cc__chan_finish_recv_from_send_waiter(ch, snode, out_value);
+            pthread_mutex_unlock(&ch->mu);
             cc__chan_signal_recv_ready(ch);
             return 0;
         }
@@ -3033,7 +3117,14 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 if (!atomic_load_explicit(&node.notified, memory_order_acquire)) {
                     (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_rendezvous", ch);
                 }
-                pthread_mutex_lock(&ch->mu);
+                /* FAST PATH: sender's direct handoff already popped us, stored
+                 * data, and decremented rv_recv_waiters / has_recv_waiters
+                 * under mu. We have nothing left that needs mu -- return
+                 * immediately and skip the re-lock cascade. */
+                if (atomic_load_explicit(&node.notified, memory_order_acquire) == CC_CHAN_NOTIFY_DATA) {
+                    return 0;
+                }
+                cc_chan_lock(ch);
             } else {
                 if (deadline) {
                     err = pthread_cond_timedwait(&ch->not_empty, &ch->mu, deadline);
@@ -3053,16 +3144,18 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
                 continue;
             }
             if (notify_val == CC_CHAN_NOTIFY_DATA) {
-                /* notified=1 means a sender actually delivered data.
-                 * The sender already popped us from the list. */
-                if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
+                /* Thread path (cond_wait) reached here: sender popped us and
+                 * already decremented rv_recv_waiters via the helper. */
+                pthread_mutex_unlock(&ch->mu);
                 return 0;
             }
             if (notify_val == CC_CHAN_NOTIFY_CLOSE) {
                 /* notified=3 means woken by close or close_err with no data */
                 cc__chan_remove_recv_waiter(ch, &node);
                 if (ch->rv_recv_waiters > 0) ch->rv_recv_waiters--;
-                return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                int rc = ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                pthread_mutex_unlock(&ch->mu);
+                return rc;
             }
             /* notified == 0: spurious wakeup (pending_unpark consumed but no
              * actual notification).  Remove ourselves from the wait list before
@@ -3075,18 +3168,19 @@ static int cc_chan_recv_unbuffered(CCChan* ch, void* out_value, const struct tim
 
         if (ch->closed) {
             /* node already removed above */
-            if (ch->send_waiters_head) {
-            }
-            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+            int rc = ch->tx_error_code ? ch->tx_error_code : EPIPE;
+            pthread_mutex_unlock(&ch->mu);
+            return rc;
         }
         if (deadline && err == ETIMEDOUT) {
             /* node already removed above */
+            pthread_mutex_unlock(&ch->mu);
             return ETIMEDOUT;
         }
     }
-    if (ch->send_waiters_head) {
-    }
-    return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+    int rc = ch->tx_error_code ? ch->tx_error_code : EPIPE;
+    pthread_mutex_unlock(&ch->mu);
+    return rc;
 }
 
 static int cc_chan_handle_full_send(CCChan* ch, const void* value, const struct timespec* deadline) {
@@ -3153,26 +3247,11 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
             cc__fiber_wait_node* rnode = cc__chan_pop_recv_waiter(ch);
             if (rnode) {
-                /* Direct handoff to waiting receiver */
-                channel_store_slot(rnode->data, value, ch->elem_size);
-                if (ch->use_lockfree) {
-                }
-                atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
-                if (rnode->is_select) cc__chan_select_dbg_inc(&g_dbg_select_data_set);
-                /* IMPORTANT: Increment signaled BEFORE waking the fiber. */
-                if (rnode->is_select && rnode->select_group) {
-                    cc__select_wait_group* group = (cc__select_wait_group*)rnode->select_group;
-                    atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
-                }
-                if (rnode->fiber) {
-                    wake_batch_add_chan(ch, rnode->fiber);
-                } else {
-                    pthread_cond_signal(&ch->not_empty);
-                }
+                /* Direct handoff: helper stores slot, marks notified=DATA,
+                 * decrements rv_recv_waiters, and schedules the wake.
+                 * The receiver's DATA fast-path returns without re-locking mu. */
+                cc__chan_finish_send_to_recv_waiter(ch, rnode, value);
                 cc__chan_trace_req_wake(ch, "send_direct_handoff", value, rnode);
-                /* Do NOT signal remaining receivers here — the handoff
-                 * consumed the item, so the post-enqueue bounded wake path
-                 * does not apply here. */
                 pthread_mutex_unlock(&ch->mu);
                 wake_batch_flush();
                 cc__chan_signal_recv_ready(ch);
@@ -3209,10 +3288,10 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     }
     if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
     
-    /* Unbuffered (rendezvous) channel - direct handoff */
+    /* Unbuffered (rendezvous) channel - direct handoff.
+     * cc_chan_send_unbuffered owns the unlock on every return path. */
     if (ch->cap == 0) {
         err = cc_chan_send_unbuffered(ch, value, NULL);
-        pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();
         if (err == 0) cc__chan_signal_recv_ready(ch);
         return err;
@@ -3308,7 +3387,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
                     wake_batch_flush();
                 }
                 (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_full", ch);
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     if (ch->use_lockfree) {
@@ -3396,14 +3475,14 @@ static int cc_chan_recv_owned(CCChan* ch, void* out_value, size_t value_size) {
     
     /* Pool is empty (EAGAIN) or closed (EPIPE) - check if we can create */
     if (rc == EAGAIN) {
-        pthread_mutex_lock(&ch->mu);
+        cc_chan_lock(ch);
         
         /* Double-check: try to dequeue under lock in case of race */
         if (ch->use_lockfree && (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
             pthread_mutex_unlock(&ch->mu);
             rc = cc_chan_try_recv(ch, out_value, value_size);
             if (rc == 0) return 0;
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
         } else if (ch->count > 0) {
             /* Mutex path: there are items, dequeue one */
             cc_chan_dequeue(ch, out_value);
@@ -3513,14 +3592,14 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     }
     
     /* Standard mutex path */
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     
-    /* Unbuffered rendezvous: direct handoff */
+    /* Unbuffered rendezvous: direct handoff.
+     * cc_chan_recv_unbuffered owns the unlock on every return path. */
     if (ch->cap == 0) {
         err = cc_chan_recv_unbuffered(ch, out_value, NULL);
-        pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();
         if (err == 0) cc__chan_signal_recv_ready(ch);
         return err;
@@ -3575,7 +3654,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc__chan_signal_activity(ch);
             return 0;
         }
-        pthread_mutex_lock(&ch->mu);
+        cc_chan_lock(ch);
 
         if (ch->closed) break;
         
@@ -3705,7 +3784,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     }
                 }
                 /* Buffer truly empty — re-register on wait list and park. */
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 /* Close may have fired while we were off the wait list.
                  * wake_all_waiters wouldn't have found us, so check now. */
                 if (ch->closed) {
@@ -3738,7 +3817,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 cc__chan_trace_req_recv(ch, "park_wait_begin", &node,
                                         atomic_load_explicit(&node.notified, memory_order_relaxed), 0);
                 (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_empty", ch);
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 goto recv_post_park_notified;
             }
         recv_post_park_notified: ;
@@ -3850,7 +3929,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     if (ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path */
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
@@ -3954,7 +4033,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
     }
     
     /* Standard mutex path */
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->cap == 0) {
@@ -4028,7 +4107,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
             /* Always signal pthread cond for timed waiters.
              * Unlike the fiber path, timed recv uses pthread_cond_timedwait
              * without adding itself to recv_waiters_head. */
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
             cc__chan_signal_recv_waiter(ch);
             pthread_cond_signal(&ch->not_empty);
             pthread_mutex_unlock(&ch->mu);
@@ -4039,14 +4118,14 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
         /* Lock-free failed (queue full), fall through to blocking path */
     }
     
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) { pthread_mutex_unlock(&ch->mu); return EPIPE; }
     if (ch->rx_error_closed) { pthread_mutex_unlock(&ch->mu); return ch->rx_error_code; }
     if (ch->cap == 0) {
+        /* cc_chan_send_unbuffered owns the unlock on every return path. */
         err = cc_chan_send_unbuffered(ch, value, abs_deadline);
-        pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();
         if (err == 0) cc__chan_signal_recv_ready(ch);
         return err;
@@ -4127,7 +4206,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     wake_batch_flush();
                 }
                 (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_full", ch);
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     atomic_store_explicit(&node.notified, CC_CHAN_NOTIFY_NONE, memory_order_release);
@@ -4160,7 +4239,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 continue;
             }
             /* Non-fiber: condvar timed wait */
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
             if (ch->closed) break;
             struct timespec poll_deadline;
             clock_gettime(CLOCK_REALTIME, &poll_deadline);
@@ -4212,7 +4291,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             /* Always signal pthread cond for timed waiters.
              * Unlike the fiber path, timed send uses pthread_cond_timedwait
              * without adding itself to send_waiters_head. */
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
             cc__chan_wake_one_send_waiter(ch);
             pthread_cond_signal(&ch->not_full);
             pthread_mutex_unlock(&ch->mu);
@@ -4227,12 +4306,12 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
         /* Lock-free failed, fall through to timed wait with polling */
     }
     
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->cap == 0) {
+        /* cc_chan_recv_unbuffered owns the unlock on every return path. */
         err = cc_chan_recv_unbuffered(ch, out_value, abs_deadline);
-        pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();
         return err;
     }
@@ -4299,7 +4378,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     wake_batch_flush();
                 }
                 (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_empty", ch);
-                pthread_mutex_lock(&ch->mu);
+                cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
                     cc__chan_remove_recv_waiter(ch, &node);
@@ -4329,7 +4408,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 continue;
             }
             /* Non-fiber: condvar timed wait */
-            pthread_mutex_lock(&ch->mu);
+            cc_chan_lock(ch);
             if (ch->closed) break;
             struct timespec poll_deadline;
             clock_gettime(CLOCK_REALTIME, &poll_deadline);
@@ -4977,12 +5056,12 @@ static CCFutureStatus cc__chan_task_poll(void* frame, intptr_t* out_val, int* ou
             CCChan* ch = f->ch;
             int err;
             if (ch->cap == 0) {
-                /* Unbuffered: use direct handoff with fiber blocking */
-                pthread_mutex_lock(&ch->mu);
+                /* Unbuffered: both _send_unbuffered and _recv_unbuffered own
+                 * their unlock on every return path. */
+                cc_chan_lock(ch);
                 err = f->is_send
                     ? cc_chan_send_unbuffered(ch, f->buf, NULL)
                     : cc_chan_recv_unbuffered(ch, f->buf, NULL);
-                pthread_mutex_unlock(&ch->mu);
             } else {
                 /* Buffered: use timed send/recv with NULL deadline for fiber blocking */
                 err = f->is_send
@@ -5033,14 +5112,15 @@ static int cc__chan_task_wait(void* frame) {
         return err;
     }
     CCChan* ch = f->ch;
-    pthread_mutex_lock(&ch->mu);
+    cc_chan_lock(ch);
     if (ch->cap == 0) {
         struct timespec ts;
         const struct timespec* p = f->deadline ? cc_deadline_as_timespec(f->deadline, &ts) : NULL;
+        /* Both _send_unbuffered and _recv_unbuffered own their unlock on
+         * every return path. */
         int err = f->is_send
             ? cc_chan_send_unbuffered(ch, f->buf, p)
             : cc_chan_recv_unbuffered(ch, f->buf, p);
-        pthread_mutex_unlock(&ch->mu);
         wake_batch_flush();
         return err;
     }
