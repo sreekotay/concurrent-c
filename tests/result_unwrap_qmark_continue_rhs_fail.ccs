@@ -1,0 +1,9 @@
+#include <stdio.h>
+int !> (CCError) f(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+int main(void) {
+    for (int i = 0; i < 3; i++) {
+        int x = f() ?> continue;
+        printf("x=%d\n", x);
+    }
+    return 0;
+}

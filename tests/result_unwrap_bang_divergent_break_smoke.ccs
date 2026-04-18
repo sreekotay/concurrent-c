@@ -1,4 +1,4 @@
-// Smoke: ?> with break as never-typed RHS inside a loop.
+// Smoke: !> (expression position) with `break;` body inside a loop.
 #include <stdio.h>
 
 static int g_last;
@@ -14,7 +14,7 @@ int !> (CCError) always_ok(void) {
 int main(void) {
     int total = 0;
     for (int i = 0; i < 5; i++) {
-        int v = (i == 3 ? always_err() : always_ok()) ?> break;
+        int v = (i == 3 ? always_err() : always_ok()) !> break;
         total += v;
         g_last = i;
     }

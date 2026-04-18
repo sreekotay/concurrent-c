@@ -1,0 +1,2 @@
+result_unwrap_qmark_continue_rhs_fail.ccs:5:
+'?>' RHS must be a value expression; use '!>' for error-handling logic

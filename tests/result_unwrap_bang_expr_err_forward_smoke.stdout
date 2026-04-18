@@ -1,0 +1,4 @@
+iter=0 acc=0
+iter=1 acc=1
+iter=2 acc=3
+handler kind=7 msg=bad

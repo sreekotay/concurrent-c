@@ -66,18 +66,23 @@ These are only reserved in specific contexts, so they can be used as identifiers
 | `@comptime if (cond) { }` | Compile-time conditional | `@comptime if (FEATURE_X) { }` |
 | `@errhandler(E e) { }` | Block-scoped default handler for `@err` in this block | `@errhandler(CCIoError e) { log(e); return cc_err(e); }` |
 
-### Result unwrap operators (4)
+### Result unwrap operators (2)
 
-Result-typed calls (`T!>(E)`) must be explicitly consumed. Four surface forms cover every consumption path:
+Result-typed calls (`T!>(E)`) must be explicitly consumed. Two operators with cleanly separated roles cover every consumption path:
 
 | Form | Context | Purpose | Example |
 |------|---------|---------|---------|
-| `expr ?> default` | expression | Unwrap value or use default expression | `int x = parse(s) ?> 0;` |
-| `expr ?>(e) rhs` | expression | Unwrap value, or evaluate `rhs` with `e` bound to the error | `int x = parse(s) ?>(e) return cc_err(e);` |
-| `call !> body` | statement | Unwrap, or execute `body` on error | `flush() !> { log("bad"); break; };` |
-| `call !>;` | statement | Unwrap, or invoke the registered default handler | `flush() !>;` |
+| `expr ?> default` | expression | Unwrap value or substitute a default value | `int x = parse(s) ?> 0;` |
+| `expr ?>(e) default_expr` | expression | Unwrap value, or evaluate `default_expr` with `e` bound to the error | `int x = parse(s) ?>(e) fallback_for(e.kind);` |
+| `call !> body` | statement / expression | Unwrap, or execute `body` on error. At expression position the body must diverge. | `int x = parse(s) !>(e) return cc_err(e);` |
+| `call !>;` | statement / expression | Unwrap, or invoke the enclosing `@errhandler` | `flush() !>;` |
 
-The `?>` RHS may be a C expression, a "never-typed" divergent statement (`return EXPR;`, `break;`, `continue;`, `goto LABEL;`, `@err(e);`, or a call to a known-noreturn function), or a `{ ... }` compound block whose textually last top-level statement is itself divergent (non-divergent or empty blocks are a compile error). The `!>` body may be a single statement, a `{ ... }` block, or a `(e) BODY` binder form. Inside a `!> (e) BODY`, the call `@err(e);` forwards the bound error to the surrounding `@errhandler` — a non-returning control-flow transfer.
+The **`?>` operator is the "default value" operator** (comparable to `??` in Swift/C#/JavaScript or `?:` in Kotlin). Its RHS is a pure C expression producing a `T`. Divergent statements (`return`, `break`, `continue`, `goto`, `@err(e);`), compound blocks `{ ... }`, and the bare shorthand are not allowed; use `!>` for that logic. The optional `(ident)` binder scopes the bound error name to the RHS.
+
+The **`!>` operator is the "error handler" operator**, usable at both statement and expression position. The body may be a single statement, a `{ ... }` block, or a `(e) BODY` binder form. Inside a `!> (e) BODY`, `@err(e);` forwards the bound error to the surrounding `@errhandler` — a non-returning control-flow transfer.
+
+- At **expression position** (RHS of `=`, inside `(`, `,`, `?`, `:`, `&&`, `||`, or after `return`) the body must *visibly diverge*: end in `return`, `break`, `continue`, `goto`, `@err(e);`, or a call to a known-noreturn function. The bare shorthand `call !>;` synthesizes a binder and inlines the enclosing `@errhandler` body (which must diverge).
+- At **statement position** the body may fall through; control returns to the statement after the `!>`.
 
 | Registration form | Purpose |
 |-------------------|---------|
@@ -560,10 +565,10 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@string(policy, \`...\`, arena)` | Policy-driven template (`${...}`, `$~tag{...}`) | `CCString html = @string(html_policy, \`<h1>${name}</h1>\`, arena);` |
 | **Expression Forms** | `await expr` | Suspend and unwrap task result | `int result = await fetch();` |
 | | `spawn (expr)` | Create task (must be in `@nursery`) | `spawn (handler(request));` |
-| **Result unwrap** | `expr ?> default` | Expression unwrap: value or default expression | `int x = parse(s) ?> 0;` |
-| | `expr ?>(e) rhs` | Expression unwrap with error binder | `int x = parse(s) ?>(e) return cc_err(e);` |
-| | `call !> body` | Statement unwrap: value or run body on error | `flush() !> { log("bad"); break; };` |
-| | `call !>;` | Statement unwrap: value or registered default handler | `flush() !>;` |
+| **Result unwrap** | `expr ?> default` | Default-value operator: unwrap or substitute a pure expression | `int x = parse(s) ?> 0;` |
+| | `expr ?>(e) default_expr` | Default-value operator with binder (RHS still a pure C expression) | `int x = parse(s) ?>(e) fallback_for(e.kind);` |
+| | `call !> body` / `call !>(e) body` | Error-handler operator (statement or expression); expression-position body must diverge | `int x = parse(s) !>(e) return cc_err(e);` |
+| | `call !>;` | Bare handler: delegate to the enclosing `@errhandler` | `flush() !>;` |
 | | `@err(e);` | Forward bound error to enclosing `@errhandler` (inside `!> (e) BODY`); never returns | `@err(e);` |
 | **Block Forms** | `cc_with_deadline(d) { }` | Apply timeout/deadline to block | `cc_with_deadline(seconds(5)) { await op(); }` |
 | **Library Functions** | `cc_ok(value)` | Construct T!>(E) success (inferred) | `return cc_ok(42);` |
@@ -786,7 +791,7 @@ int v = cc_unwrap_or(maybe_val, 0);
 
 ### 2.2 Results (`T!>(E)`)
 
-`T!>(E)` represents **success or failure** with an explicit error value. Unwrapping is strictly explicit: every result-typed call is consumed by one of four operators (`?>` expression, `!>` statement, `@err(e);` forward inside a `!>` body, or the registered `@errhandler` via bare `call !>;`). Bare result-typed statements are ill-formed. See **Unwrapping Results** below.
+`T!>(E)` represents **success or failure** with an explicit error value. Unwrapping is strictly explicit: every result-typed call is consumed by one of the two operators with cleanly separated roles — `?>` (default-value operator; pure expression RHS) or `!>` (error-handler operator; works at both statement and expression position) — or by an `@err(e);` forward inside a `!>` body, or by the registered `@errhandler` via the bare `call !>;` shorthand. Bare result-typed statements are ill-formed. See **Unwrapping Results** below.
 
 * **Unified constructor syntax**:
   * **Inferred (preferred inside a function returning `T!>(E)`):**
@@ -998,12 +1003,14 @@ CCRes(MyData, MyError) my_function(int arg);
 
 **Invariants (normative).**
 
-1. `!>` is a statement-level operator. `int x = call() !> { ... };` is a syntax error.
-2. `?>` is an expression operator. Its RHS is one of: (a) a C expression, (b) a divergent never-typed statement (`return EXPR;`, `return;`, `break;`, `continue;`, `goto LABEL;`, `@err(IDENT);`, or a call to a hardcoded noreturn function — see invariant 6), or (c) a `{ ... }` compound block whose textually last top-level statement satisfies rule (b). Any other RHS is ill-formed; in particular an empty block `{ }` or a block whose last statement can fall through is a compile error.
-3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding.
-4. `call() !>;` (no body) runs the registered default `@errhandler` on error, or the success path if the call succeeded.
-5. `@err(e);` inside a `!>` body forwards the bound error to the enclosing `@errhandler`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
-6. `@errhandler(e) { ... }` is the unchanged registration spelling. When reached via `call() !>;`, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, control never returns (invariant 5), so the handler body **must visibly diverge**. Concretely: if any `@err(e);` in the enclosing lexical scope targets a handler, that handler's body must end in one of:
+1. **`?>` is the default-value operator.** Its RHS is a pure C expression that produces a `T`. No divergent statements, no compound blocks, no bare shorthand. `EXPR ?>(e) DEFAULT_EXPR` scopes the binder `e` to `DEFAULT_EXPR`. Any other RHS shape (`?> { ... }`, `?> return …;`, `?> break;`, `?> continue;`, `?> goto …;`, `?> @err(…);`, or `?> ;`) is ill-formed and diagnosed with `'?>' RHS must be a value expression; use '!>' for error-handling logic` at the `?>` site.
+2. **`!>` is the error-handler operator.** It is valid at both *statement position* (after `;`, `{`, `}`, or start-of-file, modulo label prefix) and *expression position* (RHS of `=`, inside `(`, `,`, `?`, `:`, `&&`, `||`, or immediately after `return`).
+   - At **statement position** the body may fall through. Forms: `CALL !>;`, `CALL !> STMT;`, `CALL !> { BODY };`, `CALL !>(e) STMT;`, `CALL !>(e) { BODY };`.
+   - At **expression position** the body must *visibly diverge*. Forms: `CALL !>(e) DIVERGENT_STMT;`, `CALL !>(e) { …; DIVERGENT_STMT };`, `CALL !> DIVERGENT_STMT;`, `CALL !> { …; DIVERGENT_STMT };`, and the bare `CALL !>;` which synthesizes a binder and inlines the enclosing `@errhandler` body (which must itself diverge). A non-divergent body at expression position is diagnosed with `expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)`. A bare `CALL !>;` at expression position with no enclosing `@errhandler` is diagnosed with `'!>;' at expression position requires an enclosing '@errhandler' in scope`.
+3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding. The bare expression-position `!>;` form synthesizes a fresh internal binder that threads the error value through the inlined handler body.
+4. `CALL !>;` at statement position runs the registered default `@errhandler` on error, or the success path if the call succeeded.
+5. `@err(IDENT);` inside a `!>` body forwards the bound error to the enclosing `@errhandler`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
+6. `@errhandler(e) { ... }` is the unchanged registration spelling. When reached via `CALL !>;` at statement position, the handler body runs and control returns to the statement after the call — the handler may end in any statement. When reached via an `@err(e);` forward, via a bare expression-position `!>;`, or via an expression-position `!>` whose body inlines the handler, control never returns, so the handler body **must visibly diverge**. Concretely: if any `@err(e);` in the enclosing lexical scope targets a handler, or any expression-position `!>;` in scope of a handler inlines it, that handler's body must end in one of:
     - `return EXPR;` / `return;`
     - `break;` / `continue;`
     - `goto LABEL;`
@@ -1011,19 +1018,27 @@ CCRes(MyData, MyError) my_function(int arg);
     - A call to one of the hardcoded noreturn functions: `exit`, `_Exit`, `_exit`, `abort`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`
     - A `{ ... }` compound statement whose recursive last statement satisfies this rule.
 
-   A forward-reached handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
+   A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
 7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch. (Enforced behind the `CC_STRICT_RESULT_UNWRAP=1` transition flag during phase 1; enabled unconditionally in phase 3.)
 8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, `try` / `catch` / `if @try`, and optional types (`T?`). During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths.
 
 **Grammar (normative, minus whitespace).**
 
 ```
-qmark_expr    ::= expr '?>' qmark_rhs
-               |  expr '?>' '(' ident ')' qmark_rhs
+qmark_expr    ::= expr '?>' expr
+               |  expr '?>' '(' ident ')' expr   // RHS is always a pure C expression
 
-qmark_rhs     ::= expr                        // pure C expression
-               |  divergent_stmt              // see below
-               |  '{' stmt* divergent_stmt '}' // block whose tail diverges
+bang_stmt     ::= call '!>' ';'                            // statement: use registered handler
+               |  call '!>' stmt                            // statement: single-stmt body (may fall through)
+               |  call '!>' '{' stmt* '}' ';'?              // statement: block body (may fall through)
+               |  call '!>' '(' ident ')' stmt              // statement: binder + single stmt
+               |  call '!>' '(' ident ')' '{' stmt* '}' ';'?  // statement: binder + block
+
+bang_expr     ::= call '!>' ';'                            // expression: delegate to outer @errhandler (inlined, must diverge)
+               |  call '!>' divergent_stmt                  // expression: single divergent statement
+               |  call '!>' '{' stmt* divergent_stmt '}'    // expression: block whose tail diverges
+               |  call '!>' '(' ident ')' divergent_stmt    // expression: binder + divergent stmt
+               |  call '!>' '(' ident ')' '{' stmt* divergent_stmt '}'  // expression: binder + block
 
 divergent_stmt ::= 'return' expr? ';'
                |  'break' ';'
@@ -1032,69 +1047,84 @@ divergent_stmt ::= 'return' expr? ';'
                |  '@err' '(' ident ')' ';'
                |  noreturn_call ';'           // exit/abort/longjmp/etc.
 
-bang_stmt     ::= call '!>' ';'                            // use registered handler
-               |  call '!>' stmt                            // single-statement body
-               |  call '!>' '{' stmt* '}' ';'?              // block body
-               |  call '!>' '(' ident ')' stmt              // binder + single stmt
-               |  call '!>' '(' ident ')' '{' stmt* '}' ';'?  // binder + block
-
-err_forward   ::= '@err' '(' ident ')' ';'                 // only inside bang_stmt body
+err_forward   ::= '@err' '(' ident ')' ';'                 // only inside bang_stmt or bang_expr body
 
 err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
 ```
 
 **Semantics (normative, by form).**
 
-- `EXPR ?> DEFAULT` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT`. `EXPR ?>(e) RHS` binds the error to `e`, scoped to `RHS`.
-- `EXPR ?> DIVERGENT_STMT` — Evaluate `EXPR` exactly once. On success, the expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` runs in the error branch; because it cannot fall through, the surrounding expression has no observable value on that path. Combines with `?>(e)` binder.
-- `EXPR ?> { STMT; ...; DIVERGENT_STMT }` — Evaluate `EXPR` exactly once. On success, the expression's value is the unwrapped `T`. On error, the block runs to its textually last statement, which must diverge; fall-through from the block is ill-formed (diagnosed at the `?>` site). Combines with `?>(e)` binder, whose scope is the entire block.
-- `CALL !> ;` — Evaluate `CALL` exactly once. On success, the success payload is discarded (the statement yields nothing). On error, the enclosing lexical `@errhandler(E e) { BODY }` runs with `e` bound to the error.
-- `CALL !> BODY` — Same, with `BODY` in place of the default handler. Any `@err(e);` inside `BODY` is ill-formed without a binder.
-- `CALL !> (e) BODY` — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the enclosing `@errhandler` (see invariant 5).
-- `@err(X);` — Inside a `!> (X) BODY` only. Transfers control to the enclosing `@errhandler(E e) { HANDLER_BODY }` with the error value forwarded. Does not return.
-- `@errhandler(E e) { BODY }` — Registers a block-local default handler. All `call() !>;` and all `@err(e);` forwards within the enclosing lexical block dispatch through this handler. Subject to the divergence rule of invariant 6.
+- `EXPR ?> DEFAULT_EXPR` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT_EXPR`. `EXPR ?>(e) DEFAULT_EXPR` binds the error to `e`, scoped to `DEFAULT_EXPR`. `DEFAULT_EXPR` is always a pure C expression producing `T`.
+- `CALL !>;` *(statement)* — Evaluate `CALL` exactly once. On success, the success payload is discarded. On error, the enclosing lexical `@errhandler(E e) { BODY }` runs; control then falls through to the following statement.
+- `CALL !> BODY` *(statement)* — Same, with `BODY` in place of the default handler. `BODY` may fall through. `@err(e);` inside `BODY` is ill-formed without a binder.
+- `CALL !>(e) BODY` *(statement)* — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the enclosing `@errhandler` (see invariant 5).
+- `CALL !>;` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, a synthesized binder captures the error and the enclosing `@errhandler` body is inlined in place of `BODY`; the handler must diverge, so control never returns past the `!>;`.
+- `CALL !> DIVERGENT_STMT;` and `CALL !> { …; DIVERGENT_STMT }` *(expression)* — Evaluate `CALL` exactly once. On success, the surrounding expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` (or the block) runs; because it cannot fall through, the surrounding expression has no observable value on that path. `!>(e) …` binds the error to `e` across the body.
+- `@err(X);` — Inside a `!> (X) BODY` or `!> (X) { BODY }` (statement or expression position). Transfers control to the enclosing `@errhandler(E e) { HANDLER_BODY }` with the error value forwarded. Does not return.
+- `@errhandler(E e) { BODY }` — Registers a block-local default handler. `CALL !>;` at statement position, `@err(e);` forwards, and `CALL !>;` at expression position all dispatch through this handler. Subject to the divergence rule of invariant 6.
 
 **Single-evaluation (normative).** Every operator listed above evaluates its LHS call expression exactly once. Lowerings MUST preserve this.
 
-**Lowering (informative).** All five forms lower to straight-line C using `cc_is_ok` / `cc_is_err` / `cc_value` / `cc_error`. For example `EXPR ?> DEFAULT` lowers to a statement-expression that stores `EXPR` in a temporary and yields `cc_is_ok(tmp) ? cc_value(tmp) : (DEFAULT)`. `CALL !> (e) BODY` lowers to a block that stores the call in a temporary, tests `cc_is_err`, and on error introduces `e` bound to `cc_error(tmp)` before entering `BODY`. `@err(e);` lowers to a jump into the registered handler body with the error value threaded through. Implementations are free to vary the exact shape; the normative semantics are above.
+**Lowering (informative).**
+
+- `EXPR ?> DEFAULT_EXPR` lowers to a statement-expression that stores `EXPR` in a temporary and yields `cc_is_ok(tmp) ? cc_value(tmp) : (DEFAULT_EXPR)`.
+- `CALL !>(e) BODY` *at statement position* lowers to a block that stores the call in a temporary, tests `cc_is_err`, and on error introduces `e` bound to `cc_error(tmp)` before entering `BODY`.
+- `CALL !>(e) BODY` *at expression position* lowers to `({ __typeof__(CALL) tmp = (CALL); if (cc_is_err(tmp)) { __typeof__(cc_error(tmp)) e = cc_error(tmp); BODY } cc_value(tmp); })`. Divergence of `BODY` guarantees control never falls through to the trailing `cc_value(tmp)` on the error path.
+- `@err(e);` lowers to a jump into the registered handler body with the error value threaded through.
+
+Implementations are free to vary the exact shape; the normative semantics are above.
 
 **Examples.**
 
 ```c
-// Default value on error.
+// Default value on error (pure C expression on the RHS).
 int x = parse_int(s) ?> 0;
 
-// Propagate the error, binding explicitly.
+// Default value with the error bound, still a pure C expression.
+int x = parse_int(s) ?>(e) fallback_for(e.kind);
+
+// Propagate the error, binding explicitly — uses !> at expression position.
 int!>(CCError) propagate(char[:] s) {
-    int a = parse_int(s)  ?>(e) return cc_err(e.kind, "prop_a");
-    int b = parse_int(s)  ?>(e) return cc_err(e.kind, "prop_b");
+    int a = parse_int(s) !>(e) return cc_err(CC_ERROR(e.kind, "prop_a"));
+    int b = parse_int(s) !>(e) return cc_err(CC_ERROR(e.kind, "prop_b"));
     return cc_ok(a + b);
 }
 
-// Loop exit on error.
+// Loop exit on error (expression-position !> with divergent body).
 for (int i = 0; i < n; i++) {
-    int v = maybe(i) ?> break;
+    int v = maybe(i) !> break;
     total += v;
 }
 
-// Block RHS: multiple statements on the error path, ending in a divergent
-// statement. The block executes only on error; success still yields `int`.
+// Block body at expression position: multiple statements on the error path,
+// ending in a divergent statement.  The block executes only on error;
+// success still yields `int`.
 int!>(CCError) parse_and_log(char[:] s) {
-    int v = parse_int(s) ?>(e) {
+    int v = parse_int(s) !>(e) {
         metrics.record(e);
         log("parse failed: %d", (int)e.kind);
-        return cc_err(e.kind, "parse");
+        return cc_err(CC_ERROR(e.kind, "parse"));
     };
     return cc_ok(v);
 }
 
-// Statement form, block body.
+// Bare expression-position !>; delegates to the enclosing @errhandler.
+int main(void) {
+    @errhandler(CCError e) {
+        log(e);
+        return 1;
+    }
+    int v = parse_int(s) !>;        // error -> handler -> return 1
+    return v;
+}
+
+// Statement-position !>, block body (may fall through).
 for (;;) {
     flush() !> { log("flush failed"); break; };
     ...
 }
 
-// Statement form, binder + forwarding.
+// Statement-position !> with forwarding.
 int main(void) {
     @errhandler(CCError e) {
         log(e);
@@ -6662,8 +6692,10 @@ The following must be diagnosed at compile time:
 | Use after move | Accessing move-only value after transfer | § 1.1 |
 | Guard across suspension | Guard held across `await` or `run_blocking` | § 7.9 |
 | Unsafe adoption | `adopt()` outside `unsafe {}` | § G.2 |
-| Result unwrap — missing default | `expr ?> ;` with nothing on RHS | § 2.2 |
-| Result unwrap — non-divergent block RHS | `expr ?>(e) { ...; }` whose last top-level statement is not one of the approved divergent forms (or is empty) | § 2.2 |
+| Result unwrap — missing default | `expr ?>` / `expr ?>(e)` with nothing on RHS | § 2.2 |
+| Result unwrap — '?>' misuse for error handling | `?>` RHS is a divergent statement, a `{ ... }` block, or the bare `?>;` shorthand; use `!>` for error-handling logic | § 2.2 |
+| Result unwrap — expression-position '!>' body must diverge | `expr !>(e) { log(e); };` in a declaration initializer or other expression context whose body falls through | § 2.2 |
+| Result unwrap — '!>;' at expression position requires handler | `int x = call() !>;` with no enclosing `@errhandler` in scope | § 2.2 |
 | Result unwrap — bad binder | `expr ?>() RHS`, `expr ?>(123) RHS`, `call() !> () BODY` | § 2.2 |
 | Result unwrap — missing body | `call() !> (e) ;` | § 2.2 |
 | Result forward — unbound binder | `@err(X);` where `X` is not the enclosing `!>` binder | § 2.2 |
