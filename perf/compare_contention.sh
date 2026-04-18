@@ -27,6 +27,12 @@ echo "Building tests..."
 mkdir -p "$SCRIPT_DIR/out"
 $CCC build --release "$SCRIPT_DIR/channel_contention.ccs" -o "$SCRIPT_DIR/out/channel_contention"
 gcc -O2 "$SCRIPT_DIR/pthread_contention_baseline.c" -o "$SCRIPT_DIR/out/pthread_contention_baseline" -lpthread
+HAVE_ZIG=0
+if command -v zig >/dev/null 2>&1; then
+    zig build-exe "$SCRIPT_DIR/zig/channel_contention.zig" -O ReleaseFast -lc \
+        -femit-bin="$SCRIPT_DIR/out/zig_channel_contention" >/dev/null
+    HAVE_ZIG=1
+fi
 echo "Messages: ${CC_CONTENTION_ITERATIONS}"
 echo "Trials: ${CC_CONTENTION_TRIALS}"
 echo "Baseline shape: 1x1"
@@ -55,7 +61,18 @@ else
     echo ""
 fi
 
-# 5. Extract results
+# 5. Run Zig
+ZIG_INTF=""
+if [ "$HAVE_ZIG" -eq 1 ]; then
+    echo "--- Running Zig ---"
+    "$SCRIPT_DIR/out/zig_channel_contention" | tee zig_out.txt
+    echo ""
+else
+    echo "--- Skipping Zig (not found on PATH) ---"
+    echo ""
+fi
+
+# 6. Extract results
 PTHREAD_BASE=$(grep "^  Best baseline:" pthread_out.txt | awk '{print $3}')
 PTHREAD_CONT=$(grep "^  Best contention:" pthread_out.txt | awk '{print $3}')
 PTHREAD_INTF=$(grep "^Interference:" pthread_out.txt | awk '{print $2}' | tr -d '%')
@@ -66,6 +83,11 @@ if [ -f go_out.txt ]; then
     GO_BASE=$(grep "^  Best baseline:" go_out.txt | awk '{print $3}')
     GO_CONT=$(grep "^  Best contention:" go_out.txt | awk '{print $3}')
     GO_INTF=$(grep "^Interference:" go_out.txt | awk '{print $2}' | tr -d '%')
+fi
+if [ -f zig_out.txt ]; then
+    ZIG_BASE=$(grep "^  Best baseline:" zig_out.txt | awk '{print $3}')
+    ZIG_CONT=$(grep "^  Best contention:" zig_out.txt | awk '{print $3}')
+    ZIG_INTF=$(grep "^Interference:" zig_out.txt | awk '{print $2}' | tr -d '%')
 fi
 
 echo "DATA_PTHREAD_BASELINE_MS: $PTHREAD_BASE"
@@ -79,6 +101,11 @@ if [ -n "$GO_INTF" ]; then
     echo "DATA_GO_CONTENTION_MS: $GO_CONT"
     echo "DATA_GO_INTERFERENCE: $GO_INTF"
 fi
+if [ -n "$ZIG_INTF" ]; then
+    echo "DATA_ZIG_BASELINE_MS: $ZIG_BASE"
+    echo "DATA_ZIG_CONTENTION_MS: $ZIG_CONT"
+    echo "DATA_ZIG_INTERFERENCE: $ZIG_INTF"
+fi
 
 echo "================================================================="
 echo "FINAL VERDICT"
@@ -88,7 +115,10 @@ printf "%-20s %-14s %-16s %-15s\n" "Implementation" "Baseline (ms)" "Contention 
 printf "%-20s %-14s %-16s %-15s\n" "Pthread (Baseline)" "$PTHREAD_BASE" "$PTHREAD_CONT" "${PTHREAD_INTF}%"
 printf "%-20s %-14s %-16s %-15s\n" "Concurrent-C" "$CC_BASE" "$CC_CONT" "${CC_INTF}%"
 if [ -n "$GO_INTF" ]; then
-    printf "%-20s %-14s %-16s %-15s\n" "Go" "$GO_BASE" "$GO_CONT" "${GO_INTF}"
+    printf "%-20s %-14s %-16s %-15s\n" "Go" "$GO_BASE" "$GO_CONT" "${GO_INTF}%"
+fi
+if [ -n "$ZIG_INTF" ]; then
+    printf "%-20s %-14s %-16s %-15s\n" "Zig" "$ZIG_BASE" "$ZIG_CONT" "${ZIG_INTF}%"
 fi
 echo "-----------------------------------------------------------------"
 
@@ -100,4 +130,4 @@ else
 fi
 echo "================================================================="
 
-rm -f pthread_out.txt cc_out.txt go_out.txt
+rm -f pthread_out.txt cc_out.txt go_out.txt zig_out.txt
