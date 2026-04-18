@@ -29,10 +29,6 @@ typedef struct cc__fiber_wait_node {
     int in_wait_list;
 } cc__fiber_wait_node;
 
-/* Pool-slot result buffer TLS pointer — set by cc_pool_runner_fn in task.c
- * while executing a task, consumed by cc_task_result_ptr in fiber_sched.c */
-void cc__fiber_set_pool_slot_buf(char* buf);
-
 /* Fiber API - implemented in fiber_sched.c */
 int cc__fiber_in_context(void);
 void* cc__fiber_current(void);
@@ -75,8 +71,6 @@ void cc__fiber_set_park_obj(void* obj);
 void cc__fiber_clear_pending_unpark(void);  /* Clear stale pending_unpark before new wait */
 void cc__fiber_sleep_park(unsigned int ms); /* Park fiber on sleep queue with timer */
 void cc__fiber_touch_heartbeat(void);       /* Reset sysmon orphan timer for current worker */
-void cc__fiber_pool_task_begin(void);       /* Notify sysmon: entering long CPU-bound pool task */
-void cc__fiber_pool_task_end(void);         /* Notify sysmon: leaving long CPU-bound pool task */
 uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr);
 int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
 void cc_external_wait_enter(void);
