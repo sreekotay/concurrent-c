@@ -728,6 +728,20 @@ int cc__sched_current_worker_id(void) {
     return tls_worker_id;
 }
 
+/* V1 retired: cc__fiber_set_worker_affinity used to pin the current fiber
+ * to a specific V1 worker for the duration of the next park.  V2 has no
+ * equivalent — sysmon's orphan-and-replace can move work between threads at
+ * any time, and we deliberately don't expose a pinning API to user code.
+ *
+ * This stub keeps perf/channel_wake_wave.ccs link-clean.  That test calls
+ * the affinity API as a diagnostic hint to measure wake-to-run latency on
+ * a known worker; without affinity, its mismatch_rounds counter becomes
+ * meaningless, but its actual pass criterion (bad_value_rounds == 0) still
+ * holds because each receiver still gets the value sent on its own channel. */
+void cc__fiber_set_worker_affinity(int worker_id) {
+    (void)worker_id;
+}
+
 
 /* Called when a thread is about to block in cc_block_on.
 * Only tracks blocking on fiber worker threads - blocking on executor threads
