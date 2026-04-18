@@ -645,11 +645,10 @@ static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch) {
     return CC_FIBER_UNPARK_ATTR_NONE;
 }
 
-static inline void cc__chan_trace_flow(CCChan* ch,
-                                       const char* event,
-                                       const void* item,
-                                       int rc) {
-    if (!cc__chan_flow_trace_enabled()) return;
+static void cc__chan_trace_flow_slow(CCChan* ch,
+                                     const char* event,
+                                     const void* item,
+                                     int rc) {
     if (!cc__chan_recv_empty_trace_match_obj(ch)) return;
     int lf_count = ch->use_lockfree
         ? atomic_load_explicit(&ch->lfqueue_count, memory_order_relaxed)
@@ -670,6 +669,19 @@ static inline void cc__chan_trace_flow(CCChan* ch,
             ch->closed,
             has_recv_waiters,
             has_send_waiters);
+}
+
+/* Callsite-level gate: keep the hot path down to a cached atomic load + a
+ * likely-not-taken branch.  The payload (object-filter check + fprintf) is
+ * out-of-line so the compiler doesn't have to reason about the large body
+ * when deciding whether to inline cc_chan_send/recv hot paths. */
+static inline void cc__chan_trace_flow(CCChan* ch,
+                                       const char* event,
+                                       const void* item,
+                                       int rc) {
+    if (__builtin_expect(cc__chan_flow_trace_enabled(), 0)) {
+        cc__chan_trace_flow_slow(ch, event, item, rc);
+    }
 }
 
 int cc__chan_debug_req_wake_match(void* ch_obj) {
