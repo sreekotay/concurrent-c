@@ -1522,6 +1522,23 @@ static inline void cc__chan_post_lockfree_enqueue_signal_receivers(CCChan* ch,
             cc_socket_signal_signal(ch->recv_signal);
         return;
     }
+    /* Wake coalescing: when fiber-only receivers are parked and our wake
+     * quota is already in flight (default target=1 -- that receiver is
+     * expected to drain the queue before re-parking), skip the mutex.  A
+     * later send arriving after the consumer has drained+re-parked will
+     * see the inflight counter drop and reissue the wake.  Thread waiters
+     * don't participate in the inflight accounting so we still take the
+     * lock when any pthread cond receiver is present. */
+    if (fiber_waiters && !thread_waiters) {
+        int inflight = atomic_load_explicit(&ch->recv_wake_inflight, memory_order_acquire);
+        int target = cc__chan_recv_wake_target();
+        if (inflight >= target) {
+            if (ch->recv_signal)
+                cc_socket_signal_signal(ch->recv_signal);
+            (void)trace_event; /* no lock taken => no tracing event emitted */
+            return;
+        }
+    }
     cc_chan_lock(ch);
     if (fiber_waiters || atomic_load_explicit(&ch->has_recv_waiters, memory_order_acquire)) {
         int wake_budget = cc__chan_recv_wake_budget(ch);

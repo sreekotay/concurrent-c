@@ -1,0 +1,68 @@
+/* Not a smoke test -- a targeted micro-benchmark that isolates the
+ * V2 scheduler warm-up cost from steady-state throughput.
+ *
+ * Workload shape (mirrors the redis_hybrid pattern):
+ *   1. Spawn the worker pool via the first fiber submission.
+ *   2. Measure the latency of a single fiber round-trip (cold: first
+ *      first-wake syscall chain kicks in).
+ *   3. Measure the same round-trip in a tight loop (steady-state: queue
+ *      stays non-empty, producers short-circuit on idle_workers==0).
+ *   4. Spawn a burst of N fibers from a cold worker pool and measure
+ *      wall time until all complete (warm-up-dominated).
+ *
+ * This lets us quantify what fraction of a redis-benchmark short run
+ * (~100ms) is lost to scheduler cold-start, and provides a rerun target
+ * for any warm-up optimisations.
+ */
+
+#include <ccc/cc_sched.cch>
+#include <stdio.h>
+#include <stdint.h>
+#include <time.h>
+
+static inline uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void* noop_fn(void* arg) { return arg; }
+
+int main(void) {
+    uint64_t t0 = now_ns();
+
+    /* Cold: first spawn forces sched_v2_ensure_init + first-wake chain. */
+    CCTask first = cc_fiber_spawn_task(noop_fn, (void*)1);
+    (void)cc_block_on_intptr(first);
+    uint64_t t_first = now_ns();
+
+    /* Warm round-trips, one at a time. */
+    const int warm_iters = 1000;
+    uint64_t warm_start = now_ns();
+    for (int i = 0; i < warm_iters; i++) {
+        CCTask t = cc_fiber_spawn_task(noop_fn, (void*)(intptr_t)i);
+        (void)cc_block_on_intptr(t);
+    }
+    uint64_t warm_end = now_ns();
+
+    /* Burst: 50 fibers spawned back-to-back, then join all. Approximates
+     * the 50-client redis-benchmark connect storm. */
+    const int burst_n = 50;
+    CCTask bursts[50];
+    uint64_t burst_start = now_ns();
+    for (int i = 0; i < burst_n; i++) {
+        bursts[i] = cc_fiber_spawn_task(noop_fn, (void*)(intptr_t)i);
+    }
+    for (int i = 0; i < burst_n; i++) {
+        (void)cc_block_on_intptr(bursts[i]);
+    }
+    uint64_t burst_end = now_ns();
+
+    printf("v2-warmup cold_first_spawn_us=%.3f warm_roundtrip_us=%.3f "
+           "burst_total_us=%.3f burst_per_fiber_us=%.3f\n",
+           (double)(t_first - t0) / 1000.0,
+           (double)(warm_end - warm_start) / (double)warm_iters / 1000.0,
+           (double)(burst_end - burst_start) / 1000.0,
+           (double)(burst_end - burst_start) / (double)burst_n / 1000.0);
+    return 0;
+}
