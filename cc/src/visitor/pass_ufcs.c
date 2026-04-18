@@ -302,15 +302,45 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
         if (rs >= re) continue;
 
         struct CC__UFCSSpan sp;
+        int have_span = 0;
+        struct CC__UFCSSpan lax_sp;
+        int have_lax = 0;
         if (nodes[i].col_start > 0 && nodes[i].col_end > 0 && nodes[i].line_end > 0) {
             size_t sep_pos = cc__offset_of_line_col_1based(cur, cur_len, nodes[i].line_start, nodes[i].col_start);
             size_t end_pos = cc__offset_of_line_col_1based(cur, cur_len, nodes[i].line_end, nodes[i].col_end);
-            if (!cc__span_from_anchor_and_end(cur, rs, sep_pos, end_pos, &sp))
-                continue;
-        } else {
-            if (!cc__find_ufcs_span_in_range(cur, rs, re, nodes[i].method, nodes[i].occurrence_1based, &sp))
-                continue;
+            if (cc__span_from_anchor_and_end(cur, rs, sep_pos, end_pos, &sp)) {
+                have_span = 1;
+            } else if (sep_pos >= rs && sep_pos < end_pos && end_pos <= cur_len) {
+                /* Preserve the legacy lax-anchor span (receiver scan + TCC end) as a
+                   last-resort fallback: TCC occasionally reports col_start past the
+                   true UFCS separator (e.g., points to the method identifier or to
+                   the outer macro's closing paren for macro-arg UFCS). Range-based
+                   method lookup handles most of those; keep lax as a safety net for
+                   rarer cases where line numbers are also off. */
+                lax_sp.start = cc__scan_receiver_start_left(cur, rs, sep_pos);
+                lax_sp.end = end_pos;
+                if (lax_sp.start < lax_sp.end) have_lax = 1;
+            }
         }
+        /* Fall back to range-based search by method name if the anchor-based
+           resolver rejected the TCC-reported col_start/col_end. This is the
+           primary path for UFCS calls inside macro-argument contexts like
+           assert(obj->m() == 0), where TCC attributes the call to the outer
+           macro's closing paren rather than the inner method separator. */
+        if (!have_span) {
+            if (cc__find_ufcs_span_in_range(cur, rs, re, nodes[i].method, nodes[i].occurrence_1based, &sp)) {
+                have_span = 1;
+            }
+        }
+        /* Last resort: use the lax-anchor span computed above. The line-based
+           rewriter (cc_ufcs_rewrite_line_full) will verify a UFCS operator is
+           present in the span and return NO_MATCH silently if not, so a slightly
+           too-wide span here cannot corrupt output. */
+        if (!have_span && have_lax) {
+            sp = lax_sp;
+            have_span = 1;
+        }
+        if (!have_span) continue;
         if (sp.end > cur_len || sp.start >= sp.end) continue;
 
         /* Extend span to include chained UFCS segments like ".foo(...).bar(...)" */
@@ -532,21 +562,35 @@ static int cc__span_from_anchor_and_end(const char* s,
                                        size_t end_pos_excl,
                                        struct CC__UFCSSpan* out_span) {
     size_t actual_sep_pos = sep_pos;
+    int resolved = 0;
     if (!s || !out_span) return 0;
     if (sep_pos < range_start) return 0;
     if (end_pos_excl <= sep_pos) return 0;
-    if (!(s[actual_sep_pos] == '.' ||
-          (actual_sep_pos + 1 < end_pos_excl && s[actual_sep_pos] == '-' && s[actual_sep_pos + 1] == '>'))) {
+    if (s[actual_sep_pos] == '.') {
+        resolved = 1;
+    } else if (actual_sep_pos + 1 < end_pos_excl &&
+               s[actual_sep_pos] == '-' && s[actual_sep_pos + 1] == '>') {
+        resolved = 1;
+    } else {
+        /* TCC sometimes reports a column past the actual UFCS separator — e.g.,
+           it points at the method identifier, the closing paren of the call,
+           or (for calls inside macro expansions such as assert(obj->m() == 0))
+           the closing paren of the macro invocation itself. Scan back conservatively
+           to find a real `.`/`->` UFCS separator. If we cannot prove one is present,
+           report failure so the caller can try range-based resolution instead. */
         size_t p = actual_sep_pos;
         while (p > range_start && isspace((unsigned char)s[p - 1])) p--;
         while (p > range_start && cc__is_ident_char_char(s[p - 1])) p--;
         while (p > range_start && isspace((unsigned char)s[p - 1])) p--;
         if (p > range_start && s[p - 1] == '.') {
             actual_sep_pos = p - 1;
+            resolved = 1;
         } else if (p > range_start + 1 && s[p - 2] == '-' && s[p - 1] == '>') {
             actual_sep_pos = p - 2;
+            resolved = 1;
         }
     }
+    if (!resolved) return 0;
     out_span->start = cc__scan_receiver_start_left(s, range_start, actual_sep_pos);
     out_span->end = end_pos_excl;
     return out_span->start < out_span->end;

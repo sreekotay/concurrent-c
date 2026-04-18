@@ -197,6 +197,13 @@ int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
     return cc_nursery_spawnhybrid_async(n, cc_async_closure0_start_v2(c));
 }
 
+void* cc_closure0_call(CCClosure0 c) {
+    if (!c.fn) return NULL;
+    void* r = c.fn(c.env);
+    if (c.drop) c.drop(c.env);
+    return r;
+}
+
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0) {
     if (!c.fn) return NULL;
     void* r = c.fn(c.env, arg0);

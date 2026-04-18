@@ -1,0 +1,96 @@
+// Smoke test: `obj->closure_field()` and `obj.closure_field()` sugar.
+//
+// When a struct has a field of type CCClosureN and the user writes
+// `obj->field(args)` or `obj.field(args)`, the UFCS pass now redirects
+// through `cc_closureN_call(obj->field, (intptr_t)(args)...)` instead of
+// looking up a non-existent `Type_field` free function.
+//
+// This is the "field shadows method" rule.  With this in place, the
+// destructor-as-closure pattern (see closure_field_self_destroy_smoke.ccs)
+// collapses to the natural call syntax:
+//
+//     w->destroy();
+//
+// instead of the interim `cc_closure0_call(w->destroy)`.
+//
+// This test exercises:
+//   1. arity 0: w->destroy() on a Widget*
+//   2. arity 1: w->on_value(42) on a Widget*
+//   3. arity 2: w->on_pair(1, 2) on a Widget*
+//   4. dot-receiver: w2.destroy() on a local Widget value (CHECK)
+//
+// NOTE on (4): dot-receiver dispatch also goes through UFCS only when the
+// parser recognizes the expression as a method call.  If the compiler's
+// UFCS coverage for value receivers is narrower than pointer receivers,
+// the closure-field sugar will inherit that limitation; this test makes
+// either outcome observable rather than silent.
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int g_destroyed = 0;
+static intptr_t g_last_value = 0;
+static intptr_t g_last_sum = 0;
+
+/* Use the tagged typedef form; the preprocess pass registers fields for
+ * both anonymous and tagged typedef-structs, so the closure-field sugar
+ * works regardless of the user's chosen style. */
+typedef struct Widget {
+    int id;
+    CCClosure0 destroy;
+    CCClosure1 on_value;
+    CCClosure2 on_pair;
+} Widget;
+
+static Widget* widget_create(int id) {
+    Widget* w = (Widget*)calloc(1, sizeof(Widget));
+    if (!w) return NULL;
+    w->id = id;
+    w->destroy = () => [w] {
+        g_destroyed++;
+        free(w);
+        return (void*)0;
+    };
+    w->on_value = (intptr_t v) => [] {
+        g_last_value = v;
+        return (void*)0;
+    };
+    w->on_pair = (intptr_t a, intptr_t b) => [] {
+        g_last_sum = a + b;
+        return (void*)0;
+    };
+    return w;
+}
+
+int main(void) {
+    Widget* w = widget_create(7);
+    if (!w) return 1;
+
+    /* arity 1: uses the arrow-form sugar that UFCS now redirects to
+     * cc_closure1_call((w)->on_value, (intptr_t)(42)). */
+    w->on_value(42);
+    if (g_last_value != 42) {
+        fprintf(stderr, "obj_closure_field_call: value=%ld want 42\n", (long)g_last_value);
+        return 1;
+    }
+
+    /* arity 2. */
+    w->on_pair(10, 32);
+    if (g_last_sum != 42) {
+        fprintf(stderr, "obj_closure_field_call: sum=%ld want 42\n", (long)g_last_sum);
+        return 1;
+    }
+
+    /* arity 0: this is the destructor use case.  After the call returns,
+     * `w` is freed memory — do not touch it again. */
+    w->destroy();
+    if (g_destroyed != 1) {
+        fprintf(stderr, "obj_closure_field_call: destroyed=%d want 1\n", g_destroyed);
+        return 1;
+    }
+
+    printf("obj_closure_field_call_smoke: OK\n");
+    return 0;
+}

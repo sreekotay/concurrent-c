@@ -3121,6 +3121,14 @@ static void cc__collect_generic_ufcs_types(const char* src,
             size_t j = cc_skip_ws_and_comments(src, n, i + 7);
             if (j + 5 <= n && memcmp(src + j, "struct", 6) == 0 && !cc_is_ident_char(src[j + 6])) {
                 size_t body_l = cc_skip_ws_and_comments(src, n, j + 6);
+                /* Skip an optional struct tag between "struct" and "{" so
+                 * `typedef struct Foo { ... } Foo;` registers its fields the
+                 * same way the anonymous `typedef struct { ... } Foo;` does. */
+                if (body_l < n && cc_is_ident_start(src[body_l])) {
+                    size_t tag_end = body_l;
+                    while (tag_end < n && cc_is_ident_char(src[tag_end])) tag_end++;
+                    body_l = cc_skip_ws_and_comments(src, n, tag_end);
+                }
                 size_t body_r = 0;
                 if (body_l < n && src[body_l] == '{' && cc_find_matching_brace(src, n, body_l, &body_r)) {
                     size_t name_pos = cc_skip_ws_and_comments(src, n, body_r + 1);
@@ -3529,15 +3537,11 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
                         strcmp(recv_type_base, "CCCommand*") == 0);
         file_like = (strcmp(recv_type_base, "CCFile") == 0 ||
                      strcmp(recv_type_base, "CCFile*") == 0);
-        if (strcmp(recv_type_base, "CCArena") == 0 ||
-            strcmp(recv_type_base, "CCArena*") == 0) {
-            arena_like = (strcmp(method_name, "free") == 0 ||
-                          strcmp(method_name, "destroy") == 0 ||
-                          strcmp(method_name, "detach") == 0 ||
-                          strcmp(method_name, "reset") == 0 ||
-                          strcmp(method_name, "checkpoint") == 0 ||
-                          strcmp(method_name, "remaining") == 0);
-        }
+        /* CCArena UFCS is fully owned by its @comptime hook (cc_arena_lower_c).
+           We still tag arena_like for the gate below so its calls are skipped
+           by this text pass and lowered by the AST/text-fallback pipeline. */
+        arena_like = (strcmp(recv_type_base, "CCArena") == 0 ||
+                      strcmp(recv_type_base, "CCArena*") == 0);
         string_like = (strcmp(recv_type_base, "CCString") == 0 ||
                        strcmp(recv_type_base, "CCString*") == 0);
         nursery_like = (strcmp(recv_type_base, "CCNursery") == 0 ||
@@ -3562,17 +3566,10 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             continue;
         }
         if (nursery_like) {
-            if (!(strcmp(method_name, "wait") == 0 ||
-                  strcmp(method_name, "free") == 0 ||
-                  strcmp(method_name, "cancel") == 0 ||
-                  strcmp(method_name, "destroy") == 0 ||
-                  strcmp(method_name, "close_on") == 0)) {
-                i++;
-                continue;
-            }
-            if (strcmp(method_name, "close_on") == 0) {
-                strcpy(method_name, "add_closing_tx");
-            }
+            /* Nursery UFCS has a registered @comptime hook (cc_nursery_lower_c);
+               let the AST/text-fallback pipeline dispatch any method. */
+            i++;
+            continue;
         }
         if (chan_tx || chan_rx) {
             /* Channel UFCS now stays alive for the parser/TCC + later type-owned path. */

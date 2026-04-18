@@ -3176,6 +3176,14 @@ static void cc__collect_ufcs_field_and_var_types(const char* src, size_t n) {
             size_t j = cc__skip_ws_codegen(src, n, i + 7);
             if (j + 6 < n && memcmp(src + j, "struct", 6) == 0 && !isalnum((unsigned char)src[j + 6]) && src[j + 6] != '_') {
                 size_t body_l = cc__skip_ws_codegen(src, n, j + 6);
+                /* Skip an optional struct tag identifier before the `{` so
+                 * tagged typedefs (e.g. `typedef struct Foo { ... } Foo;`)
+                 * register their fields alongside the anonymous form. */
+                if (body_l < n && (isalpha((unsigned char)src[body_l]) || src[body_l] == '_')) {
+                    size_t tag_end = body_l;
+                    while (tag_end < n && (isalnum((unsigned char)src[tag_end]) || src[tag_end] == '_')) tag_end++;
+                    body_l = cc__skip_ws_codegen(src, n, tag_end);
+                }
                 size_t body_r = 0;
                 if (body_l < n && src[body_l] == '{' && cc__find_matching_brace_codegen(src, n, body_l, &body_r)) {
                     size_t name_pos = cc__skip_ws_codegen(src, n, body_r + 1);

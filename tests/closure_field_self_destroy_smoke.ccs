@@ -1,0 +1,152 @@
+// Smoke test: closure stored as a struct field, composed at creation,
+// carrying the cleanup sequence for the enclosing object.
+//
+// Motivating problem (see redis_hybrid.ccs / redis_conn_release_request):
+// a heap object owns multiple resources whose teardown has a strict LIFO
+// ordering constraint.  Today the ordering lives in a hand-written
+// `release()` function that callers must remember to invoke; reordering
+// it (or calling the raw primitives by hand) produces UAF.
+//
+// The pattern under test: the constructor composes a CCClosure0 at
+// acquire-time that captures every resource the object owns, with the
+// tear-down statements already in the correct order.  The "destroy
+// method" just invokes that closure — no ordering logic in the call
+// site.  Subsequent edits to the acquire sequence force the author to
+// update the exactly-colocated release sequence.
+//
+// ----- STATE OF SUPPORT UNDER CURRENT COMPILER -----
+//
+// Works today:
+//   * CCClosure0/1/2 as struct fields                           (this test)
+//   * Closure literal assigned to a field at construction       (this test)
+//   * `obj->field()` sugar, dispatched through UFCS to
+//     cc_closureN_call((obj)->field, (intptr_t)(args)...)       (this test)
+//
+// Sibling test `obj_closure_field_call_smoke.ccs` exercises all three
+// arities directly; this test leans on the sugar for the destructor
+// (arity 0) use case and verifies it composes with an arena-pool-shaped
+// ownership graph.
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int g_destroyed_count = 0;
+static int g_pool_returns = 0;
+
+/* Tiny stand-in for CCArenaPool — just enough to exercise the "capture
+ * pool + slot" shape that redis_hybrid's req_pool uses. */
+typedef struct Pool {
+    int live;
+    void* slots[8];
+} Pool;
+
+static void* pool_alloc(Pool* p) {
+    if (p->live >= 8) return NULL;
+    void* slot = calloc(1, 256);
+    if (!slot) return NULL;
+    p->slots[p->live++] = slot;
+    return slot;
+}
+
+static void pool_free(Pool* p, void* slot) {
+    for (int i = 0; i < p->live; ++i) {
+        if (p->slots[i] == slot) {
+            p->slots[i] = p->slots[p->live - 1];
+            p->live--;
+            break;
+        }
+    }
+    free(slot);
+    g_pool_returns++;
+}
+
+typedef struct Widget {
+    int value;
+    /* Cleanup sequence captured at creation time.  The body lists the
+     * teardown statements in the correct order, colocated with the
+     * acquire sequence that populated them. */
+    CCClosure0 destroy;
+} Widget;
+
+static Widget* widget_create(Pool* pool, int value) {
+    void* slot = pool_alloc(pool);
+    if (!slot) return NULL;
+    Widget* w = (Widget*)slot;
+    w->value = value;
+
+    /* Compose the destructor here, next to the acquisitions.  Capturing
+     * pool+slot means the closure environment outlives the Widget's
+     * direct field reads (which is important: after pool_free, `w` is
+     * freed memory, so the body must not touch w->* after that call). */
+    w->destroy = () => [w, pool, slot] {
+        g_destroyed_count++;
+        /* In the redis_hybrid case this is where the body would run the
+         * LIFO teardown: arena.free(); pool_free(&conn->req_pool, req);
+         * redis_conn_drop(conn); — exactly the sequence we hand-coded
+         * into redis_conn_release_request. */
+        (void)w;
+        pool_free(pool, slot);
+        return (void*)0;
+    };
+    return w;
+}
+
+/* The "method": dispatch the stored closure via the UFCS closure-field
+ * sugar.  Zero ordering logic here — the closure body is the single
+ * source of truth for teardown.
+ *
+ * Under the hood this lowers to `cc_closure0_call((w)->destroy)`, which
+ * makes a by-value copy of the CCClosure0 triple before invoking.  That
+ * copy is what keeps this safe: the closure body frees the slot holding
+ * `w`, so a re-read of w->destroy after the call would be UAF, but the
+ * invocation only ever reads the local copy. */
+static void widget_release(Widget* w) {
+    if (!w) return;
+    w->destroy();
+}
+
+int main(void) {
+    Pool pool = {0};
+
+    Widget* a = widget_create(&pool, 10);
+    Widget* b = widget_create(&pool, 20);
+    Widget* c = widget_create(&pool, 30);
+    if (!a || !b || !c) {
+        fprintf(stderr, "closure_field_self_destroy: creation failed\n");
+        return 1;
+    }
+
+    if (a->value != 10 || b->value != 20 || c->value != 30) {
+        fprintf(stderr, "closure_field_self_destroy: field read mismatch\n");
+        return 1;
+    }
+    if (pool.live != 3) {
+        fprintf(stderr, "closure_field_self_destroy: live=%d want 3\n", pool.live);
+        return 1;
+    }
+
+    widget_release(a);
+    widget_release(b);
+    widget_release(c);
+
+    if (g_destroyed_count != 3) {
+        fprintf(stderr, "closure_field_self_destroy: destroyed=%d want 3\n",
+                g_destroyed_count);
+        return 1;
+    }
+    if (g_pool_returns != 3) {
+        fprintf(stderr, "closure_field_self_destroy: pool_returns=%d want 3\n",
+                g_pool_returns);
+        return 1;
+    }
+    if (pool.live != 0) {
+        fprintf(stderr, "closure_field_self_destroy: leaked slots=%d\n", pool.live);
+        return 1;
+    }
+
+    printf("closure_field_self_destroy_smoke: OK\n");
+    return 0;
+}
