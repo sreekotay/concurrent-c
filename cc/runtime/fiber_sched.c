@@ -77,33 +77,6 @@ int cc__chan_debug_is_open(void* ch_obj);
 #include <sys/mman.h>
 #include <unistd.h>
 
-static size_t cc_page_size(void) {
-    static size_t ps = 0;
-    if (!ps) ps = (size_t)sysconf(_SC_PAGESIZE);
-    return ps;
-}
-
-static void* cc_guarded_alloc(size_t size, void* allocator_data) {
-    (void)allocator_data;
-    size_t pg = cc_page_size();
-    size_t total = size + pg;
-    void* ptr = mmap(NULL, total, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (ptr == MAP_FAILED) return NULL;
-    if (mprotect(ptr, pg, PROT_NONE) != 0) {
-        munmap(ptr, total);
-        return NULL;
-    }
-    return (char*)ptr + pg;
-}
-
-static void cc_guarded_dealloc(void* ptr, size_t size, void* allocator_data) {
-    (void)allocator_data;
-    size_t pg = cc_page_size();
-    void* real = (char*)ptr - pg;
-    munmap(real, size + pg);
-}
-
 /* ============================================================================
 * CPU pause for spin loops
 * ============================================================================ */
@@ -215,22 +188,6 @@ void cc__fiber_join_help_stats(uint64_t* out_attempts, uint64_t* out_hits) {
     }
 }
 
-static inline int cc_join_help_enabled(void) {
-    int mode = atomic_load_explicit(&g_cc_join_help_mode, memory_order_acquire);
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_JOIN_HELP");
-    mode = (!env || env[0] != '0') ? 1 : 0;
-    int expected = -1;
-    if (!atomic_compare_exchange_strong_explicit(&g_cc_join_help_mode,
-                                                 &expected,
-                                                 mode,
-                                                 memory_order_release,
-                                                 memory_order_acquire)) {
-        mode = atomic_load_explicit(&g_cc_join_help_mode, memory_order_acquire);
-    }
-    return mode;
-}
-
 
 void cc_fiber_dump_timing(void) {
 }
@@ -305,46 +262,6 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 
 static _Atomic int g_spin_fast_iters = -1;   /* -1 = not initialized */
 static _Atomic int g_spin_yield_iters = -1;
-
-static int get_spin_fast_iters(void) {
-    int val = atomic_load_explicit(&g_spin_fast_iters, memory_order_acquire);
-    if (val < 0) {
-        const char* env = getenv("CC_SPIN_FAST_ITERS");
-        int new_val = env ? atoi(env) : SPIN_FAST_ITERS_DEFAULT;
-        if (new_val < 0) new_val = SPIN_FAST_ITERS_DEFAULT;
-        /* Use compare-and-swap to ensure only one thread initializes */
-        int expected = -1;
-        if (atomic_compare_exchange_strong_explicit(&g_spin_fast_iters, &expected, new_val,
-                                                    memory_order_release,
-                                                    memory_order_acquire)) {
-            val = new_val;
-        } else {
-            /* Another thread initialized it, use their value */
-            val = atomic_load_explicit(&g_spin_fast_iters, memory_order_acquire);
-        }
-    }
-    return val;
-}
-
-static int get_spin_yield_iters(void) {
-    int val = atomic_load_explicit(&g_spin_yield_iters, memory_order_acquire);
-    if (val < 0) {
-        const char* env = getenv("CC_SPIN_YIELD_ITERS");
-        int new_val = env ? atoi(env) : SPIN_YIELD_ITERS_DEFAULT;
-        if (new_val < 0) new_val = SPIN_YIELD_ITERS_DEFAULT;
-        /* Use compare-and-swap to ensure only one thread initializes */
-        int expected = -1;
-        if (atomic_compare_exchange_strong_explicit(&g_spin_yield_iters, &expected, new_val,
-                                                    memory_order_release,
-                                                    memory_order_acquire)) {
-            val = new_val;
-        } else {
-            /* Another thread initialized it, use their value */
-            val = atomic_load_explicit(&g_spin_yield_iters, memory_order_acquire);
-        }
-    }
-    return val;
-}
 
 /* Backward compatibility macros - used in hot paths, cached after first call */
 #define SPIN_FAST_ITERS get_spin_fast_iters()
@@ -492,18 +409,6 @@ typedef struct {
     uint64_t generation;
 } runnable_ref;
 
-static inline int cc__fiber_deadlock_suppressed(const fiber_task* f) {
-    return f && f->deadlock_suppress_depth > 0;
-}
-
-static inline int cc__fiber_external_wait_active(const fiber_task* f) {
-    return f && f->external_wait_depth > 0;
-}
-
-static inline int cc__fiber_external_wait_scoped(const fiber_task* f) {
-    return f && f->external_wait_scoped;
-}
-
 typedef struct {
     fiber_task* _Atomic fiber;
     _Atomic uint64_t generation;
@@ -513,58 +418,6 @@ typedef struct fiber_overflow_node {
     runnable_ref ref;
     struct fiber_overflow_node* next;
 } fiber_overflow_node;
-
-static inline runnable_ref runnable_ref_null(void) {
-    runnable_ref ref = {0};
-    return ref;
-}
-
-static inline runnable_ref runnable_ref_snapshot(fiber_task* f) {
-    runnable_ref ref = {
-        .fiber = f,
-        .generation = atomic_load_explicit(&f->generation, memory_order_relaxed),
-    };
-    return ref;
-}
-
-static inline int runnable_ref_matches_current(runnable_ref ref) {
-    if (!ref.fiber) return 0;
-    return atomic_load_explicit(&ref.fiber->generation, memory_order_acquire) == ref.generation;
-}
-
-static inline runnable_ref runnable_ref_validate(runnable_ref ref) {
-    return runnable_ref_matches_current(ref) ? ref : runnable_ref_null();
-}
-
-static inline void runnable_slot_publish(runnable_slot* slot, runnable_ref ref) {
-    atomic_store_explicit(&slot->generation, ref.generation, memory_order_relaxed);
-    atomic_store_explicit(&slot->fiber, ref.fiber, memory_order_release);
-}
-
-static inline fiber_task* runnable_slot_load_fiber(runnable_slot* slot) {
-    return atomic_load_explicit(&slot->fiber, memory_order_acquire);
-}
-
-static inline runnable_ref runnable_slot_snapshot_and_clear(runnable_slot* slot, fiber_task* f) {
-    runnable_ref ref = {
-        .fiber = f,
-        .generation = atomic_load_explicit(&slot->generation, memory_order_relaxed),
-    };
-    atomic_store_explicit(&slot->fiber, NULL, memory_order_relaxed);
-    atomic_store_explicit(&slot->generation, 0, memory_order_relaxed);
-    return ref;
-}
-
-static inline runnable_ref runnable_slot_take_exchange(runnable_slot* slot) {
-    fiber_task* f = atomic_exchange_explicit(&slot->fiber, NULL, memory_order_acquire);
-    if (!f) return runnable_ref_null();
-    runnable_ref ref = {
-        .fiber = f,
-        .generation = atomic_load_explicit(&slot->generation, memory_order_relaxed),
-    };
-    atomic_store_explicit(&slot->generation, 0, memory_order_relaxed);
-    return ref;
-}
 
 typedef enum {
     CC_WL_ACTIVE = 0,
@@ -576,142 +429,7 @@ typedef enum {
 
 /* Optional spec assertion mode for transition/enqueue legality checks.
 * Enable with CC_V3_SPEC_ASSERT=1 when auditing §9/§10 linearization points. */
-static inline int cc_v3_spec_assert_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char* v = getenv("CC_V3_SPEC_ASSERT");
-        enabled = (v && v[0] == '1') ? 1 : 0;
-    }
-    return enabled;
-}
-
-static inline void cc_v3_assert_enqueue_runnable(fiber_task* f, const char* queue_name) {
-    if (!cc_v3_spec_assert_enabled() || !f) return;
-    int64_t ctrl = atomic_load_explicit(&f->control, memory_order_acquire);
-    if (ctrl != CTRL_QUEUED) {
-        fprintf(stderr,
-                "CC_V3_SPEC_ASSERT: enqueue_non_runnable queue=%s fiber=%lu control=%lld\n",
-                queue_name,
-                (unsigned long)f->fiber_id,
-                (long long)ctrl);
-        abort();
-    }
-}
-
-static inline void cc_v3_assert_control_is(fiber_task* f, int64_t expected_ctrl, const char* edge_name) {
-    if (!cc_v3_spec_assert_enabled() || !f) return;
-    int64_t cur = atomic_load_explicit(&f->control, memory_order_acquire);
-    if (cur != expected_ctrl) {
-        fprintf(stderr,
-                "CC_V3_SPEC_ASSERT: transition_mismatch edge=%s fiber=%lu expected=%lld actual=%lld\n",
-                edge_name,
-                (unsigned long)f->fiber_id,
-                (long long)expected_ctrl,
-                (long long)cur);
-        abort();
-    }
-}
-
-static inline void cc_v3_assert_matrix_row(fiber_task* f, const char* row_name, int predicate) {
-    if (!cc_v3_spec_assert_enabled() || !f) return;
-    if (predicate) return;
-    fprintf(stderr,
-            "CC_V3_SPEC_ASSERT: matrix_row_violation row=%s fiber=%lu\n",
-            row_name ? row_name : "(unknown)",
-            (unsigned long)f->fiber_id);
-    abort();
-}
-
-static inline int cc_v3_worker_lifecycle_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char* v = getenv("CC_V3_WORKER_LIFECYCLE_ASSERT");
-        enabled = (v && v[0] == '1') ? 1 : 0;
-    }
-    return enabled;
-}
-
 static inline int64_t cc_sched_pressure_add(int64_t delta);
-
-static inline const char* cc_v3_worker_lifecycle_name(cc_worker_lifecycle st) {
-    switch (st) {
-        case CC_WL_ACTIVE: return "ACTIVE";
-        case CC_WL_IDLE_SPIN: return "IDLE_SPIN";
-        case CC_WL_SLEEP: return "SLEEP";
-        case CC_WL_DRAINING: return "DRAINING";
-        case CC_WL_DEAD: return "DEAD";
-        default: return "UNKNOWN";
-    }
-}
-
-static inline const char* cc__last_worker_src_name(unsigned char src) {
-    switch (src) {
-        case 1: return "run";
-        case 2: return "affinity";
-        case 3: return "chan_partner";
-        default: return "none";
-    }
-}
-
-static inline const char* cc__enqueue_src_name(int src) {
-    switch (src) {
-        case 1: return "yield";
-        case 2: return "spawn";
-        case 3: return "park_abort_pending";
-        case 4: return "park_abort_flag";
-        case 5: return "park_abort_cas";
-        case 6: return "park_self_unpark";
-        case 7: return "park_post_flag";
-        case 8: return "unpark";
-        case 9: return "commit_park_abort";
-        default: return "none";
-    }
-}
-
-static inline int cc_trace_nw_spawn_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
-
-static inline int cc_trace_chan_wake_enabled_sched(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
-
-static inline int cc_trace_spawn_run_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
-
-static inline int cc_trace_fiber_migrate_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
-
-static inline uint64_t cc_trace_fiber_migrate_limit(void) {
-    return 0;
-}
-
-static inline const char* cc__spawn_publish_route_name(unsigned char route) {
-    switch (route) {
-        case 1: return "local";
-        case 2: return "inbox";
-        case 3: return "global";
-        default: return "none";
-    }
-}
 
 static inline int cc_nonworker_spawn_group_enabled(void) {
     static int enabled = -1;
@@ -730,114 +448,6 @@ static inline int cc_nonworker_keep_sleeping_target_enabled(void) {
     return enabled;
 }
 
-static inline int cc_v3_worker_lifecycle_is_legal(cc_worker_lifecycle from, cc_worker_lifecycle to) {
-    if (from == to) return 1;
-    switch (from) {
-        case CC_WL_ACTIVE:
-            return to == CC_WL_IDLE_SPIN || to == CC_WL_SLEEP || to == CC_WL_DRAINING || to == CC_WL_DEAD;
-        case CC_WL_IDLE_SPIN:
-            return to == CC_WL_ACTIVE || to == CC_WL_SLEEP || to == CC_WL_DRAINING || to == CC_WL_DEAD;
-        case CC_WL_SLEEP:
-            return to == CC_WL_ACTIVE || to == CC_WL_IDLE_SPIN || to == CC_WL_DRAINING || to == CC_WL_DEAD;
-        case CC_WL_DRAINING:
-            return to == CC_WL_DEAD;
-        case CC_WL_DEAD:
-        default:
-            return to == CC_WL_ACTIVE || to == CC_WL_DEAD;
-    }
-}
-
-static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle next, const char* edge);
-
-
-#if CC_RUNTIME_V3 && CC_V3_DIAGNOSTICS
-static _Atomic int g_cc_v3_worker_stats_mode = -1;
-static _Atomic int g_cc_v3_worker_stats_atexit = 0;
-static _Atomic int g_cc_v3_worker_dump_mode = -1;
-static _Atomic uint64_t g_cc_v3_wm_batches = 0;
-static _Atomic uint64_t g_cc_v3_wm_seed_v3_batches = 0;
-static _Atomic uint64_t g_cc_v3_wm_local_pulls = 0;
-static _Atomic uint64_t g_cc_v3_wm_inbox_pulls = 0;
-static _Atomic uint64_t g_cc_v3_wm_global_pulls = 0;
-static _Atomic uint64_t g_cc_v3_wm_steal_inbox_pulls = 0;
-static _Atomic uint64_t g_cc_v3_wm_steal_local_pulls = 0;
-static _Atomic uint64_t g_cc_v3_wm_idle_probe_hits = 0;
-static _Atomic uint64_t g_cc_v3_wm_empty_loops = 0;
-
-static inline int cc_v3_worker_stats_enabled(void) {
-    int mode = atomic_load_explicit(&g_cc_v3_worker_stats_mode, memory_order_acquire);
-    if (mode >= 0) return mode;
-    mode = 0;
-    int expected = -1;
-    (void)atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_stats_mode,
-                                                &expected,
-                                                mode,
-                                                memory_order_release,
-                                                memory_order_acquire);
-    return atomic_load_explicit(&g_cc_v3_worker_stats_mode, memory_order_acquire);
-}
-
-static inline int cc_v3_worker_dump_enabled(void) {
-    int mode = atomic_load_explicit(&g_cc_v3_worker_dump_mode, memory_order_acquire);
-    if (mode >= 0) return mode;
-    mode = 0;
-    int expected = -1;
-    (void)atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_dump_mode,
-                                                &expected,
-                                                mode,
-                                                memory_order_release,
-                                                memory_order_acquire);
-    return atomic_load_explicit(&g_cc_v3_worker_dump_mode, memory_order_acquire);
-}
-
-static void cc_v3_dump_worker_stats(void) {
-    if (!cc_v3_worker_stats_enabled()) return;
-    uint64_t batches = atomic_load_explicit(&g_cc_v3_wm_batches, memory_order_relaxed);
-    uint64_t seed_v3 = atomic_load_explicit(&g_cc_v3_wm_seed_v3_batches, memory_order_relaxed);
-    uint64_t local = atomic_load_explicit(&g_cc_v3_wm_local_pulls, memory_order_relaxed);
-    uint64_t inbox = atomic_load_explicit(&g_cc_v3_wm_inbox_pulls, memory_order_relaxed);
-    uint64_t global = atomic_load_explicit(&g_cc_v3_wm_global_pulls, memory_order_relaxed);
-    uint64_t steal_inbox = atomic_load_explicit(&g_cc_v3_wm_steal_inbox_pulls, memory_order_relaxed);
-    uint64_t steal_local = atomic_load_explicit(&g_cc_v3_wm_steal_local_pulls, memory_order_relaxed);
-    uint64_t idle_hits = atomic_load_explicit(&g_cc_v3_wm_idle_probe_hits, memory_order_relaxed);
-    uint64_t empty = atomic_load_explicit(&g_cc_v3_wm_empty_loops, memory_order_relaxed);
-    uint64_t pulls = local + inbox + global + steal_inbox + steal_local;
-    if (batches == 0 && pulls == 0 && idle_hits == 0 && empty == 0) return;
-    fprintf(stderr,
-            "\n=== V3 WORKER MAIN STATS ===\n"
-            "batches=%llu seed_v3_batches=%llu idle_probe_hits=%llu empty_loops=%llu\n"
-            "pulls local=%llu inbox=%llu global=%llu steal_inbox=%llu steal_local=%llu total=%llu\n"
-            "pull_pct local=%.1f inbox=%.1f global=%.1f steal_inbox=%.1f steal_local=%.1f\n"
-            "============================\n\n",
-            (unsigned long long)batches,
-            (unsigned long long)seed_v3,
-            (unsigned long long)idle_hits,
-            (unsigned long long)empty,
-            (unsigned long long)local,
-            (unsigned long long)inbox,
-            (unsigned long long)global,
-            (unsigned long long)steal_inbox,
-            (unsigned long long)steal_local,
-            (unsigned long long)pulls,
-            pulls ? (100.0 * (double)local / (double)pulls) : 0.0,
-            pulls ? (100.0 * (double)inbox / (double)pulls) : 0.0,
-            pulls ? (100.0 * (double)global / (double)pulls) : 0.0,
-            pulls ? (100.0 * (double)steal_inbox / (double)pulls) : 0.0,
-            pulls ? (100.0 * (double)steal_local / (double)pulls) : 0.0);
-}
-
-static inline void cc_v3_worker_stats_maybe_init(void) {
-    if (!cc_v3_worker_stats_enabled() || !cc_v3_worker_dump_enabled()) return;
-    int expected = 0;
-    if (atomic_compare_exchange_strong_explicit(&g_cc_v3_worker_stats_atexit,
-                                                &expected,
-                                                1,
-                                                memory_order_acq_rel,
-                                                memory_order_acquire)) {
-        atexit(cc_v3_dump_worker_stats);
-    }
-}
-#endif
 
 typedef struct {
     _Atomic uint64_t spin_entries;
@@ -871,32 +481,6 @@ typedef struct {
 
 static cc_sched_io_wake_stats g_cc_sched_io_wake_stats = {0};
 
-static int cc_sched_wait_stats_enabled(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_SCHED_WAIT_STATS");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
-}
-
-static inline void cc_sched_wait_stat_inc(_Atomic uint64_t* counter) {
-    if (!cc_sched_wait_stats_enabled()) return;
-    atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
-}
-
-static int cc_sched_io_wake_stats_enabled(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_SCHED_IO_WAKE_STATS");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
-}
-
-static inline void cc_sched_io_wake_stat_inc(_Atomic uint64_t* counter) {
-    if (!cc_sched_io_wake_stats_enabled()) return;
-    atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
-}
-
 /* General-purpose V1 diagnostic-counter gate.  Mirrors the V2 sched_v2.c
  * gate.  Many g_sched.pressure_*, g_sched.promotion_count,
  * g_cc_fiber_unpark_*, g_cc_join_*, g_fibers_spawned, etc. counters used to
@@ -924,74 +508,6 @@ static int cc_sched_diag_stats_enabled(void) {
             atomic_fetch_add_explicit(&(counter), (delta), memory_order_relaxed); \
     } while (0)
 
-static void cc_sched_wait_stats_dump(void) {
-    if (!cc_sched_wait_stats_enabled()) return;
-    uint64_t spin_entries = atomic_load_explicit(&g_cc_sched_wait_stats.spin_entries, memory_order_relaxed);
-    uint64_t yield_calls = atomic_load_explicit(&g_cc_sched_wait_stats.yield_calls, memory_order_relaxed);
-    uint64_t yield_found_work = atomic_load_explicit(&g_cc_sched_wait_stats.yield_found_work, memory_order_relaxed);
-    uint64_t sleep_entries = atomic_load_explicit(&g_cc_sched_wait_stats.sleep_entries, memory_order_relaxed);
-    uint64_t sleep_wait_calls = atomic_load_explicit(&g_cc_sched_wait_stats.sleep_wait_calls, memory_order_relaxed);
-    uint64_t sleep_exits = atomic_load_explicit(&g_cc_sched_wait_stats.sleep_exits, memory_order_relaxed);
-    uint64_t wake_one_calls = atomic_load_explicit(&g_cc_sched_wait_stats.wake_one_calls, memory_order_relaxed);
-    uint64_t wake_one_with_sleepers = atomic_load_explicit(&g_cc_sched_wait_stats.wake_one_with_sleepers, memory_order_relaxed);
-    uint64_t wake_one_delivered = atomic_load_explicit(&g_cc_sched_wait_stats.wake_one_delivered, memory_order_relaxed);
-    uint64_t wake_target_calls = atomic_load_explicit(&g_cc_sched_wait_stats.wake_target_calls, memory_order_relaxed);
-    uint64_t wake_target_delivered = atomic_load_explicit(&g_cc_sched_wait_stats.wake_target_delivered, memory_order_relaxed);
-    uint64_t wake_target_skipped = atomic_load_explicit(&g_cc_sched_wait_stats.wake_target_skipped_not_sleeping, memory_order_relaxed);
-    uint64_t wake_unconditional_calls = atomic_load_explicit(&g_cc_sched_wait_stats.wake_unconditional_calls, memory_order_relaxed);
-    uint64_t wake_unconditional_delivered = atomic_load_explicit(&g_cc_sched_wait_stats.wake_unconditional_delivered, memory_order_relaxed);
-    uint64_t wake_unconditional_no_sleepers = atomic_load_explicit(&g_cc_sched_wait_stats.wake_unconditional_no_sleepers, memory_order_relaxed);
-    if (spin_entries == 0 && yield_calls == 0 && sleep_entries == 0 &&
-        wake_one_calls == 0 && wake_target_calls == 0 && wake_unconditional_calls == 0) {
-        return;
-    }
-    fprintf(stderr,
-            "\n[cc:sched_wait] spin_entries=%llu yield_calls=%llu yield_found_work=%llu "
-            "sleep_entries=%llu sleep_wait_calls=%llu sleep_exits=%llu\n"
-            "[cc:sched_wait] wake_one calls=%llu sleepers=%llu delivered=%llu "
-            "wake_target calls=%llu delivered=%llu skipped_not_sleeping=%llu "
-            "wake_unconditional calls=%llu delivered=%llu no_sleepers=%llu\n",
-            (unsigned long long)spin_entries,
-            (unsigned long long)yield_calls,
-            (unsigned long long)yield_found_work,
-            (unsigned long long)sleep_entries,
-            (unsigned long long)sleep_wait_calls,
-            (unsigned long long)sleep_exits,
-            (unsigned long long)wake_one_calls,
-            (unsigned long long)wake_one_with_sleepers,
-            (unsigned long long)wake_one_delivered,
-            (unsigned long long)wake_target_calls,
-            (unsigned long long)wake_target_delivered,
-            (unsigned long long)wake_target_skipped,
-            (unsigned long long)wake_unconditional_calls,
-            (unsigned long long)wake_unconditional_delivered,
-            (unsigned long long)wake_unconditional_no_sleepers);
-}
-
-static void cc_sched_io_wake_stats_dump(void) {
-    if (!cc_sched_io_wake_stats_enabled()) return;
-    uint64_t nonworker_global_publish = atomic_load_explicit(&g_cc_sched_io_wake_stats.nonworker_global_publish, memory_order_relaxed);
-    uint64_t nonworker_global_edge = atomic_load_explicit(&g_cc_sched_io_wake_stats.nonworker_global_edge, memory_order_relaxed);
-    uint64_t nonworker_global_wake_one = atomic_load_explicit(&g_cc_sched_io_wake_stats.nonworker_global_wake_one, memory_order_relaxed);
-    uint64_t global_pop_hits = atomic_load_explicit(&g_cc_sched_io_wake_stats.global_pop_hits, memory_order_relaxed);
-    uint64_t run_attempts = atomic_load_explicit(&g_cc_sched_io_wake_stats.run_attempts, memory_order_relaxed);
-    uint64_t run_claims = atomic_load_explicit(&g_cc_sched_io_wake_stats.run_claims, memory_order_relaxed);
-    uint64_t run_skip_stale = atomic_load_explicit(&g_cc_sched_io_wake_stats.run_skip_stale, memory_order_relaxed);
-    if (nonworker_global_publish == 0 && global_pop_hits == 0 && run_attempts == 0) {
-        return;
-    }
-    fprintf(stderr,
-            "[cc:sched_io_wake] nonworker_global publish=%llu edge=%llu wake_one=%llu "
-            "global_pop_hits=%llu run_attempts=%llu run_claims=%llu run_skip_stale=%llu\n",
-            (unsigned long long)nonworker_global_publish,
-            (unsigned long long)nonworker_global_edge,
-            (unsigned long long)nonworker_global_wake_one,
-            (unsigned long long)global_pop_hits,
-            (unsigned long long)run_attempts,
-            (unsigned long long)run_claims,
-            (unsigned long long)run_skip_stale);
-}
-
 /* ============================================================================
 * Lock-Free MPMC Queue with overflow list
 *
@@ -1013,196 +529,10 @@ typedef struct {
     _Atomic size_t overflow_count;
 } fiber_queue;
 
-static void fq_init(fiber_queue* q) {
-    memset(q->slots, 0, sizeof(q->slots));
-    atomic_store(&q->head, 0);
-    atomic_store(&q->tail, 0);
-    atomic_store(&q->nonempty_hint, 0);
-    pthread_mutex_init(&q->overflow_mu, NULL);
-    q->overflow_head = NULL;
-    q->overflow_tail = NULL;
-    atomic_store(&q->overflow_count, 0);
-}
-
 /* Try to push to the lock-free ring. Returns 0 on success, -1 if full. */
-static int fq_push_ring(fiber_queue* q, fiber_task* f) {
-    cc_v3_assert_enqueue_runnable(f, "global_ring");
-    runnable_ref ref = runnable_ref_snapshot(f);
-    int spins = 0;
-    for (int retry = 0; retry < 64; retry++) {
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
-        size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
-
-        if (tail - head >= CC_FIBER_QUEUE_INITIAL) {
-            return -1;  /* Ring full */
-        }
-
-        if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
-                                                memory_order_release,
-                                                memory_order_relaxed)) {
-            size_t idx = tail % CC_FIBER_QUEUE_INITIAL;
-            runnable_slot_publish(&q->slots[idx], ref);
-            atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
-            return 0;
-        }
-        for (int i = 0; i <= spins; i++)
-            cpu_pause();
-        spins++;
-    }
-    return -1;
-}
-
 /* Push: try ring first, fall back to overflow list. Never blocks. */
-static void fq_push_blocking(fiber_queue* q, fiber_task* f) {
-    if (fq_push_ring(q, f) == 0) return;
-    
-    /* Ring full — use overflow list with a publication snapshot. */
-    fiber_overflow_node* node = (fiber_overflow_node*)malloc(sizeof(*node));
-    if (!node) {
-        while (fq_push_ring(q, f) != 0) {
-            sched_yield();
-        }
-        return;
-    }
-    node->ref = runnable_ref_snapshot(f);
-    node->next = NULL;
-    pthread_mutex_lock(&q->overflow_mu);
-    if (q->overflow_tail) {
-        q->overflow_tail->next = node;
-    } else {
-        q->overflow_head = node;
-    }
-    q->overflow_tail = node;
-    atomic_fetch_add_explicit(&q->overflow_count, 1, memory_order_relaxed);
-    atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
-    pthread_mutex_unlock(&q->overflow_mu);
-}
-
 /* Check if queue has items (non-destructive peek) */
-static int fq_peek(fiber_queue* q) {
-    if (!atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
-        return 0;
-    }
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    if (head < tail) return 1;
-    int has_overflow = atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0;
-    if (!has_overflow) {
-        /* Same race as fq_pop: a concurrent push between our tail load and
-         * this clear would set hint=1 and we'd flip it back to 0, losing the
-         * publish.  After clearing, re-check tail/overflow with a seq_cst
-         * fence and republish if work appeared. */
-        atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
-        atomic_thread_fence(memory_order_seq_cst);
-        size_t recheck_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        if (recheck_tail > head ||
-            atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0) {
-            atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
-            return 1;
-        }
-    }
-    return has_overflow;
-}
-
 /* Pop from overflow list (caller should try ring first). */
-static runnable_ref fq_pop_overflow(fiber_queue* q) {
-    if (atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0)
-        return runnable_ref_null();
-    pthread_mutex_lock(&q->overflow_mu);
-    fiber_overflow_node* node = q->overflow_head;
-    runnable_ref ref = runnable_ref_null();
-    if (node) {
-        q->overflow_head = node->next;
-        if (!q->overflow_head) q->overflow_tail = NULL;
-        atomic_fetch_sub_explicit(&q->overflow_count, 1, memory_order_relaxed);
-        ref = node->ref;
-    }
-    pthread_mutex_unlock(&q->overflow_mu);
-    if (node) free(node);
-    return ref;
-}
-
-static runnable_ref fq_pop_overflow_live(fiber_queue* q) {
-    runnable_ref ref = fq_pop_overflow(q);
-    while (ref.fiber) {
-        ref = runnable_ref_validate(ref);
-        if (ref.fiber) return ref;
-        ref = fq_pop_overflow(q);
-    }
-    return runnable_ref_null();
-}
-
-static runnable_ref fq_pop(fiber_queue* q) {
-    if (!atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
-        return runnable_ref_null();
-    }
-    /* Try lock-free ring first */
-    for (int retry = 0; retry < 1000; retry++) {
-        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        
-        if (head >= tail) break;  /* Ring empty, try overflow */
-        
-        size_t idx = head % CC_FIBER_QUEUE_INITIAL;
-        fiber_task* f = runnable_slot_load_fiber(&q->slots[idx]);
-        
-        if (!f) {
-            /* Writer incremented tail but hasn't written slot yet.
-            * Spin-wait for the slot to be populated. */
-            for (int i = 0; i < 100; i++) {
-                cpu_pause();
-                f = runnable_slot_load_fiber(&q->slots[idx]);
-                if (f) break;
-            }
-            if (!f) continue;
-        }
-        
-        if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                memory_order_relaxed,
-                                                memory_order_relaxed)) {
-            runnable_ref ref = runnable_slot_snapshot_and_clear(&q->slots[idx], f);
-            size_t new_head = head + 1;
-            size_t cur_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-            if (new_head >= cur_tail &&
-                atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
-                /* Hint clear is racy with concurrent pushers: a push that
-                 * publishes tail+1 and stores hint=1 between our tail load
-                 * and the clear below would be reverted to 0 by us, hiding
-                 * the new fiber from peek/pop.  After clearing, re-check
-                 * tail/overflow and republish the hint if work appeared. */
-                atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
-                atomic_thread_fence(memory_order_seq_cst);
-                size_t recheck_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-                if (recheck_tail > new_head ||
-                    atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0) {
-                    atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
-                }
-            }
-            ref = runnable_ref_validate(ref);
-            if (!ref.fiber) continue;
-            return ref;
-        }
-    }
-    /* Ring empty — check overflow */
-    runnable_ref of = fq_pop_overflow_live(q);
-    if (!of.fiber) {
-        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        if (head >= tail &&
-            atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0) {
-            atomic_store_explicit(&q->nonempty_hint, 0, memory_order_release);
-            atomic_thread_fence(memory_order_seq_cst);
-            size_t recheck_tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-            if (recheck_tail > head ||
-                atomic_load_explicit(&q->overflow_count, memory_order_relaxed) > 0) {
-                atomic_store_explicit(&q->nonempty_hint, 1, memory_order_release);
-            }
-        }
-        return runnable_ref_null();
-    }
-    return of;
-}
-
 /* Global run-queue helpers (implemented after scheduler state declaration). */
 static inline int sched_global_push(fiber_task* f, int preferred_worker);
 static inline runnable_ref sched_global_pop_any(void);
@@ -1236,142 +566,11 @@ static timed_park_queue g_timed_park_queue;
 void cc__fiber_unpark(void* fiber_ptr);
 void cc__fiber_unpark_tagged(void* fiber_ptr, cc__fiber_unpark_reason reason);
 
-static void sq_init(void) {
-    pthread_mutex_init(&g_sleep_queue.mu, NULL);
-    g_sleep_queue.head = NULL;
-    atomic_store(&g_sleep_queue.count, 0);
-    pthread_mutex_init(&g_timed_park_queue.mu, NULL);
-    g_timed_park_queue.head = NULL;
-    atomic_store(&g_timed_park_queue.count, 0);
-}
-
-static void sq_destroy(void) {
-    pthread_mutex_destroy(&g_sleep_queue.mu);
-    pthread_mutex_destroy(&g_timed_park_queue.mu);
-}
-
 /* Park a fiber for sleep.  Caller must have already set f->sleep_deadline
 * and transitioned the fiber control word to CTRL_QUEUED (or similar).
 * The fiber will be resumed by sq_drain when its deadline passes. */
-static void sq_push(fiber_task* f) {
-    pthread_mutex_lock(&g_sleep_queue.mu);
-    f->next = g_sleep_queue.head;
-    g_sleep_queue.head = f;
-    atomic_fetch_add_explicit(&g_sleep_queue.count, 1, memory_order_relaxed);
-    pthread_mutex_unlock(&g_sleep_queue.mu);
-}
-
 /* Drain expired sleepers back into the run queue.
 * Returns the number of fibers woken. */
-static size_t sq_drain(void) {
-    if (atomic_load_explicit(&g_sleep_queue.count, memory_order_relaxed) == 0)
-        return 0;
-    
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    
-    pthread_mutex_lock(&g_sleep_queue.mu);
-    fiber_task** pp = &g_sleep_queue.head;
-    size_t woken = 0;
-    while (*pp) {
-        fiber_task* f = *pp;
-        if (now.tv_sec > f->sleep_deadline.tv_sec ||
-            (now.tv_sec == f->sleep_deadline.tv_sec &&
-            now.tv_nsec >= f->sleep_deadline.tv_nsec)) {
-            /* Deadline passed — remove from sleep list and enqueue */
-            *pp = f->next;
-            f->next = NULL;
-            atomic_fetch_sub_explicit(&g_sleep_queue.count, 1, memory_order_relaxed);
-            sched_global_push(f, f->last_worker_id);
-            woken++;
-        } else {
-            pp = &f->next;
-        }
-    }
-    pthread_mutex_unlock(&g_sleep_queue.mu);
-    return woken;
-}
-
-static void tpq_push(fiber_task* f) {
-    pthread_mutex_lock(&g_timed_park_queue.mu);
-    f->timer_next = g_timed_park_queue.head;
-    g_timed_park_queue.head = f;
-    atomic_fetch_add_explicit(&g_timed_park_queue.count, 1, memory_order_relaxed);
-    pthread_mutex_unlock(&g_timed_park_queue.mu);
-}
-
-static int tpq_remove_if_present(fiber_task* target) {
-    if (!target) return 0;
-    int removed = 0;
-    pthread_mutex_lock(&g_timed_park_queue.mu);
-    fiber_task** pp = &g_timed_park_queue.head;
-    while (*pp) {
-        fiber_task* f = *pp;
-        if (f == target) {
-            *pp = f->timer_next;
-            if (atomic_load_explicit(&g_timed_park_queue.count, memory_order_relaxed) > 0) {
-                atomic_fetch_sub_explicit(&g_timed_park_queue.count, 1, memory_order_relaxed);
-            }
-            f->timer_next = NULL;
-            removed = 1;
-            break;
-        }
-        pp = &f->timer_next;
-    }
-    pthread_mutex_unlock(&g_timed_park_queue.mu);
-    return removed;
-}
-
-static size_t tpq_drain(void) {
-    if (atomic_load_explicit(&g_timed_park_queue.count, memory_order_relaxed) == 0) {
-        return 0;
-    }
-
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-
-    pthread_mutex_lock(&g_timed_park_queue.mu);
-    fiber_task** pp = &g_timed_park_queue.head;
-    fiber_task* expired = NULL;
-    size_t woken = 0;
-    while (*pp) {
-        fiber_task* f = *pp;
-        int registered = atomic_load_explicit(&f->timed_park_registered, memory_order_acquire);
-        int is_expired = registered &&
-            (now.tv_sec > f->timed_park_deadline.tv_sec ||
-            (now.tv_sec == f->timed_park_deadline.tv_sec &&
-            now.tv_nsec >= f->timed_park_deadline.tv_nsec));
-        if (!registered || is_expired) {
-            *pp = f->timer_next;
-            f->timer_next = expired;
-            expired = f;
-            atomic_fetch_sub_explicit(&g_timed_park_queue.count, 1, memory_order_relaxed);
-            if (is_expired &&
-                atomic_exchange_explicit(&f->timed_park_registered, 0, memory_order_acq_rel)) {
-                atomic_store_explicit(&f->timed_park_fired, 1, memory_order_release);
-                atomic_fetch_sub_explicit(&g_total_timed_parked, 1, memory_order_relaxed);
-                if (cc__fiber_deadlock_suppressed(f)) {
-                    atomic_fetch_sub_explicit(&g_deadlock_suppressed_timed_parked, 1, memory_order_relaxed);
-                }
-                woken++;
-            }
-        } else {
-            pp = &f->timer_next;
-        }
-    }
-    pthread_mutex_unlock(&g_timed_park_queue.mu);
-
-    while (expired) {
-        fiber_task* f = expired;
-        expired = expired->timer_next;
-        f->timer_next = NULL;
-        if (atomic_load_explicit(&f->timed_park_fired, memory_order_acquire)) {
-            cc__fiber_unpark_tagged(f, CC_FIBER_UNPARK_REASON_TIMER);
-        }
-    }
-    return woken;
-}
-
 /* ============================================================================
 * Scheduler State
 * ============================================================================ */
@@ -1422,77 +621,7 @@ static int g_inbox_dump = -1;   /* -1 = not checked, 0 = disabled, 1 = enabled *
 
 
 
-static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
-    if (was_empty) *was_empty = 0;
-    cc_v3_assert_enqueue_runnable(f, "inbox");
-    runnable_ref ref = runnable_ref_snapshot(f);
-    int spins = 0;
-    for (int retry = 0; retry < 1000; retry++) {
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
-        size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
-        if (tail - head >= INBOX_QUEUE_SIZE) {
-            sched_yield();
-            continue;
-        }
-        if (atomic_compare_exchange_weak_explicit(&q->tail, &tail, tail + 1,
-                                                memory_order_release,
-                                                memory_order_relaxed)) {
-            size_t idx = tail % INBOX_QUEUE_SIZE;
-            runnable_slot_publish(&q->slots[idx], ref);
-            if (was_empty) *was_empty = (tail == head);
-            return 0;
-        }
-        for (int i = 0; i <= spins; i++)
-            cpu_pause();
-        spins++;
-    }
-    sched_yield();
-    SCHED_DIAG_STAT_INC(g_inbox_overflow);
-    return -1;
-}
-
-static int iq_peek(inbox_queue* q) {
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    return head < tail;
-}
-
 /* Number of items currently in the inbox (approximate; used for spawn pairing). */
-static inline size_t iq_depth(inbox_queue* q) {
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    return (tail > head) ? (tail - head) : 0;
-}
-
-static runnable_ref iq_pop(inbox_queue* q) {
-    for (int retry = 0; retry < 1000; retry++) {
-        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        if (head >= tail) return runnable_ref_null();
-        size_t idx = head % INBOX_QUEUE_SIZE;
-        fiber_task* f = runnable_slot_load_fiber(&q->slots[idx]);
-        if (!f) {
-            /* Writer incremented tail but hasn't written slot yet.
-            * Spin-wait for the slot to be populated. This window is very short
-            * (just a single store instruction), so we spin aggressively. */
-            for (int i = 0; i < 100; i++) {
-                cpu_pause();
-                f = runnable_slot_load_fiber(&q->slots[idx]);
-                if (f) break;
-            }
-            if (!f) continue;  /* Retry from the top */
-        }
-        if (atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                memory_order_relaxed,
-                                                memory_order_relaxed)) {
-            runnable_ref ref = runnable_ref_validate(runnable_slot_snapshot_and_clear(&q->slots[idx], f));
-            if (!ref.fiber) continue;
-            return ref;
-        }
-    }
-    return runnable_ref_null();
-}
-
 typedef struct {
     pthread_t* workers;
     size_t num_workers;
@@ -1608,18 +737,6 @@ typedef enum {
     CC_WAKE_REASON_COUNT = 6
 } cc_wake_reason;
 
-static inline const char* cc_wake_reason_name(cc_wake_reason reason) {
-    switch (reason) {
-        case CC_WAKE_REASON_SYSMON_SLEEPQ: return "sysmon_sleepq";
-        case CC_WAKE_REASON_SPAWN_GLOBAL_EDGE: return "spawn_global";
-        case CC_WAKE_REASON_SPAWN_NONGLOBAL: return "spawn_non_global";
-        case CC_WAKE_REASON_JOIN_THREAD: return "join_thread";
-        case CC_WAKE_REASON_UNPARK_GLOBAL_EDGE: return "unpark_global";
-        case CC_WAKE_REASON_UNPARK_NONGLOBAL: return "unpark_non_global";
-        default: return "unknown";
-    }
-}
-
 static inline uint64_t cc__mono_ns_sched(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1636,199 +753,7 @@ static inline uint64_t cc__mono_ns_sched(void);
 
 
 
-static inline int cc_sharded_runq_enabled(void) {
-    int mode = atomic_load_explicit(&g_sharded_runq_mode, memory_order_acquire);
-    if (mode >= 0) return mode;
-    const char* v = getenv("CC_SHARDED_RUNQ");
-    mode = (v && v[0] == '1') ? 1 : 0;
-    int expected = -1;
-    (void)atomic_compare_exchange_strong_explicit(&g_sharded_runq_mode,
-                                                &expected,
-                                                mode,
-                                                memory_order_release,
-                                                memory_order_acquire);
-    return atomic_load_explicit(&g_sharded_runq_mode, memory_order_acquire);
-}
-
-static inline size_t sched_global_queue_count(void) {
-    return g_sched.run_queue_count ? g_sched.run_queue_count : 1;
-}
-
-static inline size_t sched_primary_shard_for_worker(int worker_id) {
-    size_t n = sched_global_queue_count();
-    if (n <= 1 || worker_id < 0) return 0;
-    size_t w = (size_t)worker_id;
-    return (w * 2) % n;
-}
-
-static inline size_t sched_secondary_shard_for_worker(int worker_id) {
-    size_t n = sched_global_queue_count();
-    if (n <= 1 || worker_id < 0) return 0;
-    return (sched_primary_shard_for_worker(worker_id) + 1) % n;
-}
-
-static inline int fq_likely_empty(fiber_queue* q) {
-    if (atomic_load_explicit(&q->nonempty_hint, memory_order_acquire)) {
-        return 0;
-    }
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    if (head < tail) return 0;
-    return atomic_load_explicit(&q->overflow_count, memory_order_relaxed) == 0;
-}
-
-static inline int sched_global_push(fiber_task* f, int preferred_worker) {
-    if (!g_sched.run_queue) return 0;
-    size_t n = sched_global_queue_count();
-    size_t idx = 0;
-    if (n > 1 && preferred_worker >= 0) {
-        idx = sched_primary_shard_for_worker(preferred_worker);
-    } else if (n > 1) {
-        idx = (size_t)(atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed) % n);
-    }
-    fiber_queue* q = &g_sched.run_queue[idx];
-    int was_empty = fq_likely_empty(q);
-    fq_push_blocking(q, f);
-    return was_empty;
-}
-
-static inline void spawn_mark_global_pop(fiber_task* f) {
-    if (!f) return;
-    if (f->spawn_publish_valid &&
-        f->spawn_publish_route == (unsigned char)SPAWN_ROUTE_GLOBAL &&
-        f->spawn_publish_active0) {
-    (void)f;
-
-}
-
-}
-
-static inline runnable_ref sched_global_pop_any(void) {
-    if (!g_sched.run_queue) return runnable_ref_null();
-    size_t n = sched_global_queue_count();
-    size_t start = (size_t)atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed);
-    for (size_t i = 0; i < n; i++) {
-        size_t idx = (start + i) % n;
-        if (!atomic_load_explicit(&g_sched.run_queue[idx].nonempty_hint, memory_order_acquire)) {
-            continue;
-        }
-        runnable_ref ref = fq_pop(&g_sched.run_queue[idx]);
-        if (ref.fiber) {
-            spawn_mark_global_pop(ref.fiber);
-            return ref;
-        }
-    }
-    return runnable_ref_null();
-}
-
-static inline runnable_ref sched_global_pop_for_worker(int worker_id) {
-    if (!g_sched.run_queue) return runnable_ref_null();
-    size_t n = sched_global_queue_count();
-    if (n <= 1 || worker_id < 0) {
-        if (!atomic_load_explicit(&g_sched.run_queue[0].nonempty_hint, memory_order_acquire)) {
-            return runnable_ref_null();
-        }
-        runnable_ref ref0 = fq_pop(&g_sched.run_queue[0]);
-        if (ref0.fiber) {
-            if (ref0.fiber->enqueue_src == 8) {
-                cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
-            }
-            spawn_mark_global_pop(ref0.fiber);
-        }
-        return ref0;
-    }
-
-    size_t p = sched_primary_shard_for_worker(worker_id);
-    runnable_ref ref = runnable_ref_null();
-    if (atomic_load_explicit(&g_sched.run_queue[p].nonempty_hint, memory_order_acquire)) {
-        ref = fq_pop(&g_sched.run_queue[p]);
-    }
-    if (ref.fiber) {
-        if (ref.fiber->enqueue_src == 8) {
-            cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
-        }
-        spawn_mark_global_pop(ref.fiber);
-        return ref;
-    }
-    size_t s = sched_secondary_shard_for_worker(worker_id);
-    if (s != p) {
-        if (atomic_load_explicit(&g_sched.run_queue[s].nonempty_hint, memory_order_acquire)) {
-            ref = fq_pop(&g_sched.run_queue[s]);
-        }
-        if (ref.fiber) {
-            if (ref.fiber->enqueue_src == 8) {
-                cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
-            }
-            spawn_mark_global_pop(ref.fiber);
-            return ref;
-        }
-    }
-    size_t start = (size_t)atomic_fetch_add_explicit(&g_global_pop_rr, 1, memory_order_relaxed);
-    for (size_t i = 0; i < n; i++) {
-        size_t idx = (start + i) % n;
-        if (idx == p || idx == s) continue;
-        if (!atomic_load_explicit(&g_sched.run_queue[idx].nonempty_hint, memory_order_acquire)) {
-            continue;
-        }
-        ref = fq_pop(&g_sched.run_queue[idx]);
-        if (ref.fiber) {
-            if (ref.fiber->enqueue_src == 8) {
-                cc_sched_io_wake_stat_inc(&g_cc_sched_io_wake_stats.global_pop_hits);
-            }
-            spawn_mark_global_pop(ref.fiber);
-            return ref;
-        }
-    }
-    return runnable_ref_null();
-}
-
-static inline int sched_global_peek_any(void) {
-    if (!g_sched.run_queue) return 0;
-    size_t n = sched_global_queue_count();
-    for (size_t i = 0; i < n; i++) {
-        if (fq_peek(&g_sched.run_queue[i])) return 1;
-    }
-    return 0;
-}
-
 /* Cheap global-work hint probe: checks shard nonempty hints only. */
-static inline int sched_global_has_hint_any(void) {
-    if (!g_sched.run_queue) return 0;
-    size_t n = sched_global_queue_count();
-    for (size_t i = 0; i < n; i++) {
-        if (atomic_load_explicit(&g_sched.run_queue[i].nonempty_hint, memory_order_acquire)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle next, const char* edge) {
-    if (worker_id < 0 || !g_sched.worker_lifecycle) return;
-    _Atomic unsigned char* slot = &g_sched.worker_lifecycle[(size_t)worker_id];
-
-    const int lifecycle_asserts = cc_v3_worker_lifecycle_enabled();
-
-    cc_worker_lifecycle prev = (cc_worker_lifecycle)atomic_exchange_explicit(
-        slot, (unsigned char)next, memory_order_acq_rel);
-    if (!lifecycle_asserts) return;
-    if (cc_v3_worker_lifecycle_is_legal(prev, next)) return;
-    SCHED_DIAG_STAT_INC(g_sched.lifecycle_illegal_transitions);
-    fprintf(stderr,
-            "CC_V3_LIFECYCLE_ASSERT: worker=%d edge=%s illegal %s->%s\n",
-            worker_id,
-            edge ? edge : "(unknown)",
-            cc_v3_worker_lifecycle_name(prev),
-            cc_v3_worker_lifecycle_name(next));
-    abort();
-}
-
-static inline int64_t cc_sched_pressure_add(int64_t delta) {
-    /* Hot-path update (spawn/complete): keep it to a single atomic op.
-    * int64 range is effectively unbounded for runtime pressure magnitudes here. */
-    return atomic_fetch_add_explicit(&g_sched.pressure, delta, memory_order_relaxed) + delta;
-}
-
 
 
 /* Set the number of worker threads before scheduler init */
@@ -1860,26 +785,6 @@ static inline int cc__io_wait_trace_enabled_sched(void) {
     const char* env = getenv("CC_IO_WAIT_TRACE");
     mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
     return mode;
-}
-
-static inline int cc__io_wait_trace_fiber(const fiber_task* f) {
-    return cc__io_wait_trace_enabled_sched() &&
-           f &&
-           f->park_reason &&
-           strcmp(f->park_reason, "io_ready") == 0;
-}
-
-static inline int cc__req_wake_trace_fiber(const fiber_task* f) {
-    return f &&
-           f->park_reason &&
-           strcmp(f->park_reason, "chan_recv_wait_empty") == 0 &&
-           cc__chan_debug_req_wake_match(f->park_obj);
-}
-
-static inline int cc__io_ready_fiber(const fiber_task* f) {
-    return f &&
-           f->park_reason &&
-           strcmp(f->park_reason, "io_ready") == 0;
 }
 
 /* Spawn-pair grouping: when a base worker routes a fiber to a remote inbox,
@@ -1974,19 +879,6 @@ static inline size_t cc__spawn_pick_round_robin_target(void) {
         }
     }
     return target;
-}
-
-static inline size_t cc__spawn_pick_nonworker_target(void) {
-    const void* group_key = tls_nonworker_spawn_group_hint;
-    unsigned chunk_size = tls_nonworker_spawn_group_hint_chunk;
-    int reused_target = 0;
-    tls_nonworker_spawn_group_hint = NULL;
-    tls_nonworker_spawn_group_hint_chunk = 0;
-    if (!cc_nonworker_spawn_group_enabled()) {
-        return cc__spawn_pick_round_robin_target();
-    }
-    (void)group_key; (void)chunk_size; (void)reused_target;
-    return cc__spawn_pick_round_robin_target();
 }
 
 /* Set a parked fiber's routing hint to worker_id so that its next unpark
@@ -2130,233 +1022,23 @@ int cc_external_wait_active(void) {
 }
 
 /* Fast local queue push (single producer) */
-static inline int lq_push(local_queue* q, fiber_task* f) {
-    cc_v3_assert_enqueue_runnable(f, "local");
-    runnable_ref ref = runnable_ref_snapshot(f);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
-    size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
-    if (tail - head >= LOCAL_QUEUE_SIZE) return -1;  /* Full */
-    /* Use release on slot store to ensure closure contents are visible to consumer.
-    * The consumer uses acquire on the exchange, creating a release-acquire pair. */
-    size_t idx = tail % LOCAL_QUEUE_SIZE;
-    runnable_slot_publish(&q->slots[idx], ref);
-    atomic_store_explicit(&q->tail, tail + 1, memory_order_release);
-    return 0;
-}
-
 /* Check if local queue has items (non-destructive peek) */
-static inline int lq_peek(local_queue* q) {
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    return head < tail;
-}
-
 /* Return number of items in local queue (approximate, for routing decisions) */
-static inline size_t lq_depth(local_queue* q) {
-    size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    return (tail > head) ? (tail - head) : 0;
-}
-
 /* Fast local queue pop (owner only - but must handle concurrent stealers) 
 * Uses atomic exchange to claim slot first, then try to advance head once.
 * Limited retries to avoid infinite loop under pathological contention. */
-static inline runnable_ref lq_pop(local_queue* q) {
-    for (int retry = 0; retry < 64; retry++) {
-        size_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
-        size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        if (head >= tail) return runnable_ref_null();  /* Empty */
-        
-        size_t idx = head % LOCAL_QUEUE_SIZE;
-        
-        /* Atomically exchange slot with NULL to claim it */
-        runnable_ref ref = runnable_slot_take_exchange(&q->slots[idx]);
-        fiber_task* f = ref.fiber;
-        if (!f) {
-            /* Lost race with stealer - they cleared slot, try to help advance head */
-            atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                memory_order_relaxed, memory_order_relaxed);
-            continue;
-        }
-        
-        /* We got the task. Try to advance head once.
-        * If CAS fails, someone else advanced it for us - that's fine. */
-        atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                            memory_order_relaxed, memory_order_relaxed);
-        ref = runnable_ref_validate(ref);
-        if (!ref.fiber) continue;
-        return ref;
-    }
-    return runnable_ref_null();  /* Too much contention, let caller try global queue */
-}
-
-static inline void wake_one_if_sleeping(cc_wake_reason reason) {
-    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_calls);
-    /* Dekker pair with worker sleep path: we just pushed to the global queue
-     * (release) and must observe any concurrent lifecycle/sleeping transition.
-     * Without a full fence, the relaxed loads of spinning/sleeping below can
-     * be satisfied from a stale store buffer while the worker's queue peek
-     * misses our push -- yielding a lost wake on ARM64. */
-    atomic_thread_fence(memory_order_seq_cst);
-    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
-    int allow_with_spinners = (reason == CC_WAKE_REASON_SPAWN_GLOBAL_EDGE);
-    if (spinning > 0 && !allow_with_spinners) return;
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    if (sleeping == 0) return;
-    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_with_sleepers);
-    int woke = 0;
-    if (g_sched.worker_wake_prims && g_sched.worker_lifecycle) {
-        for (size_t scan = 0; scan < g_sched.num_workers && !woke; scan++) {
-            cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
-                &g_sched.worker_lifecycle[scan], memory_order_relaxed);
-            if (lc == CC_WL_SLEEP) {
-                wake_primitive_wake_one(&g_sched.worker_wake_prims[scan]);
-                woke = 1;
-            }
-        }
-    }
-    if (!woke) wake_primitive_wake_one(&g_sched.wake_prim);
-    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_one_delivered);
-}
-
-static inline void wake_one_if_sleeping_unconditional(void) {
-    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_calls);
-    /* Match Dekker fence in wake_one_if_sleeping: pair with the worker sleep
-     * fence so newly-sleeping workers observe our prior queue publish and we
-     * observe their lifecycle transition. */
-    atomic_thread_fence(memory_order_seq_cst);
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    if (sleeping > 0) {
-        int woke = 0;
-        if (g_sched.worker_wake_prims && g_sched.worker_lifecycle) {
-            for (size_t scan = 0; scan < g_sched.num_workers && !woke; scan++) {
-                cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
-                    &g_sched.worker_lifecycle[scan], memory_order_relaxed);
-                if (lc == CC_WL_SLEEP) {
-                    wake_primitive_wake_one(&g_sched.worker_wake_prims[scan]);
-                    woke = 1;
-                }
-            }
-        }
-        if (!woke) wake_primitive_wake_one(&g_sched.wake_prim);
-        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_delivered);
-    } else {
-        /* No sleepers: bump all per-worker counters AND the global counter so
-        * any worker racing into sleep sees a changed value and re-checks. */
-        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_unconditional_no_sleepers);
-        if (g_sched.worker_wake_prims) {
-            for (size_t i = 0; i < g_sched.num_workers; i++) {
-                atomic_fetch_add_explicit(&g_sched.worker_wake_prims[i].value, 1, memory_order_relaxed);
-            }
-        }
-        atomic_fetch_add_explicit(&g_sched.wake_prim.value, 1, memory_order_relaxed);
-    }
-}
-
 /* Global-edge wake policy for count convergence:
 * require sleepers; allowing active workers avoids missed-wake starvation when
 * runnable work appears during mixed active/sleeping transitions. */
-static inline int pool_idle_for_global_edge_wake(void) {
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    return sleeping > 0;
-}
-
 /* Wake a specific worker if it is sleeping, using its per-worker primitive.
 * Used after pushing to that worker's inbox: zero thundering herd, zero
 * wasted spin cycles on all other workers.  Falls back to the global wake
 * primitive when per-worker prims are not yet allocated (startup). */
-static inline void wake_target_worker_if_sleeping(int target_worker) {
-    if (target_worker < 0) return;
-    cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_calls);
-    if (!g_sched.worker_wake_prims || !g_sched.worker_lifecycle) {
-        wake_primitive_wake_one(&g_sched.wake_prim);
-        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_delivered);
-        return;
-    }
-    /* Dekker pair with worker sleep path: producer stores into inbox (CAS tail
-     * with release) then loads worker lifecycle; worker stores lifecycle=SLEEP
-     * then loads inbox tail.  Release/acquire on distinct atomics is NOT
-     * enough to prevent this reordering on ARM64 (C11 does not give a total
-     * order to acq_rel on different objects).  Without a full fence the
-     * producer can observe stale ACTIVE while the worker observes an empty
-     * inbox, leaving a fiber parked in the inbox with the worker asleep. */
-    atomic_thread_fence(memory_order_seq_cst);
-    cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
-        &g_sched.worker_lifecycle[target_worker], memory_order_relaxed);
-    if (lc == CC_WL_SLEEP) {
-        wake_primitive_wake_one(&g_sched.worker_wake_prims[target_worker]);
-        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_delivered);
-    } else {
-        cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.wake_target_skipped_not_sleeping);
-    }
-    /* If not sleeping (active or spinning), the worker will find the task
-    * naturally in its inbox check — no wake needed. */
-}
-
-static inline int sched_in_startup_phase(void) {
-    return atomic_load_explicit(&g_sched.startup_phase, memory_order_relaxed) == CC_STARTUP_PHASE;
-}
-
-static inline void sched_maybe_promote_run_phase(void) {
-    if (!sched_in_startup_phase()) return;
-    size_t runs = atomic_fetch_add_explicit(&g_sched.startup_run_count, 1, memory_order_relaxed) + 1;
-    size_t target = atomic_load_explicit(&g_sched.startup_target_runs, memory_order_relaxed);
-    if (target == 0) target = g_sched.num_workers ? g_sched.num_workers : 1;
-    if (runs < target) return;
-    int expected = CC_STARTUP_PHASE;
-    if (atomic_compare_exchange_strong_explicit(&g_sched.startup_phase,
-                                                &expected,
-                                                CC_RUN_PHASE,
-                                                memory_order_relaxed,
-                                                memory_order_relaxed)) {
-        atomic_store_explicit(&g_spawn_nw_startup_admit_wakev, UINT32_MAX, memory_order_relaxed);
-        atomic_store_explicit(&g_spawn_nw_startup_admit_remaining, 0, memory_order_relaxed);
-    }
-}
-
-static inline int pool_strict_idle_for_nonglobal_wake(void) {
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    size_t active = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
-    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
-    return sleeping > 0 && active == 0 && spinning == 0;
-}
-
-static inline int pool_startup_spinning_no_sleep(void) {
-    if (!sched_in_startup_phase()) return 0;
-    size_t active = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
-    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    return active == 0 && spinning > 0 && sleeping == 0;
-}
-
 /* Startup guard: only allow non-worker inbox publication once at least one
 * worker is actively executing. Before that, fall back to global queue. */
-static inline int pool_ready_for_nonworker_inbox_publish(void) {
-    size_t active = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
-    size_t spinning = atomic_load_explicit(&g_sched.spinning, memory_order_relaxed);
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed);
-    size_t workers = g_sched.num_workers;
-    if (workers == 0) return 0;
-    if (!sched_in_startup_phase()) return 1;
-    /* Startup-aware gate:
-    * - require scheduler presence (active, spinning, or sleeping worker)
-    * - keep very small startup bursts on global for launch-order fairness
-    * - once backlog reaches one worker-wave, allow inbox fan-out */
-    if (active == 0 && spinning == 0 && sleeping == 0) return 0;
-    return 1;
-}
-
 
 /* Work stealing: steal from another worker's queue.
 * Uses atomic exchange to claim slot first, then CAS to advance head. */
-static inline int cc__task_should_stay_on_owner_local(fiber_task* f, int target_worker) {
-    if (!f || target_worker < 0) return 0;
-    if (f->enqueue_src == 8 && f->last_worker_id == target_worker) {
-        return 1;
-    }
-    return 0;
-}
-
 
 /* Dump scheduler state for debugging hangs */
 void cc_fiber_dump_state(const char* reason) {
@@ -2367,18 +1049,6 @@ void cc_fiber_dump_state(const char* reason) {
             atomic_load(&g_sched.sleeping),
             atomic_load_explicit(&g_sched.total_parked, memory_order_relaxed),
             atomic_load(&g_sched.completed));
-    if (g_sched.run_queue) {
-        size_t head = 0, tail = 0, overflow = 0;
-        for (size_t s = 0; s < sched_global_queue_count(); s++) {
-            head += atomic_load(&g_sched.run_queue[s].head);
-            tail += atomic_load(&g_sched.run_queue[s].tail);
-            overflow += atomic_load(&g_sched.run_queue[s].overflow_count);
-        }
-        fprintf(stderr, "  run_queue[%zu]: head=%zu tail=%zu (ring ~%zu + overflow %zu items)\n",
-                sched_global_queue_count(), head, tail, tail - head, overflow);
-    } else {
-        fprintf(stderr, "  run_queue: (uninitialized)\n");
-    }
     fprintf(stderr, "================================\n\n");
 }
 
@@ -2404,100 +1074,6 @@ void cc_fiber_dump_spawn_stats(void) {
 * Fiber Pool (with coroutine reuse)
 * ============================================================================ */
 
-static fiber_task* fiber_alloc(void) {
-    /* Try to get from free list */
-    fiber_task* f = atomic_load_explicit(&g_sched.free_list, memory_order_acquire);
-    while (f) {
-        fiber_task* next = f->next;
-        if (atomic_compare_exchange_weak_explicit(&g_sched.free_list, &f, next,
-                                                memory_order_release,
-                                                memory_order_acquire)) {
-            atomic_fetch_add_explicit(&f->generation, 1, memory_order_relaxed);
-            /* Reuse pooled fiber - reset state but KEEP the coro and fiber_id.
-            * CRITICAL: We must reset join_cv_initialized to 0. The join_cv itself
-            * can be reused (it's just a pthread_cond_t), but the initialized flag
-            * must be reset so that a new joiner doesn't try to wait on a stale
-            * condvar that won't receive a broadcast from this new fiber instance. */
-            f->fn = NULL;
-            f->arg = NULL;
-            f->result = NULL;
-            atomic_store(&f->control, CTRL_IDLE);
-            atomic_store(&f->done, 0);
-            f->yield_dest = YIELD_NONE;
-            f->park_flag = NULL;
-            f->park_expected = 0;
-            atomic_store(&f->wake_counter, 0);
-            atomic_store(&f->wait_ticket, 0);
-            atomic_store(&f->pending_unpark, 0);
-            atomic_store(&f->timed_park_registered, 0);
-            atomic_store(&f->timed_park_fired, 0);
-            atomic_store(&f->join_waiters, 0);
-            atomic_store(&f->join_waiter_fiber, NULL);
-            atomic_store(&f->join_lock, 0);
-            atomic_store(&f->join_cv_initialized, 0);  /* Reset for new fiber instance */
-            f->tsan_fiber = TSAN_FIBER_CREATE();
-            f->park_reason = NULL;
-            f->park_file = NULL;
-            f->park_line = 0;
-            f->park_obj = NULL;
-            f->enqueue_src = 0;
-            f->last_worker_id = -1;
-            f->last_worker_src = 0;
-            f->spawn_publish_tsc = 0;
-            f->spawn_global_pop_tsc = 0;
-            f->spawn_publish_route = (unsigned char)SPAWN_ROUTE_NONE;
-            f->spawn_publish_target_worker = -1;
-            f->spawn_publish_active0 = 0;
-            f->spawn_publish_forced_spill = 0;
-            f->spawn_global_pop_valid = 0;
-            f->spawn_publish_valid = 0;
-            f->timed_park_requested = 0;
-            f->timer_next = NULL;
-            f->saved_nursery = NULL;
-            f->deadlock_suppress_depth = 0;
-            f->external_wait_depth = 0;
-            f->external_wait_scoped = 0;
-            f->external_wait_parked = 0;
-            f->admission_nursery = NULL;
-            f->next = NULL;
-            /* f->coro and f->fiber_id are kept for reuse! */
-            return f;
-        }
-    }
-    
-    /* Allocate new fiber */
-    fiber_task* nf = (fiber_task*)calloc(1, sizeof(fiber_task));
-    if (nf) {
-        atomic_store_explicit(&nf->generation, 1, memory_order_relaxed);
-        atomic_store_explicit(&nf->join_cv_initialized, 0, memory_order_relaxed);
-        atomic_store_explicit(&nf->wake_counter, 0, memory_order_relaxed);
-        atomic_store_explicit(&nf->wait_ticket, 0, memory_order_relaxed);
-        atomic_store_explicit(&nf->pending_unpark, 0, memory_order_relaxed);
-        atomic_store(&nf->join_waiters, 0);
-        atomic_store(&nf->join_waiter_fiber, NULL);
-        atomic_store(&nf->join_lock, 0);
-        nf->tsan_fiber = TSAN_FIBER_CREATE();
-        nf->fiber_id = atomic_fetch_add(&g_next_fiber_id, 1);
-        nf->last_worker_id = -1;
-        nf->last_worker_src = 0;
-        nf->spawn_publish_tsc = 0;
-        nf->spawn_global_pop_tsc = 0;
-        nf->spawn_publish_route = (unsigned char)SPAWN_ROUTE_NONE;
-        nf->spawn_publish_target_worker = -1;
-        nf->spawn_publish_active0 = 0;
-        nf->spawn_publish_forced_spill = 0;
-        nf->spawn_global_pop_valid = 0;
-        nf->spawn_publish_valid = 0;
-        nf->saved_nursery = NULL;
-        nf->deadlock_suppress_depth = 0;
-        nf->external_wait_depth = 0;
-        nf->external_wait_scoped = 0;
-        nf->external_wait_parked = 0;
-        nf->admission_nursery = NULL;
-    }
-    return nf;
-}
-
 /* Return a fiber to the global free list for reuse.
 *
 * Pool state: fibers in the free list retain their coroutine stack and
@@ -2508,69 +1084,10 @@ static fiber_task* fiber_alloc(void) {
 * The per-worker idle_pool (thread-local, accessed in fiber_alloc) is the
 * fast path; this global free list is the slow path used when the local
 * pool is full or when called from a non-worker context. */
-static void fiber_free(fiber_task* f) {
-    if (!f) return;
-    /* Keep the coro and join_cv for pooling - don't destroy them! */
-    fiber_task* head;
-    do {
-        head = atomic_load_explicit(&g_sched.free_list, memory_order_relaxed);
-        f->next = head;
-    } while (!atomic_compare_exchange_weak_explicit(&g_sched.free_list, &head, f,
-                                                    memory_order_release,
-                                                    memory_order_relaxed));
-}
-
 /* Fully destroy a fiber (called during shutdown) */
-static void fiber_destroy(fiber_task* f) {
-    if (!f) return;
-    if (f->coro) mco_destroy(f->coro);
-    if (atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire)) {
-        pthread_mutex_destroy(&f->join_mu);
-        pthread_cond_destroy(&f->join_cv);
-    }
-    free(f);
-}
-
 /* ============================================================================
 * Error Handling
 * ============================================================================ */
-
-static const char* mco_result_str(mco_result res) {
-    switch (res) {
-        case MCO_SUCCESS: return "success";
-        case MCO_GENERIC_ERROR: return "generic error";
-        case MCO_INVALID_POINTER: return "invalid pointer";
-        case MCO_INVALID_COROUTINE: return "invalid coroutine";
-        case MCO_NOT_SUSPENDED: return "not suspended";
-        case MCO_NOT_RUNNING: return "not running";
-        case MCO_MAKE_CONTEXT_ERROR: return "make context error";
-        case MCO_SWITCH_CONTEXT_ERROR: return "switch context error";
-        case MCO_NOT_ENOUGH_SPACE: return "not enough space";
-        case MCO_OUT_OF_MEMORY: return "out of memory";
-        case MCO_INVALID_ARGUMENTS: return "invalid arguments";
-        case MCO_INVALID_OPERATION: return "invalid operation";
-        case MCO_STACK_OVERFLOW: return "stack overflow - increase CC_FIBER_STACK_SIZE";
-        default: return "unknown error";
-    }
-}
-
-static void fiber_panic(const char* msg, fiber_task* f, mco_result res) {
-    fprintf(stderr, "\n=== FIBER PANIC ===\n");
-    fprintf(stderr, "Error: %s\n", msg);
-    fprintf(stderr, "Minicoro result: %s (%d)\n", mco_result_str(res), (int)res);
-    if (f) {
-        fprintf(stderr, "Fiber: %p, control=%lld, done=%d\n", 
-                (void*)f, (long long)atomic_load(&f->control), atomic_load(&f->done));
-        if (f->coro) {
-            fprintf(stderr, "Coroutine: %p, status=%d\n", 
-                    (void*)f->coro, (int)mco_status(f->coro));
-        }
-    }
-    fprintf(stderr, "Stack size: %d bytes (set CC_FIBER_STACK_SIZE to increase)\n", CC_FIBER_STACK_SIZE);
-    fprintf(stderr, "===================\n\n");
-    fflush(stderr);
-    abort();
-}
 
 /* ============================================================================
 * Fiber Entry Point
@@ -2578,76 +1095,6 @@ static void fiber_panic(const char* msg, fiber_task* f, mco_result res) {
 
 /* Simple spinlock for join handshake - ensures proper ordering between
 * child setting done=1 and parent registering as waiter */
-static inline void join_spinlock_lock(_Atomic int* lock) {
-    for (;;) {
-        /* Spin with pause until lock looks free */
-        while (atomic_load_explicit(lock, memory_order_relaxed) != 0) {
-            cpu_pause();
-        }
-        /* Try to acquire */
-        int expected = 0;
-        if (atomic_compare_exchange_weak_explicit(lock, &expected, 1,
-                                                memory_order_acquire,
-                                                memory_order_relaxed)) {
-            return;
-        }
-    }
-}
-
-static inline void join_spinlock_unlock(_Atomic int* lock) {
-    atomic_store_explicit(lock, 0, memory_order_release);
-}
-
-static void fiber_entry(mco_coro* co) {
-    fiber_task* f = (fiber_task*)mco_get_user_data(co);
-    if (f && f->fn) {
-        /* Acquire fence + TSan annotation ensures all writes by spawner 
-        * (including closure captures) are visible before we execute. */
-        atomic_thread_fence(memory_order_acquire);
-        TSAN_ACQUIRE(f->arg);  /* Tell TSan: sync with release on same address */
-        /* Preserve nursery admission semantics without a spawn trampoline:
-         * cancelled nursery means no new admission, even if cancellation races
-         * after publication but before the fiber first runs. */
-        if (f->admission_nursery && cc_nursery_is_cancelled(f->admission_nursery)) {
-            f->result = NULL;
-        } else {
-            f->result = f->fn(f->arg);
-        }
-        f->admission_nursery = NULL;
-    }
-    /* Always use handshake lock to ensure proper ordering between
-    * child setting done=1 and parent registering as waiter.
-    * The fast path (checking join_waiters without lock) had a race where
-    * we could miss waiter registrations due to memory ordering.
-    * 
-    * IMPORTANT: We also check join_cv_initialized under the lock to avoid
-    * a race with thread joiners who init the condvar after we check it.
-    * 
-    * IMPORTANT: We do NOT set control=CTRL_DONE here — the worker trampoline
-    * does that after mco_resume returns, ensuring the stack is truly quiescent.
-    * Joiners observe done=1 for completion, and wait_for_fiber_done_state
-    * spins on CTRL_DONE to ensure the worker has released the stack. */
-    join_spinlock_lock(&f->join_lock);
-    atomic_store_explicit(&f->done, 1, memory_order_release);
-    atomic_fetch_sub_explicit(&g_sched.pending, 1, memory_order_relaxed);
-    cc_sched_pressure_add(-1);
-    atomic_fetch_add_explicit(&g_sched.completed, 1, memory_order_relaxed);
-    int cv_initialized = atomic_load_explicit(&f->join_cv_initialized, memory_order_acquire);
-    join_spinlock_unlock(&f->join_lock);
-    
-    /* Signal thread waiters via condvar if it was initialized when we checked */
-    if (cv_initialized) {
-        pthread_mutex_lock(&f->join_mu);
-        pthread_cond_broadcast(&f->join_cv);
-        pthread_mutex_unlock(&f->join_mu);
-    }
-    
-    /* Ensure all stores are visible before returning */
-    atomic_thread_fence(memory_order_release);
-    
-    /* Coroutine returns, will be cleaned up by caller (nursery) */
-}
-
 /* ============================================================================
 * Worker Thread
 * ============================================================================ */
@@ -2655,51 +1102,6 @@ static void fiber_entry(mco_coro* co) {
 /* Helper to resume fiber with error checking.
 * With the unified control word the caller already holds exclusive ownership
 * (CTRL_OWNED(wid)), so no separate running_lock is needed. */
-static void fiber_resume(fiber_task* f) {
-    if (!f->coro) {
-        fiber_panic("NULL coroutine", f, MCO_INVALID_POINTER);
-    }
-    
-    if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-        fprintf(stderr,
-                "\n=== FIBER RESUME OF DONE FIBER ===\n"
-                "Fiber: %p, id=%lu, control=%lld, done=1\n"
-                "Coroutine: %p, status=%d\n"
-                "park_reason=%s park_obj=%p\n"
-                "yield_dest=%d pending_unpark=%d\n"
-                "enqueue_src=%d enqueue_ctrl=%lld enqueue_done=%d enqueue_dest=%d\n"
-                "==============================\n\n",
-                (void*)f, (unsigned long)f->fiber_id,
-                (long long)atomic_load(&f->control),
-                (void*)f->coro, (int)mco_status(f->coro),
-                f->park_reason ? f->park_reason : "null",
-                f->park_obj,
-                f->yield_dest,
-                atomic_load_explicit(&f->pending_unpark, memory_order_relaxed),
-                f->enqueue_src,
-                (long long)f->enqueue_ctrl,
-                f->enqueue_done,
-                f->enqueue_dest);
-        fflush(stderr);
-        abort();
-    }
-    
-    mco_state st = mco_status(f->coro);
-    if (st != MCO_SUSPENDED) {
-        fiber_panic("coroutine not in suspended state", f, MCO_NOT_SUSPENDED);
-    }
-    
-    /* Switch TSan to the fiber context before resuming. */
-    TSAN_FIBER_SWITCH(f->tsan_fiber);
-    mco_result res = mco_resume(f->coro);
-    /* Switch back to scheduler context after resume returns. */
-    TSAN_FIBER_SWITCH(tls_tsan_sched_fiber);
-    
-    if (res != MCO_SUCCESS) {
-        fiber_panic("mco_resume failed", f, res);
-    }
-}
-
 #define WORKER_BATCH_SIZE 16  /* Standard batch size */
 #define STEAL_BATCH_SIZE (LOCAL_QUEUE_SIZE / 2)  /* Steal up to half the victim's queue */
 #define FAIRNESS_CHECK_INTERVAL 61  /* Inject global pop after this many local-only batches (prime) */
@@ -2719,12 +1121,6 @@ static inline uint64_t xorshift64(uint64_t* state) {
 
 
 
-
-static void cc_fiber_atexit_stats(void) {
-    if (atomic_load(&g_initialized) != 2) return;
-    cc_sched_wait_stats_dump();
-    cc_sched_io_wake_stats_dump();
-}
 
 
 /* V1 scheduler init/shutdown are stubs; the V2 scheduler auto-initializes
@@ -2754,47 +1150,6 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     return (fiber_task*)((uintptr_t)v2 | CC_FIBER_V2_TAG_LOCAL);
 }
 
-/* Helper: wait for fiber to fully finish executing.
-* With the unified control word, CTRL_DONE is set under the join_lock
-* together with done=1, so once we see done=1, control should be CTRL_DONE
-* (with only a brief memory ordering delay possible).
-*
-* No separate running_lock wait is needed — when fiber_resume returns on the
-* worker, the worker's trampoline immediately stores CTRL_DONE (under the
-* join_lock), so the control word is already CTRL_DONE by the time the worker
-* finishes with the fiber. */
-static inline void wait_for_fiber_done_state(fiber_task* f) {
-    if (!f) return;
-    
-    /* Wait for control=CTRL_DONE.  The gap between done=1 (set inside the
-    * coroutine by fiber_entry) and CTRL_DONE (set by the worker trampoline
-    * via CAS OWNED(wid)→CTRL_DONE after mco_resume returns) is extremely
-    * short — a few instructions on the SAME worker thread.  But the joiner
-    * may be on a different core and observe done=1 before CTRL_DONE.
-    *
-    * We MUST wait: if we return early and the caller frees the fiber, the
-    * owning worker's trampoline could race with the new incarnation.  Even
-    * with the CAS-based trampoline, cc_fiber_spawn's memset of the coroutine
-    * context could corrupt the old trampoline's stack if it hasn't finished
-    * the context switch yet.
-    *
-    * Strategy: tight cpu_pause spin (covers >99.9% of cases), then fall back
-    * to sched_yield() which is a safe OS-level yield hint (not a fiber yield). */
-    for (int i = 0; i < 10000; i++) {
-        if (atomic_load_explicit(&f->control, memory_order_acquire) == CTRL_DONE) {
-            return;
-        }
-        cpu_pause();
-    }
-    /* Fallback: sched_yield loop.  This is safe in both fiber and thread context
-    * because sched_yield() is just an OS thread hint — it does NOT call
-    * mco_yield and does NOT cause reentrancy.  The gap should be at most a few
-    * instructions, so this loop is extremely unlikely to iterate more than once. */
-    while (atomic_load_explicit(&f->control, memory_order_acquire) != CTRL_DONE) {
-        sched_yield();
-    }
-}
-
 int cc_fiber_join(fiber_task* f, void** out_result) {
     if (!f) return -1;
     if (cc__is_v2_fiber_local((cc__fiber*)f)) {
@@ -2810,9 +1165,10 @@ void cc_fiber_set_spawn_nursery_override(CCNursery* nursery) {
 }
 
 void cc_fiber_task_free(fiber_task* f) {
-    if (f) {
-        fiber_free(f);
-    }
+    /* V1 retired: cc_fiber_spawn returns V2-tagged handles and sched_v2
+     * owns the fiber lifetime (freed inside sched_v2_join). The legacy
+     * perf harness still calls this, so keep the symbol as a no-op. */
+    (void)f;
 }
 
 
@@ -3031,21 +1387,10 @@ void cc__fiber_unpark(void* fiber_ptr) {
 
 
 void cc__fiber_unpark_channel_attrib(uint32_t attrib_flags) {
-    tls_chan_attr_calls_batch++;
-    if ((attrib_flags & CC_FIBER_UNPARK_ATTR_CONTENTION_LOCAL) && tls_worker_id >= 0) {
-        tls_chan_attr_local_handoff = 1;
-    }
-    if (pool_startup_spinning_no_sleep()) {
-        tls_chan_attr_startup_batch++;
-        if (atomic_load_explicit(&g_sched.sleeping, memory_order_relaxed) > 0) {
-            tls_chan_attr_sleepers_batch++;
-        }
-    }
-    if (tls_chan_attr_calls_batch >= 256 || tls_chan_attr_startup_batch >= 32 || tls_chan_attr_sleepers_batch >= 32) {
-        tls_chan_attr_calls_batch = 0;
-        tls_chan_attr_startup_batch = 0;
-        tls_chan_attr_sleepers_batch = 0;
-    }
+    /* V1 retired: the attribute flags steered V1 worker-pool wake heuristics
+     * (sleepers/startup spin tracking) that no longer exist. V2 dispatches
+     * wakes directly via sched_v2_signal on each waiter, so this is a no-op. */
+    (void)attrib_flags;
 }
 
 void cc__fiber_sched_enqueue(void* fiber_ptr) {
@@ -3060,19 +1405,7 @@ void cc__fiber_yield(void) {
         sched_v2_yield();
         return;
     }
-    fiber_task* current = tls_current_fiber;
-    if (!current || !current->coro) {
-        /* Not in fiber context - OS yield */
-        sched_yield();
-        return;
-    }
-    
-    /* Yield-before-commit: tell the trampoline to enqueue us on the local
-    * queue after mco_resume returns.  Control stays OWNED(me) until the
-    * trampoline transitions it to QUEUED, so no other worker can touch us. */
-    current->yield_dest = YIELD_LOCAL;
-    mco_yield(current->coro);
-    /* When we resume, worker_run_fiber has already set CTRL_OWNED(new_wid). */
+    sched_yield();
 }
 
 /* Public API: cooperative yield for user code.
@@ -3093,14 +1426,7 @@ void cc__fiber_yield_global(void) {
         sched_v2_yield();
         return;
     }
-    fiber_task* current = tls_current_fiber;
-    if (!current || !current->coro) {
-        sched_yield();
-        return;
-    }
-    /* Yield-before-commit: trampoline will enqueue on global queue. */
-    current->yield_dest = YIELD_GLOBAL;
-    mco_yield(current->coro);
+    sched_yield();
 }
 
 /* Signal to the sysmon that the current worker is still alive and doing
