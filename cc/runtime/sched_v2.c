@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sched.h>
+#include <time.h>
 
 #if defined(__APPLE__)
 #include <os/lock.h>
@@ -89,7 +90,15 @@ static inline void v2_slock_unlock(v2_slock* l) {
  * Configuration
  * ============================================================================ */
 
-#define V2_MAX_THREADS     64
+/* Hard cap on active worker slots in the scheduler pool.
+ *
+ * At steady state we run at CC_V2_THREADS (~= CPU count). Sysmon's
+ * syscall-age eviction replaces aged workers in place — the orphaned
+ * thread leaves the pool (pthread_detach) while a fresh worker takes
+ * over the same slot — so this cap bounds active pool size, not total
+ * threads ever alive. Orphans are off-books and bounded only by
+ * V2_ORPHAN_SAFETY_CAP (see below). */
+#define V2_MAX_THREADS     256
 #define V2_GLOBAL_QUEUE_SIZE 4096
 #if defined(__OPTIMIZE__)
 #define V2_FIBER_STACK_SIZE (2 * 1024 * 1024)
@@ -97,7 +106,31 @@ static inline void v2_slock_unlock(v2_slock* l) {
 /* Unoptimized builds grow frame size substantially; keep debug binaries usable. */
 #define V2_FIBER_STACK_SIZE (8 * 1024 * 1024)
 #endif
-#define V2_SYSMON_INTERVAL_MS 100
+/* Tick cadence: fast enough that V2_SYSMON_SYSCALL_AGE_NS (below) gives
+ * bounded detection latency. 20 ms tick + 20 ms age threshold yields worst
+ * case ~40 ms before a kidnapped worker is detached. */
+#define V2_SYSMON_INTERVAL_MS 20
+
+/* Syscall-age detach: a worker whose current fiber has been running (not
+ * yielded) for this long is assumed to be kidnapped in a blocking kernel
+ * syscall. Sysmon evicts it in place (detach old, spawn replacement into
+ * the same slot). The kidnapped worker runs its fiber to completion, sees
+ * the slot generation has moved, and exits.
+ *
+ * 20 ms is a deliberate middle ground: long enough to tolerate normal CPU
+ * bursts (deflate chunks, JSON parsing, etc), short enough to keep blocking
+ * IO from starving the ready queue for a noticeable fraction of a second. */
+#define V2_SYSMON_SYSCALL_AGE_NS (20ull * 1000000ull)
+
+/* Safety cap on concurrent orphans (evicted workers still draining their
+ * kidnapped syscalls, off the scheduler pool). This is NOT a policy knob
+ * for the common case — at steady state sysmon creates exactly as many
+ * replacements as there are queued fibers, self-regulating via the
+ * per-tick budget. This cap exists so a pathological app that spawns tens
+ * of thousands of concurrent blocking fibers can't take the machine down
+ * with kernel-stack exhaustion. When reached, sysmon simply skips
+ * eviction for that tick and queued work waits a little longer. */
+#define V2_ORPHAN_SAFETY_CAP 4096
 
 /* ============================================================================
  * Fiber
@@ -207,8 +240,20 @@ static fiber_v2* v2_queue_pop(v2_queue* q) {
 typedef struct {
     pthread_t    handle;
     int          id;
-    int          alive;
+    _Atomic int  alive;     /* 1 while worker loop is running */
     _Atomic int  is_idle;   /* 1 = IDLE worker, 0 = BUSY worker */
+    /* Wall-clock ns of the most recent fiber dispatch on this worker.
+     * 0 when no fiber is currently executing. Sysmon scans this to detect
+     * workers stuck in non-cooperative kernel syscalls. */
+    _Atomic uint64_t dispatch_start_ns;
+    /* Slot-identity generation. Bumped by sysmon every time a new worker
+     * thread is installed into this slot (replacing an evicted orphan). A
+     * running worker caches its generation at entry (tls_v2_my_generation);
+     * when it observes slot.generation != my_gen, it's been orphaned and
+     * must exit its loop without touching slot.wake or slot.is_idle. This
+     * is the identity channel between sysmon and the worker — no separate
+     * "detached" flag is needed. */
+    _Atomic uint64_t generation;
     wake_primitive wake;
 } thread_v2;
 
@@ -298,6 +343,27 @@ static _Atomic uint64_t g_v2_join_fast = 0;
 static _Atomic uint64_t g_v2_join_spin_hit = 0;
 static _Atomic uint64_t g_v2_join_park_fiber = 0;
 static _Atomic uint64_t g_v2_join_park_thread = 0;
+
+/* Syscall-age detach counters. Cheap and always on (no V2_STAT_INC gate):
+ * only touched by sysmon and by the orphan exit path, both low-frequency.
+ *   evicted_total : monotonic count of slot-in-place replacements.
+ *   orphans_alive : live orphans right now (sysmon increments on evict,
+ *                   orphan decrements when its thread_v2_main returns).
+ *   orphans_cap_hit : sysmon skipped an eviction because safety cap was
+ *                     reached. Non-zero = pathological workload. */
+static _Atomic uint64_t g_v2_sysmon_evicted_total = 0;
+static _Atomic int64_t  g_v2_orphans_alive = 0;
+static _Atomic uint64_t g_v2_orphans_cap_hit = 0;
+
+/* Master toggle: set CC_V2_SYSMON_DETACH=0 to disable the detach mechanism
+ * (pool becomes hard-capped at CC_V2_THREADS as before). Default: enabled. */
+static _Atomic int g_v2_sysmon_detach_enabled = 1;
+
+static inline uint64_t v2_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 /* Diagnostic-counter gate.  Writes to the g_v2_* stat counters on the hot
  * signal/wake/park/resume paths used to be unconditional -- at multi-million
@@ -403,6 +469,7 @@ static void sched_v2_diag_scan_fibers(uint64_t state_counts[FIBER_V2_STATE_COUNT
 
 /* Per-thread state */
 static __thread int tls_v2_thread_id = -1;
+static __thread uint64_t tls_v2_my_generation = 0;
 static __thread fiber_v2* tls_v2_current_fiber = NULL;
 static __thread const char* tls_v2_park_reason = NULL;
 extern __thread CCNursery* cc__tls_current_nursery;
@@ -548,7 +615,12 @@ static int sched_v2_try_expand_pool(void) {
     g_v2.threads[new_id].id = new_id;
     atomic_store_explicit(&g_v2.threads[new_id].is_idle, 0, memory_order_relaxed);
     wake_primitive_init(&g_v2.threads[new_id].wake);
-    g_v2.threads[new_id].alive = 0;
+    atomic_store_explicit(&g_v2.threads[new_id].alive, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[new_id].dispatch_start_ns, 0,
+                          memory_order_relaxed);
+    /* First worker in this slot: generation starts at 0. */
+    atomic_store_explicit(&g_v2.threads[new_id].generation, 0,
+                          memory_order_release);
     pthread_create(&g_v2.threads[new_id].handle, NULL,
                    thread_v2_main, (void*)(intptr_t)new_id);
     return 1;
@@ -578,7 +650,25 @@ static void sched_v2_wake(int worker_hint) {
             fiber_v2* f = v2_queue_pop(&g_v2.ready_queue);
             if (!f) return;
             V2_STAT_INC(g_v2_worker_self_drain);
+            /* Mark the dispatch so sysmon can detect kidnapped syscalls.
+             * Sysmon reads this with relaxed order; the only timing we
+             * care about is "approximately how long has this fiber run". */
+            atomic_store_explicit(&g_v2.threads[worker_hint].dispatch_start_ns,
+                                  v2_now_ns(), memory_order_relaxed);
             thread_v2_run_fiber(worker_hint, f);
+            atomic_store_explicit(&g_v2.threads[worker_hint].dispatch_start_ns,
+                                  0, memory_order_relaxed);
+            /* Identity check: sysmon may have evicted us in place while
+             * the fiber was running (see sched_v2_sysmon_evict_aged_workers).
+             * If slot.generation has moved beyond our cached value, a new
+             * worker now owns this slot — we must not touch slot.wake or
+             * slot.is_idle again. Abandon the self-drain; the outer loop
+             * will catch the same mismatch and exit cleanly. */
+            if (atomic_load_explicit(&g_v2.threads[worker_hint].generation,
+                                     memory_order_acquire)
+                != tls_v2_my_generation) {
+                return;
+            }
         }
         return;
     }
@@ -818,13 +908,31 @@ fiber_v2* sched_v2_current_fiber(void) {
 static void* thread_v2_main(void* arg) {
     int tid = (int)(intptr_t)arg;
     tls_v2_thread_id = tid;
-    g_v2.threads[tid].alive = 1;
+    /* Cache our slot generation once at entry. Any future mismatch means
+     * sysmon has evicted us and installed a replacement — we exit without
+     * touching slot.wake or slot.is_idle (those now belong to the new
+     * worker). See pthread_create synchronize-with guarantee: anything
+     * sysmon wrote before pthread_create is visible to us here. */
+    tls_v2_my_generation = atomic_load_explicit(&g_v2.threads[tid].generation,
+                                                memory_order_acquire);
+    atomic_store_explicit(&g_v2.threads[tid].alive, 1, memory_order_release);
 
     while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
-        /* Drain: run ready fibers inline until queue is empty. */
+        /* Drain: run ready fibers inline until queue is empty (or sysmon
+         * evicted us, in which case sched_v2_wake returns early). */
         sched_v2_wake(tid);
 
         if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
+
+        /* End-of-loop identity check: if slot.generation has moved, we are
+         * an orphan. Exit before re-parking on slot.wake (which now belongs
+         * to the replacement worker). Our kidnapped fiber has already
+         * returned by now; the OS thread simply dies. */
+        if (atomic_load_explicit(&g_v2.threads[tid].generation,
+                                 memory_order_acquire)
+            != tls_v2_my_generation) {
+            break;
+        }
 
         /* No work — let this BUSY worker become IDLE.
          * Dekker protocol: mark idle, read wake counter, recheck, sleep.
@@ -860,7 +968,22 @@ static void* thread_v2_main(void* arg) {
         }
     }
 
-    g_v2.threads[tid].alive = 0;
+    /* If we left because slot.generation moved, we are an orphan. The
+     * living_alive counter for the slot now belongs to the replacement
+     * worker (which set its own alive=1 at entry), so we must NOT clear
+     * alive here — that would racily overwrite the new worker's flag.
+     * Only clean-exit (running=0) workers clear alive.
+     *
+     * We always decrement g_v2_orphans_alive if our cached generation is
+     * stale (which is also the only way to reach here without running=0). */
+    int orphaned = (atomic_load_explicit(&g_v2.threads[tid].generation,
+                                         memory_order_acquire)
+                    != tls_v2_my_generation);
+    if (orphaned) {
+        atomic_fetch_sub_explicit(&g_v2_orphans_alive, 1, memory_order_relaxed);
+    } else {
+        atomic_store_explicit(&g_v2.threads[tid].alive, 0, memory_order_release);
+    }
     return NULL;
 }
 
@@ -899,15 +1022,108 @@ static int sched_v2_count_idle_workers(void) {
     return idle;
 }
 
+/* Evict an aged worker from slot `i` and install a fresh replacement
+ * thread into the same slot. The old worker becomes an orphan: it keeps
+ * running its kidnapped fiber in the kernel syscall, then, on return to
+ * the worker loop, observes that slot.generation has moved past its
+ * cached value and exits. pthread_detach hands its stack to the OS for
+ * self-reclaim at exit — nobody joins orphans.
+ *
+ * Ordering rationale (all observable by the new thread via the
+ * pthread_create synchronize-with guarantee):
+ *   1. detach old handle (once; handle field about to be overwritten).
+ *   2. reset per-slot transient state (wake, is_idle, dispatch_start_ns).
+ *   3. bump slot.generation (the identity token the new thread will read
+ *      at entry into tls_v2_my_generation).
+ *   4. pthread_create(&slot.handle, ..., tid) — writes new handle AND
+ *      releases all prior stores to the new thread.
+ */
+static void sched_v2_sysmon_evict_worker_in_place(int i) {
+    pthread_t old_handle = g_v2.threads[i].handle;
+    pthread_detach(old_handle);
+
+    /* The orphan is mid-syscall, not parked on slot.wake (dispatch_start_ns
+     * being nonzero is what qualified it for eviction). Resetting wake is
+     * safe and gives the new worker a fresh counter. */
+    wake_primitive_init(&g_v2.threads[i].wake);
+    atomic_store_explicit(&g_v2.threads[i].is_idle, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_v2.threads[i].dispatch_start_ns, 0,
+                          memory_order_relaxed);
+    /* The new thread will set alive=1 at entry; leaving it at 1 here is
+     * intentional — the slot is never "not alive" across an eviction. */
+
+    atomic_fetch_add_explicit(&g_v2.threads[i].generation, 1,
+                              memory_order_release);
+
+    atomic_fetch_add_explicit(&g_v2_orphans_alive, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_v2_sysmon_evicted_total, 1,
+                              memory_order_relaxed);
+
+    pthread_create(&g_v2.threads[i].handle, NULL,
+                   thread_v2_main, (void*)(intptr_t)i);
+}
+
+/* Scan all active workers for ones stuck in a kidnapped fiber. Evict in
+ * place — but only as many as we actually need to drain the current
+ * ready-queue backlog.
+ *
+ * The per-tick budget (= backlog) is critical: without it, sysmon would
+ * repeatedly evict every aged worker on every tick (including freshly
+ * promoted ones once their own long fiber crossed the age threshold),
+ * cascading orphans without bound while no queued work actually runs. With
+ * the budget: we only over-commit enough threads to make forward progress
+ * on queued work. A long CPU-bound fiber with an empty queue is never
+ * evicted (nobody is waiting on that worker anyway).
+ *
+ * V2_ORPHAN_SAFETY_CAP is a pure safety net, not a policy knob. If the app
+ * ever spawns enough simultaneous blocking fibers to bump against it, it
+ * is itself pathological — sysmon simply waits one tick. */
+static void sched_v2_sysmon_evict_aged_workers(void) {
+    if (!atomic_load_explicit(&g_v2_sysmon_detach_enabled,
+                              memory_order_relaxed)) {
+        return;
+    }
+    size_t backlog = atomic_load_explicit(&g_v2.ready_queue.count,
+                                          memory_order_relaxed);
+    if (backlog == 0) return;
+
+    uint64_t now = v2_now_ns();
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    size_t budget = backlog;
+    for (int i = 0; i < n && budget > 0; i++) {
+        uint64_t t0 = atomic_load_explicit(&g_v2.threads[i].dispatch_start_ns,
+                                           memory_order_relaxed);
+        if (t0 == 0) continue;
+        if (now - t0 < V2_SYSMON_SYSCALL_AGE_NS) continue;
+
+        int64_t live_orphans = atomic_load_explicit(&g_v2_orphans_alive,
+                                                    memory_order_relaxed);
+        if (live_orphans >= V2_ORPHAN_SAFETY_CAP) {
+            atomic_fetch_add_explicit(&g_v2_orphans_cap_hit, 1,
+                                      memory_order_relaxed);
+            break;
+        }
+
+        sched_v2_sysmon_evict_worker_in_place(i);
+        budget--;
+    }
+}
+
 static void* sched_v2_sysmon_main(void* arg) {
     (void)arg;
     uint64_t last_run_count = 0;
     int stall_ticks = 0;
+    /* Stall diagnostic cadence scaled to the (now faster) tick interval:
+     * fire at ~2 s of genuine stall, print every ~2 s thereafter. */
+    const int STALL_DIAG_TICKS = 2000 / V2_SYSMON_INTERVAL_MS;
     while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
         uint32_t val = atomic_load_explicit(&g_v2.sysmon_wake.value, memory_order_acquire);
         wake_primitive_wait_timeout(&g_v2.sysmon_wake, val, V2_SYSMON_INTERVAL_MS);
 
         if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
+
+        /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
+        sched_v2_sysmon_evict_aged_workers();
 
         uint64_t cur_run = atomic_load_explicit(&g_v2_sysmon_stall_detect, memory_order_relaxed);
         if (cur_run == last_run_count) {
@@ -918,7 +1134,7 @@ static void* sched_v2_sysmon_main(void* arg) {
                 sched_v2_wake(-1);
             }
 
-            if (stall_ticks >= 20 && (stall_ticks % 20) == 0) {
+            if (stall_ticks >= STALL_DIAG_TICKS && (stall_ticks % STALL_DIAG_TICKS) == 0) {
                 int n = atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed);
                 int idle_n = sched_v2_count_idle_workers();
                 size_t gq = atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed);
@@ -951,7 +1167,7 @@ static void* sched_v2_sysmon_main(void* arg) {
                                           reason_buckets,
                                           &reason_bucket_count);
                 fprintf(stderr, "[sched_v2 sysmon] STALL #%d: threads=%d idle=%d global_q=%zu fibers_alive=%llu\n",
-                        stall_ticks / 20, n, idle_n, gq, (unsigned long long)alive);
+                        stall_ticks / STALL_DIAG_TICKS, n, idle_n, gq, (unsigned long long)alive);
                 fprintf(stderr, "  signals: ok=%llu pending=%llu dropped=%llu  parks: total=%llu\n",
                         (unsigned long long)sig_ok, (unsigned long long)sig_pend, (unsigned long long)sig_drop,
                         (unsigned long long)parks);
@@ -1045,6 +1261,10 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] sysmon_evict: evicted_total=%llu orphans_alive=%lld cap_hit=%llu\n",
+            (unsigned long long)atomic_load_explicit(&g_v2_sysmon_evicted_total, memory_order_relaxed),
+            (long long)atomic_load_explicit(&g_v2_orphans_alive, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_orphans_cap_hit, memory_order_relaxed));
 }
 
 static void sched_v2_init_impl(void) {
@@ -1059,6 +1279,11 @@ static void sched_v2_init_impl(void) {
     if (stats_env && stats_env[0] && stats_env[0] != '0') {
         atomic_store_explicit(&g_v2_stats_enabled, 1, memory_order_relaxed);
         atexit(sched_v2_atexit_dump_stats);
+    }
+    const char* detach_env = getenv("CC_V2_SYSMON_DETACH");
+    if (detach_env && detach_env[0] == '0') {
+        atomic_store_explicit(&g_v2_sysmon_detach_enabled, 0,
+                              memory_order_relaxed);
     }
     /* The periodic sysmon printer also needs the counters populated. */
     const char* sysmon_stats_env = getenv("CC_V2_SYSMON_STATS");
@@ -1084,6 +1309,14 @@ static void sched_v2_init_impl(void) {
     for (int i = 0; i < n; i++) {
         g_v2.threads[i].id = i;
         atomic_store_explicit(&g_v2.threads[i].is_idle, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_v2.threads[i].alive, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_v2.threads[i].dispatch_start_ns, 0,
+                              memory_order_relaxed);
+        /* Initial worker in this slot: generation 0. First eviction will
+         * bump it to 1; the cached tls_v2_my_generation in the orphan
+         * stays at 0 and the mismatch triggers exit. */
+        atomic_store_explicit(&g_v2.threads[i].generation, 0,
+                              memory_order_release);
         wake_primitive_init(&g_v2.threads[i].wake);
         pthread_create(&g_v2.threads[i].handle, NULL,
                        thread_v2_main, (void*)(intptr_t)i);
@@ -1108,6 +1341,11 @@ void sched_v2_shutdown(void) {
     wake_primitive_wake_one(&g_v2.sysmon_wake);
 
     for (int i = 0; i < n; i++) {
+        /* slot.handle always points to the CURRENT worker in this slot.
+         * Evicted orphans were pthread_detached at eviction time and are
+         * no longer reachable here — they self-reclaim when their
+         * kidnapped syscall eventually returns (or when the process
+         * exits, whichever comes first). */
         pthread_join(g_v2.threads[i].handle, NULL);
     }
     pthread_join(g_v2.sysmon_handle, NULL);
