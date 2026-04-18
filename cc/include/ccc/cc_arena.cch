@@ -517,8 +517,6 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     return cc_slice_from_parts(ptr, count, id, count);
 }
 
-#include <ccc/cc_type.cch>
-
 static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
                                        CCSlice method,
                                        CCSlice mode,
@@ -529,23 +527,21 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
     (void)mode;
     (void)argv;
     (void)arg_types;
-    (void)arena;
-    if (method.len == sizeof("free") - 1 && memcmp(method.ptr, "free", sizeof("free") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_free", sizeof("cc_arena_free") - 1);
-    }
-    if (method.len == sizeof("detach") - 1 && memcmp(method.ptr, "detach", sizeof("detach") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_detach", sizeof("cc_arena_detach") - 1);
-    }
-    if (method.len == sizeof("reset") - 1 && memcmp(method.ptr, "reset", sizeof("reset") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_reset", sizeof("cc_arena_reset") - 1);
-    }
-    if (method.len == sizeof("remaining") - 1 && memcmp(method.ptr, "remaining", sizeof("remaining") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_remaining", sizeof("cc_arena_remaining") - 1);
-    }
-    if (method.len == sizeof("checkpoint") - 1 && memcmp(method.ptr, "checkpoint", sizeof("checkpoint") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_checkpoint", sizeof("cc_arena_checkpoint") - 1);
-    }
-    return cc_slice_empty();
+    /* Canonical arena UFCS namespace is `cc_arena_*`. Any method name a user
+       writes on an arena receiver lowers to `cc_arena_<method>`; if that
+       symbol does not exist the C compiler reports a real missing-symbol
+       diagnostic rather than a silent UFCS fallthrough. We inline the
+       slice-concat (rather than calling cc_ufcs_concat2) because cc_ufcs.cch
+       itself #includes this header, so we can't pull cc_ufcs.cch back in to
+       get its definition at this point in the translation unit. */
+    static const char kPrefix[] = "cc_arena_";
+    const size_t prefix_len = sizeof(kPrefix) - 1;
+    size_t total = prefix_len + method.len;
+    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
+    if (!buf) return cc_slice_empty();
+    memcpy(buf, kPrefix, prefix_len);
+    if (method.len > 0 && method.ptr) memcpy(buf + prefix_len, method.ptr, method.len);
+    return cc_slice_from_buffer(buf, total);
 }
 
 #ifdef CC_COMPTIME_SCAN
