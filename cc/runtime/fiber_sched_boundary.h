@@ -44,7 +44,6 @@ typedef struct cc_sched_wait_case {
 /* Internal runtime boundary for scheduler/channel integration. */
 CCSchedFiber* cc_sched_current(void);
 void cc_sched_schedule(CCSchedFiber* fiber);
-void cc_sched_nonworker_spawn_group_hint(const void* group_key, unsigned chunk_size);
 cc_sched_wait_result cc_sched_fiber_wait(
     void* waitable,
     void* io,
