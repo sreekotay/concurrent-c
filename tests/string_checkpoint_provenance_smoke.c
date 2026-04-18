@@ -4,7 +4,7 @@
 
 int main(void) {
     char buffer[512];
-    CCArena arena = cc_arena_create_buffer(buffer, sizeof(buffer));
+    CCArena arena = cc_arena_create_buffer(buffer, sizeof(buffer), CC_ARENA_FIXED);
     assert(arena.base != NULL);
 
     CCString stable = CCString_new(&arena);
