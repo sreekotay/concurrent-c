@@ -1,0 +1,33 @@
+// Smoke: cc_err(KIND_EXPR, MSG) — the 2-arg form where the first
+// argument is a non-literal CCErrorKind expression (e.g. `e.kind`).
+// The type-syntax pass used to only rewrite 2-arg cc_err(...) when the
+// first arg literally started with `CC_ERR_`, which made forwarding an
+// existing error via `cc_err(e.kind, "fwd")` fail with "undeclared
+// function 'cc_err'".
+#include <stdio.h>
+
+int !> (CCError) f(int i) {
+    return (i == 0) ? cc_err(CC_ERR_NOT_FOUND, "bad") : cc_ok(i);
+}
+
+int !> (CCError) fwd_field(int i) {
+    int v = f(i) !>(e) return cc_err(e.kind, "fwd_field");
+    return cc_ok(v);
+}
+
+int !> (CCError) fwd_expr(int i) {
+    int v = f(i) !>(e) return cc_err((int)e.kind + 0, "fwd_expr");
+    return cc_ok(v);
+}
+
+int main(void) {
+    int !> (CCError) a = fwd_field(5);
+    int !> (CCError) b = fwd_field(0);
+    int !> (CCError) c = fwd_expr(0);
+    printf("a_ok=%d b_ok=%d b_msg=%s c_ok=%d c_msg=%s\n",
+           cc_is_ok(a), cc_is_ok(b),
+           cc_is_ok(b) ? "-" : cc_error(b).message,
+           cc_is_ok(c),
+           cc_is_ok(c) ? "-" : cc_error(c).message);
+    return 0;
+}
