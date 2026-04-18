@@ -44,7 +44,7 @@ int main(void) {
             if (!__cc_nursery178) abort();
 
             for (int i = 0; i < NUM_WAITERS; i++) {
-                __cc_nursery178->spawn(() => [rx] { waiter(rx); });
+                __cc_nursery178->spawnhybrid(() => [rx] { waiter(rx); });
             }
             
             // Give them time to all block
