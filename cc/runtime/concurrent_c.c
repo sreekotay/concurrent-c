@@ -12,7 +12,7 @@
 
 #include "channel.c"
 #include "sched_v2.c"
-#include "fiber_sched_v3.c"
+#include "fiber_sched.c"
 #include "scheduler.c"
 #include "nursery.c"
 #include "fiber_sched_boundary.c"

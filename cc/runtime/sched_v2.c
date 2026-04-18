@@ -942,6 +942,10 @@ fiber_v2* sched_v2_current_fiber(void) {
     return tls_v2_current_fiber;
 }
 
+int sched_v2_current_worker_id(void) {
+    return tls_v2_thread_id;
+}
+
 /* ============================================================================
  * Thread main loop
  * ============================================================================ */

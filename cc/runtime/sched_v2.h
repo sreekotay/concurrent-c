@@ -41,6 +41,7 @@ void   sched_v2_yield(void);
 void   sched_v2_set_park_reason(const char* reason);
 int    sched_v2_in_context(void);
 fiber_v2* sched_v2_current_fiber(void);
+int    sched_v2_current_worker_id(void); /* -1 if not on a V2 worker thread */
 void   sched_v2_shutdown(void);
 
 /* Accessors for task.c integration */
