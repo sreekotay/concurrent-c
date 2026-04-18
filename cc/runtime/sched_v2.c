@@ -205,6 +205,9 @@ static void v2_queue_init(v2_queue* q) {
     atomic_store_explicit(&q->count, 0, memory_order_relaxed);
 }
 
+/* Returns the pre-push count (i.e. queue depth before this push).
+ * Used by sched_v2_enqueue_runnable to skip the wake syscall when the
+ * queue is already deep enough that a drainer is known to be on it. */
 static int v2_queue_push(v2_queue* q, fiber_v2* f) {
     f->next = NULL;
     v2_slock_lock(&q->mu);
@@ -214,9 +217,9 @@ static int v2_queue_push(v2_queue* q, fiber_v2* f) {
         q->head = f;
     }
     q->tail = f;
-    atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
+    int prev = atomic_fetch_add_explicit(&q->count, 1, memory_order_relaxed);
     v2_slock_unlock(&q->mu);
-    return 0;
+    return prev;
 }
 
 static fiber_v2* v2_queue_pop(v2_queue* q) {
@@ -327,6 +330,13 @@ static _Atomic uint64_t g_v2_wake_calls_ext = 0;
 static _Atomic uint64_t g_v2_wake_no_idle = 0;
 static _Atomic uint64_t g_v2_wake_issued = 0;
 static _Atomic uint64_t g_v2_wake_scan_miss = 0;
+/* Pushes that skipped sched_v2_wake because the ready queue was already
+ * deep enough (>= g_v2_wake_skip_depth) that an existing drainer/wake-in-
+ * flight will pick up the new item via self-drain. Saves the seq_cst fence
+ * and idle-worker scan on the enqueue hot path. Correctness net: the
+ * parking-worker Dekker recheck catches the push->park transition race,
+ * and sysmon issues an unconditional safety-net wake every tick. */
+static _Atomic uint64_t g_v2_wake_skipped_deep = 0;
 static _Atomic uint64_t g_v2_worker_self_drain = 0;
 static _Atomic uint64_t g_v2_mco_resume_fail = 0;
 static _Atomic uint64_t g_v2_mco_yield_fail = 0;
@@ -394,6 +404,23 @@ static inline int cc_v2_stats_enabled(void) {
  * fast path at entry or have to park anyway. A non-zero value is retained
  * as an env-var knob for low-latency workloads that might benefit. */
 static int g_v2_join_spin = 0;
+
+/* Tunable via CC_V2_WAKE_SKIP_DEPTH env var.
+ *
+ * On every sched_v2_enqueue_runnable we push one fiber and then call
+ * sched_v2_wake(-1), which does a seq_cst fence + idle_workers scan.
+ * Once the ready queue is already deep enough that a drainer is either
+ * actively running (self-draining inline via sched_v2_wake(tid)) or
+ * a previous push already kicked a wake, the N-th push's wake is
+ * redundant work. We bound the per-push cost by skipping the wake call
+ * entirely when the pre-push depth was >= this threshold.
+ *
+ * 0 disables (always wake = legacy behaviour). Default 4: a 0->4 ramp
+ * still fires up to 4 wakes, after which the fan-out is capped and the
+ * drainers+self-drain carry the load. Sysmon's every-tick safety-net
+ * wake (see sched_v2_sysmon_main) bounds any under-utilisation to one
+ * tick (~20ms). */
+static int g_v2_wake_skip_depth = 4;
 
 /* Histogram bucket for park-reason diagnostics. We dedupe by pointer because
  * park reasons are static strings; falling back to strcmp keeps the table
@@ -629,7 +656,21 @@ static int sched_v2_try_expand_pool(void) {
 static void thread_v2_run_fiber(int tid, fiber_v2* f);
 
 static void sched_v2_enqueue_runnable(fiber_v2* f) {
-    v2_queue_push(&g_v2.ready_queue, f);
+    int prev = v2_queue_push(&g_v2.ready_queue, f);
+    /* If the queue was already deep, a drainer is on it (or a previous
+     * push just woke one) and will self-drain to our item. Skip the
+     * seq_cst fence + idle-worker scan on this push. Correctness is
+     * held by:
+     *   - the 0->N-1 pushes still wake on their own,
+     *   - the parking-worker Dekker recheck (see thread_v2_main) catches
+     *     the push->park transition race, and
+     *   - sysmon tick issues an unconditional safety-net wake if any
+     *     stranded idle worker slips through.
+     * Set CC_V2_WAKE_SKIP_DEPTH=0 to restore legacy always-wake. */
+    if (g_v2_wake_skip_depth > 0 && prev >= g_v2_wake_skip_depth) {
+        V2_STAT_INC(g_v2_wake_skipped_deep);
+        return;
+    }
     sched_v2_wake(-1);
 }
 
@@ -1125,14 +1166,22 @@ static void* sched_v2_sysmon_main(void* arg) {
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
 
+        /* Unconditional every-tick safety net: if any work is queued AND
+         * any worker is idle, issue a wake. sched_v2_wake(-1) itself is
+         * cheap when there's no idle worker (short-circuits on the
+         * idle_workers==0 check). This closes the one correctness gap
+         * left open by CC_V2_WAKE_SKIP_DEPTH: a push that lands while
+         * some worker is parked and the queue was already deep won't
+         * wake anyone, but this tick will, bounded to ~V2_SYSMON_INTERVAL_MS
+         * (20ms). Producer-exceeds-drainer bursts self-heal here. */
+        if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
+            atomic_load_explicit(&g_v2.idle_workers, memory_order_relaxed) > 0) {
+            sched_v2_wake(-1);
+        }
+
         uint64_t cur_run = atomic_load_explicit(&g_v2_sysmon_stall_detect, memory_order_relaxed);
         if (cur_run == last_run_count) {
             stall_ticks++;
-
-            /* Safety net: try to wake workers if there's queued work. */
-            if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0) {
-                sched_v2_wake(-1);
-            }
 
             if (stall_ticks >= STALL_DIAG_TICKS && (stall_ticks % STALL_DIAG_TICKS) == 0) {
                 int n = atomic_load_explicit(&g_v2.num_threads, memory_order_relaxed);
@@ -1252,11 +1301,14 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_join_park_fiber, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_join_park_thread, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] wake: ext_calls=%llu no_idle=%llu issued=%llu scan_miss=%llu  "
+                    "skipped_deep=%llu (depth>=%d)  "
                     "worker_self_drain=%llu  worker_idle_entries=%llu (recheck=%llu from_wake=%llu)\n",
             (unsigned long long)atomic_load_explicit(&g_v2_wake_calls_ext, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_wake_no_idle, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_wake_issued, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_wake_scan_miss, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_skipped_deep, memory_order_relaxed),
+            g_v2_wake_skip_depth,
             (unsigned long long)atomic_load_explicit(&g_v2_worker_self_drain, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
@@ -1296,6 +1348,14 @@ static void sched_v2_init_impl(void) {
         long v = strtol(spin_env, &end, 10);
         if (end != spin_env && v >= 0 && v <= 65536) {
             g_v2_join_spin = (int)v;
+        }
+    }
+    const char* wsd_env = getenv("CC_V2_WAKE_SKIP_DEPTH");
+    if (wsd_env) {
+        char* end = NULL;
+        long v = strtol(wsd_env, &end, 10);
+        if (end != wsd_env && v >= 0 && v <= 65536) {
+            g_v2_wake_skip_depth = (int)v;
         }
     }
 
