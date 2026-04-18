@@ -17,21 +17,34 @@
 
 #define NUM_KIDNAPPERS 100    // 100 kidnappers on 16 workers — same across all implementations
 #define HEARTBEAT_INTERVAL_MS 100
-#define TEST_DURATION_SEC 5
+#define TEST_DURATION_SEC 3
 
 atomic_int g_heartbeats = 0;
 atomic_int g_kidnappers_active = 0;
+atomic_int g_kidnappers_done = 0;
 
 /* A "Heartbeat" fiber that should keep ticking if the scheduler is healthy.
- * Uses cc_sleep_ms so it parks as a fiber — sysmon can reschedule it on a
- * fresh worker even if the original worker is kidnapped. */
+ * Uses raw nanosleep (not cc_sleep_ms) to match the kidnappers: both the
+ * heartbeat and the kidnappers now block their worker thread in the kernel.
+ * The only thing keeping the heartbeat alive is the scheduler's ability to
+ * free up a worker thread (or spawn a new one) in the face of 100 kidnappers.
+ *
+ * cancel still needs to work: after the parent nursery is cancelled, the
+ * heartbeat exits its loop on the next wake. */
 void heartbeat_fiber() {
     setvbuf(stdout, NULL, _IONBF, 0);
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     printf("[Heartbeat] Started\n");
+    struct timespec ts = { .tv_sec = 0, .tv_nsec = HEARTBEAT_INTERVAL_MS * 1000000L };
     while (!cc_cancelled()) {
-        cc_sleep_ms(HEARTBEAT_INTERVAL_MS);
-        atomic_fetch_add(&g_heartbeats, 1);
-        printf("[Heartbeat] Tick %d\n", atomic_load(&g_heartbeats));
+        nanosleep(&ts, NULL);
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        double ms = (double)(now.tv_sec - t0.tv_sec) * 1000.0
+                  + (double)(now.tv_nsec - t0.tv_nsec) / 1e6;
+        int n = atomic_fetch_add(&g_heartbeats, 1) + 1;
+        printf("[Heartbeat] Tick %d @ %.1fms\n", n, ms);
     }
     printf("[Heartbeat] Cancelled, exiting\n");
 }
@@ -47,6 +60,7 @@ void kidnapper_fiber(int id) {
     
     printf("[Kidnapper %d] Released OS thread\n", id);
     atomic_fetch_sub(&g_kidnappers_active, 1);
+    atomic_fetch_add(&g_kidnappers_done, 1);
     
     // Pattern: (cancelled && no_work) => exit
     // We just finished our work. If cancelled, don't take new work.
@@ -67,19 +81,13 @@ int main(void) {
         CCNursery* __cc_nursery148 = @create(NULL) @destroy;
         if (!__cc_nursery148) abort();
 
-        // 1. Start the heartbeat
-        __cc_nursery148->spawn(() => { heartbeat_fiber(); });
+        // 1. No warmup. Heartbeat and kidnappers race for workers from T=0.
+        __cc_nursery148->spawnhybrid(() => { heartbeat_fiber(); });
 
-        // 2. Wait a bit to see healthy heartbeats
-        cc_sleep_ms(500);
-        int initial_beats = atomic_load(&g_heartbeats);
-        printf("Initial heartbeats: %d (Healthy)\n", initial_beats);
-
-        // 3. Unleash the kidnappers
         printf("\n!!! Unleashing Kidnappers !!!\n");
         for (int i = 0; i < NUM_KIDNAPPERS; i++) {
             int id = i;
-            __cc_nursery148->spawn(() => [id] { kidnapper_fiber(id); });
+            __cc_nursery148->spawnhybrid(() => [id] { kidnapper_fiber(id); });
         }
 
         // 4. Monitor heartbeats while kidnappers are active (kidnappers block for 2s each)
@@ -97,9 +105,13 @@ int main(void) {
     }
 
     int final_beats = atomic_load(&g_heartbeats);
+    int final_done = atomic_load(&g_kidnappers_done);
+    int final_active = atomic_load(&g_kidnappers_active);
     printf("\n=================================================================\n");
     printf("FINAL RESULTS\n");
-    printf("Total Heartbeats: %d\n", final_beats);
+    printf("Total Heartbeats:       %d\n", final_beats);
+    printf("Kidnappers Completed:   %d / %d\n", final_done, NUM_KIDNAPPERS);
+    printf("Kidnappers Still Active:%d\n", final_active);
     
     if (final_beats > (TEST_DURATION_SEC * (1000/HEARTBEAT_INTERVAL_MS)) * 0.8) {
         printf("RESULT: PASS - The scheduler survived the kidnapping!\n");

@@ -14,10 +14,11 @@
 #define NUM_THREADS 16
 #define NUM_KIDNAPPERS 100   // Same as CC/Go — 100 kidnappers on 16 threads
 #define HEARTBEAT_INTERVAL_MS 100000 // 100ms in microseconds
-#define TEST_DURATION_SEC 5
+#define TEST_DURATION_SEC 3
 
 atomic_int g_heartbeats = 0;
 atomic_int g_kidnappers_active = 0;
+atomic_int g_kidnappers_done = 0;
 atomic_int g_stop = 0;
 
 void* heartbeat_thread(void* arg) {
@@ -39,6 +40,7 @@ void* kidnapper_thread(void* arg) {
     sleep(2);
     printf("[Kidnapper %d] Released thread\n", id);
     atomic_fetch_sub(&g_kidnappers_active, 1);
+    atomic_fetch_add(&g_kidnappers_done, 1);
     return NULL;
 }
 
@@ -50,9 +52,6 @@ int main(void) {
 
     pthread_t heartbeat;
     pthread_create(&heartbeat, NULL, heartbeat_thread, NULL);
-
-    sleep(1); // Wait for healthy start
-    printf("Initial heartbeats: %d\n", atomic_load(&g_heartbeats));
 
     printf("\n!!! Unleashing Kidnappers !!!\n");
     // With pthreads, each kidnapper gets its own OS thread, so ALL threads are blocked.
@@ -78,7 +77,9 @@ int main(void) {
 
     printf("\n=================================================================\n");
     printf("FINAL RESULTS (Pthread)\n");
-    printf("Total Heartbeats: %d\n", atomic_load(&g_heartbeats));
+    printf("Total Heartbeats:        %d\n", atomic_load(&g_heartbeats));
+    printf("Kidnappers Completed:    %d / %d\n", atomic_load(&g_kidnappers_done), NUM_KIDNAPPERS);
+    printf("Kidnappers Still Active: %d\n", atomic_load(&g_kidnappers_active));
     printf("=================================================================\n");
 
     return 0;

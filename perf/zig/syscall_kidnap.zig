@@ -6,12 +6,19 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("unistd.h");
+    @cInclude("time.h");
 });
 
+fn rawNanosleep(sec: c_long, nsec: c_long) void {
+    var ts: c.struct_timespec = .{ .tv_sec = sec, .tv_nsec = nsec };
+    _ = c.nanosleep(&ts, null);
+}
+
 const NUM_KIDNAPPERS = 100;
-const TEST_DURATION_NS: u64 = 5 * std.time.ns_per_s;
+const TEST_DURATION_NS: u64 = 3 * std.time.ns_per_s;
 
 var heartbeats: i64 = 0;
+var kidnappers_done: i64 = 0;
 var stop: i32 = 0;
 
 fn printf(comptime fmt: []const u8, args: anytype) void {
@@ -21,14 +28,14 @@ fn printf(comptime fmt: []const u8, args: anytype) void {
 }
 
 fn kidnapper() void {
-    while (@atomicLoad(i32, &stop, .seq_cst) == 0) {
-        _ = c.sleep(2);
-    }
+    // One kidnap unit: raw nanosleep(2s) blocks this kernel thread.
+    rawNanosleep(2, 0);
+    _ = @atomicRmw(i64, &kidnappers_done, .Add, 1, .monotonic);
 }
 
 fn heartbeatFn() void {
     while (@atomicLoad(i32, &stop, .seq_cst) == 0) {
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        rawNanosleep(0, 100 * std.time.ns_per_ms);
         const val = @atomicRmw(i64, &heartbeats, .Add, 1, .monotonic) + 1;
         printf("[Heartbeat] Tick {d}\n", .{val});
     }
@@ -41,8 +48,6 @@ pub fn main() !void {
     printf("=================================================================\n\n", .{});
 
     const hb = try std.Thread.spawn(.{}, heartbeatFn, .{});
-
-    std.Thread.sleep(500 * std.time.ns_per_ms);
 
     printf("\n!!! Unleashing Kidnappers (C.sleep blocking OS threads) !!!\n", .{});
 
@@ -60,8 +65,10 @@ pub fn main() !void {
     }
 
     const final = @atomicLoad(i64, &heartbeats, .seq_cst);
+    const final_done = @atomicLoad(i64, &kidnappers_done, .seq_cst);
     printf("\n=================================================================\n", .{});
     printf("FINAL RESULTS\n", .{});
-    printf("Total Heartbeats: {d}\n", .{final});
+    printf("Total Heartbeats:     {d}\n", .{final});
+    printf("Kidnappers Completed: {d} / {d}\n", .{ final_done, NUM_KIDNAPPERS });
     printf("=================================================================\n", .{});
 }

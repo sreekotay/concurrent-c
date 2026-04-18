@@ -1,82 +1,131 @@
 #!/bin/bash
-# compare_syscall.sh - Compare Concurrent-C vs Pthread robustness against blocking IO
+# compare_syscall.sh - Compare Concurrent-C (V1 + V2) vs Pthread vs Go vs Zig
+# on the "Kidnapping Challenge" (blocking-syscall robustness).
 #
-# This script runs the "Kidnapping Challenge" for both implementations and compares
-# their ability to maintain a "heartbeat" while OS threads are blocked by raw syscalls.
+# Two axes are now tracked:
+#   - Heartbeats (liveness): can the scheduler keep a ticker fiber running?
+#   - Kidnappers Completed (throughput): how many 2s blocking-sleep tasks
+#     actually drained before the test window closed?
+#
+# The liveness axis alone stopped discriminating — every runtime keeps ticking.
+# Throughput exposes whether sysmon is promoting replacement workers when
+# existing ones get pinned in blocking syscalls.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CCC="$REPO_ROOT/out/cc/bin/ccc"
 STRESS_DIR="$REPO_ROOT/stress"
+GO_SRC="$REPO_ROOT/perf/go/syscall_kidnap.go"
+ZIG_SRC="$REPO_ROOT/perf/zig/syscall_kidnap.zig"
 
-# Configuration
 KIDNAPPERS=100
 WORKERS=16
-DURATION=5
+DURATION=3
+
+# Hard wall-clock cap per run. The test has no warmup: heartbeat and kidnappers
+# race for workers from T=0, and the driver loop ends at DURATION. CC variants
+# may still be draining kidnappers when cancelled; we kill shortly after.
+MAX_WAIT=${MAX_WAIT:-6}
 
 echo "================================================================="
 echo "SYSCALL KIDNAPPING COMPARISON"
-echo "Workers: $WORKERS | Kidnappers: $KIDNAPPERS | Duration: ${DURATION}s"
+echo "Workers: $WORKERS | Kidnappers: $KIDNAPPERS | Test window: ${DURATION}s"
+echo "Max wall time per run: ${MAX_WAIT}s"
 echo "================================================================="
 echo ""
 
-# 1. Build implementations
 echo "Building tests..."
 mkdir -p "$STRESS_DIR/out"
-$CCC build --release "$STRESS_DIR/syscall_kidnap.ccs" -o "$STRESS_DIR/out/syscall_kidnap"
+$CCC build --release "$STRESS_DIR/syscall_kidnap.ccs" -o "$STRESS_DIR/out/syscall_kidnap" >/dev/null
 gcc -O2 "$STRESS_DIR/adler_baseline_kidnap.c" -o "$STRESS_DIR/out/adler_baseline_kidnap" -lpthread
+if command -v zig >/dev/null 2>&1; then
+    (cd "$STRESS_DIR/out" && zig build-exe "$ZIG_SRC" -O ReleaseFast -lc -femit-bin=syscall_kidnap_zig >/dev/null 2>&1)
+fi
 echo "Done."
 echo ""
 
+# Run a command, cap it at MAX_WAIT seconds, extract heartbeats + kidnappers-done.
+# Args: NAME CMD [ENV_PREFIX]
 run_test() {
     local name=$1
     local cmd=$2
+    local env_prefix=${3:-}
     echo "--- Running $name ---"
-    
-    # Run in background and capture output
-    $cmd > test_out.txt 2>&1 &
+
+    local out=/tmp/kidnap_out_$$.txt
+    rm -f "$out"
+    eval "$env_prefix $cmd" >"$out" 2>&1 &
     local pid=$!
-    
-    # Wait for duration plus a little buffer
-    sleep $((DURATION + 1))
-    
-    # Kill process if still running
+
+    local elapsed=0
+    while kill -0 $pid 2>/dev/null && [ $elapsed -lt $MAX_WAIT ]; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
     kill -9 $pid 2>/dev/null || true
-    
-    # Extract total heartbeats
-    local b=$(grep "Tick" test_out.txt | wc -l | tr -d ' ')
-    echo "$name Heartbeats: $b"
-    echo "$b" > last_beats.txt
+    wait $pid 2>/dev/null || true
+
+    local b
+    b=$(grep -c "\[Heartbeat\] Tick" "$out" || true)
+    [ -z "$b" ] && b=0
+    local d
+    d=$(grep -E "Kidnappers Completed" "$out" | head -1 | grep -oE '[0-9]+' | head -1)
+    [ -z "$d" ] && d=0
+
+    echo "  Heartbeats: $b | Kidnappers Completed: $d / $KIDNAPPERS | walltime: ${elapsed}s"
+    LAST_BEATS=$b
+    LAST_DONE=$d
+    rm -f "$out"
 }
 
-# 2. Run Pthread Baseline
 run_test "Pthread (Adler)" "$STRESS_DIR/out/adler_baseline_kidnap"
-PTHREAD_BEATS=$(cat last_beats.txt)
+PTHREAD_BEATS=$LAST_BEATS;  PTHREAD_DONE=$LAST_DONE
 
-# 3. Run Concurrent-C
-export CC_FIBER_WORKERS=$WORKERS
-run_test "Concurrent-C" "$STRESS_DIR/out/syscall_kidnap"
-CC_BEATS=$(cat last_beats.txt)
-rm last_beats.txt
+run_test "Concurrent-C V1" "$STRESS_DIR/out/syscall_kidnap" "CC_FIBER_WORKERS=$WORKERS"
+CCV1_BEATS=$LAST_BEATS;     CCV1_DONE=$LAST_DONE
 
+run_test "Concurrent-C V2" "$STRESS_DIR/out/syscall_kidnap" "CC_V2_THREADS=$WORKERS"
+CCV2_BEATS=$LAST_BEATS;     CCV2_DONE=$LAST_DONE
+
+GO_BEATS="-"; GO_DONE="-"
+if command -v go >/dev/null 2>&1; then
+    run_test "Go" "go run $GO_SRC"
+    GO_BEATS=$LAST_BEATS;   GO_DONE=$LAST_DONE
+fi
+
+ZIG_BEATS="-"; ZIG_DONE="-"
+if [ -x "$STRESS_DIR/out/syscall_kidnap_zig" ]; then
+    run_test "Zig" "$STRESS_DIR/out/syscall_kidnap_zig"
+    ZIG_BEATS=$LAST_BEATS;  ZIG_DONE=$LAST_DONE
+fi
+
+echo ""
 echo "DATA_PTHREAD_SYSCALL_BEATS: $PTHREAD_BEATS"
-echo "DATA_CC_SYSCALL_BEATS: $CC_BEATS"
+echo "DATA_PTHREAD_SYSCALL_DONE:  $PTHREAD_DONE"
+echo "DATA_CCV1_SYSCALL_BEATS:    $CCV1_BEATS"
+echo "DATA_CCV1_SYSCALL_DONE:     $CCV1_DONE"
+echo "DATA_CCV2_SYSCALL_BEATS:    $CCV2_BEATS"
+echo "DATA_CCV2_SYSCALL_DONE:     $CCV2_DONE"
+echo "DATA_GO_SYSCALL_BEATS:      $GO_BEATS"
+echo "DATA_GO_SYSCALL_DONE:       $GO_DONE"
+echo "DATA_ZIG_SYSCALL_BEATS:     $ZIG_BEATS"
+echo "DATA_ZIG_SYSCALL_DONE:      $ZIG_DONE"
 
 echo ""
 echo "================================================================="
 echo "VERDICT"
 echo "================================================================="
-printf "%-20s %-15s\n" "Implementation" "Total Heartbeats"
-printf "%-20s %-15s\n" "Pthread (Adler)" "$PTHREAD_BEATS"
-printf "%-20s %-15s\n" "Concurrent-C" "$CC_BEATS"
+printf "%-20s %-12s %-22s\n" "Implementation" "Heartbeats" "Kidnappers Completed"
+printf "%-20s %-12s %-22s\n" "Pthread (Adler)"    "$PTHREAD_BEATS" "$PTHREAD_DONE / $KIDNAPPERS"
+printf "%-20s %-12s %-22s\n" "Concurrent-C V1"    "$CCV1_BEATS"    "$CCV1_DONE / $KIDNAPPERS"
+printf "%-20s %-12s %-22s\n" "Concurrent-C V2"    "$CCV2_BEATS"    "$CCV2_DONE / $KIDNAPPERS"
+printf "%-20s %-12s %-22s\n" "Go"                 "$GO_BEATS"      "$GO_DONE / $KIDNAPPERS"
+printf "%-20s %-12s %-22s\n" "Zig"                "$ZIG_BEATS"     "$ZIG_DONE / $KIDNAPPERS"
 echo "-----------------------------------------------------------------"
-
-if [ "$CC_BEATS" -ge "$((PTHREAD_BEATS - 5))" ]; then
-    echo "RESULT: SUCCESS - Concurrent-C matched or exceeded Pthread robustness!"
-    echo "The user-space scheduler correctly handled OS thread kidnapping."
-else
-    echo "RESULT: PARTIAL - Concurrent-C was slowed down by kidnapping."
-    echo "The scheduler survived but heartbeats were dropped."
-fi
+echo "Liveness: all runtimes should tick ~${DURATION}0 heartbeats."
+echo "Throughput: a 1:1 runtime (pthread/go/zig) drains all $KIDNAPPERS kidnappers"
+echo "in ~2s; an M:N runtime capped at $WORKERS workers with no sysmon-driven"
+echo "worker promotion tops out near (${WORKERS} workers * ${DURATION}s / 2s)"
+echo "= $((WORKERS * DURATION / 2)) kidnappers."
 echo "================================================================="
