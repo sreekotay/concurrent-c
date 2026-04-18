@@ -1,0 +1,29 @@
+// Smoke: `return EXPR ?> DEFAULT;` — the `return` keyword must not be
+// swallowed into the ?> lowering's __typeof__(...) span.
+#include <stdio.h>
+
+int !> (CCError) f(int i) {
+    return (i == 0) ? cc_err(CC_ERR_NOT_FOUND, "bad") : cc_ok(i * 10);
+}
+
+int demo_ret_qmark(int i) {
+    return f(i) ?> (-1);
+}
+
+int demo_ret_qmark_bind(int i) {
+    return f(i) ?>(e) ((int)e.kind);
+}
+
+// Ensure identifiers that contain `return` as a prefix (`returnable`)
+// are not confused with the keyword.
+int returnable_var(int i) {
+    int returnable = 42;
+    return returnable + (f(i) ?> (-1));
+}
+
+int main(void) {
+    printf("r_q 3=%d 0=%d\n", demo_ret_qmark(3), demo_ret_qmark(0));
+    printf("r_q_b 3=%d 0=%d\n", demo_ret_qmark_bind(3), demo_ret_qmark_bind(0));
+    printf("rv 3=%d 0=%d\n", returnable_var(3), returnable_var(0));
+    return 0;
+}

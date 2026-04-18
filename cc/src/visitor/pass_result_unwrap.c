@@ -145,7 +145,7 @@ static void cc__skip_str_backward(const char* s, size_t* i) {
 
 /* Find the start of the LHS expression by scanning backward from `from`
  * (exclusive). Returns the position of the first byte of the LHS. */
-static size_t cc__find_lhs_start_backward(const char* s, size_t from) {
+static size_t cc__find_lhs_start_backward_raw(const char* s, size_t from) {
     int par = 0, brk = 0, br = 0;
     size_t i = from;
     while (i > 0) {
@@ -176,6 +176,26 @@ static size_t cc__find_lhs_start_backward(const char* s, size_t from) {
         if (c == '|' && i > 0 && s[i - 1] == '|') return i + 1;
     }
     return 0;
+}
+
+/* Wrapper over the raw scanner that additionally strips a leading
+ * `return` keyword from the LHS.  `return EXPR ?> DEFAULT;` is a
+ * statement, not an expression — the `return` belongs to the enclosing
+ * statement and must not be swallowed into the ternary lowering's
+ * `__typeof__(...)`.  By advancing `lhs_start` past `return`, the
+ * existing emit logic keeps the keyword as prefix text and hands only
+ * `EXPR` to the lowering. */
+static size_t cc__find_lhs_start_backward(const char* s, size_t from) {
+    size_t start = cc__find_lhs_start_backward_raw(s, from);
+    size_t j = start;
+    while (j < from && (s[j] == ' ' || s[j] == '\t' ||
+                        s[j] == '\n' || s[j] == '\r')) j++;
+    if (j + 6 <= from && memcmp(s + j, "return", 6) == 0 &&
+        (j + 6 == from || !cc_is_ident_char(s[j + 6])) &&
+        (j == 0 || !cc_is_ident_char(s[j - 1]))) {
+        return j + 6;
+    }
+    return start;
 }
 
 /* Find the end (exclusive) of the RHS expression by scanning forward from
