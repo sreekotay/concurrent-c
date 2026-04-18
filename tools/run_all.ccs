@@ -2,18 +2,32 @@
  * Run all examples, stress tests, or perf benchmarks.
  *
  * Usage:
- *   ccc run tools/run_all.ccs -- examples   # run all examples
- *   ccc run tools/run_all.ccs -- stress     # run all stress tests (10s timeout)
- *   ccc run tools/run_all.ccs -- perf       # run all perf benchmarks
- *   clear       # run everything
+ *   ccc run tools/run_all.ccs -- --examples   # run all examples
+ *   ccc run tools/run_all.ccs -- --stress     # run all stress tests (10s timeout)
+ *   ccc run tools/run_all.ccs -- --perf       # run all perf benchmarks
+ *   ccc run tools/run_all.ccs -- --all        # run everything
  *
- * This demonstrates the dir and process stdlib modules.
+ * Add --trace to write a per-test-boundary log that is fflush+fsynced after
+ * every START/END marker. If the machine kernel-panics mid-test, reading
+ * tmp/run_all_logs/run_trace.log after reboot shows exactly which test was
+ * running at the time of the crash (the last line will be a dangling START
+ * with no matching END).
+ *
+ * Add --stream to inherit stdout/stderr from every category's children so
+ * test output hits the terminal immediately instead of being buffered and
+ * reprinted on failure. Useful in combination with --trace when hunting a
+ * crash; without --stream, only the per-test progress line flushes live.
  */
 
 #include <ccc/std/prelude.cch>
 #include <ccc/std/cli.cch>
 #include <ccc/std/exec.cch>
 #include <unistd.h>
+#include <sys/time.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <stdarg.h>
 
 /* Default timeout for stress tests (seconds) */
 #define STRESS_TIMEOUT_SEC 10
@@ -27,6 +41,31 @@ typedef struct {
 } Stats;
 
 static const char* LOG_DIR = "tmp/run_all_logs";
+static const char* TRACE_PATH = "tmp/run_all_logs/run_trace.log";
+
+/* Global trace state. When non-NULL, every pre/post-test boundary is written
+ * here and fsync'd, so that if the machine hard-crashes we can read the trace
+ * file after reboot and see the exact test that was running. */
+static FILE* g_trace = NULL;
+
+static long long epoch_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000LL + (long long)tv.tv_usec / 1000LL;
+}
+
+static void trace_write(const char* fmt, ...) {
+    if (!g_trace) return;
+    va_list ap;
+    fprintf(g_trace, "[%lld] ", epoch_ms());
+    va_start(ap, fmt);
+    vfprintf(g_trace, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_trace);
+    fflush(g_trace);
+    /* Force kernel to push bytes to disk so it survives a panic. */
+    (void)fsync(fileno(g_trace));
+}
 
 static inline CCSlice slice_from_cstr(const char* s) {
     return cc_slice_from_buffer((void*)s, strlen(s));
@@ -143,6 +182,7 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
         
         printf("  [%zu/%zu] %s ... ", i + 1, n, path);
         fflush(stdout);
+        trace_write("START [%zu/%zu] %s (timeout=%ds)", i + 1, n, path, timeout_for_file);
 
         /* Small delay between tests to avoid resource contention */
         usleep(1000);  /* 1ms */
@@ -165,6 +205,8 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
                 CCIoError err = cc_unwrap_err_as(status, CCIoError);
                 cc_arena_free(&test_arena);
                 printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
+                fflush(stdout);
+                trace_write("END   %s SKIP (spawn error os=%d)", path, err.os_code);
                 stats->skipped++;
                 continue;
             }
@@ -180,6 +222,8 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
                 printf("FAIL (exit %d, expected %d)\n", exit_code, expected_exit);
                 stats->failed++;
             }
+            fflush(stdout);
+            trace_write("END   %s rc=%d expected=%d", path, exit_code, expected_exit);
 
             cc_arena_free(&test_arena);
             continue;
@@ -191,6 +235,8 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
             CCIoError err = cc_unwrap_err_as(res, CCIoError);
             cc_arena_free(&test_arena);
             printf("SKIP (spawn error: %s, os=%d)\n", cc_io_error_str(err), err.os_code);
+            fflush(stdout);
+            trace_write("END   %s SKIP (spawn error os=%d)", path, err.os_code);
             stats->skipped++;
             continue;
         }
@@ -214,7 +260,9 @@ static void run_files(CCArena* arena, const char* pattern, const char* label, St
             print_process_log_paths(&test_arena, path);
             stats->failed++;
         }
-        
+        fflush(stdout);
+        trace_write("END   %s rc=%d expected=%d", path, exit_code, expected_exit);
+
         cc_arena_free(&test_arena);
     }
 }
@@ -231,6 +279,12 @@ int main(int argc, char** argv) {
         { .long_ = "stress", .kind = CC_ARG_FLAG, .desc = "Run all stress tests" },
         { .long_ = "perf", .kind = CC_ARG_FLAG, .desc = "Run all performance benchmarks" },
         { .long_ = "all", .kind = CC_ARG_FLAG, .desc = "Run everything" },
+        { .long_ = "trace", .kind = CC_ARG_FLAG,
+          .desc = "Hard-flushed trace log (fsynced per test) at tmp/run_all_logs/run_trace.log; "
+                  "lets you see the exact test that was running if the machine panics" },
+        { .long_ = "stream", .kind = CC_ARG_FLAG,
+          .desc = "Stream per-test stdout/stderr to the terminal (inherit_stdio) for every "
+                  "category, not just perf" },
     };
     CCCliParse cli = cc_cli_parse_args(argc, argv, RUN_ALL_ARGS, cc_arg_spec_count(RUN_ALL_ARGS), &arena);
     if (!cli.ok) {
@@ -245,6 +299,8 @@ int main(int argc, char** argv) {
     do_stress = cli.args.has("stress");
     do_perf = cli.args.has("perf");
     do_all = cli.args.has("all");
+    bool do_trace = cli.args.has("trace");
+    bool do_stream = cli.args.has("stream");
     if (do_all) {
         do_examples = true;
         do_stress = true;
@@ -257,14 +313,35 @@ int main(int argc, char** argv) {
     }
     Stats stats = {0};
 
+    /* Make stdout unbuffered when tracing so progress is visible live even if
+     * the machine panics mid-test. */
+    if (do_trace || do_stream) {
+        setvbuf(stdout, NULL, _IONBF, 0);
+    }
+
+    /* Open the hard-flushed trace file up front, so the first test's START
+     * marker is already on disk before we spawn anything. */
+    if (do_trace) {
+        ensure_log_dir(&arena);
+        g_trace = fopen(TRACE_PATH, "a");
+        if (!g_trace) {
+            fprintf(stderr, "run_all: cannot open trace file %s: %s\n",
+                    TRACE_PATH, strerror(errno));
+            return 1;
+        }
+        trace_write("SESSION start pid=%d examples=%d stress=%d perf=%d",
+                    (int)getpid(), do_examples, do_stress, do_perf);
+        printf("Trace log: %s (fsynced per test)\n", TRACE_PATH);
+    }
+
     printf("Concurrent-C Test Runner\n");
 
     if (do_examples) {
-        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0, false);  /* No timeout */
+        run_files(&arena, "examples/*.ccs", "Examples", &stats, 0, do_stream);  /* No timeout */
     }
 
     if (do_stress) {
-        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC, false);
+        run_files(&arena, "stress/*.ccs", "Stress Tests", &stats, STRESS_TIMEOUT_SEC, do_stream);
     }
 
     if (do_perf) {
@@ -277,6 +354,13 @@ int main(int argc, char** argv) {
     printf("  Failed:  %d\n", stats.failed);
     printf("  Skipped: %d\n", stats.skipped);
     printf("  Total:   %d\n", stats.passed + stats.failed + stats.skipped);
+
+    if (g_trace) {
+        trace_write("SESSION end passed=%d failed=%d skipped=%d",
+                    stats.passed, stats.failed, stats.skipped);
+        fclose(g_trace);
+        g_trace = NULL;
+    }
 
     return stats.failed > 0 ? 1 : 0;
 }
