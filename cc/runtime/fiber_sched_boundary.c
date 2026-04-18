@@ -1,8 +1,6 @@
 #include "fiber_sched_boundary.h"
 #include "fiber_internal.h"
 
-CCSchedFiber* cc_sched_v3_worker_next_impl(void);
-CCSchedFiber* cc_sched_v3_idle_probe_impl(void);
 
 /*
  * V2 compatibility shim for the v3 scheduler boundary.
@@ -17,14 +15,6 @@ CCSchedFiber* cc_sched_current(void) {
 void cc_sched_schedule(CCSchedFiber* fiber) {
     /* LP (§10 Enqueue RUNNABLE): queue publication of runnable visibility. */
     cc__fiber_sched_enqueue(fiber);
-}
-
-CCSchedFiber* cc_sched_worker_next(void) {
-    return cc_sched_v3_worker_next_impl();
-}
-
-CCSchedFiber* cc_sched_worker_idle_probe(void) {
-    return cc_sched_v3_idle_probe_impl();
 }
 
 static void cc_sched_wait_many_unpublish(cc_sched_wait_case* cases,
