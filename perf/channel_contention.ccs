@@ -93,10 +93,16 @@ static int trace_contention_trials_enabled(void) {
     return enabled;
 }
 
-static int trace_contention_workers_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) enabled = getenv("CC_CONTENTION_WORKERS") != NULL;
-    return enabled;
+/* Cached once at program start so hot-path callers can read it inline
+ * without a function call + static-guard dance per iteration. */
+static int g_trace_contention_workers_enabled = 0;
+
+static void trace_contention_workers_init(void) {
+    g_trace_contention_workers_enabled = (getenv("CC_CONTENTION_WORKERS") != NULL);
+}
+
+static inline int trace_contention_workers_enabled(void) {
+    return g_trace_contention_workers_enabled;
 }
 
 static int trace_contention_worker_stride(void) {
@@ -124,8 +130,7 @@ static void trace_worker_state_reset(int producers, int consumers) {
     }
 }
 
-static void trace_worker_sample(int role, int iter) {
-    if (!trace_contention_workers_enabled()) return;
+static void trace_worker_sample_slow(int role, int iter) {
     if (role < 0 || role >= g_trace_role_capacity) return;
     int stride = trace_contention_worker_stride();
     if (iter != 0 && (iter % stride) != 0) return;
@@ -138,6 +143,12 @@ static void trace_worker_sample(int role, int iter) {
     }
     g_role_last_worker[role] = worker;
     g_role_samples[role]++;
+}
+
+static inline void trace_worker_sample(int role, int iter) {
+    if (__builtin_expect(g_trace_contention_workers_enabled, 0)) {
+        trace_worker_sample_slow(role, iter);
+    }
 }
 
 static void trace_worker_summary(const char* phase, int trial, int producers, int consumers) {
@@ -258,6 +269,7 @@ static double run_shared_case(const char* phase, int trial, int producers, int c
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    trace_contention_workers_init();
     int messages = bench_messages();
     int trials = bench_trials();
     int producers = bench_producers();
