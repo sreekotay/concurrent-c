@@ -186,6 +186,21 @@ struct fiber_v2 {
     uint32_t   deadlock_suppress_depth;
     uint32_t   external_wait_depth;
 
+    /* Deadline-aware park.  When a caller parks with an absolute deadline
+     * (e.g. @with_deadline wrapping a cc_chan_send that finds the channel
+     * full), they publish it here before handing off to sched_v2_park().
+     * sysmon's per-tick walk (sched_v2_wake_expired_parkers) signals any
+     * parked fiber whose deadline has passed, which delivers a spurious
+     * wake back into cc__fiber_park_if_impl; that function's post-park
+     * deadline check then returns 1 (timeout) so the channel layer
+     * returns ETIMEDOUT to @with_deadline.  Resolution is bounded by
+     * V2_SYSMON_INTERVAL_MS (20 ms today), which is fine for correctness
+     * — tests only care about observing ETIMEDOUT at all, not about
+     * tight latency.  has_park_deadline is atomic so sysmon can read
+     * without taking the fiber's stack ownership. */
+    struct timespec park_deadline;
+    _Atomic int     has_park_deadline;
+
     wake_primitive done_wake;
     cc__fiber* _Atomic join_waiter_fiber;
     CCNursery* saved_nursery;
@@ -569,6 +584,7 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->park_obj = NULL;
             f->deadlock_suppress_depth = 0;
             f->external_wait_depth = 0;
+            atomic_store_explicit(&f->has_park_deadline, 0, memory_order_relaxed);
             atomic_store_explicit(&f->state, FIBER_V2_IDLE, memory_order_relaxed);
             V2_STAT_INC(g_v2_fibers_alive);
             return f;
@@ -608,6 +624,7 @@ static void fiber_v2_free(fiber_v2* f) {
     f->park_obj = NULL;
     f->deadlock_suppress_depth = 0;
     f->external_wait_depth = 0;
+    atomic_store_explicit(&f->has_park_deadline, 0, memory_order_relaxed);
     /* Pool the coroutine memory (including its stack): mco_uninit just marks
      * the coro DEAD and runs platform teardown (a no-op on ucontext), while
      * preserving the allocation so the next spawn can re-init in place
@@ -982,6 +999,77 @@ void sched_v2_fiber_set_park_obj(fiber_v2* f, void* obj) {
     f->park_obj = obj;
 }
 
+/* Global count of fibers that currently have a park_deadline published.
+ * Sysmon's sched_v2_wake_expired_parkers short-circuits when this is 0,
+ * so the common case (no @with_deadline in flight) pays zero cost per
+ * tick beyond a single relaxed load. Maintained by the set/clear pair
+ * below using atomic exchange so a double-set or double-clear can't
+ * desync it from the per-fiber flag. */
+static _Atomic size_t g_v2_park_deadlines = 0;
+
+/* Deadline-aware park primitives.
+ *
+ * Publishing order matters: the caller sets the deadline BEFORE calling
+ * sched_v2_park(), so that if the commit-to-PARKED transition races with
+ * a sysmon tick, sysmon already sees has_park_deadline=1 and can decide
+ * to signal us.  We publish with release so the sysmon-side acquire load
+ * of the state word (pairs with park commit) observes the deadline too.
+ *
+ * We use atomic_exchange on has_park_deadline to maintain the global
+ * counter symmetrically with clear: a repeat set (same fiber, second
+ * park while the first is in flight — shouldn't happen, but safe) does
+ * not double-increment, and clear on a fiber that never set (e.g.
+ * park_if that short-circuited) does not decrement. */
+void sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d) {
+    if (!f || !d) return;
+    f->park_deadline = *d;
+    int was = atomic_exchange_explicit(&f->has_park_deadline, 1, memory_order_release);
+    if (!was) atomic_fetch_add_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed);
+}
+
+void sched_v2_fiber_clear_park_deadline(fiber_v2* f) {
+    if (!f) return;
+    int was = atomic_exchange_explicit(&f->has_park_deadline, 0, memory_order_relaxed);
+    if (was) atomic_fetch_sub_explicit(&g_v2_park_deadlines, 1, memory_order_relaxed);
+}
+
+/* Walk the all_fibers list and signal any parked fiber whose deadline
+ * has passed.  Cheap when no deadlines are in flight: the global counter
+ * short-circuits the walk on the first load.
+ *
+ * Called once per sysmon tick (see sched_v2_sysmon_main).  The resolution
+ * is V2_SYSMON_INTERVAL_MS (20 ms today) — a 10 ms deadline will fire
+ * 10–30 ms after being posted, which is fine for the only current caller
+ * (@with_deadline wrapping blocking channel ops): tests only care about
+ * seeing ETIMEDOUT, not latency. */
+static void sched_v2_wake_expired_parkers(void) {
+    if (atomic_load_explicit(&g_v2_park_deadlines, memory_order_relaxed) == 0) {
+        return;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    pthread_mutex_lock(&g_v2.all_fibers_mu);
+    for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
+        if (!atomic_load_explicit(&f->has_park_deadline, memory_order_acquire)) continue;
+        int base = fiber_v2_state_base(
+            atomic_load_explicit(&f->state, memory_order_acquire));
+        if (base != FIBER_V2_PARKED) continue;
+        if (now.tv_sec < f->park_deadline.tv_sec ||
+            (now.tv_sec == f->park_deadline.tv_sec &&
+             now.tv_nsec < f->park_deadline.tv_nsec)) {
+            continue;
+        }
+        /* Expired.  Signal via the normal unpark path; the fiber will
+         * resume, its post-park deadline check will re-read the clock,
+         * see expiry, and return timeout up to the channel layer.  We
+         * don't clear has_park_deadline here — the fiber clears it on
+         * its own resume side, which keeps the increment/decrement
+         * accounting on a single owner. */
+        sched_v2_signal(f);
+    }
+    pthread_mutex_unlock(&g_v2.all_fibers_mu);
+}
+
 void sched_v2_fiber_inc_deadlock_suppress(fiber_v2* f) {
     if (!f) return;
     if (f->deadlock_suppress_depth < UINT32_MAX) f->deadlock_suppress_depth++;
@@ -1261,6 +1349,11 @@ static void* sched_v2_sysmon_main(void* arg) {
 
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
+
+        /* Park-deadline wakeup: signal any fiber whose @with_deadline
+         * has expired while it was parked.  Short-circuits to a single
+         * relaxed load when no deadlines are in flight. */
+        sched_v2_wake_expired_parkers();
 
         /* Deadlock detector: runs every tick. Internal checks (idle
          * count + ready queue depth + first-seen timestamp) short-circuit

@@ -1064,10 +1064,22 @@ static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct 
         /* Publish park_reason so the deadlock detector can classify the
          * wait (chan_recv_wait_empty etc). sched_v2_park snapshots this
          * into f->park_reason at yield time; we clear after resume so
-         * stale values don't leak into a subsequent unrelated park. */
+         * stale values don't leak into a subsequent unrelated park.
+         *
+         * Publish park_deadline too so sysmon can fire an expiration
+         * signal if no natural wake arrives first.  Without this, a
+         * @with_deadline wrapping a buffered cc_chan_send that finds no
+         * receiver would block forever — the pre-park and post-park
+         * deadline checks only fire on entry/exit, and once sched_v2_park
+         * commits, only sched_v2_signal can resume the fiber. */
+        fiber_v2* self = sched_v2_current_fiber();
+        if (abs_deadline && self) {
+            sched_v2_fiber_set_park_deadline(self, abs_deadline);
+        }
         sched_v2_set_park_reason(reason);
         sched_v2_park();
         sched_v2_set_park_reason(NULL);
+        if (self) sched_v2_fiber_clear_park_deadline(self);
         if (abs_deadline) {
             struct timespec now;
             clock_gettime(CLOCK_REALTIME, &now);
