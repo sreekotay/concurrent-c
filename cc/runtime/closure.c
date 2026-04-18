@@ -45,18 +45,9 @@ int cc_nursery_spawn_closure0(CCNursery* n, CCClosure0 c) {
     return err;
 }
 
-int cc_nursery_spawnhybrid(CCNursery* n, void* (*fn)(void*), void* arg);
-int cc_nursery_spawnhybrid_async(CCNursery* n, CCTask task);
-
+/* spawnhybrid is a source-compat alias for spawn now that V2 is the default. */
 int cc_nursery_spawnhybrid_closure0(CCNursery* n, CCClosure0 c) {
-    if (!n || !c.fn) return EINVAL;
-    CCClosure0Heap* h = (CCClosure0Heap*)malloc(sizeof(CCClosure0Heap));
-    if (!h) return ENOMEM;
-    h->c = c;
-    TSAN_RELEASE(c.env);
-    int err = cc_nursery_spawnhybrid(n, cc__closure0_trampoline, h);
-    if (err != 0) free(h);
-    return err;
+    return cc_nursery_spawn_closure0(n, c);
 }
 
 CCNursery* cc_nursery_spawn_child_closure0(CCNursery* parent, CCClosure0 c) {
@@ -189,12 +180,13 @@ CCTask cc_async_closure0_start(CCAsyncClosure0 c) {
 
 int cc_nursery_spawn_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
     if (!n || !c.start) return EINVAL;
-    return cc_nursery_spawn_async(n, cc_async_closure0_start(c));
+    /* V2 is the default; use the V2 async-task start so non-fiber tasks get
+     * bridged through the V2 scheduler. */
+    return cc_nursery_spawn_async(n, cc_async_closure0_start_v2(c));
 }
 
 int cc_nursery_spawnhybrid_async_closure0(CCNursery* n, CCAsyncClosure0 c) {
-    if (!n || !c.start) return EINVAL;
-    return cc_nursery_spawnhybrid_async(n, cc_async_closure0_start_v2(c));
+    return cc_nursery_spawn_async_closure0(n, c);
 }
 
 void* cc_closure0_call(CCClosure0 c) {
