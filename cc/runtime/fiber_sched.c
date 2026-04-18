@@ -5219,17 +5219,6 @@ void* cc_fiber_get_result(fiber_task* f) {
     return f->result;
 }
 
-/* TLS pointer to the current pool slot's result_buf_copy.
-* Set by cc_pool_runner_fn before invoking a task, cleared after.
-* cc_task_result_ptr reads this to direct structured results into the
-* slot's stable buffer instead of the fiber's result_buf. */
-__thread char* cc_tls_pool_slot_result_buf = NULL;
-
-__attribute__((noinline))
-void cc__fiber_set_pool_slot_buf(char* buf) {
-    cc_tls_pool_slot_result_buf = buf;
-}
-
 /* Get pointer to fiber's result_buf (for range checks in task.c) */
 void* cc_fiber_get_result_buf(fiber_task* f) {
     if (!f) return NULL;
@@ -5256,11 +5245,6 @@ void* cc__fiber_current(void) {
 * Returns NULL if not in fiber context. */
 __attribute__((noinline))
 void* cc_task_result_ptr(size_t size) {
-    char* pool_buf = cc_tls_pool_slot_result_buf;
-    if (pool_buf) {
-        if (size > 48) return NULL;
-        return pool_buf;
-    }
     if (tls_current_fiber && size <= sizeof(tls_current_fiber->result_buf)) {
         return tls_current_fiber->result_buf;
     }
@@ -6167,20 +6151,6 @@ void cc__fiber_touch_heartbeat(void) {
     if (wid < 0 || !g_sched.worker_heartbeat) return;
     atomic_store_explicit(&g_sched.worker_heartbeat[wid].heartbeat,
                         rdtsc(), memory_order_relaxed);
-}
-
-/* Notify the sysmon that the current fiber is about to execute a long-running
-* CPU-bound operation (e.g. a pool task).  The sysmon will not count this
-* worker as "stuck" for the duration, suppressing hybrid-promotion spawns. */
-void cc__fiber_pool_task_begin(void) {
-    atomic_fetch_add_explicit(&g_pool_tasks_active, 1, memory_order_relaxed);
-    /* Also reset the heartbeat so the 1ms threshold starts fresh. */
-    cc__fiber_touch_heartbeat();
-}
-
-void cc__fiber_pool_task_end(void) {
-    cc__fiber_touch_heartbeat();
-    atomic_fetch_sub_explicit(&g_pool_tasks_active, 1, memory_order_relaxed);
 }
 
 /* Park the current fiber for `ms` milliseconds.
