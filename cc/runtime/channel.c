@@ -4247,7 +4247,23 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_send_wait_full", ch);
+                /* MUST pass abs_deadline — once we park, only signal/close/timeout
+                 * can wake us. The deadline check at the top of the loop (above)
+                 * only fires before parking, so without forwarding the deadline
+                 * here a @with_deadline scope cannot break a buffered-send block
+                 * if no receiver ever drains the channel. This was the root cause
+                 * of the stress/backpressure_cycle_ring3_deadline 3-fiber ring
+                 * deadlock — all 3 fibers parked forever, the V2 detector fired
+                 * after sysmon stalled, exit 124. */
+                cc_sched_wait_result wait_rc =
+                    cc__chan_wait_notified_mark_close(&node, abs_deadline,
+                                                     "chan_send_wait_full", ch);
+                if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_send_waiter(ch, &node);
+                    pthread_mutex_unlock(&ch->mu);
+                    return ETIMEDOUT;
+                }
                 cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {
@@ -4419,7 +4435,18 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     cc_chan_unlock(ch);
                     wake_batch_flush();
                 }
-                (void)cc__chan_wait_notified_mark_close(&node, NULL, "chan_recv_wait_empty", ch);
+                /* See cc_chan_timed_send: MUST pass abs_deadline through to the
+                 * park call so a @with_deadline scope can break an empty-recv
+                 * block when no sender ever shows up. */
+                cc_sched_wait_result wait_rc =
+                    cc__chan_wait_notified_mark_close(&node, abs_deadline,
+                                                     "chan_recv_wait_empty", ch);
+                if (wait_rc == CC_SCHED_WAIT_TIMEOUT) {
+                    cc_chan_lock(ch);
+                    cc__chan_remove_recv_waiter(ch, &node);
+                    pthread_mutex_unlock(&ch->mu);
+                    return ETIMEDOUT;
+                }
                 cc_chan_lock(ch);
                 int notified = atomic_load_explicit(&node.notified, memory_order_acquire);
                 if (notified == CC_CHAN_NOTIFY_SIGNAL) {

@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
+#include <time.h>
 
 typedef struct fiber_v2 fiber_v2;
 typedef struct CCNursery CCNursery;
@@ -75,6 +76,12 @@ int    sched_v2_fiber_deadlock_suppressed(fiber_v2* f);
 void   sched_v2_fiber_inc_external_wait(fiber_v2* f);
 void   sched_v2_fiber_dec_external_wait(fiber_v2* f);
 int    sched_v2_fiber_external_wait_active(fiber_v2* f);
+
+/* Deadline-aware park: sysmon wakes fibers whose deadline has passed.
+ * Callers set the deadline immediately before calling sched_v2_park(),
+ * then clear it on the resume side (from cc__fiber_park_if_impl). */
+void   sched_v2_fiber_set_park_deadline(fiber_v2* f, const struct timespec* d);
+void   sched_v2_fiber_clear_park_deadline(fiber_v2* f);
 
 /* Deadlock-detector check.
  *
