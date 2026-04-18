@@ -257,6 +257,16 @@ void   sched_v2_signal(fiber_v2* f);
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int      sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);
 void*  sched_v2_current_result_buf(size_t size);
+/* Deadlock-detector metadata setters (see sched_v2.h). Forward declared
+ * here so the V1 shims in this file can route to them without pulling in
+ * the full sched_v2.h include from fiber_sched.c. */
+void   sched_v2_fiber_set_park_obj(fiber_v2* f, void* obj);
+void   sched_v2_fiber_inc_deadlock_suppress(fiber_v2* f);
+void   sched_v2_fiber_dec_deadlock_suppress(fiber_v2* f);
+int    sched_v2_fiber_deadlock_suppressed(fiber_v2* f);
+void   sched_v2_fiber_inc_external_wait(fiber_v2* f);
+void   sched_v2_fiber_dec_external_wait(fiber_v2* f);
+int    sched_v2_fiber_external_wait_active(fiber_v2* f);
 void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
 void   sched_v2_debug_dump_state(const char* prefix);
 bool cc_nursery_is_cancelled(const CCNursery* n);
@@ -1573,7 +1583,14 @@ static _Atomic int g_initialized = 0;
 static _Atomic int g_deadlock_reported = 0;
 static _Atomic uint64_t g_deadlock_first_seen = 0;  /* Timestamp when deadlock state first seen */
 static _Atomic size_t g_external_wait_parked = 0;
-static _Atomic size_t g_external_wait_threads = 0;
+/* Non-fiber threads currently inside a cc_external_wait_enter/leave scope.
+ * Consulted by both the V1 and V2 deadlock detectors as evidence that an
+ * external progress source exists (e.g. a blocking kqueue wait), which
+ * suppresses the deadlock verdict when the only remaining internal waits
+ * are receivers on still-open channels. Exported (non-static) so
+ * sched_v2_check_deadlock in sched_v2.c can read it directly rather than
+ * through a getter — this is a single atomic load. */
+_Atomic size_t g_external_wait_threads = 0;
 static _Atomic size_t g_requested_workers = 0;  /* User-requested worker count (0 = auto) */
 static _Atomic int g_cc_v3_pressure_stats_atexit = 0;
 static _Atomic int g_sharded_runq_mode = -1; /* -1 unknown, 0 off, 1 on */
@@ -2282,21 +2299,44 @@ void cc__deadlock_thread_unblock(void) {
 }
 
 void cc_deadlock_suppress_enter(void) {
-    if (tls_deadlock_suppress_depth < UINT32_MAX) tls_deadlock_suppress_depth++;
     if (tls_current_fiber) {
+        if (tls_deadlock_suppress_depth < UINT32_MAX) tls_deadlock_suppress_depth++;
         tls_current_fiber->deadlock_suppress_depth = tls_deadlock_suppress_depth;
+        return;
     }
+    /* V2 fiber path: track scope directly on the V2 fiber. We can't rely
+     * on the V1 TLS because a V2 fiber may migrate between V2 workers
+     * across park/resume, and TLS per-worker would leak depths between
+     * unrelated fibers. Thread-scoped callers (no fiber at all) still
+     * fall through to the V1 TLS counter below. */
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) {
+        sched_v2_fiber_inc_deadlock_suppress(v2f);
+        return;
+    }
+    if (tls_deadlock_suppress_depth < UINT32_MAX) tls_deadlock_suppress_depth++;
 }
 
 void cc_deadlock_suppress_leave(void) {
+    if (tls_current_fiber) {
+        if (tls_deadlock_suppress_depth == 0) return;
+        tls_deadlock_suppress_depth--;
+        tls_current_fiber->deadlock_suppress_depth = tls_deadlock_suppress_depth;
+        return;
+    }
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) {
+        sched_v2_fiber_dec_deadlock_suppress(v2f);
+        return;
+    }
     if (tls_deadlock_suppress_depth == 0) return;
     tls_deadlock_suppress_depth--;
-    if (tls_current_fiber) {
-        tls_current_fiber->deadlock_suppress_depth = tls_deadlock_suppress_depth;
-    }
 }
 
 int cc_deadlock_suppressed(void) {
+    if (tls_current_fiber) return tls_deadlock_suppress_depth > 0;
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) return sched_v2_fiber_deadlock_suppressed(v2f);
     return tls_deadlock_suppress_depth > 0;
 }
 
@@ -2305,29 +2345,56 @@ int cc_deadlock_suppressed(void) {
  * belongs at specific runtime wait sites, but the scope form gives the
  * scheduler a simple way to carry the classification across a park/resume. */
 void cc_external_wait_enter(void) {
-    if (tls_external_wait_depth < UINT32_MAX) tls_external_wait_depth++;
     if (tls_current_fiber) {
+        if (tls_external_wait_depth < UINT32_MAX) tls_external_wait_depth++;
         tls_current_fiber->external_wait_depth = tls_external_wait_depth;
         tls_current_fiber->external_wait_scoped = 1;
-    } else if (tls_external_wait_depth == 1) {
+        return;
+    }
+    /* V2 fiber path: pin the scope on the V2 fiber, not on the worker
+     * TLS. Same rationale as cc_deadlock_suppress_enter — V2 fibers can
+     * migrate workers across park/resume. */
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) {
+        sched_v2_fiber_inc_external_wait(v2f);
+        return;
+    }
+    /* Thread-scoped caller (executor thread, test main, etc). Track per
+     * thread and count distinct threads in g_external_wait_threads so the
+     * V1+V2 deadlock detectors can treat external-wait threads as
+     * legitimate progress makers. */
+    if (tls_external_wait_depth < UINT32_MAX) tls_external_wait_depth++;
+    if (tls_external_wait_depth == 1) {
         atomic_fetch_add_explicit(&g_external_wait_threads, 1, memory_order_relaxed);
     }
 }
 
 void cc_external_wait_leave(void) {
-    if (tls_external_wait_depth == 0) return;
-    tls_external_wait_depth--;
     if (tls_current_fiber) {
+        if (tls_external_wait_depth == 0) return;
+        tls_external_wait_depth--;
         tls_current_fiber->external_wait_depth = tls_external_wait_depth;
         if (tls_external_wait_depth == 0) {
             tls_current_fiber->external_wait_scoped = 0;
         }
-    } else if (tls_external_wait_depth == 0) {
+        return;
+    }
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) {
+        sched_v2_fiber_dec_external_wait(v2f);
+        return;
+    }
+    if (tls_external_wait_depth == 0) return;
+    tls_external_wait_depth--;
+    if (tls_external_wait_depth == 0) {
         atomic_fetch_sub_explicit(&g_external_wait_threads, 1, memory_order_relaxed);
     }
 }
 
 int cc_external_wait_active(void) {
+    if (tls_current_fiber) return tls_external_wait_depth > 0;
+    fiber_v2* v2f = sched_v2_current_fiber();
+    if (v2f) return sched_v2_fiber_external_wait_active(v2f);
     return tls_external_wait_depth > 0;
 }
 
@@ -5405,7 +5472,7 @@ static void worker_commit_park(fiber_task* f, int wid) {
 static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct timespec* abs_deadline,
                                 const char* reason, const char* file, int line) {
     if (sched_v2_in_context()) {
-        (void)reason; (void)file; (void)line;
+        (void)file; (void)line;
         if (flag && atomic_load_explicit(flag, memory_order_acquire) != expected) return 0;
         if (abs_deadline) {
             struct timespec now;
@@ -5415,7 +5482,13 @@ static int cc__fiber_park_if_impl(_Atomic int* flag, int expected, const struct 
                 return 1; /* timed out */
             }
         }
+        /* Publish park_reason so the deadlock detector can classify the
+         * wait (chan_recv_wait_empty etc). sched_v2_park snapshots this
+         * into f->park_reason at yield time; we clear after resume so
+         * stale values don't leak into a subsequent unrelated park. */
+        sched_v2_set_park_reason(reason);
         sched_v2_park();
+        sched_v2_set_park_reason(NULL);
         if (abs_deadline) {
             struct timespec now;
             clock_gettime(CLOCK_REALTIME, &now);
@@ -5597,8 +5670,15 @@ void cc__fiber_park_reason(const char* reason, const char* file, int line) {
 
 void cc__fiber_set_park_obj(void* obj) {
     fiber_task* f = tls_current_fiber;
-    if (!f) return;
-    f->park_obj = obj;
+    if (f) {
+        f->park_obj = obj;
+        return;
+    }
+    /* V2-fiber-on-V2-worker path: pin park_obj on the V2 fiber so the V2
+     * deadlock detector (running on sysmon) can correlate the parked
+     * fiber with the waitable it's blocked on (channel, join target,
+     * etc). Exactly mirrors the V1 field on fiber_task. */
+    sched_v2_fiber_set_park_obj(sched_v2_current_fiber(), obj);
 }
 
 void cc__fiber_clear_pending_unpark(void) {

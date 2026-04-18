@@ -169,6 +169,23 @@ struct fiber_v2 {
     _Atomic uint64_t wait_ticket;
     int        yield_kind;      /* V2_YIELD_PARK or V2_YIELD_YIELD */
     const char* park_reason;
+
+    /* Deadlock-detector metadata. All four are written from V2 fiber context
+     * via the cc__fiber_* / cc_deadlock_suppress / cc_external_wait shims so
+     * the detector can walk g_v2.all_fibers and classify each parked fiber.
+     *   park_obj              — what we're parked on (CCChan*, V2 fiber for
+     *                            sched_v2_join, etc).
+     *   deadlock_suppress_depth — mirror of tls_deadlock_suppress_depth,
+     *                            pinned to the fiber so it survives migration
+     *                            across V2 workers.
+     *   external_wait_depth   — mirror of tls_external_wait_depth, same
+     *                            purpose.
+     * A V2 fiber with suppress_depth>0 OR external_wait_depth>0 is exempt
+     * from deadlock detection. */
+    void*      park_obj;
+    uint32_t   deadlock_suppress_depth;
+    uint32_t   external_wait_depth;
+
     wake_primitive done_wake;
     cc__fiber* _Atomic join_waiter_fiber;
     CCNursery* saved_nursery;
@@ -549,6 +566,9 @@ static fiber_v2* fiber_v2_alloc(void) {
             atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
             f->yield_kind = V2_YIELD_PARK;
             f->park_reason = NULL;
+            f->park_obj = NULL;
+            f->deadlock_suppress_depth = 0;
+            f->external_wait_depth = 0;
             atomic_store_explicit(&f->state, FIBER_V2_IDLE, memory_order_relaxed);
             V2_STAT_INC(g_v2_fibers_alive);
             return f;
@@ -582,6 +602,12 @@ static void fiber_v2_free(fiber_v2* f) {
     f->result = NULL;
     f->saved_nursery = NULL;
     f->admission_nursery = NULL;
+    /* Clear detector metadata so the next spawn starts clean and the
+     * detector never observes stale park_obj/suppress/external-wait state
+     * on a pooled fiber. */
+    f->park_obj = NULL;
+    f->deadlock_suppress_depth = 0;
+    f->external_wait_depth = 0;
     /* Pool the coroutine memory (including its stack): mco_uninit just marks
      * the coro DEAD and runs platform teardown (a no-op on ucontext), while
      * preserving the allocation so the next spawn can re-init in place
@@ -757,6 +783,10 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     f->last_thread_id = tid;
     tls_v2_current_fiber = f;
     f->park_reason = NULL;
+    /* park_obj is intentionally NOT cleared here: cc__fiber_set_park_obj
+     * writes it just before the park handshake, and the detector only
+     * consults it for fibers currently in state FIBER_V2_PARKED, so
+     * stale values on a RUNNING fiber never show up in deadlock reports. */
     f->yield_kind = V2_YIELD_PARK;
 
     /* Just-in-time coroutine binding.
@@ -931,6 +961,58 @@ void sched_v2_set_park_reason(const char* reason) {
 }
 
 /* ============================================================================
+ * Deadlock-detector metadata setters (per-fiber state)
+ *
+ * Writes happen from a V2 worker thread while the fiber is RUNNING (i.e.
+ * the scope-enter/leave call itself executes on the fiber's stack); reads
+ * happen from the sysmon thread while the fiber is PARKED. We serialize
+ * via g_v2.all_fibers_mu in the reader (sched_v2_check_deadlock), and the
+ * writes on this side are plain stores to fields the writer owns. A
+ * relaxed atomic isn't required here: the scope enter/leave always
+ * precedes the park handshake, whose own release/acquire publishes the
+ * new depth alongside state=FIBER_V2_PARKED. sysmon acquires
+ * all_fibers_mu, which synchronizes-with the fiber pool-add release in
+ * fiber_v2_alloc, and re-reads state with memory_order_acquire, which
+ * pairs with the park-commit release. The depth therefore lands in the
+ * reader's view before it treats the fiber as parked.
+ * ============================================================================ */
+
+void sched_v2_fiber_set_park_obj(fiber_v2* f, void* obj) {
+    if (!f) return;
+    f->park_obj = obj;
+}
+
+void sched_v2_fiber_inc_deadlock_suppress(fiber_v2* f) {
+    if (!f) return;
+    if (f->deadlock_suppress_depth < UINT32_MAX) f->deadlock_suppress_depth++;
+}
+
+void sched_v2_fiber_dec_deadlock_suppress(fiber_v2* f) {
+    if (!f) return;
+    if (f->deadlock_suppress_depth > 0) f->deadlock_suppress_depth--;
+}
+
+int sched_v2_fiber_deadlock_suppressed(fiber_v2* f) {
+    if (!f) return 0;
+    return f->deadlock_suppress_depth > 0;
+}
+
+void sched_v2_fiber_inc_external_wait(fiber_v2* f) {
+    if (!f) return;
+    if (f->external_wait_depth < UINT32_MAX) f->external_wait_depth++;
+}
+
+void sched_v2_fiber_dec_external_wait(fiber_v2* f) {
+    if (!f) return;
+    if (f->external_wait_depth > 0) f->external_wait_depth--;
+}
+
+int sched_v2_fiber_external_wait_active(fiber_v2* f) {
+    if (!f) return 0;
+    return f->external_wait_depth > 0;
+}
+
+/* ============================================================================
  * Context queries
  * ============================================================================ */
 
@@ -1038,6 +1120,16 @@ static void* thread_v2_main(void* arg) {
 
 static int sched_v2_detect_num_threads(void) {
     const char* env = getenv("CC_V2_THREADS");
+    if (env && env[0]) {
+        int n = atoi(env);
+        if (n > 0 && n <= V2_MAX_THREADS) return n;
+    }
+    /* Honor CC_WORKERS as a fallback for tests/tools written against the
+     * V1 knob. Under V2-default the worker count primarily affects sysmon
+     * stall detection cadence (a single V2 worker still multiplexes many
+     * fibers), but tests that set CC_WORKERS=1 for deterministic
+     * deadlock-detection timing expect that hint to take effect. */
+    env = getenv("CC_WORKERS");
     if (env && env[0]) {
         int n = atoi(env);
         if (n > 0 && n <= V2_MAX_THREADS) return n;
@@ -1169,6 +1261,12 @@ static void* sched_v2_sysmon_main(void* arg) {
 
         /* Syscall-age eviction runs every tick: cheap scan, high payoff. */
         sched_v2_sysmon_evict_aged_workers();
+
+        /* Deadlock detector: runs every tick. Internal checks (idle
+         * count + ready queue depth + first-seen timestamp) short-circuit
+         * the all_fibers walk when the system is healthy, so the
+         * amortized cost on the hot path is just two atomic loads. */
+        sched_v2_check_deadlock();
 
         /* Unconditional every-tick safety net: if any work is queued AND
          * any worker is idle, issue a wake. sched_v2_wake(-1) itself is
@@ -1544,6 +1642,254 @@ void sched_v2_debug_dump_state(const char* prefix) {
                 (void*)waiter, f->last_thread_id, f->park_reason ? f->park_reason : "-");
     }
     pthread_mutex_unlock(&g_v2.all_fibers_mu);
+    fflush(stderr);
+}
+
+/* ============================================================================
+ * Deadlock detector
+ *
+ * Port of the V1 detector (cc__fiber_check_deadlock in fiber_sched.c) to
+ * walk V2 fibers. Called from sysmon every tick. Preserves V1's public
+ * contract:
+ *   - Abort with _exit(124) when all V2 workers are idle, the ready queue
+ *     is empty, and there is at least one V2 fiber parked in a state that
+ *     is not deadlock-suppressed and not in an external-wait scope.
+ *   - Don't abort if every internally-parked fiber is waiting to receive
+ *     on an *open* channel AND some external-wait thread is providing
+ *     progress (this is the "I/O-driven progress" exemption V1 had).
+ *   - Require the condition to persist for ~1 s before declaring deadlock.
+ *   - Opt out via CC_DEADLOCK_ABORT=0 (print banner, keep running).
+ *
+ * The idle/queue checks deliberately use sysmon's own snapshot of the V2
+ * scheduler, not a V1 sleeping/blocked count. V1's "workers blocked in
+ * cc_block_on" signal isn't relevant here: V2's wake primitive doesn't
+ * consume worker slots the way V1's cond-var waits did, so "all workers
+ * IDLE + empty ready queue" is an equivalent latch.
+ * ============================================================================ */
+
+extern _Atomic size_t g_external_wait_threads;
+int cc__chan_debug_is_open(void* ch_obj);
+void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
+
+static _Atomic uint64_t g_v2_deadlock_first_seen = 0;
+static _Atomic int g_v2_deadlock_reported = 0;
+
+/* Persist-time before declaring deadlock. 1 s matches V1; enough to ride
+ * out cc_block_all startup transients without annoying tests. */
+#define SCHED_V2_DEADLOCK_PERSIST_MS 1000u
+
+static uint64_t sched_v2_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static int sched_v2_fiber_is_open_chan_recv_wait(const fiber_v2* f) {
+    if (!f || !f->park_reason || !f->park_obj) return 0;
+    if (strcmp(f->park_reason, "chan_recv_wait_empty") != 0 &&
+        strcmp(f->park_reason, "chan_recv_wait_rendezvous") != 0) {
+        return 0;
+    }
+    return cc__chan_debug_is_open(f->park_obj);
+}
+
+/* Walk the fiber list once under the all_fibers_mu, classifying parked
+ * fibers. Output counters:
+ *   *internal_parked    — parked and NOT suppressed/external-wait
+ *   *suppressed_parked  — parked and deadlock_suppress_depth > 0
+ *   *external_parked    — parked and external_wait_depth > 0
+ *   *saw_only_open_recv — 1 iff every internal_parked entry is a recv on
+ *                          an open channel (caller uses this with the
+ *                          external-wait exemption); 0 if we saw a
+ *                          non-recv or recv on a closed channel. When
+ *                          internal_parked == 0, returned value is 1 but
+ *                          meaningless (caller must check internal_parked).
+ */
+static void sched_v2_classify_parked_fibers(size_t* internal_parked,
+                                            size_t* suppressed_parked,
+                                            size_t* external_parked,
+                                            int* saw_only_open_recv) {
+    *internal_parked = 0;
+    *suppressed_parked = 0;
+    *external_parked = 0;
+    *saw_only_open_recv = 1;
+    pthread_mutex_lock(&g_v2.all_fibers_mu);
+    for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
+        int base = fiber_v2_state_base(
+            atomic_load_explicit(&f->state, memory_order_acquire));
+        if (base != FIBER_V2_PARKED) continue;
+        if (f->external_wait_depth > 0) { (*external_parked)++; continue; }
+        if (f->deadlock_suppress_depth > 0) { (*suppressed_parked)++; continue; }
+        (*internal_parked)++;
+        if (!sched_v2_fiber_is_open_chan_recv_wait(f)) *saw_only_open_recv = 0;
+    }
+    pthread_mutex_unlock(&g_v2.all_fibers_mu);
+}
+
+/* Print the same "internal parked fibers" block the V1 detector emits,
+ * but formatted for V2 fibers. Called inside the DEADLOCK banner. Prints
+ * at most 32 fibers; callers that need the full dump can rely on
+ * sched_v2_debug_dump_state which follows. */
+static void sched_v2_dump_parked_fibers_for_verdict(void) {
+    size_t shown = 0;
+    size_t total = 0;
+    size_t parked_total = 0;
+    size_t internal_total = 0;
+    size_t skipped_total = 0;
+    pthread_mutex_lock(&g_v2.all_fibers_mu);
+    for (fiber_v2* f = g_v2.all_fibers; f; f = f->all_next) {
+        total++;
+        int base = fiber_v2_state_base(
+            atomic_load_explicit(&f->state, memory_order_acquire));
+        int is_parked = (base == FIBER_V2_PARKED);
+        if (is_parked) parked_total++;
+        int skipped = 0;
+        if (is_parked && (f->external_wait_depth > 0 ||
+                          f->deadlock_suppress_depth > 0)) {
+            skipped = 1;
+            skipped_total++;
+        } else if (is_parked) {
+            internal_total++;
+        }
+        if (shown < 32) {
+            fprintf(stderr,
+                    "  %sv2_fiber=%p state=%s reason=%s obj=%p last_thread=%d "
+                    "external_wait_depth=%u suppress_depth=%u\n",
+                    is_parked ? (skipped ? "(skipped parked) " : "(parked) ")
+                              : "(not parked) ",
+                    (void*)f, fiber_v2_state_name(base),
+                    f->park_reason ? f->park_reason : "-",
+                    f->park_obj, f->last_thread_id,
+                    (unsigned)f->external_wait_depth,
+                    (unsigned)f->deadlock_suppress_depth);
+            if (is_parked && !skipped && f->park_obj && f->park_reason &&
+                strncmp(f->park_reason, "chan_", 5) == 0) {
+                cc__chan_debug_dump_state(f->park_obj, "    chan state: ");
+            }
+            shown++;
+        }
+    }
+    pthread_mutex_unlock(&g_v2.all_fibers_mu);
+    fprintf(stderr,
+            "  fiber totals: total=%zu parked=%zu internal_parked=%zu "
+            "skipped_parked=%zu\n",
+            total, parked_total, internal_total, skipped_total);
+    if (total > shown) {
+        fprintf(stderr, "  ... %zu more fibers not shown\n", total - shown);
+    }
+}
+
+void sched_v2_check_deadlock(void) {
+    if (!g_v2.initialized) return;
+    /* One-shot: if we already reported, don't re-enter. */
+    if (atomic_load_explicit(&g_v2_deadlock_reported,
+                             memory_order_acquire)) {
+        return;
+    }
+
+    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    if (n <= 0) return;
+    int idle = sched_v2_count_idle_workers();
+    size_t rq = atomic_load_explicit(&g_v2.ready_queue.count,
+                                     memory_order_relaxed);
+    if (idle < n || rq > 0) {
+        /* Some worker busy or work pending — not stalled. Reset latch. */
+        atomic_store_explicit(&g_v2_deadlock_first_seen, 0,
+                              memory_order_relaxed);
+        return;
+    }
+
+    size_t internal_parked = 0, suppressed_parked = 0, external_parked = 0;
+    int saw_only_open_recv = 1;
+    sched_v2_classify_parked_fibers(&internal_parked, &suppressed_parked,
+                                    &external_parked, &saw_only_open_recv);
+
+    if (internal_parked == 0) {
+        /* All parks are exempt (suppressed or external-wait) — not a
+         * deadlock per V1's contract. Reset latch. */
+        atomic_store_explicit(&g_v2_deadlock_first_seen, 0,
+                              memory_order_relaxed);
+        return;
+    }
+
+    /* External-progress exemption: if any fiber or non-fiber thread is
+     * inside a cc_external_wait scope AND the only internally-parked
+     * fibers are receivers on still-open channels, assume the external
+     * source will eventually produce. Reset the latch instead of
+     * declaring deadlock. Matches V1 exactly:
+     *   external_waits = external_parked_fibers + external_wait_threads
+     *   if (external_waits > 0 && only_open_recv_waits) { reset; return; }
+     * The open-channel check is the key: if any internal park is NOT on
+     * an open-channel recv, the external source has no plausible way to
+     * unblock it, so we proceed to latch the deadlock verdict. */
+    size_t external_threads = atomic_load_explicit(&g_external_wait_threads,
+                                                   memory_order_relaxed);
+    size_t external_waits = external_parked + external_threads;
+    if (external_waits > 0 && saw_only_open_recv) {
+        atomic_store_explicit(&g_v2_deadlock_first_seen, 0,
+                              memory_order_relaxed);
+        return;
+    }
+
+    /* Latch timer: require the stall to persist >= SCHED_V2_DEADLOCK_PERSIST_MS. */
+    uint64_t now = sched_v2_monotonic_ms();
+    uint64_t first = atomic_load_explicit(&g_v2_deadlock_first_seen,
+                                          memory_order_relaxed);
+    if (first == 0) {
+        atomic_compare_exchange_strong_explicit(
+            &g_v2_deadlock_first_seen, &first, now,
+            memory_order_relaxed, memory_order_relaxed);
+        return;
+    }
+    if (now - first < SCHED_V2_DEADLOCK_PERSIST_MS) return;
+
+    /* Claim the report slot. */
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_v2_deadlock_reported, &expected, 1,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        return;
+    }
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║                     DEADLOCK DETECTED                        ║\n");
+    fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n\n");
+
+    fprintf(stderr, "Runtime state:\n");
+    fprintf(stderr, "  V2 workers: %d total, %d idle (all idle is the stall signal)\n",
+            n, idle);
+    fprintf(stderr, "  V2 fibers:  %zu parked internal, %zu parked external-wait, "
+                    "%zu parked deadlock-suppressed\n",
+            internal_parked, external_parked, suppressed_parked);
+    if (external_threads > 0) {
+        fprintf(stderr, "  External threads: %zu in external-wait scope "
+                        "(not a deadlock reliever because at least one "
+                        "internal park is not an open-channel recv)\n",
+                external_threads);
+    }
+    fprintf(stderr, "  Internal parked fibers:\n");
+    sched_v2_dump_parked_fibers_for_verdict();
+    fprintf(stderr, "\n");
+    sched_v2_debug_dump_state("  ");
+    fprintf(stderr, "\n");
+
+    fprintf(stderr, "Common causes:\n");
+    fprintf(stderr, "  • Channel send() with no receiver, or recv() with no sender\n");
+    fprintf(stderr, "  • cc_fiber_join() on a fiber that's also waiting\n");
+    fprintf(stderr, "  • Circular dependency between fibers\n\n");
+    fprintf(stderr, "Debugging tips:\n");
+    fprintf(stderr, "  • Check channel operations have matching send/recv pairs\n");
+    fprintf(stderr, "  • Ensure channels are closed when done (triggers recv to return)\n");
+    fprintf(stderr, "  • Review fiber spawn/join patterns for circular waits\n\n");
+
+    const char* abort_env = getenv("CC_DEADLOCK_ABORT");
+    if (!abort_env || abort_env[0] != '0') {
+        fprintf(stderr, "Aborting with exit code 124. Set CC_DEADLOCK_ABORT=0 to continue.\n");
+        fflush(stderr);
+        _exit(124);
+    }
+    fprintf(stderr, "Continuing (CC_DEADLOCK_ABORT=0 set).\n");
     fflush(stderr);
 }
 

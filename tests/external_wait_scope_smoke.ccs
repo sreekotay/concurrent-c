@@ -1,13 +1,16 @@
 /*
- * V1-SCHEDULER-ONLY TEST (skipped under V2-default runtime).
+ * Deadlock detector / external-wait scope test.
  *
- * This test fork-children rely on V1's deadlock detector to abort with
- * exit code 124 when all remaining fibers are parked on internal
- * (non-external-wait) channels, and on CC_WORKERS=1 to serialize the
- * detection window. V2 sysmon has its own stall detection but does not
- * abort with 124; CC_WORKERS is a V1-only knob. Re-enable when V2 grows
- * an equivalent deadlock-abort primitive (tracked under id
- * v2-promote-5-failures).
+ * Runs under the V2-default runtime via sched_v2_check_deadlock (in
+ * sched_v2.c), which mirrors V1's semantics:
+ *   - _exit(124) when all workers are idle + internal parks remain
+ *   - external-wait scope exempts the fiber from the verdict
+ *   - enter/leave balance leaves the caller back in detectable state
+ *
+ * The child processes use CC_WORKERS=1 to make sysmon's stall latch
+ * trigger deterministically (V2's detect_num_threads reads CC_WORKERS
+ * as a fallback for CC_V2_THREADS) and CC_DEADLOCK_ABORT=1 to force
+ * the abort path rather than the "keep running" escape hatch.
  */
 #include <ccc/cc_runtime.cch>
 
@@ -116,10 +119,6 @@ static int run_child_expect_external_wait_hang(int mode, int timeout_ms) {
 }
 
 int main(void) {
-    /* V1-only — see file-header comment. Report skip and return success. */
-    printf("external_wait_scope_smoke: SKIP (V1-only; V2 has no deadlock-abort primitive yet)\n");
-    return 0;
-
     int rc = run_child_expect_exit124(MODE_ALL_INTERNAL, 3000);
     if (rc != 0) return rc;
 

@@ -58,6 +58,36 @@ void   sched_v2_debug_dump_fiber(fiber_v2* f, const char* prefix);
 /* Debug: dump scheduler-wide V2 state for deadlock reports. */
 void   sched_v2_debug_dump_state(const char* prefix);
 
+/* Deadlock-detector metadata setters.
+ *
+ * These are called from cc__fiber_set_park_obj / cc_deadlock_suppress_*
+ * /cc_external_wait_* shims when the calling context is a V2 fiber (no V1
+ * fiber_task attached). The values are pinned to the fiber so the detector
+ * can classify it correctly even if the fiber migrates workers between
+ * park and resume. All setters are no-ops on NULL.
+ *
+ * Reads go through sched_v2_deadlock_snapshot (below), which walks
+ * g_v2.all_fibers under the all_fibers_mu. */
+void   sched_v2_fiber_set_park_obj(fiber_v2* f, void* obj);
+void   sched_v2_fiber_inc_deadlock_suppress(fiber_v2* f);
+void   sched_v2_fiber_dec_deadlock_suppress(fiber_v2* f);
+int    sched_v2_fiber_deadlock_suppressed(fiber_v2* f);
+void   sched_v2_fiber_inc_external_wait(fiber_v2* f);
+void   sched_v2_fiber_dec_external_wait(fiber_v2* f);
+int    sched_v2_fiber_external_wait_active(fiber_v2* f);
+
+/* Deadlock-detector check.
+ *
+ * Called from V2 sysmon every tick. If every V2 worker is idle, the ready
+ * queue is empty, and there are parked V2 fibers none of which are in an
+ * external-wait or deadlock-suppress scope (and not all on open-channel
+ * recv waits backed by a matching external-wait thread), the condition is
+ * latched. Once it persists for >= 1 s the detector prints a banner and
+ * _exit(124) unless CC_DEADLOCK_ABORT=0.
+ *
+ * Idempotent: multiple calls after the first report are no-ops. */
+void   sched_v2_check_deadlock(void);
+
 /* Wait-ticket support (for kqueue / multi-wait integration) */
 uint64_t sched_v2_fiber_publish_wait_ticket(fiber_v2* f);
 int sched_v2_fiber_wait_ticket_matches(fiber_v2* f, uint64_t ticket);
