@@ -18,7 +18,7 @@ static void mark_arena_pre_destroy(CCArena* arena) {
 
 @comptime {
     (void)cc_type_register("CCArena", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_buffer"),
+        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
         .destroy = cc_type_destroy_hooks("mark_arena_pre_destroy", "cc_arena_destroy"),
         .ufcs = (recv_type, method, mode, argv, arg_types, arena) => {
             (void)recv_type;

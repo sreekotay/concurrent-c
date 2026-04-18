@@ -272,14 +272,45 @@ static inline CCArena cc_arena_create(size_t bytes) {
     return cc_arena_heap(bytes);
 }
 
-static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity) {
+/* Growth-policy sentinels for the third argument of cc_arena_create_buffer /
+ * cc_arena_buffer.  Mirror the `block_max` field on CCArena:
+ *   CC_ARENA_FIXED    (=1)  root block only, no heap overflow ever.
+ *   CC_ARENA_GROWABLE (=0)  caller-provided root, unbounded heap overflow
+ *                           when the root fills (SSO-style).
+ *   N > 1                   bounded: at most N total blocks.
+ *
+ * Passing one of these sentinels (or an explicit N) at the call site forces
+ * the author to make the growth policy visible, instead of inheriting a
+ * hidden default that silently caps at the root's size. */
+#define CC_ARENA_FIXED     1u
+#define CC_ARENA_GROWABLE  0u
+
+/* Caller-provided root buffer + explicit growth policy.
+ *
+ * Use CC_ARENA_FIXED when the root is a strict cap (e.g. stack scratch that
+ * must never malloc), CC_ARENA_GROWABLE when the root is a fast-path inline
+ * buffer and heap overflow is acceptable (e.g. pool slots sized for the
+ * common case), or a literal N > 1 to bound total blocks.
+ *
+ * cc_arena_free walks the heap-slab chain and frees only heap-owned extents;
+ * the caller-provided root buffer is preserved. */
+static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity, unsigned block_max) {
     CCArena a = {0};
     if (!buffer || capacity == 0) return a;
     if (cc_arena_buffer(&a, buffer, capacity) != 0) {
         CCArena empty = {0};
         return empty;
     }
+    a.block_max = block_max;
     return a;
+}
+
+/* Fixed 2-arg form used by the `CCArena a = @create(buf, cap)` sugar and
+ * legacy call sites that want "caller-provided root, no heap overflow".
+ * Prefer the 3-arg cc_arena_create_buffer at new call sites so the growth
+ * policy is spelled out at the site. */
+static inline CCArena cc_arena_fixed_buffer(void *buffer, size_t capacity) {
+    return cc_arena_create_buffer(buffer, capacity, CC_ARENA_FIXED);
 }
 
 // Declare `uint8_t name##_cc_stack_buf[nbytes]`, `CCArena name`, and init with
@@ -288,7 +319,7 @@ static inline CCArena cc_arena_create_buffer(void *buffer, size_t capacity) {
     uint8_t name##_cc_stack_buf[nbytes]; \
     CCArena name; \
     (void)cc_arena_buffer(&name, name##_cc_stack_buf, sizeof(name##_cc_stack_buf)); \
-    (name).block_max = 0
+    (name).block_max = CC_ARENA_GROWABLE
 
 // Declare a stack-backed arena and a pool initialized from it.
 #define CC_ARENA_POOL_STACK(name, elem_size, nbytes) \
@@ -547,7 +578,12 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCArena", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_buffer"),
+        /* 1-arg sugar `@create(bytes)` -> heap-growable arena.
+         * 2-arg sugar `@create(buf, cap)` -> fixed root (no growth), matching
+         * pre-existing scratch-buffer semantics. For a caller-rooted arena
+         * with heap overflow, use the explicit 3-arg cc_arena_create_buffer
+         * directly with CC_ARENA_GROWABLE. */
+        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
         .ufcs = cc_arena_lower_c,
     });

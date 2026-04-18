@@ -371,7 +371,11 @@ static ParseAttempt read_request_buffered(RespReader* r,
                                           uint64_t request_id,
                                           void* slot) {
     ParseAttempt out = {0};
-    CCArena req_arena_storage = cc_arena_create_buffer(slot, REQ_BUF_SIZE);
+    /* Pool slot is the fast-path root; oversized values (e.g. large SET
+     * payloads that exceed REQ_BUF_SIZE) spill into a heap slab owned by
+     * the request arena.  cc_arena_free in redis_conn_release_request frees
+     * any heap spill but leaves the pool slot intact for pool_free to reclaim. */
+    CCArena req_arena_storage = cc_arena_create_buffer(slot, REQ_BUF_SIZE, CC_ARENA_GROWABLE);
     if (!req_arena_storage.base) return out;
 
     CCSlice args[4] = {0};

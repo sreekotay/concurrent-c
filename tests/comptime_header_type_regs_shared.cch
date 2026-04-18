@@ -17,7 +17,7 @@ static CCSlice header_registered_arena_ufcs(CCSlice recv_type, CCSlice method, C
 
 @comptime {
     (void)cc_type_register("CCArena", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_create_buffer"),
+        .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
         .ufcs = header_registered_arena_ufcs,
     });

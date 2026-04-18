@@ -77,7 +77,7 @@ Result-typed calls (`T!>(E)`) must be explicitly consumed. Four surface forms co
 | `call !> body` | statement | Unwrap, or execute `body` on error | `flush() !> { log("bad"); break; };` |
 | `call !>;` | statement | Unwrap, or invoke the registered default handler | `flush() !>;` |
 
-The `?>` RHS may be a C expression, or one of the "never-typed" divergent statements `return EXPR;`, `break;`, `continue;`. The `!>` body may be a single statement, a `{ ... }` block, or a `(e) BODY` binder form. Inside a `!> (e) BODY`, the call `@err(e);` forwards the bound error to the surrounding `@errhandler` — a non-returning control-flow transfer.
+The `?>` RHS may be a C expression, a "never-typed" divergent statement (`return EXPR;`, `break;`, `continue;`, `goto LABEL;`, `@err(e);`, or a call to a known-noreturn function), or a `{ ... }` compound block whose textually last top-level statement is itself divergent (non-divergent or empty blocks are a compile error). The `!>` body may be a single statement, a `{ ... }` block, or a `(e) BODY` binder form. Inside a `!> (e) BODY`, the call `@err(e);` forwards the bound error to the surrounding `@errhandler` — a non-returning control-flow transfer.
 
 | Registration form | Purpose |
 |-------------------|---------|
@@ -999,7 +999,7 @@ CCRes(MyData, MyError) my_function(int arg);
 **Invariants (normative).**
 
 1. `!>` is a statement-level operator. `int x = call() !> { ... };` is a syntax error.
-2. `?>` is an expression operator. Its RHS is either a C expression or one of the divergent never-typed statements `return EXPR;`, `break;`, `continue;`. Any other RHS is ill-formed.
+2. `?>` is an expression operator. Its RHS is one of: (a) a C expression, (b) a divergent never-typed statement (`return EXPR;`, `return;`, `break;`, `continue;`, `goto LABEL;`, `@err(IDENT);`, or a call to a hardcoded noreturn function — see invariant 6), or (c) a `{ ... }` compound block whose textually last top-level statement satisfies rule (b). Any other RHS is ill-formed; in particular an empty block `{ }` or a block whose last statement can fall through is a compile error.
 3. Error values are accessible only via an explicit `(ident)` binder on `?>` or `!>`. Neither operator creates an implicit `e` / `err` binding.
 4. `call() !>;` (no body) runs the registered default `@errhandler` on error, or the success path if the call succeeded.
 5. `@err(e);` inside a `!>` body forwards the bound error to the enclosing `@errhandler`. It is a **structured control-flow transfer** (not a returning call): any statement textually following it in the same block is unreachable and is a compile error.
@@ -1022,9 +1022,15 @@ qmark_expr    ::= expr '?>' qmark_rhs
                |  expr '?>' '(' ident ')' qmark_rhs
 
 qmark_rhs     ::= expr                        // pure C expression
-               |  'return' expr? ';'          // never-typed: propagation
-               |  'break' ';'                 // never-typed: loop exit
-               |  'continue' ';'              // never-typed: loop skip
+               |  divergent_stmt              // see below
+               |  '{' stmt* divergent_stmt '}' // block whose tail diverges
+
+divergent_stmt ::= 'return' expr? ';'
+               |  'break' ';'
+               |  'continue' ';'
+               |  'goto' ident ';'
+               |  '@err' '(' ident ')' ';'
+               |  noreturn_call ';'           // exit/abort/longjmp/etc.
 
 bang_stmt     ::= call '!>' ';'                            // use registered handler
                |  call '!>' stmt                            // single-statement body
@@ -1041,6 +1047,7 @@ err_handler   ::= '@errhandler' '(' type ident ')' '{' stmt* '}'
 
 - `EXPR ?> DEFAULT` — Evaluate `EXPR` (a `T!>(E)` result) exactly once. If success, the expression's value is the unwrapped `T`. Otherwise the expression's value is `DEFAULT`. `EXPR ?>(e) RHS` binds the error to `e`, scoped to `RHS`.
 - `EXPR ?> DIVERGENT_STMT` — Evaluate `EXPR` exactly once. On success, the expression's value is the unwrapped `T`. On error, `DIVERGENT_STMT` runs in the error branch; because it cannot fall through, the surrounding expression has no observable value on that path. Combines with `?>(e)` binder.
+- `EXPR ?> { STMT; ...; DIVERGENT_STMT }` — Evaluate `EXPR` exactly once. On success, the expression's value is the unwrapped `T`. On error, the block runs to its textually last statement, which must diverge; fall-through from the block is ill-formed (diagnosed at the `?>` site). Combines with `?>(e)` binder, whose scope is the entire block.
 - `CALL !> ;` — Evaluate `CALL` exactly once. On success, the success payload is discarded (the statement yields nothing). On error, the enclosing lexical `@errhandler(E e) { BODY }` runs with `e` bound to the error.
 - `CALL !> BODY` — Same, with `BODY` in place of the default handler. Any `@err(e);` inside `BODY` is ill-formed without a binder.
 - `CALL !> (e) BODY` — Same, with the error bound to `e` for the scope of `BODY`. `@err(e);` inside `BODY` forwards to the enclosing `@errhandler` (see invariant 5).
@@ -1068,6 +1075,17 @@ int!>(CCError) propagate(char[:] s) {
 for (int i = 0; i < n; i++) {
     int v = maybe(i) ?> break;
     total += v;
+}
+
+// Block RHS: multiple statements on the error path, ending in a divergent
+// statement. The block executes only on error; success still yields `int`.
+int!>(CCError) parse_and_log(char[:] s) {
+    int v = parse_int(s) ?>(e) {
+        metrics.record(e);
+        log("parse failed: %d", (int)e.kind);
+        return cc_err(e.kind, "parse");
+    };
+    return cc_ok(v);
 }
 
 // Statement form, block body.
@@ -1630,6 +1648,17 @@ Arenas own memory; slices are views into arena-owned storage.
 // Creation
 CCArena cc_arena_heap(size_t bytes);          // heap-backed first slab; default block_max = 0
 int cc_arena_buffer(CCArena* a, void* buf, size_t cap);  // caller-provided first slab; default block_max = 1
+
+// Value-returning constructor with explicit growth policy. Use CC_ARENA_FIXED
+// for a strict cap (no heap overflow), CC_ARENA_GROWABLE for a caller-owned
+// root with unbounded heap-slab overflow, or a literal N > 1 to bound total
+// blocks. cc_arena_fixed_buffer(buf, cap) is the 2-arg shorthand for
+// CC_ARENA_FIXED and is the target of the `CCArena a = @create(buf, cap)`
+// sugar.
+CCArena cc_arena_create_buffer(void* buf, size_t cap, unsigned block_max);
+CCArena cc_arena_fixed_buffer(void* buf, size_t cap);
+#define CC_ARENA_FIXED     1u
+#define CC_ARENA_GROWABLE  0u
 
 // Stack scratch + arena in one declaration (storage is name##_cc_stack_buf[nbytes])
 #define CC_ARENA_STACK(name, nbytes)
@@ -6634,6 +6663,7 @@ The following must be diagnosed at compile time:
 | Guard across suspension | Guard held across `await` or `run_blocking` | § 7.9 |
 | Unsafe adoption | `adopt()` outside `unsafe {}` | § G.2 |
 | Result unwrap — missing default | `expr ?> ;` with nothing on RHS | § 2.2 |
+| Result unwrap — non-divergent block RHS | `expr ?>(e) { ...; }` whose last top-level statement is not one of the approved divergent forms (or is empty) | § 2.2 |
 | Result unwrap — bad binder | `expr ?>() RHS`, `expr ?>(123) RHS`, `call() !> () BODY` | § 2.2 |
 | Result unwrap — missing body | `call() !> (e) ;` | § 2.2 |
 | Result forward — unbound binder | `@err(X);` where `X` is not the enclosing `!>` binder | § 2.2 |
