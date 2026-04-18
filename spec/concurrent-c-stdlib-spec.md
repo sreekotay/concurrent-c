@@ -59,9 +59,8 @@ For the standard library, UFCS lowering is part of the normative API surface:
 Type modifiers bind with this precedence (tightest first):
 
 1. `*` (pointer)
-2. `?` (optional)
-3. `!E` (result)
-4. `[:]` (slice)
+2. `!>(E)` (result)
+3. `[:]` (slice)
 
 See **§2.3 Type Precedence** in the main language spec for complete rules.
 
@@ -69,28 +68,43 @@ See **§2.3 Type Precedence** in the main language spec for complete rules.
 
 | Syntax | Parses as | Meaning |
 |--------|-----------|---------|
-| `char[:]?` | `(char[:])?` | optional slice (e.g., `find()` return) |
-| `char[:]!IoError` | `(char[:])!IoError` | slice or error (e.g., `read()` return) |
-| `T*!IoError` | `((T)*)!IoError` | result of pointer (e.g., `cc_dir_open()` return) |
-| `T!>(E)?` | `((T)!>(E))?` | optional result (general nested type example) |
+| `char[:] !>(CCIoError)` | `(char[:]) !>(CCIoError)` | slice or error (e.g., `read()` return; empty slice = EOF) |
+| `T* !>(CCIoError)` | `((T)*) !>(CCIoError)` | result of pointer (e.g., `cc_dir_open()` return) |
+| `bool !>(CCIoError)` | `(bool) !>(CCIoError)` | iterator / recv / pop signal (`ok(true)` = value written to out-param, `ok(false)` = EOF/closed/drained) |
 
 **Key distinction:**
-- `T!E` — "operation may fail" (e.g., file read: error or data, empty slice means EOF)
-- `T!>(E)?` — "value may be absent; if present, it's a result" (general nesting pattern)
-- `T*!E` — "operation may fail; if it succeeds, returns a pointer" (common for allocation/lookup)
+- `T !>(E)` — "operation may fail; success is a `T`" (e.g., file read: error or data; empty slice means EOF)
+- `T* !>(E)` — "operation may fail; if it succeeds, returns a pointer" (common for allocation / fallible lookup)
+- `bool !>(E) op(T* out)` — iterators, `recv`, pop-style APIs; on `ok(true)` the out-param has been written
+
+> **Retired.** The legacy optional-type constructor `T?` has been removed from this document. See the main spec §2.1 migration appendix for the mapping from `T?` to `T !>(E)`, `T*`, empty-slice, `bool` + out-param, or `-1` sentinels.
+
+### Name Aliases (short vs prefixed)
+
+All stdlib signature tables below use the **prefixed ABI names** (`CCString`, `CCFile`, `CCIoError`, `CCNetError`, `CCVec`, `CCMap`, `CCDuplex`, etc.) — these match the exact C ABI 1:1. The compiler automatically resolves these common short aliases in source code:
+
+| Short alias | Prefixed ABI name |
+|-------------|-------------------|
+| `String` | `CCString` |
+| `File` | `CCFile` |
+| `IoError` | `CCIoError` |
+| `NetError` | `CCNetError` |
+| `ParseError` | `CCParseError` |
+| `Vec` | `CCVec` |
+| `Map` | `CCMap` |
+| `Duplex` | `CCDuplex` |
+| `Arena` | `CCArena` |
+
+Free-form example code may use either form; all normative signature tables use the prefixed form.
 
 ### Type Macros
 
-Convenience macros for constructing Optional and Result type names in C (interop only):
+Convenience macros for constructing Result type names in C (interop only):
 
 | Macro | Expands To | Example |
 |-------|------------|---------|
-| `CCOpt(T)` | `CCOptional_T` | `CCOpt(int)` → `CCOptional_int` |
-| `CCOptPtr(T)` | `CCOptional_Tptr` | `CCOptPtr(char)` → `CCOptional_charptr` |
 | `CCRes(T, E)` | `CCResult_T_E` | `CCRes(int, CCError)` → `CCResult_int_CCError` |
 | `CCResPtr(T, E)` | `CCResult_Tptr_E` | `CCResPtr(char, CCIoError)` → `CCResult_charptr_CCIoError` |
-| `CCOptRes(T, E)` | `CCOptional_CCResult_T_E` | Optional containing a Result |
-| `CCResOpt(T, E)` | `CCResult_CCOptional_T_E` | Result containing an Optional |
 
 **Usage in headers vs source files:**
 
@@ -195,30 +209,6 @@ CC_DECL_RESULT_SPEC(CCResult_MyData_MyError, MyData, MyError)
 ```
 
 **Why guards?** When you use `T !>(E)` syntax in `.ccs` files, the compiler automatically generates `CC_DECL_RESULT_SPEC` calls. The `#ifndef ..._DEFINED` guards prevent redefinition errors when explicit declarations exist in headers.
-
-### Optional Helpers
-
-Macros for working with `T?` Optional types:
-
-| Helper | Returns | Description |
-|--------|---------|-------------|
-| `cc_is_some(opt)` | `bool` | True if has value |
-| `cc_is_none(opt)` | `bool` | True if empty |
-| `cc_unwrap_opt(opt)` | `T` | Get value (aborts if none) |
-| `cc_unwrap_or(opt, default)` | `T` | Get value or default |
-
-**Example:**
-
-```c
-CCOpt(int) maybe_val = find_value(key);
-if (cc_is_some(maybe_val)) {
-    int val = cc_unwrap_opt(maybe_val);
-    use(val);
-}
-
-// Or use default
-int val = cc_unwrap_or(maybe_val, 0);
-```
 
 ---
 
@@ -374,26 +364,26 @@ UFCS methods on immutable `char[:]` views. These are allocation-free and work wi
 ```c
 size_t  char[:].len();                          // Length in bytes
 
-// Safe indexing (never traps)
-char?   char[:].get(size_t index);              // None if out of bounds
+// Safe indexing (never traps). Returns a pointer into the slice or NULL.
+char*   char[:].get(size_t index);              // NULL if out of bounds
 
-// View (no allocation, None if invalid range)
-char[:]? char[:].slice(size_t start, size_t end);  // None if start > end or end > len
+// View (no allocation). Empty slice (len == 0) on invalid range.
+char[:] char[:].slice(size_t start, size_t end);  // empty slice if start > end or end > len
 
 // Copy to new allocation
-char[:] char[:].clone(Arena* a);                // Byte-for-byte copy into arena (UTF-8 unchanged)
-char*   char[:].c_str(Arena* a);                // Copy len bytes + NUL terminator; returns char* for C interop
+char[:] char[:].clone(CCArena* a);              // Byte-for-byte copy into arena (UTF-8 unchanged)
+char*   char[:].c_str(CCArena* a);              // Copy len bytes + NUL terminator; returns char* for C interop
 ```
 
-**Slice Safety:** `.slice(start, end)` returns `None` if `start > end` or `end > len`. Otherwise, it returns a view (no allocation). This prevents invalid ranges while remaining type-safe.
+**Slice Safety:** `.slice(start, end)` returns an empty slice (`len == 0`) if `start > end` or `end > len`. Otherwise, it returns a view (no allocation). This keeps the call total (non-trapping, non-erroring) and preserves the "empty slice is the absent sentinel" convention used across stdlib slice APIs.
 
 **Example:**
 ```c
 char[:] s = "hello";
-assert(s.slice(1, 4).unwrap() == "ell");     // valid range
-assert(!s.slice(4, 1));                      // invalid: start > end
-assert(!s.slice(0, 99));                     // invalid: end > len
-assert(s.slice(5, 5).unwrap().len() == 0);   // empty slice at end
+assert(s.slice(1, 4) == "ell");        // valid range
+assert(s.slice(4, 1).len == 0);        // invalid: start > end -> empty
+assert(s.slice(0, 99).len == 0);       // invalid: end > len   -> empty
+assert(s.slice(5, 5).len == 0);        // empty slice at end (valid, bordering)
 ```
 
 ##### Query Methods
@@ -404,8 +394,8 @@ bool    char[:].is_ascii();                    // Check if all ASCII
 bool    char[:].starts_with(char[:] prefix);   // Check prefix
 bool    char[:].ends_with(char[:] suffix);     // Check suffix
 bool    char[:].contains(char[:] needle);      // Check contains
-size_t? char[:].index_of(char[:] needle);      // Find index (null if not found)
-size_t? char[:].last_index_of(char[:] needle); // Find last index
+ssize_t char[:].index_of(char[:] needle);      // Find index (-1 if not found)
+ssize_t char[:].last_index_of(char[:] needle); // Find last index (-1 if not found)
 size_t  char[:].count(char[:] needle);         // Count occurrences
 ```
 
@@ -425,30 +415,30 @@ String  char[:].repeat(Arena* a, size_t times); // Repeat n times
 ##### Parse Methods
 
 ```c
-i64!     char[:].parse_i64();                  // Parse to i64
-u64!     char[:].parse_u64();                  // Parse to u64
-f64!     char[:].parse_f64();                  // Parse to f64
-bool!    char[:].parse_bool();                 // Parse to bool ("true"/"false")
+i64  !>(CCI64ParseError)   char[:].parse_i64();    // Parse to i64
+u64  !>(CCI64ParseError)   char[:].parse_u64();    // Parse to u64
+f64  !>(CCFloatParseError) char[:].parse_f64();    // Parse to f64
+bool !>(CCBoolParseError)  char[:].parse_bool();   // Parse to bool ("true"/"false")
 ```
 
 **Error types:**
 ```c
-enum I64ParseError { InvalidChar, Overflow, Underflow };
-enum FloatParseError { InvalidChar, Overflow };
-enum BoolParseError { InvalidValue };
+enum CCI64ParseError   { InvalidChar, Overflow, Underflow };
+enum CCFloatParseError { InvalidChar, Overflow };
+enum CCBoolParseError  { InvalidValue };
 ```
 
 ##### Split Methods
 
 ```c
-struct StringSplitIter {
+struct CCStringSplitIter {
     char[:] remaining;
     char[:] delim;
 };
 
-StringSplitIter char[:].split(char[:] delim);  // Create iterator
-char[:]?        StringSplitIter.next();        // Advance iterator
-char[:][:] char[:].split_all(Arena* a, char[:] delim);  // Collect all at once
+CCStringSplitIter char[:].split(char[:] delim);                 // Create iterator
+bool              CCStringSplitIter.next(char[:]* out);         // Advance iterator; true if a field was written
+char[:][:]        char[:].split_all(CCArena* a, char[:] delim); // Collect all at once
 ```
 
 **Examples:**
@@ -461,7 +451,7 @@ bool has_hello = trimmed.contains("hello");  // true
 
 // Parse with error handling
 char[:] num_str = "42";
-i64! result = num_str.parse_i64();
+i64 !>(CCI64ParseError) result = num_str.parse_i64();
 if (try i64 val = result) {
     printf("Parsed: %ld\n", val);
 } else {
@@ -470,13 +460,14 @@ if (try i64 val = result) {
 
 // Split and iterate
 char[:] csv = "alice,bob,charlie";
-StringSplitIter it = csv.split(",");
-while (char[:]? name = it.next()) {
+CCStringSplitIter it = csv.split(",");
+char[:] name;
+while (it.next(&name)) {
     printf("Name: %.*s\n", (int)name.len, name.ptr);
 }
 
 // Split all at once
-Arena arena = arena(megabytes(1));
+CCArena arena = arena(megabytes(1));
 char[:][:] names = csv.split_all(&arena, ",");
 for (size_t i = 0; i < names.len; i++) {
     printf("%.*s\n", (int)names[i].len, names[i].ptr);
@@ -497,7 +488,7 @@ All strings are UTF-8. Basic operations (split, find, trim on whitespace) work o
 
 Concurrent-C I/O wrappers provide safe alternatives to C's stdio.h and POSIX I/O:
 
-- Replace errno with `T!IoError` Result types.
+- Replace errno with `T !>(CCIoError)` Result types.
 - Wrap file handles in opaque types for safety.
 - Provide sync and `@async` variants.
 - Allocate into arenas where needed.
@@ -514,13 +505,13 @@ For complete blocking/stalling semantics, see **§ 7.8 (Blocking, Stalling, and 
 #### 2.2 Basic I/O Errors
 
 ```c
-enum IoError {
+enum CCIoError {
     PermissionDenied,
     FileNotFound,
     InvalidArgument,
     Interrupted,
     OutOfMemory,
-    Busy,           // Blocking pool saturated, queue is full
+    Busy,              // Blocking pool saturated, queue is full
     ConnectionClosed,  // Normal closure (like EOF for streams; not an error condition)
 
     // Platform-specific error code preserved for diagnostics.
@@ -528,7 +519,7 @@ enum IoError {
     Other(i32 os_code),
 };
 
-enum ParseError {
+enum CCParseError {
     InvalidUtf8,
     Truncated,
 };
@@ -543,56 +534,56 @@ enum ParseError {
 
 ```c
 // Opaque file handle
-typedef struct File File;
+typedef struct CCFile CCFile;
 
 // Direct library-call constructors
-File! file_open(Arena* a, char[:] path, char[:] mode);  // "r", "w", "a"
-@async File! file_open_async(Arena* a, char[:] path, char[:] mode);
+CCFile !>(CCIoError)        cc_file_open(CCArena* a, char[:] path, char[:] mode);  // "r", "w", "a"
+@async CCFile !>(CCIoError) cc_file_open_async(CCArena* a, char[:] path, char[:] mode);
 
 // UFCS surface methods
 
 // Streaming read: returns slice with data, empty slice on EOF.
 // Reads up to n bytes; returns slice of actual bytes read.
-// EOF: returns Ok with empty slice (len == 0).
-char[:]!IoError File.read(Arena* a, size_t n);
+// EOF: returns ok with empty slice (len == 0).
+char[:] !>(CCIoError) CCFile.read(CCArena* a, size_t n);
 
 // Read one line into arena (line ending handling: accepts \n and \r\n).
-// EOF: returns Ok with empty slice (len == 0).
-char[:]!IoError File.read_line(Arena* a);
+// EOF: returns ok with empty slice (len == 0).
+char[:] !>(CCIoError) CCFile.read_line(CCArena* a);
 
 // Read entire file into arena. Returns empty slice for empty files.
 // This is NOT a streaming API — use read() or read_line() for streaming.
-char[:]!IoError File.read_all(Arena* a);
+char[:] !>(CCIoError) CCFile.read_all(CCArena* a);
 
 // Write all bytes from data.
-size_t !IoError File.write(char[:] data);
+size_t !>(CCIoError) CCFile.write(char[:] data);
 
 // Read into caller-provided buffer (no allocation).
 // For streaming scenarios where you want to reuse the same buffer.
 // Returns bytes read; 0 on EOF.
-size_t !IoError File.read_buf(void* buf, size_t n);
+size_t !>(CCIoError) CCFile.read_buf(void* buf, size_t n);
 
 // Write from caller-provided buffer (no slice overhead).
 // For streaming scenarios where you want to avoid slice construction.
 // Returns bytes written.
-size_t !IoError File.write_buf(const void* buf, size_t n);
+size_t !>(CCIoError) CCFile.write_buf(const void* buf, size_t n);
 
-i64    !IoError File.seek(i64 offset, int whence);      // SEEK_SET/CUR/END
-i64    !IoError File.tell();                            // Current position
-size_t !IoError File.size();                            // File size (0 for non-seekable)
+i64    !>(CCIoError) CCFile.seek(i64 offset, int whence);   // SEEK_SET/CUR/END
+i64    !>(CCIoError) CCFile.tell();                         // Current position
+size_t !>(CCIoError) CCFile.size();                         // File size (0 for non-seekable)
 
 // Flush to disk; observes flush errors.
-void   !IoError File.sync();
+void   !>(CCIoError) CCFile.sync();
 
 // Close is best-effort and infallible (no error returned).
 // Call sync() before close() to observe flush failures.
-void            File.close();
+void                 CCFile.close();
 
 // Async variants (same signatures, just async)
-@async char[:]!IoError File.read_async(Arena* a, size_t n);
-@async char[:]!IoError File.read_line_async(Arena* a);
-@async char[:]!IoError File.read_all_async(Arena* a);
-@async size_t!IoError  File.write_async(char[:] data);
+@async char[:] !>(CCIoError) CCFile.read_async(CCArena* a, size_t n);
+@async char[:] !>(CCIoError) CCFile.read_line_async(CCArena* a);
+@async char[:] !>(CCIoError) CCFile.read_all_async(CCArena* a);
+@async size_t  !>(CCIoError) CCFile.write_async(char[:] data);
 ```
 
 **Normative lowering:**
@@ -610,37 +601,37 @@ void            File.close();
 
 | Method | Return Type | EOF Behavior |
 |--------|-------------|--------------|
-| `read()` | `char[:]!IoError` | Empty slice (`len == 0`) = EOF |
-| `read_line()` | `char[:]!IoError` | Empty slice (`len == 0`) = EOF |
-| `read_all()` | `char[:]!IoError` | N/A (reads entire file; empty slice for empty file) |
+| `read()` | `char[:] !>(CCIoError)` | Empty slice (`len == 0`) = EOF |
+| `read_line()` | `char[:] !>(CCIoError)` | Empty slice (`len == 0`) = EOF |
+| `read_all()` | `char[:] !>(CCIoError)` | N/A (reads entire file; empty slice for empty file) |
 
-**Rule:** All streaming reads (`read()`, `read_line()`) return an empty slice on EOF. This simplifies the API — no need for nested Optional inside Result. Check `data.len == 0` to detect EOF.
+**Rule:** All streaming reads (`read()`, `read_line()`) return an empty slice on EOF. Check `data.len == 0` to detect EOF — there is no separate absent/EOF sentinel on top of the result.
 
 **Examples:**
 
 ```c
-Arena arena = arena(megabytes(10));
+CCArena arena = arena(megabytes(10));
 
 // Read entire file (error handling)
-File! f = file_open(&arena, "data.txt", "r");
-if (try File file = f) {
+CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
+if (try CCFile file = f) {
     char[:] content = try file.read_all(&arena);
     printf("Read %zu bytes\n", content.len);
     file.close();
-} catch (IoError err) {
+} catch (CCIoError err) {
     printf("Error: %d\n", err);
 }
 
 // Read lines (empty slice = EOF)
-File! f = file_open(&arena, "input.txt", "r");
-if (try File file = f) {
+CCFile !>(CCIoError) f = cc_file_open(&arena, "input.txt", "r");
+if (try CCFile file = f) {
     while (true) {
-        char[:]!IoError line_result = file.read_line(&arena);
+        char[:] !>(CCIoError) line_result = file.read_line(&arena);
         if (cc_is_err(line_result)) {
             // Handle error
             break;
         }
-        char[:] line = cc_unwrap(line_result);
+        char[:] line = cc_value(line_result);
         if (line.len == 0) break;  // EOF (empty slice)
         printf("Line: %.*s\n", (int)line.len, line.ptr);
     }
@@ -648,8 +639,8 @@ if (try File file = f) {
 }
 
 // Write file
-File! out = file_open(&arena, "output.txt", "w");
-if (try File file = out) {
+CCFile !>(CCIoError) out = cc_file_open(&arena, "output.txt", "w");
+if (try CCFile file = out) {
     try file.write("Hello, world!\n");
     file.close();
 }
@@ -657,8 +648,8 @@ if (try File file = out) {
 // Async I/O
 @async void process_file() {
     // Sync open is allowed; runtime may offload it to blocking pool if needed
-    File! f = file_open(&arena, "data.txt", "r");
-    if (try File file = f) {
+    CCFile !>(CCIoError) f = cc_file_open(&arena, "data.txt", "r");
+    if (try CCFile file = f) {
         char[:] data = try await file.read_all_async(&arena);
         process(data);
         file.close();
@@ -670,11 +661,11 @@ if (try File file = out) {
 
 ```c
 // UFCS methods on stdout/stderr (singletons)
-void! std_out.write(char[:] data);
-void! std_err.write(char[:] data);
-// String overloads for ergonomics
-void! std_out.write(String s);
-void! std_err.write(String s);
+void !>(CCIoError) std_out.write(char[:] data);
+void !>(CCIoError) std_err.write(char[:] data);
+// CCString overloads for ergonomics
+void !>(CCIoError) std_out.write(CCString s);
+void !>(CCIoError) std_err.write(CCString s);
 // Overload resolution is handled by UFCS lowering; the compiler selects the
 // best match and emits prefixed C ABI calls (`cc_std_out_write` or
 // `cc_std_out_write_string`) with pointer-based signatures.
@@ -688,7 +679,7 @@ void! std_err.write(String s);
 **UFCS receiver conversion (general rule):**
 - Overload selection prefers an exact receiver type match.
 - If no exact match, the compiler may apply these implicit receiver conversions (in order) to find a viable overload:
-  1) `String -> char[:]` (view of contents via `cc_string_as_slice`)
+  1) `CCString -> char[:]` (view of contents via `cc_string_as_slice`)
   2) `char[N]` / string literal -> `char[:]`
   3) `CCSlice` alias -> `char[:]`
 - If no overload is viable after these conversions, resolution fails.
@@ -699,7 +690,7 @@ void! std_err.write(String s);
 ```c
 std_out.write("Hello, world!\n");
 std_err.write("An error occurred\n");
-std_out.write(my_string); // String overload
+std_out.write(my_string); // CCString overload
 ```
 
 #### 2.5 Structured Logging (`<std/log.cch>`)
@@ -734,15 +725,15 @@ struct LogEvent {
 ```c
 // Log with drop strategy: never blocks request path
 // Logs to stderr; drops silently if output is slow
-void log_drop(LogEvent evt);
+void                 cc_log_drop(CCLogEvent evt);
 
 // Log with block strategy: blocks up to timeout, fails request if timeout exceeded
 // Use for audit/critical logs that cannot be dropped
-void! log_block(LogEvent evt, Duration timeout);
+void !>(CCIoError)   cc_log_block(CCLogEvent evt, Duration timeout);
 
 // Log with sample strategy: deterministically keep ~rate fraction
 // Use for high-volume logs (traces, metrics) that must be sparse
-void log_sample(LogEvent evt, f32 rate);
+void                 cc_log_sample(CCLogEvent evt, f32 rate);
 
 // Runtime configuration
 struct LogConfig {
@@ -815,16 +806,16 @@ log_sample(evt, 0.05);
 
 ```c
 // Path operations (mostly free functions, no state)
-char[:] path_join(Arena* a, char[:] parent, char[:] child);  // Cross-platform path joining
-char[:] path_basename(char[:] path);     // Extract filename
-char[:] path_dirname(char[:] path);      // Extract directory
-char[:] path_extension(char[:] path);    // Extract extension
+char[:] cc_path_join(CCArena* a, char[:] parent, char[:] child);  // Cross-platform path joining
+char[:] cc_path_basename(char[:] path);     // Extract filename
+char[:] cc_path_dirname(char[:] path);      // Extract directory
+char[:] cc_path_extension(char[:] path);    // Extract extension
 
 // Example: cross-platform
-char[:] config = path_join(&arena, home_dir, ".config/app.txt");
-char[:] dir = path_dirname(config);
-char[:] name = path_basename(config);
-char[:] ext = path_extension(config);
+char[:] config = cc_path_join(&arena, home_dir, ".config/app.txt");
+char[:] dir = cc_path_dirname(config);
+char[:] name = cc_path_basename(config);
+char[:] ext = cc_path_extension(config);
 ```
 
 ---
@@ -842,22 +833,22 @@ CC's collections are **arena-backed**, **generic** (canonically via `::[...]` sy
 typedef struct CCVec::[T] CCVec::[T];
 
 // Direct library-call constructors
-CCVec::[T] cc_vec_new::[T](Arena* a);
-CCVec::[T] cc_vec_with_capacity::[T](Arena* a, size_t capacity);
+CCVec::[T] cc_vec_new::[T](CCArena* a);
+CCVec::[T] cc_vec_with_capacity::[T](CCArena* a, size_t capacity);
 
 // UFCS surface methods
-void    CCVec::[T].push(T value);                // Add element (grows as needed)
-T?      CCVec::[T].pop();                        // Remove and return last
-T?      CCVec::[T].get(size_t index);            // Bounds-safe get (None if out of bounds)
-T*      CCVec::[T].get_mut(size_t index);        // Mutable access (NULL if out of bounds)
+void    CCVec::[T].push(T value);                  // Add element (grows as needed)
+bool    CCVec::[T].pop(T* out);                    // Remove last into *out; false if empty
+T*      CCVec::[T].get(size_t index);              // Bounds-safe get; NULL if out of bounds
+T*      CCVec::[T].get_mut(size_t index);          // Mutable access; NULL if out of bounds
 
-enum BoundsError { OutOfBounds };
-void!BoundsError CCVec::[T].set(size_t index, T value);   // Set with bounds check (error if out of bounds)
+enum CCBoundsError { OutOfBounds };
+void !>(CCBoundsError) CCVec::[T].set(size_t index, T value);   // Set with bounds check
 
-void    CCVec::[T].clear();                      // Clear contents
-size_t  CCVec::[T].len();                        // Length
-size_t  CCVec::[T].cap();                        // Capacity
-T[:]    CCVec::[T].as_slice();                   // View as T[:]
+void    CCVec::[T].clear();                        // Clear contents
+size_t  CCVec::[T].len();                          // Length
+size_t  CCVec::[T].cap();                          // Capacity
+T[:]    CCVec::[T].as_slice();                     // View as T[:]
 
 // Iterator
 struct CCVecIter::[T] {
@@ -866,15 +857,17 @@ struct CCVecIter::[T] {
 };
 
 CCVecIter::[T] CCVec::[T].iter();
-T?             CCVecIter::[T].next();
+bool           CCVecIter::[T].next(T* out);        // true if a value was written to *out
 ```
+
+**Rule (get vs. get_mut):** Both return `T*` (a nullable pointer into the vector's buffer). `get` returns a `const`-like read-only view in source-level prose, but the underlying pointer is identical; `get_mut` exists as a distinct name for readability at call sites that will mutate. Returned pointers are valid until the next mutating operation on the vector (push/pop/set/clear or any growth).
 
 **Normative lowering:** `CCVec::[T]` first lowers to the concrete container family `CCVec_<mangledT>`. Legacy `Vec::[T]` and `Vec<T>` spellings lower to the same family during the transition period. UFCS then lowers to that family contract. The visible concrete C family names are normative for interop: `CCVec_<mangledT>`, `CCVec_<mangledT>_init`, `CCVec_<mangledT>_push`, `CCVec_<mangledT>_get`, and related family members. Shared erased-core helpers remain an implementation detail.
 
 **Examples:**
 
 ```c
-Arena arena = arena(megabytes(1));
+CCArena arena = arena(megabytes(1));
 
 // Work queue (UFCS method syntax)
 CCVec::[Task::[void]] tasks = cc_vec_new::[Task::[void]](&arena);
@@ -884,8 +877,9 @@ tasks.push(async_work3());
 
 // Iterate and await
 CCVecIter::[Task::[void]] it = tasks.iter();
-while (Task<void>? task = it.next()) {
-    await *task;
+Task::[void] task;
+while (it.next(&task)) {
+    await task;
 }
 
 // Buffer for accumulation
@@ -895,11 +889,11 @@ for (size_t i = 0; i < input.len; i++) {
 }
 char[:] result = buffer.as_slice();
 
-// Bounds-safe access
+// Bounds-safe access (pointer into the vector, NULL if out of bounds)
 CCVec::[int] data = cc_vec_new::[int](&arena);
 data.push(42);
-int? val = data.get(0);      // Some(42)
-int? oob = data.get(100);    // None (out of bounds)
+int* val = data.get(0);      // non-NULL; *val == 42
+int* oob = data.get(100);    // NULL (out of bounds)
 
 // Size checks
 if (data.len() > 0) {
@@ -909,58 +903,61 @@ if (data.len() > 0) {
 
 ---
 
-#### 3.3 Map<K, V> (Hash Map)
+#### 3.3 CCMap::[K, V] (Hash Map)
 
-`Map<K, V>` is already defined in the Concurrent-C language spec. The stdlib provides it with UFCS methods:
+`CCMap::[K, V]` is already defined in the Concurrent-C language spec. The stdlib provides it with UFCS methods:
 
 ```c
 // Generic hash map (arena-backed)
-typedef struct Map<K, V> Map<K, V>;
+typedef struct CCMap::[K, V] CCMap::[K, V];
 
 // Direct library-call constructor
-Map<K, V> map_new<K, V>(Arena* a);
+CCMap::[K, V] cc_map_new::[K, V](CCArena* a);
 
 // UFCS surface methods
-void    Map<K, V>.insert(K key, V value);    // Insert or update
-V?      Map<K, V>.get(K key);                // Lookup (returns optional)
-V*      Map<K, V>.get_mut(K key);            // Mutable reference
-bool    Map<K, V>.remove(K key);             // Remove (true if existed)
-void    Map<K, V>.clear();                   // Clear all entries
-size_t  Map<K, V>.len();                     // Number of entries
-size_t  Map<K, V>.cap();                     // Capacity
+void    CCMap::[K, V].insert(K key, V value);     // Insert or update
+V*      CCMap::[K, V].get(K key);                 // Lookup: pointer into table, NULL if absent
+V*      CCMap::[K, V].get_mut(K key);             // Mutable reference, NULL if absent
+bool    CCMap::[K, V].remove(K key);              // Remove (true if existed)
+void    CCMap::[K, V].clear();                    // Clear all entries
+size_t  CCMap::[K, V].len();                      // Number of entries
+size_t  CCMap::[K, V].cap();                      // Capacity
 ```
 
-**Normative lowering:** `Map<K, V>` first lowers to a concrete container family such as `Map_int_char_ptr`. UFCS then lowers to that family contract. Implementations may realize the concrete family with direct symbols such as `Map_int_char_ptr_insert(&m, k, v)` or with thin wrappers/macros over a shared erased core; the family contract is normative, the erased core is an implementation detail.
+**Normative lowering:** `CCMap::[K, V]` first lowers to a concrete container family such as `CCMap_int_char_ptr`. UFCS then lowers to that family contract. Implementations may realize the concrete family with direct symbols such as `CCMap_int_char_ptr_insert(&m, k, v)` or with thin wrappers/macros over a shared erased core; the family contract is normative, the erased core is an implementation detail.
+
+**Rule (get returns pointer):** `get` / `get_mut` both return `V*` — a pointer directly into the map's table — or `NULL` if the key is absent. This matches the vector `get`/`get_mut` pattern and avoids copying `V` on each lookup. The returned pointer is valid until the next mutating operation on the map (`insert`, `remove`, `clear`, or any rehash).
 
 **Note on Iteration:** Map iteration is intentionally deferred to Phase 2 to avoid prematurely locking in traversal order semantics. Phase 1 focuses on insertion, lookup, and removal.
 
 **Examples:**
 
 ```c
-Arena arena = arena(megabytes(1));
+CCArena arena = arena(megabytes(1));
 
 // Simple cache (string → result)
-Map<char[:], int> cache = map_new<char[:], int>(&arena);
+CCMap::[char[:], int] cache = cc_map_new::[char[:], int](&arena);
 cache.insert("key1", 100);
 cache.insert("key2", 200);
 
-int? val = cache.get("key1");     // Some(100)
-int? miss = cache.get("key3");    // None
+int* val = cache.get("key1");    // non-NULL; *val == 100
+int* miss = cache.get("key3");   // NULL
 
 // State table for concurrent requests
 struct Request { int id; char[:] path; };
-Map<int, Request> active = map_new<int, Request>(&arena);
+CCMap::[int, Request] active = cc_map_new::[int, Request](&arena);
 
 active.insert(req.id, req);
-Request? found = active.get(42);
+Request* found = active.get(42);
 if (found) {
     process_request(*found);
 }
 active.remove(42);
 
 // Conditional lookup and update
-if (Request? r = active.get(id)) {
-    r.path = new_path;
+Request* r = active.get(id);
+if (r) {
+    r->path = new_path;
 }
 ```
 
@@ -996,10 +993,10 @@ struct CCDirEntry {
 };
 
 // Open directory for iteration
-CCDirIter*!IoError cc_dir_open(Arena* arena, char[:] path);
+CCDirIter*  !>(CCIoError) cc_dir_open(CCArena* arena, char[:] path);
 
 // Read next entry (returns error with CC_IO_EOF when done)
-CCDirEntry!IoError cc_dir_next(CCDirIter* iter, Arena* arena);
+CCDirEntry  !>(CCIoError) cc_dir_next(CCDirIter* iter, CCArena* arena);
 
 // Close iterator
 void cc_dir_close(CCDirIter* iter);
@@ -1008,14 +1005,14 @@ void cc_dir_close(CCDirIter* iter);
 **Example:**
 
 ```c
-Arena arena = cc_heap_arena(megabytes(1));
+CCArena arena = cc_heap_arena(megabytes(1));
 CCDirIter* iter = try cc_dir_open(&arena, "src");
 
 while (true) {
-    CCDirEntry!IoError entry_res = cc_dir_next(iter, &arena);
-    if (entry_res is IoError) break;  // EOF or error
-    
-    CCDirEntry entry = entry_res.unwrap();
+    CCDirEntry !>(CCIoError) entry_res = cc_dir_next(iter, &arena);
+    if (cc_is_err(entry_res)) break;  // EOF or error
+
+    CCDirEntry entry = cc_value(entry_res);
     printf("%s (%s)\n", entry.name.ptr,
            entry.type == CC_DIRENT_DIR ? "dir" : "file");
 }
@@ -1030,13 +1027,13 @@ bool cc_path_exists(char[:] path);     // Check if path exists
 bool cc_path_is_dir(char[:] path);     // Check if path is directory
 bool cc_path_is_file(char[:] path);    // Check if path is regular file
 
-bool!IoError cc_dir_create(char[:] path);      // Create directory
-bool!IoError cc_dir_create_all(char[:] path);  // Create directory and parents
-bool!IoError cc_dir_remove(char[:] path);      // Remove empty directory
-bool!IoError cc_file_remove(char[:] path);     // Remove file
+bool !>(CCIoError) cc_dir_create(char[:] path);      // Create directory
+bool !>(CCIoError) cc_dir_create_all(char[:] path);  // Create directory and parents
+bool !>(CCIoError) cc_dir_remove(char[:] path);      // Remove empty directory
+bool !>(CCIoError) cc_file_remove(char[:] path);     // Remove file
 
-char[:] cc_dir_cwd(Arena* arena);              // Get current working directory
-bool!IoError cc_dir_chdir(char[:] path);       // Change working directory
+char[:]            cc_dir_cwd(CCArena* arena);       // Get current working directory
+bool !>(CCIoError) cc_dir_chdir(char[:] path);       // Change working directory
 ```
 
 #### 4.4 Glob Pattern Matching
@@ -1107,26 +1104,26 @@ struct CCProcessStatus {
 
 ```c
 // Spawn with full configuration
-CCProcess!IoError cc_process_spawn(CCProcessConfig* config);
+CCProcess !>(CCIoError) cc_process_spawn(CCProcessConfig* config);
 
 // Simple spawn (no pipes)
-CCProcess!IoError cc_process_spawn_simple(char[:] program, char[:]* args);
+CCProcess !>(CCIoError) cc_process_spawn_simple(char[:] program, char[:]* args);
 
 // Spawn shell command
-CCProcess!IoError cc_process_spawn_shell(char[:] command);
+CCProcess !>(CCIoError) cc_process_spawn_shell(char[:] command);
 ```
 
 #### 5.4 Process Management
 
 ```c
 // Wait for exit (blocking)
-CCProcessStatus!IoError cc_process_wait(CCProcess* proc);
+CCProcessStatus !>(CCIoError) cc_process_wait(CCProcess* proc);
 
 // Check if exited (non-blocking, returns CC_IO_BUSY if running)
-CCProcessStatus!IoError cc_process_try_wait(CCProcess* proc);
+CCProcessStatus !>(CCIoError) cc_process_try_wait(CCProcess* proc);
 
 // Send signal (POSIX: signal number; Windows: TerminateProcess)
-bool!IoError cc_process_kill(CCProcess* proc, int signal);
+bool !>(CCIoError) cc_process_kill(CCProcess* proc, int signal);
 
 // Get process ID
 int cc_process_id(CCProcess* proc);
@@ -1136,15 +1133,15 @@ int cc_process_id(CCProcess* proc);
 
 ```c
 // Write to stdin (requires pipe_stdin)
-size_t!IoError cc_process_write(CCProcess* proc, char[:] data);
+size_t !>(CCIoError) cc_process_write(CCProcess* proc, char[:] data);
 
-// Read from stdout/stderr (requires pipe_stdout/pipe_stderr)
-char[:]!IoError cc_process_read(CCProcess* proc, Arena* arena, size_t max);
-char[:]!IoError cc_process_read_stderr(CCProcess* proc, Arena* arena, size_t max);
+// Read from stdout/stderr (requires pipe_stdout/pipe_stderr); empty slice = EOF
+char[:] !>(CCIoError) cc_process_read(CCProcess* proc, CCArena* arena, size_t max);
+char[:] !>(CCIoError) cc_process_read_stderr(CCProcess* proc, CCArena* arena, size_t max);
 
 // Read all output until EOF
-char[:]!IoError cc_process_read_all(CCProcess* proc, Arena* arena);
-char[:]!IoError cc_process_read_all_stderr(CCProcess* proc, Arena* arena);
+char[:] !>(CCIoError) cc_process_read_all(CCProcess* proc, CCArena* arena);
+char[:] !>(CCIoError) cc_process_read_all_stderr(CCProcess* proc, CCArena* arena);
 
 // Close stdin (signals EOF to child)
 void cc_process_close_stdin(CCProcess* proc);
@@ -1160,10 +1157,10 @@ struct CCProcessOutput {
 };
 
 // Run command and capture all output (blocking)
-CCProcessOutput!IoError cc_process_run(Arena* arena, char[:] program, char[:]* args);
+CCProcessOutput !>(CCIoError) cc_process_run(CCArena* arena, char[:] program, char[:]* args);
 
 // Run shell command and capture output
-CCProcessOutput!IoError cc_process_run_shell(Arena* arena, char[:] command);
+CCProcessOutput !>(CCIoError) cc_process_run_shell(CCArena* arena, char[:] command);
 ```
 
 **Examples:**
@@ -1199,8 +1196,8 @@ CCProcessStatus status = try cc_process_wait(&proc);
 char[:] cc_env_get(Arena* arena, char[:] name);
 
 // Set/unset environment variable for current process
-bool!IoError cc_env_set(char[:] name, char[:] value);
-bool!IoError cc_env_unset(char[:] name);
+bool !>(CCIoError) cc_env_set(char[:] name, char[:] value);
+bool !>(CCIoError) cc_env_unset(char[:] name);
 ```
 
 ---
@@ -1253,23 +1250,25 @@ bool!IoError cc_env_unset(char[:] name);
     
     // Run all tasks
     VecIter<Task<void>> it = tasks.iter();
-    while (Task<void>? t = it.next()) {
-        await *t;
+    Task<void> t;
+    while (it.next(&t)) {
+        await t;
     }
-    
+
     // File I/O (UFCS)
-    File! f = file_open(&arena, "data.txt", "r");
+    File !>(IoError) f = file_open(&arena, "data.txt", "r");
     if (try File file = f) {
         char[:] data = try file.read_all(&arena);
-        
+
         // String processing (UFCS)
         char[:] trimmed = data.trim();
         StringSplitIter lines = trimmed.split("\n");
-        while (char[:]? line = lines.next()) {
+        char[:] line;
+        while (lines.next(&line)) {
             std_out.write(line);
             std_out.write("\n");
         }
-        
+
         file.close();
     }
 }
@@ -1351,13 +1350,13 @@ Runtime.set_blocking_pool(
 **Handling saturation:**
 ```c
 @async void process_with_backoff() {
-    File! f = file_open(&arena, path, "r");
-    if (try File file = f) {
+    CCFile !>(CCIoError) f = cc_file_open(&arena, path, "r");
+    if (try CCFile file = f) {
         int retry_count = 0;
         while (true) {
-            char[:]!IoError line_result = file.read_line(&arena);
+            char[:] !>(CCIoError) line_result = file.read_line(&arena);
             if (cc_is_err(line_result)) {
-                CCIoError err = cc_unwrap_err(line_result);
+                CCIoError err = cc_error(line_result);
                 if (err.kind == CC_IO_BUSY) {
                     if (retry_count++ > 3) {
                         return cc_err(IoError::Busy);
@@ -1369,8 +1368,8 @@ Runtime.set_blocking_pool(
                 return cc_err(err);
             }
             retry_count = 0;
-            
-            char[:] line = cc_unwrap(line_result);
+
+            char[:] line = cc_value(line_result);
             if (line.len == 0) break;  // EOF (empty slice)
             process(line);
         }
@@ -1408,13 +1407,13 @@ The `CCVec::[T]` and `Map::[K, V]` syntax is **compile-time sugar** that lowers 
 CCVec::[int] v = cc_vec_new::[int](&arena);
 v.push(42);
 v.push(100);
-int? val = v.get(0);
+int* val = v.get(0);
 
 // Lowers to (generated C)
 CCVec_int v = CCVec_int_init(&arena, CC_VEC_INITIAL_CAP);
 CCVec_int_push(&v, 42);
 CCVec_int_push(&v, 100);
-CCOptional_int val = CCVec_int_get(&v, 0);
+int* val = CCVec_int_get(&v, 0);
 ```
 
 **Lowering rules:**
@@ -1458,41 +1457,42 @@ All functions are covered by **Spec Tests**—normative, executable tests in `.c
 @test "string slice operations" {
     Arena arena = arena(kilobytes(10));
     char[:] input = "  hello, world!  ";
-    
+
     // Test trim
     char[:] trimmed = input.trim();
     assert(trimmed.len == 13);  // "hello, world!"
-    
+
     // Test split
     StringSplitIter it = trimmed.split(", ");
-    char[:]? p1 = it.next();
-    assert(p1 && p1.len == 5);  // "hello"
-    
+    char[:] p1;
+    assert(it.next(&p1));
+    assert(p1.len == 5);        // "hello"
+
     // Test contains
     assert(trimmed.contains("world"));
     assert(!trimmed.contains("xyz"));
-    
+
     // Test parse
-    i64! val = "42".parse_i64();
+    i64 !>(I64ParseError) val = "42".parse_i64();
     assert(try i64 v = val && v == 42);
 }
 
 @test "vec and map methods" {
     Arena arena = arena(kilobytes(10));
-    
+
     // Vec<T> methods
     Vec<int> v = vec_new<int>(&arena);
     v.push(10);
     v.push(20);
     assert(v.len() == 2);
-    int? val = v.get(0);
-    assert(try int v = val && v == 10);
-    
+    int* val = v.get(0);
+    assert(val && *val == 10);
+
     // Map<K,V> methods
     Map<char[:], int> m = map_new<char[:], int>(&arena);
     m.insert("x", 100);
-    int? result = m.get("x");
-    assert(try int r = result && r == 100);
+    int* result = m.get("x");
+    assert(result && *result == 100);
 }
 ```
 
@@ -1512,16 +1512,16 @@ The `server_loop` function provides a canonical server shell that handles connec
 **Core Abstractions:**
 
 ```c
-// Duplex: unified interface for bidirectional, closeable streams
+// CCDuplex: unified interface for bidirectional, closeable streams
 // Used by TLS wrappers, WebSocket handlers, HTTP/2, raw protocols, etc.
-struct Duplex {
-    @async char[:]?!IoError read(Arena* a);      // Read chunk; Ok(None) == EOF
-    @async void!IoError write(char[:] bytes);    // Write chunk
-    @async void!IoError shutdown(ShutdownMode mode);  // Half-close: Read, Write, or Both
-    @async void!IoError close();                 // Close (equivalent to shutdown(Both))
+struct CCDuplex {
+    @async char[:] !>(CCIoError) read(CCArena* a);        // Read chunk; empty slice = EOF
+    @async void    !>(CCIoError) write(char[:] bytes);    // Write chunk
+    @async void    !>(CCIoError) shutdown(CCShutdownMode mode);  // Half-close: Read, Write, or Both
+    @async void    !>(CCIoError) close();                 // Close (equivalent to shutdown(Both))
 };
 
-enum ShutdownMode {
+enum CCShutdownMode {
     Read,   // Stop reading; keep write side open (recv FIN, continue sending)
     Write,  // Stop writing; keep read side open (send FIN, continue receiving)
     Both,   // Close both sides
@@ -1529,20 +1529,20 @@ enum ShutdownMode {
 
 **ABI Contract (Normative):**
 
-All interface values (including Duplex) lower to a two-pointer layout:
+All interface values (including CCDuplex) lower to a two-pointer layout:
 
 ```c
 typedef struct {
     void* self;                    // Opaque receiver state
-    const DuplexVTable* vt;        // Method table
-} Duplex;
+    const CCDuplexVTable* vt;      // Method table
+} CCDuplex;
 
 typedef struct {
-    Task_CharSliceOptIoErr (*read)(void* self, Arena* a);
-    Task_VoidIoErr (*write)(void* self, CharSlice bytes);
-    Task_VoidIoErr (*shutdown)(void* self, ShutdownMode mode);
-    Task_VoidIoErr (*close)(void* self);
-} DuplexVTable;
+    Task_CharSliceIoErr (*read)(void* self, CCArena* a);
+    Task_VoidIoErr      (*write)(void* self, CCSlice bytes);
+    Task_VoidIoErr      (*shutdown)(void* self, CCShutdownMode mode);
+    Task_VoidIoErr      (*close)(void* self);
+} CCDuplexVTable;
 ```
 
 **Ownership Rules (Normative):**
@@ -1569,8 +1569,8 @@ struct Request {
 struct Response {
     u16 status;                  // HTTP status (200, 404, 500, etc.)
     char[:] headers;             // Response headers
-    char[:] body;                // Response body (small/unary fast path)
-    Duplex? stream;              // Streaming response (use write() + shutdown(Write) to end)
+    char[:] body;                // Response body (small/unary fast path; empty = use stream)
+    CCDuplex* stream;            // Streaming response (NULL = unary); use write() + shutdown(Write) to end
 };
 
 // Handler returns either unary response or takes over connection
@@ -1597,10 +1597,10 @@ enum ServerAction {
 - **Connection state:** If handler returns `Reply` in Http1_KeepAlive, the same Duplex is reused for the next request (server ownership). If handler returns `Takeover`, the Duplex is consumed and no further requests are parsed on that connection.
 
 // Takeover handler (runs in a long-lived context)
-typedef @async void!IoError (*ConnHandlerFn)(Duplex* conn, Arena* conn_arena);
+typedef @async void !>(CCIoError) (*ConnHandlerFn)(CCDuplex* conn, CCArena* conn_arena);
 
 // Unary request/response handler
-typedef @async ServerAction!IoError (*ServerHandlerFn)(Request* req, Arena* req_arena);
+typedef @async ServerAction !>(CCIoError) (*ServerHandlerFn)(Request* req, CCArena* req_arena);
 
 // Server modes (how to treat connections)
 enum ServerMode {
@@ -1626,7 +1626,7 @@ struct ServerConfig {
     Duration request_timeout;              // Per-request deadline (unary handlers only)
     ServerHandlerFn handler;               // User-provided handler
     ServerMode mode;                       // Http1_Close, Http1_KeepAlive, or RawTcp
-    TlsConfig? tls;                        // Optional TLS wrapping
+    TlsConfig* tls;                        // Optional TLS wrapping (NULL = plaintext)
     
     // Optional lifecycle callbacks
     bool (*on_request_start)(Request* req);
@@ -1638,7 +1638,7 @@ struct ServerConfig {
 
 ```c
 // Accept connections, perform TLS handshake if configured, spawn workers, manage lifetimes
-@async void!IoError server_loop(ServerConfig cfg);
+@async void !>(CCIoError) server_loop(ServerConfig cfg);
 ```
 
 **Lifetime and Deadline Rules:**
@@ -1675,9 +1675,9 @@ struct ServerConfig {
 **Internal Pattern (Illustrative):**
 
 ```c
-@async void!IoError server_loop(ServerConfig cfg) {
+@async void !>(CCIoError) server_loop(ServerConfig cfg) {
     int listener = try listen(cfg.port);
-    
+
     @nursery {
         for (size_t i = 0; i < cfg.max_workers; i++) {
             spawn (server_worker(&cfg, listener));
@@ -1685,30 +1685,30 @@ struct ServerConfig {
     }
 }
 
-@async void!IoError server_worker(ServerConfig* cfg, int listener) {
+@async void !>(CCIoError) server_worker(ServerConfig* cfg, int listener) {
     while (true) {
         // Accept connection (raw socket)
         int raw_fd = try await accept(listener);
-        
+
         // Perform TLS handshake if configured
-        Duplex conn = if (cfg.tls) {
+        CCDuplex conn = if (cfg.tls) {
             try tls_handshake(raw_fd, cfg.tls)
         } else {
-            Duplex.from_fd(raw_fd)
+            CCDuplex.from_fd(raw_fd)
         };
-        
+
         // Connection-scoped arena (lives until connection closes)
-        Arena conn_arena = arena(megabytes(1));
-        
+        CCArena conn_arena = arena(megabytes(1));
+
         // Keep-alive loop: one or more requests per connection
         bool keep_alive = true;
         while (keep_alive) {
             // Request-scoped arena (reset per request)
-            Arena req_arena = arena(megabytes(1));
-            
+            CCArena req_arena = arena(megabytes(1));
+
             // Handle one request
             @match {
-                case ServerAction!IoError action = handle_request(&conn, &req_arena, &conn_arena, cfg):
+                case ServerAction !>(CCIoError) action = handle_request(&conn, &req_arena, &conn_arena, cfg):
                     // Check for keep-alive
                     if (cfg.mode == Http1_KeepAlive && action != Takeover && !has_connection_close_header(action)) {
                         arena_reset(&req_arena);
@@ -1716,40 +1716,40 @@ struct ServerConfig {
                     } else {
                         keep_alive = false;  // Close connection
                     }
-                
-                case is_cancelled() | IoError err:
+
+                case is_cancelled() | CCIoError err:
                     keep_alive = false;  // Break on error or cancellation
             }
         }
-        
-        // Close connection (Duplex.close or raw_fd)
+
+        // Close connection (CCDuplex.close or raw_fd)
         try conn.close();
         arena_reset(&conn_arena);
     }
 }
 
-@async ServerAction!IoError handle_request(Duplex* conn, Arena* req_arena, Arena* conn_arena, ServerConfig* cfg) {
+@async ServerAction !>(CCIoError) handle_request(CCDuplex* conn, CCArena* req_arena, CCArena* conn_arena, ServerConfig* cfg) {
     // Read request
     Request req = try await read_request_from_duplex(conn, req_arena);
-    
+
     if (cfg.on_request_start) cfg.on_request_start(&req);
-    
+
     // Call handler with deadline (unary only)
     with_deadline(deadline_after(cfg.request_timeout)) {
-        ServerAction!IoError action = try cfg.handler(&req, req_arena);
-        
+        ServerAction !>(CCIoError) action = try cfg.handler(&req, req_arena);
+
         // Branch on response type
         @match {
             case Response resp = action (Reply):
                 if (cfg.on_request_end) cfg.on_request_end(&req, &resp, deadline_remaining());
                 try await send_response_to_duplex(conn, &resp);
                 return cc_ok(resp);  // Return response for keep-alive check
-            
+
             case ConnHandlerFn takeover_fn = action (Takeover):
                 // Handler is taking over the connection
                 try await takeover_fn(conn, conn_arena);
                 // Takeover handler called close(); connection finished
-                return cc_err(IoError::ConnectionClosed);  // Signal to break keep-alive loop
+                return cc_err(CCIoError::ConnectionClosed);  // Signal to break keep-alive loop
         }
     }
 }
@@ -1761,7 +1761,7 @@ struct ServerConfig {
 #include <ccc/std/prelude.cch>
 #include <ccc/std/server.cch>
 
-@async @latency_sensitive ServerAction!IoError api_handler(Request* req, Arena* req_arena) {
+@async @latency_sensitive ServerAction !>(CCIoError) api_handler(Request* req, CCArena* req_arena) {
     if (req.path == "/api/users") {
         User[] users = try await db_get_users(req_arena);
         char[:] json = encode_json(users, req_arena);
@@ -1796,7 +1796,7 @@ struct ServerConfig {
 **Usage Example: WebSocket Upgrade (Takeover)**
 
 ```c
-@async ServerAction!IoError websocket_handler(Request* req, Arena* req_arena) {
+@async ServerAction !>(CCIoError) websocket_handler(Request* req, CCArena* req_arena) {
     if (req.path == "/ws" && req.headers.contains("Upgrade")) {
         // Return takeover to handle WebSocket protocol
         return ServerAction.Takeover(websocket_connection);
@@ -1805,18 +1805,19 @@ struct ServerConfig {
     }
 }
 
-@async void!IoError websocket_connection(Duplex* conn, Arena* conn_arena) {
+@async void !>(CCIoError) websocket_connection(CCDuplex* conn, CCArena* conn_arena) {
     // Perform WebSocket handshake
     try await ws_handshake(conn);
-    
+
     // Handle messages on connection (lives as long as connection lives)
-    while (char[:]?!IoError frame = try await ws_read_frame(conn, conn_arena)) {
-        if (!frame) break;  // Connection closed
-        
+    while (true) {
+        char[:] frame = try await ws_read_frame(conn, conn_arena);
+        if (frame.len == 0) break;  // Connection closed (empty frame = EOF sentinel)
+
         // Process frame; allocations live in conn_arena
         try await process_ws_message(conn, frame, conn_arena);
     }
-    
+
     // Close connection
     try await conn.close();
 }
@@ -1825,7 +1826,7 @@ struct ServerConfig {
 **Usage Example: Streaming Response (SSE)**
 
 ```c
-@async ServerAction!IoError sse_handler(Request* req, Arena* req_arena) {
+@async ServerAction !>(CCIoError) sse_handler(Request* req, CCArena* req_arena) {
     if (req.path == "/events") {
         // For SSE, use Takeover to control the connection directly
         return ServerAction.Takeover(sse_connection);
@@ -1834,7 +1835,7 @@ struct ServerConfig {
     }
 }
 
-@async void!IoError sse_connection(Duplex* conn, Arena* conn_arena) {
+@async void !>(CCIoError) sse_connection(CCDuplex* conn, CCArena* conn_arena) {
     // Send SSE headers
     try await conn.write("HTTP/1.1 200 OK\r\n");
     try await conn.write("Content-Type: text/event-stream\r\n");
@@ -1862,7 +1863,7 @@ struct ServerConfig {
         .request_timeout = seconds(5),
         .handler = api_handler,
         .mode = Http1_KeepAlive,
-        .tls = TlsConfig {
+        .tls = &(TlsConfig) {
             .cert_path = "/etc/certs/server.crt",
             .key_path = "/etc/certs/server.key"
         }
@@ -1875,21 +1876,22 @@ struct ServerConfig {
 **Usage Example: Raw TCP Protocol (Takeover Mode)**
 
 ```c
-@async ServerAction!IoError raw_protocol_handler(Request* req, Arena* req_arena) {
+@async ServerAction !>(CCIoError) raw_protocol_handler(Request* req, CCArena* req_arena) {
     // For raw TCP (not HTTP), handler always returns Takeover
     // The "Request" struct is just for convenience; raw protocols ignore it
     return ServerAction.Takeover(raw_protocol_loop);
 }
 
-@async void!IoError raw_protocol_loop(Duplex* conn, Arena* conn_arena) {
+@async void !>(CCIoError) raw_protocol_loop(CCDuplex* conn, CCArena* conn_arena) {
     // Speak custom protocol directly via conn.read() / conn.write()
-    while (char[:]?!IoError msg = try await conn.read(conn_arena)) {
-        if (!msg) break;
-        
+    while (true) {
+        char[:] msg = try await conn.read(conn_arena);
+        if (msg.len == 0) break;  // EOF (empty slice)
+
         char[:] response = process_protocol_message(msg, conn_arena);
         try await conn.write(response);
     }
-    
+
     try await conn.close();
 }
 
@@ -1919,11 +1921,12 @@ struct ServerConfig {
   - `conn_arena`: Reset per connection (allows connection state, stateful protocols)
   - For long-lived connections processing many messages, use arena checkpoint pattern to avoid unbounded growth:
     ```c
-    @async void!IoError long_lived_handler(Duplex* conn, Arena* conn_arena) {
+    @async void !>(CCIoError) long_lived_handler(CCDuplex* conn, CCArena* conn_arena) {
         size_t message_count = 0;
-        ArenaCheckpoint cp = arena_checkpoint(conn_arena);
-        while (char[:]?!IoError msg = try await conn.read(conn_arena)) {
-            if (!msg) break;
+        CCArenaCheckpoint cp = arena_checkpoint(conn_arena);
+        while (true) {
+            char[:] msg = try await conn.read(conn_arena);
+            if (msg.len == 0) break;  // EOF
             process(msg);
             message_count++;
             // Restore arena every N messages to prevent unlimited growth
@@ -1938,7 +1941,7 @@ struct ServerConfig {
     ```
 - **Deadline and Cancellation:** For deadline semantics and how cancellation is checked at suspension points, see language spec **§ 7.5 (Cancellation & Deadline)** and **§ 3.2 (Suspension Points)**. This server shell applies `request_timeout` deadline to unary handlers; takeover handlers control their own deadline semantics (or use no deadline for long-lived connections like WebSocket).
 - **Deadline narrative:** Unary handlers inherit deadline from `request_timeout`. Takeover handlers control their own deadline (or none). This makes streaming safe-by-default (server times out slow clients) while allowing long-lived connections (takeover handler explicitly manages timeouts).
-- **Half-close:** Use `Duplex.shutdown(Read)` or `Duplex.shutdown(Write)` for proxies and protocols needing unidirectional closure. Standard sentinel `IoError::ConnectionClosed` indicates normal remote closure (not an error).
+- **Half-close:** Use `CCDuplex.shutdown(Read)` or `CCDuplex.shutdown(Write)` for proxies and protocols needing unidirectional closure. Standard sentinel `CCIoError::ConnectionClosed` indicates normal remote closure (not an error).
 - **Multiplexed connections (Phase 2):** For HTTP/2 and gRPC, a future `MuxConn` abstraction will manage multiple independent streams over a single TCP/TLS connection, with each stream receiving its own `Duplex` and `stream_arena`. For now, Duplex assumes 1:1 connection-to-stream.
 - Workers are spawned in a nursery; graceful shutdown on scope exit.
 - **Shutdown (Phase 2):** Graceful shutdown via cancellation signal coming in Phase 2. Currently, `server_loop` runs until error or process exit.
@@ -2003,20 +2006,21 @@ void process_csv(char* filename) {
 @async void process_csv(char[:] filename) {
     Arena arena = arena(megabytes(1));
     
-    File! f = file_open(&arena, filename, "r");
-    if (try File file = f) {
+    CCFile !>(CCIoError) f = cc_file_open(&arena, filename, "r");
+    if (try CCFile file = f) {
         while (true) {
-            char[:]!IoError line_result = file.read_line(&arena);
+            char[:] !>(CCIoError) line_result = file.read_line(&arena);
             if (cc_is_err(line_result)) break;  // Error
-            char[:] line = cc_unwrap(line_result);
+            char[:] line = cc_value(line_result);
             if (line.len == 0) break;  // EOF (empty slice)
-            
+
             // UFCS: trim and split naturally
-            StringSplitIter it = line.trim().split(",");
-            while (char[:]? field = it.next()) {
-                std_out.write("Field: ");
-                std_out.write(field.trim());
-                std_out.write("\n");
+            CCStringSplitIter it = line.trim().split(",");
+            char[:] field;
+            while (it.next(&field)) {
+                cc_std_out.write("Field: ");
+                cc_std_out.write(field.trim());
+                cc_std_out.write("\n");
             }
         }
         file.close();
@@ -2035,43 +2039,44 @@ void process_csv(char* filename) {
     Arena arena = arena(megabytes(10));
     
     // Read file
-    File! f = file_open(&arena, "logs.txt", "r");
+    CCFile !>(CCIoError) f = cc_file_open(&arena, "logs.txt", "r");
     if (!try f) return;
-    
-    File file = f.unwrap();
-    Map<int, int> status_counts = map_new<int, int>(&arena);
-    
+
+    CCFile file = f.unwrap();
+    CCMap::[int, int] status_counts = cc_map_new::[int, int](&arena);
+
     // Process line by line (UFCS throughout)
     while (true) {
-        char[:]!IoError line_result = file.read_line(&arena);
+        char[:] !>(CCIoError) line_result = file.read_line(&arena);
         if (cc_is_err(line_result)) break;  // Error
-        char[:] line = cc_unwrap(line_result);
+        char[:] line = cc_value(line_result);
         if (line.len == 0) break;  // EOF (empty slice)
-        
+
         // Skip comments
         if (line.starts_with("#")) continue;
-        
+
         // Parse fields
-        StringSplitIter fields = line.split(" ");
-        if (char[:]? status_str = fields.next()) {
-            i64! status = status_str.parse_i64();
+        CCStringSplitIter fields = line.split(" ");
+        char[:] status_str;
+        if (fields.next(&status_str)) {
+            i64 !>(CCI64ParseError) status = status_str.parse_i64();
             if (try i64 code = status) {
-                // Update count
-                int? count = status_counts.get((int)code);
+                // Update count (nullable pointer lookup; 0 if absent)
+                int* count = status_counts.get((int)code);
                 int new_count = (count ? *count : 0) + 1;
                 status_counts.insert((int)code, new_count);
             }
         }
     }
-    
+
     file.close();
-    
+
     // Report results
-    String report = string_new(&arena);
+    CCString report = cc_string_new(&arena);
     report.append("Status Code Summary:\n");
     // (iteration over map in Phase 2)
-    
-    std_out.write(report.as_slice());
+
+    cc_std_out.write(report.as_slice());
 }
 ```
 
@@ -2092,27 +2097,27 @@ Concurrent-C networking provides safe, async-first primitives for TCP/UDP, TLS, 
 
 ```c
 // TCP client connection
-@async Socket!NetError tcp_connect(char[:] addr);  // "host:port" or "ip:port"
+@async CCSocket !>(CCNetError) cc_tcp_connect(char[:] addr);   // "host:port" or "ip:port"
 
 // TCP server listener
-Listener!NetError tcp_listen(char[:] addr);        // "0.0.0.0:8080", "[::]:8080"
+CCListener !>(CCNetError) cc_tcp_listen(char[:] addr);         // "0.0.0.0:8080", "[::]:8080"
 
 // Accept connection (async)
-@async Socket!NetError Listener.accept();
+@async CCSocket !>(CCNetError) CCListener.accept();
 
 // Listener lifecycle
-void Listener.close();
+void CCListener.close();
 
-// Socket is a Duplex — unified read/write interface
-// Socket implements Duplex, so all Duplex methods work:
-@async char[:]?!IoError Socket.read(Arena* a, size_t max_bytes);
-@async size_t!IoError   Socket.write(char[:] data);
-@async void!IoError     Socket.shutdown(ShutdownMode mode);
-void                    Socket.close();
+// CCSocket is a CCDuplex — unified read/write interface
+// CCSocket implements CCDuplex, so all CCDuplex methods work:
+@async char[:] !>(CCIoError) CCSocket.read(CCArena* a, size_t max_bytes);  // empty slice = EOF
+@async size_t  !>(CCIoError) CCSocket.write(char[:] data);
+@async void    !>(CCIoError) CCSocket.shutdown(CCShutdownMode mode);
+void                         CCSocket.close();
 
 // Socket-specific methods
-char[:]!NetError Socket.peer_addr();   // Remote address as string
-char[:]!NetError Socket.local_addr();  // Local address as string
+char[:] !>(CCNetError) CCSocket.peer_addr();   // Remote address as string
+char[:] !>(CCNetError) CCSocket.local_addr();  // Local address as string
 ```
 
 **Memory Provenance:**
@@ -2123,7 +2128,7 @@ char[:]!NetError Socket.local_addr();  // Local address as string
 
 **Error Type:**
 ```c
-enum NetError {
+enum CCNetError {
     ConnectionRefused,
     ConnectionReset,
     ConnectionClosed,    // Normal remote close (not an error condition)
@@ -2144,41 +2149,43 @@ enum NetError {
 
 ```c
 // TCP client
-@async void!NetError fetch_data() {
-    Arena arena = arena(megabytes(1));
-    
-    Socket conn = try await tcp_connect("example.com:80");
+@async void !>(CCNetError) fetch_data() {
+    CCArena arena = arena(megabytes(1));
+
+    CCSocket conn = try await cc_tcp_connect("example.com:80");
     @defer conn.close();
-    
+
     try await conn.write("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n");
-    
-    // Read response into arena
-    while (char[:]?!IoError chunk = try await conn.read(&arena, 4096)) {
-        if (!chunk) break;  // EOF
-        process(*chunk);
+
+    // Read response into arena (empty slice = EOF)
+    while (true) {
+        char[:] chunk = try await conn.read(&arena, 4096);
+        if (chunk.len == 0) break;  // EOF
+        process(chunk);
     }
 }
 
 // TCP server (low-level; prefer server_loop for HTTP)
-@async void!NetError echo_server() {
-    Listener ln = try tcp_listen("0.0.0.0:9000");
+@async void !>(CCNetError) echo_server() {
+    CCListener ln = try cc_tcp_listen("0.0.0.0:9000");
     @defer ln.close();
-    
+
     @nursery {
         while (true) {
-            Socket conn = try await ln.accept();
+            CCSocket conn = try await ln.accept();
             spawn(() => handle_echo(conn));
         }
     }
 }
 
-@async void handle_echo(Socket conn) {
-    Arena arena = arena(kilobytes(64));
+@async void handle_echo(CCSocket conn) {
+    CCArena arena = arena(kilobytes(64));
     @defer conn.close();
-    
-    while (char[:]?!IoError data = try await conn.read(&arena, 1024)) {
-        if (!data) break;
-        try await conn.write(*data);
+
+    while (true) {
+        char[:] data = try await conn.read(&arena, 1024);
+        if (data.len == 0) break;  // EOF
+        try await conn.write(data);
         arena_reset(&arena);  // Reuse buffer space
     }
 }
@@ -2188,19 +2195,20 @@ enum NetError {
 
 ```c
 // UDP socket (connectionless)
-UdpSocket!NetError udp_bind(char[:] addr);  // Bind to local address
+CCUdpSocket !>(CCNetError) cc_udp_bind(char[:] addr);  // Bind to local address
 
 // Send to specific address
-@async size_t!NetError UdpSocket.send_to(char[:] data, char[:] addr);
+@async size_t !>(CCNetError) CCUdpSocket.send_to(char[:] data, char[:] addr);
 
 // Receive with sender address
-struct UdpPacket {
-    char[:] data;       // Packet data (allocated in arena)
+struct CCUdpPacket {
+    char[:] data;       // Packet data (allocated in arena); empty = no datagram available (non-blocking)
     char[:] from_addr;  // Sender address (allocated in arena)
 };
-@async UdpPacket?!NetError UdpSocket.recv_from(Arena* a, size_t max_bytes);
+// Blocking recv; returns the next datagram. On error returns CCNetError.
+@async CCUdpPacket !>(CCNetError) CCUdpSocket.recv_from(CCArena* a, size_t max_bytes);
 
-void UdpSocket.close();
+void CCUdpSocket.close();
 ```
 
 **Memory Provenance:**
@@ -2214,36 +2222,44 @@ TLS wraps a Socket or Duplex to provide encrypted communication. The wrapped con
 
 ```c
 // TLS client configuration
-struct TlsClientConfig {
-    char[:]? ca_cert;           // Optional: custom CA cert path (None = system roots)
-    bool verify_hostname;       // Default: true
-    char[:]? sni_hostname;      // Optional: override SNI (None = use connect addr)
+// Optional fields use empty slices to mean "not set" (use system/default):
+//   - ca_cert.len == 0       -> use system root CAs
+//   - sni_hostname.len == 0  -> derive SNI from connect addr
+struct CCTlsClientConfig {
+    char[:] ca_cert;            // Optional: custom CA cert path (empty = system roots)
+    bool    verify_hostname;    // Default: true
+    char[:] sni_hostname;       // Optional: override SNI (empty = use connect addr)
 };
 
 // TLS server configuration (same as ServerConfig.tls)
-struct TlsServerConfig {
+// client_ca.len == 0  -> do not require client certs.
+struct CCTlsServerConfig {
     char[:] cert_path;          // Server certificate
     char[:] key_path;           // Private key
-    char[:]? client_ca;         // Optional: require client certs
+    char[:] client_ca;          // Optional: require client certs (empty = disabled)
 };
 
 // Wrap existing socket in TLS (client)
-@async Duplex!NetError tls_connect(Socket sock, TlsClientConfig cfg);
+@async CCDuplex !>(CCNetError) cc_tls_connect(CCSocket sock, CCTlsClientConfig cfg);
 
 // Convenience: TCP + TLS in one call
-@async Duplex!NetError tls_connect_addr(char[:] addr, TlsClientConfig cfg);
+@async CCDuplex !>(CCNetError) cc_tls_connect_addr(char[:] addr, CCTlsClientConfig cfg);
 
 // Wrap existing socket in TLS (server-side handshake)
-@async Duplex!NetError tls_accept(Socket sock, TlsServerConfig cfg);
+@async CCDuplex !>(CCNetError) cc_tls_accept(CCSocket sock, CCTlsServerConfig cfg);
 
 // TLS connection info (available after handshake)
-struct TlsInfo {
+// Optional string fields use empty slices to mean "not present":
+//   - peer_cert_subject.len == 0 -> no client cert presented
+//   - sni_hostname.len == 0      -> no SNI extension
+struct CCTlsInfo {
     char[:] protocol_version;   // "TLSv1.3", "TLSv1.2"
     char[:] cipher_suite;       // "TLS_AES_256_GCM_SHA384"
-    char[:]? peer_cert_subject; // Client cert subject (if client auth)
-    char[:]? sni_hostname;      // SNI from client hello
+    char[:] peer_cert_subject;  // Client cert subject (empty if no client auth)
+    char[:] sni_hostname;       // SNI from client hello (empty if none)
 };
-TlsInfo? Duplex.tls_info();     // None if not a TLS connection
+// Returns NULL if the Duplex is not TLS-wrapped.
+CCTlsInfo* CCDuplex.tls_info();
 ```
 
 **Memory Provenance:**
@@ -2291,26 +2307,28 @@ static int tls_sock_read(void* ctx, unsigned char* buf, size_t len) {
 **Example:**
 
 ```c
-@async void!NetError secure_fetch() {
-    Arena arena = arena(megabytes(1));
-    
+@async void !>(CCNetError) secure_fetch() {
+    CCArena arena = arena(megabytes(1));
+
     // Connect with TLS (uses system CA roots by default)
-    Duplex conn = try await tls_connect_addr("api.example.com:443", {
+    CCDuplex conn = try await cc_tls_connect_addr("api.example.com:443", {
         .verify_hostname = true,
     });
     @defer conn.close();
-    
-    // Duplex interface is identical to plain Socket
+
+    // CCDuplex interface is identical to plain CCSocket
     try await conn.write("GET /data HTTP/1.1\r\nHost: api.example.com\r\n\r\n");
-    
-    while (char[:]?!IoError chunk = try await conn.read(&arena, 4096)) {
-        if (!chunk) break;
-        process(*chunk);
+
+    while (true) {
+        char[:] chunk = try await conn.read(&arena, 4096);
+        if (chunk.len == 0) break;  // EOF
+        process(chunk);
     }
-    
-    // Optional: inspect TLS session
-    if (TlsInfo? info = conn.tls_info()) {
-        printf("Protocol: %.*s\n", (int)info.protocol_version.len, info.protocol_version.ptr);
+
+    // Optional: inspect TLS session (NULL if not TLS)
+    CCTlsInfo* info = conn.tls_info();
+    if (info) {
+        printf("Protocol: %.*s\n", (int)info->protocol_version.len, info->protocol_version.ptr);
     }
 }
 ```
@@ -2321,39 +2339,41 @@ Convenience layer over TCP+TLS for common HTTP operations.
 
 ```c
 // Simple GET/POST (one-shot, blocks until complete)
-@async HttpResponse!HttpError http_get(Arena* a, char[:] url);
-@async HttpResponse!HttpError http_post(Arena* a, char[:] url, char[:] body);
+@async CCHttpResponse !>(CCHttpError) cc_http_get(CCArena* a, char[:] url);
+@async CCHttpResponse !>(CCHttpError) cc_http_post(CCArena* a, char[:] url, char[:] body);
 
 // Response structure
-struct HttpResponse {
-    u16 status;             // 200, 404, etc.
+struct CCHttpResponse {
+    u16     status;         // 200, 404, etc.
     char[:] status_text;    // "OK", "Not Found"
     char[:] headers;        // Raw headers
     char[:] body;           // Response body
 };
 
-// Configurable client
-struct HttpClient {
-    Duration timeout;           // Request timeout (default: 30s)
-    TlsClientConfig? tls;       // TLS config (None = use defaults)
-    char[:]? user_agent;        // User-Agent header
-    bool follow_redirects;      // Follow 3xx (default: true, max 10)
+// Configurable client. Optional fields use nullable pointer / empty slice:
+//   - tls == NULL          -> use default TLS client config
+//   - user_agent.len == 0  -> omit User-Agent header
+struct CCHttpClient {
+    CCDuration        timeout;          // Request timeout (default: 30s)
+    CCTlsClientConfig* tls;             // TLS config (NULL = use defaults)
+    char[:]           user_agent;       // User-Agent header (empty = omit)
+    bool              follow_redirects; // Follow 3xx (default: true, max 10)
 };
 
-HttpClient http_client_new();
+CCHttpClient cc_http_client_new();
 
 // Builder methods
-HttpClient* HttpClient.timeout(Duration d);
-HttpClient* HttpClient.user_agent(char[:] ua);
-HttpClient* HttpClient.no_redirects();
+CCHttpClient* CCHttpClient.timeout(CCDuration d);
+CCHttpClient* CCHttpClient.user_agent(char[:] ua);
+CCHttpClient* CCHttpClient.no_redirects();
 
 // Requests
-@async HttpResponse!HttpError HttpClient.get(Arena* a, char[:] url);
-@async HttpResponse!HttpError HttpClient.post(Arena* a, char[:] url, char[:] body);
-@async HttpResponse!HttpError HttpClient.request(Arena* a, HttpRequest req);
+@async CCHttpResponse !>(CCHttpError) CCHttpClient.get(CCArena* a, char[:] url);
+@async CCHttpResponse !>(CCHttpError) CCHttpClient.post(CCArena* a, char[:] url, char[:] body);
+@async CCHttpResponse !>(CCHttpError) CCHttpClient.request(CCArena* a, CCHttpRequest req);
 
 // Full request control
-struct HttpRequest {
+struct CCHttpRequest {
     char[:] method;         // "GET", "POST", "PUT", etc.
     char[:] url;
     char[:] headers;        // Additional headers
@@ -2368,8 +2388,8 @@ struct HttpRequest {
 
 **Error Type:**
 ```c
-enum HttpError {
-    Net(NetError),          // Connection errors
+enum CCHttpError {
+    Net(CCNetError),        // Connection errors
     InvalidUrl,             // URL parse failure
     TooManyRedirects,
     InvalidResponse,        // Malformed HTTP response
@@ -2381,10 +2401,10 @@ enum HttpError {
 
 ```c
 // Simple GET
-@async void!HttpError fetch_json() {
-    Arena arena = arena(megabytes(1));
-    
-    HttpResponse resp = try await http_get(&arena, "https://api.example.com/users");
+@async void !>(CCHttpError) fetch_json() {
+    CCArena arena = arena(megabytes(1));
+
+    CCHttpResponse resp = try await cc_http_get(&arena, "https://api.example.com/users");
     if (resp.status == 200) {
         // resp.body is valid until arena reset
         User[] users = parse_json_users(resp.body, &arena);
@@ -2393,31 +2413,31 @@ enum HttpError {
 }
 
 // Configured client
-@async void!HttpError fetch_with_config() {
-    Arena arena = arena(megabytes(1));
-    
-    HttpClient client = http_client_new()
+@async void !>(CCHttpError) fetch_with_config() {
+    CCArena arena = arena(megabytes(1));
+
+    CCHttpClient client = cc_http_client_new()
         .timeout(seconds(10))
         .user_agent("MyApp/1.0")
         .no_redirects();
-    
-    HttpResponse resp = try await client.get(&arena, "https://api.example.com/data");
+
+    CCHttpResponse resp = try await client.get(&arena, "https://api.example.com/data");
     process(resp);
 }
 
 // Custom request
-@async void!HttpError post_data() {
-    Arena arena = arena(megabytes(1));
-    
-    HttpRequest req = {
+@async void !>(CCHttpError) post_data() {
+    CCArena arena = arena(megabytes(1));
+
+    CCHttpRequest req = {
         .method = "POST",
         .url = "https://api.example.com/submit",
         .headers = "Content-Type: application/json\r\nAuthorization: Bearer token\r\n",
         .body = "{\"name\": \"test\"}",
     };
-    
-    HttpClient client = http_client_new();
-    HttpResponse resp = try await client.request(&arena, req);
+
+    CCHttpClient client = cc_http_client_new();
+    CCHttpResponse resp = try await client.request(&arena, req);
 }
 ```
 
@@ -2427,10 +2447,10 @@ Async DNS resolution. Integrates with system resolver by default.
 
 ```c
 // Resolve hostname to addresses
-@async IpAddr[]!NetError dns_lookup(Arena* a, char[:] hostname);
+@async CCIpAddr[] !>(CCNetError) cc_dns_lookup(CCArena* a, char[:] hostname);
 
 // IP address (v4 or v6)
-struct IpAddr {
+struct CCIpAddr {
     enum { V4, V6 } family;
     union {
         u8 v4[4];
@@ -2439,10 +2459,10 @@ struct IpAddr {
 };
 
 // Format IP as string
-char[:] IpAddr.to_string(Arena* a);
+char[:] CCIpAddr.to_string(CCArena* a);
 
 // Parse string to IP (no DNS, just parsing)
-IpAddr!NetError ip_parse(char[:] s);
+CCIpAddr !>(CCNetError) cc_ip_parse(char[:] s);
 ```
 
 **Memory Provenance:**
@@ -2453,28 +2473,28 @@ IpAddr!NetError ip_parse(char[:] s);
 **Example:**
 
 ```c
-@async void!NetError connect_by_name() {
-    Arena arena = arena(kilobytes(4));
-    
-    IpAddr[] addrs = try await dns_lookup(&arena, "example.com");
+@async void !>(CCNetError) connect_by_name() {
+    CCArena arena = arena(kilobytes(4));
+
+    CCIpAddr[] addrs = try await cc_dns_lookup(&arena, "example.com");
     if (addrs.len == 0) {
-        return cc_err(NetError::DnsFailure);
+        return cc_err(CCNetError::DnsFailure);
     }
-    
+
     // Try each address until one works
     for (size_t i = 0; i < addrs.len; i++) {
         char[:] addr_str = addrs[i].to_string(&arena);
-        char[:] full_addr = string_new(&arena)
+        char[:] full_addr = cc_string_new(&arena)
             .append(addr_str)
             .append(":443")
             .as_slice();
-        
-        if (try Socket sock = await tcp_connect(full_addr)) {
+
+        if (try CCSocket sock = await cc_tcp_connect(full_addr)) {
             return handle_connection(sock);
         }
     }
-    
-    return cc_err(NetError::HostUnreachable);
+
+    return cc_err(CCNetError::HostUnreachable);
 }
 ```
 
@@ -2526,13 +2546,14 @@ static int socket_read_callback(void* ctx, unsigned char* buf, size_t len) {
 
 ```c
 // Long-lived connection processing many messages
-@async void!IoError process_stream(Duplex* conn, Arena* arena) {
-    ArenaCheckpoint cp = arena_checkpoint(arena);
+@async void !>(CCIoError) process_stream(CCDuplex* conn, CCArena* arena) {
+    CCArenaCheckpoint cp = arena_checkpoint(arena);
     size_t count = 0;
-    
-    while (char[:]?!IoError msg = try await conn.read(arena, 4096)) {
-        if (!msg) break;
-        process(*msg);
+
+    while (true) {
+        char[:] msg = try await conn.read(arena, 4096);
+        if (msg.len == 0) break;  // EOF
+        process(msg);
         count++;
         
         // Restore arena periodically to prevent unbounded growth
@@ -2778,7 +2799,7 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 
 - Rust `std`: Minimal scope, safety-first, owned types, UFCS methods.
 - Zig `std`: Explicit allocators, composability, low-level control.
-- C `libc`: Keep what works (stdio, basic ops), add safety (T!>(E), slices, UFCS).
+- C `libc`: Keep what works (stdio, basic ops), add safety (`T !>(E)`, slices, UFCS).
 
 ---
 
@@ -2789,14 +2810,14 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | Method | Purpose |
 |--------|---------|
 | `.len()` | Length |
-| `.get(i)` | Safe index (optional) |
-| `.slice(start, end)` | Subslice view (optional) |
+| `.get(i)` | Safe index (returns `char*`; NULL if out of range) |
+| `.slice(start, end)` | Subslice view (empty slice if range invalid) |
 | `.c_str(a)` | NUL-terminated copy for C interop |
 | `.clone(a)` | Copy to new allocation |
 | `.trim()`, `.trim_left()`, `.trim_right()` | Trim whitespace |
 | `.is_empty()`, `.is_ascii()` | Checks |
 | `.starts_with()`, `.ends_with()`, `.contains()` | Prefix/suffix/contains |
-| `.index_of()`, `.last_index_of()`, `.count()` | Find |
+| `.index_of()`, `.last_index_of()`, `.count()` | Find (returns `ssize_t`; `-1` if not found) |
 | `.upper(a)`, `.lower(a)` | Case conversion |
 | `.replace(a, old, new)` | Replace all |
 | `.split(delim)` | Iterator split |
@@ -2832,21 +2853,23 @@ Stdlib version independent of language version. Phase 1 = v1.0; Phase 2 = v1.1; 
 | Method | Purpose |
 |--------|---------|
 | `cc_vec_new::[T](a)` | Create |
-| `.push()`, `.pop()` | Add/remove |
-| `.get()`, `.set()` | Access |
+| `.push(v)` | Append |
+| `.pop(T* out)` | Remove last; returns `bool` (false if empty) |
+| `.get(i)` | Access; returns `T*` (NULL if out of range) |
+| `.set(i, v)` | Set; returns `void !>(CCBoundsError)` |
 | `.len()`, `.cap()` | Info |
-| `.iter()` | Iterator |
+| `.iter()` | Iterator (see `CCVecIter::[T].next(T* out)`) |
 | `.as_slice()` | View |
 | `.clear()` | Clear |
 
-### Map<K,V> Methods
+### `CCMap::[K, V]` Methods
 
 | Method | Purpose |
 |--------|---------|
-| `map_new<K,V>(a)` | Create |
-| `.insert()` | Insert/update |
-| `.get()`, `.get_mut()` | Lookup |
-| `.remove()` | Remove |
+| `cc_map_new::[K, V](a)` | Create |
+| `.insert(k, v)` | Insert/update |
+| `.get(k)` | Lookup; returns `V*` (NULL if absent) |
+| `.remove(k)` | Remove; returns `bool` (true if removed) |
 | `.len()`, `.cap()` | Info |
 | `.clear()` | Clear |
 
