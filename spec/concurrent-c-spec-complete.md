@@ -98,11 +98,12 @@ A result-typed call appearing as a bare statement (`f();` where `f` returns `T!>
 | Constructor | Meaning | Example |
 |-------------|---------|---------|
 | `T!>(E)` | Result type: success (T) or error (E) | `int!>(IoError) read(path);` |
-| `T?` | Optional type (DEPRECATED — see §2.1). Value (T) or absent (null) | `int? find(arr, key);` |
 | `char[:]` | Slice (variable-length view with provenance metadata) | `void process(char[:] data);` |
 | `char[4:]` | Fixed-length slice refinement | `void hash(char[32:] digest);` |
 | `char[:0]` | Sentinel slice refinement | `char[:0] name = s.as_slice();` |
 | `char[:0!]` | Sentinel unique slice refinement | `char[:0!] buf = recv(ch);` |
+
+> **Note:** The legacy optional-type constructor `T?` has been retired. See the migration appendix at the end of §2.1 for the replacement patterns (`T !>(E)`, `T*` with `NULL`, empty-slice sentinels, `bool`+out-param).
 
 ### Expression Forms (6)
 
@@ -289,7 +290,7 @@ When I/O queues are full, three canonical strategies handle saturation. See **Ap
 
 2. **Portable C output** — All CC features lower to C11 (or C99 + platform extensions). No intermediate representation, no VM. Generated code integrates seamlessly into existing C build systems (Make, CMake, Meson, etc.).
 
-3. **Minimal runtime** — Only `@async` (task scheduler, channel types) requires a linked runtime. Arenas, slices, optionals, results—all lower to pure C structures. Users can replace the async runtime with custom implementations if needed.
+3. **Minimal runtime** — Only `@async` (task scheduler, channel types) requires a linked runtime. Arenas, slices, results—all lower to pure C structures. Users can replace the async runtime with custom implementations if needed.
 
 4. **Explicit by default** — Effects visible in function signatures. Allocations pass `Arena*` explicitly. Errors return `T!>(E)` (Result types). Async code is marked `@async`. Ownership transfer is explicit (via `move()` or function parameters).
 
@@ -300,7 +301,6 @@ When I/O queues are full, three canonical strategies handle saturation. See **Ap
 **Exception:** `T!>(E)` (Result types) do not require immediate initialization and instead follow **definite assignment** rules. A `T!>(E)` variable may be declared without an initializer if the compiler can prove it is assigned on all control-flow paths before any use or before scope exit.
 
 **Rule (Concurrent-C type initialization):**
-- `T?` defaults to `null` if no initializer is provided.
 - `T!>(E)` uses **definite assignment**: the compiler verifies that a `T!>(E)` variable is assigned on all paths before any use or scope exit.
 - Channels, tasks, `Mutex<T>`, and `Atomic<T>` are always initialized on declaration.
 - `Map<K,V>` requires an explicit initializer (needs arena).
@@ -333,13 +333,12 @@ Concurrent-C distinguishes **copyable** and **move-only** values:
 **Copyable types:**
 - All C primitive types
 - Structs containing only copyable fields
-- `T?` and `T!>(E)` where `T` and `E` are copyable
+- `T!>(E)` where `T` and `E` are copyable
 - `Mutex<T>`, `Atomic<T>` (handle types)
 
 **Move-only types:**
 - `Task<T>` (represents unique computation)
 - `Map<K,V>` (arena-backed, unique ownership)
-- `T?` where `T` is move-only
 - `T!>(E)` where `T` or `E` is move-only
 
 **Slices (`T[:]`):** The slice type itself is always the same, but **copyability depends on the value's provenance**:
@@ -370,22 +369,11 @@ unsafe {
 }
 
 // Example 2: Unique slice from channel
-char[:]? opt = await ch.recv();            // optional unique slice
-if (!opt) return;                          // channel closed
-char[:] x = *opt;                          // unwrap to get unique slice
-char[:] y = x;                             // ERROR: cannot copy
-char[:] y = cc_move(x);                    // OK: x is invalid, y owns buffer
-```
-
-**Move-only optionals:**
-
-When an optional contains a move-only type (`T?` where `T` is move-only), moving the optional sets it to `null`:
-
-```c
-char[:]? x = await ch.recv();  // x is an optional unique slice
-char[:]? y = cc_move(x);       // OK: move the optional
-assert(!x);                    // OK: x is null now
-x = await ch.recv();           // OK: can reassign the optional
+char[:] x;
+bool !>(CCIoError) got = await ch.recv(&x);   // recv writes into &x
+if (cc_is_err(got) || !cc_value(got)) return; // channel closed/drained
+char[:] y = x;                                // ERROR: cannot copy unique slice
+char[:] y = cc_move(x);                       // OK: x is invalid, y owns buffer
 ```
 
 **Move semantics for different types:**
@@ -406,13 +394,6 @@ unsafe {
 }
 ```
 
-**Optional with move-only value:** Moving sets optional to `null`; optional variable remains valid.
-```c
-char[:]? opt = await ch.recv();
-char[:]? copy = cc_move(opt);  // opt becomes null
-if (opt) { ... }               // OK: null is valid state
-```
-
 **Rule (move contexts):** Move is implicit (or required) in:
 - `return expr` (move-only value)
 - By-value parameters: `fn(move_only_val)` moves the value
@@ -424,8 +405,6 @@ if (opt) { ... }               // OK: null is valid state
 **Rule (use-after-move):** Compile-time error for:
 - Bare unique slice after move
 - Borrowed views from moved owner
-
-Not an error for `T?` after move (it's null, a valid state).
 
 **Rule (function parameters):** Move-only values move by-value; pass as pointer to retain ownership:
 ```c
@@ -467,7 +446,7 @@ spawn_thread(() => {
 |------|-------------|-------|
 | Primitives | Yes | Value types |
 | Structs | Yes iff all fields capturable | Structural |
-| `T?`, `T!>(E)` | Yes iff inner types capturable | Structural |
+| `T!>(E)` | Yes iff inner types capturable | Structural |
 | Arena slices | **Depends** | Only if arena provably outlives thread/task |
 | Static slices | Yes | Lives forever |
 | Stack slices | **No** | Frame dies on return |
@@ -525,7 +504,6 @@ Concurrent-C extends C syntax with new operators and keywords in specific contex
 
 | Syntax | Meaning | Notes |
 |--------|---------|-------|
-| `T?` | Optional type | Postfix, not ternary `?:` |
 | `T!>(E)` | Result type | Postfix, binds error type `E` |
 | `T[:]` | Slice type | Distinct from C array `T[]` |
 | `T[~... >]` / `T[~... <]` | Channel handle type | `~` is not bitwise-not here |
@@ -555,7 +533,6 @@ Concurrent-C extends C with ~40 new constructs for async/await, structured concu
 | | `@comptime if` | Compile-time conditional | `@comptime if (feature) { }` |
 | | `@errhandler` | Block default handler for `call() !>;` and `@err(e);` forwards | `@errhandler(CCError e) { return cc_err(e); }` |
 | **Type Constructors** | `T!>(E)` | Result type (success or error) | `int!>(IoError) read(path);` |
-| | `T?` | Optional type — DEPRECATED, see §2.1 (value or null) | `int? find(arr, key);` |
 | | `char[:]` | Slice (variable-length view) | `void process(char[:] data);` |
 | | `char[n:]` | Fixed-length slice refinement | `void hash(char[32:] digest);` |
 | | `char[:k]` | Sentinel slice refinement | `char[:0] name = s.as_slice();` |
@@ -608,7 +585,6 @@ This section documents recommended style for Concurrent-C code.
 
 | Type | Correct | Incorrect |
 |------|---------|-----------|
-| Optional | `T?` | `T ?` |
 | Result | `T!>(E)` | `T ! E` or `T! E` |
 | Slice | `char[:]` | `char [:]` or `char[ : ]` |
 | Nested slice | `char[::]`, `char[:::]` | `char[:: ]` or C-array spellings |
@@ -687,7 +663,7 @@ All attributes use the `@` prefix and follow consistent spacing:
 
 This section defines the fundamental value-level building blocks:
 
-- **§2.1 Optionals (`T?`)** — presence or absence
+- **§2.1 Migration appendix: retired `T?`** — mapping from the old optional-type constructor to its replacements
 - **§2.2 Results (`T!>(E)`)** — success or failure; statement-level `@err` / `@errhandler`
 - **§2.3 Type Precedence** — how type modifiers bind
 - **§2.4 Arrays and Slices** — fixed arrays and views
@@ -695,97 +671,22 @@ This section defines the fundamental value-level building blocks:
 
 ---
 
-### 2.1 Optionals (`T?`)
+### 2.1 Migration appendix: retired `T?`
 
-> **DEPRECATED (retired in this revision).** Optional types (`T?`) are scheduled for removal. Use `T!>(E)` with a sentinel error variant, or a plain pointer with `NULL`. New code MUST NOT use `T?`. The text below is kept for reference; it will be deleted once all in-tree users are migrated.
+> **Retired.** Optional types (`T?`) have been removed from the normative language surface. The parsing and lowering paths may still exist during the phase-1 transition, but no normative spec surface — grammar, examples, stdlib signatures — uses `T?`. New code MUST NOT use `T?`. Existing `T?` call sites migrate as follows:
 
-`T?` represents **presence or absence** of a value.
+| Old pattern | Replacement |
+|-------------|-------------|
+| Fallible read / await returning "value or EOF" (`char[:]? read(...)`) | `char[:] !>(CCIoError)`; empty slice (`len == 0`) is EOF |
+| Channel `recv` into an optional (`char[:]? x = await ch.recv();`) | `bool !>(CCIoError) got = await ch.recv(&x);` — `ok(false)` = closed+drained |
+| Iterator `next()` (`T? next()`) | `bool next(T* out)` — loop with `while (it.next(&x)) { ... }` |
+| Container lookup (`V? Map.get(K)`, `T? Vec.get(i)`) | `V* Map.get(K)`, `T* Vec.get(i)` — `NULL` for absent |
+| Index search (`size_t? s.index_of(...)`) | `ssize_t s.index_of(...)` — `-1` for not found |
+| Pop-style (`T? Vec.pop()`) | `bool Vec.pop(T* out)` |
+| Struct-field optional slice (`char[:]? field`) | `char[:] field` where `len == 0` means absent |
+| Struct-field optional handle/config (`TlsConfig? tls`) | `TlsConfig* tls` — `NULL` means absent |
 
-* Either `null` or contains a `T`.
-* Works for all `T`, not just pointers.
-
-Operations:
-
-```c
-if (x) { ... }     // presence check
-T v = *x;          // unwrap (only when proven non-null)
-```
-
-**Lowering:**
-
-```c
-// T? lowers to a tagged union:
-struct Optional_T {
-    bool has;
-    union { T value; } u;
-};
-```
-
-Surface syntax `*x` maps to `x.u.value` in lowered code.
-
-**Rule (active field):** The `u.value` member is only valid when `has == true`. Reading `u.value` when `has == false` is undefined behavior.
-
-**Rule (operators):**
-- `if (x)` is sugar for `if (x.has)` (presence test)
-- `*x` ("unwrap") yields `x.u.value` and is only legal when the compiler can prove `x.has == true` (otherwise compile-time error)
-
-**Rule (unary `*` overloading):** Unary `*` is overloaded by operand type:
-- If operand type is `U*` (pointer): `*` is pointer dereference (C behavior)
-- If operand type is `U?` (optional): `*` is optional unwrap (Concurrent-C behavior)
-- Otherwise: compile-time error
-
-**Rule (move-only unwrap):** When `T` is a move-only type (e.g., unique slice), `*x` performs a **move** out of the optional. After the move:
-- `x.has` becomes `false` (x is now null)
-- `x` may be used normally as an optional (presence tests, assignment, re-assignment)
-- Any aliases or borrows derived from the moved value are invalidated
-
-**Rule (drop for T?):** On scope exit, if `x.has == true` and `T` has destructor semantics (e.g., unique slice), the destructor for `x.u.value` runs. If the value was moved out (making `x` null), no destructor runs.
-
-**Rule (provability):** The compiler uses flow-sensitive analysis to determine presence:
-- After `if (x) { ... }`, `x` is proven present inside the branch
-- After `x = some_value`, `x` is proven present
-- After `*x` (successful unwrap) on move-only `T`, `x` is proven null
-- Functions returning `T?` are assumed to potentially return null
-
-**Macro helpers:**
-
-For generated C code, these macros provide direct access:
-
-| Macro | Returns | Description |
-|-------|---------|-------------|
-| `cc_is_some(opt)` | `bool` | True if has value |
-| `cc_is_none(opt)` | `bool` | True if empty |
-| `cc_unwrap_opt(opt)` | `T` | Get value (aborts if none) |
-| `cc_unwrap_or(opt, default)` | `T` | Get value or default |
-
-**Type macros:**
-
-| Macro | Expands To | Description |
-|-------|------------|-------------|
-| `CCOpt(T)` | `CCOptional_T` | Optional type name |
-| `CCOptPtr(T)` | `CCOptional_Tptr` | Optional pointer |
-| `CCOptRes(T, E)` | `CCOptional_CCResult_T_E` | Optional containing Result |
-
-```c
-int? maybe = find(arr, key);
-
-// Compiler-proven access
-if (maybe) {
-    int v = *maybe;  // safe
-}
-
-// Macro-style access (for generated C code)
-CCOpt(int) maybe_val = find(arr, key);
-if (cc_is_some(maybe_val)) {
-    int v = cc_unwrap_opt(maybe_val);
-    use(v);
-}
-
-// Or use default
-int v = cc_unwrap_or(maybe_val, 0);
-```
-
-`T?` is **not** error handling. Use `T!>(E)` for errors.
+The legacy macros `CCOpt(T)` / `CCOptPtr` / `CCOptRes` / `CCResOpt`, and the helpers `cc_is_some` / `cc_is_none` / `cc_unwrap_opt` / `cc_unwrap_or`, are **no longer part of the normative surface**. They may continue to exist in the runtime/C-interop header family during migration, but new code uses `cc_is_ok` / `cc_value` (from `T!>(E)`), pointer `NULL` checks, or plain length/sentinel tests instead.
 
 ---
 
@@ -945,7 +846,6 @@ For generated C code, these macros provide direct access without UFCS lowering:
 |-------|------------|-------------|
 | `CCRes(T, E)` | `CCResult_T_E` | Result type name (C interop) |
 | `CCResPtr(T, E)` | `CCResult_Tptr_E` | Result of pointer (C interop) |
-| `CCResOpt(T, E)` | `CCResult_CCOptional_T_E` | Result containing Optional |
 
 ```c
 int!>(CCError) parse(char[:] s);
@@ -1020,7 +920,7 @@ CCRes(MyData, MyError) my_function(int arg);
 
    A forward-reached or `!>;`-inlined handler whose last statement does not satisfy this rule is a compile error at the `@errhandler` declaration site. The rule applies in `void` functions equally.
 7. A result-typed call that is not consumed by `?>`, `!>`, `@err`, assignment to a result-typed destination, `return`, or a `(void)` cast is ill-formed. `(void)call();` is the one explicit-discard escape hatch. (Enforced behind the `CC_STRICT_RESULT_UNWRAP=1` transition flag during phase 1; enabled unconditionally in phase 3.)
-8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, `try` / `catch` / `if @try`, and optional types (`T?`). During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths.
+8. The following legacy forms are retired and scheduled for removal: `=<!` / `=?`, the postfix `@err` statement sugar, `@err(e){ ... }` body form, the `@err{ ... }` shorthand, `: default`, and `try` / `catch` / `if @try`. During phase 1 they still compile for migration; phase 3 will warn on every use; phase 4 will delete the parsing and lowering paths. Optional types (`T?`) are retired outright in this revision — the normative spec no longer uses them; see §2.1 migration appendix.
 
 **Grammar (normative, minus whitespace).**
 
@@ -1160,13 +1060,9 @@ Type modifiers bind with the following precedence (tightest first):
 
 | Syntax | Parses as | Meaning |
 |--------|-----------|---------|
-| `int?` | `(int)?` | optional int |
 | `int*` | `(int)*` | pointer to int |
-| `int*?` | `((int)*)?` | optional pointer |
 | `int*!E` | `((int)*)!E` | result of pointer (success=pointer, error=E) |
 | `int!>(E)` | `(int)!>(E)` | result of int or E |
-| `int?!E` | `((int)?)!E` | result whose ok-value is optional |
-| `int!>(E)?` | `((int)!>(E))?` | optional result (e.g., recv from error channel) |
 | `int!>(E)[~]` | `((int)!>(E))[~]` | channel of results |
 | `int*!E[~]` | `(((int)*)!E)[~]` | channel of (result of pointer) |
 | `int[:]*` | `((int)[:])*` | pointer to slice |
@@ -1178,14 +1074,14 @@ Type modifiers bind with the following precedence (tightest first):
 // Function returning pointer or error — the common case
 Node*!>(IoError) find_node(int id);      // (Node*)!IoError
 
-// Function returning optional pointer (null = not found, no error)
-Node*? lookup(int id);                // (Node*)?
+// Function returning a nullable pointer (NULL = not found, no error)
+Node* lookup(int id);                    // plain pointer with NULL sentinel
 
 // Channel carrying results
 int!>(Error)[~10 >] results_tx;          // sender for channel of results
 ```
 
-**Note:** For a channel `ch : (T!>(E))[~]`, `ch.recv()` returns `(T!>(E))?` (i.e., `T!>(E)?`), where `null` means "closed+drained" and `err(e)` is an application-level error value.
+**Note:** For a channel `ch : (T!>(E))[~]`, `ch.recv(&out)` returns `bool !>(CCIoError)`, where `ok(false)` means "closed+drained" and the caller interprets `out` only when `cc_value(got) == true`. If the element type is itself a result (`T!>(E)`), `err(e)` inside `out` is an application-level error value distinct from the channel-level `ok(false)` closed signal.
 
 ---
 
@@ -1322,11 +1218,13 @@ Subslicing a unique slice produces a **borrowed view**. At runtime, borrows are 
 - Using an invalidated borrow is a compile-time error (when detectable) or undefined behavior (when not statically detectable, debug builds trap)
 
 ```c
-char[:]? x = await ch.recv();  // x owns unique slice
-char[:] borrow = (*x)[0..10]; // borrow is a view into x
-use(borrow);                   // OK
-char[:]? y = move(x);          // x moved to y
-use(borrow);                   // ERROR: borrow invalidated by move
+char[:] x;
+bool !>(CCIoError) got = await ch.recv(&x);   // x owns unique slice on ok(true)
+// Assume got is ok(true) here.
+char[:] borrow = x[0..10];                    // borrow is a view into x
+use(borrow);                                  // OK
+char[:] y = cc_move(x);                       // x moved to y
+use(borrow);                                  // ERROR: borrow invalidated by move
 ```
 
 **Rule (unique destruction):**
@@ -2809,12 +2707,13 @@ These conditions are checked using the slice's `id` field directly — **no runt
 - On success, ownership of the allocation is transferred to the channel and all borrows are invalidated.
 
 ```c
-char[:]? x = await ch.recv();       // is_unique=1, is_transferable=1, is_subslice=0
-await dst.send_take(*x);            // OK: transfers the unique slice
+char[:] x;
+bool !>(CCIoError) got = await ch.recv(&x);  // on ok(true): is_unique=1, is_transferable=1, is_subslice=0
+await dst.send_take(x);                      // OK: transfers the unique slice
 
 // Derived slices cannot be transferred:
-char[:] view = (*x)[0..(*x).len];   // view has is_unique=0 (derived)
-await dst.send_take(view);          // returns false: is_unique=0
+char[:] view = x[0..x.len];                  // view has is_unique=0 (derived)
+await dst.send_take(view);                   // returns false: is_unique=0
 ```
 
 **Why `adopt()` slices cannot use `send_take`:**
@@ -2823,10 +2722,11 @@ await dst.send_take(view);          // returns false: is_unique=0
 
 ```c
 // ✓ Channel pipeline - zero copy
-char[:]? x = await a.recv();         // is_transferable=1
-await b.send_take(*x);               // OK
+char[:] x;
+bool !>(CCIoError) got = await a.recv(&x);   // on ok(true): is_transferable=1
+await b.send_take(x);                        // OK
 
-// ✗ FFI buffer - must copy  
+// ✗ FFI buffer - must copy
 unsafe {
     char[:] s = adopt(p, 100, custom_free);  // is_transferable=0
 }
@@ -2950,14 +2850,15 @@ void close(tx);                         // idempotent, no await
 
 // Cancellation-aware variants (must await)
 bool ok = await send_cancellable(tx, value);    // returns false if cancelled
-T!>(Cancelled)? x = await recv_cancellable(&rx);   // returns err(Cancelled) if cancelled
+T y; bool got = await recv_cancellable(&rx, &y);  // ok(true)=received, ok(false)=cancelled+drained
 
 // Non-blocking (no await, either context)
 bool ok = try_send(&tx, value);        // returns false if full/closed, never awaits
 T!>(RecvStatus) x = try_recv(&rx);        // returns immediately
 
 // Timeout (must await)
-T? x = await recv_timeout(&rx, Duration d);
+T z;
+bool !>(CCIoError) got_timed = await recv_timeout(&rx, &z, Duration d);   // ok(false) = timeout/closed+drained
 
 // === SYNC CHANNELS (int[~ ... sync ... >] / int[~ ... sync ... <]) ===
 // All operations block, no await allowed
@@ -2968,7 +2869,7 @@ cc_channel_pair(&stx, &srx);
 
 // Core operations (no await, blocks)
 bool ok = send(&stx, value);            // blocks OS thread until sent
-T? x = recv(&srx);                      // blocks OS thread until received
+T x; bool !>(CCIoError) got = recv(&srx, &x);   // blocks OS thread until received; ok(false) = closed+drained
 
 // Slice transfer (no await, blocks; send handle only)
 bool ok = send_take(&stx, slice);       // blocks, transfers ownership
@@ -2981,7 +2882,7 @@ bool ok = try_send(&stx, value);        // returns false if full/closed
 T!>(RecvStatus) x = try_recv(&srx);        // returns immediately
 
 // Timeout (blocks up to duration, no await)
-T? x = recv_timeout(&srx, Duration d);
+T z; bool !>(CCIoError) got_timed = recv_timeout(&srx, &z, Duration d);
 ```
 
 **Operations Comparison:**
@@ -3027,23 +2928,25 @@ if (!await ch.send_take(s)) {
 **Rule (async ownership):** In `@async` code, ownership transfer via `send_take` occurs at the suspension point. After a successful `await send_take`, the source slice is invalidated exactly as if moved synchronously. There is no "partial" or "pending" ownership state across the `await`.
 
 ```c
-char[:]? x = await ch.recv();    // x owns unique slice
-bool ok = await dst.send_take(*x);
+char[:] x;
+bool !>(CCIoError) got = await ch.recv(&x);  // on ok(true): x owns unique slice
+bool ok = await dst.send_take(x);
 if (ok) {
-    // *x is now invalid, ownership transferred
-    use(*x);  // ERROR: use after move
+    // x is now invalid, ownership transferred
+    use(x);  // ERROR: use after move
 } else {
-    // Channel was closed, *x still valid
-    use(*x);  // OK
+    // Channel was closed, x still valid
+    use(x);  // OK
 }
 ```
 
 **Rule (send borrows slices):** When passing a slice to `send`, the slice is borrowed for the duration of the copy operation, not moved. This applies even to unique slices:
 
 ```c
-char[:]? u = await src.recv();  // unique slice
-await dst.send(*u);              // borrows *u, copies bytes, *u still valid
-use(*u);                         // OK: u still owns the buffer
+char[:] u;
+bool !>(CCIoError) got = await src.recv(&u);   // on ok(true): u owns unique slice
+await dst.send(u);                             // borrows u, copies bytes, u still valid
+use(u);                                        // OK: u still owns the buffer
 ```
 
 - `try_recv` returns `ok(value)` if a value is available
@@ -3983,26 +3886,31 @@ The compiler forces you to fix the channel type when refactoring. No silent beha
 **Async channels:**
 
 ```c
-int[~ <]? x = await recv(&rx);
-if (!x) {
-    // Channel closed and drained
+int x;
+bool !>(CCIoError) got = await recv(&rx, &x);
+if (cc_is_err(got) || !cc_value(got)) {
+    // Channel closed and drained (ok(false)) or error
 }
 
-// With error values
-int!>(Error)[~ <]? x = await recv(&error_rx);
-if @try (int val = *x) {
-    process(val);
-} else if (is_none(*x)) {
-    // Channel closed
+// With error values (element type is itself a result)
+int!>(Error) maybe_x;
+bool !>(CCIoError) got_e = await recv(&error_rx, &maybe_x);
+if (cc_is_err(got_e) || !cc_value(got_e)) {
+    // Channel closed and drained
+} else if (cc_is_ok(maybe_x)) {
+    process(cc_value(maybe_x));        // received a successful payload
+} else {
+    handle(cc_error(maybe_x));         // received an application-level error
 }
 ```
 
 **Sync channels:**
 
 ```c
-int[~ sync <]? x = recv(&rx);
-if (!x) {
-    // Channel closed and drained
+int x;
+bool !>(CCIoError) got = recv(&rx, &x);
+if (cc_is_err(got) || !cc_value(got)) {
+    // Channel closed and drained (ok(false)) or error
 }
 ```
 
@@ -4244,8 +4152,8 @@ For operations **outside `@match`** (single await, channel recv/send, sleep), us
 
 ```c
 // Channels
-T!>(Cancelled)? recv_cancellable(T[~ <]* rx);      // returns err(Cancelled) if cancelled
-bool send_cancellable(T[~ >]* tx, T value);     // returns false if cancelled
+bool !>(Cancelled) recv_cancellable(T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
+bool send_cancellable(T[~ >]* tx, T value);                // returns false if cancelled
 
 // Tasks
 T!>(Cancelled) await task_cancellable<T>(Task<T!>(Cancelled)> t);
@@ -4262,14 +4170,16 @@ Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duratio
 ```c
 @async void!>(Error) reader(int[~] ch) {
     while (true) {
-        int!>(Cancelled)? x = await ch.recv_cancellable();
-        
-        if @try (err = x) {
-            if (err == Cancelled) return cc_ok(void);  // task was cancelled
+        int x;
+        bool !>(Cancelled) got = await ch.recv_cancellable(&x);
+
+        if @try (err = got) {
+            if (err == Cancelled) return cc_ok(void);   // task was cancelled
             return cc_err(void, err);
         }
-        
-        process(*x);
+
+        if (!cc_value(got)) return cc_ok(void);         // channel closed+drained
+        process(x);
     }
 }
 ```
@@ -4599,9 +4509,9 @@ Streaming uses explicit channel parameters:
     defer out.close();
     File f = try open(path);
     while (true) {
-        char[:]? line = try f.readline();
-        if (!line) break;
-        await out.send(*line);
+        char[:] line = try f.readline();
+        if (line.len == 0) break;        // EOF: readline returns an empty slice
+        await out.send(line);
     }
 }
 
@@ -4634,8 +4544,8 @@ T      await Task<T>;                  // suspend until complete
 void   Task<T>.cancel();               // request cooperative cancellation
 
 // Cancellation-aware variants (observe cancellation when awaited)
-T!>(Cancelled)      await task_cancellable<T>(Task<T!>(Cancelled)> t);
-T!>(Cancelled)?     recv_cancellable<T>(T[~ <]* rx);      // returns err(Cancelled) if cancelled
+T!>(Cancelled)   await task_cancellable<T>(Task<T!>(Cancelled)> t);
+bool !>(Cancelled) recv_cancellable<T>(T[~ <]* rx, T* out);   // ok(true)=received, ok(false)=closed+drained, err=cancelled
 bool             send_cancellable<T>(T[~ >]* tx, T value);
 Task<void!>(Cancelled)> sleep_cancellable(Duration d);
 Task<T!>(Cancelled)> with_timeout_cancellable<T>(Task<T!>(Cancelled)> t, Duration d);
@@ -4993,17 +4903,17 @@ enum IoError {
 
 ```c
 @async void process_with_backoff() {
-    File! f = file_open(&arena, path, "r");
-    if @try (File file = f) {
+    CCFile !>(CCIoError) f = cc_file_open(&arena, path, "r");
+    if @try (CCFile file = f) {
         int retry_count = 0;
-        while (char[:]? !IoError line_result = file.read_line(&arena)) {
-            if @try (char[:]? line_opt = line_result) {
-                if (!line_opt) break;  // EOF (Ok(None))
-                char[:] line = *line_opt;
-                
+        while (true) {
+            char[:] !>(CCIoError) line_result = file.read_line(&arena);
+            if @try (char[:] line = line_result) {
+                if (line.len == 0) break;    // EOF: empty slice
+
                 // ... process line ...
-                
-                retry_count = 0;  // reset on success
+
+                retry_count = 0;             // reset on success
             } else {
                 // Error (not EOF) - handle backoff
                 if (line_result is Busy) {
@@ -5831,17 +5741,17 @@ for (size_t __i = 0; __i < slice.len; __i++) {
 // @for await (T x : expr) { BODY }
 // lowers to:
 while (true) {
-    T? __tmp = try await expr.next();
-    if (!__tmp) break;     // Ok(None) indicates end-of-stream (EOF)
-    T x = *__tmp;
+    T x;
+    bool !>(CCIoError) __got = try await expr.next(&x);
+    if (!cc_value(__got)) break;   // ok(false) indicates end-of-stream (EOF)
     BODY
 }
 ```
 
 **Rules (async iteration):**
 
-- `Ok(None)` indicates end-of-stream (EOF).
-- Errors propagate normally.
+- `next(&out)` returning `ok(false)` indicates end-of-stream (EOF, closed+drained).
+- Errors propagate normally via the `bool !>(E)` result.
 - Suspension points inside async iteration are subject to **§ 3.2.2** and **§ 7.5.2**.
 
 **`@for await` on pointers:**
@@ -6028,7 +5938,7 @@ Concurrent-C uses **compile-time monomorphization** for generic families.
 **Implementation status (v1.0):**
 - **Implemented today:** built-in generic families and generic-like surface forms that lower to concrete C names, including `CCVec::[T]`, `Map::[K,V]`, `T!>(E)`, and channel handle families derived from `T[~... >]` / `T[~... <]`.
 - **Planned direction:** full user-defined generic functions and generic type declarations with the same monomorphization model.
-- **Deprecated:** `T?` (optional types) are deprecated; use return-type patterns instead (e.g., `T*` with `NULL` for absence, or `T!>(E)` for fallible operations).
+- **Retired:** `T?` (optional types) have been retired from the normative spec surface (see §2.1 migration appendix). Use `T*` (with `NULL` for absence), `T !>(E)` (for fallible operations), `bool op(T* out)` (for iterators / pop / recv), or an in-band sentinel (empty slice, `-1`) instead.
 
 This section therefore mixes:
 - the **normative monomorphization model** used by implemented built-in families today
@@ -6206,7 +6116,7 @@ Intentionally omitted in v1.0:
 
 **Rule:** Built-in generic families (`Task::[T]`, `Mutex::[T]`, `Map::[K,V]`, `T!>(E)`, and channels parameterized by element type) follow the monomorphization model described above, even when exposed through lowering, mangling, or library-defined wrapper families rather than full user-defined generic declarations.
 
-**Deprecated:** `T?` (optional types) are deprecated as of v1.0. Use `T*` (NULL for absence) or `T!>(E)` (result types) instead. Existing code using `T?` will continue to compile during the deprecation period but should be migrated.
+**Retired:** `T?` (optional types) are retired from the normative spec surface as of this revision. Use `T*` (NULL for absence), `T !>(E)` (result types), or `bool op(T* out)` / in-band sentinels (empty slice, `-1`) instead. Legacy `T?` parsing may still lower during phase-1 migration; see §2.1 migration appendix.
 
 ---
 
@@ -7018,28 +6928,6 @@ This appendix documents stable layout and calling conventions for binary compati
 
 ### D.1 Type Layouts
 
-**Optional (`T?`) layout:**
-
-```c
-struct Optional_T {
-    _Bool has;        // C11 _Bool (1 byte, values 0 or 1)
-    // padding to alignof(T)
-    union { T value; } u;
-};
-// sizeof(Optional_T) = alignof(T) + sizeof(T) (with padding)
-```
-
-**Example (Optional<int>):**
-
-```c
-struct Optional_int {
-    _Bool has;        // 1 byte
-    // 3 bytes padding (assume 4-byte int alignment)
-    int value;        // 4 bytes
-};
-// sizeof = 8 bytes
-```
-
 **Result (`T!>(E)`) layout:**
 
 ```c
@@ -7421,7 +7309,6 @@ This keeps deadlines precise and prevents “everything is always under a deadli
 
 | Sugar | Full | Meaning |
 |-------|------|---------|
-| `T?` | `Option<T>` | Optional value |
 | `T!>(E)` | `Result<T, E>` | Either T or error E |
 | `T[:]` | Slice of T | Pointer + length |
 | `T[~... >]` / `T[~... <]` | `AsyncChanTx<T>` / `AsyncChanRx<T>` | Async channel handles |
@@ -7493,8 +7380,9 @@ Long-lived connection loops rely on timely cancellation when deadlines expire or
 ```c
 @async void!>(IoError) connection_handler(Duplex* conn, Arena* conn_arena) {
     with_deadline(deadline_after(seconds(30))) {
-        while (char[:]?!>(IoError) msg = try await conn.read(conn_arena)) {
-            if (!msg) break;
+        while (true) {
+            char[:] msg = try await conn.read(conn_arena);
+            if (msg.len == 0) break;       // EOF
             process(msg);
         }
     }
@@ -7523,20 +7411,24 @@ Many operations produce sequences of items asynchronously: request body chunks, 
 
 ```c
 // Request body
-while (char[:]?!>(IoError) chunk = try await req.body.read_chunk(arena)) {
-    if (!chunk) break;
+while (true) {
+    char[:] chunk = try await req.body.read_chunk(arena);
+    if (chunk.len == 0) break;        // EOF
     process(chunk);
 }
 
 // Response body
-while (char[:]?!>(IoError) chunk = try await resp_iter.next(arena)) {
-    if (!chunk) break;
+while (true) {
+    char[:] chunk;
+    bool got = try await resp_iter.next(arena, &chunk);
+    if (!got) break;                  // ok(false) = drained
     process(chunk);
 }
 
 // WebSocket frames
-while (char[:]?!>(IoError) frame = try await ws.read_frame(arena)) {
-    if (!frame) break;
+while (true) {
+    char[:] frame = try await ws.read_frame(arena);
+    if (frame.len == 0) break;        // EOF
     process(frame);
 }
 ```
@@ -7545,7 +7437,7 @@ while (char[:]?!>(IoError) frame = try await ws.read_frame(arena)) {
 
 ```c
 struct AsyncIterator<T> {
-    @async T?!E next(Arena* a);
+    @async bool !>(E) next(Arena* a, T* out);
 };
 
 // Declarative for await
@@ -7554,9 +7446,10 @@ for await (char[:] chunk in req.body) {
 }
 
 // Desugars to:
-while (char[:]?!>(IoError) chunk_opt = try await req.body.next(arena)) {
-    if (!chunk_opt) break;
-    char[:] chunk = *chunk_opt;
+while (true) {
+    char[:] chunk;
+    bool got = try await req.body.next(arena, &chunk);
+    if (!got) break;                  // ok(false) = drained
     process(chunk);
 }
 ```
@@ -7790,14 +7683,15 @@ Desugars to:
 {
     AsyncIterator<char[:]> iter = req.body;
     while (true) {
-        char[:]?!>(IoError) next_result = await iter.next(arena);
-        
+        char[:] !>(IoError) next_result = await iter.next(arena);
+
         if @try (char[:] chunk = next_result) {
+            if (chunk.len == 0) break;   // EOF: empty slice
             // Chunk is valid here; process it
             process(chunk);
             // No re-evaluation of condition; straight back to await
         } else {
-            // None or error; exit loop
+            // Error; exit loop
             break;
         }
     }
@@ -7820,7 +7714,7 @@ Desugars to:
 
 ```c
 typedef struct {
-    Task_CharSliceOptIoErr (*read)(void* self, Arena* a);
+    Task_CharSliceIoErr (*read)(void* self, Arena* a);
     Task_VoidIoErr (*write)(void* self, CharSlice bytes);
     Task_VoidIoErr (*shutdown)(void* self, ShutdownMode mode);
     Task_VoidIoErr (*close)(void* self);
@@ -7833,7 +7727,7 @@ typedef struct {
 
 // Calling a method
 DuplexVTable* vt = duplex.vt;
-Task_CharSliceOptIoErr result = vt->read(duplex.self, arena);
+Task_CharSliceIoErr result = vt->read(duplex.self, arena);
 ```
 
 **Constraints:**
