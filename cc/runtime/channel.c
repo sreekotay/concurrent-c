@@ -280,6 +280,25 @@ static inline int cc__chan_req_wake_trace_enabled(void) {
     return atomic_load_explicit(&cached, memory_order_relaxed);
 }
 
+/* Hot-path helper: the nursery-closing deadlock guard is opt-in, but the four
+ * callsites in cc_chan_send / cc_chan_recv gate it on autoclose_owner + current
+ * nursery matching, which is true for any channel transported inside a nursery
+ * (e.g. redis_hybrid's request/reply channels).  Without this cache each op
+ * calls getenv() once or twice -- ~2M getenv/s at steady state.  Cache the
+ * env lookup once and reduce the guard to a relaxed atomic load. */
+static inline int cc__chan_nursery_closing_guard_enabled(void) {
+    static _Atomic int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (value >= 0) return value;
+    const char* env = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
+    int enabled = (env && env[0] == '1') ? 1 : 0;
+    int expected = -1;
+    (void)atomic_compare_exchange_strong_explicit(&cached, &expected, enabled,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed);
+    return atomic_load_explicit(&cached, memory_order_relaxed);
+}
+
 int cc__chan_debug_req_wake_match(void* ch_obj);
 
 static inline void cc__chan_trace_recv_empty(CCChan* ch,
@@ -2159,9 +2178,9 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
     if (!deadline && !ch->closed && ch->count == 0 &&
         ch->autoclose_owner && cc__tls_current_nursery &&
-        ch->autoclose_owner == cc__tls_current_nursery) {
-        const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
-        if (g && g[0] == '1') {
+        ch->autoclose_owner == cc__tls_current_nursery &&
+        cc__chan_nursery_closing_guard_enabled()) {
+        {
             if (!ch->warned_autoclose_block) {
                 ch->warned_autoclose_block = 1;
                 fprintf(stderr,
@@ -2179,9 +2198,9 @@ static int cc_chan_wait_empty(CCChan* ch, const struct timespec* deadline) {
             /* Re-check deadlock guard inside loop (same as initial guard above) */
             if (!deadline && !ch->closed && ch->count == 0 &&
                 ch->autoclose_owner && cc__tls_current_nursery &&
-                ch->autoclose_owner == cc__tls_current_nursery) {
-                const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
-                if (g && g[0] == '1') {
+                ch->autoclose_owner == cc__tls_current_nursery &&
+                cc__chan_nursery_closing_guard_enabled()) {
+                {
                     if (!ch->warned_autoclose_block) {
                         ch->warned_autoclose_block = 1;
                         fprintf(stderr,
@@ -3500,9 +3519,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
     /* Runtime guard (opt-in): blocking recv on an autoclose channel from inside the same nursery
        is a common deadlock foot-gun (recv-until-close inside the nursery). */
     if (!ch->closed && ch->autoclose_owner && cc__tls_current_nursery &&
-        ch->autoclose_owner == cc__tls_current_nursery) {
-        const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
-        if (g && g[0] == '1') {
+        ch->autoclose_owner == cc__tls_current_nursery &&
+        cc__chan_nursery_closing_guard_enabled()) {
+        {
             if (!ch->warned_autoclose_block) {
                 ch->warned_autoclose_block = 1;
                 fprintf(stderr,
@@ -3544,9 +3563,9 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
          * may have passed when items were still available.  Now the buffer is
          * empty and the producer may be done -- detect the foot-gun. */
         if (!ch->closed && ch->autoclose_owner && cc__tls_current_nursery &&
-            ch->autoclose_owner == cc__tls_current_nursery) {
-            const char* g = getenv("CC_NURSERY_CLOSING_RUNTIME_GUARD");
-            if (g && g[0] == '1') {
+            ch->autoclose_owner == cc__tls_current_nursery &&
+            cc__chan_nursery_closing_guard_enabled()) {
+            {
                 if (!ch->warned_autoclose_block) {
                     ch->warned_autoclose_block = 1;
                     fprintf(stderr,
