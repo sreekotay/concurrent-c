@@ -6,7 +6,8 @@ const std = @import("std");
 
 const NUM_HOGS = 15;
 const HEARTBEAT_INTERVAL_MS = 100;
-const TEST_DURATION_NS: u64 = 5 * std.time.ns_per_s;
+const TEST_DURATION_SEC = 3;
+const TEST_DURATION_NS: u64 = TEST_DURATION_SEC * std.time.ns_per_s;
 
 var heartbeats: i64 = 0;
 var hogs_active: i64 = 0;
@@ -51,32 +52,22 @@ pub fn main() !void {
     printf("Workers: {d} | CPU Hogs: {d}\n", .{ ncpu, NUM_HOGS });
     printf("=================================================================\n\n", .{});
 
-    const hb = try std.Thread.spawn(.{}, heartbeatFn, .{});
-
-    std.Thread.sleep(500 * std.time.ns_per_ms);
-    printf("Initial heartbeats: {d} (Healthy)\n", .{@atomicLoad(i64, &heartbeats, .seq_cst)});
+    _ = try std.Thread.spawn(.{}, heartbeatFn, .{});
 
     printf("\n!!! Unleashing CPU Hogs !!!\n", .{});
 
-    var threads: [NUM_HOGS]std.Thread = undefined;
     for (0..NUM_HOGS) |i| {
-        threads[i] = try std.Thread.spawn(.{}, hog, .{i});
+        _ = try std.Thread.spawn(.{}, hog, .{i});
     }
 
     std.Thread.sleep(TEST_DURATION_NS);
-    @atomicStore(i32, &stop, 1, .seq_cst);
-
-    for (0..NUM_HOGS) |i| {
-        threads[i].join();
-    }
-    hb.join();
 
     const final = @atomicLoad(i64, &heartbeats, .seq_cst);
     printf("\n=================================================================\n", .{});
     printf("FINAL RESULTS\n", .{});
     printf("Total Heartbeats: {d}\n", .{final});
 
-    const expected: i64 = 5 * 1000 / HEARTBEAT_INTERVAL_MS;
+    const expected: i64 = TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS;
     if (final >= @divFloor(expected * 8, 10)) {
         printf("RESULT: PASS - Zig OS threads are fair even with CPU hogs!\n", .{});
     } else {
@@ -85,4 +76,6 @@ pub fn main() !void {
         printf("Heartbeat efficiency: {d:.1}%\n", .{eff});
     }
     printf("=================================================================\n", .{});
+    // Skip clean shutdown — hogs won't stop, process exit kills everything.
+    std.process.exit(0);
 }

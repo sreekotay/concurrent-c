@@ -1,20 +1,30 @@
 /*
  * noisy_neighbor.ccs - The "Latency Torture" Test for M:N Scheduling
- * 
+ *
  * This test spawns several "CPU Hog" fibers that perform intensive math
  * in a tight loop without any voluntary suspension (no await, no cc_sleep).
  * One "Heartbeat" fiber monitors if the scheduler can still maintain
  * regular execution of other tasks.
+ *
+ * Oversubscription: 15 hogs on 4 workers. The heartbeat fiber can only
+ * tick if the scheduler actually takes a worker away from a hog — pure
+ * cooperative scheduling will starve the heartbeat.  1:1 runtimes
+ * (pthread, zig) pass trivially via kernel preemption; this test asks
+ * whether M:N userspace schedulers (CC, Go) can match that guarantee.
  */
 
 #include <ccc/cc_runtime.cch>
 #include <ccc/std/prelude.cch>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
 #include <stdatomic.h>
 
-#define NUM_HOGS 15          // Leave 1 worker for the heartbeat (if scheduler is fair)
+#define NUM_WORKERS 4
+#define NUM_HOGS 15
 #define HEARTBEAT_INTERVAL_MS 100
-#define TEST_DURATION_SEC 5
+#define TEST_DURATION_SEC 3
 
 atomic_int g_heartbeats = 0;
 
@@ -48,54 +58,49 @@ void hog_fiber(int id) {
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    // Ensure we have a fixed number of workers for the test
-    setenv("CC_FIBER_WORKERS", "16", 1);
-    
+    /* Oversubscribe: 4 workers for 15 hogs + 1 heartbeat. */
+    char workers_buf[8];
+    snprintf(workers_buf, sizeof(workers_buf), "%d", NUM_WORKERS);
+    setenv("CC_FIBER_WORKERS", workers_buf, 1);
+
     printf("=================================================================\n");
     printf("NOISY NEIGHBOR CHALLENGE: Can the CC Scheduler handle CPU hogs?\n");
-    printf("Workers: 16 | CPU Hogs: %d\n", NUM_HOGS);
+    printf("Workers: %d | CPU Hogs: %d\n", NUM_WORKERS, NUM_HOGS);
     printf("=================================================================\n\n");
 
     {
         CCNursery* __cc_nursery137 = @create(NULL) @destroy;
         if (!__cc_nursery137) abort();
 
-        // 1. Start the heartbeat
-        __cc_nursery137->spawn(() => { heartbeat_fiber(); });
+        __cc_nursery137->spawnhybrid(() => { heartbeat_fiber(); });
 
-        // 2. Wait for healthy start
-        cc_sleep_ms(500);
-        printf("Initial heartbeats: %d (Healthy)\n", atomic_load(&g_heartbeats));
-
-        // 3. Unleash the hogs
-        printf("\n!!! Unleashing CPU Hogs !!!\n");
+        printf("!!! Unleashing CPU Hogs !!!\n");
         for (int i = 0; i < NUM_HOGS; i++) {
             int id = i;
-            __cc_nursery137->spawn(() => [id] { hog_fiber(id); });
+            __cc_nursery137->spawnhybrid(() => [id] { hog_fiber(id); });
         }
 
-        // 4. Monitor for duration
-        cc_sleep_ms(TEST_DURATION_SEC * 1000);
+        /* Hard 3s wall clock — sleep in the OS, not the scheduler, so this
+         * main fiber cannot be starved by the hogs it just unleashed. */
+        struct timespec ts = { TEST_DURATION_SEC, 0 };
+        nanosleep(&ts, NULL);
 
-        printf("\nStopping test...\n");
-        __cc_nursery137->cancel();
-    
+        int final_beats = atomic_load(&g_heartbeats);
+        int expected = (TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS);
+        printf("\n=================================================================\n");
+        printf("FINAL RESULTS\n");
+        printf("Total Heartbeats: %d\n", final_beats);
+        if (final_beats >= expected * 0.8) {
+            printf("RESULT: PASS - The scheduler is fair even with CPU hogs!\n");
+        } else {
+            printf("RESULT: FAIL - The scheduler was starved by CPU hogs.\n");
+            printf("Heartbeat efficiency: %.1f%%\n",
+                   (double)final_beats * 100.0 / expected);
+        }
+        printf("=================================================================\n");
+        fflush(stdout);
+        /* Don't bother joining — hogs won't yield. Harness owns shutdown. */
+        _exit(0);
     }
-
-    int final_beats = atomic_load(&g_heartbeats);
-    printf("\n=================================================================\n");
-    printf("FINAL RESULTS\n");
-    printf("Total Heartbeats: %d\n", final_beats);
-    
-    // Expected beats: (TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS)
-    int expected = (TEST_DURATION_SEC * 1000 / HEARTBEAT_INTERVAL_MS);
-    if (final_beats >= expected * 0.8) {
-        printf("RESULT: PASS - The scheduler is fair even with CPU hogs!\n");
-    } else {
-        printf("RESULT: FAIL - The scheduler was starved by CPU hogs.\n");
-        printf("Heartbeat efficiency: %.1f%%\n", (double)final_beats * 100.0 / expected);
-    }
-    printf("=================================================================\n");
-
     return 0;
 }

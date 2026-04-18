@@ -11,7 +11,7 @@
 #define NUM_THREADS 16
 #define NUM_HOGS 15
 #define HEARTBEAT_INTERVAL_MS 100000 // 100ms in microseconds
-#define TEST_DURATION_SEC 5
+#define TEST_DURATION_SEC 3
 
 atomic_int g_heartbeats = 0;
 atomic_int g_stop = 0;
@@ -53,9 +53,6 @@ int main(void) {
     pthread_t heartbeat;
     pthread_create(&heartbeat, NULL, heartbeat_thread, NULL);
 
-    sleep(1); 
-    printf("Initial heartbeats: %d\n", atomic_load(&g_heartbeats));
-
     printf("\n!!! Unleashing CPU Hogs !!!\n");
     pthread_t hogs[NUM_HOGS];
     for (int i = 0; i < NUM_HOGS; i++) {
@@ -66,18 +63,11 @@ int main(void) {
 
     sleep(TEST_DURATION_SEC);
 
-    printf("\nStopping test...\n");
-    atomic_store(&g_stop, 1);
-    
-    pthread_join(heartbeat, NULL);
-    for (int i = 0; i < NUM_HOGS; i++) {
-        pthread_join(hogs[i], NULL);
-    }
-
     printf("\n=================================================================\n");
     printf("FINAL RESULTS (Pthread)\n");
     printf("Total Heartbeats: %d\n", atomic_load(&g_heartbeats));
     printf("=================================================================\n");
-
-    return 0;
+    fflush(stdout);
+    /* Skip join — kernel tears down threads at process exit. */
+    _exit(0);
 }
