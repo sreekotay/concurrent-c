@@ -656,48 +656,16 @@ static void cc__set_fiber_v2_task(CCTask* t, fiber_v2* f) {
     fv->fiber = f;
 }
 
-/* Spawn an M:N fiber task. Returns CCTask with kind=CC_TASK_KIND_FIBER (or POOL).
+/* Spawn an M:N fiber task.
  *
- * When the fiber pool is ready (CC_FIBER_POOL != 0) and a slot is free, the
- * task is dispatched through the pool: a persistent pool-runner fiber picks it
- * up from the work channel, eliminating the per-task spawn/route/wake cycle.
- * If the pool is full or unavailable, falls back to a normal fiber spawn. */
+ * Post V2-promotion: this is a source-compat alias for
+ * cc_fiber_spawn_task_v2. The V1 fiber pool (cc_fpool_*) is no longer
+ * initialized or dispatched to; every task is a V2 fiber. The alias is kept
+ * so compiler-emitted code (pass_nursery_spawn_ast.c, pass_channel_syntax.c,
+ * pass_autoblock.c) and external callers continue to work untouched during
+ * the V1 retirement window. */
 CCTask cc_fiber_spawn_task(void* (*fn)(void*), void* arg) {
-    CCTask out;
-    memset(&out, 0, sizeof(out));
-    if (!fn) return out;
-
-    /* Attempt pool dispatch only from fiber context.
-     *
-     * The pool helps when an already-running fiber spawns more fiber tasks and
-     * wants to avoid another spawn/route/wake cycle. For top-level callers
-     * (non-fiber context), direct cc_fiber_spawn() is consistently faster in
-     * batch-spawn microbenches and matches the substrate used by nursery spawn. */
-    cc_fpool_ensure_init();
-    if (cc__fiber_in_context() && atomic_load_explicit(&g_fpool.ready, memory_order_acquire)) {
-        int slot_idx = cc_pool_alloc_slot();
-        if (slot_idx >= 0) {
-            CCPoolSlot* slot = &g_fpool.slots[slot_idx];
-            slot->fn  = fn;
-            slot->arg = arg;
-            /* Send pointer (8 bytes) — fits lock-free channel fast-path */
-            if (cc_chan_send(g_fpool.work_ch, &slot, sizeof(slot)) == 0) {
-                out.kind = CC_TASK_KIND_POOL;
-                TASK_POOL(&out)->slot_idx = slot_idx;
-                return out;
-            }
-            /* work_ch closed or error — fall through to direct spawn */
-            cc_pool_free_slot(slot_idx);
-        }
-    }
-
-    /* Fallback: direct fiber spawn */
-    fiber_task* f = cc_fiber_spawn(fn, arg);
-    if (!f) return out;
-
-    out.kind = CC_TASK_KIND_FIBER;
-    cc__set_fiber_task(&out, f);
-    return out;
+    return cc_fiber_spawn_task_v2(fn, arg);
 }
 
 /* Helper function that unpacks and calls a closure for fibers */
@@ -721,18 +689,13 @@ static intptr_t cc__task_take_v2_result(fiber_v2* fiber, void* result) {
     return (intptr_t)result;
 }
 
-/* Spawn a fiber from a 0-arg closure. */
+/* Spawn a fiber from a 0-arg closure.
+ *
+ * Post V2-promotion: alias for cc_fiber_spawn_closure0_v2 (the
+ * cc_fiber_spawn_task it calls is itself now the V2 alias, so this would
+ * route to V2 regardless, but we go direct to _v2 to skip the extra hop). */
 CCTask cc_fiber_spawn_closure0(CCClosure0 c) {
-    CCTask out;
-    memset(&out, 0, sizeof(out));
-    if (!c.fn) return out;
-    
-    /* Create a heap copy of the closure */
-    CCClosure0* heap_c = (CCClosure0*)malloc(sizeof(CCClosure0));
-    if (!heap_c) return out;
-    *heap_c = c;
-    
-    return cc_fiber_spawn_task(cc__fiber_closure0_wrapper, heap_c);
+    return cc_fiber_spawn_closure0_v2(c);
 }
 
 CCTask cc_fiber_spawn_task_v2(void* (*fn)(void*), void* arg) {
