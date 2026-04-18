@@ -1,0 +1,20 @@
+// Smoke: !> { stmts; DIVERGENT; } block form without binder (continue in loop)
+#include <stdio.h>
+
+int !> (CCError) flip(int i) {
+    return (i == 2) ? cc_err(CC_ERR_NOT_FOUND, "bad") : cc_ok(10);
+}
+
+int main(void) {
+    int total = 0;
+    int skips = 0;
+    for (int i = 0; i < 5; i++) {
+        int v = flip(i) !> {
+            skips++;
+            continue;
+        };
+        total += v;
+    }
+    printf("total=%d skips=%d\n", total, skips);
+    return 0;
+}

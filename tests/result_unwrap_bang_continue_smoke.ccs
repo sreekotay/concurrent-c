@@ -1,4 +1,4 @@
-// Smoke: ?> RHS is `continue;` inside a loop
+// Smoke: !> (expression position) RHS is `continue;` inside a loop
 #include <stdio.h>
 
 static int g_seen;
@@ -10,7 +10,7 @@ int !> (CCError) flip(int i) {
 int main(void) {
     int total = 0;
     for (int i = 0; i < 5; i++) {
-        int v = flip(i) ?> continue;
+        int v = flip(i) !> continue;
         total += v;
         g_seen++;
     }

@@ -1,0 +1,22 @@
+// Smoke: !>(e) { stmts; DIVERGENT; } block form at expression position, with binder
+#include <stdio.h>
+
+int !> (CCError) f(int i) {
+    return (i == 0) ? cc_err(CC_ERR_NOT_FOUND, "bad") : cc_ok(i * 10);
+}
+
+int !> (CCError) caller(int i) {
+    int x = f(i) !>(e) {
+        printf("err path kind=%d\n", (int)e.kind);
+        return cc_err(CC_ERR_NOT_FOUND, "fwd");
+    };
+    return cc_ok(x + 1);
+}
+
+int main(void) {
+    int !> (CCError) a = caller(3);
+    printf("a.ok=%d val=%d\n", cc_is_ok(a), cc_is_ok(a) ? cc_value(a) : -1);
+    int !> (CCError) b = caller(0);
+    printf("b.ok=%d\n", cc_is_ok(b));
+    return 0;
+}

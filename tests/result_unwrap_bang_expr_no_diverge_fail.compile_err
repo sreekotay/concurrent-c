@@ -1,0 +1,2 @@
+result_unwrap_bang_expr_no_diverge_fail.ccs:4:
+expression-position '!>' body must diverge

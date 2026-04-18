@@ -1,0 +1,26 @@
+// Smoke: `!>;` at expression position.  Synthesizes a fresh binder and
+// inlines the enclosing @errhandler body.  The handler must diverge.
+#include <stdio.h>
+
+int !> (CCError) flip(int i) {
+    return (i == 2) ? cc_err(CC_ERR_NOT_FOUND, "bad") : cc_ok(i * 10);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        printf("fallback kind=%d\n", (int)e.kind);
+        return 0;
+    }
+    int total = 0;
+    /* First iteration (i=0): success, val=0 -> total=0. */
+    /* Second iteration (i=1): success, val=10 -> total=10. */
+    /* Third iteration (i=2): error, handler fires, returns 0. */
+    for (int i = 0; i < 5; i++) {
+        int v = flip(i) !>;
+        total += v;
+        printf("iter=%d total=%d\n", i, total);
+    }
+    /* Unreachable: handler always returned on i=2. */
+    printf("unreachable\n");
+    return 99;
+}

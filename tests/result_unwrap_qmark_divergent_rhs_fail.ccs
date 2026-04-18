@@ -1,0 +1,7 @@
+#include <stdio.h>
+int !> (CCError) f(void) { return cc_err(CC_ERR_NOT_FOUND, "x"); }
+int main(void) {
+    int x = f() ?>(e) return 7;
+    printf("%d\n", x);
+    return 0;
+}

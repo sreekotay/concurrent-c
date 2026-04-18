@@ -48,6 +48,35 @@ static int cc__at_err_postfix(const char* s, size_t len, size_t i) {
         return 0;
     if (i + 4 < len && cc_is_ident_char(s[i + 4])) return 0;
     if (i > 0 && cc_is_ident_char(s[i - 1])) return 0;
+    /* Skip the new-surface `@err(IDENT);` forwarding form: the legacy
+     * `@err (DECL) { BODY }` requires `{` after the closing `)`, while the
+     * new-surface `@err(IDENT);` uses `;`.  Peek past a balanced `(...)`
+     * at `@err` and, if the next non-ws byte is `;`, leave it to
+     * `pass_result_unwrap.c` (which handles `@err(IDENT);` inside `!>`
+     * bodies as a structured control-flow forward). */
+    {
+        size_t k = i + 4;
+        while (k < len && (s[k] == ' ' || s[k] == '\t' || s[k] == '\r' ||
+                           s[k] == '\n'))
+            k++;
+        if (k < len && s[k] == '(') {
+            int dp = 1;
+            size_t j = k + 1;
+            while (j < len && dp > 0) {
+                char ch = s[j];
+                if (ch == '(') dp++;
+                else if (ch == ')') dp--;
+                j++;
+            }
+            if (dp == 0) {
+                size_t m = j;
+                while (m < len && (s[m] == ' ' || s[m] == '\t' ||
+                                   s[m] == '\r' || s[m] == '\n'))
+                    m++;
+                if (m < len && s[m] == ';') return 0;
+            }
+        }
+    }
     return 1;
 }
 

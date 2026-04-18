@@ -1,4 +1,4 @@
-// Smoke: ?>(e) with `return cc_err(...)` as a propagation statement.
+// Smoke: !>(e) at expression position with `return cc_err(...)` propagation.
 #include <stdio.h>
 
 int !> (CCError) always_err(void) {
@@ -10,8 +10,8 @@ int !> (CCError) always_ok(void) {
 }
 
 int !> (CCError) propagator(int fail) {
-    int a = always_ok() ?>(e) return cc_err(CC_ERROR(e.kind, "prop_a"));
-    int b = (fail ? always_err() : always_ok()) ?>(e) return cc_err(CC_ERROR(e.kind, "prop_b"));
+    int a = always_ok() !>(e) return cc_err(CC_ERROR(e.kind, "prop_a"));
+    int b = (fail ? always_err() : always_ok()) !>(e) return cc_err(CC_ERROR(e.kind, "prop_b"));
     return cc_ok(a + b);
 }
 

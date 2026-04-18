@@ -1,0 +1,23 @@
+// Smoke: expression-position `!>(e) @err(e);` — structured forward to the
+// enclosing @errhandler.  Exercises the legacy-pass fix that keeps
+// @err(IDENT); forwards out of the legacy @err(DECL){BODY} rewrite.
+#include <stdio.h>
+
+int !> (CCError) flip(int i) {
+    return (i == 3) ? cc_err(CC_ERR_NOT_FOUND, "bad") : cc_ok(i);
+}
+
+int main(void) {
+    @errhandler(CCError e) {
+        printf("handler kind=%d msg=%s\n", (int)e.kind, e.message);
+        return 0;
+    }
+    int acc = 0;
+    for (int i = 0; i < 5; i++) {
+        int v = flip(i) !>(e) @err(e);
+        acc += v;
+        printf("iter=%d acc=%d\n", i, acc);
+    }
+    printf("unreachable\n");
+    return 99;
+}

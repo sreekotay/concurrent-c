@@ -16,7 +16,7 @@
 CC_DEFINE_SB_APPEND_FMT
 
 /* ------------------------------------------------------------------
- * `?>` expression-operator lowering.
+ * `?>` — default-value expression operator (Swift/C# `??`, Kotlin `?:`).
  *
  * Recognized forms (shorthand: TMP = __cc_pu_r_N):
  *
@@ -24,50 +24,39 @@ CC_DEFINE_SB_APPEND_FMT
  *       => ({ __typeof__(EXPR) TMP = (EXPR);
  *             cc_is_ok(TMP) ? cc_value(TMP) : (DEFAULT_EXPR); })
  *
- *   Case 2  EXPR ?>(e) RHS_EXPR                      (binder, non-divergent)
+ *   Case 2  EXPR ?>(e) RHS_EXPR
  *       => ({ __typeof__(EXPR) TMP = (EXPR);
  *             cc_is_ok(TMP) ? cc_value(TMP)
  *                           : ({ __typeof__(cc_error(TMP)) e = cc_error(TMP);
  *                                (RHS_EXPR); }); })
  *
- *   Case 3  EXPR ?> DIVERGENT_STMT                   (no binder, divergent)
- *       => ({ __typeof__(EXPR) TMP = (EXPR);
- *             if (cc_is_err(TMP)) { DIVERGENT_STMT }
- *             cc_value(TMP); })
- *
- *   Case 4  EXPR ?>(e) DIVERGENT_STMT                (binder, divergent)
- *       => ({ __typeof__(EXPR) TMP = (EXPR);
- *             if (cc_is_err(TMP)) { __typeof__(cc_error(TMP)) e = cc_error(TMP);
- *                                   DIVERGENT_STMT }
- *             cc_value(TMP); })
- *
- * DIVERGENT_STMT is one of `return EXPR;`, `return;`, `break;`, `continue;`.
+ * `?>` is strictly a VALUE operator.  Its RHS must be a pure C expression
+ * that produces a `T`.  Divergent statements (`return`, `break`, `continue`,
+ * `goto`, `@err(IDENT);`, noreturn calls) and block bodies `{ ... }` on the
+ * RHS are compile errors — those are the province of `!>` at expression
+ * position (see below).
  *
  * Scanning strategy:
- *   - Forward-scan the source comment/string-aware, looking for the first `?>`
- *     outside strings and comments.
- *   - From that position, scan backward (paren/bracket/brace balanced, with
- *     best-effort string skipping) until we hit an expression-start boundary:
- *     `;`, `{`, `}`, `,`, `=` (not `==`/`!=`/`<=`/`>=`), `(`, `?`, `:`, `&&`,
- *     `||`, or beginning of input.  That gives us the LHS span.
- *   - Optionally consume `(ident)` as a binder.  If the `(...)` contents are
- *     not a bare identifier we leave the `(` alone and treat it as the start
- *     of a parenthesized RHS expression; this keeps `?> (7 + 8)` and similar
- *     parenthesized defaults working.
- *   - If the next non-ws token is `return` / `break` / `continue` at an
- *     identifier boundary, capture the divergent statement up to (but not
- *     including) its terminating `;` at depth 0.  Otherwise scan forward
- *     as an expression up to the usual RHS end-markers.
- *   - Splice in the statement-expression lowering and restart until no `?>`
- *     remains (capped to avoid runaway on malformed input).
- *
- * The binder `e` only exists inside the generated scoped statement-expression
- * branch, so it is naturally invisible to the success path and to any code
- * textually following the `?>` expression.
- *
- * This pass does NOT handle the `!>` statement operator; that is a future
- * slice.
+ *   - Forward-scan comment/string-aware for the first `?>`.
+ *   - Backward-scan from the operator to an expression-start boundary
+ *     (`;`, `{`, `}`, `,`, `=` (not `==`/`!=`/`<=`/`>=`), `(`, `?`, `:`,
+ *     `&&`, `||`, or SOF) with balanced paren/bracket/brace tracking.
+ *   - Optionally consume `(ident)` as a binder.  If the `(...)` contents
+ *     are not a bare identifier we leave the `(` alone and treat it as
+ *     the start of a parenthesized RHS expression; this keeps
+ *     `?> (7 + 8)` and similar parenthesized defaults working.
+ *   - If the next non-ws token starts an error-handling shape
+ *     (`return`/`break`/`continue`/`goto`/`{`/`@err`), emit a diagnostic
+ *     steering the user to `!>`.  Otherwise scan forward as a C
+ *     expression up to the usual RHS end-markers.
+ *   - Splice in the statement-expression lowering and restart until no
+ *     `?>` remains.
  * ---------------------------------------------------------------- */
+
+/* Forward declaration: full definition lives later in the file alongside
+ * the other block/divergence helpers.  Used by the expression-position
+ * `!>` handler for block-body tail-divergence checks. */
+static int cc__pu_body_diverges(const char* body, size_t blen);
 
 /* Scan forward to find the byte index of the first `?>` that is not inside
  * a comment or string literal.  Returns 1 and writes *out_pos on success,
@@ -415,36 +404,35 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
         }
     }
 
-    /* --- Divergent vs expression RHS ----------------------------------- */
+    /* --- RHS shape check: `?>` is value-only ---------------------------- */
     size_t rhs_scan = cc_skip_ws_len(s, n, scan);
-    int is_divergent = 0;
     if (rhs_scan < n) {
+        int misuse = 0;
         if (cc__match_ident_kw(s, n, rhs_scan, "return") ||
             cc__match_ident_kw(s, n, rhs_scan, "break") ||
-            cc__match_ident_kw(s, n, rhs_scan, "continue")) {
-            is_divergent = 1;
+            cc__match_ident_kw(s, n, rhs_scan, "continue") ||
+            cc__match_ident_kw(s, n, rhs_scan, "goto")) {
+            misuse = 1;
+        } else if (s[rhs_scan] == '{') {
+            misuse = 1;
+        } else if (rhs_scan + 4 <= n && memcmp(s + rhs_scan, "@err", 4) == 0 &&
+                   !(rhs_scan + 11 <= n && memcmp(s + rhs_scan, "@errhandler", 11) == 0) &&
+                   (rhs_scan + 4 == n || !cc_is_ident_char(s[rhs_scan + 4]))) {
+            misuse = 1;
+        }
+        if (misuse) {
+            char rel[1024];
+            const char* f = cc_path_rel_to_repo(
+                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "'?>' RHS must be a value expression; use '!>' for error-handling logic");
+            return -1;
         }
     }
 
     size_t rhs_start = scan;
     size_t rhs_end = 0;
-    if (is_divergent) {
-        size_t semi = 0;
-        if (!cc__find_semi_forward(s, n, rhs_scan, &semi)) {
-            char rel[1024];
-            const char* f = cc_path_rel_to_repo(
-                ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
-            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
-                              "expected ';' terminating divergent statement in '?>' RHS");
-            return -1;
-        }
-        /* Leave the `;` in the original source; it terminates the overall
-         * statement that contains the `({ ... })` expression.  The inner
-         * `;` is emitted explicitly by the lowering below. */
-        rhs_end = semi;
-    } else {
-        if (!cc__find_rhs_end_forward(s, n, rhs_start, &rhs_end)) return -1;
-    }
+    if (!cc__find_rhs_end_forward(s, n, rhs_start, &rhs_end)) return -1;
 
     size_t rhs_a = rhs_start;
     size_t rhs_b = rhs_end;
@@ -463,9 +451,7 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
         const char* f = cc_path_rel_to_repo(
             ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
         cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
-                          is_divergent
-                              ? "missing divergent statement after '?>'"
-                              : "missing default expression after '?>'");
+                          "missing default expression after '?>'");
         return -1;
     }
 
@@ -481,42 +467,25 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
     cc__append_n(&out, &ol, &oc, s, lhs_start);
     if (lhs_a > lhs_start) cc__append_n(&out, &ol, &oc, s + lhs_start, lhs_a - lhs_start);
 
-    if (is_divergent) {
-        /* Case 3 / 4: if-divergent + cc_value on the ok path. */
-        cc__append_str(&out, &ol, &oc, "({ __typeof__(");
-        cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
-        cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
-        if (has_binder) {
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
-                             tmpv, binder, tmpv);
-        }
+    /* Case 1 / 2: ternary, optionally with scoped binder on the err arm. */
+    cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+    cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
+    cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+    cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
+    cc_sb_append_fmt(&out, &ol, &oc, "); cc_is_ok(%s) ? cc_value(%s) : ",
+                     tmpv, tmpv);
+    if (has_binder) {
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         "({ __typeof__(cc_error(%s)) %s = cc_error(%s); (",
+                         tmpv, binder, tmpv);
         cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
-        cc__append_str(&out, &ol, &oc, "; } ");
-        cc_sb_append_fmt(&out, &ol, &oc, "cc_value(%s); })", tmpv);
+        cc__append_str(&out, &ol, &oc, "); })");
     } else {
-        /* Case 1 / 2: ternary, optionally with scoped binder on the err arm. */
-        cc__append_str(&out, &ol, &oc, "({ __typeof__(");
-        cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
-        cc__append_n(&out, &ol, &oc, s + lhs_a, lhs_b - lhs_a);
-        cc_sb_append_fmt(&out, &ol, &oc, "); cc_is_ok(%s) ? cc_value(%s) : ",
-                         tmpv, tmpv);
-        if (has_binder) {
-            cc_sb_append_fmt(&out, &ol, &oc,
-                             "({ __typeof__(cc_error(%s)) %s = cc_error(%s); (",
-                             tmpv, binder, tmpv);
-            cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
-            cc__append_str(&out, &ol, &oc, "); })");
-        } else {
-            cc__append_str(&out, &ol, &oc, "(");
-            cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
-            cc__append_str(&out, &ol, &oc, ")");
-        }
-        cc__append_str(&out, &ol, &oc, "; })");
+        cc__append_str(&out, &ol, &oc, "(");
+        cc__append_n(&out, &ol, &oc, s + rhs_a, rhs_b - rhs_a);
+        cc__append_str(&out, &ol, &oc, ")");
     }
+    cc__append_str(&out, &ol, &oc, "; })");
 
     /* Copy any whitespace between rhs_b and rhs_end that we stripped, then
      * the rest of the input starting at rhs_end. */
@@ -529,18 +498,52 @@ static int cc__rewrite_result_unwrap_once(const CCVisitorCtx* ctx,
 }
 
 /* ------------------------------------------------------------------
- * `!>` statement-operator lowering.
+ * `!>` — error-handling operator, usable at statement OR expression
+ * position.  Position is determined by the character immediately before
+ * the LHS call expression: `;`, `{`, `}`, or SOF → statement position;
+ * anything else (`=`, `(`, `,`, `?`, `:`, `&&`, `||`, `return`, ...) →
+ * expression position.
  *
- * Recognized forms at call-postfix position:
+ * At STATEMENT position the recognized forms are (slice 4/5 legacy):
  *
- *   Form A:  CALL !>;                               (slice 4: no binder)
- *   Form B:  CALL !> STMT;                          (slice 4: no binder)
- *   Form C:  CALL !> { BLOCK }                      (slice 4: no binder)
- *   Form D:  CALL !> (IDENT) STMT;                  (slice 5: binder)
- *   Form E:  CALL !> (IDENT) { BLOCK }              (slice 5: binder)
+ *   Form A:  CALL !>;                               (no binder)
+ *   Form B:  CALL !> STMT;                          (no binder)
+ *   Form C:  CALL !> { BLOCK }                      (no binder)
+ *   Form D:  CALL !> (IDENT) STMT;                  (binder)
+ *   Form E:  CALL !> (IDENT) { BLOCK }              (binder)
  *
- * Slice 4 forms (A/B/C) rewrite into the pre-existing legacy `@err`
- * surface that `cc__rewrite_err_syntax` already handles:
+ * At statement position the body may fall through.
+ *
+ * At EXPRESSION position the recognized forms are:
+ *
+ *   Form P:  CALL !>;                               (bare delegate)
+ *   Form Q:  CALL !> DIVERGENT_STMT;                (no binder)
+ *   Form R:  CALL !> { STMT; ...; DIVERGENT_STMT }  (no binder, block)
+ *   Form S:  CALL !>(IDENT) DIVERGENT_STMT;         (binder)
+ *   Form T:  CALL !>(IDENT) { STMT; ...; DIVERGENT_STMT } (binder, block)
+ *
+ * The body (or block tail) MUST visibly diverge (same list used by the
+ * `@errhandler` divergence check: `return`, `break`, `continue`, `goto`,
+ * `@err(IDENT);`, or a call to a hardcoded-noreturn function).  The
+ * expression-position lowering is:
+ *
+ *   ({ __typeof__(CALL) tmp = (CALL);
+ *      if (cc_is_err(tmp)) {
+ *          [__typeof__(cc_error(tmp)) BINDER = cc_error(tmp);]
+ *          <BODY>
+ *      }
+ *      cc_value(tmp);
+ *   })
+ *
+ * Form P (`CALL !>;` at expression position) synthesizes a fresh binder
+ * name, locates the nearest enclosing `@errhandler`, substitutes the
+ * handler's parameter name with the synthesized binder in the handler
+ * body, and splices that as `<BODY>`.  It is a compile error if no
+ * enclosing `@errhandler` is in scope.
+ *
+ * At STATEMENT position, slice-4 forms (A/B/C) rewrite into the
+ * pre-existing legacy `@err` surface that `cc__rewrite_err_syntax`
+ * already handles:
  *
  *   CALL !>;            => CALL @err;
  *   CALL !> STMT;       => CALL @err STMT;
@@ -1293,12 +1296,15 @@ static int cc__rewrite_bang_binder(const CCVisitorCtx* ctx,
 
 /* Locate the start of the LHS "call" expression for a `!>` at `op_at`.
  *
- * `!>` is a STATEMENT operator, so the LHS can never cross a statement
- * boundary.  In addition to the expression-level boundaries used by the
- * `?>` scanner, we also treat any `}` / `{` / `;` / `:` / `@` at depth 0
- * as a hard boundary.  Balanced `(...)` / `[...]` are consumed so that
- * calls like `foo(bar, baz)` are kept intact. */
-static size_t cc__find_bang_lhs_start(const char* s, size_t op_at) {
+ * The LHS cannot cross a statement boundary (`;`, `{`, `}`).  It may
+ * cross expression-level boundaries (`=`, `(`, `,`, `?`, `:`, `&&`,
+ * `||`, `@`), which indicate `!>` is at expression position; crossing a
+ * statement boundary (or SOF) means statement position.  Balanced
+ * `(...)` / `[...]` are consumed so calls like `foo(bar, baz)` are kept
+ * intact.  `out_is_stmt_pos` (if non-NULL) is set to 1 iff the boundary
+ * immediately before the LHS indicates statement position. */
+static size_t cc__find_bang_lhs_start_ex(const char* s, size_t op_at,
+                                         int* out_is_stmt_pos) {
     int par = 0, brk = 0;
     size_t i = op_at;
     while (i > 0) {
@@ -1311,22 +1317,274 @@ static size_t cc__find_bang_lhs_start(const char* s, size_t op_at) {
         if (c == ')') { par++; continue; }
         if (c == '(') {
             if (par > 0) { par--; continue; }
+            /* Unmatched `(` — expression-position boundary (argument start,
+             * parenthesized expr, etc.). */
+            if (out_is_stmt_pos) *out_is_stmt_pos = 0;
             return i + 1;
         }
         if (c == ']') { brk++; continue; }
         if (c == '[') { if (brk > 0) brk--; continue; }
         if (par > 0 || brk > 0) continue;
 
-        /* Hard statement-level boundaries. */
-        if (c == ';' || c == ',' || c == '{' || c == '}' ||
-            c == '?' || c == ':' || c == '@') {
+        /* Statement-position boundaries. */
+        if (c == ';' || c == '{' || c == '}') {
+            if (out_is_stmt_pos) *out_is_stmt_pos = 1;
             return i + 1;
         }
-        if (c == '=' && cc__eq_is_boundary(s, op_at, i)) return i + 1;
-        if (c == '&' && i > 0 && s[i - 1] == '&') return i + 1;
-        if (c == '|' && i > 0 && s[i - 1] == '|') return i + 1;
+        /* Expression-position boundaries. */
+        if (c == ',' || c == '?' || c == ':' || c == '@') {
+            if (out_is_stmt_pos) *out_is_stmt_pos = 0;
+            return i + 1;
+        }
+        if (c == '=' && cc__eq_is_boundary(s, op_at, i)) {
+            if (out_is_stmt_pos) *out_is_stmt_pos = 0;
+            return i + 1;
+        }
+        if (c == '&' && i > 0 && s[i - 1] == '&') {
+            if (out_is_stmt_pos) *out_is_stmt_pos = 0;
+            return i + 1;
+        }
+        if (c == '|' && i > 0 && s[i - 1] == '|') {
+            if (out_is_stmt_pos) *out_is_stmt_pos = 0;
+            return i + 1;
+        }
     }
+    /* SOF → statement position (top-level). */
+    if (out_is_stmt_pos) *out_is_stmt_pos = 1;
     return 0;
+}
+
+static size_t cc__find_bang_lhs_start(const char* s, size_t op_at) {
+    return cc__find_bang_lhs_start_ex(s, op_at, NULL);
+}
+
+/* Expression-position `!>` rewrite.  Emits the `({ ... })`
+ * statement-expression lowering after validating that the body diverges.
+ * `call_start` is the first byte of the LHS call (already adjusted past
+ * any leading `return` keyword by the caller). */
+static int cc__rewrite_bang_expr_once(const CCVisitorCtx* ctx,
+                                      const char* s, size_t n,
+                                      size_t op_at, size_t call_start,
+                                      int line_no,
+                                      char** out_buf, size_t* out_len) {
+    char rel[1024];
+    const char* f = cc_path_rel_to_repo(
+        ctx && ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
+
+    size_t call_a = call_start, call_b = op_at;
+    cc__trim_range(s, &call_a, &call_b);
+    if (call_b <= call_a) {
+        cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                          "missing expression before '!>'");
+        return -1;
+    }
+
+    size_t scan = cc_skip_ws_len(s, n, op_at + 2);
+    int has_binder = 0;
+    char binder[128];
+    binder[0] = 0;
+
+    if (scan < n && s[scan] == '(') {
+        size_t rpar = 0;
+        if (!cc_find_matching_paren(s, n, scan, &rpar)) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "unclosed '(' in '!>' binder");
+            return -1;
+        }
+        size_t ba = scan + 1, bb = rpar;
+        while (ba < bb && isspace((unsigned char)s[ba])) ba++;
+        while (bb > ba && isspace((unsigned char)s[bb - 1])) bb--;
+        if (!cc__range_is_ident(s, ba, bb)) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "expected identifier in '!> (...)'");
+            return -1;
+        }
+        size_t blen = bb - ba;
+        if (blen >= sizeof(binder)) blen = sizeof(binder) - 1;
+        memcpy(binder, s + ba, blen);
+        binder[blen] = 0;
+        has_binder = 1;
+        scan = cc_skip_ws_len(s, n, rpar + 1);
+    }
+
+    if (scan >= n) {
+        cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                          has_binder
+                              ? "expected body after '!> (e)'"
+                              : "expected body after '!>'");
+        return -1;
+    }
+
+    /* Locate the nearest enclosing @errhandler (needed for bare form and
+     * for any `@err(binder);` forwards inside a user-provided body). */
+    char outer_decl[256];
+    size_t outer_decl_len = 0;
+    const char* outer_body = NULL;
+    size_t outer_body_len = 0;
+    size_t outer_decl_pos = 0;
+    char outer_param[128];
+    outer_param[0] = 0;
+    int outer_found = cc__pu_find_outer_errhandler(
+        s, n, call_a,
+        outer_decl, sizeof(outer_decl), &outer_decl_len,
+        &outer_body, &outer_body_len, &outer_decl_pos);
+    if (outer_found) {
+        cc__pu_extract_param_name(outer_decl, outer_decl_len,
+                                  outer_param, sizeof(outer_param));
+    }
+
+    /* Form P: bare `!>;` at expression position.  Synthesize a binder,
+     * inline the outer handler body. */
+    if (s[scan] == ';' && !has_binder) {
+        if (!outer_found) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "'!>;' at expression position requires an enclosing '@errhandler' in scope");
+            return -1;
+        }
+        if (!cc__pu_body_diverges(outer_body, outer_body_len)) {
+            int decl_line = line_no;
+            cc__line_from_pos(s, outer_decl_pos, &decl_line);
+            cc_pass_error_cat(f, decl_line, 1, CC_ERR_SYNTAX,
+                              "@errhandler body must visibly diverge when used as an expression-position '!>;' delegate");
+            return -1;
+        }
+        static int g_bang_expr_bare_id = 0;
+        int id = ++g_bang_expr_bare_id;
+        char synth[48];
+        snprintf(synth, sizeof(synth), "__cc_pu_be_%d", id);
+        strncpy(binder, synth, sizeof(binder));
+        binder[sizeof(binder) - 1] = 0;
+        has_binder = 1;
+
+        size_t sub_len = 0;
+        char* substituted = cc__pu_subst_word(
+            outer_body, outer_body_len,
+            (outer_param[0] ? outer_param : ""),
+            binder, &sub_len);
+        if (!substituted) return -1;
+
+        static int g_expr_tmp_id = 0;
+        int tid = ++g_expr_tmp_id;
+        char tmpv[48];
+        snprintf(tmpv, sizeof(tmpv), "__cc_pu_e_%d", tid);
+
+        /* Leave the source `;` in place: in `int v = f() !>;` it terminates
+         * the enclosing declaration.  The generated expression is a
+         * parenthesised `({ ... })` with no trailing `;` so we must not
+         * swallow the only `;` in sight. */
+        size_t splice_to = scan;
+
+        char* out = NULL;
+        size_t ol = 0, oc = 0;
+        cc__append_n(&out, &ol, &oc, s, call_start);
+        cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+        cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+        cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+        cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+        cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                         tmpv, binder, tmpv);
+        cc__append_n(&out, &ol, &oc, substituted, sub_len);
+        cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
+        free(substituted);
+        if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
+        *out_buf = out;
+        *out_len = ol;
+        return 1;
+    }
+
+    /* Reject bare `!>(e);` form — a binder requires a body. */
+    if (s[scan] == ';' && has_binder) {
+        cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                          "expected body after '!> (%s)'", binder);
+        return -1;
+    }
+
+    /* Parse a single-statement body or block body, then require divergence. */
+    size_t body_a = 0, body_b = 0;
+    int is_block = 0;
+    size_t splice_to = 0;
+    if (s[scan] == '{') {
+        size_t rbrace = 0;
+        if (!cc_find_matching_brace(s, n, scan, &rbrace)) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "unclosed '{' in '!>' body");
+            return -1;
+        }
+        body_a = scan + 1;
+        body_b = rbrace;
+        splice_to = rbrace + 1;
+        is_block = 1;
+        if (!cc__pu_body_diverges(s + body_a, body_b - body_a)) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)");
+            return -1;
+        }
+    } else {
+        size_t semi = 0;
+        if (!cc__find_semi_forward(s, n, scan, &semi)) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "expected ';' terminating '!>' body");
+            return -1;
+        }
+        body_a = scan;
+        body_b = semi + 1; /* include `;` so cc__pu_stmt_diverges sees it */
+        /* Leave the source `;` in place so it terminates the enclosing
+         * statement (e.g. `int x = f() !> return cc_err;`).  The body `;`
+         * is re-emitted explicitly inside the if-branch below. */
+        splice_to = semi;
+        if (!cc__pu_stmt_diverges(s, body_a, body_b)) {
+            cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
+                              "expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)");
+            return -1;
+        }
+    }
+
+    /* Process `@err(IDENT);` forwards inside the body. */
+    char* processed = NULL;
+    size_t processed_len = 0;
+    if (cc__pu_process_bang_body(ctx, s, n, call_a, line_no,
+                                 s + body_a, body_b - body_a,
+                                 binder,
+                                 outer_body, outer_body_len,
+                                 outer_param,
+                                 outer_found, outer_decl_pos,
+                                 &processed, &processed_len) < 0) {
+        return -1;
+    }
+
+    static int g_expr_tmp_id2 = 0;
+    int tid = ++g_expr_tmp_id2;
+    char tmpv[48];
+    snprintf(tmpv, sizeof(tmpv), "__cc_pu_x_%d", tid);
+
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    cc__append_n(&out, &ol, &oc, s, call_start);
+    cc__append_str(&out, &ol, &oc, "({ __typeof__(");
+    cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+    cc_sb_append_fmt(&out, &ol, &oc, ") %s = (", tmpv);
+    cc__append_n(&out, &ol, &oc, s + call_a, call_b - call_a);
+    cc_sb_append_fmt(&out, &ol, &oc, "); if (cc_is_err(%s)) { ", tmpv);
+    if (has_binder) {
+        cc_sb_append_fmt(&out, &ol, &oc,
+                         "__typeof__(cc_error(%s)) %s = cc_error(%s); ",
+                         tmpv, binder, tmpv);
+    }
+    cc__append_n(&out, &ol, &oc, processed, processed_len);
+    if (!is_block) {
+        /* Single-statement form: include trailing `;` if the stmt was
+         * emitted without one (body_b already included the `;`, so
+         * processed already ends with `;` — skip). */
+        (void)0;
+    }
+    cc_sb_append_fmt(&out, &ol, &oc, " } cc_value(%s); })", tmpv);
+    free(processed);
+    if (splice_to < n) cc__append_n(&out, &ol, &oc, s + splice_to, n - splice_to);
+    *out_buf = out;
+    *out_len = ol;
+    return 1;
 }
 
 /* Single pass: find the first `!>` and rewrite it in place into either
@@ -1354,6 +1612,26 @@ static int cc__rewrite_bang_once(const CCVisitorCtx* ctx,
         cc_pass_error_cat(f, line_no, 1, CC_ERR_SYNTAX,
                           "unexpected end of input after '!>'");
         return -1;
+    }
+
+    /* Dispatch: determine whether `!>` is at statement or expression
+     * position based on the character before the LHS call expression. */
+    int is_stmt_pos = 1;
+    size_t call_start = cc__find_bang_lhs_start_ex(s, op_at, &is_stmt_pos);
+    /* Special-case: if LHS textually begins with `return`, we are actually
+     * at expression position (the `!>` operand is `return`'s expression). */
+    if (is_stmt_pos) {
+        size_t a = call_start;
+        while (a < op_at && isspace((unsigned char)s[a])) a++;
+        if (a + 6 <= op_at && memcmp(s + a, "return", 6) == 0 &&
+            (a + 6 < op_at && !cc_is_ident_char(s[a + 6]))) {
+            is_stmt_pos = 0;
+            call_start = a + 6;
+        }
+    }
+    if (!is_stmt_pos) {
+        return cc__rewrite_bang_expr_once(ctx, s, n, op_at, call_start,
+                                          line_no, out_buf, out_len);
     }
 
     /* --- Slice 5: optional `(IDENT)` binder --------------------------- */

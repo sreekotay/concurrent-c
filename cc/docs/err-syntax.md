@@ -6,8 +6,8 @@ Normative semantics live in [`spec/concurrent-c-spec-complete.md` §2.2](../../s
 
 | Pass | Module | Role | Status |
 |------|--------|------|--------|
-| Result unwrap | `cc/src/visitor/pass_result_unwrap.c`, `.h` | Primary. Lowers `?>` (expression) and `!>` (statement) to `cc_is_ok` / `cc_is_err` / `cc_value` / `cc_error`. Implements the `@err(e);` forward inside `!>` bodies, the `@errhandler` divergence check, and the slice-7 unhandled-result diagnostic. | **Active** |
-| Legacy err syntax | `cc/src/visitor/pass_err_syntax.c`, `.h` | Existing `@err` / `=<!` / `: default` / `@errhandler` handler dispatch pass. Runs after `pass_result_unwrap` so that any `!>` forms lowered into the legacy `@err` shorthand are still processed. | **Live (phases 1-3)** |
+| Result unwrap | `cc/src/visitor/pass_result_unwrap.c`, `.h` | Primary. Lowers `?>` (default-value operator, expression-only RHS) and `!>` (error-handler operator, expression- and statement-position) to `cc_is_ok` / `cc_is_err` / `cc_value` / `cc_error`. Implements the `@err(e);` forward inside `!>` bodies, the `@errhandler` divergence check, and the slice-7 unhandled-result diagnostic. | **Active** |
+| Legacy err syntax | `cc/src/visitor/pass_err_syntax.c`, `.h` | Existing `@err` / `=<!` / `: default` / `@errhandler` handler dispatch pass. Runs after `pass_result_unwrap` so that any `!>` forms lowered into the legacy `@err` shorthand are still processed. Skips `@err(IDENT);` tokens (followed immediately by `;`), which are structured forwards from the new-surface pass. | **Live (phases 1-3)** |
 
 Both passes are text-rewrite passes over CC source, converging in a short fixed-iteration loop per invocation.
 
@@ -35,26 +35,54 @@ The same `cc__rewrite_result_unwrap` call is repeated immediately before `cc__re
 
 Closure bodies are re-run through the err-syntax and result-unwrap passes so that `?>` / `!>` / `@err` inside captured blocks lower correctly.
 
+## Operator role split (slice 9)
+
+The two operators have cleanly separated responsibilities:
+
+- **`?>` — default value operator.** Reads `EXPR ?> DEFAULT_EXPR` or `EXPR ?>(ident) DEFAULT_EXPR`. The RHS is a pure C expression producing `T`. No divergent statements, no blocks, no bare shorthand. Analogous to `??` in Swift/C#/JS or `?:` in Kotlin.
+- **`!>` — error-handler operator.** Runs at both statement and expression position. At **expression position** the body must *visibly diverge*; at **statement position** the body may fall through. The bare form `CALL !>;` dispatches to the enclosing `@errhandler` (statement position) or inlines the handler body with a synthesized binder (expression position).
+
 ## Text-rewrite strategy (result-unwrap)
 
 All scans are comment- and string-aware. The algorithm:
 
 1. **Forward-scan** for the first `?>` or `!>` operator at depth 0 in a comment/string-free context.
-2. **Backward-scan** from the operator to an expression-start boundary — one of `;`, `{`, `}`, `,`, `=`, `(`, `?`, `:`, `&&`, `||`, or SOF — with balanced paren/bracket/brace tracking. This gives the LHS span (for `?>`) or the call span (for `!>`).
+2. **Backward-scan** from the operator to an expression-start boundary — one of `;`, `{`, `}`, `,`, `=`, `(`, `?`, `:`, `&&`, `||`, or SOF — with balanced paren/bracket/brace tracking. For `!>`, the scan also records whether the boundary indicates *statement position* (preceded by `;`, `{`, `}`, or SOF, modulo a labelled-statement prefix) or *expression position* (preceded by `(`, `,`, `=`, `?`, `:`, `&&`, `||`, `@`, or an immediate `return` keyword). The dispatch tables in `cc__rewrite_bang_once` split on this flag.
 3. **Optionally consume** a `(ident)` binder. Rules:
    - The `(...)` contents must be a single bare identifier. If not, the `(` is left alone and treated as the start of a parenthesized RHS expression. This keeps `?> (7 + 8)` working as a defaulted expression.
    - Empty `()` and non-identifier contents emit the diagnostic `expected identifier in '!> (...)'` (or the `?>` analogue).
-4. **RHS parse** for `?>`:
-   - If the next non-ws token is the identifier `return` / `break` / `continue` at a word boundary, capture a divergent statement up to its terminating `;` at depth 0.
-   - Otherwise scan forward as a C expression up to a statement/expression end marker.
-5. **Body parse** for `!>`:
+4. **RHS parse for `?>` (value only, slice 9).** The next non-ws token is inspected. If it is `{`, a `return` / `break` / `continue` / `goto` keyword, or an `@err` introducer, the parser emits `'?>' RHS must be a value expression; use '!>' for error-handling logic` at the `?>` line and stops. Otherwise the RHS is scanned as a normal C expression terminated by `;`, `,`, or a matching close-paren, and lowered as a ternary:
+   ```c
+   ({ __typeof__(CALL) tmp = (CALL);
+      cc_is_ok(tmp) ? cc_value(tmp) : (DEFAULT_EXPR); })
+   ```
+   The optional binder `(e)` is bound inside the `: (...)` branch so that `fallback_for(e.kind)` works.
+5. **Body parse for `!>` at statement position** (unchanged from earlier slices):
    - `;` → bare form, dispatch to registered `@errhandler`.
    - `{` → block body. The block is scanned for `@err(IDENT);` forwards; dead-code analysis fires if any statement (comment/ws-stripped) follows a `@err(IDENT);` in the same block.
-   - Otherwise → single statement.
-6. **Binder scoping.** The binder `(e)` is only injected into the generated error-branch block, so it is naturally invisible outside that scope. `@err(X);` inside a `!>` body is rejected (with the diagnostic `@err(X) forward references unknown binder`) unless `X` is the immediate binder name.
-7. **Handler divergence check.** At each `@errhandler(TYPE NAME) { BODY }` declaration, the pass inspects `BODY` to confirm the last statement (recursively descending into `{ ... }` compound tails) is one of: `return...;`, `break;`, `continue;`, `goto LBL;`, `@err(ident);`, or a call to a hardcoded noreturn name (see allowlist below). A non-divergent body emits `@errhandler body must visibly diverge` at the handler site. The check fires whether or not any particular `@err(e);` actually forwards to this handler in the current translation unit; the implementation emits the diagnostic only when an `@err(e);` forward targets the handler (matches the slice-5/6 test behaviour — a handler reached only by `!>;` without forwards is not divergence-checked).
-8. **Noreturn allowlist (hardcoded).** `exit`, `_Exit`, `_exit`, `abort`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`. A call to any of these at the tail of a handler body counts as divergence.
-9. **Result-fn name registry (slice 7).** Populated by the type-syntax / preprocess pass (`cc_result_fn_registry_add`) when a declaration `T !> (E) NAME(...)` is parsed. The strict unhandled-call scan in `pass_result_unwrap.c` uses `cc_result_fn_registry_contains` to decide whether a bare `NAME(...);` at statement position is a result-typed call that has been discarded.
+   - Otherwise → single statement. Body may fall through.
+6. **Body parse for `!>` at expression position** (slice 9, `cc__rewrite_bang_expr_once`):
+   - `;` (bare) → synthesize a fresh binder (`__cc_pu_be_N`), locate the enclosing `@errhandler` via `cc__pu_find_outer_errhandler`, substitute its parameter name → synthesized binder, and splice the handler body into the if-branch. If no `@errhandler` is in scope, emit `'!>;' at expression position requires an enclosing '@errhandler' in scope`. If the outer handler body does not diverge, emit `@errhandler body must visibly diverge when used as an expression-position '!>;' delegate` at the handler site.
+   - `{ ... }` → block body. The block must diverge (`cc__pu_body_diverges`); otherwise emit `expression-position '!>' body must diverge (return/break/continue/goto/@err/exit/abort/etc.)` at the `!>` line.
+   - Single statement → likewise, must diverge (`cc__pu_stmt_diverges`). The closing `;` of the body remains in the source so that the enclosing declaration/assignment statement keeps its terminator after the substitution.
+   - Lowering shape in all three cases:
+     ```c
+     ({ __typeof__(CALL) tmp = (CALL);
+        if (cc_is_err(tmp)) {
+            [__typeof__(cc_error(tmp)) BINDER = cc_error(tmp);]
+            <BODY>
+        }
+        cc_value(tmp); })
+     ```
+   - The call LHS is evaluated exactly once; `BODY` must diverge so control never falls through the `({ ... })` with an uninitialised `cc_value(tmp)`.
+7. **Binder scoping.** The binder `(e)` is only injected into the generated error-branch block, so it is naturally invisible outside that scope. `@err(X);` inside a `!>` body is rejected (with the diagnostic `@err(X) forward references unknown binder`) unless `X` is the immediate binder name.
+8. **Handler divergence check.** At each `@errhandler(TYPE NAME) { BODY }` declaration, the pass inspects `BODY` to confirm the last statement (recursively descending into `{ ... }` compound tails) is one of: `return...;`, `break;`, `continue;`, `goto LBL;`, `@err(ident);`, or a call to a hardcoded noreturn name (see allowlist below). A non-divergent body emits `@errhandler body must visibly diverge` at the handler site. The check fires whether or not any particular `@err(e);` actually forwards to this handler in the current translation unit; the implementation emits the diagnostic only when an `@err(e);` forward targets the handler (matches the slice-5/6 test behaviour — a handler reached only by `!>;` without forwards is not divergence-checked).
+9. **Noreturn allowlist (hardcoded).** `exit`, `_Exit`, `_exit`, `abort`, `longjmp`, `siglongjmp`, `pthread_exit`, `__builtin_unreachable`, `__builtin_trap`. A call to any of these at the tail of a handler body counts as divergence.
+10. **Result-fn name registry (slice 7).** Populated by the type-syntax / preprocess pass (`cc_result_fn_registry_add`) when a declaration `T !> (E) NAME(...)` is parsed. The strict unhandled-call scan in `pass_result_unwrap.c` uses `cc_result_fn_registry_contains` to decide whether a bare `NAME(...);` at statement position is a result-typed call that has been discarded.
+
+## Legacy-pass conflict (slice 9)
+
+The expression-position `!>(e) @err(e);` form relies on the `@err(IDENT);` forward being handled by the result-unwrap pass, not by the legacy `pass_err_syntax.c` (which expects `@err(DECL) { BODY }`). To prevent the legacy pass from rewriting new-style forwards, `cc__at_err_postfix` peeks past the balanced `(...)` after `@err` and returns 0 when the next non-whitespace byte is `;`. This single-character lookahead is sound because the legacy surface always requires a compound open-brace after `)`.
 
 ## Unhandled-result diagnostic
 
@@ -83,9 +111,14 @@ Conservative by design: a label prefix (`LBL: f();`) is a false negative, and in
 |------|--------|
 | `tests/result_unwrap_basic_smoke.ccs` | `?>` with no binder, pure-expression RHS, default value path. |
 | `tests/result_unwrap_binder_smoke.ccs` | `?>(e)` binder, pure-expression RHS, both success and error branches. |
-| `tests/result_unwrap_divergent_return_smoke.ccs` | `?>(e) return cc_err(...);` propagation from a nested call. |
-| `tests/result_unwrap_divergent_break_smoke.ccs` | `?> break;` exits the enclosing loop on error. |
-| `tests/result_unwrap_qmark_continue_smoke.ccs` | `?> continue;` skips the loop body on error. |
+| `tests/result_unwrap_bang_divergent_return_smoke.ccs` | `!>(e) return cc_err(...);` at expression position propagates from a nested call. |
+| `tests/result_unwrap_bang_divergent_break_smoke.ccs` | `!> break;` at expression position exits the enclosing loop on error. |
+| `tests/result_unwrap_bang_continue_smoke.ccs` | `!> continue;` at expression position skips the loop body on error. |
+| `tests/result_unwrap_bang_expr_block_binder_smoke.ccs` | `!>(e) { ...; return cc_err(...); };` block body with binder, multi-statement divergent tail. |
+| `tests/result_unwrap_bang_expr_block_nobinder_smoke.ccs` | `!> { ...; continue; };` block body with no binder, used inside a loop. |
+| `tests/result_unwrap_bang_expr_return_smoke.ccs` | `f() !>(e) return cc_err(CC_ERROR(e.kind, "prop"));` in a declaration initializer (expression position, single-stmt body). |
+| `tests/result_unwrap_bang_expr_bare_smoke.ccs` | `f() !>;` at expression position delegates to the enclosing `@errhandler` via synthesized binder. |
+| `tests/result_unwrap_bang_expr_err_forward_smoke.ccs` | `f() !>(e) @err(e);` at expression position forwards through the legacy-pass skip. |
 | `tests/result_unwrap_qmark_arg_position_smoke.ccs` | `?>` used in function-argument, sub-expression, and conditional-test positions. |
 | `tests/result_unwrap_bang_bare_smoke.ccs` | `call() !>;` dispatches to registered `@errhandler`. |
 | `tests/result_unwrap_bang_single_smoke.ccs` | `call() !> break;` / `!> continue;` single-statement body. |
@@ -108,6 +141,13 @@ Conservative by design: a label prefix (`LBL: f();`) is a false negative, and in
 | `tests/result_unwrap_qmark_missing_rhs_fail.ccs` | `expr ?> ;` with nothing on the RHS is rejected (`missing default expression after '?>'`). |
 | `tests/result_unwrap_qmark_empty_binder_fail.ccs` | `expr ?>() RHS` is rejected (empty binder). |
 | `tests/result_unwrap_qmark_bad_binder_fail.ccs` | `expr ?>(123) RHS` is rejected (non-identifier binder). |
+| `tests/result_unwrap_qmark_divergent_rhs_fail.ccs` | `expr ?>(e) return ...;` — divergent statement on `?>` RHS is rejected (slice 9). |
+| `tests/result_unwrap_qmark_block_rhs_fail.ccs` | `expr ?>(e) { return ...; };` — block on `?>` RHS is rejected (slice 9). |
+| `tests/result_unwrap_qmark_continue_rhs_fail.ccs` | `expr ?> continue;` — `continue` on `?>` RHS is rejected (slice 9). |
+| `tests/result_unwrap_bang_expr_block_no_diverge_fail.ccs` | `expr !>(e) { log(...); };` at expression position whose last statement is not divergent is rejected. |
+| `tests/result_unwrap_bang_expr_block_empty_fail.ccs` | `expr !>(e) { };` — empty block body at expression position is rejected. |
+| `tests/result_unwrap_bang_expr_no_diverge_fail.ccs` | `expr !>(e) { printf(...); };` — non-divergent single block at expression position is rejected. |
+| `tests/result_unwrap_bang_expr_bare_no_handler_fail.ccs` | `expr !>;` at expression position without an enclosing `@errhandler` is rejected. |
 | `tests/result_unwrap_bang_missing_body_fail.ccs` | `call() !> (e) ;` is rejected (`expected body after '!> (e)'`). |
 | `tests/result_unwrap_bang_empty_binder_fail.ccs` | `call() !> () BODY` is rejected (empty binder). |
 | `tests/result_unwrap_bang_bad_binder_fail.ccs` | `call() !> (1e2) BODY` is rejected (non-identifier binder). |
