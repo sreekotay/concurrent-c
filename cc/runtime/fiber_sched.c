@@ -267,10 +267,6 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 * Configuration
 * ============================================================================ */
 
-#ifndef CC_FIBER_WORKERS
-#define CC_FIBER_WORKERS 0  /* 0 = detect at runtime */
-#endif
-
 #ifndef CC_FIBER_STACK_SIZE
 /* With MCO_USE_VMEM_ALLOCATOR, physical memory is only committed on demand.
 * We can use large virtual stack (2MB) with low physical memory cost. */

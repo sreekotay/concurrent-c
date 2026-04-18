@@ -105,3 +105,57 @@ left over from the earlier runs.
 6. Re-run `tools/run_all.ccs --all --trace` end to end.
 7. Triage `stress/lost_wakeup_hammer.ccs` and
    `stress/backpressure_cycle_ring3_deadline.ccs` if still failing.
+
+## Update — 2026-04-18 follow-on session
+
+### `cc_fiber_task_free` leak fix (commit `768d9d0`)
+Confirmed working. `--perf --trace` ran 31/31 tests (28 pass, 2 unrelated
+failures, 1 server skip) without a single panic. Both legacy-API perf
+tests (`perf/perf_spawn_ladder.ccs`, `perf/spawn_fiber_direct.ccs`) now
+pass.
+
+`perf/spawn_sequential.ccs` un-skipped in commit `91a525a` after a
+controlled isolation run (100/1000/5000/10000 iters all clean, RSS flat
+at 46 MB). It was never the actual leaker — it crashed the machine the
+first time only because the leak in `perf_spawn_ladder` had already
+exhausted Mach VM region capacity by the time it ran.
+
+### Crasher #3: `stress/noisy_neighbor.ccs`  (still open)
+Trace pinpoint: ran `tools/run_all --all --trace`, last START with no
+END was `[1776547989433] START [41/44] stress/noisy_neighbor.ccs`.
+Definitive panic point.
+
+The test:
+- sets `CC_V2_THREADS=4` (was `CC_FIBER_WORKERS=4` until V1 retirement;
+  global rename done as part of the V1 cruft strip — V2 only honors
+  `CC_V2_THREADS` / `CC_WORKERS`, see `cc/runtime/sched_v2.c:1122-1132`).
+- spawns 15 CPU-hog fibers in a tight `while (!cc_cancelled())` loop with
+  no yield/await/syscall — each one pins a worker thread.
+- spawns 1 heartbeat fiber relying on `cc_sleep_ms(100)` to tick.
+- relies on the V2 sysmon to give the heartbeat a slot when all workers
+  are pinned.
+
+This test passed cleanly in earlier traces (run before the perf leg).
+It panicked the Mac when run after 40+ preceding stress tests. The
+causal hypothesis is cumulative: mach VM regions / kqueue / dispatch
+source state from prior subprocesses + a 3-second sustained 100% CPU
+load + sysmon pool growth pushes the kernel over an internal limit.
+
+### Other regressions visible across the two latest traces
+- `stress/pipeline_repeat.ccs` was rc=0 in the first trace, rc=1 in
+  the second. Flaky / racy under stress-suite load. Not a crash.
+- `stress/lost_wakeup_hammer.ccs` rc=1 in trace 1 (status TBD in trace
+  2 — the run panicked before it could be re-attempted).
+- `stress/backpressure_cycle_ring3_deadline.ccs` rc=1 in trace 1.
+
+### Decision
+Skip `stress/noisy_neighbor.ccs` in `tools/run_all` so the full
+`--all --trace` run can complete. Investigate it in isolation with the
+same scaling protocol used for `perf/spawn_sequential` (low
+NUM_HOGS / TEST_DURATION_SEC, watch RSS + thread count).
+
+Update: `CC_FIBER_WORKERS` was retired everywhere in the tree (10 sites)
+in favor of `CC_V2_THREADS`. The dead `#define CC_FIBER_WORKERS` in
+`cc/runtime/fiber_sched.c` was deleted, and the V1-only "Concurrent-C V1"
+comparison row in `perf/compare_syscall.sh` was collapsed into the single
+"Concurrent-C" row. The compile-time knob no longer exists in the spec.

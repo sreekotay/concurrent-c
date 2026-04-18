@@ -79,11 +79,9 @@ read PTHREAD_BEATS PTHREAD_PEAK < last_beats.txt
 echo ""
 
 # 3. Run Concurrent-C (oversubscribed workers — V2 via spawnhybrid)
-export CC_FIBER_WORKERS=$WORKERS
 export CC_V2_THREADS=$WORKERS
 run_test "Concurrent-C (${WORKERS}w)" "$STRESS_DIR/out/noisy_neighbor"
 read CC_BEATS CC_PEAK < last_beats.txt
-unset CC_FIBER_WORKERS
 unset CC_V2_THREADS
 echo ""
 

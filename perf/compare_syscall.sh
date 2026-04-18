@@ -82,11 +82,8 @@ run_test() {
 run_test "Pthread (Adler)" "$STRESS_DIR/out/adler_baseline_kidnap"
 PTHREAD_BEATS=$LAST_BEATS;  PTHREAD_DONE=$LAST_DONE
 
-run_test "Concurrent-C V1" "$STRESS_DIR/out/syscall_kidnap" "CC_FIBER_WORKERS=$WORKERS"
-CCV1_BEATS=$LAST_BEATS;     CCV1_DONE=$LAST_DONE
-
-run_test "Concurrent-C V2" "$STRESS_DIR/out/syscall_kidnap" "CC_V2_THREADS=$WORKERS"
-CCV2_BEATS=$LAST_BEATS;     CCV2_DONE=$LAST_DONE
+run_test "Concurrent-C" "$STRESS_DIR/out/syscall_kidnap" "CC_V2_THREADS=$WORKERS"
+CC_BEATS=$LAST_BEATS;       CC_DONE=$LAST_DONE
 
 GO_BEATS="-"; GO_DONE="-"
 if command -v go >/dev/null 2>&1; then
@@ -103,10 +100,8 @@ fi
 echo ""
 echo "DATA_PTHREAD_SYSCALL_BEATS: $PTHREAD_BEATS"
 echo "DATA_PTHREAD_SYSCALL_DONE:  $PTHREAD_DONE"
-echo "DATA_CCV1_SYSCALL_BEATS:    $CCV1_BEATS"
-echo "DATA_CCV1_SYSCALL_DONE:     $CCV1_DONE"
-echo "DATA_CCV2_SYSCALL_BEATS:    $CCV2_BEATS"
-echo "DATA_CCV2_SYSCALL_DONE:     $CCV2_DONE"
+echo "DATA_CC_SYSCALL_BEATS:      $CC_BEATS"
+echo "DATA_CC_SYSCALL_DONE:       $CC_DONE"
 echo "DATA_GO_SYSCALL_BEATS:      $GO_BEATS"
 echo "DATA_GO_SYSCALL_DONE:       $GO_DONE"
 echo "DATA_ZIG_SYSCALL_BEATS:     $ZIG_BEATS"
@@ -118,8 +113,7 @@ echo "VERDICT"
 echo "================================================================="
 printf "%-20s %-12s %-22s\n" "Implementation" "Heartbeats" "Kidnappers Completed"
 printf "%-20s %-12s %-22s\n" "Pthread (Adler)"    "$PTHREAD_BEATS" "$PTHREAD_DONE / $KIDNAPPERS"
-printf "%-20s %-12s %-22s\n" "Concurrent-C V1"    "$CCV1_BEATS"    "$CCV1_DONE / $KIDNAPPERS"
-printf "%-20s %-12s %-22s\n" "Concurrent-C V2"    "$CCV2_BEATS"    "$CCV2_DONE / $KIDNAPPERS"
+printf "%-20s %-12s %-22s\n" "Concurrent-C"       "$CC_BEATS"      "$CC_DONE / $KIDNAPPERS"
 printf "%-20s %-12s %-22s\n" "Go"                 "$GO_BEATS"      "$GO_DONE / $KIDNAPPERS"
 printf "%-20s %-12s %-22s\n" "Zig"                "$ZIG_BEATS"     "$ZIG_DONE / $KIDNAPPERS"
 echo "-----------------------------------------------------------------"

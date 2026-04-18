@@ -6,7 +6,7 @@ Minimal, complete spec for the fiber scheduler state machine, ownership rules, a
 
 - **Fiber**: a reusable stack + context that repeatedly executes assigned thunks.
 - **Worker**: an OS thread that runs fibers.
-- **Virtual core**: a fiber treated as a reusable execution slot.
+- 
 - **Correctness goals**: no lost wakeups, no double-schedule, no concurrent use of a stack.
 
 ## Fiber lifecycle (persistent)
@@ -48,7 +48,7 @@ Each fiber has `_Atomic int64_t control`:
 The runtime MUST use C11 atomics with at least the following orderings:
 
 - **Wait-node notification**: waker `store_release(node.notified, reason)`; waiter `load_acquire(node.notified)`.
-- **`pending_unpark` latch**: set with `store_release`; checked with `load_acquire`; cleared with `exchange_acq_rel`.
+- `**pending_unpark` latch**: set with `store_release`; checked with `load_acquire`; cleared with `exchange_acq_rel`.
 - **Ownership/state words** (e.g. `control`): transitions via `CAS_acq_rel` on success and `acquire` on failure; publishing a state other threads act on uses `store_release`; observing uses `load_acquire`.
 - **Run-queue / inbox publish**: enqueue is `release`, dequeue is `acquire` (or an equivalent HB guarantee).
 - **Diagnostics/counters**: `relaxed` only; must not be used for correctness.
@@ -97,7 +97,7 @@ Spawner acquires an `IDLE` fiber (local idle stack fast-path). Then:
 2. Write runnable metadata (thunk `fn`, `arg`, etc.).
 3. Publish to a worker by pushing `f` to that worker's inbox or local queue.
 4. The target worker dequeues `f` and claims execution by `CAS(f->control, ASSIGNED, OWNED(worker_id))`, then runs the thunk.
-   - If the CAS fails, the dequeued entry is stale and MUST be discarded.
+  - If the CAS fails, the dequeued entry is stale and MUST be discarded.
 
 If no `IDLE` fiber is available, the runtime MUST take a non-blocking slow path (e.g. allocate a new fiber / pull from a global pool). It must not block a worker thread waiting for an idle fiber.
 
@@ -126,11 +126,11 @@ Minimal required behavior (yield-before-commit):
 2. If `load(flag) != expected`, return immediately.
 3. Yield to a scheduler/trampoline stack (the fiber stack becomes quiescent).
 4. On the scheduler/trampoline stack, attempt to commit to parking:
-   - re-check `pending_unpark`; if set, abort and re-enqueue.
-   - re-check `flag`; if changed, abort and re-enqueue.
-   - publish the parked state: `CAS(control, OWNED, PARKED)`.
-   - post-commit Dekker check: read `pending_unpark` with `seq_cst`; if non-zero, abort parking (`CAS(PARKED→ASSIGNED)` then enqueue). If the CAS fails, a concurrent unpark already made it runnable; no further action needed.
-   - post-commit flag check: if `load(flag) != expected`, abort parking.
+  - re-check `pending_unpark`; if set, abort and re-enqueue.
+  - re-check `flag`; if changed, abort and re-enqueue.
+  - publish the parked state: `CAS(control, OWNED, PARKED)`.
+  - post-commit Dekker check: read `pending_unpark` with `seq_cst`; if non-zero, abort parking (`CAS(PARKED→ASSIGNED)` then enqueue). If the CAS fails, a concurrent unpark already made it runnable; no further action needed.
+  - post-commit flag check: if `load(flag) != expected`, abort parking.
 5. If still parked, run another runnable fiber. When this fiber is later made runnable, it resumes and returns to the caller.
 
 This yield-before-commit ordering is REQUIRED (it ensures `PARKED` is published only when the fiber stack is already quiescent, preventing double-resume).
@@ -152,14 +152,14 @@ Parking is a 2-phase commit: publish the wait node before releasing the stack.
 Commit point: the wait is committed once the wait node is **enqueued on the wait list under the wait object's lock**.
 
 1. Under the wait object's lock:
-   - initialize the wait node (`notified = 0`, `fiber = current`)
-   - enqueue the node in the appropriate waiter queue
-   - re-check the condition; if satisfied, dequeue the node and do not park.
+  - initialize the wait node (`notified = 0`, `fiber = current`)
+  - enqueue the node in the appropriate waiter queue
+  - re-check the condition; if satisfied, dequeue the node and do not park.
 2. Release the wait object's lock.
 3. Call `park_if(&node.notified, 0)` (may return spuriously).
 4. Reacquire the wait object's lock and observe `node.notified`:
-   - if still 0, dequeue the node (it was a spurious wake / pending-unpark consumption)
-   - otherwise, treat the non-zero value as the wake reason (DATA/CLOSE/CANCEL/SIGNAL).
+  - if still 0, dequeue the node (it was a spurious wake / pending-unpark consumption)
+  - otherwise, treat the non-zero value as the wake reason (DATA/CLOSE/CANCEL/SIGNAL).
 
 ### Unparking (someone else -> runnable)
 
@@ -186,12 +186,14 @@ Some runtimes defer wakeups while holding internal scheduler locks; any `wake_ba
 Parking while lock depth > 0 is a design hazard and must be treated as a bug. If a fiber parks while holding a scheduler lock, it can deadlock the system.
 
 Diagnostics should flag:
+
 - `WAKE-FLUSH-UNDER-LOCK`: flushing deferred wakes with lock depth > 0.
 - `PARK-UNDER-LOCK`: attempting to park with lock depth > 0.
 
 For both cases, capture the lock stack (or current lock owner chain) to aid postmortem analysis.
 
 Additional lock-gap findings:
+
 - Under-lock flush/park events were traced to channel send/recv/close paths calling wake/park while `ch->mu` depth was non-zero.
 - Raw `pthread_mutex_unlock(&ch->mu)` in channel code can leave lock depth skewed and trigger park-under-lock even when the mutex is technically released.
 - Select/match cleanup across multiple channels can leave nested lock depth > 1; wake deferral must flush only when depth returns to 0.
@@ -225,22 +227,26 @@ Non-blocking channel fast paths (buffer not full/empty, direct handoff, etc.) do
 
 ### Channel notification values
 
-| Value | Constant | Meaning |
-|-------|----------|---------|
-| 0 | `CC_CHAN_NOTIFY_NONE` | Not yet notified (initial state) |
-| 1 | `CC_CHAN_NOTIFY_DATA` | Direct handoff — data written to `node.data` |
-| 2 | `CC_CHAN_NOTIFY_CANCEL` | Select: this node lost the race |
-| 3 | `CC_CHAN_NOTIFY_CLOSE` | Channel closed while waiting |
-| 4 | `CC_CHAN_NOTIFY_SIGNAL` | Buffer state changed — retry the operation |
+
+| Value | Constant                | Meaning                                      |
+| ----- | ----------------------- | -------------------------------------------- |
+| 0     | `CC_CHAN_NOTIFY_NONE`   | Not yet notified (initial state)             |
+| 1     | `CC_CHAN_NOTIFY_DATA`   | Direct handoff — data written to `node.data` |
+| 2     | `CC_CHAN_NOTIFY_CANCEL` | Select: this node lost the race              |
+| 3     | `CC_CHAN_NOTIFY_CLOSE`  | Channel closed while waiting                 |
+| 4     | `CC_CHAN_NOTIFY_SIGNAL` | Buffer state changed — retry the operation   |
+
 
 ### Variant differences (only what matters to the scheduler)
 
-| Channel kind | Blocks when | Wake reason / action |
-|---|---|---|
-| **sync** (any cap) | full/empty/partner | condvar signal/broadcast (thread ctx); park fiber (fiber ctx) |
-| **async buffered** (cap>0) | send: full, recv: empty | set `notified=DATA` then `unpark` |
-| **async rendezvous** (cap==0) | until a partner exists | set `notified=DATA` then `unpark` |
-| **ordered** | same as buffered/unbuffered | DATA wakes the recv; payload is a `CCTask` handle (FIFO) |
+
+| Channel kind                  | Blocks when                 | Wake reason / action                                          |
+| ----------------------------- | --------------------------- | ------------------------------------------------------------- |
+| **sync** (any cap)            | full/empty/partner          | condvar signal/broadcast (thread ctx); park fiber (fiber ctx) |
+| **async buffered** (cap>0)    | send: full, recv: empty     | set `notified=DATA` then `unpark`                             |
+| **async rendezvous** (cap==0) | until a partner exists      | set `notified=DATA` then `unpark`                             |
+| **ordered**                   | same as buffered/unbuffered | DATA wakes the recv; payload is a `CCTask` handle (FIFO)      |
+
 
 ### No-gap invariant when parking
 
@@ -249,8 +255,8 @@ The receiver must be on the channel's wait list at all times when it could park:
 1. Take mutex. Node is on the wait list.
 2. Check `notified` under lock — handle `DATA`, `SIGNAL`, `CLOSE`.
 3. If `notified == 0`: check `lfqueue_count` under lock.
-   - `count <= 0`: buffer empty — **stay on wait list**, unlock, park.
-   - `count > 0`: remove node under lock, unlock, try dequeue.
+  - `count <= 0`: buffer empty — **stay on wait list**, unlock, park.
+  - `count > 0`: remove node under lock, unlock, try dequeue.
 4. If dequeue fails (CAS contention): loop retry (running, not parking — safe).
 
 ### `lfqueue_inflight` counter
@@ -297,7 +303,7 @@ Required mechanism: perform the publish-to-idle step on a stack that is **not** 
 
 `cc_sleep_ms` (and any future timed waits) use a **sleep queue** instead of busy-yielding through the run queue.
 
-- A global `sleep_queue` is a mutex-protected singly-linked list of `fiber_task*`, each with a `sleep_deadline` (`CLOCK_MONOTONIC`).
+- A global `sleep_queue` is a mutex-protected singly-linked list of `fiber_task`*, each with a `sleep_deadline` (`CLOCK_MONOTONIC`).
 - `sq_drain` walks the list, removes expired fibers, and pushes them to the global run queue.
 - Draining happens in sysmon (every tick) and in idle workers (before sleeping).
 
@@ -344,36 +350,45 @@ Shutdown sequence:
 
 ### Environment variables
 
-| Variable | Description |
-|----------|-------------|
-| `CC_WORKERS=N` | Override initial worker count |
-| `CC_FIBER_STATS=1` | Print scheduler statistics at exit |
-| `CC_VERBOSE=1` | Print scheduler initialization info |
-| `CC_DEBUG_STALL=0` | Disable stall diagnostic (default: on) |
+
+| Variable           | Description                                                              |
+| ------------------ | ------------------------------------------------------------------------ |
+| `CC_V2_THREADS=N`  | Override initial worker count (preferred)                                |
+| `CC_WORKERS=N`     | Same as `CC_V2_THREADS`; back-compat alias                               |
+| `CC_FIBER_STATS=1` | Print scheduler statistics at exit                                       |
+| `CC_VERBOSE=1`     | Print scheduler initialization info                                      |
+| `CC_DEBUG_STALL=0` | Disable stall diagnostic (default: on)                                   |
+
 
 ### Compile-time defines
 
-| Define | Default | Description |
-|--------|---------|-------------|
-| `CC_FIBER_WORKERS` | 0 (auto-detect) | Fixed worker count |
-| `CC_FIBER_STACK_SIZE` | 2MB (vmem) / 128KB | Per-fiber stack size |
-| `CC_FIBER_QUEUE_INITIAL` | 4096 | Slots in global run queue ring |
+
+| Define                   | Default            | Description                    |
+| ------------------------ | ------------------ | ------------------------------ |
+| `CC_FIBER_STACK_SIZE`    | 2MB (vmem) / 128KB | Per-fiber stack size           |
+| `CC_FIBER_QUEUE_INITIAL` | 4096               | Slots in global run queue ring |
+
+> Worker count is no longer a compile-time knob. Use the `CC_V2_THREADS`
+> env var (above). Default: `sysconf(_SC_NPROCESSORS_ONLN)`, capped at 256.
+
 
 ### Debug flags (environment)
 
-| Variable | Description |
-|----------|-------------|
-| `CC_DEBUG_JOIN=1` | Log fiber join/unpark operations |
-| `CC_DEBUG_WAKE=1` | Log wake counter increments |
-| `CC_DEBUG_INBOX=1` | Log inbox queue operations |
-| `CC_DEBUG_INBOX_DUMP=1` | Dump inbox contents on deadlock |
-| `CC_DEBUG_SYSMON=1` | Log sysmon scaling decisions |
-| `CC_CHAN_DEBUG=1` | Channel operation logs |
-| `CC_CHAN_DEBUG_VERBOSE=1` | Detailed select/wake logging |
-| `CC_CHAN_NO_LOCKFREE=1` | Force mutex-based channel path |
-| `CC_DEBUG_DEADLOCK_RUNTIME=1` | Parked fiber dump on deadlock |
-| `CC_DEADLOCK_ABORT=0` | Continue after deadlock (for log capture) |
-| `CC_PARK_DEBUG=1` | Log `park_if` decisions |
+
+| Variable                      | Description                               |
+| ----------------------------- | ----------------------------------------- |
+| `CC_DEBUG_JOIN=1`             | Log fiber join/unpark operations          |
+| `CC_DEBUG_WAKE=1`             | Log wake counter increments               |
+| `CC_DEBUG_INBOX=1`            | Log inbox queue operations                |
+| `CC_DEBUG_INBOX_DUMP=1`       | Dump inbox contents on deadlock           |
+| `CC_DEBUG_SYSMON=1`           | Log sysmon scaling decisions              |
+| `CC_CHAN_DEBUG=1`             | Channel operation logs                    |
+| `CC_CHAN_DEBUG_VERBOSE=1`     | Detailed select/wake logging              |
+| `CC_CHAN_NO_LOCKFREE=1`       | Force mutex-based channel path            |
+| `CC_DEBUG_DEADLOCK_RUNTIME=1` | Parked fiber dump on deadlock             |
+| `CC_DEADLOCK_ABORT=0`         | Continue after deadlock (for log capture) |
+| `CC_PARK_DEBUG=1`             | Log `park_if` decisions                   |
+
 
 ## Implementation files
 
@@ -382,3 +397,4 @@ Shutdown sequence:
 - `cc/runtime/nursery.c`: Structured concurrency nurseries
 - `cc/runtime/task.c`: CCTask API and spawn functions
 - `cc/include/ccc/cc_sched.cch`: Public API declarations
+
