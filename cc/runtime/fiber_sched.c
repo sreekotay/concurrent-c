@@ -113,7 +113,6 @@ static inline uint64_t rdtsc(void) {
 
 /* Spawn timing breakdown (enabled by CC_SPAWN_TIMING env var) */
 
-static int g_timing_enabled = -1;  /* -1 = not checked, 0 = disabled, 1 = enabled */
 static _Atomic uint64_t g_cc_fiber_unpark_calls = 0;
 static _Atomic uint64_t g_cc_fiber_unpark_enqueues = 0;
 static _Atomic uint64_t g_cc_fiber_unpark_by_reason[CC_FIBER_UNPARK_REASON_COUNT] = {0};
@@ -230,7 +229,6 @@ bool cc_nursery_is_cancelled(const CCNursery* n);
 /* cc__tls_current_nursery is the per-OS-thread nursery context pointer.
 * Fibers must restore it on migration; see worker_run_fiber(). */
 extern __thread CCNursery* cc__tls_current_nursery;
-static __thread CCNursery* cc__tls_spawn_nursery_override = NULL;
 
 void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, const char* file, int line);
 
@@ -260,8 +258,6 @@ void cc__fiber_park_if(_Atomic int* flag, int expected, const char* reason, cons
 #define SPIN_FAST_ITERS_DEFAULT 128
 #define SPIN_YIELD_ITERS_DEFAULT 8
 
-static _Atomic int g_spin_fast_iters = -1;   /* -1 = not initialized */
-static _Atomic int g_spin_yield_iters = -1;
 
 /* Backward compatibility macros - used in hot paths, cached after first call */
 #define SPIN_FAST_ITERS get_spin_fast_iters()
@@ -429,57 +425,7 @@ typedef enum {
 
 /* Optional spec assertion mode for transition/enqueue legality checks.
 * Enable with CC_V3_SPEC_ASSERT=1 when auditing §9/§10 linearization points. */
-static inline int64_t cc_sched_pressure_add(int64_t delta);
 
-static inline int cc_nonworker_spawn_group_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        enabled = 0;
-    }
-    return enabled;
-}
-
-static inline int cc_nonworker_keep_sleeping_target_enabled(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char* v = getenv("CC_NW_SPAWN_KEEP_SLEEPING");
-        enabled = (!v || v[0] != '0') ? 1 : 0;
-    }
-    return enabled;
-}
-
-
-typedef struct {
-    _Atomic uint64_t spin_entries;
-    _Atomic uint64_t yield_calls;
-    _Atomic uint64_t yield_found_work;
-    _Atomic uint64_t sleep_entries;
-    _Atomic uint64_t sleep_wait_calls;
-    _Atomic uint64_t sleep_exits;
-    _Atomic uint64_t wake_one_calls;
-    _Atomic uint64_t wake_one_with_sleepers;
-    _Atomic uint64_t wake_one_delivered;
-    _Atomic uint64_t wake_target_calls;
-    _Atomic uint64_t wake_target_delivered;
-    _Atomic uint64_t wake_target_skipped_not_sleeping;
-    _Atomic uint64_t wake_unconditional_calls;
-    _Atomic uint64_t wake_unconditional_delivered;
-    _Atomic uint64_t wake_unconditional_no_sleepers;
-} cc_sched_wait_stats;
-
-static cc_sched_wait_stats g_cc_sched_wait_stats = {0};
-
-typedef struct {
-    _Atomic uint64_t nonworker_global_publish;
-    _Atomic uint64_t nonworker_global_edge;
-    _Atomic uint64_t nonworker_global_wake_one;
-    _Atomic uint64_t global_pop_hits;
-    _Atomic uint64_t run_attempts;
-    _Atomic uint64_t run_claims;
-    _Atomic uint64_t run_skip_stale;
-} cc_sched_io_wake_stats;
-
-static cc_sched_io_wake_stats g_cc_sched_io_wake_stats = {0};
 
 /* General-purpose V1 diagnostic-counter gate.  Mirrors the V2 sched_v2.c
  * gate.  Many g_sched.pressure_*, g_sched.promotion_count,
@@ -534,10 +480,6 @@ typedef struct {
 /* Check if queue has items (non-destructive peek) */
 /* Pop from overflow list (caller should try ring first). */
 /* Global run-queue helpers (implemented after scheduler state declaration). */
-static inline int sched_global_push(fiber_task* f, int preferred_worker);
-static inline runnable_ref sched_global_pop_any(void);
-static inline runnable_ref sched_global_pop_for_worker(int worker_id);
-static inline int sched_global_peek_any(void);
 
 /* ============================================================================
 * Sleep Queue — timer-based fiber parking for cc_sleep_ms
@@ -554,7 +496,6 @@ typedef struct {
     _Atomic size_t count;    /* Approximate count for quick peek */
 } sleep_queue;
 
-static sleep_queue g_sleep_queue;
 
 typedef struct {
     pthread_mutex_t mu;
@@ -562,7 +503,6 @@ typedef struct {
     _Atomic size_t count;    /* Approximate queue size for quick peek */
 } timed_park_queue;
 
-static timed_park_queue g_timed_park_queue;
 void cc__fiber_unpark(void* fiber_ptr);
 void cc__fiber_unpark_tagged(void* fiber_ptr, cc__fiber_unpark_reason reason);
 
@@ -776,45 +716,7 @@ static __thread fiber_task* tls_current_fiber = NULL;
 static __thread unsigned tls_deadlock_suppress_depth = 0;
 static __thread unsigned tls_external_wait_depth = 0;
 static __thread int tls_worker_id = -1;  /* -1 = not a worker thread */
-static _Atomic size_t g_spawn_counter = 0;
-static const uint64_t cc_orphan_threshold_cycles_hint = 3000000ULL;
 
-static inline int cc__io_wait_trace_enabled_sched(void) {
-    static int mode = -1;
-    if (mode >= 0) return mode;
-    const char* env = getenv("CC_IO_WAIT_TRACE");
-    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-    return mode;
-}
-
-/* Spawn-pair grouping: when a base worker routes a fiber to a remote inbox,
-* remember the target so the NEXT inbox-bound spawn from the same calling
-* context can co-locate with it (if and only if the inbox still has exactly
-* that one pending fiber).  Grouping two consecutive spawns to the same
-* inbox ensures a producer/consumer pair starts on the same worker without
-* requiring the developer to order spawns or add scheduler hints.
-* Reset to -1 after each pairing so triples never form. */
-static __thread int tls_spawn_pair_target = -1;
-/* Non-worker nursery startup hint: consecutive sibling spawns in the same
-* group stay together for a small chunk before the next chunk advances RR.
-* This preserves producer/consumer locality for tiny startup bursts while
-* still letting larger batches spread across workers. */
-static __thread const void* tls_nonworker_spawn_group_hint = NULL;
-static __thread unsigned tls_nonworker_spawn_group_hint_chunk = 0;
-
-/* Pre-assign the calling fiber to a specific worker before its first park.
-* Pool runners call this once so each parks with a distinct last_worker_id.
-* Combined with the corrected saturation bypass (only fires when sleeping==0),
-* this ensures each runner routes to a dedicated worker's inbox on first
-* unpark — no serialisation, no thundering herd. */
-void cc__fiber_set_worker_affinity(int worker_id) {
-    fiber_task* f = tls_current_fiber;
-    if (!f) return;
-    size_t n = g_sched.num_workers;
-    if (n == 0) return;
-    f->last_worker_id = worker_id % (int)n;
-    f->last_worker_src = 2;
-}
 
 /* Return the current scheduler base-worker ID, or -1 if the calling thread
 * is not a base worker (e.g. a temp/timer worker or a non-scheduler thread).
@@ -830,81 +732,6 @@ int cc__sched_current_worker_id(void) {
     return tls_worker_id;
 }
 
-uint64_t cc__fiber_debug_id(void* fiber_ptr) {
-    fiber_task* f = (fiber_task*)fiber_ptr;
-    return f ? (uint64_t)f->fiber_id : 0;
-}
-
-int cc__fiber_debug_last_worker(void* fiber_ptr) {
-    fiber_task* f = (fiber_task*)fiber_ptr;
-    return f ? f->last_worker_id : -1;
-}
-
-const char* cc__fiber_debug_park_reason(void* fiber_ptr) {
-    fiber_task* f = (fiber_task*)fiber_ptr;
-    return (f && f->park_reason) ? f->park_reason : NULL;
-}
-
-void cc_sched_nonworker_spawn_group_hint(const void* group_key, unsigned chunk_size) {
-    tls_nonworker_spawn_group_hint = group_key;
-    tls_nonworker_spawn_group_hint_chunk = chunk_size ? chunk_size : 1;
-}
-
-
-static inline size_t cc__spawn_pick_round_robin_target(void) {
-    size_t target = atomic_fetch_add_explicit(&g_spawn_counter, 1, memory_order_relaxed) % g_sched.num_workers;
-    if (cc_nonworker_keep_sleeping_target_enabled() &&
-        g_sched.worker_lifecycle && g_sched.num_workers > 1) {
-        cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
-            &g_sched.worker_lifecycle[target], memory_order_relaxed);
-        /* A sleeping worker is still a good target for a non-worker spawn:
-        * we can publish directly to its inbox and wake it specifically.
-        * Only reroute away from workers that are genuinely unavailable. */
-        if (lc != CC_WL_DRAINING && lc != CC_WL_DEAD) {
-            return target;
-        }
-    }
-    if (g_sched.worker_heartbeat && g_sched.num_workers > 1) {
-        uint64_t hb0 = atomic_load_explicit(&g_sched.worker_heartbeat[target].heartbeat, memory_order_relaxed);
-        uint64_t now_cyc = rdtsc();
-        if (hb0 != 0 && (now_cyc - hb0) >= cc_orphan_threshold_cycles_hint) {
-            for (size_t scan = 1; scan < g_sched.num_workers; scan++) {
-                size_t cand = (target + scan) % g_sched.num_workers;
-                uint64_t hb = atomic_load_explicit(&g_sched.worker_heartbeat[cand].heartbeat, memory_order_relaxed);
-                if (hb != 0 && (now_cyc - hb) < cc_orphan_threshold_cycles_hint) {
-                    target = cand;
-                    break;
-                }
-            }
-        }
-    }
-    return target;
-}
-
-/* Set a parked fiber's routing hint to worker_id so that its next unpark
-* lands on that worker's local queue rather than a remote inbox.  Must only
-* be called while the fiber is parked (not running on any thread).
-* worker_id is clamped to valid base-worker range; -1 is a no-op. */
-void cc__fiber_hint_channel_partner(void* fiber, int worker_id) {
-    fiber_task* f = (fiber_task*)fiber;
-    if (!f) return;
-    size_t n = g_sched.num_workers;
-    if (n == 0 || worker_id < 0 || (size_t)worker_id >= n) return;
-    f->last_worker_id = worker_id;
-    f->last_worker_src = 3;
-}
-
-/* Count of workers currently executing a long-running CPU-bound pool task via
-* cc__fiber_pool_task_begin/end.  Sysmon excludes these workers from the
-* "stuck" count so it doesn't spawn hybrid-promotion threads for them. */
-static _Atomic size_t g_pool_tasks_active = 0;
-/* True for scheduler-owned execution threads (base workers + replacement workers). */
-static __thread int tls_sched_worker_ctx = 0;
-static __thread void* tls_tsan_sched_fiber = NULL;
-static __thread uint32_t tls_chan_attr_calls_batch = 0;
-static __thread uint32_t tls_chan_attr_startup_batch = 0;
-static __thread uint32_t tls_chan_attr_sleepers_batch = 0;
-static __thread uint32_t tls_chan_attr_local_handoff = 0;
 
 /* Called when a thread is about to block in cc_block_on.
 * Only tracks blocking on fiber worker threads - blocking on executor threads
@@ -1161,7 +988,9 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
 }
 
 void cc_fiber_set_spawn_nursery_override(CCNursery* nursery) {
-    cc__tls_spawn_nursery_override = nursery;
+    /* V1 retired: the override was consulted by the V1 spawn router.
+     * V2 routes fibers through nurseries directly. Kept as a symbol stub. */
+    (void)nursery;
 }
 
 void cc_fiber_task_free(fiber_task* f) {
@@ -1434,13 +1263,6 @@ void cc__fiber_yield_global(void) {
 * (e.g. CPU-bound pool tasks) to prevent the orphan-threshold detector
 * from treating the worker as "stuck" and spawning hybrid-promotion
 * threads unnecessarily. */
-void cc__fiber_touch_heartbeat(void) {
-    int wid = tls_worker_id;
-    if (wid < 0 || !g_sched.worker_heartbeat) return;
-    atomic_store_explicit(&g_sched.worker_heartbeat[wid].heartbeat,
-                        rdtsc(), memory_order_relaxed);
-}
-
 /* Park the current fiber for `ms` milliseconds.
 * The fiber is removed from the run queue entirely and placed on the
 * sleep queue.  Sysmon drains expired sleepers every ~250µs.
