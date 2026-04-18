@@ -71,31 +71,36 @@ typedef struct RedisConn {
     uint64_t conn_id;
     uint64_t next_request_id;
     Pipeline pipeline;
-    /* Reply channel carries RedisReply* pointers whose backing memory is owned
-     * by `reply_pool`.  The producer pops a slot from the pool, materializes
-     * the reply in place (the slot's inline_buf backs its arena's initial
-     * slab, overflowing to heap only for oversize replies), and sends just
-     * the pointer.  The consumer frees the arena and returns the slot to the
-     * pool.  Pool slot addresses are stable for the pool's lifetime, so
-     * `data.ptr` pointers into the inline_buf survive the channel handoff
-     * without any rebase. */
+    /* Reply channel carries RedisReply* pointers into reply_pool (see below).
+     * The producer materializes the reply in place and sends the pointer;
+     * the consumer frees the arena and returns the slot to the pool. */
     RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
-    /* Per-slot storage for in-flight requests: each slot is REQ_BUF_SIZE
-     * bytes and backs a RedisRequest's arena (the RedisRequest struct plus
-     * its cloned argv strings live inside the slot).  Sizing matches the
-     * channel cap so back-pressure is real: if all PIPELINE_LIMIT slots are
-     * in flight, alloc returns NULL and parse_and_submit_requests stops
-     * reading from the socket until the owner drains one reply. */
+    /* Per-slot storage for in-flight requests / replies.  Both pools are
+     * OWNED by this conn and torn down in redis_conn_destroy on last drop.
+     *
+     * LIFETIME INVARIANT (load-bearing): any cc_arena_pool_free(&*_pool, slot)
+     * MUST precede the redis_conn_drop that may be last-ref.  If the drop
+     * runs first, redis_conn_destroy tears down the pool's backing arena,
+     * and the subsequent pool_free writes a freelist link into memory that
+     * libc has already reclaimed.  See redis_conn_release_request.
+     *
+     * req_pool: each slot is REQ_BUF_SIZE and backs a RedisRequest's arena;
+     * the RedisRequest struct plus its cloned argv strings live inside the
+     * slot.  Sizing matches PIPELINE_LIMIT so back-pressure is real.
+     *
+     * reply_pool: each slot is sizeof(RedisReply); the slot IS the struct,
+     * arena.base points at reply->inline_buf so small replies never touch
+     * the heap.  Slot addresses are stable across the channel handoff. */
     CCArenaPool req_pool;
     CCArenaPool reply_pool;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
 } RedisConn;
 
-static void free_request(RedisRequest* req);
 static void redis_conn_retain(RedisConn* conn);
 static void redis_conn_drop(RedisConn* conn);
+static void redis_conn_release_request(RedisRequest* req);
 
 static CCError mkerr(int err_kind, const char* msg) {
     CCError err = {0};
@@ -359,7 +364,7 @@ typedef struct ParseAttempt {
 /* Parse one pipelined request into `slot` (a REQ_BUF_SIZE buffer popped from
  * conn->req_pool).  On success (status=1) the caller loses ownership of the
  * slot: it becomes the backing storage for the returned request's arena, and
- * will be returned to the pool by free_request.  On any other status the
+ * will be returned to the pool by redis_conn_release_request.  On any other status the
  * caller is responsible for returning the slot to the pool. */
 static ParseAttempt read_request_buffered(RespReader* r,
                                           RedisConn* conn,
@@ -800,9 +805,9 @@ static void redis_conn_destroy(RedisConn* conn) {
      * so destroying the backing arena here reclaims only the slot structs. */
     cc_arena_pool_destroy(&conn->reply_pool);
     /* Requests still held by the owner fiber keep the conn alive via the
-     * refcount (build_request retain / free_request drop), so by the time we
+     * refcount (build_request retain / redis_conn_release_request drop), so by the time we
      * reach this destroy every request-slot has already been returned to the
-     * pool via free_request. */
+     * pool via redis_conn_release_request. */
     cc_arena_pool_destroy(&conn->req_pool);
     cc_channel_free(conn->reply_tx);
     free(conn);
@@ -839,18 +844,23 @@ static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
     return ok;
 }
 
-static void free_request(RedisRequest* req) {
+/* Conn method: release one in-flight request + drop the matching conn ref.
+ *
+ * Pool return MUST precede the conn_drop that may be last-ref; if our drop
+ * is last, conn_destroy tears down req_pool's backing arena and a later
+ * pool_free would scribble into reclaimed memory.  See the LIFETIME
+ * INVARIANT on RedisConn.req_pool.
+ *
+ * req itself is the slot: build_request places RedisRequest at offset 0 of
+ * the req_pool slot (first alloc in a buffer-backed arena, aligned base).
+ * arena.free() only touches req->arena's own fields; pool_free then
+ * overwrites the head of the slot with the freelist link. */
+static void redis_conn_release_request(RedisRequest* req) {
     if (!req) return;
     RedisConn* conn = req->conn;
-    /* Snapshot the slot pointer before the arena.free() call: the request
-     * struct itself lives inside the slot, so after cc_arena_pool_free writes
-     * the freelist link into the slot head, any further read of req->* is
-     * undefined.  arena.free() only releases heap overflow blocks for
-     * buffer-backed arenas; it leaves the slot buffer untouched. */
-    void* slot = req->arena.base;
     if (req->arena.base) req->arena.free();
     if (conn) {
-        if (slot) cc_arena_pool_free(&conn->req_pool, slot);
+        cc_arena_pool_free(&conn->req_pool, req);
         redis_conn_drop(conn);
     }
 }
@@ -935,7 +945,7 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
         if (!req || !req->conn) continue;
 
         RedisConn* conn = req->conn;
-        @defer free_request(req);
+        @defer redis_conn_release_request(req);
         RedisReply !>(CCError) exec_res = execute_request(&db, req);
         RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error()) : exec_res.value();
         @defer free_reply(&reply);
@@ -979,7 +989,7 @@ static int !>(CCError) parse_and_submit_requests(RespReader* reader,
             cc_arena_pool_free(&conn->req_pool, slot);
             return cc_err(parsed.err);
         }
-        /* parsed.req now owns `slot` via its detached arena; free_request
+        /* parsed.req now owns `slot` via its detached arena; redis_conn_release_request
          * will return it to the pool. */
 
         /* Blocking send: under heavy pipelining 50 conns * PIPELINE_LIMIT can
@@ -989,13 +999,13 @@ static int !>(CCError) parse_and_submit_requests(RespReader* reader,
          * owner_loop without losing work. */
         bool !>(CCIoError) send_res = owner_tx.send(parsed.req);
         if (send_res.is_err()) {
-            free_request(parsed.req);
+            redis_conn_release_request(parsed.req);
             return cc_err(mkerr(CC_ERR_IO, "owner handoff failed"));
         }
         if (!send_res.value()) {
             /* Owner channel closed gracefully — server is shutting down.
              * Stop reading; caller will exit the client loop cleanly. */
-            free_request(parsed.req);
+            redis_conn_release_request(parsed.req);
             break;
         }
 
@@ -1012,48 +1022,11 @@ static void report_io_err(CCSocket* sock, RedisConn* conn, CCIoError err) {
     (void)write_reply_now(sock, conn, io_err_reply(err));
 }
 
-/* Environment threaded through the CCSelect handlers below. The runtime
- * populates `reply_ptr` before firing `on_reply_recv`, and `close_err` before
- * firing `on_reply_close`. Handler return-value convention: non-NULL means
- * "keep the outer loop running"; NULL means "exit the client loop". */
-typedef struct HandleClientEnv {
-    CCSocket* sock;
-    RedisConn* conn;
-    RespReader* reader;
-    RedisReply* reply_ptr;
-    CCIoError close_err;
-} HandleClientEnv;
-
-static void* on_reply_recv(void* env_) {
-    HandleClientEnv* e = (HandleClientEnv*)env_;
-    bool ok = write_received_reply(e->sock, e->conn, e->reply_ptr)
-           && flush_output_buffer(e->sock, e->conn);
-    return ok ? env_ : NULL;
-}
-
-static void* on_reply_close(void* env_) {
-    (void)env_; /* reply side closed — exit the client loop */
-    return NULL;
-}
-
-static void* on_socket_readable(void* env_) {
-    HandleClientEnv* e = (HandleClientEnv*)env_;
-    /* Race: a reply may have landed between the last drain and the wake.
-     * Drain first; only touch the socket if we truly made no progress. */
-    int raced_drained = drain_and_flush_replies(e->sock, e->conn);
-    if (raced_drained < 0) return NULL;
-    if (raced_drained > 0) return env_;
-    bool !>(CCIoError) fill = rr_try_fill(e->reader, e->sock);
-    if (fill.is_err()) {
-        report_io_err(e->sock, e->conn, fill.error());
-        return NULL;
-    }
-    return env_;
-}
-
-static void handle_client(CCSocket client,
-                          RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx,
-                          uint64_t conn_id) {
+/* Per-connection driver: parses requests from the socket, dispatches to
+ * shards, and multiplexes incoming replies with more input via CCSelect.
+ * Handler return-value convention: non-NULL means "keep the outer loop
+ * running"; NULL means "exit the client loop". */
+static void handle_client(CCSocket client, RedisRequest*[~REQUEST_CHAN_CAP N:1 >] owner_tx, uint64_t conn_id) {
     @defer client.close();
 
     RedisConn* conn = redis_conn_create(conn_id);
@@ -1063,21 +1036,41 @@ static void handle_client(CCSocket client,
     char read_buf[READ_BUF_CAP];
     RespReader reader = rr_init(read_buf, sizeof(read_buf));
 
-    HandleClientEnv env = {0};
-    env.sock = &client;
-    env.conn = conn;
-    env.reader = &reader;
+    /* Slots the runtime writes into before invoking the matching closure. */
+    RedisReply* reply_ptr = NULL;
+    CCIoError close_err = {0};
 
-    /* Compose the select once; reuse on every blocking wait below. */
-    CCSelect sel;
-    cc_select_init(&sel);
-    @defer cc_select_dispose(&sel);
-    (void)cc_select_add_recv(&sel, conn->reply_rx.raw, (void**)&env.reply_ptr,
-                             cc_closure0_make(on_reply_recv, &env, NULL));
-    (void)cc_select_add_close(&sel, conn->reply_rx.raw, &env.close_err,
-                              cc_closure0_make(on_reply_close, &env, NULL));
+    /* Compose the select once; reuse on every blocking wait below. @unsafe
+     * because CCSelect invokes these closures synchronously from this fiber
+     * during cc_select_wait, so the captured `&client`/`&reader` are not
+     * actually shared across fibers. */
+    CCSelect sel = @create() @destroy;
+
+    (void)cc_select_add_recv(&sel, conn->reply_rx, (void**)&reply_ptr,
+        @unsafe () => [&client, conn, &reply_ptr] {
+            bool ok = write_received_reply(&client, conn, reply_ptr)
+                   && flush_output_buffer(&client, conn);
+            return ok ? (void*)1 : (void*)NULL;
+        });
+    (void)cc_select_add_close(&sel, conn->reply_rx, &close_err,
+        () => {
+            /* reply side closed — exit the client loop */
+            return (void*)NULL;
+        });
     (void)cc_select_add_readable(&sel, &client,
-                                 cc_closure0_make(on_socket_readable, &env, NULL));
+        @unsafe () => [&client, conn, &reader] {
+            /* Race: a reply may have landed between the last drain and the wake.
+             * Drain first; only touch the socket if we made no progress. */
+            int raced = drain_and_flush_replies(&client, conn);
+            if (raced < 0) return (void*)NULL;
+            if (raced > 0) return (void*)1;
+            bool !>(CCIoError) fill = rr_try_fill(&reader, &client);
+            if (fill.is_err()) {
+                report_io_err(&client, conn, fill.error());
+                return (void*)NULL;
+            }
+            return (void*)1;
+        });
 
     while (true) {
         int drained = drain_and_flush_replies(&client, conn);
