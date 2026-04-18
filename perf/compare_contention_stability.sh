@@ -50,6 +50,11 @@ metrics = {
         "contention": "DATA_GO_CONTENTION_MS",
         "interference": "DATA_GO_INTERFERENCE",
     },
+    "Zig": {
+        "baseline": "DATA_ZIG_BASELINE_MS",
+        "contention": "DATA_ZIG_CONTENTION_MS",
+        "interference": "DATA_ZIG_INTERFERENCE",
+    },
 }
 
 values = {name: {k: [] for k in cols} for name, cols in metrics.items()}
@@ -71,7 +76,7 @@ def fmt_triplet(xs):
 print("min / mean / max")
 print("--------------------------------------------------------------------------")
 print(f"{'Implementation':<20} {'Baseline (ms)':<22} {'Contention (ms)':<22} {'Interference %':<22}")
-for name in ("Pthread", "Concurrent-C", "Go"):
+for name in ("Pthread", "Concurrent-C", "Go", "Zig"):
     print(
         f"{name:<20} "
         f"{fmt_triplet(values[name]['baseline']):<22} "
