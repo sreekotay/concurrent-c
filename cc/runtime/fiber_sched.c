@@ -485,7 +485,6 @@ typedef struct fiber_task {
     int enqueue_dest;         /* yield_dest at enqueue time */
     
     struct fiber_task* next;  /* For free list / queues */
-    struct fiber_task* debug_next;  /* For all-fibers debug list (deadlock dump) */
 } fiber_task;
 
 typedef struct {
@@ -1422,7 +1421,6 @@ static int g_inbox_dump = -1;   /* -1 = not checked, 0 = disabled, 1 = enabled *
 
 
 
-static void cc__fiber_dump_queue_state(void);
 
 static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
     if (was_empty) *was_empty = 0;
@@ -1575,8 +1573,6 @@ enum {
     CC_RUN_PHASE = 1
 };
 static _Atomic int g_initialized = 0;
-static _Atomic int g_deadlock_reported = 0;
-static _Atomic uint64_t g_deadlock_first_seen = 0;  /* Timestamp when deadlock state first seen */
 static _Atomic size_t g_external_wait_parked = 0;
 /* Non-fiber threads currently inside a cc_external_wait_enter/leave scope.
  * Consulted by both the V1 and V2 deadlock detectors as evidence that an
@@ -1849,266 +1845,6 @@ size_t cc_sched_get_num_workers(void) {
 }
 static _Atomic uintptr_t g_next_fiber_id = 1;       /* Counter for unique fiber IDs */
 
-/* Parked fibers list for debugging (runtime-gated). */
-static pthread_mutex_t g_parked_list_mu = PTHREAD_MUTEX_INITIALIZER;
-static fiber_task* g_parked_list_head = NULL;
-
-
-/* All-fibers list for deadlock debugging (append-only, debug-gated). */
-static pthread_mutex_t g_all_fibers_mu = PTHREAD_MUTEX_INITIALIZER;
-static fiber_task* g_all_fibers_head = NULL;
-static _Atomic size_t g_fibers_spawned = 0;  /* Total fibers ever created */
-
-static void all_fibers_track(fiber_task* f) {
-    if (!f) return;
-    pthread_mutex_lock(&g_all_fibers_mu);
-    f->debug_next = g_all_fibers_head;
-    g_all_fibers_head = f;
-    pthread_mutex_unlock(&g_all_fibers_mu);
-}
-
-static inline size_t get_total_parked(void) {
-    return atomic_load_explicit(&g_sched.total_parked, memory_order_relaxed);
-}
-
-static inline size_t get_total_deadlock_suppressed_parked(void) {
-    return atomic_load_explicit(&g_sched.deadlock_suppressed_parked, memory_order_relaxed);
-}
-
-static inline size_t get_total_timed_parked(void) {
-    return atomic_load_explicit(&g_total_timed_parked, memory_order_relaxed);
-}
-
-static inline size_t get_total_deadlock_suppressed_timed_parked(void) {
-    return atomic_load_explicit(&g_deadlock_suppressed_timed_parked, memory_order_relaxed);
-}
-
-static void cc__fiber_dump_parked_channel_state(const fiber_task* f) {
-    if (!f || !f->park_reason) return;
-
-    if (strncmp(f->park_reason, "chan_", 5) == 0 && f->park_obj) {
-        int control = (int)atomic_load_explicit(&f->control, memory_order_acquire);
-        int pending_unpark = atomic_load_explicit(&f->pending_unpark, memory_order_relaxed);
-
-        fprintf(stderr,
-                "    fiber state: control=%d pending_unpark=%d\n",
-                control,
-                pending_unpark);
-        cc__chan_debug_dump_state(f->park_obj, "    chan state: ");
-        return;
-    }
-
-    if (strcmp(f->park_reason, "sched_v2_join") == 0 && f->park_obj) {
-        sched_v2_debug_dump_fiber((fiber_v2*)f->park_obj, "    join target: ");
-    }
-}
-
-static const char* cc__fiber_control_name(int64_t control) {
-    switch ((int)control) {
-        case CTRL_PARKED:    return "PARKED";
-        case CTRL_QUEUED:    return "QUEUED";
-        default:             return control >= 0 ? "OWNED" : "OTHER";
-    }
-}
-
-static void cc__fiber_dump_parked_fibers(void) {
-    size_t shown = 0;
-    size_t total = 0;
-    size_t parked_total = 0;
-    size_t internal_total = 0;
-    size_t skipped_total = 0;
-    pthread_mutex_lock(&g_all_fibers_mu);
-    for (fiber_task* f = g_all_fibers_head; f; f = f->debug_next) {
-        total++;
-        int64_t control = atomic_load_explicit(&f->control, memory_order_acquire);
-        int is_parked = (control == CTRL_PARKED);
-        if (is_parked) parked_total++;
-        int skipped = f->external_wait_parked || cc__fiber_external_wait_scoped(f) || cc__fiber_deadlock_suppressed(f);
-        if (is_parked) {
-            if (!skipped) internal_total++;
-            else skipped_total++;
-        }
-        if (shown < 32) {
-            fprintf(stderr,
-                    "  %sfiber id=%llu ctrl=%s(%lld) reason=%s where=%s:%d obj=%p external=%u ext_scoped=%u suppressed=%u pending_unpark=%d\n",
-                    is_parked ? (skipped ? "(skipped parked) " : "(parked) ") : "(not parked) ",
-                    (unsigned long long)f->fiber_id,
-                    cc__fiber_control_name(control),
-                    (long long)control,
-                    f->park_reason ? f->park_reason : "-",
-                    f->park_file ? f->park_file : "?",
-                    f->park_line,
-                    f->park_obj,
-                    (unsigned)f->external_wait_parked,
-                    (unsigned)cc__fiber_external_wait_scoped(f),
-                    (unsigned)cc__fiber_deadlock_suppressed(f),
-                    atomic_load_explicit(&f->pending_unpark, memory_order_relaxed));
-            if (is_parked) cc__fiber_dump_parked_channel_state(f);
-            shown++;
-        }
-    }
-    pthread_mutex_unlock(&g_all_fibers_mu);
-    fprintf(stderr, "  fiber totals: total=%zu parked=%zu internal_parked=%zu skipped_parked=%zu\n",
-            total, parked_total, internal_total, skipped_total);
-    if (total > shown) {
-        fprintf(stderr, "  ... %zu more fibers not shown\n", total - shown);
-    }
-}
-
-static int cc__fiber_is_open_channel_recv_wait(const fiber_task* f) {
-    return f &&
-           f->park_reason &&
-           (strcmp(f->park_reason, "chan_recv_wait_empty") == 0 ||
-            strcmp(f->park_reason, "chan_recv_wait_rendezvous") == 0) &&
-           f->park_obj &&
-           cc__chan_debug_is_open(f->park_obj);
-}
-
-static int cc__fiber_only_open_channel_recv_waits(void) {
-    int saw_internal = 0;
-    pthread_mutex_lock(&g_all_fibers_mu);
-    for (fiber_task* f = g_all_fibers_head; f; f = f->debug_next) {
-        int64_t control = atomic_load_explicit(&f->control, memory_order_acquire);
-        if (control != CTRL_PARKED) continue;
-        if (f->external_wait_parked || cc__fiber_external_wait_scoped(f) || cc__fiber_deadlock_suppressed(f)) continue;
-        saw_internal = 1;
-        if (!cc__fiber_is_open_channel_recv_wait(f)) {
-            pthread_mutex_unlock(&g_all_fibers_mu);
-            return 0;
-        }
-    }
-    pthread_mutex_unlock(&g_all_fibers_mu);
-    return saw_internal;
-}
-
-static size_t cc__fiber_count_external_wait_scope_parked(void) {
-    size_t count = 0;
-    pthread_mutex_lock(&g_all_fibers_mu);
-    for (fiber_task* f = g_all_fibers_head; f; f = f->debug_next) {
-        int64_t control = atomic_load_explicit(&f->control, memory_order_acquire);
-        if (control != CTRL_PARKED) continue;
-        if (f->external_wait_parked || cc__fiber_external_wait_scoped(f)) count++;
-    }
-    pthread_mutex_unlock(&g_all_fibers_mu);
-    return count;
-}
-
-
-/* Get monotonic time in milliseconds */
-static uint64_t cc__monotonic_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-}
-
-/* Deadlock detection: called when a worker is about to sleep or block.
-* 
-* We detect deadlock when ALL workers are unavailable (sleeping OR blocked
-* in cc_block_on) AND there are parked fibers. To avoid false positives on
-* transient states (e.g., cc_block_all startup), we require the state to
-* persist for at least 1 second.
-*/
-static void cc__fiber_check_deadlock(void) {
-    size_t sleeping = atomic_load_explicit(&g_sched.sleeping, memory_order_acquire);
-    size_t blocked = atomic_load_explicit(&g_sched.blocked_threads, memory_order_acquire);
-    size_t parked = get_total_parked();
-    size_t suppressed_parked = get_total_deadlock_suppressed_parked();
-    size_t timed_parked = get_total_timed_parked();
-    size_t suppressed_timed_parked = get_total_deadlock_suppressed_timed_parked();
-    size_t unsuppressed_parked = (parked > suppressed_parked) ? (parked - suppressed_parked) : 0;
-    size_t unsuppressed_timed_parked =
-        (timed_parked > suppressed_timed_parked) ? (timed_parked - suppressed_timed_parked) : 0;
-    size_t deadlock_parked =
-        (unsuppressed_parked > unsuppressed_timed_parked) ? (unsuppressed_parked - unsuppressed_timed_parked) : 0;
-    size_t external_wait_parked = cc__fiber_count_external_wait_scope_parked();
-    size_t external_wait_threads = atomic_load_explicit(&g_external_wait_threads, memory_order_relaxed);
-    size_t external_waits = external_wait_parked + external_wait_threads;
-    size_t internal_deadlock_parked =
-        (deadlock_parked > external_wait_parked) ? (deadlock_parked - external_wait_parked) : 0;
-    size_t temp_workers = atomic_load_explicit(&g_sched.temp_worker_count, memory_order_acquire);
-    size_t total_workers = g_sched.num_workers + temp_workers;
-
-    if (external_waits > 0 &&
-        internal_deadlock_parked > 0 &&
-        cc__fiber_only_open_channel_recv_waits()) {
-        atomic_store(&g_deadlock_first_seen, 0);
-        return;
-    }
-    
-    /* Potential deadlock: all workers unavailable + parked fibers waiting */
-    size_t unavailable = sleeping + blocked;
-    if (unavailable >= total_workers && internal_deadlock_parked > 0) {
-        uint64_t now = cc__monotonic_ms();
-        uint64_t first = atomic_load(&g_deadlock_first_seen);
-        
-        if (first == 0) {
-            /* First time seeing this state - record timestamp */
-            atomic_compare_exchange_strong(&g_deadlock_first_seen, &first, now);
-            return;
-        }
-        
-        /* Require state to persist for 1+ seconds before declaring deadlock */
-        if (now - first < 1000) return;
-        
-        int expected = 0;
-        if (atomic_compare_exchange_strong(&g_deadlock_reported, &expected, 1)) {
-            fprintf(stderr, "\n");
-            fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
-            fprintf(stderr, "║                     DEADLOCK DETECTED                        ║\n");
-            fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n\n");
-            
-            fprintf(stderr, "Runtime state:\n");
-            fprintf(stderr, "  Workers: %zu total (%zu base, %zu temp), %zu unavailable (sleeping or blocked)\n",
-                    total_workers, g_sched.num_workers, temp_workers, unavailable);
-            fprintf(stderr, "  Fibers:  %zu parked (waiting), %zu completed, %zu spawned total, %zu pending\n",
-                    parked, (size_t)atomic_load(&g_sched.completed),
-                    (size_t)atomic_load_explicit(&g_fibers_spawned, memory_order_relaxed),
-                    (size_t)atomic_load_explicit(&g_sched.pending, memory_order_relaxed));
-            if (suppressed_parked > 0) {
-                fprintf(stderr, "  Ignored: %zu parked waits are inside deadlock-suppressed scopes\n",
-                        suppressed_parked);
-            }
-            if (timed_parked > 0) {
-                fprintf(stderr, "  Timers:  %zu parked waits still have deadline wakeups\n", timed_parked);
-            }
-            if (external_wait_parked > 0) {
-                fprintf(stderr, "  I/O waits: %zu parked waits are awaiting external progress\n",
-                        external_wait_parked);
-            }
-            fprintf(stderr, "  Internal parked fibers:\n");
-            cc__fiber_dump_parked_fibers();
-            fprintf(stderr, "\n");
-            sched_v2_debug_dump_state("  ");
-            fprintf(stderr, "\n");
-            cc__fiber_dump_queue_state();
-            fprintf(stderr, "\n");
-            
-            
-            fprintf(stderr, "\n");
-            fprintf(stderr, "Common causes:\n");
-            fprintf(stderr, "  • Channel send() with no receiver, or recv() with no sender\n");
-            fprintf(stderr, "  • cc_fiber_join() on a fiber that's also waiting\n");
-            fprintf(stderr, "  • Circular dependency between fibers\n");
-            fprintf(stderr, "\n");
-            fprintf(stderr, "Debugging tips:\n");
-            fprintf(stderr, "  • Check channel operations have matching send/recv pairs\n");
-            fprintf(stderr, "  • Ensure channels are closed when done (triggers recv to return)\n");
-            fprintf(stderr, "  • Review fiber spawn/join patterns for circular waits\n");
-            fprintf(stderr, "\n");
-            
-            const char* abort_env = getenv("CC_DEADLOCK_ABORT");
-            if (!abort_env || abort_env[0] != '0') {
-                fprintf(stderr, "Aborting with exit code 124. Set CC_DEADLOCK_ABORT=0 to continue.\n");
-                _exit(124);
-            } else {
-                fprintf(stderr, "Continuing (CC_DEADLOCK_ABORT=0 set).\n");
-            }
-        }
-    } else {
-        /* State is healthy - reset timer */
-        atomic_store(&g_deadlock_first_seen, 0);
-    }
-}
 
 /* Per-worker thread-local state */
 static __thread fiber_task* tls_current_fiber = NULL;
@@ -2610,60 +2346,6 @@ static inline int pool_ready_for_nonworker_inbox_publish(void) {
     return 1;
 }
 
-/* Safe to publish directly to worker inboxes once at least one worker has
-* clearly entered the scheduler loop (active/spinning/sleeping). */
-static void cc__fiber_dump_queue_state(void) {
-    if (!g_sched.run_queue) return;
-    fprintf(stderr, "[cc] Classic sched queue state:\n");
-    fprintf(stderr, "  pending=%zu active=%zu sleeping=%zu spinning=%zu parked=%zu\n",
-            (size_t)atomic_load(&g_sched.pending),
-            (size_t)atomic_load(&g_sched.active),
-            (size_t)atomic_load(&g_sched.sleeping),
-            (size_t)atomic_load(&g_sched.spinning),
-            get_total_parked());
-    fprintf(stderr, "  workers: base=%zu temp=%zu\n",
-            g_sched.num_workers,
-            (size_t)atomic_load_explicit(&g_sched.temp_worker_count, memory_order_relaxed));
-    size_t rq_head = 0, rq_tail = 0;
-    for (size_t s = 0; s < sched_global_queue_count(); s++) {
-        rq_head += atomic_load(&g_sched.run_queue[s].head);
-        rq_tail += atomic_load(&g_sched.run_queue[s].tail);
-    }
-    fprintf(stderr, "  run_queue[%zu shards]: head=%zu tail=%zu depth=%zu\n",
-            sched_global_queue_count(), rq_head, rq_tail,
-            rq_tail >= rq_head ? rq_tail - rq_head : 0);
-    fprintf(stderr, "  inbox_overflow=%zu\n",
-            (size_t)atomic_load(&g_inbox_overflow));
-    if (g_sched.worker_lifecycle) {
-        for (size_t i = 0; i < g_sched.num_workers; i++) {
-            local_queue* lq = &g_sched.local_queues[i];
-            inbox_queue* iq = &g_sched.inbox_queues[i];
-            size_t lq_head = atomic_load_explicit(&lq->head, memory_order_relaxed);
-            size_t lq_tail = atomic_load_explicit(&lq->tail, memory_order_relaxed);
-            size_t iq_head = atomic_load_explicit(&iq->head, memory_order_relaxed);
-            size_t iq_tail = atomic_load_explicit(&iq->tail, memory_order_relaxed);
-            cc_worker_lifecycle lc = (cc_worker_lifecycle)atomic_load_explicit(
-                &g_sched.worker_lifecycle[i], memory_order_relaxed);
-            const char* ls = "?";
-            switch ((int)lc) {
-                case CC_WL_ACTIVE: ls = "ACTIVE"; break;
-                case CC_WL_IDLE_SPIN: ls = "SPIN"; break;
-                case CC_WL_SLEEP: ls = "SLEEP"; break;
-                default: break;
-            }
-            uint32_t wakev = g_sched.worker_wake_prims
-                ? atomic_load_explicit(&g_sched.worker_wake_prims[i].value, memory_order_relaxed)
-                : 0;
-            fprintf(stderr, "  worker[%zu] lc=%s local=%zu inbox=%zu wake_prim=%u\n",
-                    i, ls,
-                    lq_tail >= lq_head ? lq_tail - lq_head : 0,
-                    iq_tail >= iq_head ? iq_tail - iq_head : 0,
-                    (unsigned)wakev);
-        }
-    }
-    fflush(stderr);
-}
-
 static inline int cc__restore_inbox_task(size_t victim, fiber_task* f);
 
 /* Work stealing: steal from another worker's queue.
@@ -2767,7 +2449,7 @@ void cc_fiber_dump_state(const char* reason) {
             atomic_load(&g_sched.pending),
             atomic_load(&g_sched.active),
             atomic_load(&g_sched.sleeping),
-            get_total_parked(),
+            atomic_load_explicit(&g_sched.total_parked, memory_order_relaxed),
             atomic_load(&g_sched.completed));
     if (g_sched.run_queue) {
         size_t head = 0, tail = 0, overflow = 0;
@@ -4189,9 +3871,6 @@ static void* worker_main(void* arg) {
             }
         }
         
-        /* Check for deadlock: all workers sleeping + parked fibers + no runnable work */
-        cc__fiber_check_deadlock();
-        
         /* Sleep while no runnable work (check local queue, global queue) and still running.
         * Wake primitive is signaled when fibers are spawned or unparked.
         * Periodically wake to check for deadlock (every ~500ms).
@@ -4253,7 +3932,6 @@ static void* worker_main(void* arg) {
             uint64_t wait_start_ns = 0;
             cc_sched_wait_stat_inc(&g_cc_sched_wait_stats.sleep_wait_calls);
             wake_primitive_wait_timeout(my_wake, wake_val, 500);
-            cc__fiber_check_deadlock();
         }
         atomic_fetch_sub_explicit(&g_sched.sleeping, 1, memory_order_relaxed);
         cc_v3_worker_lifecycle_set(worker_id, CC_WL_ACTIVE, "sleep_exit");
@@ -4986,11 +4664,6 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
         }
     }
     
-    /* Debug: track fiber in all-fibers list and log lifecycle event */
-    if (!reused) {
-        all_fibers_track(f);
-    }
-    SCHED_DIAG_STAT_INC(g_fibers_spawned);
     
     return f;
 }
@@ -5284,29 +4957,6 @@ void* cc_task_result_ptr(size_t size) {
     void* v2_buf = sched_v2_current_result_buf(size);
     if (v2_buf) return v2_buf;
     return NULL;
-}
-
-/* Internal: add fiber to parked list for debugging */
-static void parked_list_add(fiber_task* f) {
-    pthread_mutex_lock(&g_parked_list_mu);
-    f->next = g_parked_list_head;
-    g_parked_list_head = f;
-    pthread_mutex_unlock(&g_parked_list_mu);
-}
-
-/* Internal: remove fiber from parked list */
-static void parked_list_remove(fiber_task* f) {
-    pthread_mutex_lock(&g_parked_list_mu);
-    fiber_task** pp = &g_parked_list_head;
-    while (*pp) {
-        if (*pp == f) {
-            *pp = f->next;
-            f->next = NULL;
-            break;
-        }
-        pp = &(*pp)->next;
-    }
-    pthread_mutex_unlock(&g_parked_list_mu);
 }
 
 /* worker_commit_park — called by the trampoline (worker_run_fiber) after
