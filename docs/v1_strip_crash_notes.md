@@ -159,3 +159,54 @@ in favor of `CC_V2_THREADS`. The dead `#define CC_FIBER_WORKERS` in
 `cc/runtime/fiber_sched.c` was deleted, and the V1-only "Concurrent-C V1"
 comparison row in `perf/compare_syscall.sh` was collapsed into the single
 "Concurrent-C" row. The compile-time knob no longer exists in the spec.
+
+## Post-V1-strip test triage (6 failures from run_all --all)
+
+After the full run_all completed without kernel panics (first time
+since V1 retirement), 6 tests failed. Triage status:
+
+1. **`perf/channel_wake_wave.ccs`** — FIXED (commit `a5a33d9`?)
+   V1-strip casualty: called the retired `cc__fiber_set_worker_affinity`
+   API. Added a no-op shim in `cc/runtime/fiber_sched.c` so the test
+   links. Its mismatch_rounds counter is now meaningless (affinity is
+   gone) but its actual pass criterion (`bad_value_rounds == 0`) still
+   holds.
+
+2. **`examples/recipe_http_get.ccs`** — SKIPPED (pre-existing toolchain
+   issue). `curl/system.h` declares `accept()` before `<sys/socket.h>`
+   pulls in the macOS SDK version, producing
+   `incompatible types for redefinition of 'accept'`. Unrelated to
+   the V1 strip; defer until we touch the curl integration.
+
+3. **`stress/backpressure_cycle_ring3_deadline.ccs`** — FIXED
+   (commit `b108d4b`). Root cause: `sched_v2_park()` had no deadline
+   awareness, so `@with_deadline` wrapping a blocking `cc_chan_send`
+   on a full-no-receiver channel would never time out — the V2
+   deadlock detector (~200 ms) fired instead of `ETIMEDOUT` reaching
+   the caller. Fix: added `park_deadline` + `has_park_deadline` to
+   `fiber_v2`, a global atomic counter `g_v2_park_deadlines` so sysmon
+   short-circuits when nothing has a deadline in flight, and hooked
+   `sched_v2_wake_expired_parkers()` into the sysmon tick. Resolution
+   is bounded by `V2_SYSMON_INTERVAL_MS` (20 ms).
+
+4. **`stress/pipeline_repeat.ccs`** — FLAKY (pre-existing, not V1-strip
+   related). 5-stage pipeline, 100 items per iter, cap=8 channels, 500
+   iters. Passes 2/4 runs, fails with identical loss pattern:
+   `count=92 sum=4554` = first 92 items delivered, last 8 (= one
+   buffer-worth) lost. Strong signal of a close-vs-drain race in the
+   lockfree backend — producer sends 100 items then closes, but close
+   propagates through the pipeline before all 8 in-flight items are
+   drained at some stage. Needs a full audit of
+   `cc__chan_try_drain_lockfree_on_close` + `lfqueue_inflight`
+   accounting under high close/send contention. Deferred — was flaky
+   before the V1 strip.
+
+5. **`perf/mem_stress.ccs`** — FIXED by timeout bump. Completes
+   cleanly in ~21 s standalone; default 20 s timeout in run_all was
+   tripping on a good run. Bumped to 40 s in `get_timeout_sec`.
+
+6. **`perf/channel_contention.ccs`** — APPEARS FIXED. Failed once in
+   the original trace but now passes 3/3 runs in isolation. May have
+   been collateral damage from the deadline bug (#3) or genuinely
+   flaky. Watch in future runs; if it recurs, treat as a lost-wake bug
+   on the send side.

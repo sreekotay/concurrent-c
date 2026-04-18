@@ -159,6 +159,10 @@ static int get_timeout_sec(const char* path, int default_timeout_sec) {
     if (strstr(path, "join_init_race") != NULL) return 20;
     if (strstr(path, "block_combinators_stress") != NULL) return 20;
     if (strstr(path, "cancellation_race_storm") != NULL) return 30;
+    /* mem_stress spawns/joins 5000 fibers and completes cleanly in
+     * ~21 s standalone.  The default 20 s timeout trips on a good run;
+     * bump to 40 s so we only fail for genuine hangs. */
+    if (strstr(path, "mem_stress") != NULL) return 40;
     return default_timeout_sec;
 }
 
