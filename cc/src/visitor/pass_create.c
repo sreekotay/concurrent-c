@@ -279,7 +279,32 @@ char* cc_rewrite_registered_type_create_destroy(const char* src,
         name_s = p;
         name_e = name_end;
         stmt_s = name_s;
-        while (stmt_s > 0 && src[stmt_s - 1] != ';' && src[stmt_s - 1] != '{' && src[stmt_s - 1] != '}') stmt_s--;
+        {
+            /* Walk back to the previous statement terminator, skipping over
+             * block comments so a ';' inside a comment doesn't get treated as
+             * a false terminator. Needed when a comment immediately precedes a
+             * `Type var = @create(...)` declaration. */
+            int in_block_comment = 0;
+            while (stmt_s > 0) {
+                char prev = src[stmt_s - 1];
+                if (!in_block_comment) {
+                    if (stmt_s >= 2 && src[stmt_s - 2] == '*' && src[stmt_s - 1] == '/') {
+                        in_block_comment = 1;
+                        stmt_s -= 2;
+                        continue;
+                    }
+                    if (prev == ';' || prev == '{' || prev == '}') break;
+                    stmt_s--;
+                } else {
+                    if (stmt_s >= 2 && src[stmt_s - 2] == '/' && src[stmt_s - 1] == '*') {
+                        in_block_comment = 0;
+                        stmt_s -= 2;
+                        continue;
+                    }
+                    stmt_s--;
+                }
+            }
+        }
         stmt_s = cc_skip_ws_and_comments(src, n, stmt_s);
         declared_type_len = name_s - stmt_s;
         while (declared_type_len > 0 &&

@@ -1,0 +1,39 @@
+// Tests UFCS lowering inside macro-argument contexts.
+// Historical bug: AST pass didn't surface `root->wait() == 0` inside
+// `assert(...)` because the macro expansion hid the call from the stub AST.
+// The text fallback must pick it up instead.
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct Counter {
+    int value;
+} Counter;
+
+static int Counter_bump(Counter* c) {
+    c->value += 1;
+    return c->value;
+}
+
+static int Counter_peek(Counter* c) {
+    return c->value;
+}
+
+int main(void) {
+    Counter c = (Counter){ .value = 0 };
+    Counter* p = &c;
+
+    // UFCS inside macro-argument context: must still lower.
+    assert(p->bump() == 1);
+    assert(p->bump() == 2);
+    assert(p->peek() == 2);
+
+    // UFCS inside an ordinary function call (not a macro) — already works.
+    fprintf(stderr, "peek=%d\n", p->peek());
+
+    // Nested UFCS inside a printf-style arg list, which expands to nothing
+    // macro-like but exercises the same code path.
+    printf("%d %d\n", p->peek(), p->bump());
+
+    return 0;
+}

@@ -37,10 +37,27 @@ static void cc__mangle_type(const char* src, size_t len, char* out, size_t out_s
     cc_result_spec_mangle_type(src, len, out, out_sz);
 }
 
-/* Scan back from position to find type start (delimited by ; { } , ( ) newline) */
+/* Scan back from position to find type start (delimited by ; { } , ( ) newline).
+ * Skips over block comments so text inside them (including '*' continuations
+ * that mangle to '_ptr_') doesn't get absorbed into the type name. */
 static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
     size_t i = from;
+    int in_block_comment = 0;
     while (i > 0) {
+        if (in_block_comment) {
+            if (i >= 2 && s[i - 2] == '/' && s[i - 1] == '*') {
+                in_block_comment = 0;
+                i -= 2;
+                continue;
+            }
+            i--;
+            continue;
+        }
+        if (i >= 2 && s[i - 2] == '*' && s[i - 1] == '/') {
+            in_block_comment = 1;
+            i -= 2;
+            continue;
+        }
         char p = s[i - 1];
         if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
         i--;

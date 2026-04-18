@@ -91,6 +91,13 @@ int cc_run_blocking_closure0(CCClosure0 c);
 void* cc_run_blocking_closure0_ptr(CCClosure0 c);
 
 
+/* Invoke a 0-arg closure.  Useful when the closure is stored in a struct
+ * field or any expression the compiler's closure-call rewriter does not
+ * recognize (it only rewrites bare-identifier callees — see
+ * cc/src/cccn/passes/pass_closure.c).  Prefer this over `c.fn(c.env)` so
+ * the call site compiles in parser mode, where CCClosure0 is stubbed to
+ * intptr_t. */
+void* cc_closure0_call(CCClosure0 c);
 /* Invoke a 1-arg closure. */
 void* cc_closure1_call(CCClosure1 c, intptr_t arg0);
 /* Invoke a 2-arg closure. */

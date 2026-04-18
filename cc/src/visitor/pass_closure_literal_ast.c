@@ -136,7 +136,31 @@ static int cc__closure_start_off_best_effort(const char* src, size_t len,
     for (size_t i = lo; i + 1 < hi; i++) {
         if (src[i] == '=' && src[i + 1] == '>') { arrow = i; break; }
     }
-    if (arrow == (size_t)-1) return 0;
+    if (arrow == (size_t)-1) {
+        /* Fallback: closures inside macro arguments get assigned the line of
+         * the macro call's closing ')' (not where `=>` actually appears in
+         * source). Scan backward from `lo` for the nearest '=>' and derive
+         * the closure start from it. Bounded to avoid crossing statements. */
+        size_t scan_limit = (lo > 4096) ? (lo - 4096) : 0;
+        size_t back_arrow = (size_t)-1;
+        for (size_t i = lo; i-- > scan_limit; ) {
+            if (i + 1 < len && src[i] == '=' && src[i + 1] == '>') {
+                back_arrow = i;
+                break;
+            }
+        }
+        if (back_arrow == (size_t)-1) return 0;
+        size_t st = cc__find_closure_start_from_arrow(src, scan_limit, back_arrow);
+        *out_off = st;
+        if (out_col_1based) {
+            /* Column is relative to the closure's actual line; compute by
+             * walking back to the preceding newline. */
+            size_t line_lo = st;
+            while (line_lo > 0 && src[line_lo - 1] != '\n') line_lo--;
+            *out_col_1based = 1 + (int)(st - line_lo);
+        }
+        return 1;
+    }
     size_t st = cc__find_closure_start_from_arrow(src, lo, arrow);
     *out_off = st;
     if (out_col_1based) *out_col_1based = 1 + (int)(st - lo);

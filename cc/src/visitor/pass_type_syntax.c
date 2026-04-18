@@ -178,11 +178,31 @@ static void cc__mangle_type_name(const char* src, size_t len, char* out, size_t 
 
 /* Scan back from position `from` to find the start of a type token (delimited by ; { } , ( ) newline). */
 static size_t cc__scan_back_to_type_start(const char* s, size_t from) {
+    /* Walk back to a statement/expression boundary, skipping over block
+     * comments so text inside them doesn't get absorbed into the type name
+     * (block comments may span multiple lines and contain '*' continuations
+     * that would otherwise be mangled into '_ptr_' by the type-name
+     * mangler). */
     size_t i = from;
+    int in_block_comment = 0;
     while (i > 0) {
-        char p = s[i - 1];
-        if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
-        i--;
+        if (!in_block_comment) {
+            if (i >= 2 && s[i - 2] == '*' && s[i - 1] == '/') {
+                in_block_comment = 1;
+                i -= 2;
+                continue;
+            }
+            char p = s[i - 1];
+            if (p == ';' || p == '{' || p == '}' || p == ',' || p == '(' || p == ')' || p == '\n') break;
+            i--;
+        } else {
+            if (i >= 2 && s[i - 2] == '/' && s[i - 1] == '*') {
+                in_block_comment = 0;
+                i -= 2;
+                continue;
+            }
+            i--;
+        }
     }
     while (s[i] && (s[i] == ' ' || s[i] == '\t')) i++;
     return i;

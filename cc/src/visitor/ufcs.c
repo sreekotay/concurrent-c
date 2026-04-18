@@ -165,7 +165,24 @@ static int cc__ufcs_parse_decl_name_and_type_fallback(const char* stmt_start,
     if (!decl_name || decl_name_sz == 0 || !decl_type || decl_type_sz == 0) return 0;
     decl_name[0] = '\0';
     decl_type[0] = '\0';
-    while (s < e && isspace((unsigned char)*s)) s++;
+    /* Skip leading whitespace and C-style comments so block comments between
+     * the previous statement terminator and the type (e.g. a doc comment on
+     * `bool !>(CCIoError) fill = ...;`) aren't absorbed into the type name. */
+    for (;;) {
+        while (s < e && isspace((unsigned char)*s)) s++;
+        if (s + 1 < e && s[0] == '/' && s[1] == '/') {
+            s += 2;
+            while (s < e && *s != '\n') s++;
+            continue;
+        }
+        if (s + 1 < e && s[0] == '/' && s[1] == '*') {
+            s += 2;
+            while (s + 1 < e && !(s[0] == '*' && s[1] == '/')) s++;
+            if (s + 1 < e) s += 2;
+            continue;
+        }
+        break;
+    }
     while (e > s && isspace((unsigned char)e[-1])) e--;
     if (e <= s) return 0;
     scan_end = e;
@@ -1113,6 +1130,124 @@ static int cc__emit_type_driven_dispatch(char* out,
     return -1;
 }
 
+/* UFCS-vs-closure-field dispatch.
+ *
+ * If `method` is actually a CCClosureN field on the receiver's type, emit
+ * `cc_closureN_call(recv->method, <args>)` instead of falling through to
+ * free-function dispatch (`Type_method(recv, ...)`).  This is what lets
+ *
+ *     w->destroy();
+ *
+ * invoke the closure stored in the `destroy` field of `*w`, rather than
+ * looking up a non-existent `Widget_destroy` free function.  It is the
+ * "field shadows method" rule every OO-ish language with both has to pick.
+ *
+ * Gating: we only redirect when cc_type_registry_lookup_field returns a
+ * field type that is exactly one of CCClosure0/1/2 (pointer-to-closure or
+ * other wrappers explicitly don't qualify).  When the method name is not a
+ * field of the receiver, or the field is not a closure type, we return
+ * CC_UFCS_EMIT_UNRESOLVED so the rest of emit_desugared_call runs normally.
+ */
+static int cc__emit_closure_field_call(char* out,
+                                       size_t cap,
+                                       const char* recv,
+                                       const char* method,
+                                       bool recv_is_ptr,
+                                       const char* args_rewritten,
+                                       bool has_args,
+                                       const CCUFCSDispatchCtx* ctx) {
+    if (!ctx) return CC_UFCS_EMIT_UNRESOLVED;
+    const char* type_for_lookup = NULL;
+    if (ctx->recv_type_base[0]) type_for_lookup = ctx->recv_type_base;
+    else if (ctx->recv_type_name) type_for_lookup = ctx->recv_type_name;
+    if (!type_for_lookup || !type_for_lookup[0]) return CC_UFCS_EMIT_UNRESOLVED;
+    /* Strip leading "struct "/"union " so we match the tag recorded by the
+     * preprocess pass (which keys fields on the typedef name / tag alone). */
+    if (strncmp(type_for_lookup, "struct ", 7) == 0) type_for_lookup += 7;
+    else if (strncmp(type_for_lookup, "union ", 6) == 0) type_for_lookup += 6;
+    while (*type_for_lookup == ' ' || *type_for_lookup == '\t') type_for_lookup++;
+    if (!*type_for_lookup) return CC_UFCS_EMIT_UNRESOLVED;
+
+    CCTypeRegistry* reg = cc_type_registry_get_global();
+    if (!reg) return CC_UFCS_EMIT_UNRESOLVED;
+    const char* field_type = cc_type_registry_lookup_field(reg, type_for_lookup, method);
+    if (!field_type) return CC_UFCS_EMIT_UNRESOLVED;
+
+    /* Trim leading whitespace on the field type. */
+    while (*field_type == ' ' || *field_type == '\t') field_type++;
+
+    int arity;
+    const char* fn_name;
+    if (strcmp(field_type, "CCClosure0") == 0) {
+        arity = 0;
+        fn_name = "cc_closure0_call";
+    } else if (strcmp(field_type, "CCClosure1") == 0) {
+        arity = 1;
+        fn_name = "cc_closure1_call";
+    } else if (strcmp(field_type, "CCClosure2") == 0) {
+        arity = 2;
+        fn_name = "cc_closure2_call";
+    } else {
+        return CC_UFCS_EMIT_UNRESOLVED;
+    }
+
+    /* Build the closure-field access expression.  If the user wrote `->`,
+     * or type resolution says the receiver is a pointer, emit pointer
+     * dereference; otherwise value-access with `.`.
+     *
+     * Parenthesize the receiver so complex expressions like `get()->destroy`
+     * still compose correctly; the existing UFCS path already trusts the
+     * rewriter to supply well-formed receivers at this point. */
+    char access[512];
+    int use_arrow = recv_is_ptr || (ctx && ctx->recv_is_ptr);
+    int an = snprintf(access, sizeof(access),
+                      use_arrow ? "(%s)->%s" : "(%s).%s", recv, method);
+    if (an < 0 || (size_t)an >= sizeof(access)) return -1;
+
+    if (arity == 0) {
+        if (has_args) return CC_UFCS_EMIT_UNRESOLVED; /* signature mismatch */
+        return snprintf(out, cap, "%s(%s)", fn_name, access);
+    }
+
+    const char* args = (has_args && args_rewritten) ? args_rewritten : "";
+    if (arity == 1) {
+        return snprintf(out, cap, "%s(%s, (intptr_t)(%s))", fn_name, access, args);
+    }
+
+    /* arity == 2: split args on the top-level comma (respecting strings and
+     * nested ()/[]/{}).  If we can't find a balanced split, punt and let
+     * UFCS's default dispatch handle the diagnostic. */
+    const char* comma = NULL;
+    {
+        int par = 0, brk = 0, brc = 0;
+        int in_str = 0; char q = 0;
+        for (const char* p = args; *p; p++) {
+            char ch = *p;
+            if (in_str) {
+                if (ch == '\\' && p[1]) { p++; continue; }
+                if (ch == q) in_str = 0;
+                continue;
+            }
+            if (ch == '"' || ch == '\'') { in_str = 1; q = ch; continue; }
+            if (ch == '(') par++;
+            else if (ch == ')') { if (par) par--; }
+            else if (ch == '[') brk++;
+            else if (ch == ']') { if (brk) brk--; }
+            else if (ch == '{') brc++;
+            else if (ch == '}') { if (brc) brc--; }
+            else if (ch == ',' && par == 0 && brk == 0 && brc == 0) { comma = p; break; }
+        }
+    }
+    if (!comma) return CC_UFCS_EMIT_UNRESOLVED;
+
+    size_t a_len = (size_t)(comma - args);
+    while (a_len > 0 && isspace((unsigned char)args[a_len - 1])) a_len--;
+    const char* b = comma + 1;
+    while (*b && isspace((unsigned char)*b)) b++;
+    return snprintf(out, cap, "%s(%s, (intptr_t)(%.*s), (intptr_t)(%s))",
+                    fn_name, access, (int)a_len, args, b);
+}
+
 static int emit_desugared_call(char* out,
                                size_t cap,
                                const char* recv,
@@ -1124,6 +1259,14 @@ static int emit_desugared_call(char* out,
     int dispatch_n;
     if (!out || cap == 0 || !recv || !method) return -1;
     cc__resolve_dispatch_ctx(&ctx, recv);
+    /* Closure-field dispatch shadows free-function UFCS.  See comment on
+     * cc__emit_closure_field_call. */
+    {
+        int n = cc__emit_closure_field_call(out, cap, recv, method, recv_is_ptr,
+                                            args_rewritten, has_args, &ctx);
+        if (n >= 0) return n;
+        /* n == CC_UFCS_EMIT_UNRESOLVED or error: fall through to normal dispatch. */
+    }
     if ((strcmp(recv, "std_out") == 0 || strcmp(recv, "cc_std_out") == 0 ||
          strcmp(recv, "std_err") == 0 || strcmp(recv, "cc_std_err") == 0) &&
         strcmp(method, "write") == 0) {
