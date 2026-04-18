@@ -1160,9 +1160,20 @@ char* cc__rewrite_inferred_result_constructors(const char* src, size_t n) {
                         size_t k = args_start;
                         while (k < j && (src[k] == ' ' || src[k] == '\t')) k++;
                         
-                        /* cc_err(CC_ERR_*) or cc_err(CC_ERR_*, "msg")
-                           -> cc_err_...(CC_ERROR(...)) */
-                        if (is_default_err && k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0) {
+                        /* Default-CCError constructors:
+                         *   cc_err(KIND)           -> cc_err_...(CC_ERROR(KIND, NULL))
+                         *   cc_err(KIND, MSG)      -> cc_err_...(CC_ERROR(KIND, MSG))
+                         * The 1-arg form is only taken when KIND is a
+                         * `CC_ERR_*` literal, because a 1-arg cc_err(e) with
+                         * a CCError-typed `e` is the pass-through short form
+                         * handled below.  The 2-arg form is unambiguous —
+                         * the second argument is a message, so the first
+                         * must be a CCErrorKind (literal or expression). */
+                        int is_default_2arg = (is_default_err && comma_count == 1);
+                        int is_default_kind_literal =
+                            (is_default_err && comma_count == 0 &&
+                             k + 7 < j && memcmp(src + k, "CC_ERR_", 7) == 0);
+                        if (is_default_2arg || is_default_kind_literal) {
                             cc__sb_append_local(&out, &out_len, &out_cap, src + last_emit, macro_start - last_emit);
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, "cc_err_");
                             cc__sb_append_cstr_local(&out, &out_len, &out_cap, current_result_type);
