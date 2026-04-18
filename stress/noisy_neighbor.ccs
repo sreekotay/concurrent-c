@@ -61,7 +61,7 @@ int main(void) {
     /* Oversubscribe: 4 workers for 15 hogs + 1 heartbeat. */
     char workers_buf[8];
     snprintf(workers_buf, sizeof(workers_buf), "%d", NUM_WORKERS);
-    setenv("CC_FIBER_WORKERS", workers_buf, 1);
+    setenv("CC_V2_THREADS", workers_buf, 1);
 
     printf("=================================================================\n");
     printf("NOISY NEIGHBOR CHALLENGE: Can the CC Scheduler handle CPU hogs?\n");

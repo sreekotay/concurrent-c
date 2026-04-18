@@ -70,7 +70,7 @@ void kidnapper_fiber(int id) {
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     // Ensure we have a fixed number of workers for the test
-    setenv("CC_FIBER_WORKERS", "16", 1);
+    setenv("CC_V2_THREADS", "16", 1);
     
     printf("=================================================================\n");
     printf("KIDNAPPING CHALLENGE: Can the CC Scheduler survive rude IO?\n");
