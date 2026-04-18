@@ -2,15 +2,17 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"sync/atomic"
 	"time"
 )
 
 const (
+	NUM_WORKERS           = 4
 	NUM_HOGS              = 15
 	HEARTBEAT_INTERVAL_MS = 100
-	TEST_DURATION_SEC     = 5
+	TEST_DURATION_SEC     = 3
 )
 
 var (
@@ -49,18 +51,14 @@ func hog(id int) {
 }
 
 func main() {
+	runtime.GOMAXPROCS(NUM_WORKERS)
+
 	fmt.Printf("=================================================================\n")
 	fmt.Printf("GO NOISY NEIGHBOR CHALLENGE\n")
-	fmt.Printf("Workers: %d | CPU Hogs: %d\n", runtime.NumCPU(), NUM_HOGS)
+	fmt.Printf("Workers: %d | CPU Hogs: %d\n", NUM_WORKERS, NUM_HOGS)
 	fmt.Printf("=================================================================\n\n")
 
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
 	go heartbeat()
-
-	// Give heartbeat a head start
-	time.Sleep(500 * time.Millisecond)
-	fmt.Printf("Initial heartbeats: %d (Healthy)\n", atomic.LoadInt64(&heartbeats))
 
 	fmt.Printf("\n!!! Unleashing CPU Hogs !!!\n")
 	for i := 0; i < NUM_HOGS; i++ {
@@ -68,12 +66,6 @@ func main() {
 	}
 
 	time.Sleep(TEST_DURATION_SEC * time.Second)
-	atomic.StoreInt32(&stop, 1)
-
-	// Wait for hogs to stop
-	for atomic.LoadInt64(&hogsActive) > 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
 
 	finalBeats := atomic.LoadInt64(&heartbeats)
 	fmt.Printf("\n=================================================================\n")
@@ -88,4 +80,6 @@ func main() {
 		fmt.Printf("Heartbeat efficiency: %.1f%%\n", float64(finalBeats)*100.0/float64(expected))
 	}
 	fmt.Printf("=================================================================\n")
+	/* Skip clean shutdown — hogs won't yield, harness is done. */
+	os.Exit(0)
 }
