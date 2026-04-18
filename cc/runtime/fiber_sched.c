@@ -892,6 +892,33 @@ static inline void cc_sched_io_wake_stat_inc(_Atomic uint64_t* counter) {
     atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
 }
 
+/* General-purpose V1 diagnostic-counter gate.  Mirrors the V2 sched_v2.c
+ * gate.  Many g_sched.pressure_*, g_sched.promotion_count,
+ * g_cc_fiber_unpark_*, g_cc_join_*, g_fibers_spawned, etc. counters used to
+ * be unconditionally incremented on hot paths (pressure eval, park/unpark,
+ * join) purely for diagnostics.  Opt in with CC_SCHED_STATS=1 to populate
+ * them.  The macros fall through to a no-op when disabled, so the RMW and
+ * the cache-line contention disappear entirely. */
+static int cc_sched_diag_stats_enabled(void) {
+    static int mode = -1;
+    if (mode >= 0) return mode;
+    const char* env = getenv("CC_SCHED_STATS");
+    mode = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+    return mode;
+}
+
+#define SCHED_DIAG_STAT_INC(counter) \
+    do { \
+        if (__builtin_expect(cc_sched_diag_stats_enabled(), 0)) \
+            atomic_fetch_add_explicit(&(counter), 1, memory_order_relaxed); \
+    } while (0)
+
+#define SCHED_DIAG_STAT_ADD(counter, delta) \
+    do { \
+        if (__builtin_expect(cc_sched_diag_stats_enabled(), 0)) \
+            atomic_fetch_add_explicit(&(counter), (delta), memory_order_relaxed); \
+    } while (0)
+
 static void cc_sched_wait_stats_dump(void) {
     if (!cc_sched_wait_stats_enabled()) return;
     uint64_t spin_entries = atomic_load_explicit(&g_cc_sched_wait_stats.spin_entries, memory_order_relaxed);
@@ -1416,7 +1443,7 @@ static int iq_push_with_edge(inbox_queue* q, fiber_task* f, int* was_empty) {
         spins++;
     }
     sched_yield();
-    atomic_fetch_add_explicit(&g_inbox_overflow, 1, memory_order_relaxed);
+    SCHED_DIAG_STAT_INC(g_inbox_overflow);
     return -1;
 }
 
@@ -1777,7 +1804,7 @@ static inline void cc_v3_worker_lifecycle_set(int worker_id, cc_worker_lifecycle
         slot, (unsigned char)next, memory_order_acq_rel);
     if (!lifecycle_asserts) return;
     if (cc_v3_worker_lifecycle_is_legal(prev, next)) return;
-    atomic_fetch_add_explicit(&g_sched.lifecycle_illegal_transitions, 1, memory_order_relaxed);
+    SCHED_DIAG_STAT_INC(g_sched.lifecycle_illegal_transitions);
     fprintf(stderr,
             "CC_V3_LIFECYCLE_ASSERT: worker=%d edge=%s illegal %s->%s\n",
             worker_id,
@@ -3374,8 +3401,7 @@ static void* sysmon_main(void* arg) {
                         atomic_fetch_add_explicit(&g_sched.temp_worker_count, 1,
                                                 memory_order_relaxed);
                         if (spawn_detached_worker(timer_service_worker) == 0)
-                            atomic_fetch_add_explicit(&g_sched.promotion_count, 1,
-                                                    memory_order_relaxed);
+                            SCHED_DIAG_STAT_INC(g_sched.promotion_count);
                         else {
                             atomic_fetch_sub_explicit(&g_sched.temp_worker_count, 1,
                                                     memory_order_relaxed);
@@ -3395,12 +3421,12 @@ static void* sysmon_main(void* arg) {
         size_t active = atomic_load_explicit(&g_sched.active, memory_order_relaxed);
         int64_t pressure = atomic_load_explicit(&g_sched.pressure, memory_order_relaxed);
 #if CC_V3_DIAGNOSTICS
-        atomic_fetch_add_explicit(&g_sched.pressure_samples, 1, memory_order_relaxed);
+        SCHED_DIAG_STAT_INC(g_sched.pressure_samples);
         if (pressure > 0) {
-            atomic_fetch_add_explicit(&g_sched.pressure_positive_samples, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_sched.pressure_positive_samples);
             negative_pressure_streak = 0;
         } else if (pressure < 0) {
-            atomic_fetch_add_explicit(&g_sched.pressure_negative_samples, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_sched.pressure_negative_samples);
             if (negative_pressure_streak < UINT64_MAX) negative_pressure_streak++;
             uint64_t prev = atomic_load_explicit(&g_sched.pressure_negative_streak_max, memory_order_relaxed);
             while (negative_pressure_streak > prev) {
@@ -3419,13 +3445,13 @@ static void* sysmon_main(void* arg) {
         /* Scale-up gate (§7): require runnable work evidence and positive pressure. */
         if (!sysmon_has_pending_work()) {
 #if CC_V3_DIAGNOSTICS
-            atomic_fetch_add_explicit(&g_sched.pressure_block_no_work, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_sched.pressure_block_no_work);
 #endif
             continue;
         }
         if (pressure <= 0) {
 #if CC_V3_DIAGNOSTICS
-            atomic_fetch_add_explicit(&g_sched.pressure_block_nonpositive, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_sched.pressure_block_nonpositive);
 #endif
             continue;
         }
@@ -3446,7 +3472,7 @@ static void* sysmon_main(void* arg) {
         /* If current idle capacity can plausibly absorb pressure, don't promote yet. */
         if ((sleeping + spinning) > 0 && pressure <= (int64_t)(sleeping + spinning)) {
 #if CC_V3_DIAGNOSTICS
-            atomic_fetch_add_explicit(&g_sched.pressure_block_idle_capacity, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_sched.pressure_block_idle_capacity);
 #endif
             continue;
         }
@@ -3477,7 +3503,7 @@ static void* sysmon_main(void* arg) {
 
         if (stuck == 0) {
 #if CC_V3_DIAGNOSTICS
-            atomic_fetch_add_explicit(&g_sched.pressure_block_not_stuck, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_sched.pressure_block_not_stuck);
 #endif
             continue;
         }
@@ -3492,7 +3518,7 @@ static void* sysmon_main(void* arg) {
         
         if (to_spawn == 0) continue;
 #if CC_V3_DIAGNOSTICS
-        atomic_fetch_add_explicit(&g_sched.pressure_gate_passes, 1, memory_order_relaxed);
+        SCHED_DIAG_STAT_INC(g_sched.pressure_gate_passes);
 #endif
         
         /* Rate limit overall scaling bursts */
@@ -3506,7 +3532,7 @@ static void* sysmon_main(void* arg) {
         
         /* Spawn all needed workers at once */
 #if CC_V3_DIAGNOSTICS
-        atomic_fetch_add_explicit(&g_sched.pressure_promoted_workers, to_spawn, memory_order_relaxed);
+        SCHED_DIAG_STAT_ADD(g_sched.pressure_promoted_workers, to_spawn);
 #endif
         for (size_t s = 0; s < to_spawn; s++) {
             /* temp_worker_count participates in heuristic accounting, not correctness LPs. */
@@ -3517,7 +3543,7 @@ static void* sysmon_main(void* arg) {
             current++;
             
             if (spawn_detached_worker(replacement_worker) == 0)
-                atomic_fetch_add_explicit(&g_sched.promotion_count, 1, memory_order_relaxed);
+                SCHED_DIAG_STAT_INC(g_sched.promotion_count);
             else
                 atomic_fetch_sub_explicit(&g_sched.temp_worker_count, 1, memory_order_relaxed);
         }
@@ -4924,7 +4950,7 @@ fiber_task* cc_fiber_spawn(void* (*fn)(void*), void* arg) {
     if (!reused) {
         all_fibers_track(f);
     }
-    atomic_fetch_add_explicit(&g_fibers_spawned, 1, memory_order_relaxed);
+    SCHED_DIAG_STAT_INC(g_fibers_spawned);
     
     return f;
 }
@@ -5067,7 +5093,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         * entry that also fails CAS.  No double-execution is possible. */
         int my_wid = tls_worker_id;
         if (cc_join_help_enabled() && my_wid >= 0 && g_sched.inbox_queues) {
-            atomic_fetch_add_explicit(&g_cc_join_help_attempts, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_cc_join_help_attempts);
             int64_t ctrl = CTRL_QUEUED;
             int64_t owned = CTRL_OWNED(my_wid);
             if (atomic_compare_exchange_strong_explicit(&f->control, &ctrl, owned,
@@ -5075,7 +5101,7 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
                                                         memory_order_relaxed)) {
                 atomic_store_explicit(&f->control, CTRL_QUEUED, memory_order_release);
                 iq_push_with_edge(&g_sched.inbox_queues[my_wid], f, NULL);
-                atomic_fetch_add_explicit(&g_cc_join_help_hits, 1, memory_order_relaxed);
+                SCHED_DIAG_STAT_INC(g_cc_join_help_hits);
             }
         }
 
@@ -5086,10 +5112,10 @@ int cc_fiber_join(fiber_task* f, void** out_result) {
         * fiber yields back to that worker loop immediately, so no extra wake
         * nudge is needed here. */
         int park_loops = 0;
-        atomic_fetch_add_explicit(&g_cc_join_park_joins, 1, memory_order_relaxed);
+        SCHED_DIAG_STAT_INC(g_cc_join_park_joins);
         while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
             park_loops++;
-            atomic_fetch_add_explicit(&g_cc_join_park_loops, 1, memory_order_relaxed);
+            SCHED_DIAG_STAT_INC(g_cc_join_park_loops);
             cc__fiber_park_if(&f->done, 0, "join", __FILE__, __LINE__);
         }
     } else {
@@ -5624,7 +5650,7 @@ static void cc__fiber_unpark_impl(void* fiber_ptr) {
     fiber_task* f = (fiber_task*)fiber_ptr;
     if (!f) return;
 #if CC_V3_DIAGNOSTICS
-    atomic_fetch_add_explicit(&g_cc_fiber_unpark_calls, 1, memory_order_relaxed);
+    SCHED_DIAG_STAT_INC(g_cc_fiber_unpark_calls);
 #endif
     int trace_recv_empty = 0;
     int trace_req_wake = 0;
@@ -5752,7 +5778,7 @@ queued:
                 f->park_obj);
     }
 #if CC_V3_DIAGNOSTICS
-    atomic_fetch_add_explicit(&g_cc_fiber_unpark_enqueues, 1, memory_order_relaxed);
+    SCHED_DIAG_STAT_INC(g_cc_fiber_unpark_enqueues);
 #endif
     /* Decrement parked counter (incremented by worker_commit_park). */
     atomic_fetch_sub_explicit(&g_sched.total_parked, 1, memory_order_relaxed);
@@ -6041,7 +6067,7 @@ void cc__fiber_unpark_tagged(void* fiber_ptr, cc__fiber_unpark_reason reason) {
     if ((unsigned)reason >= CC_FIBER_UNPARK_REASON_COUNT) {
         reason = CC_FIBER_UNPARK_REASON_GENERIC;
     }
-    atomic_fetch_add_explicit(&g_cc_fiber_unpark_by_reason[reason], 1, memory_order_relaxed);
+    SCHED_DIAG_STAT_INC(g_cc_fiber_unpark_by_reason[reason]);
     cc__fiber_unpark_impl(fiber_ptr);
 }
 

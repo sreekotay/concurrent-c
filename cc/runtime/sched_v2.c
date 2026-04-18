@@ -299,6 +299,29 @@ static _Atomic uint64_t g_v2_join_spin_hit = 0;
 static _Atomic uint64_t g_v2_join_park_fiber = 0;
 static _Atomic uint64_t g_v2_join_park_thread = 0;
 
+/* Diagnostic-counter gate.  Writes to the g_v2_* stat counters on the hot
+ * signal/wake/park/resume paths used to be unconditional -- at multi-million
+ * ops/sec this became ~10-20M contended RMWs/s on cold globals across worker
+ * threads purely for diagnostics that are only dumped when CC_V2_STATS is
+ * opted in.  Set from sched_v2_global_init().  The V2_STAT_INC macro branches
+ * out the RMW entirely in the common case (no stats). */
+static _Atomic int g_v2_stats_enabled = 0;
+
+static inline int cc_v2_stats_enabled(void) {
+    return atomic_load_explicit(&g_v2_stats_enabled, memory_order_relaxed);
+}
+
+#define V2_STAT_INC(counter) \
+    do { \
+        if (__builtin_expect(cc_v2_stats_enabled(), 0)) \
+            atomic_fetch_add_explicit(&(counter), 1, memory_order_relaxed); \
+    } while (0)
+#define V2_STAT_DEC(counter) \
+    do { \
+        if (__builtin_expect(cc_v2_stats_enabled(), 0)) \
+            atomic_fetch_sub_explicit(&(counter), 1, memory_order_relaxed); \
+    } while (0)
+
 /* Tunable via CC_V2_JOIN_SPIN env var. Default 0: measurement on pigz (and
  * any workload where the joinee runs much longer than the spin budget)
  * showed the spin never catches a ready task — all joins either hit the
@@ -433,7 +456,7 @@ static fiber_v2* fiber_v2_alloc(void) {
             f->yield_kind = V2_YIELD_PARK;
             f->park_reason = NULL;
             atomic_store_explicit(&f->state, FIBER_V2_IDLE, memory_order_relaxed);
-            atomic_fetch_add_explicit(&g_v2_fibers_alive, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_fibers_alive);
             return f;
         }
     }
@@ -449,7 +472,7 @@ static fiber_v2* fiber_v2_alloc(void) {
     wake_primitive_init(&f->done_wake);
 
     atomic_fetch_add_explicit(&g_v2.fiber_count, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_v2_fibers_alive, 1, memory_order_relaxed);
+    V2_STAT_INC(g_v2_fibers_alive);
     pthread_mutex_lock(&g_v2.all_fibers_mu);
     f->all_next = g_v2.all_fibers;
     g_v2.all_fibers = f;
@@ -458,7 +481,7 @@ static fiber_v2* fiber_v2_alloc(void) {
 }
 
 static void fiber_v2_free(fiber_v2* f) {
-    atomic_fetch_sub_explicit(&g_v2_fibers_alive, 1, memory_order_relaxed);
+    V2_STAT_DEC(g_v2_fibers_alive);
     atomic_store_explicit(&f->state, FIBER_V2_IDLE, memory_order_relaxed);
     f->entry_fn = NULL;
     f->entry_arg = NULL;
@@ -503,12 +526,12 @@ static int sched_v2_try_wake_one(void) {
         if (atomic_compare_exchange_strong_explicit(&g_v2.threads[i].is_idle, &exp, 0,
                 memory_order_acq_rel, memory_order_relaxed)) {
             atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
-            atomic_fetch_add_explicit(&g_v2_wake_issued, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_wake_issued);
             wake_primitive_wake_one(&g_v2.threads[i].wake);
             return 1;
         }
     }
-    atomic_fetch_add_explicit(&g_v2_wake_scan_miss, 1, memory_order_relaxed);
+    V2_STAT_INC(g_v2_wake_scan_miss);
     return 0;
 }
 
@@ -554,12 +577,12 @@ static void sched_v2_wake(int worker_hint) {
         while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
             fiber_v2* f = v2_queue_pop(&g_v2.ready_queue);
             if (!f) return;
-            atomic_fetch_add_explicit(&g_v2_worker_self_drain, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_worker_self_drain);
             thread_v2_run_fiber(worker_hint, f);
         }
         return;
     }
-    atomic_fetch_add_explicit(&g_v2_wake_calls_ext, 1, memory_order_relaxed);
+    V2_STAT_INC(g_v2_wake_calls_ext);
 
     /* External: wake IDLE workers while there's work in the queue.
      *
@@ -577,7 +600,7 @@ static void sched_v2_wake(int worker_hint) {
     atomic_thread_fence(memory_order_seq_cst);
 
     if (atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) <= 0) {
-        atomic_fetch_add_explicit(&g_v2_wake_no_idle, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_wake_no_idle);
         return;
     }
     while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
@@ -619,7 +642,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
             fprintf(stderr, "[sched_v2] mco_create failed on worker pickup\n");
             abort();
         }
-        atomic_fetch_add_explicit(&g_v2_coro_fresh, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_coro_fresh);
     } else if (mco_status(f->coro) == MCO_DEAD) {
         mco_desc desc = mco_desc_init(fiber_v2_entry, V2_FIBER_STACK_SIZE);
         desc.user_data = f;
@@ -631,9 +654,9 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
                 fprintf(stderr, "[sched_v2] mco_create fallback failed on worker pickup\n");
                 abort();
             }
-            atomic_fetch_add_explicit(&g_v2_coro_fresh, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_coro_fresh);
         } else {
-            atomic_fetch_add_explicit(&g_v2_coro_reuse, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_coro_reuse);
         }
     }
 
@@ -642,7 +665,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
     tls_v2_current_fiber = NULL;
     atomic_fetch_add_explicit(&g_v2_sysmon_stall_detect, 1, memory_order_relaxed);
     if (res != MCO_SUCCESS) {
-        atomic_fetch_add_explicit(&g_v2_mco_resume_fail, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_mco_resume_fail);
         fprintf(stderr, "[sched_v2] mco_resume failed rc=%d\n", (int)res);
         abort();
     }
@@ -664,7 +687,7 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
             cc__fiber_unpark_tagged(waiter, CC_FIBER_UNPARK_REASON_TASK_DONE);
         }
         wake_primitive_wake_all(&f->done_wake);
-        atomic_fetch_add_explicit(&g_v2_run_dead, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_run_dead);
         return;
     }
 
@@ -673,9 +696,9 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
         atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
         sched_v2_enqueue_runnable(f);
         if (f->yield_kind == V2_YIELD_YIELD) {
-            atomic_fetch_add_explicit(&g_v2_run_yield_requeue, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_run_yield_requeue);
         } else {
-            atomic_fetch_add_explicit(&g_v2_run_pending_requeue, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_run_pending_requeue);
         }
         return;
     }
@@ -685,15 +708,14 @@ static void thread_v2_run_fiber(int tid, fiber_v2* f) {
             memory_order_acq_rel, memory_order_relaxed)) {
         int fail_state = fiber_v2_state_base(expected);
         if (fail_state >= 0 && fail_state < FIBER_V2_STATE_COUNT) {
-            atomic_fetch_add_explicit(&g_v2_run_commit_park_fail_state[fail_state], 1,
-                                      memory_order_relaxed);
+            V2_STAT_INC(g_v2_run_commit_park_fail_state[fail_state]);
         }
         atomic_store_explicit(&f->state, FIBER_V2_QUEUED, memory_order_release);
         sched_v2_enqueue_runnable(f);
-        atomic_fetch_add_explicit(&g_v2_run_pending_requeue, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_run_pending_requeue);
         return;
     }
-    atomic_fetch_add_explicit(&g_v2_run_commit_parked, 1, memory_order_relaxed);
+    V2_STAT_INC(g_v2_run_commit_parked);
 }
 
 /* ============================================================================
@@ -705,14 +727,13 @@ void sched_v2_signal(fiber_v2* f) {
         int expected = atomic_load_explicit(&f->state, memory_order_acquire);
         int base_state = fiber_v2_state_base(expected);
         if (base_state == FIBER_V2_QUEUED) {
-            atomic_fetch_add_explicit(&g_v2_signal_ok, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_signal_ok);
             return;
         }
         if (base_state == FIBER_V2_RUNNING) {
             if (fiber_v2_state_has_signal_pending(expected)) {
-                atomic_fetch_add_explicit(&g_v2_signal_running_pending_already_set, 1,
-                                          memory_order_relaxed);
-                atomic_fetch_add_explicit(&g_v2_signal_pending, 1, memory_order_relaxed);
+                V2_STAT_INC(g_v2_signal_running_pending_already_set);
+                V2_STAT_INC(g_v2_signal_pending);
                 return;
             }
             int desired = expected | FIBER_V2_FLAG_SIGNAL_PENDING;
@@ -720,8 +741,8 @@ void sched_v2_signal(fiber_v2* f) {
                     memory_order_acq_rel, memory_order_relaxed)) {
                 continue;
             }
-            atomic_fetch_add_explicit(&g_v2_signal_running_pending_set, 1, memory_order_relaxed);
-            atomic_fetch_add_explicit(&g_v2_signal_pending, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_signal_running_pending_set);
+            V2_STAT_INC(g_v2_signal_pending);
             return;
         }
         if (base_state == FIBER_V2_PARKED) {
@@ -730,14 +751,13 @@ void sched_v2_signal(fiber_v2* f) {
                     memory_order_acq_rel, memory_order_relaxed)) {
                 continue;
             }
-            atomic_fetch_add_explicit(&g_v2_signal_ok, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_signal_ok);
             sched_v2_enqueue_runnable(f);
             return;
         }
-        atomic_fetch_add_explicit(&g_v2_signal_dropped, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_signal_dropped);
         if (base_state >= 0 && base_state < FIBER_V2_STATE_COUNT) {
-            atomic_fetch_add_explicit(&g_v2_signal_dropped_state[base_state], 1,
-                                      memory_order_relaxed);
+            V2_STAT_INC(g_v2_signal_dropped_state[base_state]);
         }
         return;
     }
@@ -751,12 +771,12 @@ void sched_v2_park(void) {
     fiber_v2* f = tls_v2_current_fiber;
     if (!f) return;
 
-    atomic_fetch_add_explicit(&g_v2_parks, 1, memory_order_relaxed);
+    V2_STAT_INC(g_v2_parks);
     f->park_reason = tls_v2_park_reason;
     f->yield_kind = V2_YIELD_PARK;
     mco_result res = mco_yield(f->coro);
     if (res != MCO_SUCCESS) {
-        atomic_fetch_add_explicit(&g_v2_mco_yield_fail, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_mco_yield_fail);
         fprintf(stderr, "[sched_v2] mco_yield(park) failed rc=%d\n", (int)res);
         abort();
     }
@@ -769,7 +789,7 @@ void sched_v2_yield(void) {
     f->yield_kind = V2_YIELD_YIELD;
     mco_result res = mco_yield(f->coro);
     if (res != MCO_SUCCESS) {
-        atomic_fetch_add_explicit(&g_v2_mco_yield_fail, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_mco_yield_fail);
         fprintf(stderr, "[sched_v2] mco_yield(yield) failed rc=%d\n", (int)res);
         abort();
     }
@@ -817,7 +837,7 @@ static void* thread_v2_main(void* arg) {
          * See sched_v2_wake for the matching fence on the producer side. */
         atomic_store_explicit(&g_v2.threads[tid].is_idle, 1, memory_order_release);
         atomic_fetch_add_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
-        atomic_fetch_add_explicit(&g_v2_worker_idle_entries, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_worker_idle_entries);
         atomic_thread_fence(memory_order_seq_cst);
         uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
                                             memory_order_acquire);
@@ -827,7 +847,7 @@ static void* thread_v2_main(void* arg) {
             if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0, memory_order_acq_rel)) {
                 atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
             }
-            atomic_fetch_add_explicit(&g_v2_worker_busy_from_recheck, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_worker_busy_from_recheck);
             continue;
         }
 
@@ -836,7 +856,7 @@ static void* thread_v2_main(void* arg) {
             atomic_fetch_sub_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
         }
         if (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_acquire) > 0) {
-            atomic_fetch_add_explicit(&g_v2_worker_busy_from_wake, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_worker_busy_from_wake);
         }
     }
 
@@ -1037,7 +1057,13 @@ static void sched_v2_init_impl(void) {
 
     const char* stats_env = getenv("CC_V2_STATS");
     if (stats_env && stats_env[0] && stats_env[0] != '0') {
+        atomic_store_explicit(&g_v2_stats_enabled, 1, memory_order_relaxed);
         atexit(sched_v2_atexit_dump_stats);
+    }
+    /* The periodic sysmon printer also needs the counters populated. */
+    const char* sysmon_stats_env = getenv("CC_V2_SYSMON_STATS");
+    if (sysmon_stats_env && sysmon_stats_env[0] == '1') {
+        atomic_store_explicit(&g_v2_stats_enabled, 1, memory_order_relaxed);
     }
     const char* spin_env = getenv("CC_V2_JOIN_SPIN");
     if (spin_env) {
@@ -1227,14 +1253,14 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
     if (!f) return -1;
 
     if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-        atomic_fetch_add_explicit(&g_v2_join_fast, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_join_fast);
         return sched_v2_finish_join(f, out_result);
     }
 
     int spin = g_v2_join_spin;
     for (int i = 0; i < spin; i++) {
         if (atomic_load_explicit(&f->done, memory_order_acquire)) {
-            atomic_fetch_add_explicit(&g_v2_join_spin_hit, 1, memory_order_relaxed);
+            V2_STAT_INC(g_v2_join_spin_hit);
             return sched_v2_finish_join(f, out_result);
         }
         #if defined(__aarch64__) || defined(__arm64__)
@@ -1254,7 +1280,7 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
          * reorder on both sides, so the completer may read NULL while the
          * waiter still observes done==0 -- a lost wake. */
         atomic_thread_fence(memory_order_seq_cst);
-        atomic_fetch_add_explicit(&g_v2_join_park_fiber, 1, memory_order_relaxed);
+        V2_STAT_INC(g_v2_join_park_fiber);
         /* Expose the awaited V2 fiber via park_obj so the deadlock dump can
          * correlate the parked waiter with its target task. */
         cc__fiber_set_park_obj(f);
@@ -1265,7 +1291,7 @@ int sched_v2_join(fiber_v2* f, void** out_result) {
         atomic_store_explicit(&f->join_waiter_fiber, NULL, memory_order_relaxed);
         return sched_v2_finish_join(f, out_result);
     }
-    atomic_fetch_add_explicit(&g_v2_join_park_thread, 1, memory_order_relaxed);
+    V2_STAT_INC(g_v2_join_park_thread);
     while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
         uint32_t wait_val = atomic_load_explicit(&f->done_wake.value, memory_order_acquire);
         if (atomic_load_explicit(&f->done, memory_order_acquire)) break;
