@@ -63,7 +63,7 @@ static int cc__select_append_case(CCSelect* sel, CCSelectCase c) {
     return 0;
 }
 
-int cc_select_add_recv(CCSelect* sel, CCChan* ch, void** out_ptr_slot, CCClosure0 handler) {
+int cc_select_add_recv_raw(CCSelect* sel, CCChan* ch, void** out_ptr_slot, CCClosure0 handler) {
     if (!sel || !ch) return EINVAL;
     CCSelectCase c = {0};
     c.kind = CC_SEL_RECV;
@@ -73,7 +73,7 @@ int cc_select_add_recv(CCSelect* sel, CCChan* ch, void** out_ptr_slot, CCClosure
     return cc__select_append_case(sel, c);
 }
 
-int cc_select_add_close(CCSelect* sel, CCChan* ch, CCIoError* out_err_slot, CCClosure0 handler) {
+int cc_select_add_close_raw(CCSelect* sel, CCChan* ch, CCIoError* out_err_slot, CCClosure0 handler) {
     if (!sel || !ch) return EINVAL;
     CCSelectCase c = {0};
     c.kind = CC_SEL_CLOSE;

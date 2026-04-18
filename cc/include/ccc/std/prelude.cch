@@ -16,6 +16,7 @@
 #include <ccc/cc_slice.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_channel.cch>
+#include <ccc/cc_nursery.cch>
 #include <ccc/cc_exec.cch>
 #include "string.cch"
 #include "io.cch"
