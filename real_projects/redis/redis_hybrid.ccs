@@ -963,7 +963,10 @@ static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
         if (!write_received_reply(sock, conn, reply_ptr)) return -1;
         drained++;
     }
-    if (drained > 0 && !flush_output_buffer(sock, conn)) return -1;
+    /* Flush any buffered bytes - includes replies buffered by the select recv
+     * callback earlier this iteration (which intentionally defers the flush
+     * so this drain can coalesce them with additional pipelined replies). */
+    if (conn->out_len > 0 && !flush_output_buffer(sock, conn)) return -1;
     return drained;
 }
 
@@ -1048,9 +1051,10 @@ static void handle_client(CCSocket client, RedisRequest*[~REQUEST_CHAN_CAP N:1 >
 
     (void)cc_select_add_recv(&sel, conn->reply_rx, (void**)&reply_ptr,
         @unsafe () => [&client, conn, &reply_ptr] {
-            bool ok = write_received_reply(&client, conn, reply_ptr)
-                   && flush_output_buffer(&client, conn);
-            return ok ? (void*)1 : (void*)NULL;
+            /* Buffer only - defer the flush to the outer loop's
+             * drain_and_flush_replies, which drains any additional replies
+             * via try_recv and flushes them all in one write(). */
+            return write_received_reply(&client, conn, reply_ptr) ? (void*)1 : (void*)NULL;
         });
     (void)cc_select_add_close(&sel, conn->reply_rx, &close_err,
         () => {
