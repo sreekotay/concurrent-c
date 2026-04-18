@@ -1574,6 +1574,25 @@ static void cc__chan_signal_recv_ready(CCChan* ch) {
     cc__chan_broadcast_activity();
 }
 
+/* Wake one parked sender after a successful lock-free dequeue.
+ *
+ * The fence pairs with the sender's publish-then-load in cc_chan_send: the
+ * sender publishes `has_send_waiters=1` then loads queue state; the dequeuer
+ * stores queue state then (via this fence) loads has_send_waiters.  Without
+ * the fence, arm64 can reorder both sides past each other and we park on a
+ * queue that just became writable. */
+static inline void cc__chan_post_lockfree_dequeue_signal_senders(CCChan* ch) {
+    atomic_thread_fence(memory_order_seq_cst);
+    if (!atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire)) {
+        return;
+    }
+    cc_chan_lock(ch);
+    cc__chan_wake_one_send_waiter(ch);
+    pthread_cond_signal(&ch->not_full);
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
+}
+
 static inline void cc__chan_post_lockfree_enqueue_signal_receivers(CCChan* ch,
                                                                    const void* value,
                                                                    const char* trace_event) {
@@ -3537,14 +3556,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                  * state of the other and the sender parks on a queue that has
                  * just become writable. See cc_chan_send for the matching
                  * fence on the producer side. */
-                atomic_thread_fence(memory_order_seq_cst);
-                if (__builtin_expect(atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire) != 0, 0)) {
-                    cc_chan_lock(ch);
-                    cc__chan_wake_one_send_waiter(ch);
-                    pthread_cond_signal(&ch->not_full);
-                    pthread_mutex_unlock(&ch->mu);
-                    wake_batch_flush();
-                }
+                cc__chan_post_lockfree_dequeue_signal_senders(ch);
                 return 0;
             }
         }
@@ -3573,15 +3585,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
              * mutex-protected send_waiters_head.  See the note at the
              * minimal-path equivalent above: this fence is the receiver's
              * half of the Dekker pair with cc_chan_send. */
-            atomic_thread_fence(memory_order_seq_cst);
-            if (atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire)) {
-                cc_chan_lock(ch);
-                cc__chan_wake_one_send_waiter(ch);
-                pthread_cond_signal(&ch->not_full);
-                pthread_mutex_unlock(&ch->mu);
-                wake_batch_flush();
-            } else {
-            }
+            cc__chan_post_lockfree_dequeue_signal_senders(ch);
             cc__chan_signal_activity(ch);
             return 0;
         }
@@ -3646,11 +3650,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         pthread_mutex_unlock(&ch->mu);
         int rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
         if (rc == 0) {
-            cc_chan_lock(ch);
-            cc__chan_wake_one_send_waiter(ch);
-            pthread_cond_signal(&ch->not_full);
-            pthread_mutex_unlock(&ch->mu);
-            wake_batch_flush();
+            cc__chan_post_lockfree_dequeue_signal_senders(ch);
             cc__chan_signal_activity(ch);
             return 0;
         }
