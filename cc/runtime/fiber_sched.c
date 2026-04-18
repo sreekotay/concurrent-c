@@ -2346,7 +2346,6 @@ static inline int pool_ready_for_nonworker_inbox_publish(void) {
     return 1;
 }
 
-static inline int cc__restore_inbox_task(size_t victim, fiber_task* f);
 
 /* Work stealing: steal from another worker's queue.
 * Uses atomic exchange to claim slot first, then CAS to advance head. */
@@ -2358,89 +2357,6 @@ static inline int cc__task_should_stay_on_owner_local(fiber_task* f, int target_
     return 0;
 }
 
-static inline runnable_ref lq_steal(local_queue* q, int target_worker) {
-    size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    if (head >= tail) return runnable_ref_null();  /* Empty */
-    
-    size_t idx = head % LOCAL_QUEUE_SIZE;
-    
-    /* Atomically exchange slot with NULL to claim it */
-    runnable_ref ref = runnable_slot_take_exchange(&q->slots[idx]);
-    fiber_task* f = ref.fiber;
-    if (!f) return runnable_ref_null();  /* Lost race */
-    
-    /* We got the task. Now try to advance head. If we fail, someone else advanced it. */
-    if (!atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                memory_order_relaxed, memory_order_relaxed)) {
-        /* Lost CAS but we still have the task - another thread advanced head.
-        * This can happen if owner also exchanged slot (both got NULL except us).
-        * But since we got f != NULL, we're the winner. Just return it. */
-    }
-    ref = runnable_ref_validate(ref);
-    if (!ref.fiber) {
-        return runnable_ref_null();
-    }
-    if (cc__task_should_stay_on_owner_local(f, target_worker) &&
-        cc__restore_inbox_task((size_t)target_worker, f)) {
-        return runnable_ref_null();
-    }
-    return ref;
-}
-
-/* Batch work stealing: steal up to half the victim's queue.
-* This amortizes the cost of coordinating the steal across multiple tasks.
-* Returns number of tasks stolen (stored in out_tasks array). */
-static inline size_t lq_steal_batch(local_queue* q, int target_worker, runnable_ref* out_tasks, size_t max_steal) {
-    size_t stolen = 0;
-    
-    /* Read queue bounds - we'll try to steal up to half */
-    size_t head = atomic_load_explicit(&q->head, memory_order_acquire);
-    size_t tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-    
-    if (head >= tail) return 0;  /* Empty */
-    
-    size_t available = tail - head;
-    size_t to_steal = available / 2;  /* Steal half */
-    if (to_steal == 0) to_steal = 1;  /* At least try to steal one */
-    if (to_steal > max_steal) to_steal = max_steal;
-    
-    /* Steal tasks one by one using atomic exchange.
-    * This is safe because we only advance head after successfully claiming a slot. */
-    for (size_t i = 0; i < to_steal; i++) {
-        head = atomic_load_explicit(&q->head, memory_order_acquire);
-        tail = atomic_load_explicit(&q->tail, memory_order_acquire);
-        
-        if (head >= tail) break;  /* Queue became empty */
-        
-        size_t idx = head % LOCAL_QUEUE_SIZE;
-        
-        /* Atomically claim slot */
-        runnable_ref ref = runnable_slot_take_exchange(&q->slots[idx]);
-        fiber_task* f = ref.fiber;
-        if (!f) {
-            /* Lost race - try to help advance head and continue */
-            atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                                memory_order_relaxed, memory_order_relaxed);
-            continue;
-        }
-        
-        /* Got a task - try to advance head */
-        atomic_compare_exchange_weak_explicit(&q->head, &head, head + 1,
-                                            memory_order_relaxed, memory_order_relaxed);
-        ref = runnable_ref_validate(ref);
-        if (!ref.fiber) {
-            continue;
-        }
-        if (cc__task_should_stay_on_owner_local(f, target_worker) &&
-            cc__restore_inbox_task((size_t)target_worker, f)) {
-            continue;
-        }
-        out_tasks[stolen++] = ref;
-    }
-    
-    return stolen;
-}
 
 /* Dump scheduler state for debugging hangs */
 void cc_fiber_dump_state(const char* reason) {
@@ -2803,19 +2719,6 @@ static inline uint64_t xorshift64(uint64_t* state) {
 
 
 
-static inline int cc__restore_inbox_task(size_t victim, fiber_task* f) {
-    int edge = 0;
-    for (int attempt = 0; attempt < 8; attempt++) {
-        if (iq_push_with_edge(&g_sched.inbox_queues[victim], f, &edge) == 0) {
-            if (edge) {
-                wake_target_worker_if_sleeping((int)victim);
-            }
-            return 1;
-        }
-        cpu_pause();
-    }
-    return 0;
-}
 
 static void cc_fiber_atexit_stats(void) {
     if (atomic_load(&g_initialized) != 2) return;
@@ -2826,7 +2729,7 @@ static void cc_fiber_atexit_stats(void) {
 
 /* V1 scheduler init/shutdown are stubs; the V2 scheduler auto-initializes
  * via sched_v2_spawn() on first use (see sched_v2.c). These remain as
- * private hooks only for the legacy cc_fiber_spawn/cc_fiber_pool_prewarm
+ * private hooks only for the legacy cc_fiber_spawn
  * entry points in this file, which are themselves headed for removal. */
 int cc_fiber_sched_init(size_t num_workers) {
     (void)num_workers;
@@ -3564,23 +3467,6 @@ void cc_fiber_task_free(fiber_task* f) {
     }
 }
 
-/* Non-blocking poll: check if fiber is done without blocking */
-int cc_fiber_poll_done(fiber_task* f) {
-    if (!f) return 1;  /* NULL fiber is "done" */
-    return atomic_load_explicit(&f->done, memory_order_acquire);
-}
-
-/* Get result from a completed fiber (only valid after poll_done returns true) */
-void* cc_fiber_get_result(fiber_task* f) {
-    if (!f) return NULL;
-    return f->result;
-}
-
-/* Get pointer to fiber's result_buf (for range checks in task.c) */
-void* cc_fiber_get_result_buf(fiber_task* f) {
-    if (!f) return NULL;
-    return f->result_buf;
-}
 
 /* ============================================================================
 * Fiber Parking (for channel blocking)
@@ -4405,38 +4291,5 @@ void cc__fiber_sleep_park(unsigned int ms) {
 
 int cc__fiber_sched_active(void) {
     return atomic_load_explicit(&g_initialized, memory_order_acquire) == 2;
-}
-
-/* Pre-warm the fiber pool by creating N fibers with coroutines.
-* Call this at startup to avoid cold-start penalty on first nursery.
-* Returns number of fibers successfully pre-warmed. */
-int cc_fiber_pool_prewarm(size_t n) {
-    /* Ensure scheduler is initialized */
-    if (atomic_load_explicit(&g_initialized, memory_order_acquire) != 2) {
-        cc_fiber_sched_init(0);
-    }
-    
-    size_t created = 0;
-    for (size_t i = 0; i < n; i++) {
-        fiber_task* f = (fiber_task*)calloc(1, sizeof(fiber_task));
-        if (!f) break;
-        
-        /* Create coroutine */
-        mco_desc desc = mco_desc_init(fiber_entry, CC_FIBER_STACK_SIZE);
-        desc.user_data = f;
-        desc.alloc_cb = cc_guarded_alloc;
-        desc.dealloc_cb = cc_guarded_dealloc;
-        mco_result res = mco_create(&f->coro, &desc);
-        if (res != MCO_SUCCESS) {
-            free(f);
-            break;
-        }
-        
-        /* Add to free list */
-        fiber_free(f);
-        created++;
-    }
-    
-    return (int)created;
 }
 
