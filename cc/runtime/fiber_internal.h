@@ -70,7 +70,6 @@ int cc__fiber_sched_active(void);
 void cc__fiber_set_park_obj(void* obj);
 void cc__fiber_clear_pending_unpark(void);  /* Clear stale pending_unpark before new wait */
 void cc__fiber_sleep_park(unsigned int ms); /* Park fiber on sleep queue with timer */
-void cc__fiber_touch_heartbeat(void);       /* Reset sysmon orphan timer for current worker */
 uint64_t cc__fiber_publish_wait_ticket(void* fiber_ptr);
 int cc__fiber_wait_ticket_matches(void* fiber_ptr, uint64_t ticket);
 void cc_external_wait_enter(void);
@@ -78,10 +77,6 @@ void cc_external_wait_leave(void);
 
 /* Channel direct-handoff helpers — implemented in fiber_sched.c */
 int  cc__sched_current_worker_id(void);
-void cc__fiber_hint_channel_partner(void* fiber, int worker_id);
-uint64_t cc__fiber_debug_id(void* fiber_ptr);
-int cc__fiber_debug_last_worker(void* fiber_ptr);
-const char* cc__fiber_debug_park_reason(void* fiber_ptr);
 void cc__chan_debug_dump_state(void* ch_obj, const char* prefix);
 
 /* Convenience macro to park with source location */

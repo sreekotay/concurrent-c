@@ -15,7 +15,6 @@
 /* Unified deadlock tracking (defined in fiber_sched.c) */
 void cc__deadlock_thread_block(void);
 void cc__deadlock_thread_unblock(void);
-void cc__fiber_set_worker_affinity(int worker_id);
 
 #include <errno.h>
 
