@@ -142,7 +142,7 @@ static inline void wake_batch_flush(void);
 static inline uint32_t cc__chan_wake_sched_attrib(CCChan* ch);
 static cc__fiber_wait_node* cc__chan_pop_send_waiter(CCChan* ch);
 static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_wait_node* snode, void* out_value);
-static inline int cc__chan_tx_close_errno(CCChan* ch);
+static inline int cc__chan_send_close_errno(CCChan* ch);
 static inline void cc__chan_post_enqueue_notify(CCChan* ch, int mu_held);
 static inline void cc__chan_post_dequeue_notify(CCChan* ch, int mu_held);
 static inline void cc__chan_dekker_wake_recv_before_park(CCChan* ch);
@@ -2118,7 +2118,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                     if (err == ETIMEDOUT) {
                         /* Close/error wins over timeout once observed. */
                         if (ch->rx_error_closed) return ch->rx_error_code;
-                        if (ch->closed) return cc__chan_tx_close_errno(ch);
+                        if (ch->closed) return cc__chan_send_close_errno(ch);
                         return ETIMEDOUT;
                     }
                 } else {
@@ -2128,7 +2128,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
         }
         
         if (ch->rx_error_closed) return ch->rx_error_code;
-        return ch->closed ? cc__chan_tx_close_errno(ch) : 0;
+        return ch->closed ? cc__chan_send_close_errno(ch) : 0;
     }
 
     /* Buffered channel */
@@ -2183,7 +2183,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
                 if (err == ETIMEDOUT) {
                     /* Close/error wins over timeout once observed. */
                     if (ch->rx_error_closed) return ch->rx_error_code;
-                    if (ch->closed) return cc__chan_tx_close_errno(ch);
+                    if (ch->closed) return cc__chan_send_close_errno(ch);
                     return ETIMEDOUT;
                 }
             } else {
@@ -2194,7 +2194,7 @@ static int cc_chan_wait_full(CCChan* ch, const struct timespec* deadline) {
     
     if (ch->rx_error_closed) return ch->rx_error_code;
     if (ch->closed) {
-        return cc__chan_tx_close_errno(ch);
+        return cc__chan_send_close_errno(ch);
     }
     return 0;
 }
@@ -2774,7 +2774,7 @@ static inline int cc__chan_dequeue_lockfree_minimal(CCChan* ch, void* out_value,
 static inline int cc__chan_enqueue_mutex_minimal(CCChan* ch, const void* value) {
     cc_chan_lock(ch);
     if (ch->closed) {
-        int rc = cc__chan_tx_close_errno(ch);
+        int rc = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc;
     }
@@ -3003,22 +3003,42 @@ static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value,
     return cc__chan_recv_resolve_closed(ch, out_value, abs_deadline, /*try_only=*/0);
 }
 
-/* Canonical tx-side close errno.
+/* Canonical send-side close errno.
  *
- * cc_chan_close_with(ch, CCIoError) populates ch->tx_error_code to carry
- * a structured close reason (CC_IO_TIMEOUT, CC_IO_CANCELLED, user code,
- * etc.).  Every send-side return path that observes ch->closed MUST
- * surface that code in preference to a bare EPIPE; similarly every
- * recv-side path that has no items left to drain.  Bare `return EPIPE`
- * silently downgrades the user's structured error — a drift-leak
- * parallel to the close-drain leak the unified recv resolver fixes.
+ * The channel has two independent error-code axes:
  *
- * Receive-side close paths already route through
- * cc__chan_recv_resolve_closed, which applies the same rule.  Callers
- * that observe ch->closed synchronously on the send side should call
- * this helper instead of returning EPIPE directly. */
-static inline int cc__chan_tx_close_errno(CCChan* ch) {
-    return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+ *   tx_error_code  — set by a TX-side close operation
+ *                    (cc_chan_close_err / the tx half of cc_chan_close_with).
+ *                    Observed by RECEIVERS via cc__chan_recv_resolve_closed
+ *                    as "the producer closed me with this reason".
+ *
+ *   rx_error_code  — set by an RX-side close operation
+ *                    (cc_chan_rx_close_err / the rx half of cc_chan_close_with).
+ *                    Observed by SENDERS (here) as "the consumer closed me
+ *                    with this reason".
+ *
+ * This asymmetry is by spec (spec/concurrent-c-spec-complete.md §bidirectional
+ * error propagation) and mirrors cc__chan_get_close_error(ch, is_recv):
+ *   is_recv=true  → tx_io_error         (what receivers see)
+ *   is_recv=false → rx_io_error         (what senders see)
+ *
+ * Truth table for the int-returning send API:
+ *
+ *   cc_chan_close(ch)                 → EPIPE
+ *   cc_chan_close_err(ch, E)          → EPIPE        (E is for receivers)
+ *   cc_chan_rx_close_err(ch, E)       → E
+ *   cc_chan_close_with(ch, e)         → e.os_code    (bilateral: sets both axes)
+ *   cc_chan_cancel(ch)                → ECANCELED    (close_with(CANCELLED))
+ *
+ * Prior to this helper, the tx-side Phase 2 helper was named
+ * cc__chan_send_close_errno and incorrectly surfaced ch->tx_error_code to
+ * senders — see tests/chan_close_err_smoke.ccs test 4 for the canonical
+ * failure mode.  Renaming to "send" makes the caller axis obvious and
+ * keeps recv/send helpers symmetric (recv uses cc__chan_recv_resolve_closed).
+ */
+static inline int cc__chan_send_close_errno(CCChan* ch) {
+    if (ch->rx_error_closed && ch->rx_error_code) return ch->rx_error_code;
+    return EPIPE;
 }
 
 /* Canonical post-successful-enqueue wake sequence.
@@ -3259,7 +3279,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
                 /* notified=3 means woken by close or rx_error_close */
                 cc__chan_remove_send_waiter(ch, &node);
                 int rc = ch->rx_error_closed ? ch->rx_error_code
-                                             : cc__chan_tx_close_errno(ch);
+                                             : cc__chan_send_close_errno(ch);
                 pthread_mutex_unlock(&ch->mu);
                 return rc;
             }
@@ -3279,7 +3299,7 @@ static int cc_chan_send_unbuffered(CCChan* ch, const void* value, const struct t
         }
         if (ch->closed) {
             /* node already removed above */
-            int rc2 = cc__chan_tx_close_errno(ch);
+            int rc2 = cc__chan_send_close_errno(ch);
             pthread_mutex_unlock(&ch->mu);
             return rc2;
         }
@@ -3458,7 +3478,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     if (ch->use_lockfree && ch->cap > 0 && ch->elem_size == value_size && ch->buf &&
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         /* Check closed flag (relaxed read is fine, we'll verify under lock if needed) */
-        if (ch->closed) return cc__chan_tx_close_errno(ch);
+        if (ch->closed) return cc__chan_send_close_errno(ch);
         /* Check rx error closed (upstream error propagation) */
         if (ch->rx_error_closed) return ch->rx_error_code;
         
@@ -3468,7 +3488,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             cc__chan_trace_req_wake(ch, "send_direct_handoff_check", value, NULL);
             cc_chan_lock(ch);
             if (ch->closed) {
-                int rc2 = cc__chan_tx_close_errno(ch);
+                int rc2 = cc__chan_send_close_errno(ch);
                 pthread_mutex_unlock(&ch->mu);
                 return rc2;
             }
@@ -3503,7 +3523,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     }
     
     /* Unbuffered channels: check closed before mutex path */
-    if (ch->cap == 0 && ch->closed) return cc__chan_tx_close_errno(ch);
+    if (ch->cap == 0 && ch->closed) return cc__chan_send_close_errno(ch);
     if (ch->cap == 0 && ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path (unbuffered, initial setup, or lock-free full) */
@@ -3511,7 +3531,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) {
-        int rc2 = cc__chan_tx_close_errno(ch);
+        int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
     }
@@ -3647,7 +3667,7 @@ int cc_chan_send(CCChan* ch, const void* value, size_t value_size) {
             cc__chan_post_enqueue_notify(ch, /*mu_held=*/0);
             return 0;
         }
-        return cc__chan_tx_close_errno(ch);
+        return cc__chan_send_close_errno(ch);
     }
     
     /* Original mutex-based path for non-lock-free channels */
@@ -4133,7 +4153,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         chan_inflight_inc(ch);
         if (ch->closed) {
             chan_inflight_dec(ch);
-            return cc__chan_tx_close_errno(ch);
+            return cc__chan_send_close_errno(ch);
         }
         if (ch->rx_error_closed) {
             chan_inflight_dec(ch);
@@ -4160,7 +4180,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     }
     
     /* Unbuffered channels: check closed before mutex path */
-    if (ch->cap == 0 && ch->closed) return cc__chan_tx_close_errno(ch);
+    if (ch->cap == 0 && ch->closed) return cc__chan_send_close_errno(ch);
     if (ch->rx_error_closed) return ch->rx_error_code;
     
     /* Standard mutex path */
@@ -4168,7 +4188,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) {
-        int rc2 = cc__chan_tx_close_errno(ch);
+        int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
     }
@@ -4179,7 +4199,7 @@ int cc_chan_try_send(CCChan* ch, const void* value, size_t value_size) {
         if (!rnode) {
             pthread_mutex_unlock(&ch->mu);
             if (ch->rx_error_closed) return ch->rx_error_code;
-            return ch->closed ? cc__chan_tx_close_errno(ch) : EAGAIN;
+            return ch->closed ? cc__chan_send_close_errno(ch) : EAGAIN;
         }
         channel_store_slot(rnode->data, value, ch->elem_size);
         atomic_store_explicit(&rnode->notified, CC_CHAN_NOTIFY_DATA, memory_order_release);
@@ -4299,10 +4319,10 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
             return 0;
         }
-        return ch->closed ? cc__chan_tx_close_errno(ch) : EAGAIN;
+        return ch->closed ? cc__chan_send_close_errno(ch) : EAGAIN;
     }
     
-    if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? cc__chan_tx_close_errno(ch) : EAGAIN; }
+    if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? cc__chan_send_close_errno(ch) : EAGAIN; }
     cc_chan_dequeue(ch, out_value);
     cc__chan_post_dequeue_notify(ch, /*mu_held=*/1);
     return 0;
@@ -4319,7 +4339,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
         chan_inflight_inc(ch);
         if (ch->closed) {
             chan_inflight_dec(ch);
-            return cc__chan_tx_close_errno(ch);
+            return cc__chan_send_close_errno(ch);
         }
         if (ch->rx_error_closed) {
             chan_inflight_dec(ch);
@@ -4343,7 +4363,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
     int err = cc_chan_ensure_buf(ch, value_size);
     if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
     if (ch->closed) {
-        int rc2 = cc__chan_tx_close_errno(ch);
+        int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
     }
@@ -4490,7 +4510,7 @@ int cc_chan_timed_send(CCChan* ch, const void* value, size_t value_size, const s
                 }
             }
         }
-        int rc2 = cc__chan_tx_close_errno(ch);
+        int rc2 = cc__chan_send_close_errno(ch);
         pthread_mutex_unlock(&ch->mu);
         return rc2;
     }
@@ -4856,7 +4876,7 @@ static inline int cc__chan_match_resolve_close(CCChanMatchCase* c) {
     }
     /* Send case: surface the structured close error (tx_error_code) if
      * the closer called cc_chan_close_with(); otherwise plain EPIPE. */
-    return cc__chan_tx_close_errno(c->ch);
+    return cc__chan_send_close_errno(c->ch);
 }
 
 // Non-blocking match helper (optionally rotated start for fairness)
