@@ -1,0 +1,97 @@
+/*
+ * Regression test for BUG #1 (FIXED): cc_thread_spawn silent task drop
+ * under executor queue overflow.
+ *
+ * Background (April 14 triage):
+ *   cc_thread_spawn used cc_exec_submit, which returned EAGAIN once the
+ *   bounded executor queue filled up.  The caller silently freed the
+ *   task and returned an INVALID CCTask.  cc_block_on_intptr(INVALID)
+ *   yields 0, corrupting any checksum that XORs task results.
+ *   perf_spawn_v2_vs_thread.ccs hit this at ~23% rates.
+ *
+ *   Fix: scheduler executor is now unbounded by default (qcap=0), and
+ *   cc_thread_spawn calls cc_exec_submit_blocking which either grows
+ *   the queue (unbounded) or blocks on cv_not_full (user-bounded).
+ *   Silent drops are no longer possible.
+ *
+ * This test locks down the invariant by doing exactly the pattern the
+ * bug broke, but deliberately choosing a pathological config:
+ *
+ *   1. Set CC_SPAWN_QUEUE_CAP=4 at the top of main (before any spawn).
+ *      This forces a TINY bounded queue — user-override of the default
+ *      unbounded queue.  With a cap of 4, any regression that drops
+ *      tasks on queue-full will be visible within a handful of spawns.
+ *   2. Spawn N pthread-backed tasks via cc_thread_spawn.  Each returns
+ *      a deterministic value derived from its input.
+ *   3. Join them with cc_block_on_intptr and XOR all returned values.
+ *   4. Compare against the expected checksum computed inline.
+ *
+ * Any silent drop -> joined result of 0 -> checksum mismatch -> FAIL.
+ * A healthy runtime passes 100% of iterations.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
+#define TASKS_PER_ITER 1024
+#define ITERATIONS     16
+
+static void* tiny_work(void* arg) {
+    /* Deterministic non-zero transform of the input.  If the runtime
+     * ever returns 0 where it should return f(arg), the checksum below
+     * will mismatch. */
+    uintptr_t x = (uintptr_t)arg;
+    x = (x * 1103515245u + 12345u) & 0x7fffffffu;
+    x ^= x >> 7;
+    if (x == 0) x = 1;  /* guarantee nonzero so a silent-drop zero stands out */
+    return (void*)(intptr_t)x;
+}
+
+static uintptr_t expected_checksum(int tasks) {
+    uintptr_t c = 0;
+    for (int i = 0; i < tasks; i++) {
+        c ^= (uintptr_t)tiny_work((void*)(uintptr_t)(i + 1));
+    }
+    return c;
+}
+
+int main(void) {
+    /* Force the pathological tiny bounded queue.  cc__sched_exec_lazy
+     * reads this on first use, so it must be set before any spawn. */
+    setenv("CC_SPAWN_QUEUE_CAP", "4", 1);
+
+    uintptr_t expected = expected_checksum(TASKS_PER_ITER);
+    int fails = 0;
+
+    for (int iter = 0; iter < ITERATIONS; iter++) {
+        CCTask* spawned = (CCTask*)malloc(sizeof(CCTask) * TASKS_PER_ITER);
+        if (!spawned) { fprintf(stderr, "OOM\n"); return 2; }
+
+        for (int i = 0; i < TASKS_PER_ITER; i++) {
+            spawned[i] = cc_thread_spawn(tiny_work, (void*)(uintptr_t)(i + 1));
+        }
+
+        uintptr_t actual = 0;
+        for (int i = 0; i < TASKS_PER_ITER; i++) {
+            actual ^= (uintptr_t)cc_block_on_intptr(spawned[i]);
+        }
+
+        if (actual != expected) {
+            fprintf(stderr,
+                    "FAIL iter %d: checksum actual=0x%lx expected=0x%lx "
+                    "(bug #1: cc_thread_spawn silent drop)\n",
+                    iter, (unsigned long)actual, (unsigned long)expected);
+            fails++;
+            if (fails >= 3) { free(spawned); return 1; }
+        }
+        free(spawned);
+    }
+
+    if (fails > 0) return 1;
+    printf("thread_spawn_overflow_checksum: OK (%d iters x %d tasks, cap=4)\n",
+           ITERATIONS, TASKS_PER_ITER);
+    return 0;
+}

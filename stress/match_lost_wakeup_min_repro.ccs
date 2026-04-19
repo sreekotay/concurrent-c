@@ -1,0 +1,89 @@
+/*
+ * Minimal repro for BUG #2: @match harness lost-wakeup / fiber identity mismatch.
+ *
+ * Symptoms (on current code, pre-fix):
+ *   - `stress/lost_wakeup_hammer.ccs` fails with mco_yield rc=12
+ *     (MCO_NOT_ENOUGH_SPACE) — diagnosed as fiber identity mismatch:
+ *     mco_yield invoked while executing on a different coroutine's stack.
+ *   - Heisenbug: any instrumentation on sched_v2_park masks it.
+ *
+ * Reduction rationale:
+ *   - Swapping `@match { case rx.recv(&v) ... }` for `rx.recv(&v)` directly
+ *     makes the failure disappear (see triage notes in channel_audit_fix_plan.md).
+ *     So the trigger is the @match harness, not channel park semantics.
+ *   - Even with 1 sender + 1 receiver and @match with ONE case (no actual
+ *     branch selection), the bug fires. That points at @match's
+ *     register/wait/commit plumbing, not multi-branch selection.
+ *
+ * Failure mode:
+ *   - Hangs (stall counter trips after 5 s of no recv progress -> exit 1).
+ *   - Historically ~97% fail rate over 30 runs in the shape below.
+ *
+ * Expected behavior:
+ *   - PASSES once the @match fiber-identity / lost-wakeup bug is fixed.
+ *   - Until then, this test is EXPECTED TO FAIL — it is checked in so the
+ *     suite visibly reflects the open bug and so the eventual fix has a
+ *     tight regression test.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define OPS 100000
+
+cc_atomic_int g_recvs = 0;
+
+void rx_fiber(int[~ <] rx) {
+    for (int i = 0; i < OPS; i++) {
+        int v;
+        @match {
+            case rx.recv(&v): { cc_atomic_fetch_add(&g_recvs, 1); }
+        }
+    }
+}
+
+void tx_fiber(int[~ >] tx) {
+    for (int i = 0; i < OPS; i++) {
+        (void)tx.send(i);
+    }
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("match_lost_wakeup: 1+1 fibers x %d ops (unbuffered, @match/1case)\n", OPS);
+
+    int[~ >] tx_h;
+    int[~ <] rx_h;
+    cc_channel_pair(&tx_h, &rx_h);
+    int[~ >] tx = tx_h;
+    int[~ <] rx = rx_h;
+
+    {
+        CCNursery* __nur = @create(NULL) @destroy;
+        if (!__nur) abort();
+        CCChanRx r = rx;
+        CCChanTx t = tx;
+        __nur->spawn(() => [r] { rx_fiber(r); });
+        __nur->spawn(() => [t] { tx_fiber(t); });
+
+        /* Watchdog: bail early if recv progress stalls.  This is not a
+         * perf budget — a healthy run finishes OPS in well under a
+         * second; the bug manifests as a permanent stall. */
+        int stalled = 0, last = 0;
+        while (cc_atomic_load(&g_recvs) < OPS) {
+            cc_sleep_ms(500);
+            int cur = cc_atomic_load(&g_recvs);
+            printf("\r  %d/%d", cur, OPS);
+            if (cur == last) {
+                if (++stalled > 10) { printf("\nHANG (bug #2)\n"); exit(1); }
+            } else {
+                last = cur;
+                stalled = 0;
+            }
+        }
+    }
+    printf("\nPASS\n");
+    return 0;
+}
