@@ -2868,17 +2868,103 @@ static inline int cc__chan_timespec_expired(const struct timespec* abs_deadline)
         (now.tv_sec == abs_deadline->tv_sec && now.tv_nsec >= abs_deadline->tv_nsec));
 }
 
-static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value, const struct timespec* abs_deadline) {
+/* ============================================================================
+ * CLOSED-RECV RESOLUTION — one path to rule them all
+ * ============================================================================
+ *
+ * The invariant (see stress/pipeline_repeat, "everything MUST drain"):
+ *   A close on the tx side stops admitting new sends, but every item that
+ *   was ever enqueued MUST reach a receiver before any EPIPE is surfaced.
+ *
+ * This function is the SINGLE authoritative answer to the question every
+ * receive path eventually asks: "I just observed ch->closed=1 — do I
+ * return an item or EPIPE?".  Every recv-side close observation MUST
+ * route through here.  Returning EPIPE directly while items remain
+ * buffered is a drain leak and violates the invariant above.
+ *
+ * Why a helper was necessary:  lock-free queues expose several transient
+ * "looks empty" states (Vyukov cell->seq not yet propagated, lfds bmm
+ * internal ordering gap) that are harmless for live recv — the caller
+ * parks and retries on wake — but FATAL at close time: the producer is
+ * done forever, so a bare try_dequeue miss followed by EPIPE silently
+ * drops every still-in-transit item.  Before this helper each close-path
+ * inlined its own close-or-drain policy and several of them got it
+ * wrong; pipeline_repeat lost 5–8 tail items per ~300 iterations.
+ *
+ * Per-backend strategy:
+ *   - ring backend (SPSC/Vyukov MPMC): use (ring_tail - ring_head) as the
+ *     authoritative upper bound.  By the time close is visible every
+ *     producer has completed its enqueue (close is called by the same
+ *     thread AFTER its last send returns), so ring_tail is frozen.  Spin
+ *     with a seq_cst fence + bounded pause budget until tail == head or
+ *     try_dequeue succeeds.
+ *   - lfds bmm backend (MPMC fallback): lfqueue_count is the approximate
+ *     item count, lfqueue_inflight is producers still inside their
+ *     enqueue critical section.  Only declare empty when BOTH are 0 AND
+ *     a final fenced try_dequeue fails.
+ *   - mutex buffered / cap==0: not drainable via lock-free probes; caller
+ *     has either already drained count>0 under ch->mu (buffered mutex
+ *     path) or never had a buffer (unbuffered).  We simply surface the
+ *     close error.
+ *
+ * Parameters:
+ *   abs_deadline : NULL = wait forever, else ETIMEDOUT when expired.
+ *   try_only     : true = non-blocking caller (cc_chan_try_recv, select
+ *                  try-phase, any poll); return EAGAIN instead of yielding
+ *                  when items may still be in transit but not yet visible.
+ *
+ * Returns:
+ *   0           item drained into *out_value
+ *   EPIPE       provably drained; caller should exit recv loop
+ *   EAGAIN      try_only: item possibly in transit, caller should retry
+ *   ETIMEDOUT   deadline expired
+ *   <other>     ch->tx_error_code when cc_chan_close_with() set a
+ *               structured error (takes precedence over EPIPE)
+ */
+static int cc__chan_recv_resolve_closed(CCChan* ch, void* out_value,
+                                        const struct timespec* abs_deadline,
+                                        int try_only) {
+    if (!ch->use_lockfree || ch->cap == 0) {
+        /* Nothing to drain in lock-free space.  Mutex-buffered callers
+         * must have already pulled count>0 under ch->mu before reaching a
+         * close site; unbuffered has no buffer.  Surface close as-is. */
+        return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+    }
     while (1) {
         if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
             return 0;
         }
         if (ch->use_ring_queue) {
-            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
-        }
-        int inflight = atomic_load_explicit(&ch->lfqueue_inflight, memory_order_acquire);
-        if (inflight == 0) {
-            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+            size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_acquire);
+            size_t head = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
+            if (tail == head) {
+                return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+            }
+            atomic_thread_fence(memory_order_seq_cst);
+            int pause_budget = 1024;
+            while (pause_budget-- > 0) {
+                if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
+                    return 0;
+                }
+                size_t t2 = atomic_load_explicit(&ch->ring_tail, memory_order_acquire);
+                size_t h2 = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
+                if (t2 == h2) {
+                    return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+                }
+                cc__chan_cpu_pause();
+            }
+            if (try_only) return EAGAIN;
+        } else {
+            int inflight = atomic_load_explicit(&ch->lfqueue_inflight, memory_order_acquire);
+            int count = atomic_load_explicit(&ch->lfqueue_count, memory_order_acquire);
+            if (inflight == 0 && count <= 0) {
+                atomic_thread_fence(memory_order_seq_cst);
+                if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
+                    return 0;
+                }
+                return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+            }
+            if (try_only) return EAGAIN;
         }
         if (cc__chan_timespec_expired(abs_deadline)) {
             return ETIMEDOUT;
@@ -2889,6 +2975,14 @@ static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value, con
             sched_yield();
         }
     }
+}
+
+/* Legacy name retained for call-site stability; blocking variant of the
+ * canonical resolver.  New recv close-paths should prefer
+ * cc__chan_recv_resolve_closed() directly and pass try_only explicitly. */
+static int cc__chan_try_drain_lockfree_on_close(CCChan* ch, void* out_value,
+                                                const struct timespec* abs_deadline) {
+    return cc__chan_recv_resolve_closed(ch, out_value, abs_deadline, /*try_only=*/0);
 }
 
 /* ============================================================================
@@ -3764,10 +3858,20 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                 /* Buffer truly empty — re-register on wait list and park. */
                 cc_chan_lock(ch);
                 /* Close may have fired while we were off the wait list.
-                 * wake_all_waiters wouldn't have found us, so check now. */
+                 * wake_all_waiters wouldn't have found us, so check now.
+                 *
+                 * CRITICAL: do NOT return EPIPE directly here — in-flight
+                 * sends may have arrived in the window between our empty
+                 * probe and us observing closed=1.  The invariant is:
+                 * close stops new admissions but every already-enqueued
+                 * item must drain.  Route through the authoritative drain
+                 * path which spins on ring_tail > ring_head.  Without this,
+                 * stress/pipeline_repeat loses 5-6 tail items per ~300
+                 * iterations when close racesthe receiver re-register
+                 * window. */
                 if (ch->closed) {
                     pthread_mutex_unlock(&ch->mu);
-                    return EPIPE;
+                    return cc__chan_try_drain_lockfree_on_close(ch, out_value, NULL);
                 }
                 /* Re-check notified: a sender may have done a direct handoff
                  * while we were off the list. */
@@ -4066,10 +4170,10 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
             return 0;
         }
         if (ch->closed) {
-            if (atomic_load_explicit(&ch->lfqueue_inflight, memory_order_acquire) > 0) {
-                return EAGAIN;
-            }
-            return ch->tx_error_code ? ch->tx_error_code : EPIPE;
+            /* Route every closed-recv observation through the canonical
+             * resolver.  try_only=1 preserves try_recv's non-blocking
+             * contract: EAGAIN when an item may still be in transit. */
+            return cc__chan_recv_resolve_closed(ch, out_value, NULL, /*try_only=*/1);
         }
         return EAGAIN;
     }
@@ -4684,6 +4788,28 @@ int cc_chan_recv_async(CCExec* ex, CCChan* ch, void* out_value, size_t value_siz
     return cc__chan_async_submit(ex, ch, NULL, out_value, value_size, out, deadline, 0);
 }
 
+/* Select-case close resolution.  Whenever a parked select case receives
+ * CC_CHAN_NOTIFY_CLOSE we must NOT bare-return EPIPE for a recv case while
+ * the underlying buffer still has items — that is a drain leak.  Route
+ * through the canonical resolver first: if an item is still available,
+ * return 0 (the case fires with data); otherwise return EPIPE (the case
+ * fires with "closed and drained").  Send cases have nothing to drain —
+ * a close always means the send is permanently impossible. */
+static inline int cc__chan_match_resolve_close(CCChanMatchCase* c) {
+    if (!c || !c->ch) return EPIPE;
+    if (!c->is_send && c->recv_buf && c->elem_size > 0) {
+        /* Blocking resolver: by the time CLOSE was delivered the producer
+         * is done, so the resolver terminates quickly — either with an
+         * item (tail>head / count>0) or with EPIPE (provably drained). */
+        int rc = cc__chan_recv_resolve_closed(c->ch, c->recv_buf, NULL, /*try_only=*/0);
+        if (rc == 0) return 0;
+        /* EPIPE (or tx_error_code) — drained.  ETIMEDOUT cannot happen
+         * here since we pass NULL deadline. */
+        return rc;
+    }
+    return EPIPE;
+}
+
 // Non-blocking match helper (optionally rotated start for fairness)
 static int cc__chan_match_try_from(CCChanMatchCase* cases, size_t n, size_t* ready_index, size_t start) {
     if (!cases || n == 0 || !ready_index) return EINVAL;
@@ -4785,8 +4911,12 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                         pthread_mutex_unlock(&cj->ch->mu);
                     }
                     *ready_index = i;
-                    if (notified == CC_CHAN_NOTIFY_DATA) cc__chan_select_dbg_inc(&g_dbg_select_data_returned);
-                    return (notified == CC_CHAN_NOTIFY_DATA) ? 0 : EPIPE;
+                    if (notified == CC_CHAN_NOTIFY_DATA) {
+                        cc__chan_select_dbg_inc(&g_dbg_select_data_returned);
+                        return 0;
+                    }
+                    /* CLOSE: route through canonical drain before reporting EPIPE. */
+                    return cc__chan_match_resolve_close(&cases[i]);
                 }
             }
             /* After adding all nodes, wake any senders that are parked waiting for
@@ -4825,8 +4955,11 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                         pthread_mutex_unlock(&cj->ch->mu);
                     }
                     *ready_index = i;
-                    if (notified == CC_CHAN_NOTIFY_DATA) cc__chan_select_dbg_inc(&g_dbg_select_data_returned);
-                    return (notified == CC_CHAN_NOTIFY_DATA) ? 0 : EPIPE;
+                    if (notified == CC_CHAN_NOTIFY_DATA) {
+                        cc__chan_select_dbg_inc(&g_dbg_select_data_returned);
+                        return 0;
+                    }
+                    return cc__chan_match_resolve_close(&cases[i]);
                 }
             }
             int need_rearm = 0;
@@ -4908,7 +5041,7 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 }
                 if (notified == CC_CHAN_NOTIFY_CLOSE) {
                     *ready_index = i;
-                    return EPIPE;
+                    return cc__chan_match_resolve_close(&cases[i]);
                 }
             }
             if (need_rearm) {
@@ -4935,7 +5068,7 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                     }
                     if (notified == CC_CHAN_NOTIFY_CLOSE) {
                         *ready_index = (size_t)sel;
-                        return EPIPE;
+                        return cc__chan_match_resolve_close(&cases[sel]);
                     }
                     if (!fiber) {
                         break;
@@ -4954,7 +5087,7 @@ int cc_chan_match_deadline(CCChanMatchCase* cases, size_t n, size_t* ready_index
                 }
                 if (notified == CC_CHAN_NOTIFY_CLOSE) {
                     *ready_index = i;
-                    return EPIPE;
+                    return cc__chan_match_resolve_close(&cases[i]);
                 }
             }
         } else {
