@@ -871,17 +871,6 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
             r = 1;
         }
     }
-    {
-        const char* base_src = rewritten ? rewritten : eb->src;
-        size_t base_len = rewritten ? rewritten_len : eb->src_len;
-        char* family_rewritten = cc_rewrite_generic_family_ufcs_concrete(base_src, base_len);
-        if (family_rewritten) {
-            if (rewritten) free(rewritten);
-            rewritten = family_rewritten;
-            rewritten_len = strlen(rewritten);
-            r = 1;
-        }
-    }
     cc_ufcs_set_symbols(NULL);
     if (r < 0) return -1;
     if (r == 0 || !rewritten) return 0;
