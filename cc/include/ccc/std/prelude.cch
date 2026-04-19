@@ -24,6 +24,7 @@
 #include "map.cch"
 #include "dir.cch"
 #include "process.cch"
+#include "exec.cch"
 #include "async_io.cch"
 #include "future.cch"
 

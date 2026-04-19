@@ -651,7 +651,7 @@ int ! IoError read_int (char [ : ] data) {
 
 ### Method Call Style
 
-UFCS is the primary surface style for receiver-oriented APIs. Direct library-call forms may also be provided where they improve composition or readability.
+Ordinary C member access is primary: if `receiver.name` or `receiver->name` resolves to a struct or union member, that is an ordinary field access and UFCS does not apply. UFCS is the secondary dispatch rule: when the member name is **not** a field of the receiver's type, `receiver.method(args)` / `receiver->method(args)` lowers through the receiver-type's UFCS family. This gives a receiver-oriented method surface on top of plain C structs without perturbing field access. See §8 for the full dispatch contract and error rules.
 
 **Use UFCS for method chains:**
 
@@ -5418,6 +5418,10 @@ This section defines the core standard library using **UFCS-first design**: meth
 - Field access and mixed member chains participate normally: `holder.arena.free()` dispatches on `holder.arena`; `ptr->arena.free()` dispatches on `ptr->arena`.
 - When multiple links appear in a chain, the nearest concrete typed receiver in the chain determines dispatch.
 - Standard-library families define canonical lowered C namespaces (`cc_file_`*, `cc_arena_`*, `cc_string_*`, `cc_slice_*`, `cc_channel_*`); internal erased-core helpers remain implementation details.
+
+**Rule (C-first dispatch, normative):** Ordinary C struct/union member access wins over UFCS. For `receiver.name(args)` (or `receiver->name(args)`), if `name` is a data member of the receiver's resolved type — including a function-pointer member — the expression is an ordinary C member access/call and UFCS is **not** considered. UFCS applies only when `name` is **not** a member of the receiver type. Shadowing semantics follow plain C: members shadow any UFCS family entry of the same name without ambiguity or diagnostic. This makes UFCS an error-trap layer on top of C member access rather than a competing dispatch rule.
+
+**Rule (unresolved is ill-formed, normative):** If UFCS applies (the receiver's resolved type has no matching member and the receiver type has a registered UFCS family or a type-driven fallback namespace) but no callable can be produced — because the registered `.ufcs` handler returns the empty slice, no fallback family is registered for the receiver type, or the synthesized callee does not exist at link time — the program is ill-formed. The compiler must diagnose this at compile time with the receiver type, the method name, and the source location of the call, rather than silently falling through to ambient name lookup. A receiver whose type is not a struct/union and has no registered UFCS family is simply not a UFCS call and the ordinary C lookup rules apply unchanged (no diagnostic).
 
 **UFCS Equivalence (Normative):**
 

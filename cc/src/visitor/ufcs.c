@@ -1953,12 +1953,6 @@ int cc_ufcs_rewrite_line(const char* in, char* out, size_t out_cap) {
     return cc__ufcs_rewrite_line_simple(in, out, out_cap);
 }
 
-int cc_ufcs_rewrite(CCASTRoot* root) {
-    (void)root;
-    // Rewriter now handled per-line in visitor; AST rewrite will come with TCC.
-    return 0;
-}
-
 // Rewrite UFCS with await context: channel ops emit task-returning variants.
 int cc_ufcs_rewrite_line_await(const char* in, char* out, size_t out_cap, int is_await) {
     g_ufcs_await_context = is_await;
