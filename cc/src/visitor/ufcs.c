@@ -603,23 +603,6 @@ typedef struct {
     int recv_is_ptr;
 } CCUFCSDispatchCtx;
 
-static const void* cc__lookup_builtin_ufcs_callable(const char* recv_type_name) {
-    if (!recv_type_name || !recv_type_name[0]) return NULL;
-    if (cc__is_channel_tx_recv_type(recv_type_name)) {
-        return (const void*)cc_channel_tx_lower_c;
-    }
-    if (cc__is_channel_rx_recv_type(recv_type_name)) {
-        return (const void*)cc_channel_rx_lower_c;
-    }
-    if (strcmp(recv_type_name, "CCFile") == 0 || strcmp(recv_type_name, "CCFile*") == 0) {
-        return (const void*)cc_file_lower_c;
-    }
-    if (strcmp(recv_type_name, "CCArena") == 0 || strcmp(recv_type_name, "CCArena*") == 0) {
-        return (const void*)cc_arena_lower_c;
-    }
-    return NULL;
-}
-
 static int cc__recv_pass_direct(const CCUFCSDispatchCtx* ctx, bool recv_is_ptr) {
     return recv_is_ptr || !ctx || ctx->recv_is_ptr || !ctx->recv_is_addressable;
 }
@@ -815,34 +798,22 @@ static int cc__emit_registered_callable(char* out,
     char lowered_name[256];
     size_t lowered_len = 0;
     int receiver_by_value = 0;
-    /* is_registered_hook tracks whether `fn_ptr` came from a user
-     * `cc_type_register(".ufcs = ...")` entry.  If such a hook returns an
-     * empty slice for this method, that means the owner explicitly rejects
-     * the call (strict C-first model: the hook is authoritative).  We
-     * propagate that as CC_UFCS_EMIT_UNRESOLVED so the AST pass raises a
-     * hard error instead of silently emitting a default
-     * `Type_method(&recv, ...)` callee that may not exist.
-     *
-     * Legacy `cc__lookup_builtin_ufcs_callable` entries are not
-     * authoritative — if they return empty we still permit fallthrough to
-     * the convention-based `Type_method(&recv, ...)` path below. */
-    int is_registered_hook = 0;
+    /* `fn_ptr` can only come from a user `cc_type_register(".ufcs = ...")`
+     * entry (including the @comptime registrations that headers install for
+     * CCFile, CCArena, CCChanTx_ and CCChanRx_ families, etc).  If that hook returns an
+     * empty slice for this method, the owner has explicitly rejected the
+     * call: strict C-first says the hook is authoritative, so propagate
+     * CC_UFCS_EMIT_UNRESOLVED instead of silently falling back to a
+     * convention-based `Type_method(&recv, ...)` that may not exist. */
     if (!recv_type_name) return -1;
-    /* Real comptime UFCS path for callable registrations collected from named
-       handlers and non-capturing lambdas. */
     if (g_ufcs_symbols) {
-        if (cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, recv_type_name, &fn_ptr) == 0 && fn_ptr) {
-            is_registered_hook = 1;
-        } else {
+        if (cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, recv_type_name, &fn_ptr) != 0 || !fn_ptr) {
             fn_ptr = NULL;
         }
     }
     if (!fn_ptr) {
-        fn_ptr = cc__lookup_builtin_ufcs_callable(recv_type_name);
-        if (!fn_ptr) {
-            cc_heap_arena_free(&arena);
-            return -1;
-        }
+        cc_heap_arena_free(&arena);
+        return -1;
     }
     fn = (CCUfcsCompiledCallable)fn_ptr;
     if (has_args && args_rewritten && args_rewritten[0]) {
@@ -856,9 +827,9 @@ static int cc__emit_registered_callable(char* out,
     lowered = fn(recv_type_slice, method_slice, mode_slice, argv, arg_types, &arena);
     if (!lowered.ptr || lowered.len == 0) {
         cc_heap_arena_free(&arena);
-        /* Registered hook said "not mine" => strict UNRESOLVED.  Legacy
-         * builtin callable said "not mine" => legacy fallthrough. */
-        return is_registered_hook ? CC_UFCS_EMIT_UNRESOLVED : -1;
+        /* Registered hook said "not mine": strict C-first demands UNRESOLVED
+         * so the AST pass raises a hard error. */
+        return CC_UFCS_EMIT_UNRESOLVED;
     }
     if (lowered.len > sizeof(CC_UFCS_VALUE_TAG) - 1 &&
         memcmp(lowered.ptr, CC_UFCS_VALUE_TAG, sizeof(CC_UFCS_VALUE_TAG) - 1) == 0) {
