@@ -815,12 +815,24 @@ static int cc__emit_registered_callable(char* out,
     char lowered_name[256];
     size_t lowered_len = 0;
     int receiver_by_value = 0;
+    /* is_registered_hook tracks whether `fn_ptr` came from a user
+     * `cc_type_register(".ufcs = ...")` entry.  If such a hook returns an
+     * empty slice for this method, that means the owner explicitly rejects
+     * the call (strict C-first model: the hook is authoritative).  We
+     * propagate that as CC_UFCS_EMIT_UNRESOLVED so the AST pass raises a
+     * hard error instead of silently emitting a default
+     * `Type_method(&recv, ...)` callee that may not exist.
+     *
+     * Legacy `cc__lookup_builtin_ufcs_callable` entries are not
+     * authoritative — if they return empty we still permit fallthrough to
+     * the convention-based `Type_method(&recv, ...)` path below. */
+    int is_registered_hook = 0;
     if (!recv_type_name) return -1;
     /* Real comptime UFCS path for callable registrations collected from named
        handlers and non-capturing lambdas. */
     if (g_ufcs_symbols) {
         if (cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, recv_type_name, &fn_ptr) == 0 && fn_ptr) {
-            /* authoritative per-type callable */
+            is_registered_hook = 1;
         } else {
             fn_ptr = NULL;
         }
@@ -844,7 +856,9 @@ static int cc__emit_registered_callable(char* out,
     lowered = fn(recv_type_slice, method_slice, mode_slice, argv, arg_types, &arena);
     if (!lowered.ptr || lowered.len == 0) {
         cc_heap_arena_free(&arena);
-        return -1;
+        /* Registered hook said "not mine" => strict UNRESOLVED.  Legacy
+         * builtin callable said "not mine" => legacy fallthrough. */
+        return is_registered_hook ? CC_UFCS_EMIT_UNRESOLVED : -1;
     }
     if (lowered.len > sizeof(CC_UFCS_VALUE_TAG) - 1 &&
         memcmp(lowered.ptr, CC_UFCS_VALUE_TAG, sizeof(CC_UFCS_VALUE_TAG) - 1) == 0) {
@@ -984,6 +998,12 @@ static int cc__emit_type_driven_dispatch(char* out,
         int callable_len = cc__emit_registered_callable(out, cap, recv, method, ctx->recv_is_addressable,
                                                         recv_is_ptr, ctx->recv_type_name, args_rewritten, has_args);
         if (callable_len >= 0) return callable_len;
+        /* Registered @comptime UFCS hook explicitly rejected this method.
+         * The owner is authoritative: short-circuit the rest of the
+         * dispatch chain so we don't silently synthesize a default
+         * `Type_method(&recv, ...)` that the host C compiler would then
+         * reject with a confusing "undeclared function" error. */
+        if (callable_len == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_EMIT_UNRESOLVED;
     }
     channel_callee = cc_ufcs_channel_callee(ctx->recv_type_name, method, g_ufcs_await_context,
                                             &channel_kind, &channel_recv_by_value);
@@ -1391,6 +1411,10 @@ static int emit_desugared_call(char* out,
     }
     dispatch_n = cc__emit_type_driven_dispatch(out, cap, recv, method, recv_is_ptr, args_rewritten, has_args, &ctx);
     if (dispatch_n >= 0) return dispatch_n;
+    /* Registered-hook-rejected (CC_UFCS_EMIT_UNRESOLVED) must not be
+     * overridden by the CCSlice convenience fallbacks below: the owner
+     * already said no.  Only -1 (no hook / snprintf error) falls through. */
+    if (dispatch_n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_EMIT_UNRESOLVED;
     
     /* Slice UFCS methods dispatch to CCSlice_* (pointer-receiver). */
     if (cc__is_slice_recv_type(ctx.recv_type_name) && strcmp(method, "len") == 0) {
