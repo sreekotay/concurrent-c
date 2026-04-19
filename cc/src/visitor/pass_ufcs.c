@@ -137,6 +137,9 @@ static int cc__rewrite_ufcs_text_fallback(const char* in_src,
             int rc = cc_ufcs_rewrite_line(line, rewritten, rew_cap);
             cc_ufcs_set_source_context(NULL, 0);
             if (rc == CC_UFCS_REWRITE_OK && strcmp(rewritten, line) != 0) {
+                if (getenv("CC_DEBUG_UFCS_FALLBACK")) {
+                    fprintf(stderr, "[ufcs-fb] BEFORE: %s\n[ufcs-fb] AFTER:  %s\n", line, rewritten);
+                }
                 emit = rewritten;
                 changed = 1;
             }
