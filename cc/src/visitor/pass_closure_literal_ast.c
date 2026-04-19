@@ -924,37 +924,120 @@ static char* cc__dup_decl_type_text(const char* ty_s,
     return ty;
 }
 
+/* Produce a copy of src[0..len) with the contents of line comments, block
+ * comments, and string/char literals replaced by spaces (newlines preserved).
+ * All offsets remain valid in the returned buffer. Used by text-based decl
+ * scanners so that an identifier appearing inside a comment cannot masquerade
+ * as a real decl, and the backward "type text" walks cannot pick up tokens
+ * from a preceding comment line into the inferred type. */
+static char* cc__src_strip_comments_and_strings(const char* src, size_t len) {
+    if (!src) return NULL;
+    char* out = (char*)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, src, len);
+    out[len] = '\0';
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = out[i];
+        char c2 = (i + 1 < len) ? out[i + 1] : 0;
+        if (in_lc) {
+            if (c == '\n') in_lc = 0;
+            else out[i] = ' ';
+            continue;
+        }
+        if (in_bc) {
+            if (c == '*' && c2 == '/') {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                i++;
+                in_bc = 0;
+                continue;
+            }
+            if (c != '\n') out[i] = ' ';
+            continue;
+        }
+        if (in_str) {
+            if (c == '\\' && c2 && i + 1 < len) {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                i++;
+                continue;
+            }
+            if (c == '"') { in_str = 0; continue; }
+            if (c != '\n') out[i] = ' ';
+            continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && c2 && i + 1 < len) {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                i++;
+                continue;
+            }
+            if (c == '\'') { in_chr = 0; continue; }
+            if (c != '\n') out[i] = ' ';
+            continue;
+        }
+        if (c == '/' && c2 == '/') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            i++;
+            in_lc = 1;
+            continue;
+        }
+        if (c == '/' && c2 == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            i++;
+            in_bc = 1;
+            continue;
+        }
+        if (c == '"') in_str = 1;
+        else if (c == '\'') in_chr = 1;
+    }
+    return out;
+}
+
 static char* cc__lookup_internal_generated_decl_type(const char* src,
                                                      size_t before_off,
                                                      const char* name,
                                                      unsigned char* out_flags) {
     size_t name_len;
     size_t src_len;
+    char* clean = NULL;
+    char* result = NULL;
     if (out_flags) *out_flags = 0;
     if (!src || !name || !name[0]) return NULL;
     name_len = strlen(name);
     src_len = strlen(src);
     if (before_off > src_len) before_off = src_len;
 
+    /* Operate on a comment/string-stripped copy so that an occurrence of `name`
+     * inside a block comment cannot be picked up as a synthetic decl, and the
+     * backward walk that builds the "type text" cannot drag tokens out of a
+     * preceding comment line into the inferred type. Offsets are preserved. */
+    clean = cc__src_strip_comments_and_strings(src, src_len);
+    if (!clean) return NULL;
+
     for (size_t pos = before_off; pos-- > 0; ) {
         if (pos + name_len > before_off) continue;
-        if (memcmp(src + pos, name, name_len) != 0) continue;
-        if (pos > 0 && cc__is_ident_char2(src[pos - 1])) continue;
-        if (pos + name_len < src_len && cc__is_ident_char2(src[pos + name_len])) continue;
+        if (memcmp(clean + pos, name, name_len) != 0) continue;
+        if (pos > 0 && cc__is_ident_char2(clean[pos - 1])) continue;
+        if (pos + name_len < src_len && cc__is_ident_char2(clean[pos + name_len])) continue;
         {
-            const char* after = src + pos + name_len;
+            const char* after = clean + pos + name_len;
             while (*after == ' ' || *after == '\t') after++;
             if (*after != '=' && *after != ';' && *after != '[') continue;
         }
 
-        const char* ty_s = src + pos;
-        while (ty_s > src) {
+        const char* ty_s = clean + pos;
+        while (ty_s > clean) {
             char prev = ty_s[-1];
             if (prev == '\n' || prev == ';' || prev == '{' || prev == '}') break;
             ty_s--;
         }
         while (*ty_s == ' ' || *ty_s == '\t') ty_s++;
-        const char* ty_e = src + pos;
+        const char* ty_e = clean + pos;
         while (ty_e > ty_s && (ty_e[-1] == ' ' || ty_e[-1] == '\t')) ty_e--;
         if (ty_e <= ty_s) continue;
         {
@@ -969,9 +1052,11 @@ static char* cc__lookup_internal_generated_decl_type(const char* src,
             }
             if (has_eq || !has_ident || has_member_access) continue;
         }
-        return cc__dup_decl_type_text(ty_s, ty_e, out_flags);
+        result = cc__dup_decl_type_text(ty_s, ty_e, out_flags);
+        break;
     }
-    return NULL;
+    free(clean);
+    return result;
 }
 
 static char* cc__lookup_decl_type_by_text_fallback(const char* src,
