@@ -306,7 +306,10 @@ CCTask cc_run_blocking_task(CCClosure0 c) {
     fut->fut.result = &h->result;
     fut->heap = h;
 
-    int sub = cc_exec_submit(ex, cc__task_job, h);
+    /* The blocking I/O pool is intentionally bounded (CC_BLOCKING_QUEUE_CAP);
+     * backpressure is the whole point. Use the blocking variant so callers
+     * never see a silently-dropped task masquerade as an INVALID CCTask. */
+    int sub = cc_exec_submit_blocking(ex, cc__task_job, h);
     if (sub != 0) {
         cc_atomic_fetch_add(&g_task_submit_failures, 1);
         if (h->done) {

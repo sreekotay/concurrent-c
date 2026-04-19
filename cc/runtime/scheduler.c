@@ -62,7 +62,12 @@ static CCExec* cc__sched_exec_lazy(void) {
         if (workers == 0) {
             workers = cc__env_size("CC_WORKERS", cc__default_workers());
         }
-        size_t qcap = cc__env_size("CC_SPAWN_QUEUE_CAP", 1024);
+        /* qcap=0 means "unbounded, grow on demand". cc_thread_spawn() is
+         * fire-and-forget and must never silently drop a task; backpressure
+         * here would also risk deadlock (e.g. a fiber that spawns thread
+         * work and is the only drainer). Callers that want a hard cap can
+         * set CC_SPAWN_QUEUE_CAP explicitly. */
+        size_t qcap = cc__env_size("CC_SPAWN_QUEUE_CAP", 0);
         g_sched_exec = cc_exec_create(workers, qcap);
     }
     CCExec* ex = g_sched_exec;
@@ -141,7 +146,15 @@ CCTask cc_thread_spawn(void* (*fn)(void*), void* arg) {
     task->arg = arg;
     pthread_mutex_init(&task->mu, NULL);
     pthread_cond_init(&task->cv, NULL);
-    int err = cc_exec_submit(ex, cc__spawn_task_job, task);
+    /* Use the blocking variant so we never silently drop a task.
+     *   - Default config: scheduler exec is unbounded (qcap=0), so this
+     *     grows the queue on demand and effectively never blocks.
+     *   - If the user explicitly sets CC_SPAWN_QUEUE_CAP, the queue is
+     *     bounded and this blocks the caller — real backpressure.
+     * Previously the non-blocking submit turned EAGAIN into an INVALID
+     * CCTask, which cc_block_on_intptr() silently "joined" as result=0,
+     * producing bogus checksums (see perf_spawn_v2_vs_thread). */
+    int err = cc_exec_submit_blocking(ex, cc__spawn_task_job, task);
     if (err != 0) {
         cc__spawn_task_free_internal(task);
         return out;
