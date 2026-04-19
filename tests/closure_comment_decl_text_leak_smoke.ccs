@@ -1,0 +1,40 @@
+/* Regression: closure capture-type inference must skip comments.
+ *
+ * Bug found: when the closure-lowering pass needed to infer the type of an
+ * identifier referenced from a closure body, cc__lookup_internal_generated_decl_type
+ * scanned the source backwards for `<name>;` / `<name>[` / `<name> =` patterns
+ * without comment-awareness. A `<name>;` appearing inside a block comment would
+ * match, and the backward "type text" walk (stopping at \n / ; / { / }) would
+ * scoop up arbitrary words from the preceding comment line as the inferred
+ * type. That bogus type then got spliced verbatim into the synthesized
+ * __cc_closure_make_N(...) parameter list, producing C source like:
+ *
+ *     static CCClosure0 __cc_closure_make_1(void* __cc_opaque_y,
+ *                                           * Some text mentioning foo_bar_baz);
+ *
+ * which (correctly) fails to reparse as C.
+ *
+ * This file reproduces the original failure pattern: a block comment
+ * containing both arbitrary prose and `<fnname>;` immediately above a real
+ * declaration, with that fnname referenced from inside a closure body. */
+
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+
+/* drain_and_flush_replies: drains the in-flight queue and rewinds the
+ * per-conn reply arena. The reset cadence is load-bearing: the bump pointer
+ * is rewound to zero in drain_and_flush_replies; the arena is freed outright
+ * in conn_destroy. */
+static int drain_and_flush_replies(int fd) { return fd + 1; }
+
+int main(void) {
+    int client = 41;
+    CCClosure0 c = @unsafe () => [&client] {
+        int raced = drain_and_flush_replies(client);
+        return (void*)(intptr_t)raced;
+    };
+    void* r = cc_closure0_call(c);
+    printf("raced=%d\n", (int)(intptr_t)r);
+    return 0;
+}
