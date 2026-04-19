@@ -71,29 +71,26 @@ typedef struct RedisConn {
     uint64_t conn_id;
     uint64_t next_request_id;
     Pipeline pipeline;
-    /* Reply channel carries RedisReply* pointers into reply_pool (see below).
-     * The producer materializes the reply in place and sends the pointer;
-     * the consumer frees the arena and returns the slot to the pool. */
+    /* Reply channel carries RedisReply* pointers into reply_arena (see below). */
     RedisReply*[~REPLY_CHAN_CAP 1:1 >] reply_tx;
     RedisReply*[~REPLY_CHAN_CAP 1:1 <] reply_rx;
-    /* Per-slot storage for in-flight requests / replies.  Both pools are
-     * OWNED by this conn and torn down in redis_conn_destroy on last drop.
-     *
-     * LIFETIME INVARIANT (load-bearing): any cc_arena_pool_free(&*_pool, slot)
-     * MUST precede the redis_conn_drop that may be last-ref.  If the drop
-     * runs first, redis_conn_destroy tears down the pool's backing arena,
-     * and the subsequent pool_free writes a freelist link into memory that
-     * libc has already reclaimed.  See redis_conn_release_request.
-     *
-     * req_pool: each slot is REQ_BUF_SIZE and backs a RedisRequest's arena;
+    /* req_pool: each slot is REQ_BUF_SIZE and backs a RedisRequest's arena;
      * the RedisRequest struct plus its cloned argv strings live inside the
      * slot.  Sizing matches PIPELINE_LIMIT so back-pressure is real.
      *
-     * reply_pool: each slot is sizeof(RedisReply); the slot IS the struct,
-     * arena.base points at reply->inline_buf so small replies never touch
-     * the heap.  Slot addresses are stable across the channel handoff. */
+     * LIFETIME INVARIANT (load-bearing): any cc_arena_pool_free(&req_pool, slot)
+     * MUST precede the redis_conn_drop that may be last-ref.  If the drop
+     * runs first, redis_conn_destroy tears down the pool's backing arena,
+     * and the subsequent pool_free writes a freelist link into memory that
+     * libc has already reclaimed.  See redis_conn_release_request. */
     CCArenaPool req_pool;
-    CCArenaPool reply_pool;
+    /* reply_arena: bump-allocated backing store for every in-flight reply on
+     * this connection. Both the RedisReply struct and its serialized bytes
+     * live here. Reset (O(1)) at pipeline-idle boundaries; freed outright in
+     * redis_conn_destroy. The reset cadence is load-bearing: the reset point
+     * coincides with pipeline.inflight == 0, so the owner fiber has provably
+     * no in-flight allocation for this conn when we rewind the bump pointer. */
+    CCArena reply_arena;
     size_t out_len;
     char out_buf[WRITE_BUF_CAP];
 } RedisConn;
@@ -668,18 +665,9 @@ static bool buffer_write_bytes(CCSocket* sock, RedisConn* conn, CCSlice data) {
     return true;
 }
 
-/* Initialize a reply's arena to use its own inline_buf as the initial slab,
- * auto-overflowing to heap for oversize replies. Callers (owner_queue_reply
- * and write_reply_now) invoke this exactly once per reply before materialize.
- * block_max=0 permits unbounded growth via heap extents. */
-static void reply_init_arena(RedisReply* reply) {
-    cc_arena_buffer(&reply->arena, reply->inline_buf, sizeof(reply->inline_buf));
-    reply->arena.block_max = 0;
-}
-
-static CCSlice !>(CCError) reply_alloc_bytes(RedisReply* reply, size_t len) {
-    if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply alloc without reply"));
-    char* dst = cc_arena_alloc(&reply->arena, len, 1);
+static CCSlice !>(CCError) reply_alloc_bytes(CCArena* arena, size_t len) {
+    if (!arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply alloc without arena"));
+    char* dst = cc_arena_alloc(arena, len, 1);
     if (len > 0 && !dst) {
         return cc_err(mkerr(CC_ERR_OUT_OF_MEMORY, "reply encode allocation failed"));
     }
@@ -687,15 +675,17 @@ static CCSlice !>(CCError) reply_alloc_bytes(RedisReply* reply, size_t len) {
     return cc_ok(slice);
 }
 
-/* Encode the reply into reply->arena (which must be initialized by the caller
- * via reply_init_arena). On return, reply->kind == REDIS_REPLY_RAW and
- * reply->data points into the arena. Must be called exactly once per reply. */
-static bool !>(CCError) reply_materialize(RedisReply* reply) {
+/* Encode the reply into `arena`. On return, reply->kind == REDIS_REPLY_RAW and
+ * reply->data points into `arena`. Bytes outlive the call exactly as long as
+ * the arena does: for the per-conn reply path that's until the next
+ * drain-and-reset; for write_reply_now that's the stack frame. */
+static bool !>(CCError) reply_materialize(RedisReply* reply, CCArena* arena) {
     if (!reply) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize without reply"));
+    if (!arena) return cc_err(mkerr(CC_ERR_INVALID_ARG, "reply materialize without arena"));
 
     switch (reply->kind) {
         case REDIS_REPLY_RAW: {
-            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, reply->data.len);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, reply->data.len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
             if (reply->data.len > 0) memcpy(dst.ptr, reply->data.ptr, reply->data.len);
@@ -705,7 +695,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
         case REDIS_REPLY_SIMPLE_STRING:
         case REDIS_REPLY_ERROR: {
             size_t len = reply->data.len + 3;
-            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
             char* out = dst.ptr;
@@ -720,7 +710,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
         case REDIS_REPLY_BULK_STRING: {
             size_t hdr_len = resp_bulk_header_len(reply->data.len);
             size_t len = hdr_len + reply->data.len + 2;
-            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
             char* out = dst.ptr;
@@ -734,7 +724,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
         }
         case REDIS_REPLY_INTEGER: {
             size_t len = resp_integer_encoded_len(reply->int_value);
-            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, len);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
             resp_encode_integer_into(dst.ptr, reply->int_value);
@@ -744,7 +734,7 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
         }
         case REDIS_REPLY_NULL_BULK: {
             CCSlice data = cc_slice_from_cstr("$-1\r\n");
-            CCSlice !>(CCError) dst_res = reply_alloc_bytes(reply, data.len);
+            CCSlice !>(CCError) dst_res = reply_alloc_bytes(arena, data.len);
             if (dst_res.is_err()) return cc_err(dst_res.error());
             CCSlice dst = dst_res.value();
             memcpy(dst.ptr, data.ptr, data.len);
@@ -757,12 +747,10 @@ static bool !>(CCError) reply_materialize(RedisReply* reply) {
     }
 }
 
-static void free_reply(RedisReply* reply) {
-    if (!reply) return;
-    /* cc_arena_free is a no-op when base is NULL and also clears base to NULL,
-     * so it is safe to call repeatedly or on an uninitialized arena. */
-    cc_arena_free(&reply->arena);
-}
+/* Initial reply_arena size: sized so a fully-pipelined batch of typical
+ * replies (bulk strings up to ~64B) fits without growth. Oversized replies
+ * trigger heap-overflow blocks automatically (block_max=0). */
+#define REPLY_ARENA_INITIAL (16 * 1024)
 
 static RedisConn* redis_conn_create(uint64_t conn_id) {
     RedisConn* conn = calloc(1, sizeof(*conn));
@@ -774,13 +762,15 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
         free(conn);
         return NULL;
     }
-    if (cc_arena_pool(&conn->reply_pool, sizeof(RedisReply)) != 0) {
+    conn->reply_arena = cc_arena_heap(REPLY_ARENA_INITIAL);
+    if (!conn->reply_arena.base) {
         cc_channel_free(reply_tx);
         free(conn);
         return NULL;
     }
+    conn->reply_arena.block_max = 0;
     if (cc_arena_pool(&conn->req_pool, REQ_BUF_SIZE) != 0) {
-        cc_arena_pool_destroy(&conn->reply_pool);
+        cc_arena_free(&conn->reply_arena);
         cc_channel_free(reply_tx);
         free(conn);
         return NULL;
@@ -796,18 +786,9 @@ static RedisConn* redis_conn_create(uint64_t conn_id) {
 
 static void redis_conn_destroy(RedisConn* conn) {
     if (!conn) return;
-    /* Drain any in-flight replies: free each reply's arena (which may hold
-     * heap overflow blocks) before destroying the pool. Slot structs
-     * themselves live in the pool's backing arena and are reclaimed below. */
-    RedisReply* reply_ptr = NULL;
-    while (cc_io_avail(cc_channel_try_recv(conn->reply_rx, &reply_ptr))) {
-        free_reply(reply_ptr);
-    }
-    /* The pool's backing arena also holds any slots that were allocated but
-     * never made it into the channel (e.g. materialize or send failure).
-     * Those slots' arenas were freed on the error path before return-to-pool,
-     * so destroying the backing arena here reclaims only the slot structs. */
-    cc_arena_pool_destroy(&conn->reply_pool);
+    /* reply_arena owns every in-flight reply struct and its serialized bytes,
+     * so freeing the arena reclaims them in one shot — no per-reply drain. */
+    cc_arena_free(&conn->reply_arena);
     /* Requests still held by the owner fiber keep the conn alive via the
      * refcount (build_request retain / redis_conn_release_request drop), so by the time we
      * reach this destroy every request-slot has already been returned to the
@@ -830,18 +811,22 @@ static void redis_conn_drop(RedisConn* conn) {
 }
 
 static bool write_reply(CCSocket* sock, RedisConn* conn, const RedisReply* reply) {
-    /* After reply_materialize, reply->data always points into reply->arena,
-     * whose storage is either the stable inline_buf (for replies from the
-     * pool or a by-value stack reply) or heap overflow blocks owned by the
-     * arena.  Either way the pointer is valid for the lifetime of the arena. */
+    /* After reply_materialize, reply->data points into the arena we fed to
+     * materialize (either the per-conn reply_arena or a write_reply_now
+     * stack scratch arena). Valid for the lifetime of that arena. */
     if (!reply || reply->kind != REDIS_REPLY_RAW) return false;
     return buffer_write_bytes(sock, conn, reply->data);
 }
 
 static bool write_reply_now(CCSocket* sock, RedisConn* conn, RedisReply reply) {
-    @defer free_reply(&reply);
-    reply_init_arena(&reply);
-    bool !>(CCError) mat_res = reply_materialize(&reply);
+    /* One-shot error-reporting path: materialize into a stack-backed scratch
+     * arena that starts on the reply's own inline_buf and overflows to heap
+     * only for oversize encodings. Freed on return. */
+    CCArena scratch = {0};
+    cc_arena_buffer(&scratch, reply.inline_buf, sizeof(reply.inline_buf));
+    scratch.block_max = 0;
+    @defer cc_arena_free(&scratch);
+    bool !>(CCError) mat_res = reply_materialize(&reply, &scratch);
     bool ok = mat_res.is_ok() &&
               write_reply(sock, conn, &reply) &&
               flush_output_buffer(sock, conn);
@@ -882,34 +867,30 @@ static void fail_reply_stream(RedisConn* conn, CCIoError e) {
 
 static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
     if (!conn || !reply) return false;
-    /* Pop a fresh slot from the pool, move the caller's reply into it, and
-     * materialize in place so reply->data ends up pointing into the slot's
-     * own inline_buf (or heap overflow owned by the slot's arena).  The
-     * channel then carries just the slot pointer; the consumer frees the
-     * arena and returns the slot to the pool. */
-    RedisReply* slot = (RedisReply*)cc_arena_pool_alloc(&conn->reply_pool);
+    /* Bump-allocate the slot + its serialized bytes into the per-conn
+     * reply_arena; the channel carries just the slot pointer. No per-reply
+     * arena init, no pool return — the consumer resets the whole arena once
+     * the pipeline drains to zero. Error-path "leaks" are reclaimed by the
+     * next reset (or by redis_conn_destroy), so there's nothing to unwind. */
+    RedisReply* slot = (RedisReply*)cc_arena_alloc(&conn->reply_arena,
+                                                    sizeof(RedisReply),
+                                                    _Alignof(RedisReply));
     if (!slot) {
-        free_reply(reply);
         *reply = (RedisReply){0};
         fail_reply_stream(conn, cc_io_error(CC_IO_OUT_OF_MEMORY));
         return false;
     }
     *slot = *reply;
-    *reply = (RedisReply){0};  /* ownership transferred; caller's defer is a no-op */
+    *reply = (RedisReply){0};
 
-    reply_init_arena(slot);
-    bool !>(CCError) mat_res = reply_materialize(slot);
+    bool !>(CCError) mat_res = reply_materialize(slot, &conn->reply_arena);
     if (mat_res.is_err()) {
-        free_reply(slot);
-        cc_arena_pool_free(&conn->reply_pool, slot);
         fail_reply_stream(conn, cc_io_error(CC_IO_OUT_OF_MEMORY));
         return false;
     }
 
     bool !>(CCIoError) send_res = cc_channel_send(conn->reply_tx, slot);
     if (!cc_io_avail(send_res)) {
-        free_reply(slot);
-        cc_arena_pool_free(&conn->reply_pool, slot);
         /* Two failure shapes here:
          *   Err(e)   -> rx side closed with a structured error; propagate e
          *               verbatim so any queued-but-unread replies still
@@ -928,10 +909,8 @@ static bool owner_queue_reply(RedisConn* conn, RedisReply* reply) {
 
 static bool write_received_reply(CCSocket* sock, RedisConn* conn, RedisReply* reply) {
     if (!reply) return false;
-    @defer {
-        free_reply(reply);
-        cc_arena_pool_free(&conn->reply_pool, reply);
-    };
+    /* No per-reply cleanup: the slot and its bytes live in conn->reply_arena
+     * and are reclaimed wholesale at the next pipeline-drain reset. */
     if (!sock || !conn || !pipeline_active(&conn->pipeline)) return false;
     pipeline_complete(&conn->pipeline);
     return write_reply(sock, conn, reply);
@@ -952,7 +931,8 @@ static void owner_loop(RedisRequest*[~REQUEST_CHAN_CAP N:1 <] req_rx) {
         @defer redis_conn_release_request(req);
         RedisReply !>(CCError) exec_res = execute_request(&db, req);
         RedisReply reply = exec_res.is_err() ? err_reply(exec_res.error()) : exec_res.value();
-        @defer free_reply(&reply);
+        /* `reply` carries no arena of its own (data.ptr aliases the db's
+         * storage); owner_queue_reply copies it into conn->reply_arena. */
         (void)owner_queue_reply(conn, &reply);
     }
 
@@ -971,6 +951,15 @@ static int drain_and_flush_replies(CCSocket* sock, RedisConn* conn) {
      * callback earlier this iteration (which intentionally defers the flush
      * so this drain can coalesce them with additional pipelined replies). */
     if (conn->out_len > 0 && !flush_output_buffer(sock, conn)) return -1;
+    /* Pipeline quiescent: owner has no in-flight allocation for this conn
+     * (inflight>0 is the gate that permits owner-side reply materialization),
+     * and buffer_write_bytes has already copied every reply's bytes into
+     * out_buf (then flushed above). Rewinding the bump pointer here keeps
+     * steady-state reply memory bounded at one pipeline batch rather than
+     * growing for the lifetime of the connection. */
+    if (!pipeline_active(&conn->pipeline)) {
+        cc_arena_reset(&conn->reply_arena);
+    }
     return drained;
 }
 
