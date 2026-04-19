@@ -144,6 +144,7 @@ static cc__fiber_wait_node* cc__chan_pop_send_waiter(CCChan* ch);
 static inline void cc__chan_finish_recv_from_send_waiter(CCChan* ch, cc__fiber_wait_node* snode, void* out_value);
 static inline int cc__chan_tx_close_errno(CCChan* ch);
 static inline void cc__chan_post_enqueue_notify(CCChan* ch, int mu_held);
+static inline void cc__chan_post_dequeue_notify(CCChan* ch, int mu_held);
 
 /* Add a fiber to the wake batch */
 static inline void wake_batch_add(cc__fiber* f) {
@@ -3038,6 +3039,29 @@ static inline void cc__chan_post_enqueue_notify(CCChan* ch, int mu_held) {
     cc__chan_signal_recv_ready(ch);
 }
 
+/* Canonical post-successful-dequeue wake sequence (symmetric with
+ * cc__chan_post_enqueue_notify).  Every path that successfully removes
+ * a value from a buffered channel MUST call this before returning.
+ *
+ * Step 5 is cc__chan_signal_activity — NOT signal_recv_ready.  Here
+ * the channel has LESS data, not more, so there is no reason to poke
+ * per-channel recv_signal sockets (they signal "data available on
+ * this channel").  Senders waiting for space are woken by step 2
+ * (pthread_cond_signal not_full) and by step 1 (wake_one_send_waiter);
+ * multi-channel select/activity subscribers still learn via step 5.
+ *
+ * mu_held = 1  : caller owns ch->mu; we just unlock at step 3.
+ * mu_held = 0  : we acquire at step 1.
+ */
+static inline void cc__chan_post_dequeue_notify(CCChan* ch, int mu_held) {
+    if (!mu_held) cc_chan_lock(ch);
+    cc__chan_wake_one_send_waiter(ch);
+    pthread_cond_signal(&ch->not_full);
+    pthread_mutex_unlock(&ch->mu);
+    wake_batch_flush();
+    cc__chan_signal_activity(ch);
+}
+
 /* ============================================================================
  * Unbuffered Channel (Rendezvous) Operations
  * ============================================================================
@@ -3733,11 +3757,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
         if (err != 0) { pthread_mutex_unlock(&ch->mu); return err; }
         cc_chan_dequeue(ch, out_value);
         /* Wake a sender waiting for space (buffered channel). */
-        cc__chan_wake_one_send_waiter(ch);
-        pthread_cond_signal(&ch->not_full);
-        pthread_mutex_unlock(&ch->mu);
-        wake_batch_flush();
-        cc__chan_signal_activity(ch);
+        cc__chan_post_dequeue_notify(ch, /*mu_held=*/1);
         return 0;
     }
     
@@ -3887,12 +3907,7 @@ int cc_chan_recv(CCChan* ch, void* out_value, size_t value_size) {
                     int probe_rc = cc__chan_dequeue_lockfree_fast(ch, out_value, NULL);
                     cc__chan_trace_req_recv(ch, "pre_park_probe_deq", &node, pre_deq_notified, probe_rc);
                     if (probe_rc == 0) {
-                        cc_chan_lock(ch);
-                        cc__chan_wake_one_send_waiter(ch);
-                        pthread_cond_signal(&ch->not_full);
-                        pthread_mutex_unlock(&ch->mu);
-                        wake_batch_flush();
-                        cc__chan_signal_activity(ch);
+                        cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
                         return 0;
                     }
                 }
@@ -4201,12 +4216,7 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
              * Only wake parked senders; skip signal and broadcast. */
             int send_waiters = atomic_load_explicit(&ch->has_send_waiters, memory_order_acquire);
             if (send_waiters) {
-                cc_chan_lock(ch);
-                cc__chan_wake_one_send_waiter(ch);
-                pthread_cond_signal(&ch->not_full);
-                pthread_mutex_unlock(&ch->mu);
-                wake_batch_flush();
-                cc__chan_signal_activity(ch);
+                cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
             }
             return 0;
         }
@@ -4253,15 +4263,10 @@ int cc_chan_try_recv(CCChan* ch, void* out_value, size_t value_size) {
         pthread_mutex_unlock(&ch->mu);
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
-            cc_chan_lock(ch);
-            cc__chan_wake_one_send_waiter(ch);
-            pthread_cond_signal(&ch->not_full);
-            pthread_mutex_unlock(&ch->mu);
-            wake_batch_flush();
-            cc__chan_signal_activity(ch);
+            cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
             return 0;
         }
-        return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN;
+        return ch->closed ? cc__chan_tx_close_errno(ch) : EAGAIN;
     }
     
     if (ch->count == 0) { pthread_mutex_unlock(&ch->mu); return ch->closed ? (ch->tx_error_code ? ch->tx_error_code : EPIPE) : EAGAIN; }
@@ -4484,15 +4489,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
         (ch->use_ring_queue || ch->elem_size <= sizeof(void*))) {
         int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
         if (rc == 0) {
-            /* Always signal pthread cond for timed waiters.
-             * Unlike the fiber path, timed send uses pthread_cond_timedwait
-             * without adding itself to send_waiters_head. */
-            cc_chan_lock(ch);
-            cc__chan_wake_one_send_waiter(ch);
-            pthread_cond_signal(&ch->not_full);
-            pthread_mutex_unlock(&ch->mu);
-            wake_batch_flush();
-            cc__chan_signal_activity(ch);
+            cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
             return 0;
         }
         /* Check if closed and drain any in-flight sends */
@@ -4520,12 +4517,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
             pthread_mutex_unlock(&ch->mu);
             int rc = cc_chan_try_dequeue_lockfree(ch, out_value);
             if (rc == 0) {
-                cc_chan_lock(ch);
-                cc__chan_wake_one_send_waiter(ch);
-                pthread_cond_signal(&ch->not_full);
-                pthread_mutex_unlock(&ch->mu);
-                wake_batch_flush();
-                cc__chan_signal_activity(ch);
+                cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
                 return 0;
             }
             /* Check deadline */
@@ -4570,11 +4562,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 if (rc == 0) {
                     cc_chan_lock(ch);
                     cc__chan_remove_recv_waiter(ch, &node);
-                    cc__chan_wake_one_send_waiter(ch);
-                    pthread_cond_signal(&ch->not_full);
-                    pthread_mutex_unlock(&ch->mu);
-                    wake_batch_flush();
-                    cc__chan_signal_activity(ch);
+                    cc__chan_post_dequeue_notify(ch, /*mu_held=*/1);
                     return 0;
                 }
                 /* Dekker pre-park: wake any parked sender */
@@ -4606,12 +4594,7 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                     pthread_mutex_unlock(&ch->mu);
                     rc = cc_chan_try_dequeue_lockfree(ch, out_value);
                     if (rc == 0) {
-                        cc_chan_lock(ch);
-                        cc__chan_wake_one_send_waiter(ch);
-                        pthread_cond_signal(&ch->not_full);
-                        pthread_mutex_unlock(&ch->mu);
-                        wake_batch_flush();
-                        cc__chan_signal_activity(ch);
+                        cc__chan_post_dequeue_notify(ch, /*mu_held=*/0);
                         return 0;
                     }
                     cc_chan_lock(ch);
