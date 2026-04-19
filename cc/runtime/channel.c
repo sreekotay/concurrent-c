@@ -4512,6 +4512,18 @@ int cc_chan_timed_recv(CCChan* ch, void* out_value, size_t value_size, const str
                 atomic_store(&node.notified, 0);
                 cc__chan_add_recv_waiter(ch, &node);
                 pthread_mutex_unlock(&ch->mu);
+                /* Dekker pair with the producer's symmetric
+                 *   store-queue-state ; seq_cst fence ; load has_recv_waiters
+                 * in cc__chan_post_enqueue_wake_check.  pthread_mutex_unlock is
+                 * release-only; on arm64 the subsequent acquire-load of
+                 * queue-state (cc__chan_lf_count / try_dequeue_lockfree) and
+                 * has_send_waiters can reorder before the add_recv_waiter
+                 * release-store, which would let a sender observe
+                 * has_recv_waiters=0 and skip the wake while we observe
+                 * empty and park forever.  See cc_chan_recv@~3944 and
+                 * cc_chan_timed_send@~4321 for the two symmetric fences
+                 * this pairs with. */
+                atomic_thread_fence(memory_order_seq_cst);
                 /* Re-check count */
                 if (cc__chan_lf_count(ch) > 0) {
                     cc_chan_lock(ch);
