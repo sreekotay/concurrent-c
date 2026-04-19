@@ -1,0 +1,110 @@
+/*
+ * Minimal repro for BUG #3: buffered-channel drain-on-close truncation.
+ *
+ * User invariant being violated (from the April 14 triage session):
+ *   "A close / cancel / error must NOT ADMIT NEW sends — it must not
+ *    change recv behavior for items that were already enqueued.
+ *    Receivers must drain the buffer to empty before EPIPE is surfaced."
+ *
+ * Symptom on current code (pre-fix):
+ *   A 4-stage pipeline (producer -> relay1 -> relay2 -> consumer)
+ *   sometimes loses the TAIL of the stream: the terminal consumer
+ *   exits its `cc_io_avail(chan_recv(rx, &v))` loop after the
+ *   upstream has closed but before draining the last few items in the
+ *   buffered ring.
+ *
+ * Historical failure rate on this 4-stage shape: ~7% (2/30 runs).
+ *   The larger 6-stage pipeline_repeat_debug.ccs is worse (~35-47%
+ *   fail or deadlock), because every added relay gives the race
+ *   another generation to fire.
+ *
+ * Root cause (see channel_audit_fix_plan.md bug #3 section):
+ *   `cc__chan_recv_resolve_closed` in cc/runtime/channel.c uses
+ *   `ring_tail == ring_head` as its "truly empty" check after
+ *   observing `ch->closed`.  The `ch->closed` read is non-atomic,
+ *   and the tail/head acquire loads aren't a compound operation.
+ *   Under the MPMC ring queue this can race: consumer sees
+ *   closed=1 via cache coherence while the acquire-load of
+ *   ring_tail returns a pre-publish value — the resolver returns
+ *   EPIPE while items with published seq are still in the ring.
+ *
+ * Expected behavior:
+ *   - PASSES once bug #3 is fixed (close-drain resolver uses a
+ *     seq_cst fence before the empty check, and/or `ch->closed` is
+ *     promoted to `_Atomic int` with acquire/release).
+ *   - Until then, this test is EXPECTED TO FAIL intermittently — it
+ *     is checked in so the suite visibly tracks the open bug and so
+ *     the eventual fix has a tight regression test.
+ */
+
+#include <ccc/cc_runtime.cch>
+#include <ccc/cc_atomic.cch>
+#include <stdio.h>
+
+#define NUM_ITEMS 100
+#define REPEATS   500
+
+int[~8 >] g_tx0, g_tx1, g_tx2;
+int[~8 <] g_rx0, g_rx1, g_rx2;
+CCChan* g_ch0;
+CCChan* g_ch1;
+CCChan* g_ch2;
+cc_atomic_int g_recv;
+cc_atomic_int g_sum;
+
+int main(void) {
+    int fails = 0;
+    for (int iter = 0; iter < REPEATS; iter++) {
+        g_ch0 = cc_channel_pair(&g_tx0, &g_rx0);
+        g_ch1 = cc_channel_pair(&g_tx1, &g_rx1);
+        g_ch2 = cc_channel_pair(&g_tx2, &g_rx2);
+        cc_atomic_store(&g_recv, 0);
+        cc_atomic_store(&g_sum, 0);
+
+        {
+            CCNursery* __n = @create(NULL) @destroy;
+            if (!__n) abort();
+
+            __n->spawn(() => {
+                for (int i = 0; i < NUM_ITEMS; i++) chan_send(g_tx0, i);
+                chan_close(g_tx0);
+            });
+            __n->spawn(() => {
+                int v;
+                while (cc_io_avail(chan_recv(g_rx0, &v))) chan_send(g_tx1, v+1);
+                chan_close(g_tx1);
+            });
+            __n->spawn(() => {
+                int v;
+                while (cc_io_avail(chan_recv(g_rx1, &v))) chan_send(g_tx2, v+1);
+                chan_close(g_tx2);
+            });
+            __n->spawn(() => {
+                int v;
+                while (cc_io_avail(chan_recv(g_rx2, &v))) {
+                    cc_atomic_fetch_add(&g_recv, 1);
+                    cc_atomic_fetch_add(&g_sum, v);
+                }
+            });
+        }
+
+        int recv = cc_atomic_load(&g_recv);
+        int sum  = cc_atomic_load(&g_sum);
+        /* Each relay does v+1, two relays = v+2; source i in [0..N-1]; */
+        int expected_sum = (NUM_ITEMS*(NUM_ITEMS-1))/2 + 2*NUM_ITEMS;
+
+        if (recv != NUM_ITEMS || sum != expected_sum) {
+            fprintf(stderr, "FAIL iter %d: recv=%d sum=%d (expected %d/%d) - bug #3 drain truncation\n",
+                    iter, recv, sum, NUM_ITEMS, expected_sum);
+            fails++;
+            if (fails >= 3) {
+                cc_chan_free(g_ch0); cc_chan_free(g_ch1); cc_chan_free(g_ch2);
+                return 1;
+            }
+        }
+        cc_chan_free(g_ch0); cc_chan_free(g_ch1); cc_chan_free(g_ch2);
+    }
+    if (fails > 0) return 1;
+    printf("buffered_drain_truncation: OK (%d iters)\n", REPEATS);
+    return 0;
+}
