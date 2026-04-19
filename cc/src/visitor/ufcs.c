@@ -859,11 +859,70 @@ static int cc__emit_registered_callable(char* out,
     return snprintf(out, cap, "%s(&%s)", lowered_name, recv);
 }
 
+/* Canonicalize parser-family stub macro names like `__CC_VEC(int)` /
+ * `__CC_MAP(K,V)` into their concrete instantiations (`CCVec_int`,
+ * `Map_K_V`).  Historically the AST UFCS pass emitted `__cc_vec_generic_*`
+ * placeholders for these receivers and a separate end-of-pipeline
+ * rewriter walked the emitted source to substitute the real type.
+ * Running the same mangling here lets dispatch emit the concrete
+ * Vec/Map callee directly and retires the placeholder pass. */
+static const char* cc__ufcs_canonicalize_family_macro(const char* type_name,
+                                                      char* scratch,
+                                                      size_t scratch_cap) {
+    const char* args = NULL;
+    const char* close = NULL;
+    int is_map = 0;
+    char mangled_a[128];
+    char mangled_b[128];
+    if (!type_name || !scratch || scratch_cap == 0) return NULL;
+    if (strncmp(type_name, "__CC_VEC(", 9) == 0) {
+        args = type_name + 9;
+    } else if (strncmp(type_name, "__CC_MAP(", 9) == 0) {
+        args = type_name + 9;
+        is_map = 1;
+    } else {
+        return NULL;
+    }
+    close = strrchr(args, ')');
+    if (!close || close <= args) return NULL;
+    if (!is_map) {
+        cc_result_spec_mangle_type(args, (size_t)(close - args), mangled_a, sizeof(mangled_a));
+        if (!mangled_a[0]) return NULL;
+        snprintf(scratch, scratch_cap, "CCVec_%s", mangled_a);
+        return scratch;
+    }
+    {
+        const char* comma = NULL;
+        int par = 0, br = 0, brc = 0, ang = 0;
+        for (const char* p = args; p < close; ++p) {
+            if (*p == '(') par++;
+            else if (*p == ')' && par > 0) par--;
+            else if (*p == '[') br++;
+            else if (*p == ']' && br > 0) br--;
+            else if (*p == '{') brc++;
+            else if (*p == '}' && brc > 0) brc--;
+            else if (*p == '<') ang++;
+            else if (*p == '>' && ang > 0) ang--;
+            else if (*p == ',' && par == 0 && br == 0 && brc == 0 && ang == 0) {
+                comma = p;
+                break;
+            }
+        }
+        if (!comma) return NULL;
+        cc_result_spec_mangle_type(args, (size_t)(comma - args), mangled_a, sizeof(mangled_a));
+        cc_result_spec_mangle_type(comma + 1, (size_t)(close - (comma + 1)), mangled_b, sizeof(mangled_b));
+        if (!mangled_a[0] || !mangled_b[0]) return NULL;
+        snprintf(scratch, scratch_cap, "Map_%s_%s", mangled_a, mangled_b);
+        return scratch;
+    }
+}
+
 static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
     CCTypeRegistry* reg = cc_type_registry_get_global();
     const char* reg_type_name = NULL;
     const char* alias_target = NULL;
     char local_type_buf[256];
+    char family_canon_buf[256];
     int reg_recv_is_ptr = 0;
     int recv_is_member_chain = 0;
     if (!ctx) return;
@@ -901,6 +960,19 @@ static void cc__resolve_dispatch_ctx(CCUFCSDispatchCtx* ctx, const char* recv) {
               strcmp(ctx->recv_type_name, "CCChanRx") == 0) &&
              reg_type_name && reg_type_name[0])) {
             ctx->recv_type_name = reg_type_name;
+        }
+        /* If the (possibly-overridden) receiver type is a parser-family
+         * macro stub (`__CC_VEC(int)`, `__CC_MAP(K,V)`), canonicalize to
+         * the concrete `CCVec_<T>` / `Map_<K>_<V>` name up front so the
+         * type-driven dispatch below emits a real callee instead of the
+         * `__cc_vec_generic_*` / `__cc_map_generic_*` placeholder that
+         * used to be cleaned up by a separate end-of-pipeline rewriter. */
+        if (ctx->recv_type_name &&
+            (strncmp(ctx->recv_type_name, "__CC_VEC(", 9) == 0 ||
+             strncmp(ctx->recv_type_name, "__CC_MAP(", 9) == 0)) {
+            const char* canon = cc__ufcs_canonicalize_family_macro(
+                ctx->recv_type_name, family_canon_buf, sizeof(family_canon_buf));
+            if (canon && canon[0]) ctx->recv_type_name = canon;
         }
         if (reg_type_name && reg_type_name[0]) {
             if (reg_recv_is_ptr &&
