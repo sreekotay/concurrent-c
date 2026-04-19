@@ -290,17 +290,6 @@ typedef struct {
      * "detached" flag is needed. */
     _Atomic uint64_t generation;
     wake_primitive wake;
-    /* Last-park diagnostic slot. Populated unconditionally at the top of
-     * sched_v2_{park,yield}, BEFORE mco_yield. Non-atomic per-worker
-     * memory — only the worker itself writes, dumped only after all
-     * workers have quiesced (abort or shutdown). Cost on the park
-     * path: six scalar stores. */
-    void*        last_park_fiber;
-    void*        last_park_coro;
-    size_t       last_park_sp;
-    size_t       last_park_coro_base;
-    const char*  last_park_reason;
-    uint64_t     last_park_seq;
 } thread_v2;
 
 /* ============================================================================
@@ -956,136 +945,6 @@ void sched_v2_signal(fiber_v2* f) {
  * Park / Yield (unchanged — fiber-side API)
  * ============================================================================ */
 
-/* ----------------------------------------------------------------------
- * Fiber identity assertion (structural, cheap).
- *
- * Invariant: every mco_yield(f->coro) must be called while the stack we
- * are currently on IS f->coro's stack — equivalently, mco_running() must
- * equal f->coro. Violations were seen in lost_wakeup_hammer.ccs: SP ~180
- * MB away from f->coro's stack range while f came from
- * tls_v2_current_fiber. Symptom was a spurious "coroutine stack
- * overflow" from minicoro's magic/range check.
- *
- * We record up to V2_IDENT_RING_CAP violations in a bounded lock-free
- * ring (seq_cst RMW on the head) and dump them at atexit. Logging is
- * off-path in the common case (a single atomic load + compare). */
-#define V2_IDENT_RING_CAP 64
-typedef struct {
-    const void* f;
-    const void* fiber_coro;
-    size_t      sp;            /* observed SP at park/yield */
-    size_t      coro_base;     /* f->coro->stack_base */
-    size_t      coro_size;     /* f->coro->stack_size */
-    const char* reason;
-    int         worker_id;
-    int         kind;          /* 0=park, 1=yield */
-} v2_ident_fault;
-static v2_ident_fault g_v2_ident_ring[V2_IDENT_RING_CAP];
-static _Atomic uint64_t g_v2_ident_count = 0;
-
-static void sched_v2_record_ident_fault(int kind, fiber_v2* f,
-                                        size_t sp,
-                                        const char* reason) {
-    uint64_t idx = atomic_fetch_add_explicit(&g_v2_ident_count, 1,
-                                             memory_order_relaxed);
-    v2_ident_fault* slot = &g_v2_ident_ring[idx % V2_IDENT_RING_CAP];
-    slot->f           = (const void*)f;
-    slot->fiber_coro  = (const void*)f->coro;
-    slot->sp          = sp;
-    slot->coro_base   = f->coro ? (size_t)f->coro->stack_base : 0;
-    slot->coro_size   = f->coro ? f->coro->stack_size : 0;
-    slot->reason      = reason;
-    slot->worker_id   = tls_v2_thread_id;
-    slot->kind        = kind;
-}
-
-static void sched_v2_atexit_dump_ident_faults(void) {
-    uint64_t total = atomic_load_explicit(&g_v2_ident_count,
-                                          memory_order_relaxed);
-    if (total == 0) return;
-    uint64_t shown = total < V2_IDENT_RING_CAP ? total : V2_IDENT_RING_CAP;
-    fprintf(stderr, "[sched_v2 IDENT FAULT] %llu identity mismatches "
-                    "in sched_v2_{park,yield}; showing last %llu of ring:\n",
-            (unsigned long long)total, (unsigned long long)shown);
-    uint64_t start = total <= V2_IDENT_RING_CAP ? 0 : total - V2_IDENT_RING_CAP;
-    for (uint64_t i = start; i < total; ++i) {
-        v2_ident_fault* slot = &g_v2_ident_ring[i % V2_IDENT_RING_CAP];
-        ssize_t offset = (ssize_t)slot->sp - (ssize_t)slot->coro_base;
-        fprintf(stderr, "  #%llu kind=%s f=%p f->coro=%p "
-                        "sp=%zx coro_base=%zx coro_size=%zu "
-                        "sp-base=%zd worker=%d reason=%s\n",
-                (unsigned long long)i,
-                slot->kind == 0 ? "park" : "yield",
-                slot->f, slot->fiber_coro,
-                slot->sp, slot->coro_base, slot->coro_size,
-                offset,
-                slot->worker_id,
-                slot->reason ? slot->reason : "(null)");
-    }
-}
-
-/* Installed from sched_v2_init_impl. */
-static void sched_v2_arm_ident_dump(void) {
-    static _Atomic int armed = 0;
-    int e = 0;
-    if (atomic_compare_exchange_strong_explicit(
-            &armed, &e, 1, memory_order_acq_rel, memory_order_relaxed)) {
-        atexit(sched_v2_atexit_dump_ident_faults);
-    }
-}
-
-/* Global monotonic park sequence. Relaxed RMW; purely diagnostic. */
-static _Atomic uint64_t g_v2_park_seq = 0;
-
-/* Per-worker last-park stash. Cost per park: six scalar stores to
- * thread-owned memory (g_v2.threads[tid].last_park_*) + one relaxed
- * atomic fetch_add for the sequence number. No branch, no function
- * call, no memory fence, nothing that could mask the race we're
- * chasing. The stash is consumed from the mco_yield-fail path or at
- * atexit by iterating g_v2.threads[] and dumping any populated slot.
- *
- * Note: tls_v2_thread_id is -1 on non-worker contexts (e.g. main).
- * When a park happens there, we don't have a per-worker slot to write.
- * In that case we fall through to the lock-free ring. That's fine: the
- * failure we're chasing is inside worker dispatches. */
-#define SCHED_V2_IDENT_PROBE(kind_id, fiber_ptr, reason_str)           \
-    do {                                                               \
-        fiber_v2* __probe_f = (fiber_ptr);                             \
-        volatile char __probe_dummy;                                   \
-        size_t __probe_sp = (size_t)&__probe_dummy;                    \
-        int __probe_tid = tls_v2_thread_id;                            \
-        if (__probe_tid >= 0 && __probe_tid < V2_MAX_THREADS) {        \
-            thread_v2* __probe_t = &g_v2.threads[__probe_tid];         \
-            __probe_t->last_park_fiber     = __probe_f;                \
-            __probe_t->last_park_coro      = __probe_f->coro;          \
-            __probe_t->last_park_sp        = __probe_sp;               \
-            __probe_t->last_park_coro_base =                           \
-                __probe_f->coro ? (size_t)__probe_f->coro->stack_base : 0; \
-            __probe_t->last_park_reason    = (reason_str);             \
-            __probe_t->last_park_seq       =                           \
-                atomic_fetch_add_explicit(&g_v2_park_seq, 1,           \
-                                          memory_order_relaxed);       \
-        }                                                              \
-    } while (0)
-
-static void sched_v2_dump_last_parks(void) {
-    int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
-    fprintf(stderr, "[sched_v2 LAST PARK PER WORKER] (n=%d)\n", n);
-    for (int i = 0; i < n; ++i) {
-        thread_v2* t = &g_v2.threads[i];
-        void* f = t->last_park_fiber;
-        if (!f) continue;
-        size_t sp = t->last_park_sp;
-        size_t base = t->last_park_coro_base;
-        ssize_t off = (ssize_t)sp - (ssize_t)base;
-        fprintf(stderr, "  worker=%d seq=%llu f=%p f->coro=%p "
-                        "sp=%zx base=%zx sp-base=%zd reason=%s\n",
-                i, (unsigned long long)t->last_park_seq,
-                f, t->last_park_coro, sp, base, off,
-                t->last_park_reason ? t->last_park_reason : "(null)");
-    }
-}
-
 void sched_v2_park(void) {
     fiber_v2* f = tls_v2_current_fiber;
     if (!f) return;
@@ -1662,7 +1521,6 @@ static void sched_v2_init_impl(void) {
     pthread_mutex_init(&g_v2.all_fibers_mu, NULL);
     g_v2.all_fibers = NULL;
     wake_primitive_init(&g_v2.sysmon_wake);
-    sched_v2_arm_ident_dump();
 
     const char* stats_env = getenv("CC_V2_STATS");
     if (stats_env && stats_env[0] && stats_env[0] != '0') {
