@@ -3727,13 +3727,9 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
     return out;
 }
 
-char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n) {
-    return cc__rewrite_generic_family_ufcs_impl(src, n, 0);
-}
-
-/* Parser-survival companion to the family-only concrete rewrite. Keep normal
-   lowering on the generic-family path; use this only where TCC's stub parse
-   still needs concrete command/file-style calls normalized up front. */
+/* Parser-survival text rewriter for concrete family UFCS. Kept narrow so TCC's
+   stub parse sees lowered receiver forms for fragile nested contexts; the AST
+   UFCS pass remains authoritative for everything else. */
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n) {
     return cc__rewrite_generic_family_ufcs_impl(src, n, 1);
 }

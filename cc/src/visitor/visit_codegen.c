@@ -4265,18 +4265,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
             }
         }
 
-        /* Final concrete-family sweep: pointer-backed family types like Map_* can
-           still survive the AST UFCS pass in raw surface form (for example
-           `m.insert(...)` where `m` is already `Map_K_V*`). Normalize any
-           remaining concrete family UFCS before emitting host C. */
-        {
-            char* rewritten = cc_rewrite_generic_family_ufcs_concrete(src_ufcs, src_ufcs_len);
-            if (rewritten) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rewritten;
-                src_ufcs_len = strlen(rewritten);
-            }
-        }
         {
             char* rewritten = cc__rewrite_result_helper_family_to_visible_type(src_ufcs, src_ufcs_len);
             if (rewritten) {

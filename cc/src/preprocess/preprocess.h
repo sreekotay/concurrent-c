@@ -75,17 +75,11 @@ char* cc__rewrite_link_directives(const char* src, size_t n);
 // Returns newly allocated string with rewrites, or NULL if no changes.
 char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input_path);
 
-// Rewrite parser-style generic family types in final lowered source to concrete
-// family calls:
-//   __CC_VEC(int) v; v.get(1) -> CCVec_int_get(&v, 1)
-//   __CC_MAP(int,int)* m; m.get(1) -> Map_int_int_get(m, 1)
-char* cc_rewrite_generic_family_ufcs_concrete(const char* src, size_t n);
-
-// Parser-only variant: normal lowering should stay family-focused and let the
-// later typed/AST UFCS pipeline remain authoritative. Use this only when the
-// stub-AST parser needs a narrow parser-survival rewrite for concrete UFCS
-// forms (for example concrete CCCommand/CCFile methods that still need to be
-// normalized before TCC sees them).
+// Parser-only text rewrite for concrete generic family UFCS. The AST UFCS
+// pass is authoritative for all family UFCS; this rewriter remains as a
+// narrow parser-survival aid so the stub-AST parser sees lowered receiver
+// forms for fragile nested contexts (Vec methods inside printf args,
+// CCCommand/CCFile calls recorded inconsistently by TCC, etc.).
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
 
 // Rewrite raw CCChan UFCS in final lowered C when concrete receiver types are
