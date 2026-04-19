@@ -146,6 +146,33 @@ Note: post-dequeue uses `signal_activity` (not `signal_recv_ready`) — senders 
 
 ---
 
+## Phase 4b — FINDING: buffered enqueue/dequeue primitives leak signaling
+
+**Severity**: DRIFT (with latent double-wake / under-wake bugs at callers).
+**Effort**: 30-line refactor + 7 caller fixups.
+**Trigger**: user concern — "the other 9 sites… I want smell and cleanliness without trading perf."
+
+**The gap**: `cc_chan_enqueue` and `cc_chan_dequeue` were supposed to be pure ring-buffer ops but both buffered-branches inlined a *partial* post-enqueue / post-dequeue wake sequence (cond_signal + signal_recv_waiter / wake_one_send_waiter + signal_recv_ready / signal_activity). Every caller then had to decide whether to trust that embedded sequence or add their own on top. Result:
+
+- 2 sites (post-Phase-3/4 refactor) called both the primitive and `cc__chan_post_{enqueue,dequeue}_notify` → **double wakes** (extra atomic ops, extra futex syscalls).
+- 2 sites called the primitive and then only `unlock + flush + signal_activity` → relied silently on the primitive doing the real wakeup work, which would break invisibly if the primitive were ever changed.
+- 1 site (cc_chan_send mutex path) called the primitive and then `unlock + flush + signal_recv_ready` → same hidden dependency.
+
+Exactly the shape of the recv-side close-drain bug that started this audit: one logical op, several inlined implementations, caller-by-caller drift.
+
+**Fix**:
+1. Strip ALL signaling from the BUFFERED branches of `cc_chan_enqueue` and `cc_chan_dequeue`. They now do only the ring-buffer index math + value copy + trace.
+2. Preserve unbuffered (cap=0) branches untouched — rendezvous completion uses `cond_broadcast(not_full)` with different semantics, separate code path.
+3. Every buffered caller (3 enqueue, 4 dequeue) invokes `cc__chan_post_{enqueue,dequeue}_notify(ch, /*mu_held=*/1)` after the primitive. Document the contract in the primitive comment.
+
+**Validation gate**: C1 through C5 + extended channel smoke suite (`chan_buffered_wakeup_smoke`, `chan_close_err_smoke`, `chan_close_wakeall_idempotent_smoke`, `chan_double_wake_nodup_smoke`, `chan_park_wake_lostwake_stress_smoke`, `chan_post_commit_wake_smoke`, `chan_pre_park_wake_smoke`, `chan_select_cancel_close_stale_smoke`, `chan_timed_ping_pong`) + `redis_hybrid` end-to-end bench.
+
+**Exit criterion**: zero `pthread_cond_signal(&ch->not_{empty,full})` calls inside `cc_chan_enqueue` / `cc_chan_dequeue` buffered branches; zero callers invoke the primitive without a canonical notify helper.
+
+**Bonus cleanup**: collapse 4 inlined Dekker pre-park blocks into 2 helpers (`cc__chan_dekker_wake_{recv,send}_before_park`). These are asymmetric from post-enqueue/dequeue (no signal_activity / signal_recv_ready because nothing was produced/consumed — we are about to park) so they deserve their own name. Same drift-risk, same cure.
+
+---
+
 ## Phase 5 — FINDING #5 + #6: V1 residue strip
 
 **Severity**: CRUFT — ~350 lines of unreachable code in `fiber_sched.c`.
