@@ -4021,18 +4021,10 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = strlen(src_ufcs);
             }
         }
-        /* Keep generic-family UFCS in source form here. The final AST-aware UFCS
-           pass has better receiver type information, while the older parser-safe
-           textual rewrite can leak parser-generic names like __cc_vec_generic_* into
-           emitted host C. */
-        {
-            char* rew_channel = cc_rewrite_channel_ufcs_concrete(src_ufcs, src_ufcs_len);
-            if (rew_channel) {
-                if (src_ufcs != src_all) free(src_ufcs);
-                src_ufcs = rew_channel;
-                src_ufcs_len = strlen(src_ufcs);
-            }
-        }
+        /* Channel UFCS is handled by the AST UFCS pass (via the
+           CCChanTx/CCChanRx registered hooks).  Drop the belt-and-suspenders
+           text rewriter; it used to run here to normalize channel receivers
+           before other text passes. */
         {
             size_t st_len = 0;
             char* st = cc__rewrite_chan_send_task_text(ctx, src_ufcs, src_ufcs_len, &st_len);
@@ -4079,14 +4071,6 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                     free(closure_defs);
                     closure_defs = lowered;
                     closure_defs_len = lowered_len;
-                }
-            }
-            {
-                char* rewritten = cc_rewrite_channel_ufcs_concrete(closure_defs, closure_defs_len);
-                if (rewritten) {
-                    free(closure_defs);
-                    closure_defs = rewritten;
-                    closure_defs_len = strlen(rewritten);
                 }
             }
             if (strstr(closure_defs, "send_task") != NULL ||
@@ -4541,17 +4525,7 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 }
             }
 
-            /* Same rationale as the main source path above: leave family UFCS for the
-               final AST-aware rewrite instead of baking parser-safe generic names into
-               emitted closure definitions. */
-            {
-                char* rewritten = cc_rewrite_channel_ufcs_concrete(closure_defs, closure_defs_len);
-                if (rewritten) {
-                    free(closure_defs);
-                    closure_defs = rewritten;
-                    closure_defs_len = strlen(rewritten);
-                }
-            }
+
             if (strstr(closure_defs, "send_task") != NULL || strstr(closure_defs, "cc_channel_send_task") != NULL) {
                 size_t rewritten_len = 0;
                 char* rewritten = cc__rewrite_chan_send_task_text(ctx, closure_defs, closure_defs_len, &rewritten_len);

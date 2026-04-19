@@ -82,9 +82,10 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
 // CCCommand/CCFile calls recorded inconsistently by TCC, etc.).
 char* cc_rewrite_generic_family_ufcs_parser_safe(const char* src, size_t n);
 
-// Rewrite raw CCChan UFCS in final lowered C when concrete receiver types are
-// still visible in source text.
-char* cc_rewrite_channel_ufcs_concrete(const char* src, size_t n);
+// [Removed] cc_rewrite_channel_ufcs_concrete: channel UFCS is now handled by
+// the AST UFCS pass via the CCChanTx/CCChanRx registered hooks.  The AST
+// dispatch also retains a small cc_ufcs_channel_callee helper for the raw
+// CCChan/untyped-alias cases that still need sizeof(*out_ptr) insertion.
 
 // Prototype rewrite for builtin nursery declarations:
 //   CCNursery* n = @create(parent, closure) @destroy;
