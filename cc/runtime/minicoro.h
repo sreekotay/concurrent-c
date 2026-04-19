@@ -1824,6 +1824,10 @@ mco_result mco_yield(mco_coro* co) {
   size_t stack_min = (size_t)co->stack_base;
   size_t stack_max = stack_min + co->stack_size;
   if(co->magic_number != MCO_MAGIC_NUMBER || stack_addr < stack_min || stack_addr > stack_max) { /* Stack overflow. */
+    fprintf(stderr, "[mco overflow] co=%p magic=%zx(want %zx) sp=%zx base=%zx size=%zu sp-base=%zd\n",
+            (void*)co, co->magic_number, (size_t)MCO_MAGIC_NUMBER,
+            stack_addr, stack_min, co->stack_size,
+            (ssize_t)((ssize_t)stack_addr - (ssize_t)stack_min));
     MCO_LOG("coroutine stack overflow, try increasing the stack size");
     return MCO_STACK_OVERFLOW;
   }

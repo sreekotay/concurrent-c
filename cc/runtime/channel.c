@@ -2953,9 +2953,30 @@ static int cc__chan_recv_resolve_closed(CCChan* ch, void* out_value,
             return 0;
         }
         if (ch->use_ring_queue) {
+            /* Fence BEFORE sampling tail/head.  Without this, a prior acquire
+             * load of cell->seq inside cc_chan_try_dequeue_lockfree can be
+             * reordered such that we observe an old ring_tail that predates
+             * the producer's release-store of a later tail value — returning
+             * EPIPE while items are still reachable ("failed to drain" bug).
+             * The seq_cst fence forces tail/head reads to observe the same
+             * global ordering as the close flag that got us here. */
+            atomic_thread_fence(memory_order_seq_cst);
             size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_acquire);
             size_t head = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
             if (tail == head) {
+                /* Double-check via one more dequeue attempt with fence;
+                 * if tail == head was genuinely observed in a consistent
+                 * ordering, another dequeue will also fail. */
+                atomic_thread_fence(memory_order_seq_cst);
+                if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
+                    return 0;
+                }
+                size_t t_rc = atomic_load_explicit(&ch->ring_tail, memory_order_acquire);
+                size_t h_rc = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
+                if (t_rc != h_rc) {
+                    /* State changed between checks: continue draining. */
+                    continue;
+                }
                 return ch->tx_error_code ? ch->tx_error_code : EPIPE;
             }
             atomic_thread_fence(memory_order_seq_cst);
@@ -2964,9 +2985,18 @@ static int cc__chan_recv_resolve_closed(CCChan* ch, void* out_value,
                 if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
                     return 0;
                 }
+                atomic_thread_fence(memory_order_seq_cst);
                 size_t t2 = atomic_load_explicit(&ch->ring_tail, memory_order_acquire);
                 size_t h2 = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
                 if (t2 == h2) {
+                    /* Same double-check as above. */
+                    atomic_thread_fence(memory_order_seq_cst);
+                    if (cc_chan_try_dequeue_lockfree(ch, out_value) == 0) {
+                        return 0;
+                    }
+                    size_t t_rc = atomic_load_explicit(&ch->ring_tail, memory_order_acquire);
+                    size_t h_rc = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
+                    if (t_rc != h_rc) break;  /* drop out of pause loop, retry outer */
                     return ch->tx_error_code ? ch->tx_error_code : EPIPE;
                 }
                 cc__chan_cpu_pause();

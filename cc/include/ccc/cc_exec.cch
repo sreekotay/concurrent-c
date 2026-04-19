@@ -27,7 +27,15 @@ static inline CCExec* cc_exec_init(size_t workers, size_t queue_cap) {
 }
 
 // Submit a job; returns 0 on success, EAGAIN/EBUSY on full, or errno on failure.
+// If the exec was created with queue_cap=0 (unbounded), the queue grows on
+// demand and only EINVAL/ENOMEM are possible.
 int cc_exec_submit(CCExec* ex, cc_exec_fn fn, void *arg);
+
+// Blocking submit: waits on cv_not_full if the bounded queue is full.
+// Intended for paths (e.g. the blocking I/O pool) where the queue cap is a
+// real backpressure signal and the caller must never observe silent drops.
+// Returns 0 on success, EINVAL on bad args or shutdown.
+int cc_exec_submit_blocking(CCExec* ex, cc_exec_fn fn, void *arg);
 
 // Graceful shutdown: no new work, waits for queued tasks to finish.
 void cc_exec_shutdown(CCExec* ex);
