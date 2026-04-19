@@ -28,6 +28,7 @@
 #include "visitor/edit_buffer.h"
 #include "visitor/visitor_fileutil.h"
 #include "visitor/text_span.h"
+#include "comptime/hook_compile.h"
 #include "header/lower_header.h"
 #include "parser/tcc_bridge.h"
 #include "preprocess/preprocess.h"
@@ -1026,31 +1027,79 @@ static int cc__parse_ident_codegen(const char* src, size_t n, size_t* io_pos, ch
     return 1;
 }
 
-typedef struct {
-    void* dl_handle;
-    char obj_path[1024];
-    char dylib_path[1024];
-} CCComptimeDlModule;
-
 /*
- * Named @comptime UFCS handlers currently execute through a small backend
- * boundary:
- *   1. extract a helper translation unit from the original source
- *   2. build a loadable helper module
- *   3. resolve the exported wrapper and store it as a callable registration
+ * Phase-2 batched UFCS / @comptime hook compilation.
  *
- * On macOS we intentionally use the host C toolchain plus a temporary dylib
- * here rather than libtcc in-process relocation. That keeps the current bridge
- * working while the pure libtcc backend remains a separate follow-up.
+ * Registrations discovered from both `cc_type_register({.ufcs = ...})` and
+ * the legacy `cc_ufcs_register(...)` calls inside @comptime blocks are
+ * collected into a single pending list, bucketed by the on-disk source that
+ * defines the handler body (usually the main TU, but headers also contribute
+ * their own bucket), then each bucket is compiled into a single dylib with
+ * one exported wrapper per registration.  The produced dylib is owned by a
+ * refcounted handle in cc/src/comptime/hook_compile.c; each registered fn_ptr
+ * retains one reference.  The dylib closes once every registration drops its
+ * reference.
  */
 
-static void cc__dl_module_free(void* owner) {
-    CCComptimeDlModule* module = (CCComptimeDlModule*)owner;
-    if (!module) return;
-    if (module->dl_handle) dlclose(module->dl_handle);
-    if (module->obj_path[0]) unlink(module->obj_path);
-    if (module->dylib_path[0]) unlink(module->dylib_path);
-    free(module);
+typedef struct {
+    int    is_legacy;         /* 0 = set_type_ufcs_callable, 1 = add_legacy_type_ufcs_callable */
+    char*  pattern;           /* owned: pattern or type_name */
+    int    handler_is_ident;  /* 1 → use handler_name; 0 → emit lambda_src */
+    char*  handler_name;      /* owned ident, or NULL */
+    char*  lambda_src;        /* owned source span (for lambda mode), or NULL */
+    size_t lambda_len;
+    char*  bucket_path;       /* owned canonical path: input_path or logical_file */
+    char   entry_name[192];   /* generated unique exported symbol name */
+} CCUfcsPendingReg;
+
+typedef struct {
+    CCUfcsPendingReg* items;
+    size_t            count;
+    size_t            capacity;
+} CCUfcsPendingList;
+
+typedef struct {
+    CCUfcsPendingList* pending;
+    const char*        default_path;
+    const char*        default_src;
+    size_t             default_src_len;
+} CCUfcsBatchCtx;
+
+static int cc__ufcs_pending_append(CCUfcsPendingList* list, CCUfcsPendingReg item) {
+    if (!list) return -1;
+    if (list->count + 1 > list->capacity) {
+        size_t new_cap = list->capacity ? list->capacity * 2 : 8;
+        CCUfcsPendingReg* nv = (CCUfcsPendingReg*)realloc(list->items, new_cap * sizeof(*nv));
+        if (!nv) return -1;
+        list->items = nv;
+        list->capacity = new_cap;
+    }
+    list->items[list->count++] = item;
+    return 0;
+}
+
+static void cc__ufcs_pending_free(CCUfcsPendingList* list) {
+    if (!list) return;
+    for (size_t i = 0; i < list->count; ++i) {
+        CCUfcsPendingReg* r = &list->items[i];
+        free(r->pattern);
+        free(r->handler_name);
+        free(r->lambda_src);
+        free(r->bucket_path);
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = list->capacity = 0;
+}
+
+static char* cc__strndup_local(const char* s, size_t n) {
+    char* out;
+    if (!s) return NULL;
+    out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
 }
 
 static void cc__dirname_codegen(const char* path, char* out, size_t out_sz) {
@@ -1125,7 +1174,327 @@ static int cc__chunk_contains_at_codegen(const char* src, size_t start, size_t e
     return 0;
 }
 
-static char* cc__build_comptime_tu_from_preprocessed(const char* src,
+/*
+ * UFCS / @comptime hook batch compile.
+ *
+ * One pass groups pending registrations by their bucket_path (the on-disk
+ * source that defines the handler body) and compiles each bucket into a
+ * single dylib via `cc_comptime_compile_type_hooks`.  Each registered
+ * function pointer retains one reference to the returned owner; the batch
+ * ref is released once all registrations have been recorded.
+ */
+
+static int cc__ufcs_compile_bucket(CCSymbolTable* symbols,
+                                   const char* reg_input_path,
+                                   const char* bucket_path,
+                                   const char* bucket_src,
+                                   size_t bucket_src_len,
+                                   CCUfcsPendingReg** items,
+                                   size_t n_items) {
+    CCComptimeHookSpec* specs = NULL;
+    const void** fn_ptrs = NULL;
+    void* owner = NULL;
+    int rc = -1;
+
+    if (!symbols || !bucket_src || n_items == 0) return -1;
+
+    specs = (CCComptimeHookSpec*)calloc(n_items, sizeof(*specs));
+    fn_ptrs = (const void**)calloc(n_items, sizeof(*fn_ptrs));
+    if (!specs || !fn_ptrs) goto done;
+
+    for (size_t i = 0; i < n_items; ++i) {
+        CCUfcsPendingReg* r = items[i];
+        /* Entry name must be stable across processes so the content-addressed
+           dylib cache hits for unchanged TUs.  Derive it purely from inputs
+           the user can see (handler/lambda spans + position in the bucket),
+           not from heap addresses. */
+        const char* hkey  = r->handler_is_ident ? r->handler_name : "lam";
+        size_t      hsize = r->handler_is_ident ? strlen(r->handler_name)
+                                                : r->lambda_len;
+        snprintf(r->entry_name, sizeof(r->entry_name),
+                 "__cc_ufcs_hook_%s_%zu_%zu", hkey, hsize, i);
+        specs[i].kind = CC_COMPTIME_TYPE_HOOK_UFCS;
+        specs[i].entry_name = r->entry_name;
+        if (r->handler_is_ident) {
+            specs[i].handler_name = r->handler_name;
+        } else {
+            specs[i].lambda_src = r->lambda_src;
+            specs[i].lambda_len = r->lambda_len;
+        }
+    }
+
+    if (cc_comptime_compile_type_hooks(bucket_path ? bucket_path : reg_input_path,
+                                       bucket_path,
+                                       bucket_src, bucket_src_len,
+                                       specs, n_items,
+                                       &owner, fn_ptrs) != 0) {
+        fprintf(stderr, "%s: error: failed to compile @comptime UFCS hook batch (bucket=%s, %zu handler%s)\n",
+                reg_input_path ? reg_input_path : "<input>",
+                bucket_path ? bucket_path : "<none>",
+                n_items, n_items == 1 ? "" : "s");
+        goto done;
+    }
+
+    for (size_t i = 0; i < n_items; ++i) {
+        CCUfcsPendingReg* r = items[i];
+        const void* fn = fn_ptrs[i];
+        int reg_rc;
+        cc_comptime_type_hook_owner_retain(owner);
+        if (r->is_legacy) {
+            reg_rc = cc_symbols_add_legacy_type_ufcs_callable(symbols, r->pattern, fn, owner,
+                                                              cc_comptime_type_hook_owner_free);
+        } else {
+            reg_rc = cc_symbols_set_type_ufcs_callable(symbols, r->pattern, fn, owner,
+                                                       cc_comptime_type_hook_owner_free);
+        }
+        if (reg_rc != 0) {
+            fprintf(stderr, "%s: error: failed to record callable UFCS registration for '%s'\n",
+                    reg_input_path ? reg_input_path : "<input>", r->pattern);
+            cc_comptime_type_hook_owner_free(owner);  /* undo retain */
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    if (owner) cc_comptime_type_hook_owner_free(owner);  /* drop batch's creator ref */
+    free(specs);
+    free(fn_ptrs);
+    return rc;
+}
+
+static int cc__ufcs_pending_compile_and_register(CCSymbolTable* symbols,
+                                                 const char* reg_input_path,
+                                                 const char* default_src,
+                                                 size_t default_src_len,
+                                                 CCUfcsPendingList* list) {
+    int rc = 0;
+    char* loaded_src = NULL;  /* reused across buckets that read from disk */
+    size_t loaded_src_len = 0;
+    char* loaded_path = NULL;
+
+    if (!list || list->count == 0) return 0;
+
+    /* Simple n² bucketing by bucket_path strcmp — handler counts are tiny. */
+    char** visited = (char**)calloc(list->count, sizeof(char*));
+    if (!visited) return -1;
+    size_t visited_n = 0;
+
+    CCUfcsPendingReg** bucket = (CCUfcsPendingReg**)calloc(list->count, sizeof(*bucket));
+    if (!bucket) { free(visited); return -1; }
+
+    for (size_t i = 0; i < list->count; ++i) {
+        const char* key = list->items[i].bucket_path;
+        int already = 0;
+        for (size_t k = 0; k < visited_n; ++k) {
+            const char* v = visited[k];
+            if ((!v && !key) || (v && key && strcmp(v, key) == 0)) { already = 1; break; }
+        }
+        if (already) continue;
+        visited[visited_n++] = list->items[i].bucket_path;
+
+        size_t bn = 0;
+        for (size_t j = 0; j < list->count; ++j) {
+            const char* bk = list->items[j].bucket_path;
+            if ((!bk && !key) || (bk && key && strcmp(bk, key) == 0)) {
+                bucket[bn++] = &list->items[j];
+            }
+        }
+        if (bn == 0) continue;
+
+        const char* bsrc = default_src;
+        size_t blen = default_src_len;
+        if (key && reg_input_path && strcmp(key, reg_input_path) != 0) {
+            /* Handler body lives in a different on-disk file (typically a
+               header that registered the hook) — read it once and reuse. */
+            if (!loaded_path || strcmp(loaded_path, key) != 0) {
+                free(loaded_src);
+                loaded_src = NULL;
+                loaded_src_len = 0;
+                cc__read_entire_file(key, &loaded_src, &loaded_src_len);
+                free(loaded_path);
+                loaded_path = loaded_src ? strdup(key) : NULL;
+            }
+            if (loaded_src && loaded_src_len > 0) {
+                bsrc = loaded_src;
+                blen = loaded_src_len;
+            }
+        }
+
+        if (cc__ufcs_compile_bucket(symbols, reg_input_path, key, bsrc, blen, bucket, bn) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+
+    free(visited);
+    free(bucket);
+    free(loaded_src);
+    free(loaded_path);
+    return rc;
+}
+
+static int cc__collect_type_ufcs_registration(CCSymbolTable* symbols,
+                                              const char* registration_input_path,
+                                              const char* logical_file,
+                                              const char* type_name,
+                                              const char* expr_src,
+                                              size_t expr_len,
+                                              void* user_ctx) {
+    CCUfcsBatchCtx* ctx = (CCUfcsBatchCtx*)user_ctx;
+    CCUfcsPendingReg r = {0};
+    char ident[128];
+    size_t p = 0;
+    (void)symbols;  /* we only collect here; registration happens at end-of-pass */
+
+    if (!ctx || !type_name || !expr_src || expr_len == 0) return -1;
+
+    r.is_legacy = 0;
+    r.pattern = strdup(type_name);
+    if (!r.pattern) return -1;
+
+    if (cc__parse_ident_codegen(expr_src, expr_len, &p, ident, sizeof(ident)) && p == expr_len) {
+        r.handler_is_ident = 1;
+        r.handler_name = strdup(ident);
+        if (!r.handler_name) { free(r.pattern); return -1; }
+    } else {
+        r.handler_is_ident = 0;
+        r.lambda_src = cc__strndup_local(expr_src, expr_len);
+        r.lambda_len = expr_len;
+        if (!r.lambda_src) { free(r.pattern); return -1; }
+    }
+
+    if (logical_file && logical_file[0] && registration_input_path &&
+        strcmp(logical_file, registration_input_path) != 0) {
+        r.bucket_path = strdup(logical_file);
+    } else {
+        r.bucket_path = strdup(registration_input_path ? registration_input_path : "");
+    }
+    if (!r.bucket_path) {
+        free(r.pattern); free(r.handler_name); free(r.lambda_src);
+        return -1;
+    }
+
+    if (cc__ufcs_pending_append(ctx->pending, r) != 0) {
+        free(r.pattern); free(r.handler_name); free(r.lambda_src); free(r.bucket_path);
+        return -1;
+    }
+    return 0;
+}
+
+static int cc__collect_legacy_ufcs_registrations(CCUfcsPendingList* pending,
+                                                 const char* input_path,
+                                                 const char* src,
+                                                 size_t n) {
+    int in_lc = 0, in_bc = 0, in_str = 0, in_chr = 0, line_start = 1;
+    char logical_file[1024] = {0};
+    if (!pending || !src) return 0;
+    for (size_t i = 0; i < n; ++i) {
+        char c = src[i];
+        char c2 = (i + 1 < n) ? src[i + 1] : 0;
+        if (line_start && c == '#') {
+            size_t p = i + 1;
+            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
+            while (p < n && isdigit((unsigned char)src[p])) p++;
+            while (p < n && isspace((unsigned char)src[p]) && src[p] != '\n') p++;
+            if (p < n && src[p] == '"') {
+                size_t q = p + 1;
+                size_t out = 0;
+                while (q < n && src[q] && src[q] != '"' && out + 1 < sizeof(logical_file)) {
+                    logical_file[out++] = src[q++];
+                }
+                logical_file[out] = '\0';
+            }
+            while (i < n && src[i] != '\n') i++;
+            line_start = 1;
+            continue;
+        }
+        if (in_lc) { if (c == '\n') in_lc = 0; continue; }
+        if (in_bc) { if (c == '*' && c2 == '/') { in_bc = 0; i++; } continue; }
+        if (in_str) { if (c == '\\' && c2) { i++; continue; } if (c == '"') in_str = 0; continue; }
+        if (in_chr) { if (c == '\\' && c2) { i++; continue; } if (c == '\'') in_chr = 0; continue; }
+        if (c == '/' && c2 == '/') { in_lc = 1; i++; continue; }
+        if (c == '/' && c2 == '*') { in_bc = 1; i++; continue; }
+        if (c == '"') { in_str = 1; continue; }
+        if (c == '\'') { in_chr = 1; continue; }
+        line_start = (c == '\n');
+        if (c != '@' || !cc__match_keyword_codegen(src, n, i + 1, "comptime")) continue;
+        {
+            size_t kw_end = i + 1 + strlen("comptime");
+            size_t body_l = cc__skip_ws_codegen(src, n, kw_end);
+            size_t body_r;
+            if (body_l >= n || src[body_l] != '{') continue;
+            if (!cc__find_matching_brace_codegen(src, n, body_l, &body_r)) continue;
+            for (size_t j = body_l + 1; j < body_r; ++j) {
+                if (!cc__match_keyword_codegen(src, body_r, j, "cc_ufcs_register")) continue;
+                size_t lpar = cc__skip_ws_codegen(src, body_r, j + strlen("cc_ufcs_register"));
+                size_t rpar, p;
+                char pattern[128];
+                char handler[128];
+                size_t handler_s = 0, handler_e = 0;
+                int handler_is_ident = 0;
+                if (lpar >= body_r || src[lpar] != '(') continue;
+                if (!cc__find_matching_paren_codegen(src, body_r, lpar, &rpar)) continue;
+                p = cc__skip_ws_codegen(src, body_r, lpar + 1);
+                if (!cc__parse_string_literal_codegen(src, body_r, &p, pattern, sizeof(pattern))) {
+                    fprintf(stderr, "%s: error: unsupported @comptime cc_ufcs_register pattern form\n",
+                            input_path ? input_path : "<input>");
+                    return -1;
+                }
+                p = cc__skip_ws_codegen(src, body_r, p);
+                if (p >= body_r || src[p] != ',') {
+                    fprintf(stderr, "%s: error: malformed cc_ufcs_register(...) in @comptime block\n",
+                            input_path ? input_path : "<input>");
+                    return -1;
+                }
+                p = cc__skip_ws_codegen(src, body_r, p + 1);
+                handler_s = p;
+                if (cc__parse_ident_codegen(src, body_r, &p, handler, sizeof(handler))) {
+                    handler_is_ident = 1;
+                    handler_e = p;
+                } else {
+                    handler_e = rpar;
+                }
+
+                CCUfcsPendingReg r = {0};
+                r.is_legacy = 1;
+                r.pattern = strdup(pattern);
+                if (!r.pattern) return -1;
+                if (handler_is_ident) {
+                    r.handler_is_ident = 1;
+                    r.handler_name = strdup(handler);
+                    if (!r.handler_name) { free(r.pattern); return -1; }
+                    if (logical_file[0] && input_path && strcmp(logical_file, input_path) != 0) {
+                        r.bucket_path = strdup(logical_file);
+                    } else {
+                        r.bucket_path = strdup(input_path ? input_path : "");
+                    }
+                } else {
+                    cc__trim_range_codegen(src, &handler_s, &handler_e);
+                    r.handler_is_ident = 0;
+                    r.lambda_src = cc__strndup_local(src + handler_s, handler_e - handler_s);
+                    r.lambda_len = handler_e - handler_s;
+                    if (!r.lambda_src) { free(r.pattern); return -1; }
+                    r.bucket_path = strdup(input_path ? input_path : "");
+                }
+                if (!r.bucket_path) {
+                    free(r.pattern); free(r.handler_name); free(r.lambda_src);
+                    return -1;
+                }
+                if (cc__ufcs_pending_append(pending, r) != 0) {
+                    free(r.pattern); free(r.handler_name); free(r.lambda_src); free(r.bucket_path);
+                    return -1;
+                }
+                j = rpar;
+            }
+            i = body_r;
+        }
+    }
+    return 0;
+}
+
+#if 0  /* superseded by cc__ufcs_pending_compile_and_register + cc_comptime_compile_type_hooks. */
+static char* cc__build_comptime_tu_from_preprocessed_UNUSED(const char* src,
                                                      size_t n,
                                                      const char* repo_root,
                                                      const char* extra_defs,
@@ -1840,6 +2209,7 @@ static int cc__collect_comptime_ufcs_registrations(CCSymbolTable* symbols,
     }
     return 0;
 }
+#endif  /* legacy UFCS compile helpers disabled */
 
 
 static char* cc__blank_comptime_blocks_preserve_layout(const char* src, size_t n) {
@@ -3561,12 +3931,12 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
        context matters; the comptime discovery input itself should come from one
        authoritative source. */
     if (reg_src && reg_src_len && ctx && ctx->symbols) {
-        CCTypeUfcsCompileCtx type_ufcs_ctx = {
-            .registration_src = reg_src,
-            .registration_n = reg_src_len,
-            .compile_src = src_all,
-            .compile_n = src_len,
-            .compile_src_is_include_expanded = 0,
+        CCUfcsPendingList pending = {0};
+        CCUfcsBatchCtx batch_ctx = {
+            .pending = &pending,
+            .default_path = ctx->input_path,
+            .default_src = src_all,
+            .default_src_len = src_len,
         };
         if (cc_symbols_collect_type_registrations_ex(ctx->symbols,
                                                      ctx->input_path,
@@ -3574,18 +3944,26 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                                                      reg_src_len,
                                                      NULL,
                                                      NULL,
-                                                     cc__compile_type_ufcs_registration,
-                                                     &type_ufcs_ctx) != 0) {
+                                                     cc__collect_type_ufcs_registration,
+                                                     &batch_ctx) != 0) {
+            cc__ufcs_pending_free(&pending);
             fclose(out);
             free(src_regs);
             free(src_all);
             return EINVAL;
         }
-        if (cc__collect_comptime_ufcs_registrations(ctx->symbols, ctx->input_path,
-                                                    reg_src, reg_src_len,
-                                                    src_all, src_len,
-                                                    0,
-                                                    0) != 0) {
+        if (cc__collect_legacy_ufcs_registrations(&pending, ctx->input_path,
+                                                  reg_src, reg_src_len) != 0) {
+            cc__ufcs_pending_free(&pending);
+            fclose(out);
+            free(src_regs);
+            free(src_all);
+            return EINVAL;
+        }
+        int reg_rc = cc__ufcs_pending_compile_and_register(ctx->symbols, ctx->input_path,
+                                                           src_all, src_len, &pending);
+        cc__ufcs_pending_free(&pending);
+        if (reg_rc != 0) {
             fclose(out);
             free(src_regs);
             free(src_all);
