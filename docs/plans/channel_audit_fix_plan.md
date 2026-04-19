@@ -173,24 +173,33 @@ Exactly the shape of the recv-side close-drain bug that started this audit: one 
 
 ---
 
-## Phase 5 — FINDING #5 + #6: V1 residue strip
+## Phase 5 — FINDING #5 + #6: V1 residue strip (DONE)
 
-**Severity**: CRUFT — ~350 lines of unreachable code in `fiber_sched.c`.
+**Severity**: CRUFT — ~300 lines of unreachable code in `fiber_sched.c`.
 **Effort**: mechanical delete + verify compile.
 
-**Evidence**: `tls_current_fiber` is declared `= NULL` at `fiber_sched.c:711` and **never assigned anywhere else**. Every `if (tls_current_fiber) { ... }` branch is dead. Every field of `struct fiber_task` (lines 324–404) is unread.
+**Evidence**: `tls_current_fiber` was declared `= NULL` at `fiber_sched.c:711` and **never assigned anywhere else**. Every `if (tls_current_fiber) { ... }` branch was dead. Every field of `struct fiber_task` (lines 324–404) was unread. `tls_worker_id` was similarly declared `= -1` and never set — every `tls_worker_id >= 0` branch was dead.
 
-**Scope**:
-1. Delete `struct fiber_task` definition (lines 324–404, ~80 lines).
-2. Delete `tls_current_fiber`, `tls_deadlock_suppress_depth`, `tls_external_wait_depth` TLS declarations and their mirror-write logic.
-3. Collapse every `if (tls_current_fiber) { ... } else { ... }` to the `else` branch (V2-only).
-   Sites: 762, 781, 797, 808, 833, 855, 1026, 1030, 1041, 1114, 1143, 1182, 1196, 1300.
-4. Delete V1 tails of `cc__fiber_park_if_impl`, `cc__fiber_suspend_until_ready`, `cc__fiber_suspend_until_ready_or_cancel` (the code paths reached only when `sched_v2_in_context()` is false — impossible now).
-5. Keep ABI-reserved `CC_TASK_KIND_FIBER` enum value in `task.c:562` (already documented as ABI-frozen).
+**Completed scope**:
+1. ✅ Deleted `struct fiber_task` field-full definition (lines 324–404, ~80 lines). Replaced with a forward declaration `typedef struct fiber_task fiber_task;` so `typedef struct fiber_task CCSchedFiber;` in `fiber_sched_boundary.h` continues to work as an opaque handle and so the legacy `cc_fiber_spawn` / `cc_fiber_join` / `cc_fiber_task_free` signatures don't break.
+2. ✅ Deleted `tls_current_fiber` and `tls_worker_id` TLS declarations. **Kept** `tls_deadlock_suppress_depth` and `tls_external_wait_depth` — those are the per-OS-thread counters for pthread callers (not fibers) and are still written by the fall-through branches in `cc_deadlock_suppress_*` / `cc_external_wait_*`.
+3. ✅ Collapsed every `if (tls_current_fiber) { ... } else { ... }` to the V2+pthread fall-through. Functions touched: `cc_deadlock_suppress_enter/leave/suppressed`, `cc_external_wait_enter/leave/active`, `cc__fiber_in_context`, `cc__fiber_current`, `cc_task_result_ptr`, `cc__fiber_suspend_until_ready`, `cc__fiber_suspend_until_ready_or_cancel`, `cc__fiber_set_park_obj`, `cc__fiber_clear_pending_unpark`, `cc__fiber_sleep_park`, `cc__fiber_publish_wait_ticket`, `cc__fiber_wait_ticket_matches`.
+4. ✅ Deleted V1 tails of `cc__fiber_suspend_until_ready` and `cc__fiber_suspend_until_ready_or_cancel` (the code paths reached only when `sched_v2_in_context()` is false — impossible now outside a fiber, where the caller is a thread and the flag-loop is handled by the caller).
+5. ✅ Simplified `cc__fiber_sleep_park` to nanosleep-only. V2 has no dedicated fiber timer park yet, so the V1 "yield to sleep queue drained by sysmon" path is unreachable; a future V2 timer park can be added in sched_v2.c and this shim rewired.
+6. ✅ `cc__deadlock_thread_block` / `cc__deadlock_thread_unblock` → no-op shims (tls_worker_id is never set, so the guard was always true, so the counter bumps were dead).
+7. ✅ `cc__sched_current_worker_id` → delegates directly to `sched_v2_current_worker_id()`.
+8. ABI-reserved `CC_TASK_KIND_FIBER` enum value in `task.c:562` kept as-is (already documented as ABI-frozen).
 
-**Validation gate**: clean build + all canaries + `tools/run_all.ccs --all` + `perf/run_neckbeard_challenges.sh`.
+**Net result**:
+- `cc/runtime/fiber_sched.c`: 1325 → 1198 lines (-127 net; +98 insertions, -225 deletions).
+- Zero live references to `tls_current_fiber` or `tls_worker_id` in `cc/runtime/`. Two remaining hits are comments documenting the retirement.
+- Zero dead `if (tls_current_fiber) { ... }` branches; every shim is now a single-path V2-or-pthread dispatch.
 
-**Exit criterion**: `grep "tls_current_fiber" cc/runtime/` returns zero hits; `grep "struct fiber_task" cc/runtime/` returns zero hits (except possibly a forward-declared opaque typedef if anything external depends on it — verify and decide).
+**Validation**:
+- Clean build, zero new warnings.
+- Canaries: `pipeline_repeat` 20/20, `pipeline_repeat_debug` 20/20, `backpressure_cycle_ring3_deadline` 60/60, `channel_contention` interference 41.5–69% (noisy; no regressions), `match_recv_smoke`, `match_send_smoke`, `channel_cancel_and_close_err_smoke` ok.
+- Extended channel smoke suite passes except for a **pre-existing** failure in `tests/chan_close_err_smoke.ccs` test 4 that reproduces on the pre-Phase-5 commit (verified via `git stash`). Tracked separately; not a Phase 5 regression.
+- `real_projects/redis/bench_simple.sh`: hybrid 1.59–1.63M rps, 65–79% of upstream — matches post-Phase-4b baseline.
 
 ---
 
@@ -211,5 +220,5 @@ Exactly the shape of the recv-side close-drain bug that started this audit: one 
 - [ ] Phase 2: tx_error_code unification
 - [ ] Phase 3: post-enqueue wake helper
 - [ ] Phase 4: post-dequeue wake helper
-- [ ] Phase 5: V1 residue strip
+- [x] Phase 5: V1 residue strip
 - [ ] Phase 6: sign-off
