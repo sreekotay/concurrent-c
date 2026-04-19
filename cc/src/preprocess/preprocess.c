@@ -4694,8 +4694,21 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                 if (reg) {
                     size_t j = cc_skip_ws_and_comments(src, n, delim_end + 1);
                     if (j < n && (cc_is_ident_start(src[j]) || src[j] == '*')) {
-                        /* Skip any * for pointer types */
-                        while (j < n && src[j] == '*') j++;
+                        /* Count any leading * so we can preserve pointer-ness in
+                         * the seeded type (the text-based UFCS fallback looks at
+                         * the seeded string to decide whether to pass `recv` or
+                         * `&recv`).  For Map<K,V> the canonical form `Map_K_V`
+                         * is already a struct typedef, and the declaration
+                         * `__CC_MAP(K,V)* var` is a single pointer; seeding
+                         * plain `Map_K_V` would lose that and the fallback
+                         * would emit `&var` instead of `var`. */
+                        int ptr_count = 0;
+                        while (j < n && src[j] == '*') { j++; ptr_count++; }
+                        /* Map<K,V> declarations always end with `)*` in the
+                         * emitted macro form, so the first `*` belongs to the
+                         * Map pointer typedef semantics.  Treat it as implicit
+                         * pointer-ness by appending it to the seeded type. */
+                        if (is_map_type && ptr_count == 0) ptr_count = 1;
                         j = cc_skip_ws_and_comments(src, n, j);
                         if (j < n && cc_is_ident_start(src[j])) {
                             size_t var_start = j;
@@ -4705,7 +4718,15 @@ char* cc_rewrite_generic_containers(const char* src, size_t n, const char* input
                             if (vn_len < sizeof(var_name)) {
                                 memcpy(var_name, src + var_start, vn_len);
                                 var_name[vn_len] = 0;
-                                cc_type_registry_add_var(reg, var_name, mangled);
+                                if (ptr_count > 0) {
+                                    char seeded[160];
+                                    int stars = ptr_count > 8 ? 8 : ptr_count;
+                                    snprintf(seeded, sizeof(seeded), "%s%.*s", mangled,
+                                             stars, "********");
+                                    cc_type_registry_add_var(reg, var_name, seeded);
+                                } else {
+                                    cc_type_registry_add_var(reg, var_name, mangled);
+                                }
                             }
                         }
                     }
