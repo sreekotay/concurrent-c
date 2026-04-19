@@ -1143,6 +1143,31 @@ static int cc__emit_type_driven_dispatch(char* out,
         strcmp(family_recv_type, "CCChanRx*") != 0 &&
         strncmp(family_recv_type, "CCChanTx_", 9) != 0 &&
         strncmp(family_recv_type, "CCChanRx_", 9) != 0) {
+        /* Convention-based default: emit `<surface_recv_type>_<method>(&recv, ...)`.
+         * Validate `surface_recv_type` looks like a real C identifier prefix before
+         * using it as part of a callee name — the stub type-resolver can return
+         * junk for receivers whose declarations use CC extensions (e.g. the owned
+         * channel declaration `CCArena*[~N owned { ... }] arena_pool;` lets
+         * `}]` or `]` leak through as the "surface type", which would otherwise
+         * produce nonsense like `]_free(&arena_pool)`).  Bail out to UNRESOLVED
+         * so the caller leaves the original source span untouched, and trust any
+         * earlier pass (preprocess text / AST) that already lowered this call. */
+        {
+            unsigned char c0 = (unsigned char)surface_recv_type[0];
+            int first_ok = (c0 == '_' || (c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z'));
+            int all_ok = first_ok;
+            if (first_ok) {
+                for (const char* p = surface_recv_type + 1; *p; p++) {
+                    unsigned char cc = (unsigned char)*p;
+                    int ok = (cc == '_' || cc == '*' ||
+                              (cc >= '0' && cc <= '9') ||
+                              (cc >= 'A' && cc <= 'Z') ||
+                              (cc >= 'a' && cc <= 'z'));
+                    if (!ok) { all_ok = 0; break; }
+                }
+            }
+            if (!all_ok) return CC_UFCS_EMIT_UNRESOLVED;
+        }
         if (has_args) {
             if (cc__recv_pass_direct(ctx, recv_is_ptr))
                 return snprintf(out, cap, "%s_%s(%s, ", surface_recv_type, method, recv);
