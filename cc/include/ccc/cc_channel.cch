@@ -592,6 +592,17 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
     (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
         .ufcs = cc_channel_rx_lower_c,
     });
+    /* Raw (untyped) aliases: `CCChanTx tx = ...; tx.send(1)` used to hit
+       the builtin-callable lookup in ufcs.c.  Now that the AST dispatch is
+       registry-only, the bare aliases also need explicit hooks — the
+       wildcard pattern `CCChanTx_*` only matches the typed family
+       (CCChanTx_int, CCChanTx_Foo, ...), not the plain CCChanTx typedef. */
+    (void)cc_type_register("CCChanTx", (CCTypeHooks){
+        .ufcs = cc_channel_tx_lower_c,
+    });
+    (void)cc_type_register("CCChanRx", (CCTypeHooks){
+        .ufcs = cc_channel_rx_lower_c,
+    });
 }
 #endif
 
