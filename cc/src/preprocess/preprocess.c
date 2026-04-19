@@ -3565,9 +3565,23 @@ static char* cc__rewrite_generic_family_ufcs_impl(const char* src, size_t n, int
             i++;
             continue;
         }
-        if (nursery_like) {
-            /* Nursery UFCS has a registered @comptime hook (cc_nursery_lower_c);
-               let the AST/text-fallback pipeline dispatch any method. */
+        if (nursery_like || arena_like) {
+            /* CCNursery and CCArena have registered @comptime hooks
+               (cc_nursery_lower_c, cc_arena_lower_c) whose return values are
+               ordinary struct/scalar-typed C, so the CC_PARSER_MODE stub
+               member signatures are compatible with the real lowered
+               callables. Skip rewriting here so the hook is authoritative:
+               rewriting would bypass the hook and silently produce default
+               `cc_<family>_<method>` callees that may not exist (e.g.
+               comptime_type_arena_hooks_smoke block 2: `arena.avail()` must
+               lower via the hook to `arena_avail`, not `cc_arena_avail`).
+               CCFile/CCCommand/CCString also have hooks now (Phase 1b/1c)
+               but their real methods return structured types (CCResult
+               families, CCString*) that the default parser-mode member
+               stubs can't model without a wider type-registry upgrade; for
+               now the preprocess-text path keeps eagerly lowering them to
+               avoid parser-mode stub/signature mismatches. See the
+               `file-command-string-skip` follow-up for the larger fix. */
             i++;
             continue;
         }
