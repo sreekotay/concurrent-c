@@ -1,0 +1,50 @@
+/* Regression guard for "UFCS inside lifted closure bodies".
+   Before the final-UFCS sweep was taught to splice closure_defs back into
+   src_ufcs, UFCS calls such as `w.step()` that appeared inside an
+   `() => [capture] { ... }` closure body lived in a side buffer that the
+   AST UFCS pass never saw.  Without the text fallback (which is now off by
+   default) those calls leaked to the host C compiler as unresolved
+   `struct.method(...)` expressions.
+
+   This test exercises the fixed path: a closure captures a struct pointer
+   by value and calls a UFCS-lowered method on it.  The AST UFCS pass in the
+   final sweep must rewrite `w->step()` into `Widget_step(w)` inside the
+   lifted body. */
+#include <ccc/std/prelude.cch>
+#include <ccc/cc_nursery.cch>
+#include <ccc/cc_closure.cch>
+#include <stdio.h>
+
+typedef struct Widget {
+    int base;
+} Widget;
+
+static int g_step_calls = 0;
+
+static void Widget_step(Widget* w) {
+    (void)w;
+    g_step_calls++;
+}
+
+int main(void) {
+    Widget w = { .base = 7 };
+    Widget* wp = &w;
+
+    CCNursery* nursery = cc_nursery_create_child(NULL);
+    if (!nursery) return 1;
+
+    cc_nursery_spawn_closure0(nursery, () => [wp] {
+        wp->step();
+    });
+
+    cc_nursery_wait(nursery);
+    cc_nursery_free(nursery);
+
+    if (g_step_calls != 1) {
+        fprintf(stderr, "ufcs_closure: step_calls=%d want 1\n", g_step_calls);
+        return 2;
+    }
+
+    printf("ufcs_in_lifted_closure_smoke: OK\n");
+    return 0;
+}

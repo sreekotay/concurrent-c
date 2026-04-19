@@ -1,0 +1,20 @@
+/* Unresolved UFCS must be ill-formed.  `w.nonexistent_method(42)` has no
+   matching struct member, no registered UFCS hook, and no
+   Widget_nonexistent_method free function.  The AST UFCS pass emits the
+   speculative Widget_nonexistent_method(&w, 42) lowering and the C compiler
+   — the "error trap at the bottom of the pipeline" — reports the undeclared
+   function as the diagnostic, which is the intended behaviour for plain
+   (un-hooked) C types. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef struct Widget {
+    int base;
+} Widget;
+
+int main(void) {
+    Widget w = { .base = 100 };
+    int r = w.nonexistent_method(42);
+    printf("should-not-reach: %d\n", r);
+    return 0;
+}
