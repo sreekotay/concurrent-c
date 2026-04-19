@@ -31,6 +31,11 @@ static _Thread_local size_t g_ufcs_source_offset = 0;
 static _Thread_local CCSymbolTable* g_ufcs_symbols = NULL;
 
 #define CC_UFCS_EMIT_UNRESOLVED (-2)
+/* C-first dispatch: the method name is an ordinary data member (non-closure)
+   of the receiver's type, so the source expression is already a valid C
+   function-pointer / field access call.  Leave the source span untouched
+   and let TCC type-check the plain C form. */
+#define CC_UFCS_EMIT_FIELD_WINS (-3)
 
 void cc_ufcs_set_symbols(CCSymbolTable* symbols) {
     g_ufcs_symbols = symbols;
@@ -1188,7 +1193,25 @@ static int cc__emit_closure_field_call(char* out,
         arity = 2;
         fn_name = "cc_closure2_call";
     } else {
-        return CC_UFCS_EMIT_UNRESOLVED;
+        /* C-first dispatch: a data/function-pointer member with this name
+         * exists on the receiver type.  Normally the field shadows any
+         * free UFCS function of the same name and we signal FIELD_WINS
+         * so the caller leaves `recv.method(args)` untouched.
+         *
+         * Opt-out: if the receiver type has a registered UFCS hook
+         * (cc_type_register(".ufcs = ...")), treat that as the user
+         * explicitly taking ownership of method dispatch.  This covers
+         * the stdlib + user pattern where a struct body carries a
+         * CC_PARSER_MODE-only scaffold field like `int (*ping)();` to
+         * keep CCC's parser-mode TCC happy — those scaffold fields do
+         * not exist in host-C and must not shadow the real UFCS hook. */
+        const void* fn_ptr = NULL;
+        if (g_ufcs_symbols &&
+            cc_symbols_lookup_type_ufcs_callable(g_ufcs_symbols, type_for_lookup, &fn_ptr) == 0 &&
+            fn_ptr) {
+            return CC_UFCS_EMIT_UNRESOLVED;
+        }
+        return CC_UFCS_EMIT_FIELD_WINS;
     }
 
     /* Build the closure-field access expression.  If the user wrote `->`,
@@ -1259,13 +1282,19 @@ static int emit_desugared_call(char* out,
     int dispatch_n;
     if (!out || cap == 0 || !recv || !method) return -1;
     cc__resolve_dispatch_ctx(&ctx, recv);
-    /* Closure-field dispatch shadows free-function UFCS.  See comment on
-     * cc__emit_closure_field_call. */
+    /* C-first dispatch: if `method` is a data member of the receiver type,
+     * the source `recv.method(args)` is already a valid C call (field
+     * shadows any same-named free function).  Closure-typed fields get a
+     * dedicated `cc_closureN_call` lowering; all other fields get the
+     * FIELD_WINS sentinel so the caller can leave the span untouched.
+     * Only actual UNRESOLVED / snprintf error (-1) should fall through to
+     * normal free-function dispatch. */
     {
         int n = cc__emit_closure_field_call(out, cap, recv, method, recv_is_ptr,
                                             args_rewritten, has_args, &ctx);
         if (n >= 0) return n;
-        /* n == CC_UFCS_EMIT_UNRESOLVED or error: fall through to normal dispatch. */
+        if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_EMIT_FIELD_WINS;
+        /* n == CC_UFCS_EMIT_UNRESOLVED or snprintf error: fall through. */
     }
     if ((strcmp(recv, "std_out") == 0 || strcmp(recv, "cc_std_out") == 0 ||
          strcmp(recv, "std_err") == 0 || strcmp(recv, "cc_std_err") == 0) &&
@@ -1445,6 +1474,7 @@ static int emit_full_call(char* out,
     char tmp[1024];
     int n = emit_desugared_call(tmp, sizeof(tmp), recv, method, recv_is_ptr, args_rewritten, has_args);
     if (n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_EMIT_UNRESOLVED;
+    if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_EMIT_FIELD_WINS;
     if (n < 0 || (size_t)n >= sizeof(tmp)) return -1;
     if (n > 0 && tmp[n - 1] == ')') {
         return snprintf(out, cap, "%s", tmp);
@@ -1652,6 +1682,7 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
         free(rewritten_args);
         cc__free_ufcs_segments(segs, seg_count);
         if (n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_REWRITE_UNRESOLVED;
+        if (n == CC_UFCS_EMIT_FIELD_WINS) return CC_UFCS_REWRITE_NO_MATCH;
         return (n < 0 || (size_t)n >= out_cap) ? CC_UFCS_REWRITE_ERROR : CC_UFCS_REWRITE_OK;
     }
 
@@ -1685,6 +1716,14 @@ static int cc__rewrite_ufcs_chain(const char* in, char* out, size_t out_cap) {
         if (cn == CC_UFCS_EMIT_UNRESOLVED) {
             cc__free_ufcs_segments(segs, seg_count);
             return CC_UFCS_REWRITE_UNRESOLVED;
+        }
+        if (cn == CC_UFCS_EMIT_FIELD_WINS) {
+            /* In a chain, a mid-segment field-wins hit would require splicing
+               the chain around the plain-C member call.  Treat as "leave
+               chain alone" for now so the line rewriter falls through to the
+               simple path and never half-rewrites a chain. */
+            cc__free_ufcs_segments(segs, seg_count);
+            return CC_UFCS_REWRITE_NO_MATCH;
         }
         if (cn < 0 || (size_t)cn >= sizeof(call)) {
             cc__free_ufcs_segments(segs, seg_count);
@@ -1921,7 +1960,16 @@ static int cc__ufcs_rewrite_line_simple(const char* in, char* out, size_t out_ca
 
         // Emit desugared call
         int n = emit_desugared_call(o, cap, recv, method, recv_is_ptr, rewritten_args, has_args);
-        if (n == CC_UFCS_EMIT_UNRESOLVED) return CC_UFCS_REWRITE_UNRESOLVED;
+        if (n == CC_UFCS_EMIT_UNRESOLVED) {
+            free(rewritten_args);
+            free(inner);
+            return CC_UFCS_REWRITE_UNRESOLVED;
+        }
+        if (n == CC_UFCS_EMIT_FIELD_WINS) {
+            free(rewritten_args);
+            free(inner);
+            return CC_UFCS_REWRITE_NO_MATCH;
+        }
         if (n < 0 || (size_t)n >= cap) return -1;
         o += n; cap -= (size_t)n;
         /* If we emitted a full call for std_out/std_err.write overload, we don't

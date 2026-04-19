@@ -1,0 +1,61 @@
+/* C-first dispatch smoke: a data/function-pointer field shadows any
+   free UFCS function of the same name.  For `w.op(5)` the compiler must
+   call the stored function pointer `w.op`, NOT emit `Widget_op(&w, 5)`. */
+#include <ccc/std/prelude.cch>
+#include <stdio.h>
+
+typedef int (*widget_op_fn)(int x);
+
+typedef struct Widget {
+    int base;
+    widget_op_fn op;
+} Widget;
+
+static int field_calls = 0;
+static int free_fn_calls = 0;
+
+static int field_double(int x) {
+    field_calls++;
+    return x * 2;
+}
+
+/* If UFCS dispatch ignored the field it would lower `w.op(5)` into a
+   call to this function (receiver-prepended) — we want to see this
+   counter stay at zero. */
+static int Widget_op(Widget* w, int x) {
+    (void)w;
+    free_fn_calls++;
+    return x + 1;
+}
+
+int main(void) {
+    Widget w = { .base = 100, .op = field_double };
+
+    int r1 = w.op(5);
+    if (r1 != 10) {
+        fprintf(stderr, "ufcs_cfirst: expected 10 from field call, got %d\n", r1);
+        return 1;
+    }
+    if (field_calls != 1) {
+        fprintf(stderr, "ufcs_cfirst: field_calls=%d want 1\n", field_calls);
+        return 2;
+    }
+    if (free_fn_calls != 0) {
+        fprintf(stderr, "ufcs_cfirst: free_fn_calls=%d want 0 (field should shadow)\n",
+                free_fn_calls);
+        return 3;
+    }
+
+    /* Explicit free-function call still works — we haven't broken the
+       underlying UFCS lowering, we just aren't reaching for it when a
+       field of the same name exists. */
+    int r2 = Widget_op(&w, 5);
+    if (r2 != 6 || free_fn_calls != 1) {
+        fprintf(stderr, "ufcs_cfirst: explicit free-fn call misbehaved r=%d calls=%d\n",
+                r2, free_fn_calls);
+        return 4;
+    }
+
+    printf("ufcs_c_first_field_wins_smoke: OK\n");
+    return 0;
+}
