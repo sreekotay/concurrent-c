@@ -115,6 +115,48 @@ char* cc__prepend_reparse_prelude(const char* buf, size_t len, size_t* out_len, 
         "#include <stdint.h>\n"
         "typedef intptr_t CCAbIntptr;\n"
         "#include <ccc/cc_closure.cch>\n"
+        /* Closure-lowering macro stubs.  The full definitions live in
+         * ccc/cc_closure_helper.h, but including that header in parser-mode
+         * drags in function bodies that reference types the reparse AST does
+         * not know about.  The final-UFCS reparse splices closure_defs (lifted
+         * closure bodies) into src_ufcs, so the reparse must expand these
+         * macros into syntactically-valid declarations of the env pointer;
+         * otherwise TCC sees CC_CLOSURE_ENV_ALLOC(E, v) as an implicit call,
+         * leaves `v` undeclared, and fails later `v->field` with "pointer
+         * expected".  Stub to minimal declaration-shaped forms. */
+        "#ifndef CC_CLOSURE0_DECL\n"
+        "#define CC_CLOSURE0_DECL(n) static void* __cc_closure_entry_##n(void*); static CCClosure0 __cc_closure_make_##n(void)\n"
+        "#endif\n"
+        "#ifndef CC_CLOSURE0_SIMPLE\n"
+        "#define CC_CLOSURE0_SIMPLE(n) static CCClosure0 __cc_closure_make_##n(void) { return cc_closure0_make(__cc_closure_entry_##n, (void*)0, (void*)0); } static void* __cc_closure_entry_##n(void* __p)\n"
+        "#endif\n"
+        "#ifndef CC_CLOSURE_ENV_ALLOC\n"
+        "#define CC_CLOSURE_ENV_ALLOC(env_ty, var) env_ty* var = (env_ty*)0\n"
+        "#endif\n"
+        "#ifndef CC_CLOSURE_ENV_NURSERY_ALLOC\n"
+        "#define CC_CLOSURE_ENV_NURSERY_ALLOC(nursery, env_ty, var) env_ty* var = (env_ty*)0\n"
+        "#endif\n"
+        "#ifndef CC_TASK_RESULT_PTR_OR_RETURN\n"
+        "#define CC_TASK_RESULT_PTR_OR_RETURN(type, var) type* var = (type*)0\n"
+        "#endif\n"
+        "#ifndef CC_SEND_TASK_OR_JOIN\n"
+        "#define CC_SEND_TASK_OR_JOIN(tx_expr, task_var) ((void)0)\n"
+        "#endif\n"
+        "#ifndef CC_TSAN_RELEASE\n"
+        "#define CC_TSAN_RELEASE(addr) ((void)0)\n"
+        "#endif\n"
+        "#ifndef CC_TSAN_ACQUIRE\n"
+        "#define CC_TSAN_ACQUIRE(addr) ((void)0)\n"
+        "#endif\n"
+        "#ifndef __cc_ret\n"
+        "#define __cc_ret(id, value) ((void)(value))\n"
+        "#endif\n"
+        "#ifndef __cc_ret_ok\n"
+        "#define __cc_ret_ok(id, value) ((void)(value))\n"
+        "#endif\n"
+        "#ifndef __cc_ret_err\n"
+        "#define __cc_ret_err(id, err) ((void)(err))\n"
+        "#endif\n"
         "#include <ccc/cc_nursery.cch>\n"
         "#include <ccc/cc_arena.cch>\n"
         "#include <ccc/cc_result.cch>\n"

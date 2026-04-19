@@ -4063,6 +4063,155 @@ int cc_visit_codegen(const CCASTRoot* root, CCVisitorCtx* ctx, const char* outpu
                 src_ufcs_len = rewritten_len;
             }
         }
+        /* Splice generated closure definitions into src_ufcs BEFORE the final
+         * UFCS sweep so the AST UFCS pass sees the lifted closure bodies as
+         * part of the translation unit.  Historically closure_defs was
+         * emitted as a side buffer and never went through AST UFCS, which
+         * forced an always-on text fallback to clean up cases like
+         *   chan.send_task(() => [blk] { blk->arena.free(); })
+         * By merging here we make the AST UFCS pass authoritative. */
+        if (closure_defs && closure_defs_len > 0) {
+            if (strstr(closure_defs, "@defer") != NULL || strstr(closure_defs, "cancel") != NULL) {
+                char* lowered = NULL;
+                size_t lowered_len = 0;
+                if (cc__rewrite_defer_syntax(ctx, closure_defs, closure_defs_len,
+                                             &lowered, &lowered_len) > 0) {
+                    free(closure_defs);
+                    closure_defs = lowered;
+                    closure_defs_len = lowered_len;
+                }
+            }
+            {
+                char* rewritten = cc_rewrite_channel_ufcs_concrete(closure_defs, closure_defs_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
+            }
+            if (strstr(closure_defs, "send_task") != NULL ||
+                strstr(closure_defs, "cc_channel_send_task") != NULL) {
+                size_t rewritten_len = 0;
+                char* rewritten = cc__rewrite_chan_send_task_text(ctx, closure_defs,
+                                                                  closure_defs_len, &rewritten_len);
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = rewritten_len;
+                }
+            }
+            {
+                char* rewritten = NULL;
+                CCTypeRegistry* saved_reg = cc_type_registry_get_global();
+                CCTypeRegistry* temp_reg = cc_type_registry_new();
+                if (temp_reg) {
+                    cc_type_registry_set_global(temp_reg);
+                    if (ctx && ctx->symbols) {
+                        cc__collect_registered_ufcs_var_types(ctx->symbols, closure_defs, closure_defs_len);
+                    }
+                }
+                rewritten = cc__rewrite_parser_placeholder_ufcs_lowers(closure_defs, closure_defs_len);
+                if (temp_reg) {
+                    cc_type_registry_set_global(saved_reg);
+                    cc_type_registry_free(temp_reg);
+                }
+                if (rewritten) {
+                    free(closure_defs);
+                    closure_defs = rewritten;
+                    closure_defs_len = strlen(rewritten);
+                }
+            }
+
+            /* The AST UFCS pass addresses rewrite targets by PHYSICAL line
+             * number in the final src_ufcs buffer.  closure_defs contains
+             * `#line <userN> "pigz.ccs"` directives (so user-level diagnostics
+             * still point to the source `() => { ... }` expression) which, if
+             * left intact, cause TCC to report UFCS calls at user lines
+             * (e.g. 210) that already correspond to unrelated physical text
+             * earlier in src_ufcs.  Strip those remapping directives so the
+             * closure section's TCC line numbers match physical line numbers
+             * in the merged buffer.  User-line diagnostics for code inside
+             * lifted closure bodies are handled at spawn-time by the closure
+             * literal pass anchoring the top-level `#line` before the call. */
+            char* closure_defs_stripped = NULL;
+            size_t closure_defs_stripped_len = 0;
+            {
+                closure_defs_stripped = (char*)malloc(closure_defs_len + 1);
+                if (closure_defs_stripped) {
+                    size_t di = 0;
+                    for (size_t i = 0; i < closure_defs_len;) {
+                        size_t ln_end = i;
+                        while (ln_end < closure_defs_len && closure_defs[ln_end] != '\n') ln_end++;
+                        size_t ss = i;
+                        while (ss < ln_end && (closure_defs[ss] == ' ' || closure_defs[ss] == '\t')) ss++;
+                        int is_line_directive = 0;
+                        if (ss < ln_end && closure_defs[ss] == '#') {
+                            size_t ps = ss + 1;
+                            while (ps < ln_end && (closure_defs[ps] == ' ' || closure_defs[ps] == '\t')) ps++;
+                            if (ps + 4 <= ln_end && memcmp(closure_defs + ps, "line", 4) == 0 &&
+                                (ps + 4 == ln_end || closure_defs[ps + 4] == ' ' || closure_defs[ps + 4] == '\t')) {
+                                is_line_directive = 1;
+                            }
+                        }
+                        if (!is_line_directive) {
+                            size_t n = (ln_end < closure_defs_len ? ln_end + 1 : ln_end) - i;
+                            memcpy(closure_defs_stripped + di, closure_defs + i, n);
+                            di += n;
+                            i += n;
+                        } else {
+                            i = (ln_end < closure_defs_len) ? ln_end + 1 : ln_end;
+                        }
+                    }
+                    closure_defs_stripped[di] = '\0';
+                    closure_defs_stripped_len = di;
+                }
+            }
+            const char* hdr_protos_open  = "\n/* --- CC closure declarations --- */\n";
+            const char* hdr_protos_close = "/* --- end closure declarations --- */\n";
+            const char* hdr_defs_open    = "\n/* --- CC generated closures --- */\n";
+            int has_protos = (closure_protos && closure_protos_len > 0);
+            const char* defs_buf = closure_defs_stripped ? closure_defs_stripped : closure_defs;
+            size_t defs_buf_len  = closure_defs_stripped ? closure_defs_stripped_len : closure_defs_len;
+            size_t add = strlen(hdr_defs_open) + defs_buf_len + 64 + 1;
+            if (has_protos) add += strlen(hdr_protos_open) + closure_protos_len + strlen(hdr_protos_close);
+            char* merged = (char*)malloc(src_ufcs_len + add + 1);
+            if (merged) {
+                size_t pos = 0;
+                memcpy(merged + pos, src_ufcs, src_ufcs_len); pos += src_ufcs_len;
+                if (has_protos) {
+                    size_t l = strlen(hdr_protos_open);
+                    memcpy(merged + pos, hdr_protos_open, l); pos += l;
+                    memcpy(merged + pos, closure_protos, closure_protos_len); pos += closure_protos_len;
+                    l = strlen(hdr_protos_close);
+                    memcpy(merged + pos, hdr_protos_close, l); pos += l;
+                }
+                {
+                    size_t l = strlen(hdr_defs_open);
+                    memcpy(merged + pos, hdr_defs_open, l); pos += l;
+                }
+                /* Reset TCC's logical-line counter so physical-line == reported-
+                 * line throughout the closure section. */
+                {
+                    int phys_line = 1;
+                    for (size_t k = 0; k < pos; k++) if (merged[k] == '\n') phys_line++;
+                    int n = snprintf(merged + pos, 64, "#line %d \"<cc-closures>\"\n", phys_line + 1);
+                    if (n > 0) pos += (size_t)n;
+                }
+                memcpy(merged + pos, defs_buf, defs_buf_len); pos += defs_buf_len;
+                merged[pos++] = '\n';
+                merged[pos] = '\0';
+                if (src_ufcs != src_all) free(src_ufcs);
+                src_ufcs = merged;
+                src_ufcs_len = pos;
+                /* Ownership of both closure_protos and closure_defs transferred
+                 * into src_ufcs; zero them so the legacy end-of-TU emission
+                 * paths become no-ops. */
+                free(closure_protos); closure_protos = NULL; closure_protos_len = 0;
+                free(closure_defs);   closure_defs   = NULL; closure_defs_len   = 0;
+            }
+            if (closure_defs_stripped) free(closure_defs_stripped);
+        }
+
         /* Final UFCS sweep: earlier statement/syntax rewrites can synthesize new
            method-call surface syntax (notably via @defer / spawn / nursery
            lowering). Reparse the current source and lower any remaining UFCS
