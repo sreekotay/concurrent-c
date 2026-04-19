@@ -25,7 +25,11 @@ typedef struct cc__socket_signal_impl {
     uint64_t waiter_seen_epoch;
     void* wait_group;
     size_t wait_index;
-    int wait_armed;
+    /* wait_armed is written under wait_mu but READ lock-free by
+     * cc_socket_signal_signal so a busy producer can skip wait_mu entirely
+     * when no fiber is parked on this signal.  See the Dekker comment in
+     * cc_socket_signal_signal and cc__socket_signal_arm for the pairing. */
+    _Atomic int wait_armed;
     int initialized;
 } cc__socket_signal_impl;
 
@@ -95,7 +99,7 @@ static int cc__socket_signal_notify_waiter(CCSocketSignal* sig) {
     int should_unpark = 0;
 
     pthread_mutex_lock(&impl->wait_mu);
-    if (impl->wait_armed) {
+    if (atomic_load_explicit(&impl->wait_armed, memory_order_relaxed)) {
         uint64_t cur_epoch = atomic_load_explicit(&impl->epoch, memory_order_acquire);
         if (impl->waiter_fiber &&
             cur_epoch != impl->waiter_seen_epoch &&
@@ -104,7 +108,7 @@ static int cc__socket_signal_notify_waiter(CCSocketSignal* sig) {
             if (cc__wait_select_try_win(group, impl->wait_index)) {
                 atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
                 fiber = impl->waiter_fiber;
-                impl->wait_armed = 0;
+                atomic_store_explicit(&impl->wait_armed, 0, memory_order_release);
                 impl->waiter_fiber = NULL;
                 impl->wait_group = NULL;
                 should_unpark = 1;
@@ -124,7 +128,26 @@ void cc_socket_signal_signal(CCSocketSignal* sig) {
     if (!sig) return;
     cc__socket_signal_impl* impl = cc__socket_signal_impl_ptr(sig);
     if (!impl->initialized) return;
-    atomic_fetch_add_explicit(&impl->epoch, 1, memory_order_release);
+
+    /* Bump epoch with seq_cst ordering so it Dekker-pairs with arm()'s
+     * "set wait_armed=1 ; seq_cst fence ; reload epoch" sequence.  If
+     * this load of wait_armed observes 0, then the arming fiber's store
+     * of wait_armed=1 has not happened-before us, and by the seq_cst
+     * total order the armer's subsequent epoch reload is guaranteed to
+     * see our bump and self-wake in the recheck branch of arm().  This
+     * lets a busy producer (redis_hybrid reply channel, etc.) skip the
+     * wait_mu lock/unlock pair on every send when the consumer is
+     * already running — which is the steady state under load.
+     *
+     * Before this fast-path, every successful send on a signal-bearing
+     * channel took wait_mu via cc__socket_signal_notify_waiter, which
+     * showed up as ~175 leaf samples of pthread_mutex_{lock,unlock} on
+     * redis_hybrid profiles — pure overhead because wait_armed was 0
+     * on the vast majority of sends. */
+    atomic_fetch_add_explicit(&impl->epoch, 1, memory_order_seq_cst);
+    if (atomic_load_explicit(&impl->wait_armed, memory_order_acquire) == 0) {
+        return;
+    }
     (void)cc__socket_signal_notify_waiter(sig);
 }
 
@@ -150,14 +173,23 @@ static int cc__socket_signal_arm(CCSocketSignal* sig,
     impl->waiter_seen_epoch = seen_epoch;
     impl->wait_group = group;
     impl->wait_index = select_index;
-    impl->wait_armed = 1;
+    /* Publish wait_armed=1 with release so a concurrent producer in
+     * cc_socket_signal_signal sees it when loaded with acquire.  The
+     * following seq_cst fence + epoch reload is the Dekker pair: if
+     * the producer's seq_cst epoch bump happens-before our load here,
+     * we observe the new epoch and self-wake.  If it happens-after,
+     * the producer's acquire-load of wait_armed is guaranteed to
+     * observe our store above (by seq_cst total order) and take the
+     * mutex-based notify path. */
+    atomic_store_explicit(&impl->wait_armed, 1, memory_order_release);
+    atomic_thread_fence(memory_order_seq_cst);
 
     cur_epoch = atomic_load_explicit(&impl->epoch, memory_order_acquire);
     if (cur_epoch != seen_epoch) {
         if (cc__wait_select_try_win(group, select_index)) {
             atomic_fetch_add_explicit(&group->signaled, 1, memory_order_release);
         }
-        impl->wait_armed = 0;
+        atomic_store_explicit(&impl->wait_armed, 0, memory_order_release);
         impl->waiter_fiber = NULL;
         impl->wait_group = NULL;
         pthread_mutex_unlock(&impl->wait_mu);
@@ -173,8 +205,9 @@ static void cc__socket_signal_disarm(CCSocketSignal* sig, uint64_t wait_ticket) 
     cc__socket_signal_impl* impl = cc__socket_signal_impl_ptr(sig);
     if (!impl->initialized) return;
     pthread_mutex_lock(&impl->wait_mu);
-    if (impl->wait_armed && impl->waiter_ticket == wait_ticket) {
-        impl->wait_armed = 0;
+    if (atomic_load_explicit(&impl->wait_armed, memory_order_relaxed) &&
+        impl->waiter_ticket == wait_ticket) {
+        atomic_store_explicit(&impl->wait_armed, 0, memory_order_release);
         impl->waiter_fiber = NULL;
         impl->wait_group = NULL;
     }
