@@ -745,18 +745,30 @@ int cc__collect_ufcs_edits(const CCASTRoot* root,
     char* rewritten = NULL;
     size_t rewritten_len = 0;
     int r = cc__rewrite_ufcs_spans_with_nodes(root, ctx, eb->src, eb->src_len, &rewritten, &rewritten_len);
-    /* Keep the AST-driven path primary, but if it finds nothing, give the
-       source-context-aware line fallback a chance to lower simple local UFCS
-       that the stub AST failed to surface. */
-    if ((r == 0 || !rewritten) && eb->src && eb->src_len > 0) {
+    /* Keep the AST-driven path primary, then ALWAYS run the text-based line
+       fallback over the current best source (either AST-rewritten or the
+       input).  TCC's stub parser cannot always surface UFCS calls inside
+       closure literal bodies, macro argument lists, or other constructs it
+       parses opaquely — concretely for pigz_idiomatic.ccs, the AST pass
+       lowers 99% of the call sites but misses `blk->arena.free();` inside
+       `results_tx.send_task(() => [blk] { ... });` because the closure
+       body isn't in the stub AST.  The fallback is idempotent over already
+       -lowered forms: once `recv.method(args)` has been rewritten to
+       `Type_method(&recv, args)` the line no longer has UFCS shape, so the
+       fallback leaves it untouched. */
+    if (eb->src && eb->src_len > 0) {
+        const char* base_src = rewritten ? rewritten : eb->src;
+        size_t base_len = rewritten ? rewritten_len : eb->src_len;
         char* fallback = NULL;
         size_t fallback_len = 0;
-        int fr = cc__rewrite_ufcs_text_fallback(eb->src, eb->src_len, &fallback, &fallback_len);
+        int fr = cc__rewrite_ufcs_text_fallback(base_src, base_len, &fallback, &fallback_len);
         if (fr < 0) {
             cc_ufcs_set_symbols(NULL);
+            free(rewritten);
             return -1;
         }
         if (fr > 0 && fallback) {
+            if (rewritten) free(rewritten);
             rewritten = fallback;
             rewritten_len = fallback_len;
             r = 1;
