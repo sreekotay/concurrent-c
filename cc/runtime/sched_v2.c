@@ -33,6 +33,7 @@
 
 #if defined(__APPLE__)
 #include <os/lock.h>
+#include <mach/mach_time.h>
 #endif
 
 /* ============================================================================
@@ -277,10 +278,21 @@ typedef struct {
     int          id;
     _Atomic int  alive;     /* 1 while worker loop is running */
     _Atomic int  is_idle;   /* 1 = IDLE worker, 0 = BUSY worker */
-    /* Wall-clock ns of the most recent fiber dispatch on this worker.
-     * 0 when no fiber is currently executing. Sysmon scans this to detect
-     * workers stuck in non-cooperative kernel syscalls. */
-    _Atomic uint64_t dispatch_start_ns;
+    /* Monotonic dispatch epoch: bumped to a fresh value each time this
+     * worker starts running a fiber, reset to 0 when the fiber returns.
+     * Sysmon scans this on each tick and compares against a locally-
+     * cached snapshot from the previous tick: a worker that is still on
+     * the same non-zero epoch has been running the same fiber for ≥1
+     * sysmon tick (V2_SYSMON_INTERVAL_MS) and is a candidate for
+     * in-place eviction as a kidnapped syscall.
+     *
+     * This replaces the prior `dispatch_start_ns` nanosecond timestamp:
+     * the hot path no longer pays for mach_absolute_time/clock_gettime
+     * per dispatch (each worker maintains a thread-local counter and
+     * does a single relaxed store). Aging resolution is one tick
+     * (20 ms today), which is what the previous 20 ms threshold also
+     * provided in practice. */
+    _Atomic uint64_t dispatch_epoch;
     /* Slot-identity generation. Bumped by sysmon every time a new worker
      * thread is installed into this slot (replacing an evicted orphan). A
      * running worker caches its generation at entry (tls_v2_my_generation);
@@ -370,6 +382,25 @@ static _Atomic uint64_t g_v2_wake_scan_miss = 0;
  * and sysmon issues an unconditional safety-net wake every tick. */
 static _Atomic uint64_t g_v2_wake_skipped_deep = 0;
 static _Atomic uint64_t g_v2_worker_self_drain = 0;
+/* Spin-before-park outcomes (self-drain path, tid==worker_hint).
+ *   worker_spin_hit:   queue became non-empty during the spin budget — we
+ *                      dequeued a fresh fiber and stayed BUSY (0 syscalls).
+ *   worker_spin_miss:  budget exhausted with queue still empty — fall
+ *                      through to the park path (mark idle + ulock_wait). */
+static _Atomic uint64_t g_v2_worker_spin_hit = 0;
+static _Atomic uint64_t g_v2_worker_spin_miss = 0;
+/* Admission-control (CC_V2_TARGET_ACTIVE) instrumentation.
+ *   admit_ok:           try_admit_running CAS succeeded — this worker
+ *                       is now counted toward g_v2_running_workers.
+ *   admit_fail:         try_admit_running observed running >= target;
+ *                       the worker went straight to the park cycle
+ *                       instead of entering the drain loop.
+ *   wake_gated_target:  producer-side sched_v2_wake(-1) skipped issuing
+ *                       another wake because running is already at the
+ *                       target; the extra parked-idle worker stays parked. */
+static _Atomic uint64_t g_v2_worker_admit_ok = 0;
+static _Atomic uint64_t g_v2_worker_admit_fail = 0;
+static _Atomic uint64_t g_v2_wake_gated_target = 0;
 static _Atomic uint64_t g_v2_mco_resume_fail = 0;
 static _Atomic uint64_t g_v2_mco_yield_fail = 0;
 static _Atomic uint64_t g_v2_mco_stack_overflow = 0;
@@ -401,11 +432,41 @@ static _Atomic uint64_t g_v2_orphans_cap_hit = 0;
  * (pool becomes hard-capped at CC_V2_THREADS as before). Default: enabled. */
 static _Atomic int g_v2_sysmon_detach_enabled = 1;
 
+/* Fast wall-clock tick for the worker hot path. On Apple Silicon,
+ * mach_absolute_time() returns nanoseconds directly (timebase 1/1) and
+ * compiles down to a single `mrs CNTVCT_EL0` (~6 cycles). On x86 macs and
+ * older hardware the timebase numer/denom is set at init; we scale once.
+ * On non-Apple platforms we fall back to CLOCK_MONOTONIC.
+ *
+ * Consumers (sysmon eviction, park-deadline check) only care about ~ms-scale
+ * differences, so we prefer the cheap path over strict portability to
+ * POSIX ns. */
+#if defined(__APPLE__)
+static struct mach_timebase_info v2_mach_tb = { 0, 0 };
+static inline void v2_mach_tb_init_once(void) {
+    if (v2_mach_tb.denom == 0) {
+        mach_timebase_info(&v2_mach_tb);
+        if (v2_mach_tb.denom == 0) {
+            /* Defensive: should never happen, but avoid divide-by-zero. */
+            v2_mach_tb.numer = 1;
+            v2_mach_tb.denom = 1;
+        }
+    }
+}
+static inline uint64_t v2_now_ns(void) {
+    uint64_t t = mach_absolute_time();
+    /* Fast path on arm64 macOS where timebase is 1/1: skip the mult/div. */
+    if (v2_mach_tb.numer == 1 && v2_mach_tb.denom == 1) return t;
+    return (t * v2_mach_tb.numer) / v2_mach_tb.denom;
+}
+#else
+static inline void v2_mach_tb_init_once(void) {}
 static inline uint64_t v2_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+#endif
 
 /* Diagnostic-counter gate.  Writes to the g_v2_* stat counters on the hot
  * signal/wake/park/resume paths used to be unconditional -- at multi-million
@@ -453,6 +514,167 @@ static int g_v2_join_spin = 0;
  * wake (see sched_v2_sysmon_main) bounds any under-utilisation to one
  * tick (~20ms). */
 static int g_v2_wake_skip_depth = 4;
+
+/* ---------------------------------------------------------------------------
+ * Worker-pool shaping knobs
+ * ---------------------------------------------------------------------------
+ *
+ * Three knobs tune how the N-slot worker pool responds to bursty or
+ * chain-heavy workloads. All three are default-off (legacy behaviour) and
+ * opt-in via env var; they compose orthogonally, so you can mix them.
+ *
+ * The problem they address (observed clearest in redis_hybrid, a chain of
+ * ~4 fiber handoffs per request under 50-client pipelined load):
+ *
+ *   - Eagerly starting N workers and letting them all drain the same global
+ *     ready queue produces thundering-herd churn: one pops, N-1 miss and
+ *     commit to __ulock_wait, then the next enqueue wakes them all again.
+ *   - Each park/wake round-trip is ~1-2 µs of syscall time, fired tens of
+ *     thousands of times per second at N>1. Beyond some point the extra
+ *     workers don't add throughput — they burn syscall bandwidth and
+ *     thrash the ready-queue cache line.
+ *
+ * The three knobs attack different points along the park/wake lifecycle:
+ *
+ *   SPIN_BEFORE_PARK     — shrinks the time between "queue ran dry" and
+ *                          "worker actually enters __ulock_wait". Busy-wait
+ *                          polls the queue for a bounded budget first, so
+ *                          fibers that arrive in the gap get picked up with
+ *                          zero syscalls. Doesn't change how many workers
+ *                          are eligible to run.
+ *
+ *   PARK_EXTRAS_AT_STARTUP — shapes the *initial condition*. Sends N-1
+ *                            workers to park before they ever touch the
+ *                            drain loop, so the first enqueue wakes only
+ *                            one. No ongoing enforcement: once an extra
+ *                            gets admitted it behaves like any normal
+ *                            worker forever after.
+ *
+ *   TARGET_ACTIVE        — enforces a *steady-state cap* on concurrently
+ *                          running workers. Every drain cycle re-checks
+ *                          admission; the producer-side wake loop also
+ *                          refuses to wake past target. Extras that slip
+ *                          through get bounced back to park on the next
+ *                          loop iter. Costs a counter CAS per admission
+ *                          and a branch in the wake-many loop.
+ *
+ * Interaction notes (for future-me reaching for these again):
+ *
+ *   - PARK_EXTRAS is *not* a cap: under sustained backpressure,
+ *     sched_v2_wake(-1) will still wake as many idle workers as there are
+ *     queued fibers. If you want to guarantee "at most K active forever",
+ *     use TARGET_ACTIVE (alone or in combination).
+ *   - TARGET_ACTIVE subsumes PARK_EXTRAS's steady-state effect — any extras
+ *     that show up eagerly will fail admission and re-park within
+ *     microseconds. The init-time thundering herd is the only thing
+ *     PARK_EXTRAS uniquely addresses.
+ *   - SPIN_BEFORE_PARK is orthogonal to both: it changes what a *single*
+ *     worker does when its own drain runs empty, not how many workers are
+ *     eligible. Useful when fibers arrive in tight bursts faster than the
+ *     wake-park cycle, regardless of whether you've capped the pool.
+ * --------------------------------------------------------------------------- */
+
+/* Tunable via CC_V2_SPIN_BEFORE_PARK env var.
+ *
+ * Budget of cpu_relax iterations a worker spends polling the ready queue
+ * after its drain loop observes an empty queue, BEFORE committing to
+ * __ulock_wait. During the spin the worker stays is_idle=0, so producers
+ * take the idle_workers==0 fast path and issue no wake syscall; a fiber
+ * that lands in the spin window is picked up in self-drain with zero
+ * syscalls on either side.
+ *
+ * Budget shape: arm64 "yield" is ~1-2 cycles (4096 iters ≈ 2-4 µs on
+ * Apple silicon); x86 "pause" is ~25-140 cycles (scale accordingly).
+ * The upper clamp at init is 1e9 so pathological sweeps are survivable.
+ *
+ * Safety: sysmon's in-place eviction targets workers with dispatch_epoch
+ * != 0 (i.e. actively running a fiber). A spinning worker has
+ * dispatch_epoch == 0, so it is not a candidate for eviction during the
+ * spin.
+ *
+ * 0 disables (legacy: park immediately on empty queue). */
+static int g_v2_spin_before_park = 0;
+
+/* Tunable via CC_V2_PARK_EXTRAS_AT_STARTUP env var.
+ *
+ * When non-zero, workers with tid != 0 mark idle and park immediately at
+ * thread_v2_main entry, skipping the initial self-drain attempt entirely.
+ * Only the primary (tid == 0) enters the drain loop at startup; extras
+ * are admitted on demand when sched_v2_wake(-1) observes real backpressure
+ * (queue > 0 AND idle > 0).
+ *
+ * One-shot: this is an init-time shape, not a steady-state cap. Once an
+ * extra has been woken and admitted it runs like any other worker and
+ * parks via the normal Dekker park-when-empty path. Subsequent wakes can
+ * recruit it again, and under sustained load nothing prevents all N
+ * workers from being active simultaneously. For a true cap, use
+ * CC_V2_TARGET_ACTIVE (alone or with this).
+ *
+ * Cost: one extra park at startup per extra; zero hot-path overhead
+ * thereafter.
+ *
+ * 0 disables (legacy: all N workers enter the drain loop at startup,
+ * producing a thundering herd on the first enqueue). */
+static int g_v2_park_extras_at_startup = 0;
+
+/* Tunable via CC_V2_TARGET_ACTIVE env var.
+ *
+ * Steady-state admission cap on concurrently running worker threads.
+ * g_v2_running_workers counts workers that are NOT currently in
+ * __ulock_wait — actively spinning, draining, or executing a fiber. On
+ * every iteration of thread_v2_main a worker calls try_admit_running():
+ *   - CAS-inc running_workers only if the result stays <= target.
+ *   - On failure (target saturated), the worker skips drain, marks idle,
+ *     and parks without touching the ready queue.
+ *   - deadmit_running() releases the slot when the drain loop exits.
+ *
+ * Producer-side: sched_v2_wake(-1) short-circuits its wake-many loop once
+ * running_workers >= target (counted in g_v2_wake_gated_target). Skipping
+ * those wakes avoids __ulock_wake syscalls whose only effect would be to
+ * make an extra cycle park → wake → admit-fail → re-park.
+ *
+ * Practical sizing:
+ *   - 1 for chain-heavy I/O workloads where a single hot drainer keeps
+ *     the ready queue L1-warm and avoids lock contention on the global
+ *     queue (the redis_hybrid shape).
+ *   - N (CPU count) for CPU-bound parallel workloads (pigz, etc.) that
+ *     genuinely want every core drainable.
+ *   - 0 = disabled (legacy: all workers always eligible, no gating).
+ *
+ * Cost: one atomic load + branch per drain cycle + one admission CAS per
+ * drain cycle + one branch in the producer wake-many loop. Non-zero but
+ * cheap enough to leave permanently enabled once a target is set. */
+static int g_v2_target_active = 0;
+static _Atomic int g_v2_running_workers = 0;
+
+/* Try to become an "active running" worker. Returns 1 on success (caller
+ * is counted toward g_v2_running_workers and must call deadmit_running
+ * before parking) or 0 if target is already saturated. */
+static int try_admit_running(void) {
+    if (g_v2_target_active <= 0) {
+        atomic_fetch_add_explicit(&g_v2_running_workers, 1,
+                                  memory_order_acq_rel);
+        V2_STAT_INC(g_v2_worker_admit_ok);
+        return 1;
+    }
+    int cur = atomic_load_explicit(&g_v2_running_workers,
+                                   memory_order_relaxed);
+    while (cur < g_v2_target_active) {
+        if (atomic_compare_exchange_weak_explicit(
+                &g_v2_running_workers, &cur, cur + 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            V2_STAT_INC(g_v2_worker_admit_ok);
+            return 1;
+        }
+        /* cur was updated by CAS on failure */
+    }
+    V2_STAT_INC(g_v2_worker_admit_fail);
+    return 0;
+}
+
+static void deadmit_running(void) {
+    atomic_fetch_sub_explicit(&g_v2_running_workers, 1, memory_order_release);
+}
 
 /* Histogram bucket for park-reason diagnostics. We dedupe by pointer because
  * park reasons are static strings; falling back to strcmp keeps the table
@@ -531,6 +753,11 @@ static __thread int tls_v2_thread_id = -1;
 static __thread uint64_t tls_v2_my_generation = 0;
 static __thread fiber_v2* tls_v2_current_fiber = NULL;
 static __thread const char* tls_v2_park_reason = NULL;
+/* Per-worker monotonic dispatch counter, incremented before each fiber
+ * run. Published to slot.dispatch_epoch so sysmon can detect "same fiber
+ * still running after one tick" without any wall-clock read on the hot
+ * path. Starts at 1 so that 0 unambiguously means "no fiber running". */
+static __thread uint64_t tls_v2_dispatch_seq = 0;
 extern __thread CCNursery* cc__tls_current_nursery;
 bool cc_nursery_is_cancelled(const CCNursery* n);
 
@@ -686,7 +913,7 @@ static int sched_v2_try_expand_pool(void) {
     atomic_store_explicit(&g_v2.threads[new_id].is_idle, 0, memory_order_relaxed);
     wake_primitive_init(&g_v2.threads[new_id].wake);
     atomic_store_explicit(&g_v2.threads[new_id].alive, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_v2.threads[new_id].dispatch_start_ns, 0,
+    atomic_store_explicit(&g_v2.threads[new_id].dispatch_epoch, 0,
                           memory_order_relaxed);
     /* First worker in this slot: generation starts at 0. */
     atomic_store_explicit(&g_v2.threads[new_id].generation, 0,
@@ -732,15 +959,53 @@ static void sched_v2_wake(int worker_hint) {
     if (worker_hint >= 0 && worker_hint == tls_v2_thread_id) {
         while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
             fiber_v2* f = v2_queue_pop(&g_v2.ready_queue);
-            if (!f) return;
+            if (!f) {
+                /* Spin-before-park: rather than immediately return and
+                 * commit to __ulock_wait, stay BUSY for a bounded budget
+                 * of cpu_relax cycles, polling the queue. Fibers that land
+                 * during the window are picked up in self-drain with zero
+                 * syscalls, and producers never see us as idle so they
+                 * don't issue a wake syscall either.
+                 *
+                 * Safety: we stay is_idle=0 throughout. sysmon's in-place
+                 * eviction only targets workers with dispatch_epoch!=0
+                 * (it was reset at the end of the previous fiber), so we
+                 * are not a candidate during the spin. Generation check
+                 * runs in the outer thread_v2_main loop on return. */
+                int spin = g_v2_spin_before_park;
+                while (spin-- > 0) {
+#if defined(__aarch64__) || defined(__arm__)
+                    __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+                    __asm__ volatile("pause" ::: "memory");
+#else
+                    __asm__ volatile("" ::: "memory");
+#endif
+                    if (atomic_load_explicit(&g_v2.ready_queue.count,
+                                             memory_order_acquire) > 0) {
+                        f = v2_queue_pop(&g_v2.ready_queue);
+                        if (f) break;
+                        /* Lost the race to another drainer; keep spinning. */
+                    }
+                }
+                if (!f) {
+                    V2_STAT_INC(g_v2_worker_spin_miss);
+                    return;
+                }
+                V2_STAT_INC(g_v2_worker_spin_hit);
+            }
             V2_STAT_INC(g_v2_worker_self_drain);
-            /* Mark the dispatch so sysmon can detect kidnapped syscalls.
-             * Sysmon reads this with relaxed order; the only timing we
-             * care about is "approximately how long has this fiber run". */
-            atomic_store_explicit(&g_v2.threads[worker_hint].dispatch_start_ns,
-                                  v2_now_ns(), memory_order_relaxed);
+            /* Publish a fresh dispatch epoch so sysmon can detect
+             * kidnapped syscalls. We use a thread-local monotonic counter
+             * and a single relaxed store — no wall-clock syscall on the
+             * hot path. Sysmon compares this against a snapshot it took
+             * on the previous tick; if it hasn't changed and is non-zero,
+             * the worker has been on the same fiber for ≥1 tick. */
+            uint64_t seq = ++tls_v2_dispatch_seq;
+            atomic_store_explicit(&g_v2.threads[worker_hint].dispatch_epoch,
+                                  seq, memory_order_relaxed);
             thread_v2_run_fiber(worker_hint, f);
-            atomic_store_explicit(&g_v2.threads[worker_hint].dispatch_start_ns,
+            atomic_store_explicit(&g_v2.threads[worker_hint].dispatch_epoch,
                                   0, memory_order_relaxed);
             /* Identity check: sysmon may have evicted us in place while
              * the fiber was running (see sched_v2_sysmon_evict_aged_workers).
@@ -779,6 +1044,20 @@ static void sched_v2_wake(int worker_hint) {
     }
     while (atomic_load_explicit(&g_v2.ready_queue.count, memory_order_relaxed) > 0 &&
            atomic_load_explicit(&g_v2.idle_workers, memory_order_acquire) > 0) {
+        /* Producer-side admission gate: if we're already at the active
+         * target, issuing another wake just produces a ulock_wake syscall
+         * whose only effect is to make an extra worker cycle through
+         * park→wake→try_admit_fail→re-park. Skip it.
+         *
+         * Note: count != #wakes — running_workers lags the wake by one
+         * ulock_wait round-trip, so we may over-wake by ~1 per burst.
+         * Good enough; the consumer-side gate catches the rest. */
+        if (g_v2_target_active > 0 &&
+            atomic_load_explicit(&g_v2_running_workers, memory_order_acquire)
+                >= g_v2_target_active) {
+            V2_STAT_INC(g_v2_wake_gated_target);
+            break;
+        }
         if (!sched_v2_try_wake_one()) {
             sched_v2_try_expand_pool();
             break;
@@ -1132,12 +1411,61 @@ static void* thread_v2_main(void* arg) {
                                                 memory_order_acquire);
     atomic_store_explicit(&g_v2.threads[tid].alive, 1, memory_order_release);
 
+    /* Startup-park for extras (see CC_V2_PARK_EXTRAS_AT_STARTUP). Non-primary
+     * workers (tid != 0) skip the initial self-drain and park immediately.
+     * They are admitted on demand by sched_v2_wake(-1) when the primary
+     * cannot drain fast enough. */
+    if (g_v2_park_extras_at_startup && tid != 0) {
+        atomic_store_explicit(&g_v2.threads[tid].is_idle, 1, memory_order_release);
+        atomic_fetch_add_explicit(&g_v2.idle_workers, 1, memory_order_acq_rel);
+        V2_STAT_INC(g_v2_worker_idle_entries);
+        atomic_thread_fence(memory_order_seq_cst);
+        uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
+                                            memory_order_acquire);
+        /* Queue is empty at startup so no Dekker recheck needed. */
+        wake_primitive_wait(&g_v2.threads[tid].wake, val);
+        if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0,
+                                     memory_order_acq_rel)) {
+            atomic_fetch_sub_explicit(&g_v2.idle_workers, 1,
+                                      memory_order_acq_rel);
+        }
+    }
+
     while (atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
+        /* Admission gate: try to register as one of the (up to)
+         * g_v2_target_active running workers. If target is disabled
+         * (0), try_admit_running always succeeds. If target is saturated,
+         * we skip the drain and go straight to the park cycle — extras
+         * that got woken by sched_v2_wake(-1)'s producer-side loop
+         * bow out without burning cycles. */
+        if (!try_admit_running()) {
+            atomic_store_explicit(&g_v2.threads[tid].is_idle, 1,
+                                  memory_order_release);
+            atomic_fetch_add_explicit(&g_v2.idle_workers, 1,
+                                      memory_order_acq_rel);
+            V2_STAT_INC(g_v2_worker_idle_entries);
+            atomic_thread_fence(memory_order_seq_cst);
+            uint32_t val = atomic_load_explicit(&g_v2.threads[tid].wake.value,
+                                                memory_order_acquire);
+            /* No Dekker recheck here: we're parked because target is
+             * saturated, not because the queue was empty. Pure wait. */
+            wake_primitive_wait(&g_v2.threads[tid].wake, val);
+            if (atomic_exchange_explicit(&g_v2.threads[tid].is_idle, 0,
+                                         memory_order_acq_rel)) {
+                atomic_fetch_sub_explicit(&g_v2.idle_workers, 1,
+                                          memory_order_acq_rel);
+            }
+            continue;
+        }
+
         /* Drain: run ready fibers inline until queue is empty (or sysmon
          * evicted us, in which case sched_v2_wake returns early). */
         sched_v2_wake(tid);
 
-        if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) break;
+        if (!atomic_load_explicit(&g_v2.running, memory_order_acquire)) {
+            deadmit_running();
+            break;
+        }
 
         /* End-of-loop identity check: if slot.generation has moved, we are
          * an orphan. Exit before re-parking on slot.wake (which now belongs
@@ -1146,8 +1474,13 @@ static void* thread_v2_main(void* arg) {
         if (atomic_load_explicit(&g_v2.threads[tid].generation,
                                  memory_order_acquire)
             != tls_v2_my_generation) {
+            deadmit_running();
             break;
         }
+
+        /* Drain exhausted. Release our admission slot so another worker
+         * can be admitted on the next wake. */
+        deadmit_running();
 
         /* No work — let this BUSY worker become IDLE.
          * Dekker protocol: mark idle, read wake counter, recheck, sleep.
@@ -1257,7 +1590,7 @@ static int sched_v2_count_idle_workers(void) {
  * Ordering rationale (all observable by the new thread via the
  * pthread_create synchronize-with guarantee):
  *   1. detach old handle (once; handle field about to be overwritten).
- *   2. reset per-slot transient state (wake, is_idle, dispatch_start_ns).
+ *   2. reset per-slot transient state (wake, is_idle, dispatch_epoch).
  *   3. bump slot.generation (the identity token the new thread will read
  *      at entry into tls_v2_my_generation).
  *   4. pthread_create(&slot.handle, ..., tid) — writes new handle AND
@@ -1267,12 +1600,12 @@ static void sched_v2_sysmon_evict_worker_in_place(int i) {
     pthread_t old_handle = g_v2.threads[i].handle;
     pthread_detach(old_handle);
 
-    /* The orphan is mid-syscall, not parked on slot.wake (dispatch_start_ns
+    /* The orphan is mid-syscall, not parked on slot.wake (dispatch_epoch
      * being nonzero is what qualified it for eviction). Resetting wake is
      * safe and gives the new worker a fresh counter. */
     wake_primitive_init(&g_v2.threads[i].wake);
     atomic_store_explicit(&g_v2.threads[i].is_idle, 0, memory_order_relaxed);
-    atomic_store_explicit(&g_v2.threads[i].dispatch_start_ns, 0,
+    atomic_store_explicit(&g_v2.threads[i].dispatch_epoch, 0,
                           memory_order_relaxed);
     /* The new thread will set alive=1 at entry; leaving it at 1 here is
      * intentional — the slot is never "not alive" across an eviction. */
@@ -1303,6 +1636,18 @@ static void sched_v2_sysmon_evict_worker_in_place(int i) {
  * V2_ORPHAN_SAFETY_CAP is a pure safety net, not a policy knob. If the app
  * ever spawns enough simultaneous blocking fibers to bump against it, it
  * is itself pathological — sysmon simply waits one tick. */
+/* Sysmon-local cache of per-worker dispatch epoch seen on the previous
+ * tick. Sole reader/writer is sched_v2_sysmon_evict_aged_workers, which
+ * runs on the single sysmon thread — no atomics needed. A worker whose
+ * current epoch equals the cached value AND is non-zero has been on the
+ * same fiber across at least one full sysmon tick (>= 20 ms today) and
+ * is flagged for in-place eviction.
+ *
+ * Slot replacement (sched_v2_sysmon_evict_worker_in_place) resets
+ * dispatch_epoch to 0 and the replacement worker starts a fresh TLS
+ * counter, so the stale cache entry naturally clears on the next tick. */
+static uint64_t g_v2_sysmon_last_epoch[V2_MAX_THREADS];
+
 static void sched_v2_sysmon_evict_aged_workers(void) {
     if (!atomic_load_explicit(&g_v2_sysmon_detach_enabled,
                               memory_order_relaxed)) {
@@ -1310,26 +1655,42 @@ static void sched_v2_sysmon_evict_aged_workers(void) {
     }
     size_t backlog = atomic_load_explicit(&g_v2.ready_queue.count,
                                           memory_order_relaxed);
-    if (backlog == 0) return;
-
-    uint64_t now = v2_now_ns();
+    /* Zero backlog: still refresh the cache so we don't accidentally
+     * flag a worker that happened to run a long fiber during a quiet
+     * window and is now between dispatches. The scan is essentially
+     * free (N loads from a contiguous array). */
     int n = atomic_load_explicit(&g_v2.num_threads, memory_order_acquire);
+    if (backlog == 0) {
+        for (int i = 0; i < n; i++) {
+            g_v2_sysmon_last_epoch[i] = atomic_load_explicit(
+                &g_v2.threads[i].dispatch_epoch, memory_order_relaxed);
+        }
+        return;
+    }
+
     size_t budget = backlog;
-    for (int i = 0; i < n && budget > 0; i++) {
-        uint64_t t0 = atomic_load_explicit(&g_v2.threads[i].dispatch_start_ns,
-                                           memory_order_relaxed);
-        if (t0 == 0) continue;
-        if (now - t0 < V2_SYSMON_SYSCALL_AGE_NS) continue;
+    for (int i = 0; i < n; i++) {
+        uint64_t cur = atomic_load_explicit(&g_v2.threads[i].dispatch_epoch,
+                                            memory_order_relaxed);
+        uint64_t prev = g_v2_sysmon_last_epoch[i];
+        g_v2_sysmon_last_epoch[i] = cur;
+
+        if (budget == 0) continue;          /* keep refreshing the cache */
+        if (cur == 0) continue;              /* no fiber running */
+        if (cur != prev) continue;           /* dispatched something new */
 
         int64_t live_orphans = atomic_load_explicit(&g_v2_orphans_alive,
                                                     memory_order_relaxed);
         if (live_orphans >= V2_ORPHAN_SAFETY_CAP) {
             atomic_fetch_add_explicit(&g_v2_orphans_cap_hit, 1,
                                       memory_order_relaxed);
-            break;
+            continue;
         }
 
         sched_v2_sysmon_evict_worker_in_place(i);
+        /* Eviction resets the slot's epoch to 0; clear our cache so the
+         * replacement worker starts from a clean state. */
+        g_v2_sysmon_last_epoch[i] = 0;
         budget--;
     }
 }
@@ -1508,6 +1869,17 @@ static void sched_v2_atexit_dump_stats(void) {
             (unsigned long long)atomic_load_explicit(&g_v2_worker_idle_entries, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_recheck, memory_order_relaxed),
             (unsigned long long)atomic_load_explicit(&g_v2_worker_busy_from_wake, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] spin_before_park=%d: hit=%llu miss=%llu\n",
+            g_v2_spin_before_park,
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_spin_hit, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_spin_miss, memory_order_relaxed));
+    fprintf(stderr, "[sched_v2 stats] target_active=%d running=%d: "
+                    "admit_ok=%llu admit_fail=%llu wake_gated=%llu\n",
+            g_v2_target_active,
+            atomic_load_explicit(&g_v2_running_workers, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_admit_ok, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_worker_admit_fail, memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_v2_wake_gated_target, memory_order_relaxed));
     fprintf(stderr, "[sched_v2 stats] sysmon_evict: evicted_total=%llu orphans_alive=%lld cap_hit=%llu\n",
             (unsigned long long)atomic_load_explicit(&g_v2_sysmon_evicted_total, memory_order_relaxed),
             (long long)atomic_load_explicit(&g_v2_orphans_alive, memory_order_relaxed),
@@ -1515,6 +1887,10 @@ static void sched_v2_atexit_dump_stats(void) {
 }
 
 static void sched_v2_init_impl(void) {
+    /* Prime the mach timebase cache before any worker calls v2_now_ns on
+     * the hot path. On arm64 macOS this is 1/1 (no-op fast path); still
+     * cheaper to do once than to branch-check on every call. */
+    v2_mach_tb_init_once();
     atomic_store_explicit(&g_v2.running, 1, memory_order_release);
     atomic_store_explicit(&g_v2.idle_workers, 0, memory_order_relaxed);
     v2_queue_init(&g_v2.ready_queue);
@@ -1553,6 +1929,26 @@ static void sched_v2_init_impl(void) {
             g_v2_wake_skip_depth = (int)v;
         }
     }
+    const char* sbp_env = getenv("CC_V2_SPIN_BEFORE_PARK");
+    if (sbp_env) {
+        char* end = NULL;
+        long v = strtol(sbp_env, &end, 10);
+        if (end != sbp_env && v >= 0 && v <= 1000000000L) {
+            g_v2_spin_before_park = (int)v;
+        }
+    }
+    const char* pxs_env = getenv("CC_V2_PARK_EXTRAS_AT_STARTUP");
+    if (pxs_env && pxs_env[0] && pxs_env[0] != '0') {
+        g_v2_park_extras_at_startup = 1;
+    }
+    const char* tgt_env = getenv("CC_V2_TARGET_ACTIVE");
+    if (tgt_env) {
+        char* end = NULL;
+        long v = strtol(tgt_env, &end, 10);
+        if (end != tgt_env && v >= 0 && v <= 1024) {
+            g_v2_target_active = (int)v;
+        }
+    }
 
     int n = sched_v2_detect_num_threads();
     atomic_store_explicit(&g_v2.num_threads, n, memory_order_release);
@@ -1565,7 +1961,7 @@ static void sched_v2_init_impl(void) {
         g_v2.threads[i].id = i;
         atomic_store_explicit(&g_v2.threads[i].is_idle, 0, memory_order_relaxed);
         atomic_store_explicit(&g_v2.threads[i].alive, 0, memory_order_relaxed);
-        atomic_store_explicit(&g_v2.threads[i].dispatch_start_ns, 0,
+        atomic_store_explicit(&g_v2.threads[i].dispatch_epoch, 0,
                               memory_order_relaxed);
         /* Initial worker in this slot: generation 0. First eviction will
          * bump it to 1; the cached tls_v2_my_generation in the orphan
