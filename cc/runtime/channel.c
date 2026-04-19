@@ -2486,6 +2486,41 @@ static inline void* cc__ring_slot_ptr(CCChan* ch, size_t pos) {
     return (char*)ch->buf + ((pos & (ch->lfqueue_cap - 1)) * ch->elem_size);
 }
 
+/* Pack a caller-supplied value of size elem_size into a pointer-sized cell
+ * slot. The common case — pointer-typed channels (elem_size == sizeof(void*))
+ * — uses a direct aligned pointer store so clang can't fold the branch back
+ * into a single runtime-size memcpy.  The profile showed ~213 _platform_
+ * memmove leaf samples attributable to this pack/unpack pair on pointer
+ * channels; the goal is to eliminate those by forcing an inline ldr/str.
+ *
+ * First attempt used `memcpy(&v, src, sizeof(void*))` (literal size) in the
+ * == branch, but the optimizer observed both branches funnel into memcpy
+ * and rewrote them into a single memcpy call with a runtime size.  Direct
+ * typed store defeats that fold.
+ *
+ * The generic branch (elem_size < sizeof(void*)) still needs a real memcpy
+ * because the runtime size could be 1/2/4.  Zero-init of the pointer slot
+ * is retained so the unused upper bytes are deterministic. */
+static inline void cc__chan_pack_value(void** slot, const void* src,
+                                       size_t elem_size) {
+    if (elem_size == sizeof(void*)) {
+        *slot = *(void* const*)src;
+    } else {
+        void* v = NULL;
+        memcpy(&v, src, elem_size);
+        *slot = v;
+    }
+}
+
+static inline void cc__chan_unpack_value(void* dst, void* slot_val,
+                                         size_t elem_size) {
+    if (elem_size == sizeof(void*)) {
+        *(void**)dst = slot_val;
+    } else {
+        memcpy(dst, &slot_val, elem_size);
+    }
+}
+
 static inline int cc__ring_enqueue_spsc_value(CCChan* ch, const void* value) {
     size_t tail = atomic_load_explicit(&ch->ring_tail, memory_order_relaxed);
     size_t head = atomic_load_explicit(&ch->ring_head, memory_order_acquire);
@@ -2495,9 +2530,7 @@ static inline int cc__ring_enqueue_spsc_value(CCChan* ch, const void* value) {
 
     size_t slot = tail & (ch->lfqueue_cap - 1);
     if (ch->elem_size <= sizeof(void*)) {
-        void* queue_val = NULL;
-        memcpy(&queue_val, value, ch->elem_size);
-        ch->ring_cells[slot].value = queue_val;
+        cc__chan_pack_value(&ch->ring_cells[slot].value, value, ch->elem_size);
     } else {
         void* dst = cc__ring_slot_ptr(ch, tail);
         channel_store_slot(dst, value, ch->elem_size);
@@ -2515,8 +2548,8 @@ static inline int cc__ring_dequeue_spsc_value(CCChan* ch, void* out_value) {
 
     size_t slot = head & (ch->lfqueue_cap - 1);
     if (ch->elem_size <= sizeof(void*)) {
-        void* val = ch->ring_cells[slot].value;
-        memcpy(out_value, &val, ch->elem_size);
+        cc__chan_unpack_value(out_value, ch->ring_cells[slot].value,
+                              ch->elem_size);
     } else {
         void* src = cc__ring_slot_ptr(ch, head);
         channel_load_slot(src, out_value, ch->elem_size);
@@ -2608,9 +2641,7 @@ static inline int cc__queue_enqueue_value(CCChan* ch, const void* value) {
                                                           memory_order_relaxed,
                                                           memory_order_relaxed)) {
                     if (ch->elem_size <= sizeof(void*)) {
-                        void* queue_val = NULL;
-                        memcpy(&queue_val, value, ch->elem_size);
-                        cell->value = queue_val;
+                        cc__chan_pack_value(&cell->value, value, ch->elem_size);
                     } else {
                         void* slot = cc__ring_slot_ptr(ch, pos);
                         channel_store_slot(slot, value, ch->elem_size);
@@ -2634,7 +2665,7 @@ static inline int cc__queue_enqueue_value(CCChan* ch, const void* value) {
     }
 
     void* queue_val = NULL;
-    memcpy(&queue_val, value, ch->elem_size);
+    cc__chan_pack_value(&queue_val, value, ch->elem_size);
     return lfds711_queue_bmm_enqueue(&ch->lfqueue_state, NULL, queue_val);
 }
 
@@ -2654,8 +2685,8 @@ static inline int cc__queue_dequeue_value(CCChan* ch, void* out_value) {
                                                           memory_order_relaxed,
                                                           memory_order_relaxed)) {
                     if (ch->elem_size <= sizeof(void*)) {
-                        void* val = cell->value;
-                        memcpy(out_value, &val, ch->elem_size);
+                        cc__chan_unpack_value(out_value, cell->value,
+                                              ch->elem_size);
                     } else {
                         void* slot = cc__ring_slot_ptr(ch, pos);
                         channel_load_slot(slot, out_value, ch->elem_size);
@@ -2683,7 +2714,7 @@ static inline int cc__queue_dequeue_value(CCChan* ch, void* out_value) {
     if (!lfds711_queue_bmm_dequeue(&ch->lfqueue_state, &key, &val)) {
         return 0;
     }
-    memcpy(out_value, &val, ch->elem_size);
+    cc__chan_unpack_value(out_value, val, ch->elem_size);
     return 1;
 }
 
