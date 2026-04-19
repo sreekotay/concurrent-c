@@ -15,6 +15,7 @@
 #include <ccc/cc_runtime.cch>
 #include <ccc/cc_io_error.cch>
 #include <ccc/cc_result.cch>
+#include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include <ccc/cc_exec.cch>
 #include "async_io.cch"
@@ -269,6 +270,17 @@ static inline CCSlice cc_file_lower_c(CCSlice recv_type,
                            cc_slice_from_buffer((void*)"cc_file_", sizeof("cc_file_") - 1),
                            method);
 }
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCFile", (CCTypeHooks){
+        .ufcs = cc_file_lower_c,
+    });
+    (void)cc_type_register("CCFile*", (CCTypeHooks){
+        .ufcs = cc_file_lower_c,
+    });
+}
+#endif
 
 // Stdout/Stderr convenience
 CCRes(size_t, CCIoError) cc_std_out_write(CCSlice data);

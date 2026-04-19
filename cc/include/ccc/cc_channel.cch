@@ -21,6 +21,7 @@
 #include <ccc/cc_chan_handle.cch>
 #include <ccc/cc_result.cch>
 #include <ccc/cc_optional.cch>
+#include <ccc/cc_type.cch>
 #include <ccc/cc_ufcs.cch>
 #include <ccc/cc_io_error.cch>
 #include <ccc/std/task.cch>
@@ -582,6 +583,17 @@ static inline CCSlice cc_channel_rx_lower_c(CCSlice recv_type, CCSlice method, C
     if (cc__channel_lower_c_eq(method, "free")) return cc_ufcs_emit_value_cstr(arena, "cc_channel_free");
     return cc_slice_empty();
 }
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCChanTx_*", (CCTypeHooks){
+        .ufcs = cc_channel_tx_lower_c,
+    });
+    (void)cc_type_register("CCChanRx_*", (CCTypeHooks){
+        .ufcs = cc_channel_rx_lower_c,
+    });
+}
+#endif
 
 /* Complete-type-only helper for direct header use after the element type is defined. */
 #define CC_DECL_TYPED_CHAN_FAMILY(T, Mangled)                                           \

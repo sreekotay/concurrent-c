@@ -17,6 +17,8 @@
 #include <math.h>
 
 #include <ccc/cc_runtime.cch>
+#include <ccc/cc_type.cch>
+#include <ccc/cc_ufcs.cch>
 #include <ccc/std/vec.cch>
 
 /* In parser mode, CCVec_char is already typedef'd to __CCVecGeneric in vec.cch.
@@ -830,5 +832,31 @@ static inline CCResult_bool_CC_BoolParseError cc_slice_parse_bool(CCSlice s) {
     }
     return cc_err_CCResult_bool_CC_BoolParseError(CC_BOOL_PARSE_INVALID_VALUE);
 }
+
+static inline CCSlice cc_string_lower_c(CCSlice recv_type,
+                                        CCSlice method,
+                                        CCSlice mode,
+                                        CCSliceArray argv,
+                                        CCSliceArray arg_types,
+                                        CCArena *arena) {
+    (void)recv_type;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    return cc_ufcs_concat2(arena,
+                           cc_slice_from_buffer((void*)"CCString_", sizeof("CCString_") - 1),
+                           method);
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCString", (CCTypeHooks){
+        .ufcs = cc_string_lower_c,
+    });
+    (void)cc_type_register("CCString*", (CCTypeHooks){
+        .ufcs = cc_string_lower_c,
+    });
+}
+#endif
 
 #endif // CC_STD_STRING_H

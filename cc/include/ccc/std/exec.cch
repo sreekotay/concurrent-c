@@ -83,15 +83,15 @@ static inline CCCommand *cc_command_arg_i32_if(CCCommand *cmd, bool cond, int va
 
 const char **cc_command_argv(CCCommand *cmd);
 CCProcessConfig cc_command_process_config(CCCommand *cmd);
-CCProcess !> (CCIoError) cc_command_spawn(CCCommand *cmd);
-CCProcessOutput !> (CCIoError) cc_command_run(CCCommand *cmd, CCArena *arena);
-CCProcessOutput !> (CCIoError) cc_command_output(CCCommand *cmd, CCArena *arena);
-CCProcessOutput !> (CCIoError) cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
-int !> (CCIoError) cc_command_status(CCCommand *cmd);
+CCResult_CCProcess_CCIoError cc_command_spawn(CCCommand *cmd);
+CCResult_CCProcessOutput_CCIoError cc_command_run(CCCommand *cmd, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *arena);
+CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
+CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
 
-static inline char[:] cc_command_lower_c(char[:] recv_type,
-                                         char[:] method,
-                                         char[:] mode,
+static inline CCSlice cc_command_lower_c(CCSlice recv_type,
+                                         CCSlice method,
+                                         CCSlice mode,
                                          CCSliceArray argv,
                                          CCSliceArray arg_types,
                                          CCArena *arena) {
@@ -102,11 +102,15 @@ static inline char[:] cc_command_lower_c(char[:] recv_type,
     return cc_ufcs_concat2(arena, cc_slice_from_buffer((void*)"cc_command_", sizeof("cc_command_") - 1), method);
 }
 
+#ifdef CC_COMPTIME_SCAN
 @comptime {
-
     (void)cc_type_register("CCCommand", (CCTypeHooks){
         .ufcs = cc_command_lower_c,
     });
+    (void)cc_type_register("CCCommand*", (CCTypeHooks){
+        .ufcs = cc_command_lower_c,
+    });
 }
+#endif
 
 #endif /* CC_STD_EXEC_H */
