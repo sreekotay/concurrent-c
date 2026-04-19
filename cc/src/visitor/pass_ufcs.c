@@ -484,16 +484,6 @@ int cc__rewrite_ufcs_spans_with_nodes(const CCASTRoot* root,
                                                        nodes[i].recv_type_is_ptr, nodes[i].recv_type);
             cc_ufcs_set_source_context(NULL, 0);
             if (rewrite_rc == CC_UFCS_REWRITE_UNRESOLVED) {
-                const char* builtin_channel = cc_ufcs_channel_callee(nodes[i].recv_type,
-                                                                     nodes[i].method,
-                                                                     nodes[i].is_under_await,
-                                                                     NULL,
-                                                                     NULL);
-                if (builtin_channel && builtin_channel[0]) {
-                    free(expr);
-                    free(out_buf);
-                    continue;
-                }
                 char rel[1024];
                 char recv_expr[256];
                 const char* file = cc_path_rel_to_repo(ctx->input_path ? ctx->input_path : "<input>", rel, sizeof(rel));
