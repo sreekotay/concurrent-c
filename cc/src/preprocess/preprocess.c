@@ -6734,16 +6734,23 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
                     const char* ok = spec ? spec->mangled_ok : NULL;
                     const char* err = spec ? spec->mangled_err : NULL;
                     if (!ok || !err) continue;
+                    int ok_is_void = (strcmp(spec->ok_type, "void") == 0);
                     fprintf(out, "bool __cc_parser_result_is_ok_CCResult_%s_%s(CCResult_%s_%s r);\n",
                             ok, err, ok, err);
                     fprintf(out, "bool __cc_parser_result_is_err_CCResult_%s_%s(CCResult_%s_%s r);\n",
                             ok, err, ok, err);
-                    fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
-                            spec->ok_type, ok, err, ok, err);
+                    /* unwrap/unwrap_or return OkType — skip when OkType is void (can't
+                     * have a void-returning function with a void parameter). */
+                    if (!ok_is_void) {
+                        fprintf(out, "%s __cc_parser_result_unwrap_CCResult_%s_%s(CCResult_%s_%s r);\n",
+                                spec->ok_type, ok, err, ok, err);
+                    }
                     fprintf(out, "%s __cc_parser_result_error_CCResult_%s_%s(CCResult_%s_%s r);\n",
                             spec->err_type, ok, err, ok, err);
-                    fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
-                            spec->ok_type, ok, err, ok, err, spec->ok_type);
+                    if (!ok_is_void) {
+                        fprintf(out, "%s __cc_parser_result_unwrap_or_CCResult_%s_%s(CCResult_%s_%s r, %s def);\n",
+                                spec->ok_type, ok, err, ok, err, spec->ok_type);
+                    }
                 }
                 {
                     int resume_line = 1;

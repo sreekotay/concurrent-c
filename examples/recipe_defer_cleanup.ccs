@@ -20,8 +20,7 @@
 
 /* Writes two lines to `path`. If `inject_error` is nonzero, returns an
  * error after the first line — exercising the @defer(err) rollback. */
-// bug: parser rejects `void !>(E) fn(...)` at definition site with "parameter declared as void"; stdlib spec uses this form freely. Workaround: return int.
-int !>(CCError) write_report(const char* path, int inject_error) {
+void !>(CCError) write_report(const char* path, int inject_error) {
     FILE* f = fopen(path, "w");
     if (!f) return cc_err(CC_ERR_IO, "fopen failed");
 
@@ -29,16 +28,11 @@ int !>(CCError) write_report(const char* path, int inject_error) {
     @defer(ok)  printf("  committed %s\n", path);
     @defer(err) printf("  rolled back %s\n", path);
 
-    int written = 0;
-    int n = fprintf(f, "line 1\n");
-    if (n < 0) return cc_err(CC_ERR_IO, "write 1 failed");
-    written += n;
+    if (fprintf(f, "line 1\n") < 0) return cc_err(CC_ERR_IO, "write 1 failed");
     if (inject_error) return cc_err(CC_ERR_INVALID_ARG, "injected failure");
-    n = fprintf(f, "line 2\n");
-    if (n < 0) return cc_err(CC_ERR_IO, "write 2 failed");
-    written += n;
+    if (fprintf(f, "line 2\n") < 0) return cc_err(CC_ERR_IO, "write 2 failed");
 
-    return cc_ok(written);
+    return cc_ok();
 }
 
 int main(void) {
@@ -54,7 +48,7 @@ int main(void) {
     /* Injected failure: fclose still runs, @defer(err) prints "rolled back",
      * @defer(ok) is skipped, error is caught here (not forwarded). */
     printf("write_report (err):\n");
-    int !>(CCError) r = write_report("/tmp/report_err.txt", 1);
+    void !>(CCError) r = write_report("/tmp/report_err.txt", 1);
     if (r.is_err()) printf("  caught: %s\n", r.error().message); // direct ResultType check
 
     return 0;
