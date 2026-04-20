@@ -395,7 +395,7 @@ static char* cc__lower_nursery_spawn_in_body_text(int closure_id, const char* bo
             nursery_counter++;
             int nid = nursery_counter;
             cc__append_fmt(&out, &out_len, &out_cap,
-                           "%.*sCCNursery* __cc_nursery_body%d_%d = cc_nursery_create();\n"
+                           "%.*sCCNursery* __cc_nursery_body%d_%d = cc_nursery_create(NULL);\n"
                            "%.*sif (!__cc_nursery_body%d_%d) abort();\n"
                            "%.*s{\n",
                            (int)ind, line_start, closure_id, nid,

@@ -1,79 +1,55 @@
 /*
- * Recipe: Error Handling with Result Types (T!>(E))
+ * Recipe: Result Types and Error Unwrapping
  *
- * Demonstrates:
- *   - Declaring functions that return T!>(E) (Result types)
- *   - Using try to propagate errors
- *   - Helper macros: cc_is_ok(), cc_is_err(), cc_unwrap(), cc_unwrap_err()
+ * Functions that can fail return T!>(E). Three unwrap forms cover the
+ * full space:
  *
- * Key insight: Result types make error handling explicit and composable.
- * Use `try` for early propagation, helper macros for manual checks.
+ *   expr ?> default      — substitute a default value on error
+ *   expr !>(e) { ... }   — handle inline (body must diverge)
+ *   expr !>;             — forward to the enclosing @errhandler
  *
- * See spec §2.2 for complete Result type documentation.
+ * hello.ccs shows the single-call inline form. This recipe shows the
+ * hoisted @errhandler pattern: declare one fatal policy at the top of
+ * a scope, then use bare !>; at every call site.
+ *
+ * See spec §3.1 for complete semantics.
  */
 #include <ccc/std/prelude.cch>
 
-/* Simulated I/O operation that can fail. */
+/* A fallible operation: returns T!>(CCError). */
 int !>(CCError) read_config_value(const char* key) {
-    if (!key || key[0] == '\0') {
-        return cc_err(CC_ERR_INVALID_ARG, "empty key");
-    }
-    if (strcmp(key, "timeout") == 0) {
-        return cc_ok(30);
-    }
-    if (strcmp(key, "max_retries") == 0) {
-        return cc_ok(3);
-    }
+    if (!key || key[0] == '\0')          return cc_err(CC_ERR_INVALID_ARG, "empty key");
+    if (strcmp(key, "timeout") == 0)     return cc_ok(30);
+    if (strcmp(key, "max_retries") == 0) return cc_ok(3);
     return cc_err(CC_ERR_NOT_FOUND, "key not found");
 }
 
-/* Function that uses try to propagate errors. */
+/* Composes fallible calls. !>(e) return cc_err(e); propagates the
+ * error unchanged to the caller — the function-level equivalent of !>;. */
 int !>(CCError) get_total_wait_time(void) {
-    int timeout = try read_config_value("timeout");
-    int retries = try read_config_value("max_retries");
+    int timeout = read_config_value("timeout")     !>(e) return cc_err(e);
+    int retries = read_config_value("max_retries") !>(e) return cc_err(e);
     return cc_ok(timeout * retries);
 }
 
-/* Function that handles errors locally using helper macros. */
-int get_timeout_with_default(int default_val) {
-    int !>(CCError) result = read_config_value("timeout");
-    if (cc_is_ok(result)) {
-        return cc_unwrap(result);
-    }
-    /* Error case: log and return default */
-    printf("warning: %s, using default %d\n", cc_unwrap_err(result).message, default_val);
-    return default_val;
-}
-
 int main(void) {
-    /* Test 1: Successful try propagation */
-    int !>(CCError) total = get_total_wait_time();
-    if (cc_is_err(total)) {
-        printf("FAIL: expected ok, got error: %s\n", cc_unwrap_err(total).message);
+    /* One fatal policy governs every !>; in this scope. */
+    @errhandler(CCError e) {
+        fprintf(stderr, "fatal [%ld]: %s\n", (long)e.kind, e.message);
         return 1;
     }
-    printf("total wait time: %d seconds\n", cc_unwrap(total));
-    
-    /* Test 2: Error propagation via try */
-    int !>(CCError) missing = read_config_value("unknown_key");
-    if (cc_is_ok(missing)) {
-        printf("FAIL: expected error for unknown key\n");
-        return 1;
-    }
-    printf("expected error: %s\n", cc_unwrap_err(missing).message);
-    
-    /* Test 3: Manual error handling with default */
-    int timeout = get_timeout_with_default(60);
-    printf("timeout (with default fallback): %d\n", timeout);
-    
-    /* Test 4: Invalid argument error */
-    int !>(CCError) invalid = read_config_value("");
-    if (cc_is_ok(invalid)) {
-        printf("FAIL: expected error for empty key\n");
-        return 1;
-    }
-    printf("expected error: %s\n", cc_unwrap_err(invalid).message);
-    
-    printf("\nAll error handling tests passed!\n");
+
+    /* (1) !>; — forwards to @errhandler if the composition fails. */
+    int total = get_total_wait_time() !>;
+    printf("total wait time: %d seconds\n", total);
+
+    /* (2) ?> — substitutes a default; never propagates. */
+    int missing = read_config_value("unknown_key") ?> -1;
+    printf("missing key fell back to: %d\n", missing);
+
+    /* (3) ?>(e) — default computed from the error value. */
+    int bad = read_config_value("") ?>(e) (e.kind == CC_ERR_INVALID_ARG ? 0 : -1);
+    printf("invalid key mapped to: %d\n", bad);
+
     return 0;
 }

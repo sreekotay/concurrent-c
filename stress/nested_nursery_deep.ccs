@@ -28,7 +28,7 @@ void* nested_task(void* arg) {
     
     if (depth < DEPTH) {
         /* Create nested nursery */
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, nested_task, (void*)(intptr_t)(depth + 1));
         cc_nursery_wait(n);
         cc_nursery_free(n);
@@ -43,7 +43,7 @@ int main(void) {
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&deepest_reached, 0);
         
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, nested_task, (void*)(intptr_t)1);
         cc_nursery_wait(n);
         cc_nursery_free(n);

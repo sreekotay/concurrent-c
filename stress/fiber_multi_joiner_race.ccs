@@ -39,7 +39,7 @@ int main(void) {
         cc_atomic_store(&inner_done, 0);
         
         /* Spawn inner task and multiple waiters */
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, inner_task, (void*)(intptr_t)iter);
         for (int j = 0; j < NUM_WAITERS; j++) {
             cc_nursery_spawn(n, waiter_task, NULL);

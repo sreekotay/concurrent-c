@@ -27,7 +27,7 @@ int main(void) {
     cc_atomic_int sum = 0;
 
     {
-        //future: CCNursery* outer = cc_nursery_create() !> @destroy;
+        //future: CCNursery* outer = cc_nursery_create(NULL) !> @destroy;
         CCNursery* outer = @create(NULL) @destroy;
         if (!outer) abort();
 
@@ -40,7 +40,7 @@ int main(void) {
         });
 
         {
-            //future: CCNursery* inner = cc_nursery_create() !> @destroy;
+            //future: CCNursery* inner = cc_nursery_create(NULL) !> @destroy;
             CCNursery* inner = @create(NULL) @destroy;
             if (!inner) abort();
             (void)inner->close_on(tx);

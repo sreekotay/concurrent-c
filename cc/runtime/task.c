@@ -741,7 +741,7 @@ int cc_block_all(int count, CCTask* tasks, intptr_t* results) {
         return 0;
     }
 
-    CCNursery* n = cc_nursery_create();
+    CCNursery* n = cc_nursery_create(NULL);
     if (!n) return ENOMEM;
 
     CCBlockAllSlot* slots = (CCBlockAllSlot*)calloc((size_t)count, sizeof(CCBlockAllSlot));
@@ -816,7 +816,7 @@ int cc_block_race(int count, CCTask* tasks, int* winner, intptr_t* result) {
     CCChan* done_chan = cc_chan_create(count);
     if (!done_chan) return ENOMEM;
 
-    CCNursery* n = cc_nursery_create();
+    CCNursery* n = cc_nursery_create(NULL);
     if (!n) {
         cc_chan_free(done_chan);
         return ENOMEM;
@@ -889,7 +889,7 @@ int cc_block_any(int count, CCTask* tasks, int* winner, intptr_t* result) {
     CCChan* done_chan = cc_chan_create(count);
     if (!done_chan) return ENOMEM;
 
-    CCNursery* n = cc_nursery_create();
+    CCNursery* n = cc_nursery_create(NULL);
     if (!n) {
         cc_chan_free(done_chan);
         return ENOMEM;

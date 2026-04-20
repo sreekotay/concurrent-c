@@ -34,7 +34,7 @@ int main(void) {
     for (int iter = 0; iter < ITERATIONS; iter++) {
         cc_atomic_store(&completed, 0);
         
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         for (int i = 0; i < NUM_FIBERS; i++) {
             cc_nursery_spawn(n, quick_task, (void*)(intptr_t)i);
         }

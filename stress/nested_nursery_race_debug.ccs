@@ -22,7 +22,7 @@ void* outer_task(void* arg) {
     fflush(stderr);
     
     /* Create inner nursery using C API */
-    CCNursery* inner = cc_nursery_create();
+    CCNursery* inner = cc_nursery_create(NULL);
     cc_nursery_spawn(inner, inner_task, (void*)(intptr_t)iter);
     fprintf(stderr, "DEBUG: iter %d - inner spawned, waiting\n", iter);
     fflush(stderr);
@@ -44,7 +44,7 @@ int main(void) {
         fprintf(stderr, "DEBUG: iter %d - outer nursery start\n", i);
         fflush(stderr);
         
-        CCNursery* outer = cc_nursery_create();
+        CCNursery* outer = cc_nursery_create(NULL);
         cc_nursery_spawn(outer, outer_task, (void*)(intptr_t)i);
         fprintf(stderr, "DEBUG: iter %d - outer spawned, waiting\n", i);
         fflush(stderr);

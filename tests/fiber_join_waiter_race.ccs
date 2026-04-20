@@ -40,7 +40,7 @@ void* instant_task(void* arg) {
     
     if (depth < DEPTH) {
         /* Immediately spawn nested nursery - no delay to maximize race window */
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, instant_task, (void*)(intptr_t)(depth + 1));
         cc_nursery_wait(n);
         cc_nursery_free(n);
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     for (int iter = 0; iter < iterations; iter++) {
         cc_atomic_store(&completed_depth, 0);
         
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, instant_task, (void*)(intptr_t)1);
         cc_nursery_wait(n);
         cc_nursery_free(n);

@@ -17,11 +17,10 @@ typedef struct CCChan CCChan;
 
 typedef struct CCNursery CCNursery;
 
-// Create a nursery. Returns NULL on allocation failure.
-CCNursery* cc_nursery_create(void);
-// Create a child nursery handle intended for explicit ownership/lifecycle lowering.
-// The current low-risk form snapshots parent cancel/deadline state at creation time.
-CCNursery* cc_nursery_create_child(CCNursery* parent);
+// Create a nursery.  Pass NULL for a top-level nursery; pass a parent to inherit
+// its cancellation flag and deadline (snapshot — no live parent pointer retained).
+// Returns NULL on allocation failure.
+CCNursery* cc_nursery_create(CCNursery* parent);
 
 // Cancel all tasks (sets flag; tasks must poll cooperatively).
 void cc_nursery_cancel(CCNursery* n);
@@ -135,12 +134,12 @@ static inline CCSlice cc_nursery_lower_c(CCSlice recv_type,
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCNursery*", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_nursery_create_child", "cc_nursery_spawn_child_closure0"),
+        .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
         .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
         .ufcs = cc_nursery_lower_c,
     });
     (void)cc_type_register("CCNursery", (CCTypeHooks){
-        .create = cc_type_create_overloads("cc_nursery_create_child", "cc_nursery_spawn_child_closure0"),
+        .create = cc_type_create_overloads("cc_nursery_create", "cc_nursery_spawn_child_closure0"),
         .destroy = cc_type_destroy_hooks("cc_nursery_wait", "cc_nursery_free"),
         .ufcs = cc_nursery_lower_c,
     });

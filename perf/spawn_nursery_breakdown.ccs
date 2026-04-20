@@ -101,7 +101,7 @@ static Breakdown bench_manual_once(int use_nursery_env) {
     cc_atomic_int counter = 0;
 
     for (int batch = 0; batch < total_batches(); batch++) {
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         if (!n) {
             fprintf(stderr, "cc_nursery_create failed\n");
             abort();

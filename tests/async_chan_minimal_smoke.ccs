@@ -71,7 +71,7 @@ int main(void) {
         return 2;
     }
 
-    CCNursery* n = cc_nursery_create();
+    CCNursery* n = cc_nursery_create(NULL);
     if (!n) {
         cc_channel_free(rch);
         cc_channel_free(reply_ch);

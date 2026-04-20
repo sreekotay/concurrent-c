@@ -188,19 +188,13 @@ static CCNursery* cc__nursery_alloc(void) {
     return n;
 }
 
-CCNursery* cc_nursery_create(void) {
-    return cc__nursery_alloc();
-}
-
-CCNursery* cc_nursery_create_child(CCNursery* parent) {
+CCNursery* cc_nursery_create(CCNursery* parent) {
     CCNursery* n = cc__nursery_alloc();
     if (!n) return NULL;
     if (!parent) return n;
 
-    /* Low-risk inheritance for the new explicit nursery-handle path:
-       snapshot current parent cancellation/deadline state without creating
-       a live parent pointer dependency. This keeps the helper safe even while
-       destroy/ownership ordering is still being designed. */
+    /* Snapshot parent cancellation/deadline state at creation time.  No live
+       parent pointer is retained, which keeps ownership ordering simple. */
     if (cc_nursery_is_cancelled(parent)) {
         n->cancelled = 1;
     }

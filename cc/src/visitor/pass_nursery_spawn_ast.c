@@ -784,7 +784,7 @@ int cc__rewrite_nursery_blocks_with_nodes(const CCASTRoot* root,
         size_t pro_len = 0, pro_cap = 0;
         cc__append_fmt(&pro, &pro_len, &pro_cap,
                        "%.*s{\n"
-                       "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
+                       "%.*sCCNursery* __cc_nursery%d = cc_nursery_create(NULL);\n"
                        "%.*sif (!__cc_nursery%d) abort();\n"
                        "#undef nursery_cancel\n"
                        "#define nursery_cancel() cc_nursery_cancel(__cc_nursery%d)\n",
@@ -914,7 +914,7 @@ int cc__collect_nursery_edits(const CCASTRoot* root,
         size_t pro_len = 0, pro_cap = 0;
         cc__append_fmt(&pro, &pro_len, &pro_cap,
                        "%.*s{\n"
-                       "%.*sCCNursery* __cc_nursery%d = cc_nursery_create();\n"
+                       "%.*sCCNursery* __cc_nursery%d = cc_nursery_create(NULL);\n"
                        "%.*sif (!__cc_nursery%d) abort();\n"
                        "#undef nursery_cancel\n"
                        "#define nursery_cancel() cc_nursery_cancel(__cc_nursery%d)\n",

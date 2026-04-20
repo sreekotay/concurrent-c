@@ -42,7 +42,7 @@ int main(void) {
         cc_atomic_store(&observers_done, 0);
         
         /* Spawn target and NUM_OBSERVERS observers that race to see completion */
-        CCNursery* n = cc_nursery_create();
+        CCNursery* n = cc_nursery_create(NULL);
         cc_nursery_spawn(n, target_task, (void*)(intptr_t)iter);
         for (int o = 0; o < NUM_OBSERVERS; o++) {
             cc_nursery_spawn(n, observer_task, NULL);
