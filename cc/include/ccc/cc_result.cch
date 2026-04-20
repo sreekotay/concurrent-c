@@ -209,6 +209,9 @@ static inline CCError CCResult_void_CCError_unwrap_err(CCResult_void_CCError r) 
     }
     return r.u.error;
 }
+static inline CCError CCResult_void_CCError_error(CCResult_void_CCError r) {
+    return CCResult_void_CCError_unwrap_err(r);
+}
 #endif /* CCResult_void_CCError_DEFINED */
 #endif /* CC_PARSER_MODE */
 
