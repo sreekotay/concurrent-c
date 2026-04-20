@@ -1,62 +1,62 @@
 /*
  * Recipe: Channel Pipeline (Producer/Consumer)
  *
- * Demonstrates:
- *   - Nested owned nurseries for structured channel lifetime
- *   - `close_on(tx)` on the inner nursery closes the producer side when done
- *   - Consumer in outer nursery drains until close, then exits
- *   - Channel handles captured in closures
+ *   inner { producer }              close_on(tx) — tx closes when producer finishes
+ *   outer { consumer, inner }       consumer sees close → drains → exits
  *
- * Key insight: Nest producers inside the close-owning nursery so the channel closes
- * exactly when producers finish, while consumer keeps running.
+ * Nested nurseries encode the close protocol without any explicit
+ * `tx.close()` or refcount: the inner nursery's @destroy waits for the
+ * producer, then auto-closes tx; the outer nursery's @destroy waits for
+ * the consumer, which by then has drained the remaining values.
+ *
+ * The consumer captures &sum by reference and uses an atomic — only one
+ * fiber writes so a plain int would be correct today, but atomic is the
+ * right default for anything a second fiber might ever touch.
  */
-#include <ccc/cc_nursery.cch>
-#include <ccc/cc_runtime.cch>
-#include <stdio.h>
-
-/* Global sum (closures capture by value, so local int wouldn't work) */
-int g_sum = 0;
+#include <ccc/std/prelude.cch>
 
 int main(void) {
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); abort(); }
+
     int[~4 >] tx;
     int[~4 <] rx;
     CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+    @defer ch->free();
+
+    cc_atomic_int sum = 0;
 
     {
-        CCNursery* __cc_nursery98 = @create(NULL) @destroy;
-        if (!__cc_nursery98) abort();
+        //future: CCNursery* outer = cc_nursery_create() !> @destroy;
+        CCNursery* outer = @create(NULL) @destroy;
+        if (!outer) abort();
 
-        /* Consumer: lives in outer nursery, drains until close. */
-        __cc_nursery98->spawn(() => {
+        outer->spawn(() => [&sum, rx] {
             int v;
-            while (cc_io_avail(chan_recv(rx, &v))) {
+            while (cc_io_avail(rx.recv(&v))) {
                 printf("recv: %d\n", v);
-                g_sum += v;
+                cc_atomic_fetch_add(&sum, v);
             }
-            printf("consumer: channel closed\n");
         });
 
-        /* Producers: live in the inner close-owning nursery. */
         {
-            CCNursery* __cc_nursery99 = @create(NULL) @destroy;
-            if (!__cc_nursery99) abort();
-            (void)__cc_nursery99->close_on(tx);
+            //future: CCNursery* inner = cc_nursery_create() !> @destroy;
+            CCNursery* inner = @create(NULL) @destroy;
+            if (!inner) abort();
+            (void)inner->close_on(tx);
 
-            __cc_nursery99->spawn(() => {
+            inner->spawn(() => [tx] {
                 for (int i = 1; i <= 3; i++) {
-                    (void)chan_send(tx, i);
+                    (void)tx.send(i);
                     printf("send: %d\n", i);
                 }
             });
-        
         }
-        /* Inner nursery done -> producers finished -> ch closed. */
-        /* Consumer sees close, drains remaining, exits. */
-    
+        /* inner @destroy: wait producer → close tx */
     }
-    /* Outer nursery done -> consumer finished -> all clean. */
+    /* outer @destroy: wait consumer (saw close, drained, exited) */
 
-    cc_chan_free(ch);
-    printf("sum = %d (expected 6)\n", g_sum);  /* 1+2+3 = 6 */
-    return (g_sum == 6) ? 0 : 1;
+    int total = cc_atomic_load(&sum);
+    printf("sum = %d (expected 6)\n", total);
+    return (total == 6) ? 0 : 1;
 }

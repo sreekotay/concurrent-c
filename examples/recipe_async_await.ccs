@@ -1,91 +1,36 @@
 /*
  * Recipe: Async/Await with Channels
  *
- * Demonstrates:
- *   - @async functions for cooperative concurrency
- *   - await on channel operations in async context
- *   - UFCS ergonomic channel syntax: tx.send(val), rx.recv(&val)
- *   - cc_block_on() to run async functions from main()
+ *   @async int f(...) { ... await tx.send(v) ... }   compose suspension points
+ *   cc_block_on(int, f(...))                         drive an async fn from sync main()
+ *   tx.send(v), rx.recv(&v), tx.close(), ch.free()   UFCS channel ops
  *
- * IMPORTANT: When sending values to a channel from cc_block_on(),
- * ensure the buffer is large enough to hold all values, OR use
- * concurrent producer/consumer via an explicit nursery handle.
+ * `send_then_recv` puts one value into a 1-slot buffered channel and reads
+ * it back. It has no loop of channel ops, so the compiler infers it as
+ * nonblocking and cc_block_on drives it without a deadlock warning. For
+ * producer/consumer pipelines, see recipe_channel_pipeline.ccs.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
 
-/* Async producer: sends values on a channel */
-@async int producer(CCChanTx tx, int count) {
-    printf("producer: will send %d values\n", count);
-    for (int i = 1; i <= count; i++) {
-        intptr_t rc = await tx.send(i);
-        if (rc != 0) {
-            printf("producer: send failed at %d\n", i);
-            return -1;
-        }
-        printf("producer: sent %d\n", i);
-    }
-    printf("producer: done\n");
-    return 0;
-}
-
-/* Async consumer: receives one value */
-@async int recv_one(CCChanRx rx) {
-    int val = 0;
-    intptr_t rc = await rx.recv(&val);
-    if (rc != 0) return -1;
-    return val;
+@async int send_then_recv(CCChanTx tx, CCChanRx rx, int v) {
+    if (await tx.send(v) != 0) return -1;
+    int got = 0;
+    if (await rx.recv(&got) != 0) return -2;
+    return got;
 }
 
 int main(void) {
-    /*
-     * Pattern 1: Buffer large enough for all sends
-     * Use buffer >= number of values to avoid blocking.
-     */
-    printf("=== Pattern 1: Large buffer ===\n");
-    {
-        int[~10 >] tx;  /* Buffer of 10 fits 5 values */
-        int[~10 <] rx;
-        CCChan* ch = cc_channel_pair(&tx, &rx);
-        
-        int rc = cc_block_on(int, producer(tx, 5));
-        printf("producer returned: %d\n", rc);
-        
-        /* Drain synchronously */
-        int val, sum = 0;
-        while (cc_io_avail(chan_try_recv(rx, &val))) {
-            printf("  received: %d\n", val);
-            sum += val;
-        }
-        printf("sum = %d (expected 15)\n", sum);
-        
-        chan_close(tx);
-        cc_chan_free(ch);
-    }
-    
-    /*
-     * Pattern 2: Single send/recv (always safe)
-     */
-    printf("\n=== Pattern 2: Single value ===\n");
-    {
-        int[~1 >] tx;
-        int[~1 <] rx;
-        CCChan* ch = cc_channel_pair(&tx, &rx);
-        
-        /* Send one value */
-        int val = 42;
-        printf("sending %d...\n", val);
-        intptr_t rc = cc_chan_send(tx.raw, &val, sizeof(val));
-        printf("send rc = %ld\n", (long)rc);
-        
-        /* Receive it back via async */
-        int received = cc_block_on(int, recv_one(rx));
-        printf("received: %d\n", received);
-        
-        chan_close(tx);
-        cc_chan_free(ch);
-    }
-    
-    printf("\nResult: PASS\n");
-    return 0;
+    @errhandler(CCError e) { fprintf(stderr, "fatal: %s\n", e.message); abort(); }
+
+    int[~1 >] tx;
+    int[~1 <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+    @defer ch->free();
+
+    int got = cc_block_on(int, send_then_recv(tx, rx, 42));
+    // future: int got = @await send_then_recv(tx, rx, 42); // we should lower to the above automtically, not error
+    printf("got=%d (expected 42)\n", got);
+    return (got == 42) ? 0 : 1;
 }

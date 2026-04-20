@@ -89,26 +89,16 @@ CCResult_CCProcessOutput_CCIoError cc_command_output(CCCommand *cmd, CCArena *ar
 CCResult_CCProcessOutput_CCIoError cc_command_output_with_input(CCCommand *cmd, CCArena *arena, CCSlice input);
 CCResult_int_CCIoError cc_command_status(CCCommand *cmd);
 
-static inline CCSlice cc_command_lower_c(CCSlice recv_type,
-                                         CCSlice method,
-                                         CCSlice mode,
-                                         CCSliceArray argv,
-                                         CCSliceArray arg_types,
-                                         CCArena *arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    return cc_ufcs_concat2(arena, cc_slice_from_buffer((void*)"cc_command_", sizeof("cc_command_") - 1), method);
-}
+/* CCCommand UFCS uses the shared generic snake_case helper:
+   smart-lowering CCCommand -> cc_command_*, matching the existing C API. */
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCCommand", (CCTypeHooks){
-        .ufcs = cc_command_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCCommand*", (CCTypeHooks){
-        .ufcs = cc_command_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
 }
 #endif

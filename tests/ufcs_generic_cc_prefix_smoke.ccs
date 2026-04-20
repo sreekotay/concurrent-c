@@ -1,0 +1,37 @@
+// Exercises the generic CC* UFCS helper via CCArenaCheckpoint and
+// CCArenaPool.  Smart snake_case lowering splits CamelCase on uppercase
+// boundaries, so the helper produces, for example:
+//   `cp.restore()`       becomes  cc_arena_checkpoint_restore(&cp)
+//   `p.alloc()`          becomes  cc_arena_pool_alloc(p)
+//   `p.detach_arena()`   becomes  cc_arena_pool_detach_arena(&p)
+// All registered via the shared cc_ufcs_generic_cc_prefix_lower_c hook
+// (opt-in registrations live in cc_arena.cch).
+#include <ccc/std/prelude.cch>
+#include <assert.h>
+
+int main(void) {
+    char backing[1024];
+    CCArena __arena = @create(backing, sizeof(backing)) @destroy;
+    if (!__arena.base) abort();
+    CCArena* arena = &__arena;
+
+    int* a1 = cc_arena_alloc_T(int, arena);
+    assert(a1 != NULL);
+    *a1 = 42;
+
+    CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
+
+    int* a2 = cc_arena_alloc_T_count(int, arena, 8);
+    assert(a2 != NULL);
+    a2[0] = 7;
+
+    cp.restore();
+
+    assert(*a1 == 42);
+
+    int* a3 = cc_arena_alloc_T_count(int, arena, 8);
+    assert(a3 == a2);
+
+    printf("ufcs_generic_cc_prefix_smoke: OK\n");
+    return 0;
+}

@@ -1,45 +1,27 @@
 /*
  * Recipe: Scoped Memory (Arena)
  *
- * Demonstrates:
- *   - owned arena scope with automatic cleanup
- *   - Arena-backed CCString builder with UFCS
- *   - Request-scoped allocation: O(1) reset per iteration
- *
- * Key insight: Arena resets are instant (pointer bump reset).
- * No per-allocation free, no fragmentation, no leaks.
+ * Arenas are bump-allocated memory with O(1) reset. @destroy frees the
+ * arena at scope exit — in a loop body, that's once per iteration, so
+ * each "request" gets a clean arena. Checkpoints let you peel back
+ * scratch work without tearing down the whole arena.
  */
 #include <ccc/std/prelude.cch>
-#include <stdio.h>
 
 int main(void) {
-    /* Simulate processing 3 "requests" - arena resets each iteration. */
+    //future: CCArena arena = cc_arena_heap(kilobytes(4)) !> @destroy;
+    CCArena arena = @create(kilobytes(4)) @destroy;
+    if (!arena.base) return 1;
     for (int i = 1; i <= 3; i++) {
-        {
-            CCArena arena_storage = @create(kilobytes(4)) @destroy;
-            if (!arena_storage.base) return 1;
-            CCArena* arena = &arena_storage;
-            /* All allocations this iteration use this arena. */
-            CCString s = CCString_new(arena);
-            
-            /* UFCS: method syntax on plain C types. */
-            s.append("Processing request ");
-            CCString_push_int(&s, i);
-            s.append("\n");
-            
-            cc_std_out.write(s);
+        CCString s = @string(`Processing request ${i} bytes: ${arena.remaining()}\n`, &arena);
+        cc_std_out.write(s);
 
-            /* Checkpoints: reclaim temporary allocations without resetting the whole arena. */
-            CCArenaCheckpoint cp = cc_arena_checkpoint(arena);
-            char* scratch = cc_arena_alloc_T_count(char, arena, 64);
-            if (scratch) {
-                scratch[0] = '\0';
-            }
-            cc_arena_restore(cp);  /* Scratch allocations reclaimed */
-        }
-        /* Arena reset here - O(1), no matter how much was allocated. */
+        /* scratch allocation, reclaimed at cp.restore() */
+        CCArenaCheckpoint cp = arena.checkpoint();
+        //future: char* scratch = arena.alloc_array::[char](64) !>;
+        char* scratch = cc_arena_alloc_T_count(char, &arena, 1024);
+        if (scratch) scratch[0] = '\0';
+        cp.restore();
     }
-
-    printf("done\n");
     return 0;
 }

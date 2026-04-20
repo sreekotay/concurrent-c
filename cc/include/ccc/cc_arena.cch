@@ -88,6 +88,9 @@ static size_t remaining();
 static CCArena detach();
 static CCArenaCheckpoint checkpoint();
 
+/* CCArenaCheckpoint stubs */
+static void restore();
+
 /* CCArenaPool stubs */
 static void* alloc();
 static CCArena detach_arena();
@@ -250,6 +253,93 @@ static inline void *cc_arena_alloc_local_grow(CCArena *arena, size_t size, size_
 
 #define cc_arena_alloc_T_count(T, arena, count) \
     ((T*)cc_arena_alloc((arena), sizeof(T) * (size_t)(count), _Alignof(T)))
+
+/* Generic UFCS name composer shared by any `CC<Rest>` type whose C API
+ * follows the stdlib convention `cc_<snake_rest>_<method>(CCType* self, ...)`.
+ * Emits the callee name only; the ufcs.c dispatcher handles `&recv` vs
+ * `recv` based on whether the receiver is a pointer or an addressable value.
+ *
+ * The type name (after stripping the leading `CC`) is lowered ASCII-by-
+ * ASCII: every uppercase letter after the first becomes `_<lower>`, so
+ * CamelCase implicitly splits into snake_case.  This matches the existing
+ * stdlib naming without any per-type configuration:
+ *
+ *      CCFile f;              f.close()       -> cc_file_close(&f)
+ *      CCArena* a;            a->remaining()  -> cc_arena_remaining(a)
+ *      CCArenaCheckpoint cp;  cp.restore()    -> cc_arena_checkpoint_restore(&cp)
+ *      CCArenaPool* p;        p->alloc()      -> cc_arena_pool_alloc(p)
+ *      CCString s;            s.len()         -> cc_string_len(&s)
+ *      CCNursery* n;          n->wait()       -> cc_nursery_wait(n)
+ *
+ * Types opt in by registering this helper directly:
+ *
+ *      @comptime {
+ *          (void)cc_type_register("CCFoo", (CCTypeHooks){
+ *              .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
+ *          });
+ *      }
+ *
+ * Lives in cc_arena.cch (rather than cc_ufcs.cch) because the body needs
+ * `cc_arena_alloc` and cc_ufcs.cch is the one that #includes this header;
+ * putting it here avoids the otherwise-circular include order.
+ *
+ * Defined unconditionally (no CC_PARSER_MODE guard) because the
+ * @comptime hook TU compiler defines CC_PARSER_MODE while still needing
+ * this helper as a referenceable symbol for `.ufcs = ...` registrations. */
+static inline CCSlice cc_ufcs_generic_cc_prefix_lower_c(CCSlice recv_type,
+                                                        CCSlice method,
+                                                        CCSlice mode,
+                                                        CCSliceArray argv,
+                                                        CCSliceArray arg_types,
+                                                        CCArena *arena) {
+    const char *t;
+    size_t tlen;
+    size_t max_total;
+    size_t ri;
+    size_t wi;
+    size_t total;
+    char *buf;
+    (void)mode;
+    (void)argv;
+    (void)arg_types;
+    t = (const char *)recv_type.ptr;
+    tlen = recv_type.len;
+    if (!t || tlen == 0 || !arena) return cc_slice_empty();
+    /* Strip optional leading "struct " / "union " qualifiers that TCC
+       occasionally reports for elaborated type names. */
+    if (tlen >= 7 && memcmp(t, "struct ", 7) == 0) { t += 7; tlen -= 7; }
+    else if (tlen >= 6 && memcmp(t, "union ", 6) == 0) { t += 6; tlen -= 6; }
+    /* Strip trailing pointer stars and whitespace so both `CCFoo` and
+       `CCFoo*` resolve to the same callee. */
+    while (tlen > 0 && (t[tlen - 1] == '*' || t[tlen - 1] == ' ' || t[tlen - 1] == '\t')) tlen--;
+    /* Require the `CC` prefix followed by at least one more character so
+       we don't produce `cc__method` for the bare `CC` typedef. */
+    if (tlen <= 2 || t[0] != 'C' || t[1] != 'C') return cc_slice_empty();
+    /* Worst case: every remaining char is uppercase and gains a `_`, so
+       plan for 2x + the "cc_" prefix + "_" separator + method. */
+    max_total = 3 /* "cc_" */ + (tlen - 2) * 2 + 1 /* "_" */ + method.len;
+    buf = (char *)cc_arena_alloc(arena, max_total, sizeof(char));
+    if (!buf) return cc_slice_empty();
+    wi = 0;
+    buf[wi++] = 'c'; buf[wi++] = 'c'; buf[wi++] = '_';
+    /* Smart snake_case: first char after `CC` is emitted as lowercase
+       with no leading `_`; each subsequent uppercase letter gets a
+       preceding `_`.  Non-ASCII / already-lowercase / digits / `_` pass
+       through unchanged. */
+    for (ri = 2; ri < tlen; ++ri) {
+        char c = t[ri];
+        int is_upper = (c >= 'A' && c <= 'Z');
+        if (is_upper && ri > 2) buf[wi++] = '_';
+        buf[wi++] = is_upper ? (char)(c + ('a' - 'A')) : c;
+    }
+    buf[wi++] = '_';
+    if (method.len > 0 && method.ptr) {
+        memcpy(buf + wi, method.ptr, method.len);
+        wi += method.len;
+    }
+    total = wi;
+    return cc_slice_from_buffer(buf, total);
+}
 
 
 // Allocate a growable arena with heap-backed storage of given initial size.
@@ -504,6 +594,25 @@ static inline void cc_arena_restore(CCArenaCheckpoint checkpoint) {
     arena->provenance = checkpoint.provenance;
 }
 
+/* Pointer-taking UFCS wrapper: `cp.restore()` lowers to
+   cc_arena_checkpoint_restore(&cp) via the smart snake_case generic
+   helper (CamelCase split on uppercase: CCArenaCheckpoint ->
+   cc_arena_checkpoint), which forwards by value to cc_arena_restore.
+   Keeping the value-taking `cc_arena_restore` as the canonical entry
+   point preserves existing C callers. */
+static inline void cc_arena_checkpoint_restore(CCArenaCheckpoint* cp) {
+    if (!cp) return;
+    cc_arena_restore(*cp);
+}
+
+#ifdef CC_COMPTIME_SCAN
+@comptime {
+    (void)cc_type_register("CCArenaCheckpoint", (CCTypeHooks){
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
+    });
+}
+#endif
+
 // True (non-zero) iff the current slab can satisfy this alloc without growing
 // (same condition as cc__arena_alloc_fast). Does not observe future growth; use
 // cc_arena_remaining for raw tail space ignoring alignment.
@@ -548,32 +657,10 @@ static inline CCSlice cc_arena_alloc_slice(CCArena *arena, size_t elem_size, siz
     return cc_slice_from_parts(ptr, count, id, count);
 }
 
-static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
-                                       CCSlice method,
-                                       CCSlice mode,
-                                       CCSliceArray argv,
-                                       CCSliceArray arg_types,
-                                       CCArena *arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    /* Canonical arena UFCS namespace is `cc_arena_*`. Any method name a user
-       writes on an arena receiver lowers to `cc_arena_<method>`; if that
-       symbol does not exist the C compiler reports a real missing-symbol
-       diagnostic rather than a silent UFCS fallthrough. We inline the
-       slice-concat (rather than calling cc_ufcs_concat2) because cc_ufcs.cch
-       itself #includes this header, so we can't pull cc_ufcs.cch back in to
-       get its definition at this point in the translation unit. */
-    static const char kPrefix[] = "cc_arena_";
-    const size_t prefix_len = sizeof(kPrefix) - 1;
-    size_t total = prefix_len + method.len;
-    char *buf = arena ? (char *)cc_arena_alloc(arena, total, sizeof(char)) : NULL;
-    if (!buf) return cc_slice_empty();
-    memcpy(buf, kPrefix, prefix_len);
-    if (method.len > 0 && method.ptr) memcpy(buf + prefix_len, method.ptr, method.len);
-    return cc_slice_from_buffer(buf, total);
-}
+/* CCArena UFCS uses the generic `cc_<lower_type>_<method>` convention
+ * (cc_arena_alloc, cc_arena_remaining, ...), so it opts in to the shared
+ * `cc_ufcs_generic_cc_prefix_lower_c` helper rather than carrying a
+ * bespoke name-composer here.  See cc/include/ccc/cc_ufcs.cch. */
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
@@ -585,7 +672,7 @@ static inline CCSlice cc_arena_lower_c(CCSlice recv_type,
          * directly with CC_ARENA_GROWABLE. */
         .create = cc_type_create_overloads("cc_arena_create", "cc_arena_fixed_buffer"),
         .destroy = cc_type_destroy_call("cc_arena_destroy"),
-        .ufcs = cc_arena_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
 }
 #endif
@@ -632,6 +719,17 @@ static inline void cc_arena_pool_destroy(CCArenaPool* p) {
     }
     p->arena = NULL;
     cc_atomic_store(&p->freelist, 0);
+}
+
+/* Alias for `cc_arena_pool_detach` — the UFCS surface spelling is
+   `pool.detach_arena()`, which the generic helper lowers to
+   `cc_arena_pool_detach_arena(&pool)` (type `CCArenaPool` ->
+   `cc_arena_pool_`, method `detach_arena`).  Keeping the shorter
+   `cc_arena_pool_detach` name as the canonical implementation preserves
+   pre-UFCS C callers. */
+static inline CCArena cc_arena_pool_detach(CCArenaPool* p);
+static inline CCArena cc_arena_pool_detach_arena(CCArenaPool* p) {
+    return cc_arena_pool_detach(p);
 }
 
 // Detach and return the underlying arena, leaving the pool empty.
@@ -681,36 +779,15 @@ static inline void cc_arena_pool_free(CCArenaPool* p, void* ptr) {
     }
 }
 
-static inline CCSlice cc_arena_pool_lower_c(CCSlice recv_type,
-                                            CCSlice method,
-                                            CCSlice mode,
-                                            CCSliceArray argv,
-                                            CCSliceArray arg_types,
-                                            void *pool) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    (void)pool;
-    if (method.len == sizeof("alloc") - 1 && memcmp(method.ptr, "alloc", sizeof("alloc") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_pool_alloc", sizeof("cc_arena_pool_alloc") - 1);
-    }
-    if (method.len == sizeof("free") - 1 && memcmp(method.ptr, "free", sizeof("free") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_pool_free", sizeof("cc_arena_pool_free") - 1);
-    }
-    if (method.len == sizeof("detach_arena") - 1 && memcmp(method.ptr, "detach_arena", sizeof("detach_arena") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_pool_detach", sizeof("cc_arena_pool_detach") - 1);
-    }
-    if (method.len == sizeof("destroy") - 1 && memcmp(method.ptr, "destroy", sizeof("destroy") - 1) == 0) {
-        return cc_slice_from_buffer((void*)"cc_arena_pool_destroy", sizeof("cc_arena_pool_destroy") - 1);
-    }
-    return cc_slice_empty();
-}
+/* CCArenaPool UFCS uses the generic snake_case helper: CamelCase split
+   on uppercase maps `CCArenaPool` -> `cc_arena_pool_*`, matching the
+   existing C API (alloc/free/destroy) plus the `detach_arena` alias
+   declared above. */
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCArenaPool", (CCTypeHooks){
-        .ufcs = cc_arena_pool_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
 }
 #endif

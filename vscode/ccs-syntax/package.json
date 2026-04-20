@@ -2,11 +2,11 @@
   "name": "concurrent-c-syntax",
   "displayName": "Concurrent-C Syntax",
   "description": "Syntax highlighting for Concurrent-C (*.ccs, *.cch), a C-preprocessor-based language.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.60.0"
   },
   "categories": [
     "Programming Languages"

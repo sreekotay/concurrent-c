@@ -17,7 +17,7 @@ int main(void) {
     CCNursery* n = cc_nursery_create() !>(e) { //Error handler
                 fprintf(stderr, "Error [%ld]: %s", (long)e.kind, e.message); 
                 return 1;
-                } @destroy { printf("Done. Always After B, C, A\n"); }; //Scope-based RAII
+                } @destroy { printf("Done. Always After B, C, A\n"); }; //Scope deferred cleanup
     n->spawn(() => {usleep(100); printf("Hello from task A! (Always third)\n");});
     n->spawn(() => printf("Hello from task B!\n"));
     n->spawn(() => printf("Hello from task C!\n"));

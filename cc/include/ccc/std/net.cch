@@ -216,49 +216,23 @@ CCSlice cc_ip_addr_to_string(CCIpAddr* addr, CCArena* arena);
 /* Parse string to IP address */
 CCIpAddr cc_ip_parse(const char* s, size_t len, CCNetError* out_err);
 
-static inline CCSlice cc_socket_lower_c(CCSlice recv_type,
-                                        CCSlice method,
-                                        CCSlice mode,
-                                        CCSliceArray argv,
-                                        CCSliceArray arg_types,
-                                        CCArena* arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    return cc_ufcs_concat2(arena,
-                           cc_slice_from_buffer((void*)"cc_socket_", sizeof("cc_socket_") - 1),
-                           method);
-}
-
-static inline CCSlice cc_listener_lower_c(CCSlice recv_type,
-                                          CCSlice method,
-                                          CCSlice mode,
-                                          CCSliceArray argv,
-                                          CCSliceArray arg_types,
-                                          CCArena* arena) {
-    (void)recv_type;
-    (void)mode;
-    (void)argv;
-    (void)arg_types;
-    return cc_ufcs_concat2(arena,
-                           cc_slice_from_buffer((void*)"cc_listener_", sizeof("cc_listener_") - 1),
-                           method);
-}
+/* CCSocket / CCListener UFCS use the shared generic snake_case helper:
+   smart-lowering CCSocket -> cc_socket_*, CCListener -> cc_listener_*,
+   matching the existing C API. */
 
 #ifdef CC_COMPTIME_SCAN
 @comptime {
     (void)cc_type_register("CCSocket", (CCTypeHooks){
-        .ufcs = cc_socket_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCSocket*", (CCTypeHooks){
-        .ufcs = cc_socket_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCListener", (CCTypeHooks){
-        .ufcs = cc_listener_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
     (void)cc_type_register("CCListener*", (CCTypeHooks){
-        .ufcs = cc_listener_lower_c,
+        .ufcs = cc_ufcs_generic_cc_prefix_lower_c,
     });
 }
 #endif
