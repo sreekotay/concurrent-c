@@ -1,0 +1,32 @@
+/*
+ * Regression: when a typed-channel handle carries a Result<Ok, Err> element
+ * (e.g. `Widget* !>(MyErr)[~16 >] tx;`), the UFCS receiver-type inference
+ * used to see the *inner* Result mangle (CCResult_Widgetptr_MyErr) and miss
+ * the CCChanTx_* wrapper, making `tx.close()` fall through to the typed
+ * fallback emitting a nonexistent `<TypedChan>_close`.
+ *
+ * Fix in cc__ufcs_normalize_decl_type: detect trailing `[~... >]` /
+ * `[~... <]` channel sugar, recurse on the element type (so bang-Results
+ * still mangle correctly), and wrap with CCChanTx_/CCChanRx_.
+ */
+
+#include <ccc/std/prelude.cch>
+
+typedef struct MyPayload {
+    int seq;
+} MyPayload;
+
+typedef struct MyErr {
+    int code;
+} MyErr;
+
+int main(void) {
+    MyPayload* !>(MyErr)[~8 >] tx;
+    MyPayload* !>(MyErr)[~8 ordered <] rx;
+    CCChan* ch = cc_channel_pair(&tx, &rx);
+    if (!ch) return 1;
+    tx.close();
+    ch.free();
+    printf("ok\n");
+    return 0;
+}

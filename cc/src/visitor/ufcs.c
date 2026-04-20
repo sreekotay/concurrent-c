@@ -110,6 +110,48 @@ static void cc__ufcs_normalize_decl_type(char* out, size_t out_sz, const char* t
     out[0] = '\0';
     if (!type_name || !type_name[0]) return;
     type_name = cc__ufcs_canonicalize_string_type(type_name);
+    /* Channel sugar: `<elem> [~<cap> >]` / `<elem> [~<cap> <]` wraps the
+     * element type into a CCChanTx_<mangled> / CCChanRx_<mangled> handle.
+     * Detect the trailing bracketed span, mangle the element (which may
+     * itself carry bang-result sugar), and wrap.  Mirrors the logic in
+     * preprocess/type_registry.c so receiver-type inference matches the
+     * registered typedef. */
+    {
+        const char* lb = strchr(type_name, '[');
+        if (lb) {
+            const char* rb = strchr(lb, ']');
+            if (rb && memchr(lb, '~', (size_t)(rb - lb)) != NULL) {
+                int is_tx = memchr(lb, '>', (size_t)(rb - lb)) != NULL;
+                int is_rx = memchr(lb, '<', (size_t)(rb - lb)) != NULL;
+                if (is_tx || is_rx) {
+                    const char* elem_s = type_name;
+                    const char* elem_e = lb;
+                    char elem_buf[256];
+                    char elem_norm[256];
+                    size_t elem_len;
+                    cc__ufcs_trim_type_span(&elem_s, &elem_e);
+                    if (elem_e > elem_s) {
+                        elem_len = (size_t)(elem_e - elem_s);
+                        if (elem_len >= sizeof(elem_buf)) elem_len = sizeof(elem_buf) - 1;
+                        memcpy(elem_buf, elem_s, elem_len);
+                        elem_buf[elem_len] = '\0';
+                        /* Recurse to resolve bang-result sugar on the element. */
+                        cc__ufcs_normalize_decl_type(elem_norm, sizeof(elem_norm), elem_buf);
+                        if (elem_norm[0]) {
+                            char mangled_elem[128];
+                            cc_result_spec_mangle_type(elem_norm, strlen(elem_norm),
+                                                       mangled_elem, sizeof(mangled_elem));
+                            if (mangled_elem[0]) {
+                                snprintf(out, out_sz, "%s_%s",
+                                         is_tx ? "CCChanTx" : "CCChanRx", mangled_elem);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     bang = strchr(type_name, '!');
     if (!bang || bang[1] == '=') {
         strncpy(out, type_name, out_sz - 1);
