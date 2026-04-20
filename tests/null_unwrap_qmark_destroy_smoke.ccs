@@ -1,0 +1,12 @@
+// Smoke: `?>` with a trailing `@destroy { body }` success-destructor.
+// The @destroy body runs at scope exit, seeing the bound `s`.
+#include <stdio.h>
+
+static const char g_good[] = "real";
+static const char* get_real(void) { return g_good; }
+
+int main(void) {
+    const char* s = get_real() ?> "fallback" @destroy { printf("destroy s=%s\n", s); };
+    printf("main s=%s\n", s);
+    return 0;
+}

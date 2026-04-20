@@ -1,0 +1,25 @@
+// Smoke: !>; bare form on a pointer-returning call delegates to the
+// enclosing @errhandler; the synthesized CCError has kind CC_ERR_NULL
+// and a message that carries the call-site expression + file:line.
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static char* get_null_str(void) { return NULL; }
+
+static int g_kind = -1;
+static int g_has_src = -1;
+
+int main(void) {
+    @errhandler(CCError e) {
+        g_kind = (int)e.kind;
+        g_has_src = (e.message != NULL && strstr(e.message, "get_null_str") != NULL) ? 1 : 0;
+        printf("default kind=%d has_src=%d is_null=%d\n",
+               g_kind, g_has_src, g_kind == CC_ERR_NULL);
+        exit(0);
+    }
+    get_null_str() !>;
+    get_null_str() !> @destroy { printf("destroy handler ran\n"); };
+    printf("UNEXPECTED\n");
+    return 1;
+}

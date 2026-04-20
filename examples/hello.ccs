@@ -1,27 +1,25 @@
 /*
  * Hello, Concurrent-C!
  *
- * A minimal example showing the core concept: structured concurrency.
- * Tasks run in parallel, nursery waits for all to complete.
+ * Three tasks run concurrently. The nursery waits for all of them at
+ * scope exit; the @destroy block fires after. A program-scope
+ * @errhandler turns any unhandled !> into a fatal diagnostic.
  */
 #include <ccc/cc_runtime.cch>
 #include <stdio.h>
+#include <unistd.h>
 
 int main(void) {
-    printf("Starting...\n");
-    
-    {
-        CCNursery* __cc_nursery97 = @create(NULL) @destroy;
-        if (!__cc_nursery97) abort();
-
-        __cc_nursery97->spawn(() => printf("Hello from task A!\n"));
-        __cc_nursery97->spawn(() => printf("Hello from task B!\n"));
-        __cc_nursery97->spawn(() => printf("Hello from task C!\n"));
-    
-    }
-    /* All tasks complete before we reach here. */
-    
-    printf("Done.\n");
+    /* ther other option:
+    @errhandler(CCError e) {fprintf(stderr, "Error [%ld]: %s", (long)e.kind, e.message); exit(1);}
+    CCNursery* n = cc_nursery_create() !> @destroy { printf("Done. Always After B, C, A\n"); };
+    */
+    CCNursery* n = cc_nursery_create() !>(e) { //Error handler
+                fprintf(stderr, "Error [%ld]: %s", (long)e.kind, e.message); 
+                return 1;
+                } @destroy { printf("Done. Always After B, C, A\n"); }; //Scope-based RAII
+    n->spawn(() => {usleep(100); printf("Hello from task A! (Always third)\n");});
+    n->spawn(() => printf("Hello from task B!\n"));
+    n->spawn(() => printf("Hello from task C!\n"));
     return 0;
 }
-

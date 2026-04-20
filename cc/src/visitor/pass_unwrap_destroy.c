@@ -1,0 +1,374 @@
+#include "pass_unwrap_destroy.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "util/text.h"
+#include "visitor/pass_common.h"
+
+#define cc__append_n   cc_sb_append
+#define cc__append_str cc_sb_append_cstr
+CC_DEFINE_SB_APPEND_FMT
+
+/* Skip C comments and string/char literals starting at `s[*i]`.  Advances
+ * `*i` past the skipped region.  Returns 1 if any input was consumed. */
+static int cc__ud_skip_comment_or_string(const char* s, size_t n, size_t* i) {
+    if (*i >= n) return 0;
+    char c = s[*i];
+    if (c == '/' && *i + 1 < n && s[*i + 1] == '/') {
+        *i += 2;
+        while (*i < n && s[*i] != '\n') (*i)++;
+        return 1;
+    }
+    if (c == '/' && *i + 1 < n && s[*i + 1] == '*') {
+        *i += 2;
+        while (*i + 1 < n && !(s[*i] == '*' && s[*i + 1] == '/')) (*i)++;
+        if (*i + 1 < n) *i += 2;
+        return 1;
+    }
+    if (c == '"' || c == '\'') {
+        char q = c;
+        (*i)++;
+        while (*i < n && s[*i] != q) {
+            if (s[*i] == '\\' && *i + 1 < n) { *i += 2; continue; }
+            (*i)++;
+        }
+        if (*i < n) (*i)++;
+        return 1;
+    }
+    return 0;
+}
+
+/* Return 1 if position `pos` in `s` lies inside a `//` line comment on
+ * the same line.  Used by the backward scanner to skip over commented
+ * characters without mistaking them for statement terminators. */
+static int cc__ud_pos_in_line_comment(const char* s, size_t pos) {
+    size_t line_start = pos;
+    while (line_start > 0 && s[line_start - 1] != '\n') line_start--;
+    size_t j = line_start;
+    int in_str = 0;
+    char qch = 0;
+    while (j < pos) {
+        char c = s[j];
+        if (in_str) {
+            if (c == '\\' && j + 1 < pos) { j += 2; continue; }
+            if (c == qch) in_str = 0;
+            j++;
+            continue;
+        }
+        if (c == '"' || c == '\'') { in_str = 1; qch = c; j++; continue; }
+        if (c == '/' && j + 1 < pos && s[j + 1] == '/') return 1;
+        j++;
+    }
+    return 0;
+}
+
+/* Walk backward from `pos` (exclusive) to find the start of the current
+ * statement — right after the nearest enclosing `{`, `}`, `;`, or the
+ * start of file.  Balanced `{ ... }` bodies are traversed transparently
+ * by counting depth.  String/comment aware. */
+static size_t cc__ud_stmt_start_backward(const char* s, size_t pos) {
+    size_t i = pos;
+    int brace_depth = 0;
+    int paren_depth = 0;
+    while (i > 0) {
+        size_t k = i - 1;
+        char c = s[k];
+        /* Skip block comment: when `s[k-1..k+1]` is a `*` `/` pair
+         * terminating a `/ * ... * /` block, rewind `i` to just before
+         * the matching `/ *`. */
+        if (c == '/' && k > 0 && s[k - 1] == '*') {
+            size_t j = k - 1;
+            while (j > 0 && !(s[j - 1] == '/' && s[j] == '*')) j--;
+            i = (j > 0) ? (j - 1) : 0;
+            continue;
+        }
+        /* Skip line comment: if `k` is inside a `//...` on this line,
+         * rewind to just before the `//`. */
+        if (c != '\n' && cc__ud_pos_in_line_comment(s, k)) {
+            while (i > 0 && s[i - 1] != '\n') i--;
+            continue;
+        }
+        if (c == ')') { paren_depth++; i--; continue; }
+        if (c == '(') {
+            if (paren_depth > 0) paren_depth--;
+            i--;
+            continue;
+        }
+        if (c == '}') { brace_depth++; i--; continue; }
+        if (c == '{') {
+            if (brace_depth > 0) { brace_depth--; i--; continue; }
+            return i; /* stop AFTER the `{` — stmt starts here */
+        }
+        if (c == ';' && paren_depth == 0 && brace_depth == 0) return i;
+        i--;
+    }
+    return 0;
+}
+
+/* Extract the declared variable name from a statement range
+ * `s[stmt_a .. op_pos)` that looks like `Type ptr_or_ref name = expr ...`.
+ * Fills `*name_a`, `*name_b` with the identifier span if found.  The scan
+ * looks for the top-level `=` sign in the range, walks back over spaces,
+ * and grabs the preceding identifier token.  Returns 1 on success. */
+static int cc__ud_extract_decl_name(const char* s, size_t stmt_a, size_t op_pos,
+                                    size_t* name_a, size_t* name_b) {
+    /* Find top-level `=` between stmt_a and op_pos. */
+    size_t eq = (size_t)-1;
+    int paren = 0, brace = 0, brack = 0;
+    size_t i = stmt_a;
+    while (i < op_pos) {
+        /* Use local scanner for comments/strings. */
+        size_t save = i;
+        if (cc__ud_skip_comment_or_string(s, op_pos, &i)) continue;
+        if (i == save) {
+            char c = s[i];
+            if (c == '(') paren++;
+            else if (c == ')') { if (paren > 0) paren--; }
+            else if (c == '[') brack++;
+            else if (c == ']') { if (brack > 0) brack--; }
+            else if (c == '{') brace++;
+            else if (c == '}') { if (brace > 0) brace--; }
+            else if (c == '=' && paren == 0 && brace == 0 && brack == 0) {
+                if (i + 1 < op_pos && s[i + 1] == '=') { i += 2; continue; }
+                eq = i;
+                break;
+            }
+            i++;
+        }
+    }
+    if (eq == (size_t)-1) return 0;
+    /* Walk back over whitespace. */
+    size_t p = eq;
+    while (p > stmt_a && isspace((unsigned char)s[p - 1])) p--;
+    size_t nb = p;
+    while (p > stmt_a && (isalnum((unsigned char)s[p - 1]) || s[p - 1] == '_')) p--;
+    size_t na = p;
+    if (na >= nb) return 0;
+    /* Leading char must be ident-start. */
+    if (!(isalpha((unsigned char)s[na]) || s[na] == '_')) return 0;
+    *name_a = na;
+    *name_b = nb;
+    return 1;
+}
+
+/* Return 1 if the declared type text `s[stmt_a .. name_a)` is
+ * `CCNursery*` (possibly with spaces / `const`).  Fills a pair of
+ * destructor callees `*pre_hook` / `*post_hook` — the former runs
+ * BEFORE the user body, the latter AFTER.  For CCNursery this gives
+ * the standard "wait for tasks, then free" lifecycle.  Returns 0 if
+ * the type is not a recognized builtin-owned type. */
+static int cc__ud_builtin_owned_hooks(const char* s, size_t type_a, size_t type_b,
+                                      const char** pre_hook,
+                                      const char** post_hook,
+                                      int* post_pass_address) {
+    *pre_hook = NULL;
+    *post_hook = NULL;
+    *post_pass_address = 0;
+    int saw_nursery = 0, saw_arena = 0, saw_star = 0;
+    size_t i = type_a;
+    while (i < type_b) {
+        char c = s[i];
+        if (c == '*') { saw_star = 1; i++; continue; }
+        if (isalpha((unsigned char)c) || c == '_') {
+            size_t start = i;
+            while (i < type_b && (isalnum((unsigned char)s[i]) || s[i] == '_')) i++;
+            size_t len = i - start;
+            if (len == 9 && memcmp(s + start, "CCNursery", 9) == 0) saw_nursery = 1;
+            else if (len == 7 && memcmp(s + start, "CCArena", 7) == 0) saw_arena = 1;
+            continue;
+        }
+        i++;
+    }
+    if (saw_nursery && saw_star && !saw_arena) {
+        *pre_hook = "cc_nursery_wait";
+        *post_hook = "cc_nursery_free";
+        *post_pass_address = 0;
+        return 1;
+    }
+    if (saw_arena && !saw_nursery && !saw_star) {
+        *pre_hook = NULL;
+        *post_hook = "cc_arena_destroy";
+        *post_pass_address = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Return 1 if the range `s[a..b)` contains a bare `!>` or `?>` operator
+ * (at top-level, respecting strings/comments and brace depth). */
+static int cc__ud_range_has_unwrap_op(const char* s, size_t a, size_t b) {
+    size_t i = a;
+    while (i < b) {
+        if (cc__ud_skip_comment_or_string(s, b, &i)) continue;
+        char c = s[i];
+        if ((c == '!' || c == '?') && i + 1 < b && s[i + 1] == '>') {
+            /* Make sure it's the op (`!>` or `?>`), not `!>=` or `?>=`
+             * or `!>>` shift (bogus for `?`, still skip defensively). */
+            if (i + 2 < b && (s[i + 2] == '=' || s[i + 2] == '>')) {
+                i += 2;
+                continue;
+            }
+            return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Return 1 iff `s[i..i+8)` is the literal token `@destroy` at a word
+ * boundary (next char is ws/{/(/;/\0). */
+static int cc__ud_is_at_destroy(const char* s, size_t n, size_t i) {
+    if (i + 8 > n) return 0;
+    if (memcmp(s + i, "@destroy", 8) != 0) return 0;
+    if (i + 8 < n) {
+        char nx = s[i + 8];
+        if (nx == '_' || isalnum((unsigned char)nx)) return 0;
+    }
+    return 1;
+}
+
+/* Append newline-preserving whitespace that mirrors `s[a..b)` so that
+ * line numbers downstream stay stable. */
+static void cc__ud_emit_pad(char** out, size_t* out_len, size_t* out_cap,
+                            const char* s, size_t a, size_t b) {
+    for (size_t i = a; i < b; i++) {
+        char c = s[i];
+        cc__append_n(out, out_len, out_cap, (c == '\n') ? "\n" : " ", 1);
+    }
+}
+
+int cc__rewrite_unwrap_destroy_suffix(const char* src,
+                                      size_t n,
+                                      char** out_buf,
+                                      size_t* out_len) {
+    if (!src || n == 0 || !out_buf || !out_len) {
+        if (out_buf) *out_buf = NULL;
+        if (out_len) *out_len = 0;
+        return 0;
+    }
+    *out_buf = NULL;
+    *out_len = 0;
+
+    char* out = NULL;
+    size_t ol = 0, oc = 0;
+    size_t last_emit = 0;
+    int changed = 0;
+
+    size_t i = 0;
+    while (i < n) {
+        if (cc__ud_skip_comment_or_string(src, n, &i)) continue;
+
+        if (!cc__ud_is_at_destroy(src, n, i)) { i++; continue; }
+
+        /* The unwrap-suffix form is only recognized when the current
+         * statement contains `!>` or `?>`.  `@create(...) @destroy { ... }`
+         * lives in statements without those operators, so pass_create
+         * continues to own that shape. */
+        size_t stmt_a = cc__ud_stmt_start_backward(src, i);
+        if (!cc__ud_range_has_unwrap_op(src, stmt_a, i)) {
+            i += 8;
+            continue;
+        }
+
+        /* Parse `@destroy [ { body } ] ;`.  A bodyless form isn't
+         * meaningful here; require the `{ ... }`. */
+        size_t after_kw = i + 8;
+        size_t body_s = after_kw;
+        while (body_s < n &&
+               (src[body_s] == ' ' || src[body_s] == '\t' ||
+                src[body_s] == '\n' || src[body_s] == '\r'))
+            body_s++;
+        if (body_s >= n || src[body_s] != '{') {
+            /* Give up — leave the @destroy alone so a later pass (or
+             * error reporter) can complain. */
+            i = after_kw;
+            continue;
+        }
+        size_t body_e = 0;
+        if (!cc_find_matching_brace(src, n, body_s, &body_e)) {
+            i = body_s + 1;
+            continue;
+        }
+        /* body_e is index of `}`; body content is [body_s+1 .. body_e). */
+
+        /* The original statement's terminating `;` must follow (allowing
+         * whitespace).  If missing, bail out. */
+        size_t semi = body_e + 1;
+        while (semi < n &&
+               (src[semi] == ' ' || src[semi] == '\t' ||
+                src[semi] == '\n' || src[semi] == '\r'))
+            semi++;
+        if (semi >= n || src[semi] != ';') {
+            i = body_e + 1;
+            continue;
+        }
+
+        /* If the host statement is a declaration of a builtin-owned
+         * type (e.g. `CCNursery* n = ...`), we need to ALSO emit the
+         * implicit lifecycle hooks (wait + free for a nursery; destroy
+         * for an arena) around the user-supplied body.  Otherwise a
+         * plain `@defer { user_body }` suffices. */
+        size_t name_a = 0, name_b = 0;
+        int have_name = cc__ud_extract_decl_name(src, stmt_a, i, &name_a, &name_b);
+        const char* pre_hook = NULL;
+        const char* post_hook = NULL;
+        int post_pass_addr = 0;
+        if (have_name) {
+            /* Type span is [stmt_a .. name_a), trimmed of trailing ws. */
+            size_t type_b = name_a;
+            while (type_b > stmt_a && isspace((unsigned char)src[type_b - 1])) type_b--;
+            cc__ud_builtin_owned_hooks(src, stmt_a, type_b, &pre_hook, &post_hook, &post_pass_addr);
+        }
+
+        /* Emit everything up to (but not including) the `@destroy` kw. */
+        cc__append_n(&out, &ol, &oc, src + last_emit, i - last_emit);
+        /* Pad the stripped `@destroy { body }` range with whitespace so
+         * that the statement terminator `;` still lands on the original
+         * line — keeps TCC line numbers in sync with the source view. */
+        cc__ud_emit_pad(&out, &ol, &oc, src, i, semi);
+        /* Emit the `;` terminating the original statement. */
+        cc__append_n(&out, &ol, &oc, ";", 1);
+        /* Now synthesize the standalone `@defer { ... };` on the same
+         * line — the defer-syntax pass will attach it to the enclosing
+         * scope. */
+        cc__append_str(&out, &ol, &oc, " @defer { ");
+        if (pre_hook && have_name) {
+            cc__append_str(&out, &ol, &oc, pre_hook);
+            cc__append_str(&out, &ol, &oc, "(");
+            cc__append_n(&out, &ol, &oc, src + name_a, name_b - name_a);
+            cc__append_str(&out, &ol, &oc, "); ");
+        }
+        cc__append_n(&out, &ol, &oc,
+                     src + body_s + 1,
+                     body_e - (body_s + 1));
+        if (post_hook && have_name) {
+            cc__append_str(&out, &ol, &oc, " ");
+            cc__append_str(&out, &ol, &oc, post_hook);
+            cc__append_str(&out, &ol, &oc, "(");
+            if (post_pass_addr) cc__append_str(&out, &ol, &oc, "&");
+            cc__append_n(&out, &ol, &oc, src + name_a, name_b - name_a);
+            cc__append_str(&out, &ol, &oc, ");");
+        }
+        cc__append_str(&out, &ol, &oc, " };");
+
+        last_emit = semi + 1;
+        i = last_emit;
+        changed = 1;
+    }
+
+    if (!changed) {
+        free(out);
+        return 0;
+    }
+
+    if (last_emit < n) {
+        cc__append_n(&out, &ol, &oc, src + last_emit, n - last_emit);
+    }
+
+    *out_buf = out;
+    *out_len = ol;
+    return 1;
+}

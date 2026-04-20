@@ -23,6 +23,7 @@
 #include "visitor/visitor.h"
 #include "visitor/pass_err_syntax.h"
 #include "visitor/pass_result_unwrap.h"
+#include "visitor/pass_unwrap_destroy.h"
 
 /* ========================================================================== */
 /* Diagnostic helpers (gcc/clang compatible format)                           */
@@ -249,12 +250,14 @@ static int cc__pp_find_top_level_equal(const char* src, size_t start, size_t end
 }
 
 static int cc__pp_builtin_destroy_info(const char* declared_type,
+                                       const char** out_pre_callee,
                                        const char** out_callee,
                                        int* out_pass_address) {
     int saw_nursery = 0;
     int saw_arena = 0;
     int saw_star = 0;
     size_t i = 0;
+    if (out_pre_callee) *out_pre_callee = NULL;
     if (out_callee) *out_callee = NULL;
     if (out_pass_address) *out_pass_address = 0;
     if (!declared_type) return 0;
@@ -288,6 +291,11 @@ static int cc__pp_builtin_destroy_info(const char* declared_type,
         return 1;
     }
     if (saw_nursery && saw_star && !saw_arena) {
+        /* Nurseries must wait for outstanding tasks before the handle is
+         * freed, so the full lifecycle is wait -> user body -> free.  This
+         * mirrors the hook sequence registered for the `@create(CCNursery)
+         * @destroy { body }` primary path in pass_create.c. */
+        if (out_pre_callee) *out_pre_callee = "cc_nursery_wait";
         if (out_callee) *out_callee = "cc_nursery_free";
         if (out_pass_address) *out_pass_address = 0;
         return 1;
@@ -311,6 +319,7 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
         size_t rhs_s = 0, rhs_e = 0, semi = 0;
         size_t destroy_body_s = 0, destroy_body_e = 0;
         char declared_type[256];
+        const char* destroy_pre_callee = NULL;
         const char* destroy_callee = NULL;
         int pass_address = 0;
 
@@ -373,7 +382,7 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
             declared_type[declared_type_len] = '\0';
         }
 
-        if (!cc__pp_builtin_destroy_info(declared_type, &destroy_callee, &pass_address)) {
+        if (!cc__pp_builtin_destroy_info(declared_type, &destroy_pre_callee, &destroy_callee, &pass_address)) {
             i++;
             continue;
         }
@@ -440,16 +449,34 @@ static char* cc__rewrite_builtin_owned_decl_annotations(const char* src, size_t 
             int has_custom_body = (destroy_body_s && destroy_body_e > destroy_body_s);
             cc_sb_append_cstr(&out, &out_len, &out_cap, "; ");
             if (!has_custom_body) {
-                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer ");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
+                if (destroy_pre_callee) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_pre_callee);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                    if (pass_address) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                    }
+                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                }
                 cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
                 if (pass_address) {
                     cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
                 }
                 cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
-                cc_sb_append_cstr(&out, &out_len, &out_cap, ");\n");
+                cc_sb_append_cstr(&out, &out_len, &out_cap, "); };\n");
             } else {
                 cc_sb_append_cstr(&out, &out_len, &out_cap, "@defer { ");
+                if (destroy_pre_callee) {
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_pre_callee);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "(");
+                    if (pass_address) {
+                        cc_sb_append_cstr(&out, &out_len, &out_cap, "&");
+                    }
+                    cc_sb_append(&out, &out_len, &out_cap, src + name_s, name_e - name_s);
+                    cc_sb_append_cstr(&out, &out_len, &out_cap, "); ");
+                }
                 cc_sb_append(&out, &out_len, &out_cap, src + destroy_body_s, destroy_body_e - destroy_body_s + 1);
                 cc_sb_append_cstr(&out, &out_len, &out_cap, " ");
                 cc_sb_append_cstr(&out, &out_len, &out_cap, destroy_callee);
@@ -6583,8 +6610,14 @@ char* cc_preprocess_to_string_ex(const char* input, size_t input_len, const char
         }
     }
 
-    /* If result types are used, include cc_result.cch and emit parse-time stubs for custom types */
-    if (cc__result_specs.count > 0) {
+    /* Include cc_result.cch whenever:
+     *   - the TU declares Result types (`cc__result_specs.count > 0`), OR
+     *   - the TU uses the `!>` / `?>` operators on raw pointer returns.
+     * The latter case synthesizes `CCError` / `CC_ERR_NULL` in the lowered
+     * output (see pass_result_unwrap.c / pass_err_syntax.c pointer-path
+     * emission); without the include, those symbols would be undeclared. */
+    int uses_unwrap_ops = use && (strstr(use, "!>") != NULL || strstr(use, "?>") != NULL);
+    if (cc__result_specs.count > 0 || uses_unwrap_ops) {
         fprintf(out, "/* --- CC result type support --- */\n");
         fprintf(out, "#ifndef CC_PARSER_MODE\n");
         fprintf(out, "#define CC_PARSER_MODE 1\n");
@@ -7147,6 +7180,41 @@ static int cc__apply_phase3_host_lowering_passes(CCPassChain* chain,
         int has_ops = chain->src && chain->len > 0 &&
             (strstr(chain->src, "?>") != NULL || strstr(chain->src, "!>") != NULL);
         if ((has_ops || strict_on) && chain->src && chain->len > 0) {
+            /* Lift any trailing `@destroy { body }` suffix off of `!>` /
+             * `?>` statements into a standalone `@defer { body };` placed
+             * after the statement.  This runs BEFORE pass_result_unwrap
+             * so the downstream unwrap parser (and the early TCC AST
+             * probe that happens later in this phase) sees the canonical
+             * form.  `@create(...) @destroy { ... };` is untouched
+             * because its statement has no `!>` / `?>` operator.
+             *
+             * The same rewrite is also invoked in visit_codegen.c right
+             * before the final `!>`/`?>` lowering, because visit_codegen
+             * re-reads the raw source for its own text-pass pipeline. */
+            if (strstr(chain->src, "@destroy") != NULL) {
+                char* ud_out = NULL;
+                size_t ud_out_len = 0;
+                int ud_r = cc__rewrite_unwrap_destroy_suffix(
+                    chain->src, chain->len, &ud_out, &ud_out_len);
+                (void)ud_out_len;
+                if (ud_r < 0) return -1;
+                if (ud_r > 0 && ud_out && cc_pass_chain_apply(chain, ud_out) < 0) return -1;
+            }
+            /* Populate the pointer-fn registry before lowering `!>` / `?>` so
+             * the pass can recognize calls to plain C functions that return
+             * raw pointers (e.g. `fopen`, `getenv`, `cc_nursery_create`) and
+             * emit a NULL-check based lowering instead of the Result-struct
+             * lowering.  Scanning both the current source AND the include-
+             * expanded stream lets us pick up declarations in system and
+             * CC-runtime headers without requiring any user-side annotation. */
+            cc_pointer_fn_registry_scan(chain->src, chain->len);
+            if (input_path && input_path[0]) {
+                char* expanded = cc_preprocess_include_expanded(input_path);
+                if (expanded) {
+                    cc_pointer_fn_registry_scan(expanded, strlen(expanded));
+                    free(expanded);
+                }
+            }
             char* ru_out = NULL;
             size_t ru_out_len = 0;
             CCVisitorCtx ru_ctx = {.symbols = NULL, .input_path = input_path};

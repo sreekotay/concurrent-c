@@ -1,0 +1,12 @@
+// Smoke: !> on a pointer-returning C function; value is non-NULL, body is not entered.
+#include <stdio.h>
+
+static int g_target = 42;
+static int* get_ptr(void) { return &g_target; }
+
+int main(void) {
+    int* p1 = get_ptr() !> { printf("UNEXPECTED\n"); return 1; };
+    int* p2 = get_ptr() !> { printf("UNEXPECTED\n"); return 1; } @destroy { printf("p2=%d\n", *p2); };
+    printf("p1=%d\n", *p1);
+    return 0;
+}
